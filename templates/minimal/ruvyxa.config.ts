@@ -1,6 +1,6 @@
-import { defineConfig } from "ruvyxa/config"
+import { defineConfig, type RuvyxaConfig } from "ruvyxa/config"
 
-export default defineConfig({
+const config: RuvyxaConfig = {
   appDir: "app",
   outDir: ".ruvyxa",
 
@@ -39,4 +39,6 @@ export default defineConfig({
   // },
   // adapter: nodeAdapter(),
   // plugins: [],
-})
+}
+
+export default defineConfig(config)
