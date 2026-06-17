@@ -887,7 +887,7 @@ dependencies = [
 
 [[package]]
 name = "ruvyxa_cli"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -905,7 +905,7 @@ dependencies = [
 
 [[package]]
 name = "ruvyxa_dev_server"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "axum",
  "notify",
@@ -922,7 +922,7 @@ dependencies = [
 
 [[package]]
 name = "ruvyxa_diagnostics"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "serde",
  "thiserror",
@@ -930,7 +930,7 @@ dependencies = [
 
 [[package]]
 name = "ruvyxa_graph"
-version = "0.1.0"
+version = "1.0.0"
 dependencies = [
  "ruvyxa_diagnostics",
  "serde",

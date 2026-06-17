@@ -1,6 +1,6 @@
 {
   "name": "@ruvyxa/adapter-netlify",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Shape Ruvyxa builds for Netlify functions and assets with a small typed adapter contract.",
   "license": "MIT",
   "type": "module",

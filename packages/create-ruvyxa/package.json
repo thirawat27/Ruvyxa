@@ -1,6 +1,6 @@
 {
   "name": "create-ruvyxa",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Spin up a production-minded Ruvyxa app with file routing, Tailwind CSS, actions, and agent-ready project docs.",
   "license": "MIT",
   "type": "module",

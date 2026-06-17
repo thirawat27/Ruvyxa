@@ -7,8 +7,9 @@ dist/
 !.env.example
 *.log
 .DS_Store
-.pid
+*.pid
 .npm-pack/
+.npm-smoke/
 packages/ruvyxa/native-bin/
 packages/create-ruvyxa/template/
 packages/@ruvyxa/cli-*/bin/

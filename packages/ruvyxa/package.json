@@ -1,6 +1,6 @@
 {
   "name": "ruvyxa",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "The Ruvyxa CLI and runtime: Rust-powered full-stack TypeScript with SSR, actions, HMR, and production-accurate builds.",
   "license": "MIT",
   "type": "module",

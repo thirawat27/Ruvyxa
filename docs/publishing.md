@@ -48,6 +48,8 @@ pnpm -r build
 pnpm -r check
 pnpm -r test
 cargo run -p ruvyxa_cli -- test:parity --root examples/basic-app
+pnpm release:validate
+pnpm pack:smoke
 ```
 
 ## Dry Run
@@ -64,9 +66,9 @@ pnpm --filter create-ruvyxa pack --pack-destination .npm-pack
 Inspect the tarballs:
 
 ```bash
-tar -tf .npm-pack/ruvyxa-0.1.0.tgz
-tar -tf .npm-pack/ruvyxa-cli-win32-x64-0.1.0.tgz
-tar -tf .npm-pack/create-ruvyxa-0.1.0.tgz
+tar -tf .npm-pack/ruvyxa-1.0.0.tgz
+tar -tf .npm-pack/ruvyxa-cli-win32-x64-1.0.0.tgz
+tar -tf .npm-pack/create-ruvyxa-1.0.0.tgz
 ```
 
 Confirm:
