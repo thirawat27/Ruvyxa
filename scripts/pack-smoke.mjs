@@ -52,7 +52,11 @@ for (const file of readdirSync(destination).filter((name) => name.endsWith(".tgz
 const extracted = ".npm-smoke"
 rmSync(extracted, { recursive: true, force: true })
 mkdirSync(extracted, { recursive: true })
-execSync(`tar -xzf ${destination}/ruvyxa-1.0.0.tgz -C ${extracted}`)
+
+const ruvyxaTgz = readdirSync(destination).find((name) => name.startsWith("ruvyxa-") && name.endsWith(".tgz") && !name.includes("adapter") && !name.includes("cli") && !name.includes("core") && !name.includes("react") && !name.includes("create"))
+if (!ruvyxaTgz) throw new Error("ruvyxa tarball not found in " + destination)
+
+execSync(`tar -xzf ${destination}/${ruvyxaTgz} -C ${extracted}`)
 execFileSync("node", [`${extracted}/package/bin/ruvyxa.js`, "--help"], {
   stdio: "inherit",
   shell: process.platform === "win32",

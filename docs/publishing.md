@@ -85,8 +85,8 @@ pnpm --filter @ruvyxa/core pack --pack-destination .npm-pack
 Verify the tarballs:
 
 ```bash
-tar -tf .npm-pack/ruvyxa-1.0.0.tgz
-tar -tf .npm-pack/create-ruvyxa-1.0.0.tgz
+tar -tf .npm-pack/ruvyxa-<VERSION>.tgz
+tar -tf .npm-pack/create-ruvyxa-<VERSION>.tgz
 ```
 
 Confirm:
