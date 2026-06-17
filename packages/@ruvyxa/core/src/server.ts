@@ -86,19 +86,64 @@ export interface CacheBuilder {
   get<T>(producer: () => T | Promise<T>): Promise<T>
 }
 
+// In-memory TTL cache store for server-side data fetching.
+const cacheStore = new Map<string, { value: unknown; expiresAt: number }>()
+
+function parseTtl(value: string): number {
+  const match = value.match(/^(\d+)\s*(ms|s|m|h|d)$/)
+  if (!match) return 60_000 // default 60s
+  const amount = parseInt(match[1], 10)
+  switch (match[2]) {
+    case "ms":
+      return amount
+    case "s":
+      return amount * 1000
+    case "m":
+      return amount * 60_000
+    case "h":
+      return amount * 3_600_000
+    case "d":
+      return amount * 86_400_000
+    default:
+      return 60_000
+  }
+}
+
 export function cache(key: string): CacheBuilder {
-  let ttlValue: string | undefined
+  let ttlMs = 60_000 // default 60 seconds
 
   return {
     ttl(value: string) {
-      ttlValue = value
-      void ttlValue
+      ttlMs = parseTtl(value)
       return this
     },
-    async get<T>(producer: () => T | Promise<T>) {
-      void key
-      return producer()
+    async get<T>(producer: () => T | Promise<T>): Promise<T> {
+      const now = Date.now()
+      const cached = cacheStore.get(key)
+
+      if (cached && cached.expiresAt > now) {
+        return cached.value as T
+      }
+
+      const value = await producer()
+      cacheStore.set(key, { value, expiresAt: now + ttlMs })
+      return value
     },
+  }
+}
+
+/**
+ * Invalidate a specific cache key or all keys matching a prefix.
+ */
+export function invalidateCache(keyOrPrefix?: string): void {
+  if (!keyOrPrefix) {
+    cacheStore.clear()
+    return
+  }
+  for (const key of cacheStore.keys()) {
+    if (key === keyOrPrefix || key.startsWith(keyOrPrefix + ":")) {
+      cacheStore.delete(key)
+    }
   }
 }
 

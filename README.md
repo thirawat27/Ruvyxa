@@ -11,7 +11,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="License" />
-  <img src="https://img.shields.io/badge/node-%3E%3D20-blue?style=flat-square" alt="Node 20+" />
+  <img src="https://img.shields.io/badge/node-%3E%3D20-blue?style=flat-square" alt="Node 22" />
   <img src="https://img.shields.io/badge/rust-1.80%2B-orange?style=flat-square" alt="Rust 1.80+" />
   <img src="https://img.shields.io/badge/pnpm-10%2B-yellow?style=flat-square" alt="pnpm 10+" />
 </p>

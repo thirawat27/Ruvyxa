@@ -8,6 +8,7 @@ rust-version.workspace = true
 
 [dependencies]
 axum.workspace = true
+blake3.workspace = true
 notify.workspace = true
 ruvyxa_diagnostics = { path = "../ruvyxa_diagnostics" }
 ruvyxa_graph = { path = "../ruvyxa_graph" }

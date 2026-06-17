@@ -21,8 +21,18 @@ use ruvyxa_graph::{discover_routes, DiscoverOptions, RouteEntry, RouteKind, Rout
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
+use tower_http::compression::CompressionLayer;
 use tracing::{info, warn};
 use walkdir::WalkDir;
+
+mod worker_pool;
+pub use worker_pool::NodeWorkerPool;
+
+mod router;
+pub use router::RadixRouter;
+
+mod render_cache;
+pub use render_cache::RenderCache;
 
 const MAX_ACTION_BODY_BYTES: usize = 64 * 1024;
 const ACTION_RATE_LIMIT_MAX: usize = 60;
@@ -79,55 +89,94 @@ struct AppState {
     reload_tx: broadcast::Sender<String>,
     runtime_cache: Arc<RuntimeCache>,
     action_limiter: Arc<Mutex<ActionRateLimiter>>,
+    worker_pool: Arc<NodeWorkerPool>,
+    render_cache: Arc<RenderCache>,
 }
 
 #[derive(Default)]
 struct RuntimeCache {
-    manifest: Mutex<Option<RouteManifest>>,
-    styles: Mutex<Option<String>>,
+    manifest: tokio::sync::RwLock<Option<RouteManifest>>,
+    styles: tokio::sync::RwLock<Option<String>>,
+    router: tokio::sync::RwLock<Option<RadixRouter>>,
 }
 
 impl RuntimeCache {
     fn with_manifest(manifest: RouteManifest) -> Self {
+        let router = RadixRouter::compile(&manifest);
         Self {
-            manifest: Mutex::new(Some(manifest)),
-            styles: Mutex::new(None),
+            manifest: tokio::sync::RwLock::new(Some(manifest)),
+            styles: tokio::sync::RwLock::new(None),
+            router: tokio::sync::RwLock::new(Some(router)),
         }
     }
 
-    fn manifest(&self, config: &ServerConfig) -> Result<RouteManifest> {
+    async fn manifest(&self, config: &ServerConfig) -> Result<RouteManifest> {
         if !config.cache_route_manifest {
             return discover_routes(DiscoverOptions::new(&config.app_dir));
         }
 
-        let mut cached = self.manifest.lock().expect("manifest cache mutex poisoned");
-        if let Some(manifest) = cached.as_ref() {
-            return Ok(manifest.clone());
+        {
+            let cached = self.manifest.read().await;
+            if let Some(manifest) = cached.as_ref() {
+                return Ok(manifest.clone());
+            }
         }
 
         let manifest = discover_routes(DiscoverOptions::new(&config.app_dir))?;
-        *cached = Some(manifest.clone());
+        {
+            let mut cached = self.manifest.write().await;
+            *cached = Some(manifest.clone());
+        }
+        {
+            let mut router_cache = self.router.write().await;
+            *router_cache = Some(RadixRouter::compile(&manifest));
+        }
+
         Ok(manifest)
     }
 
-    fn styles(&self, config: &ServerConfig) -> Result<String> {
+    async fn router(&self, config: &ServerConfig) -> Result<(RouteManifest, RadixRouter)> {
+        let manifest = self.manifest(config).await?;
+        let router_cache = self.router.read().await;
+        let router = router_cache
+            .as_ref()
+            .cloned()
+            .unwrap_or_else(|| RadixRouter::compile(&manifest));
+        Ok((manifest, router))
+    }
+
+    async fn styles(&self, config: &ServerConfig) -> Result<String> {
         if !config.cache_css {
             return collect_css(&config.root, &config.app_dir);
         }
 
-        let mut cached = self.styles.lock().expect("style cache mutex poisoned");
-        if let Some(styles) = cached.as_ref() {
-            return Ok(styles.clone());
+        {
+            let cached = self.styles.read().await;
+            if let Some(styles) = cached.as_ref() {
+                return Ok(styles.clone());
+            }
         }
 
         let styles = collect_css(&config.root, &config.app_dir)?;
-        *cached = Some(styles.clone());
+        {
+            let mut cached = self.styles.write().await;
+            *cached = Some(styles.clone());
+        }
         Ok(styles)
     }
 
     fn invalidate(&self) {
-        *self.manifest.lock().expect("manifest cache mutex poisoned") = None;
-        *self.styles.lock().expect("style cache mutex poisoned") = None;
+        // Use blocking_write for sync context (file watcher callback)
+        *self.manifest.blocking_write() = None;
+        *self.styles.blocking_write() = None;
+        *self.router.blocking_write() = None;
+    }
+
+    #[cfg(test)]
+    async fn invalidate_async(&self) {
+        *self.manifest.write().await = None;
+        *self.styles.write().await = None;
+        *self.router.write().await = None;
     }
 }
 
@@ -137,11 +186,26 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
 
     let (reload_tx, _) = broadcast::channel(64);
     let runtime_cache = Arc::new(RuntimeCache::with_manifest(manifest.clone()));
+
+    let env = project_env(&config.root)?;
+    let worker_pool = Arc::new(NodeWorkerPool::start(&config.root, env).await?);
+    info!("Node worker pool ready");
+
+    let render_cache = Arc::new(if config.watch {
+        RenderCache::default_dev()
+    } else {
+        RenderCache::default_production()
+    });
+
+    let watcher_pool = worker_pool.clone();
+    let watcher_render_cache = render_cache.clone();
     let state = AppState {
         config: config.clone(),
         reload_tx,
         runtime_cache,
         action_limiter: Arc::new(Mutex::new(ActionRateLimiter::default())),
+        worker_pool,
+        render_cache,
     };
 
     let _watcher = if config.watch {
@@ -149,6 +213,8 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
             &watch_paths(&config),
             state.reload_tx.clone(),
             state.runtime_cache.clone(),
+            watcher_pool,
+            watcher_render_cache,
         )?)
     } else {
         None
@@ -163,6 +229,7 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
         )
         .route("/__ruvyxa/trace", get(trace_endpoint))
         .fallback(handle_request)
+        .layer(CompressionLayer::new())
         .with_state(Arc::new(state));
 
     let address: SocketAddr = format!("{}:{}", config.host, config.port)
@@ -236,18 +303,31 @@ fn start_watcher(
     watch_paths: &[PathBuf],
     reload_tx: broadcast::Sender<String>,
     runtime_cache: Arc<RuntimeCache>,
+    worker_pool: Arc<NodeWorkerPool>,
+    render_cache: Arc<RenderCache>,
 ) -> Result<RecommendedWatcher> {
     let mut watcher =
         notify::recommended_watcher(move |event: notify::Result<notify::Event>| match event {
             Ok(event) => {
                 let paths = event.paths;
                 runtime_cache.invalidate();
+                render_cache.invalidate_all_blocking();
+
+                // Invalidate worker bundle caches for changed files
+                let path_strings: Vec<String> = paths
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect();
+                let pool = worker_pool.clone();
+                tokio::task::block_in_place(|| {
+                    tokio::runtime::Handle::current().block_on(async {
+                        pool.invalidate(path_strings.clone()).await;
+                    });
+                });
+
                 let payload = serde_json::json!({
                     "type": classify_hmr_event(&paths),
-                    "paths": paths
-                        .iter()
-                        .map(|path| path.display().to_string())
-                        .collect::<Vec<_>>(),
+                    "paths": path_strings,
                 })
                 .to_string();
                 let _ = reload_tx.send(payload);
@@ -368,7 +448,7 @@ async fn client_bundle(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ClientBundleQuery>,
 ) -> Response {
-    let response = match render_client_bundle(&state.config, &query.path) {
+    let response = match render_client_bundle_pooled(&state, &query.path).await {
         Ok(script) => {
             let mut response = script.into_response();
             response.headers_mut().insert(
@@ -408,12 +488,14 @@ async fn action_endpoint(
         );
     }
 
-    let response = match render_server_action(
-        &state.config,
+    let response = match render_server_action_pooled(
+        &state,
         &query.path,
         &query.name,
         std::str::from_utf8(&body).unwrap_or("{}"),
-    ) {
+    )
+    .await
+    {
         Ok(response) => response,
         Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -428,14 +510,15 @@ async fn trace_endpoint(
     State(state): State<Arc<AppState>>,
     Query(query): Query<TraceQuery>,
 ) -> Response {
-    let response = match runtime_trace_cached(&state.config, &state.runtime_cache, &query.path) {
-        Ok(trace) => json_response(StatusCode::OK, &trace),
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("console.error({:?});", error.to_string()),
-        )
-            .into_response(),
-    };
+    let response =
+        match runtime_trace_cached(&state.config, &state.runtime_cache, &query.path).await {
+            Ok(trace) => json_response(StatusCode::OK, &trace),
+            Err(error) => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("console.error({:?});", error.to_string()),
+            )
+                .into_response(),
+        };
     with_security_headers(response)
 }
 
@@ -443,12 +526,15 @@ async fn handle_request<B>(
     State(state): State<Arc<AppState>>,
     request: Request<B>,
 ) -> impl IntoResponse {
-    match render_request_cached(
-        &state.config,
-        &state.runtime_cache,
+    let headers = request.headers().clone();
+    match render_request_pooled(
+        &state,
         request.uri().path(),
         request.method().as_str(),
-    ) {
+        &headers,
+    )
+    .await
+    {
         Ok(response) => response,
         Err(error) => {
             let body = error_page(&error.to_string());
@@ -458,24 +544,24 @@ async fn handle_request<B>(
 }
 
 pub fn render_request(config: &ServerConfig, request_path: &str, method: &str) -> Result<Response> {
-    render_request_cached(config, &RuntimeCache::default(), request_path, method)
+    render_request_cached(config, request_path, method)
 }
 
+#[allow(dead_code)]
 fn render_request_cached(
     config: &ServerConfig,
-    runtime_cache: &RuntimeCache,
     request_path: &str,
     method: &str,
 ) -> Result<Response> {
-    if let Some(client_response) = serve_client_file(&config.client_dir, request_path)? {
+    if let Some(client_response) = serve_client_file_sync(&config.client_dir, request_path)? {
         return Ok(client_response);
     }
 
-    if let Some(public_response) = serve_public_file(&config.public_dir, request_path)? {
+    if let Some(public_response) = serve_public_file_sync(&config.public_dir, request_path)? {
         return Ok(public_response);
     }
 
-    let manifest = runtime_cache.manifest(config)?;
+    let manifest = discover_routes(DiscoverOptions::new(&config.app_dir))?;
     let Some(route_match) = find_route(&manifest, request_path) else {
         return Ok(html_response(
             StatusCode::NOT_FOUND,
@@ -485,7 +571,7 @@ fn render_request_cached(
 
     match route_match.route.kind {
         RouteKind::Page => {
-            let styles = runtime_cache.styles(config)?;
+            let styles = collect_css(&config.root, &config.app_dir)?;
             let html = render_page(
                 config,
                 route_match.route,
@@ -505,12 +591,400 @@ fn render_request_cached(
     }
 }
 
-fn runtime_trace_cached(
+/// Sync fallback for static file serving (used by render_request test/bench path).
+#[allow(dead_code)]
+fn serve_public_file_sync(public_dir: &Path, request_path: &str) -> Result<Option<Response>> {
+    let trimmed = request_path.trim_start_matches('/');
+    if !is_safe_relative_path(trimmed) {
+        return Ok(None);
+    }
+    let file = public_dir.join(trimmed);
+    if !file.is_file() {
+        return Ok(None);
+    }
+    let bytes = fs::read(&file)?;
+    let content_type = content_type_for(&file);
+    let mut response = bytes.into_response();
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    apply_security_headers(&mut response);
+    Ok(Some(response))
+}
+
+/// Sync fallback for client file serving (used by render_request test/bench path).
+#[allow(dead_code)]
+fn serve_client_file_sync(client_dir: &Path, request_path: &str) -> Result<Option<Response>> {
+    let Some(file_name) = request_path.strip_prefix("/__ruvyxa/client/") else {
+        return Ok(None);
+    };
+    if file_name.is_empty()
+        || file_name.contains('/')
+        || file_name.contains('\\')
+        || file_name.contains("..")
+    {
+        return Ok(None);
+    }
+    let file = client_dir.join(file_name);
+    if !file.is_file() {
+        return Ok(None);
+    }
+    let bytes = fs::read(&file)?;
+    let mut response = bytes.into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/javascript; charset=utf-8"),
+    );
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=31536000, immutable"),
+    );
+    apply_security_headers(&mut response);
+    Ok(Some(response))
+}
+
+// --- Worker-pool-based async render functions ---
+
+async fn render_request_pooled(
+    state: &AppState,
+    request_path: &str,
+    method: &str,
+    request_headers: &HeaderMap,
+) -> Result<Response> {
+    if let Some(client_response) = serve_client_file(
+        &state.config.client_dir,
+        request_path,
+        Some(request_headers),
+    )
+    .await?
+    {
+        return Ok(client_response);
+    }
+
+    if let Some(public_response) = serve_public_file(
+        &state.config.public_dir,
+        request_path,
+        Some(request_headers),
+    )
+    .await?
+    {
+        return Ok(public_response);
+    }
+
+    let (manifest, router) = state.runtime_cache.router(&state.config).await?;
+    let Some(route_match) = router.find(&manifest, request_path) else {
+        return Ok(html_response(
+            StatusCode::NOT_FOUND,
+            error_page("Route not found"),
+        ));
+    };
+
+    match route_match.route.kind {
+        RouteKind::Page => {
+            let styles = state.runtime_cache.styles(&state.config).await?;
+            let html = render_page_pooled(
+                state,
+                route_match.route,
+                request_path,
+                &route_match.params,
+                &styles,
+            )
+            .await?;
+            Ok(html_response(StatusCode::OK, html))
+        }
+        RouteKind::Api => {
+            render_api_pooled(
+                state,
+                route_match.route,
+                request_path,
+                method,
+                &route_match.params,
+            )
+            .await
+        }
+    }
+}
+
+async fn render_page_pooled(
+    state: &AppState,
+    route: &RouteEntry,
+    request_path: &str,
+    params: &BTreeMap<String, String>,
+    styles: &str,
+) -> Result<String> {
+    // Check render cache first
+    let cache_key = render_cache::ssr_cache_key(request_path, params);
+    if let Some(cached) = state.render_cache.get(&cache_key).await {
+        return Ok(cached);
+    }
+
+    let source = fs::read_to_string(&route.file).map_err(|source| RuvyxaError::Io {
+        message: format!("Failed to read page module {}", route.file.display()),
+        source,
+    })?;
+
+    if !source.contains("export default") {
+        return Err(
+            Diagnostic::new("RUV1004", "Page is missing a default export")
+                .explain("Every page.tsx file must export a default component.")
+                .at_file(&route.file)
+                .suggest("Add `export default function Page() { return <main /> }`.")
+                .into(),
+        );
+    }
+
+    let response = state
+        .worker_pool
+        .render_ssr(
+            &state.config.root,
+            &state.config.app_dir,
+            &route.file,
+            request_path,
+            params,
+        )
+        .await?;
+
+    if !response.ok {
+        let code = response.code.unwrap_or_else(|| "RUV1100".to_string());
+        let message = response
+            .message
+            .unwrap_or_else(|| "React SSR failed without an error message".to_string());
+        let explanation = if let Some(stack) = response.stack {
+            format!("{message}\n\n{stack}")
+        } else {
+            message
+        };
+        return Err(Diagnostic::new("RUV1100", "React SSR failed")
+            .explain(format!("{code}: {explanation}"))
+            .at_file(&route.file)
+            .suggest("Check the page component, its imports, and whether React dependencies are installed.")
+            .into());
+    }
+
+    let rendered = response
+        .html
+        .ok_or_else(|| RuvyxaError::Message("React SSR completed without HTML".to_string()))?;
+
+    let asset_links = public_asset_links(&state.config.public_dir);
+    let hmr = if state.config.watch {
+        hmr_client_script()
+    } else {
+        ""
+    };
+    let client_script = client_hydration_script(&state.config, route, request_path, params);
+    let head_content = format!(r#"{asset_links}<style data-ruvyxa-css>{styles}</style>"#);
+
+    let html = compose_document(&rendered, &head_content, &format!("{client_script}{hmr}"));
+
+    // Cache the fully rendered page for subsequent requests
+    state.render_cache.put(cache_key, html.clone()).await;
+
+    Ok(html)
+}
+async fn render_api_pooled(
+    state: &AppState,
+    route: &RouteEntry,
+    request_path: &str,
+    method: &str,
+    params: &BTreeMap<String, String>,
+) -> Result<Response> {
+    let response = state
+        .worker_pool
+        .render_api(
+            &state.config.root,
+            &route.file,
+            method,
+            request_path,
+            params,
+        )
+        .await?;
+
+    if !response.ok {
+        let code = response.code.unwrap_or_else(|| "RUV1200".to_string());
+        let message = response
+            .message
+            .unwrap_or_else(|| "API route failed without an error message".to_string());
+        let explanation = if let Some(stack) = response.stack {
+            format!("{message}\n\n{stack}")
+        } else {
+            message
+        };
+        return Err(Diagnostic::new("RUV1200", "API route execution failed")
+            .explain(format!("{code}: {explanation}"))
+            .at_file(&route.file)
+            .suggest("Check the route handler export and its imports.")
+            .into());
+    }
+
+    let status = response.status.unwrap_or(200);
+    let status = StatusCode::from_u16(status)
+        .map_err(|error| RuvyxaError::Message(format!("Invalid API response status: {error}")))?;
+    let body = response.body.unwrap_or_default();
+    let mut http_response = (status, body).into_response();
+
+    if let Some(headers) = response.headers {
+        for (name, value) in headers {
+            if let (Ok(name), Ok(value)) = (
+                HeaderName::from_bytes(name.as_bytes()),
+                HeaderValue::from_str(&value),
+            ) {
+                http_response.headers_mut().insert(name, value);
+            }
+        }
+    }
+
+    Ok(with_security_headers(http_response))
+}
+
+async fn render_client_bundle_pooled(state: &AppState, request_path: &str) -> Result<String> {
+    let (manifest, router) = state.runtime_cache.router(&state.config).await?;
+    let Some(route_match) = router.find(&manifest, request_path) else {
+        return Err(Diagnostic::new("RUV1303", "Client route was not found")
+            .explain("The browser requested a hydration bundle for a route that does not exist.")
+            .suggest("Reload the page so the client bundle URL matches the current route.")
+            .into());
+    };
+
+    if route_match.route.kind != RouteKind::Page {
+        return Err(
+            Diagnostic::new("RUV1304", "Client bundle requested for a non-page route")
+                .explain("Only page routes can produce a hydration bundle.")
+                .at_file(&route_match.route.file)
+                .suggest("Request a client bundle for a page route instead.")
+                .into(),
+        );
+    }
+
+    // Check render cache for client bundles
+    let cache_key = render_cache::client_cache_key(request_path, &route_match.params);
+    if let Some(cached) = state.render_cache.get(&cache_key).await {
+        return Ok(cached);
+    }
+
+    let response = state
+        .worker_pool
+        .render_client(
+            &state.config.root,
+            &state.config.app_dir,
+            &route_match.route.file,
+            request_path,
+            &route_match.params,
+        )
+        .await?;
+
+    if !response.ok {
+        let code = response.code.unwrap_or_else(|| "RUV1300".to_string());
+        let message = response
+            .message
+            .unwrap_or_else(|| "Client bundling failed without an error message".to_string());
+        let explanation = if let Some(stack) = response.stack {
+            format!("{message}\n\n{stack}")
+        } else {
+            message
+        };
+        return Err(
+            Diagnostic::new("RUV1300", "Client hydration bundling failed")
+                .explain(format!("{code}: {explanation}"))
+                .suggest(
+                    "Check the page component, its browser-safe imports, and React dependencies.",
+                )
+                .into(),
+        );
+    }
+
+    let script = response.script.ok_or_else(|| {
+        RuvyxaError::Message("Client renderer completed without script output".to_string())
+    })?;
+
+    // Cache the bundled client script
+    state.render_cache.put(cache_key, script.clone()).await;
+
+    Ok(script)
+}
+
+async fn render_server_action_pooled(
+    state: &AppState,
+    request_path: &str,
+    action_name: &str,
+    payload_json: &str,
+) -> Result<Response> {
+    let (manifest, router) = state.runtime_cache.router(&state.config).await?;
+    let Some(route_match) = router.find(&manifest, request_path) else {
+        return Ok((StatusCode::NOT_FOUND, "Route not found for action").into_response());
+    };
+
+    if route_match.route.kind != RouteKind::Page {
+        return Ok((
+            StatusCode::METHOD_NOT_ALLOWED,
+            "Actions can only target page routes",
+        )
+            .into_response());
+    }
+
+    let action_file = action_file_for(route_match.route).ok_or_else(|| {
+        Diagnostic::new("RUV1501", "Route action file was not found")
+            .explain(
+                "Server actions are resolved from action.ts or action.js next to the page route.",
+            )
+            .at_file(&route_match.route.file)
+            .suggest(
+                "Create action.ts beside the page and export the action handler you want to call.",
+            )
+    })?;
+
+    let response = state
+        .worker_pool
+        .render_action(
+            &state.config.root,
+            &action_file,
+            action_name,
+            payload_json,
+            request_path,
+        )
+        .await?;
+
+    if !response.ok {
+        let code = response.code.unwrap_or_else(|| "RUV1500".to_string());
+        let message = response
+            .message
+            .unwrap_or_else(|| "Unknown server action error".to_string());
+        let mut diagnostic = Diagnostic::new(
+            action_error_code(Some(&code)),
+            "Server action execution failed",
+        )
+        .explain(message)
+        .at_file(&route_match.route.file);
+
+        if let Some(stack) = response.stack {
+            diagnostic = diagnostic.suggest(stack);
+        }
+
+        return Err(diagnostic.into());
+    }
+
+    let status = StatusCode::from_u16(response.status.unwrap_or(200)).unwrap_or(StatusCode::OK);
+    let mut http_response = (status, response.body.unwrap_or_default()).into_response();
+
+    if let Some(headers) = response.headers {
+        for (key, value) in headers {
+            if let (Ok(name), Ok(value)) = (
+                HeaderName::from_bytes(key.as_bytes()),
+                HeaderValue::from_str(&value),
+            ) {
+                http_response.headers_mut().insert(name, value);
+            }
+        }
+    }
+
+    Ok(with_security_headers(http_response))
+}
+
+async fn runtime_trace_cached(
     config: &ServerConfig,
     runtime_cache: &RuntimeCache,
     request_path: &str,
 ) -> Result<RuntimeTrace> {
-    let manifest = runtime_cache.manifest(config)?;
+    let manifest = runtime_cache.manifest(config).await?;
     let route_match = find_route(&manifest, request_path);
     let (route, params) = match route_match {
         Some(route_match) => (Some(route_match.route.clone()), route_match.params),
@@ -530,23 +1004,59 @@ fn runtime_trace_cached(
     })
 }
 
-fn serve_public_file(public_dir: &Path, request_path: &str) -> Result<Option<Response>> {
+async fn serve_public_file(
+    public_dir: &Path,
+    request_path: &str,
+    request_headers: Option<&HeaderMap>,
+) -> Result<Option<Response>> {
     let trimmed = request_path.trim_start_matches('/');
     if !is_safe_relative_path(trimmed) {
         return Ok(None);
     }
 
     let file = public_dir.join(trimmed);
-    if !file.is_file() {
-        return Ok(None);
+    let metadata = match tokio::fs::metadata(&file).await {
+        Ok(meta) if meta.is_file() => meta,
+        _ => return Ok(None),
+    };
+
+    let bytes = tokio::fs::read(&file)
+        .await
+        .map_err(|source| RuvyxaError::Io {
+            message: format!("Failed to read public file {}", file.display()),
+            source,
+        })?;
+
+    // Compute ETag using blake3 hash
+    let etag = compute_etag(&bytes);
+
+    // Check If-None-Match for conditional response
+    if let Some(headers) = request_headers {
+        if let Some(if_none_match) = headers.get(header::IF_NONE_MATCH) {
+            if let Ok(client_etag) = if_none_match.to_str() {
+                if client_etag.trim_matches('"') == etag.trim_matches('"') {
+                    let mut response = StatusCode::NOT_MODIFIED.into_response();
+                    apply_security_headers(&mut response);
+                    return Ok(Some(response));
+                }
+            }
+        }
     }
 
-    let bytes = fs::read(&file)?;
     let content_type = content_type_for(&file);
     let mut response = bytes.into_response();
-    response
-        .headers_mut()
-        .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    let headers = response.headers_mut();
+    headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    headers.insert(
+        header::ETAG,
+        HeaderValue::from_str(&etag).unwrap_or_else(|_| HeaderValue::from_static("")),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("public, max-age=3600, must-revalidate"),
+    );
+
+    let _ = metadata; // used for existence check
     apply_security_headers(&mut response);
     Ok(Some(response))
 }
@@ -564,7 +1074,17 @@ fn is_safe_relative_path(path: &str) -> bool {
     })
 }
 
-fn serve_client_file(client_dir: &Path, request_path: &str) -> Result<Option<Response>> {
+/// Compute a strong ETag using blake3 hash of file content.
+fn compute_etag(bytes: &[u8]) -> String {
+    let hash = blake3::hash(bytes);
+    format!("\"{}\"", &hash.to_hex()[..16])
+}
+
+async fn serve_client_file(
+    client_dir: &Path,
+    request_path: &str,
+    request_headers: Option<&HeaderMap>,
+) -> Result<Option<Response>> {
     let Some(file_name) = request_path.strip_prefix("/__ruvyxa/client/") else {
         return Ok(None);
     };
@@ -578,19 +1098,46 @@ fn serve_client_file(client_dir: &Path, request_path: &str) -> Result<Option<Res
     }
 
     let file = client_dir.join(file_name);
-    if !file.is_file() {
-        return Ok(None);
+    match tokio::fs::metadata(&file).await {
+        Ok(meta) if meta.is_file() => {}
+        _ => return Ok(None),
     }
 
-    let bytes = fs::read(&file)?;
+    let bytes = tokio::fs::read(&file)
+        .await
+        .map_err(|source| RuvyxaError::Io {
+            message: format!("Failed to read client file {}", file.display()),
+            source,
+        })?;
+
+    // Client bundles are content-hashed, so use immutable caching with ETag
+    let etag = compute_etag(&bytes);
+
+    if let Some(headers) = request_headers {
+        if let Some(if_none_match) = headers.get(header::IF_NONE_MATCH) {
+            if let Ok(client_etag) = if_none_match.to_str() {
+                if client_etag.trim_matches('"') == etag.trim_matches('"') {
+                    let mut response = StatusCode::NOT_MODIFIED.into_response();
+                    apply_security_headers(&mut response);
+                    return Ok(Some(response));
+                }
+            }
+        }
+    }
+
     let mut response = bytes.into_response();
-    response.headers_mut().insert(
+    let headers = response.headers_mut();
+    headers.insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("text/javascript; charset=utf-8"),
     );
-    response.headers_mut().insert(
+    headers.insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static("public, max-age=31536000, immutable"),
+    );
+    headers.insert(
+        header::ETAG,
+        HeaderValue::from_str(&etag).unwrap_or_else(|_| HeaderValue::from_static("")),
     );
     apply_security_headers(&mut response);
     Ok(Some(response))
@@ -638,6 +1185,12 @@ fn apply_security_headers(response: &mut Response) {
     headers.insert(
         HeaderName::from_static("cross-origin-opener-policy"),
         HeaderValue::from_static("same-origin"),
+    );
+    // Keep-alive for HTTP/1.1 connection reuse
+    headers.insert(header::CONNECTION, HeaderValue::from_static("keep-alive"));
+    headers.insert(
+        HeaderName::from_static("keep-alive"),
+        HeaderValue::from_static("timeout=30, max=1000"),
     );
 }
 
@@ -707,6 +1260,7 @@ struct ApiRenderResult {
     stack: Option<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ClientRenderResult {
@@ -717,6 +1271,7 @@ struct ClientRenderResult {
     stack: Option<String>,
 }
 
+#[allow(dead_code)]
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ActionRenderResult {
@@ -799,10 +1354,12 @@ fn find_api_renderer(root: &Path) -> Option<PathBuf> {
     find_runtime_script(root, "api-renderer.mjs")
 }
 
+#[allow(dead_code)]
 fn find_client_renderer(root: &Path) -> Option<PathBuf> {
     find_runtime_script(root, "client-renderer.mjs")
 }
 
+#[allow(dead_code)]
 fn find_action_renderer(root: &Path) -> Option<PathBuf> {
     find_runtime_script(root, "action-renderer.mjs")
 }
@@ -969,6 +1526,7 @@ fn render_api(
     Ok(with_security_headers(response))
 }
 
+#[allow(dead_code)]
 fn render_client_bundle(config: &ServerConfig, request_path: &str) -> Result<String> {
     let manifest = discover_routes(DiscoverOptions::new(&config.app_dir))?;
     let Some(route_match) = find_route(&manifest, request_path) else {
@@ -1042,6 +1600,7 @@ fn render_client_bundle(config: &ServerConfig, request_path: &str) -> Result<Str
     )
 }
 
+#[allow(dead_code)]
 fn render_server_action(
     config: &ServerConfig,
     request_path: &str,
@@ -1705,8 +2264,8 @@ mod tests {
         assert!(html.contains("<script /></body>"));
     }
 
-    #[test]
-    fn builds_runtime_trace_for_matched_routes() {
+    #[tokio::test]
+    async fn builds_runtime_trace_for_matched_routes() {
         let temp = tempfile::tempdir().unwrap();
         let app = temp.path().join("app/blog/[slug]");
         std::fs::create_dir_all(&app).unwrap();
@@ -1718,7 +2277,7 @@ mod tests {
         std::fs::write(app.join("action.ts"), "export const save = {}").unwrap();
 
         let config = ServerConfig::dev(temp.path(), "localhost", 3000);
-        let trace = runtime_trace_cached(&config, &RuntimeCache::default(), "/blog/hello").unwrap();
+        let trace = runtime_trace_cached(&config, &RuntimeCache::default(), "/blog/hello").await.unwrap();
 
         assert!(trace.matched);
         assert_eq!(trace.params.get("slug"), Some(&"hello".to_string()));
@@ -1859,8 +2418,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn runtime_cache_reuses_manifest_until_invalidated() {
+    #[tokio::test]
+    async fn runtime_cache_reuses_manifest_until_invalidated() {
         let temp = tempfile::tempdir().unwrap();
         let app = temp.path().join("app");
         std::fs::create_dir_all(&app).unwrap();
@@ -1873,7 +2432,7 @@ mod tests {
         let config = ServerConfig::dev(temp.path(), "localhost", 3000);
         let cache = RuntimeCache::default();
 
-        assert_eq!(cache.manifest(&config).unwrap().routes.len(), 1);
+        assert_eq!(cache.manifest(&config).await.unwrap().routes.len(), 1);
 
         let about = app.join("about");
         std::fs::create_dir_all(&about).unwrap();
@@ -1883,9 +2442,9 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(cache.manifest(&config).unwrap().routes.len(), 1);
-        cache.invalidate();
-        assert_eq!(cache.manifest(&config).unwrap().routes.len(), 2);
+        assert_eq!(cache.manifest(&config).await.unwrap().routes.len(), 1);
+        cache.invalidate_async().await;
+        assert_eq!(cache.manifest(&config).await.unwrap().routes.len(), 2);
     }
 
     #[test]
