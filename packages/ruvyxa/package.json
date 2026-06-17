@@ -12,7 +12,7 @@
   "files": [
     "bin",
     "dist",
-    "native-src",
+    "native-bin",
     "runtime/action-renderer.mjs",
     "runtime/api-renderer.mjs",
     "runtime/client-renderer.mjs",
@@ -60,11 +60,18 @@
     "@ruvyxa/core": "workspace:^",
     "esbuild": "^0.27.2"
   },
+  "optionalDependencies": {
+    "@ruvyxa/cli-darwin-arm64": "workspace:^",
+    "@ruvyxa/cli-darwin-x64": "workspace:^",
+    "@ruvyxa/cli-linux-arm64": "workspace:^",
+    "@ruvyxa/cli-linux-x64": "workspace:^",
+    "@ruvyxa/cli-win32-x64": "workspace:^"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --passWithNoTests",
     "format": "tsc -p tsconfig.json --noEmit",
-    "prepack": "pnpm run build && node scripts/prepare-native-source.mjs"
+    "prepack": "pnpm run build && node scripts/prepare-native-binary.mjs"
   }
 }

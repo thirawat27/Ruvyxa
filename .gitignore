@@ -9,5 +9,6 @@ dist/
 .DS_Store
 .pid
 .npm-pack/
-packages/ruvyxa/native-src/
+packages/ruvyxa/native-bin/
 packages/create-ruvyxa/template/
+packages/@ruvyxa/cli-*/bin/

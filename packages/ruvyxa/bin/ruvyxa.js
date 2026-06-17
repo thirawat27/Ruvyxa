@@ -1,28 +1,69 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process"
 import { existsSync } from "node:fs"
-import { dirname, resolve } from "node:path"
+import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
 const here = dirname(fileURLToPath(import.meta.url))
 const packageRoot = resolve(here, "..")
-const sourceRoot = resolve(packageRoot, "native-src")
 const monorepoRoot = resolve(here, "../../..")
-const sourceCargoToml = resolve(sourceRoot, "Cargo.toml")
-const monorepoCargoToml = resolve(monorepoRoot, "Cargo.toml")
+const executable = process.platform === "win32" ? "ruvyxa.exe" : "ruvyxa"
+const platformKey = `${process.platform}-${process.arch}`
 
-const cargoRoot = existsSync(sourceCargoToml) ? sourceRoot : existsSync(monorepoCargoToml) ? monorepoRoot : null
+const binary = findBinary()
 
-if (!cargoRoot) {
-  console.error("Ruvyxa CLI source was not found in this npm package.")
-  console.error("Reinstall ruvyxa, or run from a complete Ruvyxa source checkout.")
+if (!binary) {
+  console.error(`Ruvyxa native CLI binary was not found for ${platformKey}.`)
+  console.error("Reinstall ruvyxa, or install the matching @ruvyxa/cli-* optional package.")
+  console.error("When working from source, run `cargo build -p ruvyxa_cli` first.")
   process.exit(1)
 }
 
-const result = spawnSync("cargo", ["run", "-p", "ruvyxa_cli", "--", ...process.argv.slice(2)], {
-  cwd: cargoRoot,
+const result = spawnSync(binary, process.argv.slice(2), {
+  cwd: process.cwd(),
   stdio: "inherit",
   shell: process.platform === "win32",
 })
 
 process.exit(result.status ?? 1)
+
+function findBinary() {
+  const bundled = resolve(packageRoot, "native-bin", platformKey, executable)
+  if (existsSync(bundled)) return bundled
+
+  const optionalPackage = optionalBinaryPackageName()
+  if (optionalPackage) {
+    try {
+      const packageJson = import.meta.resolve(`${optionalPackage}/package.json`)
+      const packageRoot = dirname(fileURLToPath(packageJson))
+      const optionalBinary = join(packageRoot, "bin", executable)
+      if (existsSync(optionalBinary)) return optionalBinary
+    } catch {
+      // Optional platform package is absent on unsupported platforms.
+    }
+  }
+
+  for (const profile of ["debug", "release"]) {
+    const sourceBinary = resolve(monorepoRoot, "target", profile, executable)
+    if (existsSync(sourceBinary)) return sourceBinary
+  }
+
+  return null
+}
+
+function optionalBinaryPackageName() {
+  switch (platformKey) {
+    case "darwin-arm64":
+      return "@ruvyxa/cli-darwin-arm64"
+    case "darwin-x64":
+      return "@ruvyxa/cli-darwin-x64"
+    case "linux-arm64":
+      return "@ruvyxa/cli-linux-arm64"
+    case "linux-x64":
+      return "@ruvyxa/cli-linux-x64"
+    case "win32-x64":
+      return "@ruvyxa/cli-win32-x64"
+    default:
+      return null
+  }
+}
