@@ -2,7 +2,8 @@
 import { readdirSync, readFileSync, statSync } from "node:fs"
 import { join } from "node:path"
 
-const expectedVersion = "1.0.0"
+const rootPkg = JSON.parse(readFileSync("package.json", "utf8"))
+const expectedVersion = rootPkg.version
 const repoUrl = "git+https://github.com/thirawat27/ruvyxa.git"
 const packageDirs = [
   "packages/ruvyxa",
@@ -32,6 +33,29 @@ if (failures.length > 0) {
 }
 
 console.log(`Validated ${packageDirs.length} npm package manifests for ${expectedVersion}.`)
+
+// Validate Rust crate versions match
+const crateDirs = readdirSync("crates")
+  .map((name) => `crates/${name}`)
+  .filter((dir) => statSync(dir).isDirectory())
+
+for (const dir of crateDirs) {
+  const cargoToml = readFileSync(join(dir, "Cargo.toml"), "utf8")
+  const versionMatch = cargoToml.match(/^version\s*=\s*"([^"]+)"/m)
+  if (versionMatch) {
+    const crateVersion = versionMatch[1]
+    if (crateVersion !== expectedVersion) {
+      failures.push(`${dir} Cargo.toml version "${crateVersion}" must be "${expectedVersion}"`)
+    }
+  }
+}
+
+if (failures.length > 0) {
+  console.error(failures.map((failure) => `- ${failure}`).join("\n"))
+  process.exit(1)
+}
+
+console.log(`Validated ${crateDirs.length} Rust crate manifests for ${expectedVersion}.`)
 
 function check(condition, message) {
   if (!condition) failures.push(message)

@@ -165,14 +165,12 @@ async fn hmr_ws(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> Res
     ws.on_upgrade(move |mut socket| async move {
         let mut reload_rx = state.reload_tx.subscribe();
 
-        while let Ok(path) = reload_rx.recv().await {
-            let payload = serde_json::json!({
-                "type": "full-reload",
-                "path": path,
-            })
-            .to_string();
-
-            if socket.send(Message::Text(payload.into())).await.is_err() {
+        while let Ok(payload) = reload_rx.recv().await {
+            if socket
+                .send(Message::Text(payload.into()))
+                .await
+                .is_err()
+            {
                 break;
             }
         }

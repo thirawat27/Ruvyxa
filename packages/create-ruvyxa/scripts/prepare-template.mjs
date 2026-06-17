@@ -13,4 +13,5 @@ await mkdir(resolve(packageRoot, "template"), { recursive: true })
 await cp(resolve(repoRoot, "templates", "minimal"), target, {
   recursive: true,
   force: true,
+  filter: (source) => !source.includes("node_modules"),
 })

@@ -1,6 +1,6 @@
 {
   "name": "@ruvyxa/adapter-static",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Prepare Ruvyxa routes and assets for static output targets through the first-party adapter contract.",
   "license": "MIT",
   "type": "module",

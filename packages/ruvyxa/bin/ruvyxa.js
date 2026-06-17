@@ -30,7 +30,7 @@ if (result.error) {
   process.exit(1)
 }
 
-process.exit(result.status ?? 1)
+process.exit(result.status ?? 0)
 
 function findBinary() {
   const bundled = resolve(packageRoot, "native-bin", platformKey, executable)

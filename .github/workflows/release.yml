@@ -26,6 +26,8 @@ jobs:
             package: "@ruvyxa/cli-linux-arm64"
           - os: macos-latest
             package: "@ruvyxa/cli-darwin-arm64"
+          - os: macos-13
+            package: "@ruvyxa/cli-darwin-x64"
 
     steps:
       - uses: actions/checkout@v4

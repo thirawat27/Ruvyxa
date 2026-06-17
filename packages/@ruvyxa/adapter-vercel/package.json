@@ -1,6 +1,6 @@
 {
   "name": "@ruvyxa/adapter-vercel",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Shape Ruvyxa builds for Vercel-style serverless deployments with typed output metadata.",
   "license": "MIT",
   "type": "module",

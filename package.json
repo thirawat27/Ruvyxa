@@ -1,6 +1,6 @@
 {
   "name": "ruvyxa-monorepo",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "Rust-powered full-stack TypeScript framework for fast dev, honest builds, and explainable production apps.",  
   "license": "MIT",

@@ -1,6 +1,6 @@
 {
   "name": "@ruvyxa/cli-darwin-x64",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Prebuilt Ruvyxa native CLI binary for macOS x64.",
   "license": "MIT",
   "type": "module",
