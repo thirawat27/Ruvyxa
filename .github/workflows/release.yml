@@ -38,8 +38,8 @@ jobs:
         if: github.event_name == 'workflow_dispatch'
         run: |
           TAG="${{ steps.version.outputs.tag }}"
-          if git rev-parse "$TAG" >/dev/null 2>&1; then
-            echo "Tag $TAG already exists, skipping creation"
+          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists on origin, skipping creation"
           else
             git tag "$TAG"
             git push origin "$TAG"
