@@ -1,0 +1,15 @@
+{
+  "name": "Ruvyxa",
+  "short_name": "Ruvyxa",
+  "icons": [
+    {
+      "src": "/logo.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ],
+  "theme_color": "#17191f",
+  "background_color": "#f7f7f4",
+  "display": "standalone"
+}

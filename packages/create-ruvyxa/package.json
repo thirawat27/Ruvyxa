@@ -1,0 +1,17 @@
+{
+  "name": "create-ruvyxa",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "create-ruvyxa": "./bin/create-ruvyxa.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run --passWithNoTests",
+    "format": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^24.10.1"
+  }
+}

@@ -1,0 +1,7 @@
+{
+  "extends": "./.ruvyxa/tsconfig.json",
+  "compilerOptions": {
+    "strict": true
+  },
+  "include": ["app", "components", "server", "ruvyxa.config.ts"]
+}

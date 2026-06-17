@@ -1,0 +1,9 @@
+target/
+node_modules/
+dist/
+.ruvyxa/
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store

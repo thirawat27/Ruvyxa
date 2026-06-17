@@ -1,0 +1,17 @@
+{
+  "name": "basic-ruvyxa-app",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "cargo run -p ruvyxa_cli -- dev --root .",
+    "build": "cargo run -p ruvyxa_cli -- build --root .",
+    "start": "cargo run -p ruvyxa_cli -- start --root ."
+  },
+  "dependencies": {
+    "@ruvyxa/core": "workspace:*",
+    "ruvyxa": "workspace:*",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  }
+}
