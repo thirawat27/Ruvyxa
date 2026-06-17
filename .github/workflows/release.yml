@@ -7,12 +7,48 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: read
+  contents: write
   id-token: write
 
 jobs:
+  resolve-version:
+    name: Resolve release version
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: version
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Resolved version: $VERSION"
+      - name: Validate tag matches package.json
+        if: github.event_name == 'push'
+        run: |
+          TAG_VERSION="${GITHUB_REF_NAME#v}"
+          PKG_VERSION="${{ steps.version.outputs.version }}"
+          if [ "$TAG_VERSION" != "$PKG_VERSION" ]; then
+            echo "::error::Tag version ($TAG_VERSION) does not match package.json ($PKG_VERSION)"
+            exit 1
+          fi
+      - name: Create tag if workflow_dispatch
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          TAG="${{ steps.version.outputs.tag }}"
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            echo "Tag $TAG already exists, skipping creation"
+          else
+            git tag "$TAG"
+            git push origin "$TAG"
+            echo "Created and pushed tag $TAG"
+          fi
+
   publish-native:
     name: Publish native CLI (${{ matrix.os }})
+    needs: resolve-version
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -47,7 +83,7 @@ jobs:
 
   publish-packages:
     name: Publish JavaScript packages
-    needs: publish-native
+    needs: [resolve-version, publish-native]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -80,3 +116,7 @@ jobs:
       - run: pnpm --filter create-ruvyxa publish --access public --no-git-checks
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+      - name: Release summary
+        run: |
+          echo "## Release v${{ needs.resolve-version.outputs.version }}" >> "$GITHUB_STEP_SUMMARY"
+          echo "All packages published to npm successfully." >> "$GITHUB_STEP_SUMMARY"

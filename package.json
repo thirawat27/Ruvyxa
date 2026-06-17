@@ -2,7 +2,7 @@
   "name": "ruvyxa-monorepo",
   "version": "1.0.1",
   "private": true,
-  "description": "Rust-powered full-stack TypeScript framework for fast dev, honest builds, and explainable production apps.",  
+  "description": "Rust-powered full-stack TypeScript framework for fast dev, honest builds, and explainable production apps.",
   "license": "MIT",
   "packageManager": "pnpm@10.32.1",
   "scripts": {
@@ -11,6 +11,7 @@
     "test": "cargo test --workspace && pnpm -r test",
     "format": "cargo fmt --all && pnpm -r format",
     "release:validate": "node scripts/validate-package-metadata.mjs",
+    "release:bump": "node scripts/bump-version.mjs",
     "pack:smoke": "node scripts/pack-smoke.mjs",
     "publish:dry-run": "pnpm -r --filter './packages/**' publish --access public --dry-run"
   },

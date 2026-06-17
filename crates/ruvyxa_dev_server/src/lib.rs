@@ -166,11 +166,7 @@ async fn hmr_ws(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> Res
         let mut reload_rx = state.reload_tx.subscribe();
 
         while let Ok(payload) = reload_rx.recv().await {
-            if socket
-                .send(Message::Text(payload.into()))
-                .await
-                .is_err()
-            {
+            if socket.send(Message::Text(payload.into())).await.is_err() {
                 break;
             }
         }
