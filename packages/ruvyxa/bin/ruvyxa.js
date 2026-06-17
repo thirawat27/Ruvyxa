@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process"
-import { existsSync } from "node:fs"
+import { chmodSync, existsSync } from "node:fs"
 import { dirname, join, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
@@ -25,11 +25,16 @@ const result = spawnSync(binary, process.argv.slice(2), {
   shell: process.platform === "win32",
 })
 
+if (result.error) {
+  console.error(`Failed to run Ruvyxa native CLI at ${binary}: ${result.error.message}`)
+  process.exit(1)
+}
+
 process.exit(result.status ?? 1)
 
 function findBinary() {
   const bundled = resolve(packageRoot, "native-bin", platformKey, executable)
-  if (existsSync(bundled)) return bundled
+  if (existsSync(bundled)) return prepareExecutable(bundled)
 
   const optionalPackage = optionalBinaryPackageName()
   if (optionalPackage) {
@@ -37,7 +42,7 @@ function findBinary() {
       const packageJson = import.meta.resolve(`${optionalPackage}/package.json`)
       const packageRoot = dirname(fileURLToPath(packageJson))
       const optionalBinary = join(packageRoot, "bin", executable)
-      if (existsSync(optionalBinary)) return optionalBinary
+      if (existsSync(optionalBinary)) return prepareExecutable(optionalBinary)
     } catch {
       // Optional platform package is absent on unsupported platforms.
     }
@@ -45,10 +50,18 @@ function findBinary() {
 
   for (const profile of ["debug", "release"]) {
     const sourceBinary = resolve(monorepoRoot, "target", profile, executable)
-    if (existsSync(sourceBinary)) return sourceBinary
+    if (existsSync(sourceBinary)) return prepareExecutable(sourceBinary)
   }
 
   return null
+}
+
+function prepareExecutable(binary) {
+  if (process.platform !== "win32") {
+    chmodSync(binary, 0o755)
+  }
+
+  return binary
 }
 
 function optionalBinaryPackageName() {

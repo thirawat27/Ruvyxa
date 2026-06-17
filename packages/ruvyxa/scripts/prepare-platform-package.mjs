@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process"
-import { cp, mkdir, readFile, rm } from "node:fs/promises"
+import { chmod, cp, mkdir, readFile, rm } from "node:fs/promises"
 import { dirname, resolve } from "node:path"
 import { fileURLToPath } from "node:url"
 
@@ -34,7 +34,12 @@ if (build.status !== 0) {
 
 await rm(resolve(platformPackageRoot, "bin"), { recursive: true, force: true })
 await mkdir(resolve(platformPackageRoot, "bin"), { recursive: true })
+const target = resolve(platformPackageRoot, "bin", platform.executable)
 await cp(
   resolve(repoRoot, "target", "release", platform.executable),
-  resolve(platformPackageRoot, "bin", platform.executable),
+  target,
 )
+
+if (process.platform !== "win32") {
+  await chmod(target, 0o755)
+}
