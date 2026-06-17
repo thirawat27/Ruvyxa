@@ -1,109 +1,256 @@
-# Ruvyxa
+<p align="center">
+  <img src="examples/basic-app/public/ruvyxa.png" alt="Ruvyxa" width="120" height="120" />
+</p>
 
-Ruvyxa is a Rust-powered full-stack TypeScript framework prototype with file routing, a smart dev server, production output, and typed public APIs.
+<h1 align="center">Ruvyxa</h1>
 
+<p align="center">
+  The Rust-powered full-stack React framework.<br/>
+  File routing. Server-side rendering. Server actions. Production builds. One CLI.
+</p>
 
-## What Works Today
+<p align="center">
+  <a href="https://github.com/thirawat27/ruvyxa/actions"><img src="https://img.shields.io/github/actions/workflow/status/thirawat27/ruvyxa/ci.yml?branch=main&style=flat-square" alt="CI" /></a>
+  <a href="https://www.npmjs.com/package/ruvyxa"><img src="https://img.shields.io/npm/v/ruvyxa?style=flat-square&color=blue" alt="npm" /></a>
+  <a href="https://github.com/thirawat27/ruvyxa/blob/main/LICENSE"><img src="https://img.shields.io/github/license/thirawat27/ruvyxa?style=flat-square" alt="License" /></a>
+</p>
 
-- Rust CLI commands: `dev`, `build`, `start`, `routes`, `analyze`, `doctor`, `bench`, `test:parity`
-- File route discovery from `app/`
-- Route manifest generation
-- React-compatible SSR for `page.tsx` through the Ruvyxa SSR renderer
-- TS/TSX transformation through esbuild in the Node renderer bridge
-- Dynamic route params passed into SSR page components
-- CSS injection from app CSS files
-- Tailwind CSS v4 support through `@import "tailwindcss"` in app CSS
-- Single-file PNG brand asset copied from `public/ruvyxa.png` into `.ruvyxa/assets`
-- API route execution for `route.ts` handlers such as `GET`
-- HMR WebSocket events for CSS updates, component updates, and full reload fallbacks
-- Route-level browser hydration bundles with BLAKE3-hashed production output, minification, and esbuild tree shaking
-- Server action endpoint for `action.ts` route modules with body-limit middleware, same-origin checks, Fetch Metadata checks, content-type guards, and rate limiting
-- Default production security headers on HTML, JSON, static assets, client bundles, API responses, and action responses
-- Runtime trace endpoint for route/module debugging
-- `.env` and `.env.local` loading for SSR, API routes, and actions
-- First-party adapter contracts for Node, Vercel, Cloudflare, Netlify, Bun, and static output
-- Client bundle boundary diagnostics for `server-only`, `server/` imports, and private `process.env.*`
-- TypeScript public API package stubs
+---
+
+## Why Ruvyxa
+
+- **Fast by default** — Rust CLI handles route discovery, validation, and dev serving. No JavaScript toolchain startup tax.
+- **Honest builds** — `ruvyxa analyze` catches server/client boundary leaks _before_ production output is emitted.
+- **SSR-first React** — Pages render on the server through ReactDOMServer. Hydration bundles are route-level, tree-shaken, and BLAKE3-hashed.
+- **Server actions** — Typed, validated mutations with origin checks, rate limiting, and Fetch Metadata guards built in.
+- **One command, both modes** — `ruvyxa dev` and `ruvyxa start` share route semantics. What works in dev works in production.
+- **Deploy anywhere** — First-party adapters for Node, Vercel, Cloudflare Workers, Netlify, Bun, and static export.
+
+---
 
 ## Quick Start
+
+```bash
+npm create ruvyxa@latest my-app
+cd my-app
+npm install
+npx ruvyxa dev
+```
+
+Open [http://localhost:3000](http://localhost:3000).
+
+### From source (monorepo)
 
 ```bash
 pnpm install
 cargo run -p ruvyxa_cli -- dev --root examples/basic-app
 ```
 
-Open `http://localhost:3000`.
+---
 
-Build and serve production output:
+## Project Structure
 
-```bash
-cargo run -p ruvyxa_cli -- build --root examples/basic-app
-cargo run -p ruvyxa_cli -- start --root examples/basic-app
+```
+my-app/
+├── app/
+│   ├── layout.tsx          # Root layout
+│   ├── page.tsx            # Home page  →  /
+│   ├── about/page.tsx      # Static page → /about
+│   ├── blog/[slug]/
+│   │   ├── page.tsx        # Dynamic page → /blog/:slug
+│   │   └── server.ts       # Server-side loader
+│   ├── todos/
+│   │   ├── page.tsx        # Page with actions
+│   │   └── action.ts       # Server action
+│   └── api/health/route.ts # API route → /api/health
+├── public/                 # Static assets
+├── ruvyxa.config.ts        # Framework config
+└── package.json
 ```
 
-## Commands
+---
 
-```bash
-cargo run -p ruvyxa_cli -- routes --root examples/basic-app
-cargo run -p ruvyxa_cli -- analyze --root examples/basic-app
-cargo run -p ruvyxa_cli -- doctor --root examples/basic-app
-cargo run -p ruvyxa_cli -- trace /todos --root examples/basic-app
-cargo run -p ruvyxa_cli -- bench --root examples/basic-app --samples 3
-cargo run -p ruvyxa_cli -- test:parity --root examples/basic-app
-cargo test --workspace
-pnpm -r build
+## Features
+
+### File Routing
+
+Routes are discovered from the `app/` directory. No manual registration required.
+
+| File | Route |
+|------|-------|
+| `app/page.tsx` | `/` |
+| `app/about/page.tsx` | `/about` |
+| `app/blog/[slug]/page.tsx` | `/blog/:slug` |
+| `app/docs/[...path]/page.tsx` | `/docs/*path` |
+| `app/(marketing)/pricing/page.tsx` | `/pricing` |
+| `app/api/health/route.ts` | `/api/health` |
+
+### Server-Side Rendering
+
+Every `page.tsx` is rendered on the server by default. Dynamic params are injected automatically:
+
+```tsx
+export default function BlogPost({ params }: { params: { slug: string } }) {
+  return <h1>{params.slug}</h1>
+}
 ```
 
-`doctor` reports app structure, package manager, Node/Bun/Deno availability, React version alignment, duplicate dependency versions, route diagnostics, env schema presence, and native binary status.
+### Data Loading
 
-Call the example server action:
+Keep data access server-side with co-located loaders:
 
-```bash
-curl -X POST "http://localhost:3000/__ruvyxa/action?path=/todos&name=createTodo" \
-  -H "content-type: application/json" \
-  -d "{\"title\":\"Ship Ruvyxa\"}"
+```ts
+// app/blog/[slug]/server.ts
+import { loader } from "ruvyxa/server"
+
+export const getPost = loader(async ({ params, cache }) => {
+  return cache(`post:${params.slug}`).ttl("5m").get(async () => {
+    return db.posts.findBySlug(params.slug)
+  })
+})
 ```
 
-## Styling
+### Server Actions
 
-New Ruvyxa apps include Tailwind CSS v4 by default:
+Type-safe mutations with built-in validation:
+
+```ts
+// app/todos/action.ts
+import { action } from "ruvyxa/server"
+
+export const createTodo = action
+  .input({ parse: (value: any) => ({ title: String(value.title).trim() }) })
+  .handler(async ({ input, invalidate }) => {
+    invalidate("todos")
+    return { title: input.title, completed: false }
+  })
+```
+
+Actions are secured by default: origin validation, Fetch Metadata checks, content-type guards, 64 KB body limit, and per-client rate limiting.
+
+### Styling
+
+Tailwind CSS v4 works out of the box:
 
 ```css
+/* app/global.css */
 @import "tailwindcss";
 
 @source "../app";
 @source "../components";
 ```
 
-Ruvyxa detects CSS files that import `tailwindcss`, runs the local `@tailwindcss/cli`, and injects the compiled CSS during dev and production serving. The minimal template includes both `tailwindcss` and `@tailwindcss/cli`.
+### Environment Variables
 
-## Environment
+Server-side code has access to all env vars. Browser-reachable code is restricted to `RUVYXA_PUBLIC_*` prefixed variables. The boundary is enforced at build time.
 
-Server-side renderers load `.env` and `.env.local` from the app root. Document required keys in `.env.example`. Browser-reachable code may only use `RUVYXA_PUBLIC_*` variables.
+---
+
+## CLI Commands
+
+| Command | Description |
+|---------|-------------|
+| `ruvyxa dev` | Start the development server with HMR |
+| `ruvyxa build` | Create an optimized production build |
+| `ruvyxa start` | Serve the production build |
+| `ruvyxa routes` | List all discovered routes |
+| `ruvyxa analyze` | Validate server/client boundaries |
+| `ruvyxa doctor` | Check project health and dependencies |
+| `ruvyxa trace <path>` | Inspect route matching for a URL |
+| `ruvyxa bench` | Benchmark route discovery, validation, and builds |
+| `ruvyxa test:parity` | Verify dev/production route consistency |
+| `ruvyxa clean` | Remove `.ruvyxa` build output |
+
+---
+
+## Configuration
+
+```ts
+// ruvyxa.config.ts
+import { defineConfig } from "ruvyxa/config"
+
+export default defineConfig({
+  appDir: "app",
+  outDir: ".ruvyxa",
+  runtime: "node",
+  react: true,
+  server: {
+    port: 3000,
+    host: "localhost",
+  },
+})
+```
+
+---
+
+## Deployment
+
+Ruvyxa builds to a self-contained `.ruvyxa/` directory. Deploy with first-party adapters:
+
+```ts
+import { nodeAdapter } from "@ruvyxa/adapter-node"
+import { vercelAdapter } from "@ruvyxa/adapter-vercel"
+import { cloudflareAdapter } from "@ruvyxa/adapter-cloudflare"
+import { netlifyAdapter } from "@ruvyxa/adapter-netlify"
+import { bunAdapter } from "@ruvyxa/adapter-bun"
+import { staticAdapter } from "@ruvyxa/adapter-static"
+```
+
+See [docs/deployment.md](docs/deployment.md) for platform-specific guides.
+
+---
 
 ## Build Output
 
-```txt
+```
 .ruvyxa/
-├─ server/   # production route source used by ruvyxa start
-├─ client/   # hashed route-level hydration bundles and client manifest
-├─ assets/   # copied public assets
-├─ manifest.json
-└─ build.json
+├── server/       # Production route source
+├── client/       # BLAKE3-hashed hydration bundles
+├── assets/       # Static assets from public/
+├── manifest.json # Route manifest
+└── build.json    # Build metadata and security config
 ```
 
-`build.json` records the production profile, Unix build time, output directories, hash algorithm, and enabled security defaults.
+---
 
-## npm Publishing
+## Packages
 
-Public npm package metadata is configured for `https://github.com/thirawat27/ruvyxa`. See [docs/publishing.md](docs/publishing.md) for dry-run checks, package contents, publish order, and post-publish verification.
+| Package | Description |
+|---------|-------------|
+| [`ruvyxa`](packages/ruvyxa) | CLI + runtime — the main framework package |
+| [`create-ruvyxa`](packages/create-ruvyxa) | Project scaffolding tool |
+| [`@ruvyxa/core`](packages/@ruvyxa/core) | Shared primitives: config, loaders, actions, adapters |
+| [`@ruvyxa/react`](packages/@ruvyxa/react) | React SSR and hydration integration |
+| [`@ruvyxa/adapter-node`](packages/@ruvyxa/adapter-node) | Node.js deployment adapter |
+| [`@ruvyxa/adapter-vercel`](packages/@ruvyxa/adapter-vercel) | Vercel deployment adapter |
+| [`@ruvyxa/adapter-cloudflare`](packages/@ruvyxa/adapter-cloudflare) | Cloudflare Workers adapter |
+| [`@ruvyxa/adapter-netlify`](packages/@ruvyxa/adapter-netlify) | Netlify deployment adapter |
+| [`@ruvyxa/adapter-bun`](packages/@ruvyxa/adapter-bun) | Bun runtime adapter |
+| [`@ruvyxa/adapter-static`](packages/@ruvyxa/adapter-static) | Static site export adapter |
 
-## Production Readiness
+---
 
-Ruvyxa 1.0 is packaged for npm with native CLI binaries, release validation scripts, CI/release workflows, route-level optimized builds, hardened server actions, default security headers, deterministic BLAKE3 asset hashes, and dev/prod parity checks.
+## Documentation
 
-See [docs/production-readiness.md](docs/production-readiness.md) and [SECURITY.md](SECURITY.md).
+- [Getting Started](docs/getting-started.md)
+- [File Routing](docs/routing.md)
+- [Data Loading](docs/data.md)
+- [Server Actions](docs/actions.md)
+- [Deployment](docs/deployment.md)
+- [Debugging & Diagnostics](docs/debugging.md)
+- [Performance](docs/performance.md)
+- [Dev/Prod Parity](docs/parity.md)
+- [Production Readiness](docs/production-readiness.md)
+- [Publishing](docs/publishing.md)
 
-## Roadmap
+---
 
-Post-1.0 work focuses on deeper Fast Refresh state preservation, richer source-map optimizer reports, and host-specific deployment emitters beyond the current typed adapter contracts.
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for development setup, conventions, and PR guidelines.
+
+---
+
+## License
+
+[MIT](LICENSE)

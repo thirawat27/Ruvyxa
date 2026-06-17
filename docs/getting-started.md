@@ -1,13 +1,61 @@
 # Getting Started
 
-## Start in 60 Seconds
+## Create a New Project
+
+The fastest way to start is with the scaffolding tool:
 
 ```bash
-pnpm install
-cargo run -p ruvyxa_cli -- dev --root examples/basic-app
+npm create ruvyxa@latest my-app
+cd my-app
+npm install
+npx ruvyxa dev
 ```
 
-Open `http://localhost:3000`.
+Open [http://localhost:3000](http://localhost:3000) to see your app.
+
+> You can also use `pnpm`, `yarn`, or `bun` in place of `npm`.
+
+---
+
+## Manual Setup
+
+Install the framework package into any existing project:
+
+```bash
+npm install ruvyxa react react-dom
+```
+
+Add scripts to your `package.json`:
+
+```json
+{
+  "scripts": {
+    "dev": "ruvyxa dev",
+    "build": "ruvyxa build",
+    "start": "ruvyxa start"
+  }
+}
+```
+
+Create a config file:
+
+```ts
+// ruvyxa.config.ts
+import { defineConfig } from "ruvyxa/config"
+
+export default defineConfig({
+  appDir: "app",
+  outDir: ".ruvyxa",
+  runtime: "node",
+  react: true,
+  server: {
+    port: 3000,
+    host: "localhost",
+  },
+})
+```
+
+---
 
 ## Your First Page
 
@@ -24,19 +72,123 @@ export default function Home() {
 }
 ```
 
-## Build
+Every `page.tsx` is server-rendered by default. No client-side JavaScript ships unless you add a hydration bundle.
 
-```bash
-cargo run -p ruvyxa_cli -- analyze --root examples/basic-app
-cargo run -p ruvyxa_cli -- build --root examples/basic-app
-cargo run -p ruvyxa_cli -- start --root examples/basic-app
+---
+
+## Add a Layout
+
+Create `app/layout.tsx` to wrap all pages:
+
+```tsx
+import "./global.css"
+
+export const meta = {
+  title: "My App",
+  description: "Built with Ruvyxa.",
+}
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="en">
+      <body>{children}</body>
+    </html>
+  )
+}
 ```
 
-`analyze` validates route exports, client/server boundaries, and private env usage before production builds. The production server reads `.ruvyxa/server/app`, serves assets from `.ruvyxa/assets`, and uses the same route matching path as the dev server.
+Layouts nest automatically. A layout in `app/blog/layout.tsx` wraps all pages under `/blog/*`.
 
-## Styling With Tailwind
+---
 
-Ruvyxa apps include Tailwind CSS v4 support in `app/global.css`:
+## Dynamic Routes
+
+Use bracket notation for dynamic segments:
+
+```tsx
+// app/blog/[slug]/page.tsx
+export default function BlogPost({ params }: { params: { slug: string } }) {
+  return <h1>Post: {params.slug}</h1>
+}
+```
+
+The `params` object is injected during SSR with the matched URL segments.
+
+---
+
+## API Routes
+
+Create `app/api/health/route.ts`:
+
+```ts
+export function GET() {
+  return Response.json({ ok: true })
+}
+```
+
+API routes support `GET`, `POST`, `PUT`, `PATCH`, and `DELETE` handlers.
+
+---
+
+## Server Actions
+
+Create `app/todos/action.ts` beside your page:
+
+```ts
+import { action } from "ruvyxa/server"
+
+export const createTodo = action
+  .input({
+    parse(value: unknown) {
+      if (!value || typeof value !== "object" || !("title" in value)) {
+        throw new Error("Title is required")
+      }
+      return { title: String(value.title).trim() }
+    },
+  })
+  .handler(async ({ input, invalidate }) => {
+    invalidate("todos")
+    return { title: input.title, completed: false }
+  })
+```
+
+Call it from a form:
+
+```tsx
+export default function Todos() {
+  return (
+    <form method="post" action="/__ruvyxa/action?path=/todos&name=createTodo">
+      <input name="title" placeholder="New todo" />
+      <button type="submit">Add</button>
+    </form>
+  )
+}
+```
+
+---
+
+## Data Loading
+
+Co-locate server-side data fetching with your pages:
+
+```ts
+// app/blog/[slug]/server.ts
+import { loader } from "ruvyxa/server"
+
+export const getPost = loader(async ({ params, cache }) => {
+  return cache(`post:${params.slug}`).ttl("5m").get(async () => {
+    return db.posts.findBySlug(params.slug)
+  })
+})
+```
+
+Loaders run on the server only. They have access to all environment variables and can call databases directly.
+
+---
+
+## Styling with Tailwind CSS
+
+Ruvyxa supports Tailwind CSS v4 out of the box. Add it to `app/global.css`:
 
 ```css
 @import "tailwindcss";
@@ -45,57 +197,66 @@ Ruvyxa apps include Tailwind CSS v4 support in `app/global.css`:
 @source "../components";
 ```
 
-Install dependencies once with `pnpm install`. Ruvyxa runs the local Tailwind CLI when a CSS file imports `tailwindcss`, then injects the compiled CSS into rendered pages.
+Install the Tailwind dependencies:
+
+```bash
+npm install tailwindcss @tailwindcss/cli
+```
+
+Ruvyxa detects the `@import "tailwindcss"` directive, runs the Tailwind CLI, and injects compiled CSS into your pages automatically.
+
+---
 
 ## Environment Variables
 
-Put documented keys in `.env.example` and local values in `.env` or `.env.local`.
+Create `.env.example` to document required keys, and `.env` or `.env.local` for local values:
 
 ```env
-RUVYXA_PUBLIC_APP_NAME=Ruvyxa
-DATABASE_URL=postgres://user:password@localhost:5432/ruvyxa
+# Public — exposed to browser code
+RUVYXA_PUBLIC_APP_NAME=My App
+
+# Private — server-only
+DATABASE_URL=postgres://localhost:5432/mydb
 ```
 
-Ruvyxa loads `.env` and then `.env.local` into server-side renderers for SSR, API routes, and actions. Only `RUVYXA_PUBLIC_*` variables are allowed in client-reachable code.
+Rules:
+- `RUVYXA_PUBLIC_*` variables are available everywhere.
+- All other variables are server-only (SSR, API routes, actions, loaders).
+- `ruvyxa analyze` will catch private env usage in client-reachable code at build time.
 
-## React SSR
+---
 
-Ruvyxa renders `page.tsx` through ReactDOMServer. Dynamic route params are passed to page components:
+## Build for Production
 
-```tsx
-export default function BlogPost({ params }: { params: { slug: string } }) {
-  return <h1>{params.slug}</h1>
-}
+```bash
+npx ruvyxa build
+npx ruvyxa start
 ```
 
-API routes are executed from `route.ts`:
+The build step validates your app, bundles client-side code with tree-shaking and minification, and emits everything to `.ruvyxa/`. The production server serves from this directory with the same route semantics as dev.
 
-```ts
-export function GET() {
-  return Response.json({ ok: true })
-}
+---
+
+## Validate Before Deploy
+
+```bash
+npx ruvyxa analyze
 ```
 
-## Add an Action
+This checks for:
+- Missing default exports in pages
+- Server-only modules imported into client code
+- Private environment variables leaked to the browser
+- Invalid route segments
 
-Create `app/todos/action.ts`:
+Fix all diagnostics before deploying.
 
-```ts
-import { action } from "ruvyxa/server"
+---
 
-export const createTodo = action
-  .input({ parse: (value: any) => ({ title: String(value.title).trim() }) })
-  .handler(async ({ input, invalidate }) => {
-    invalidate("todos")
-    return { title: input.title, completed: false }
-  })
-```
+## Next Steps
 
-Then post to it from the matching route:
-
-```tsx
-<form method="post" action="/__ruvyxa/action?path=/todos&name=createTodo">
-  <input name="title" />
-  <button type="submit">Create todo</button>
-</form>
-```
+- [File Routing](routing.md) — dynamic segments, catch-all routes, route groups
+- [Data Loading](data.md) — loaders, caching, and server-side data patterns
+- [Server Actions](actions.md) — mutations, validation, and security
+- [Deployment](deployment.md) — adapters for Node, Vercel, Cloudflare, and more
+- [Debugging](debugging.md) — diagnostics, tracing, and the doctor command
