@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
 use std::time::SystemTime;
@@ -50,11 +51,11 @@ struct ServerArgs {
     #[arg(long, default_value = ".")]
     root: PathBuf,
 
-    #[arg(long, default_value = "localhost")]
-    host: String,
+    #[arg(long)]
+    host: Option<String>,
 
-    #[arg(long, default_value_t = 3000)]
-    port: u16,
+    #[arg(long)]
+    port: Option<u16>,
 }
 
 #[derive(Debug, Parser)]
@@ -93,26 +94,96 @@ struct BenchArgs {
     json: bool,
 }
 
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ProjectConfig {
+    app_dir: Option<String>,
+    out_dir: Option<String>,
+    #[serde(default)]
+    server: ServerConfigOptions,
+    #[serde(default)]
+    build: BuildConfigOptions,
+    #[serde(default)]
+    security: SecurityConfigOptions,
+    #[serde(default)]
+    cache: CacheConfigOptions,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ServerConfigOptions {
+    host: Option<String>,
+    port: Option<u16>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BuildConfigOptions {
+    minify: Option<bool>,
+    sourcemap: Option<bool>,
+    split_strategy: Option<String>,
+    parallelism: Option<usize>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct SecurityConfigOptions {
+    action_body_limit_bytes: Option<usize>,
+    same_origin_actions: Option<bool>,
+    fetch_metadata_actions: Option<bool>,
+    security_headers: Option<bool>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CacheConfigOptions {
+    route_manifest: Option<bool>,
+    css: Option<bool>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ConfigRendererOutput {
+    ok: bool,
+    config: Option<ProjectConfig>,
+    code: Option<String>,
+    message: Option<String>,
+    stack: Option<String>,
+}
+
+impl ProjectConfig {
+    fn app_dir(&self) -> &str {
+        self.app_dir.as_deref().unwrap_or("app")
+    }
+
+    fn out_dir(&self) -> &str {
+        self.out_dir.as_deref().unwrap_or(".ruvyxa")
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "ruvyxa=info,tower_http=info".into()),
+            tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| "warn".into()),
         )
+        .without_time()
+        .with_target(false)
         .init();
 
     let cli = Cli::parse();
 
     match cli.command {
         Command::Dev(args) => {
-            serve(ServerConfig::dev(args.root, args.host, args.port))
+            let config = load_project_config(&args.root)?;
+            serve(dev_server_config(&args, &config))
                 .await
                 .context("dev server failed")?;
         }
         Command::Build(args) => build(args).context("build failed")?,
         Command::Start(args) | Command::Preview(args) => {
-            serve(ServerConfig::production(args.root, args.host, args.port))
+            let config = load_project_config(&args.root)?;
+            serve(production_server_config(&args, &config))
                 .await
                 .context("production server failed")?;
         }
@@ -128,9 +199,83 @@ async fn main() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn dev_server_config(args: &ServerArgs, config: &ProjectConfig) -> ServerConfig {
+    let mut server = ServerConfig::dev(
+        &args.root,
+        args.host
+            .clone()
+            .or_else(|| config.server.host.clone())
+            .unwrap_or_else(|| "localhost".to_string()),
+        args.port.or(config.server.port).unwrap_or(3000),
+    );
+    let out_dir = args.root.join(config.out_dir());
+    server.app_dir = args.root.join(config.app_dir());
+    server.public_dir = args.root.join("public");
+    server.client_dir = out_dir.join("client");
+    server.cache_route_manifest = config.cache.route_manifest.unwrap_or(true);
+    server.cache_css = config.cache.css.unwrap_or(true);
+    server
+}
+
+fn production_server_config(args: &ServerArgs, config: &ProjectConfig) -> ServerConfig {
+    let mut server = ServerConfig::production(
+        &args.root,
+        args.host
+            .clone()
+            .or_else(|| config.server.host.clone())
+            .unwrap_or_else(|| "localhost".to_string()),
+        args.port.or(config.server.port).unwrap_or(3000),
+    );
+    let out_dir = args.root.join(config.out_dir());
+    server.app_dir = out_dir.join("server").join(config.app_dir());
+    server.public_dir = out_dir.join("assets");
+    server.client_dir = out_dir.join("client");
+    server.cache_route_manifest = config.cache.route_manifest.unwrap_or(true);
+    server.cache_css = config.cache.css.unwrap_or(true);
+    server
+}
+
+fn load_project_config(root: &Path) -> anyhow::Result<ProjectConfig> {
+    let Some(renderer) = find_runtime_script(root, "config-renderer.mjs") else {
+        return Ok(ProjectConfig::default());
+    };
+
+    let output = ProcessCommand::new("node")
+        .arg(&renderer)
+        .arg(root)
+        .output()
+        .with_context(|| format!("failed to load config for {}", root.display()))?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let result: ConfigRendererOutput = serde_json::from_str(&stdout).with_context(|| {
+        format!(
+            "config renderer returned invalid output for {}\nstdout:\n{}",
+            root.display(),
+            stdout
+        )
+    })?;
+
+    if output.status.success() && result.ok {
+        return Ok(result.config.unwrap_or_default());
+    }
+
+    anyhow::bail!(
+        "config load failed: {} {}",
+        result.code.unwrap_or_else(|| "RUV1600".to_string()),
+        result
+            .message
+            .or(result.stack)
+            .unwrap_or_else(|| "unknown config error".to_string())
+    )
+}
+
 fn build(args: BuildArgs) -> anyhow::Result<()> {
-    let app_dir = args.root.join("app");
-    let out_dir = args.root.join(".ruvyxa");
+    build_with_output(args, true)
+}
+
+fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> {
+    let config = load_project_config(&args.root)?;
+    let app_dir = args.root.join(config.app_dir());
+    let out_dir = args.root.join(config.out_dir());
     let server_dir = out_dir.join("server");
     let client_dir = out_dir.join("client");
     let assets_dir = out_dir.join("assets");
@@ -154,7 +299,14 @@ fn build(args: BuildArgs) -> anyhow::Result<()> {
     fs::create_dir_all(&client_dir)?;
     write_manifest(&manifest, &out_dir.join("manifest.json"))?;
 
-    let client_manifest = emit_client_bundles(&args.root, &app_dir, &manifest, &client_dir)?;
+    let client_manifest = emit_client_bundles(
+        &args.root,
+        &app_dir,
+        &manifest,
+        &client_dir,
+        config.build.minify.unwrap_or(true),
+        config.build.parallelism,
+    )?;
     fs::write(
         client_dir.join("manifest.json"),
         serde_json::to_string_pretty(&client_manifest)?,
@@ -175,10 +327,16 @@ fn build(args: BuildArgs) -> anyhow::Result<()> {
         "assetsDir": "assets",
         "hashAlgorithm": "blake3-128",
         "security": {
-            "actionBodyLimitBytes": 65536,
-            "sameOriginActions": true,
-            "fetchMetadataActions": true,
-            "securityHeaders": true
+            "actionBodyLimitBytes": config.security.action_body_limit_bytes.unwrap_or(65536),
+            "sameOriginActions": config.security.same_origin_actions.unwrap_or(true),
+            "fetchMetadataActions": config.security.fetch_metadata_actions.unwrap_or(true),
+            "securityHeaders": config.security.security_headers.unwrap_or(true)
+        },
+        "build": {
+            "minify": config.build.minify.unwrap_or(true),
+            "sourcemap": config.build.sourcemap.unwrap_or(false),
+            "splitStrategy": config.build.split_strategy.unwrap_or_else(|| "route".to_string()),
+            "parallelism": client_manifest.get("parallelism").cloned().unwrap_or(serde_json::Value::Null)
         }
     });
     fs::write(
@@ -192,11 +350,18 @@ fn build(args: BuildArgs) -> anyhow::Result<()> {
         output = %out_dir.display(),
         "build complete"
     );
-    println!(
-        "Built {} routes into {}",
-        manifest.routes.len(),
-        out_dir.display()
-    );
+    if show_summary {
+        println!(
+            "\n{}\n  {} {}\n  {} {}\n  {} Built into {}\n",
+            heading("Ruvyxa build"),
+            label("target"),
+            accent(format!("{:?}", args.target).to_lowercase()),
+            label("routes"),
+            accent(manifest.routes.len().to_string()),
+            success(),
+            path_text(&out_dir)
+        );
+    }
     Ok(())
 }
 
@@ -210,64 +375,81 @@ struct ClientBundleOutput {
     stack: Option<String>,
 }
 
+struct ClientBundle {
+    path: String,
+    entry: PathBuf,
+    file_name: String,
+    script: String,
+}
+
 fn emit_client_bundles(
     root: &Path,
     app_dir: &Path,
     manifest: &RouteManifest,
     client_dir: &Path,
+    minify: bool,
+    configured_parallelism: Option<usize>,
 ) -> anyhow::Result<serde_json::Value> {
     let renderer = find_runtime_script(root, "client-renderer.mjs")
         .context("client renderer was not found for production build")?;
-    let mut routes = Vec::new();
-
-    for route in manifest
+    let page_routes = manifest
         .routes
         .iter()
         .filter(|route| route.kind == ruvyxa_graph::RouteKind::Page)
-    {
-        let output = ProcessCommand::new("node")
-            .env("RUVYXA_CLIENT_MINIFY", "1")
-            .arg(&renderer)
-            .arg(root)
-            .arg(app_dir)
-            .arg(&route.file)
-            .arg(&route.path)
-            .arg("{}")
-            .output()
-            .with_context(|| format!("failed to bundle client route {}", route.path))?;
+        .cloned()
+        .collect::<Vec<_>>();
+    let available_parallelism = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1);
+    let parallelism = configured_parallelism
+        .unwrap_or(available_parallelism)
+        .clamp(1, page_routes.len().max(1));
+    let chunk_size = page_routes.len().max(1).div_ceil(parallelism);
+    let mut bundles = Vec::new();
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let result: ClientBundleOutput = serde_json::from_str(&stdout).with_context(|| {
-            format!(
-                "client renderer returned invalid output for {}\nstdout:\n{}",
-                route.path, stdout
-            )
-        })?;
+    std::thread::scope(|scope| -> anyhow::Result<()> {
+        let mut handles = Vec::new();
 
-        if !output.status.success() || !result.ok {
-            anyhow::bail!(
-                "client bundle failed for {}: {} {}",
-                route.path,
-                result.code.unwrap_or_else(|| "RUV1300".to_string()),
-                result
-                    .message
-                    .or(result.stack)
-                    .unwrap_or_else(|| "unknown client build error".to_string())
+        for (chunk_index, chunk) in page_routes.chunks(chunk_size).enumerate() {
+            let routes = chunk.to_vec();
+            let offset = chunk_index * chunk_size;
+            let renderer = renderer.clone();
+
+            handles.push(
+                scope.spawn(move || -> anyhow::Result<Vec<(usize, ClientBundle)>> {
+                    routes
+                        .iter()
+                        .enumerate()
+                        .map(|(index, route)| {
+                            bundle_client_route(root, app_dir, &renderer, route, minify)
+                                .map(|bundle| (offset + index, bundle))
+                        })
+                        .collect()
+                }),
             );
         }
 
-        let script = result
-            .script
-            .context("client renderer completed without script output")?;
-        let file_name = format!("{}.js", content_hash(&script));
-        fs::write(client_dir.join(&file_name), script.as_bytes())?;
+        for handle in handles {
+            let mut next = handle
+                .join()
+                .map_err(|_| anyhow::anyhow!("client bundler worker panicked"))??;
+            bundles.append(&mut next);
+        }
 
+        Ok(())
+    })?;
+
+    bundles.sort_by_key(|(index, _)| *index);
+
+    let mut routes = Vec::new();
+    for (_, bundle) in bundles {
+        fs::write(client_dir.join(&bundle.file_name), bundle.script.as_bytes())?;
         routes.push(serde_json::json!({
-            "path": route.path,
-            "entry": route.file,
-            "file": file_name,
-            "src": format!("/__ruvyxa/client/{}", file_name),
-            "bytes": script.len(),
+            "path": bundle.path,
+            "entry": bundle.entry,
+            "file": bundle.file_name,
+            "src": format!("/__ruvyxa/client/{}", bundle.file_name),
+            "bytes": bundle.script.len(),
             "optimized": true,
             "treeShaken": true,
             "chunkStrategy": "route"
@@ -276,10 +458,62 @@ fn emit_client_bundles(
 
     Ok(serde_json::json!({
         "chunkStrategy": "route",
-        "minify": true,
+        "minify": minify,
         "treeShaking": true,
+        "parallelism": parallelism,
         "routes": routes
     }))
+}
+
+fn bundle_client_route(
+    root: &Path,
+    app_dir: &Path,
+    renderer: &Path,
+    route: &RouteEntry,
+    minify: bool,
+) -> anyhow::Result<ClientBundle> {
+    let output = ProcessCommand::new("node")
+        .env("RUVYXA_CLIENT_MINIFY", if minify { "1" } else { "0" })
+        .arg(renderer)
+        .arg(root)
+        .arg(app_dir)
+        .arg(&route.file)
+        .arg(&route.path)
+        .arg("{}")
+        .output()
+        .with_context(|| format!("failed to bundle client route {}", route.path))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let result: ClientBundleOutput = serde_json::from_str(&stdout).with_context(|| {
+        format!(
+            "client renderer returned invalid output for {}\nstdout:\n{}",
+            route.path, stdout
+        )
+    })?;
+
+    if !output.status.success() || !result.ok {
+        anyhow::bail!(
+            "client bundle failed for {}: {} {}",
+            route.path,
+            result.code.unwrap_or_else(|| "RUV1300".to_string()),
+            result
+                .message
+                .or(result.stack)
+                .unwrap_or_else(|| "unknown client build error".to_string())
+        );
+    }
+
+    let script = result
+        .script
+        .context("client renderer completed without script output")?;
+    let file_name = format!("{}.js", content_hash(&script));
+
+    Ok(ClientBundle {
+        path: route.path.clone(),
+        entry: route.file.clone(),
+        file_name,
+        script,
+    })
 }
 
 fn content_hash(input: &str) -> String {
@@ -303,22 +537,29 @@ fn find_runtime_script(root: &Path, file_name: &str) -> Option<PathBuf> {
 }
 
 fn print_routes(args: ProjectArgs) -> anyhow::Result<()> {
-    let manifest = discover_routes(DiscoverOptions::new(args.root.join("app")))?;
+    let config = load_project_config(&args.root)?;
+    let manifest = discover_routes(DiscoverOptions::new(args.root.join(config.app_dir())))?;
 
+    println!("\n{}", heading("Ruvyxa routes"));
+    print_route_row("kind", label("kind"), "path", label("path"), label("id"));
     for route in manifest.routes {
-        println!(
-            "{:<8} {:<24} {}",
-            format!("{:?}", route.kind),
-            route.path,
-            route.id
+        let kind = format!("{:?}", route.kind);
+        print_route_row(
+            &kind,
+            accent(&kind),
+            &route.path,
+            route.path.clone(),
+            dim(route.id),
         );
     }
+    println!();
 
     Ok(())
 }
 
 fn analyze(args: ProjectArgs) -> anyhow::Result<()> {
-    let manifest = discover_routes(DiscoverOptions::new(args.root.join("app")))?;
+    let config = load_project_config(&args.root)?;
+    let manifest = discover_routes(DiscoverOptions::new(args.root.join(config.app_dir())))?;
     let validation = validate_app(&args.root, &manifest)?;
 
     println!("{}", serde_json::to_string_pretty(&validation)?);
@@ -334,67 +575,94 @@ fn analyze(args: ProjectArgs) -> anyhow::Result<()> {
 }
 
 fn doctor(args: ProjectArgs) -> anyhow::Result<()> {
-    let app_dir = args.root.join("app");
+    let config = load_project_config(&args.root)?;
+    let app_dir = args.root.join(config.app_dir());
     let package_json = args.root.join("package.json");
     let tsconfig = args.root.join("tsconfig.json");
 
-    println!("Ruvyxa doctor");
-    println!("root: {}", args.root.display());
-    println!("app directory: {}", exists_label(&app_dir));
-    println!("package.json: {}", exists_label(&package_json));
-    println!("tsconfig.json: {}", exists_label(&tsconfig));
-    println!("package manager: {}", detect_package_manager(&args.root));
-    println!("node: {}", tool_version("node", &["--version"]));
-    println!("bun: {}", tool_version("bun", &["--version"]));
-    println!("deno: {}", tool_version("deno", &["--version"]));
+    println!("\n{}", heading("Ruvyxa doctor"));
+    print_field("root", path_text(&args.root));
+    print_field("config", exists_status(&args.root.join("ruvyxa.config.ts")));
+    print_field("app dir", path_text(&app_dir));
+    print_field("out dir", path_text(&args.root.join(config.out_dir())));
+    print_field("app directory", exists_status(&app_dir));
+    print_field("package.json", exists_status(&package_json));
+    print_field("tsconfig.json", exists_status(&tsconfig));
+    print_field(
+        "package manager",
+        accent(detect_package_manager(&args.root)),
+    );
+    print_field("node", tool_status(tool_version("node", &["--version"])));
+    print_field("bun", tool_status(tool_version("bun", &["--version"])));
+    print_field("deno", tool_status(tool_version("deno", &["--version"])));
 
     if package_json.exists() {
         let package = read_package_json(&package_json)?;
-        println!(
-            "react: {}",
-            dependency_version(&package, "react").unwrap_or_else(|| "missing".to_string())
+        print_field(
+            "react",
+            tool_status(
+                dependency_version(&package, "react").unwrap_or_else(|| "missing".to_string()),
+            ),
         );
-        println!(
-            "react-dom: {}",
-            dependency_version(&package, "react-dom").unwrap_or_else(|| "missing".to_string())
+        print_field(
+            "react-dom",
+            tool_status(
+                dependency_version(&package, "react-dom").unwrap_or_else(|| "missing".to_string()),
+            ),
         );
-        println!("react compatibility: {}", react_compatibility(&package));
+        print_field(
+            "react compatibility",
+            compatibility_status(react_compatibility(&package)),
+        );
 
         let duplicates = duplicate_dependencies(&package);
         if duplicates.is_empty() {
-            println!("dependency duplicates: ok");
+            print_field("dependency duplicates", ok_text("ok"));
         } else {
-            println!("dependency duplicates: {}", duplicates.join(", "));
+            print_field("dependency duplicates", warn_text(duplicates.join(", ")));
         }
     }
 
     let manifest = discover_routes(DiscoverOptions::new(&app_dir))?;
     let validation = validate_app(&args.root, &manifest)?;
-    println!("routes: {}", manifest.routes.len());
-    println!("page routes: {}", validation.page_routes);
-    println!("api routes: {}", validation.api_routes);
-    println!("client modules: {}", validation.client_modules);
-    println!("server modules: {}", validation.server_modules);
-    println!("diagnostics: {}", validation.diagnostics.len());
-    println!(
-        "env schema: {}",
-        exists_label(&args.root.join(".env.example"))
+    print_field("routes", accent(manifest.routes.len().to_string()));
+    print_field("page routes", accent(validation.page_routes.to_string()));
+    print_field("api routes", accent(validation.api_routes.to_string()));
+    print_field(
+        "client modules",
+        accent(validation.client_modules.to_string()),
     );
-    println!("native binary: ok");
+    print_field(
+        "server modules",
+        accent(validation.server_modules.to_string()),
+    );
+    print_field(
+        "diagnostics",
+        if validation.diagnostics.is_empty() {
+            ok_text("0")
+        } else {
+            warn_text(validation.diagnostics.len().to_string())
+        },
+    );
+    print_field("env schema", exists_status(&args.root.join(".env.example")));
+    print_field("native binary", ok_text("ok"));
+    println!();
     Ok(())
 }
 
 fn clean(args: ProjectArgs) -> anyhow::Result<()> {
-    let out_dir = args.root.join(".ruvyxa");
+    let config = load_project_config(&args.root)?;
+    let out_dir = args.root.join(config.out_dir());
     if out_dir.exists() {
         fs::remove_dir_all(&out_dir)?;
     }
-    println!("Removed {}", out_dir.display());
+    println!("\n{} Removed {}\n", success(), path_text(&out_dir));
     Ok(())
 }
 
 fn trace(args: TraceArgs) -> anyhow::Result<()> {
-    let manifest = discover_routes(DiscoverOptions::new(args.root.join("app")))?;
+    let config = load_project_config(&args.root)?;
+    let manifest = discover_routes(DiscoverOptions::new(args.root.join(config.app_dir())))?;
     let route = manifest
         .routes
         .iter()
@@ -408,39 +676,35 @@ fn trace(args: TraceArgs) -> anyhow::Result<()> {
 fn bench(args: BenchArgs) -> anyhow::Result<()> {
     let samples = args.samples.max(1);
     let root = args.root;
+    let config = load_project_config(&root)?;
+    let app_dir = root.join(config.app_dir());
     let mut results = Vec::new();
 
     results.push(run_benchmark("route-discovery", samples, || {
-        let _manifest = discover_routes(DiscoverOptions::new(root.join("app")))?;
+        let _manifest = discover_routes(DiscoverOptions::new(&app_dir))?;
         Ok(())
     })?);
     results.push(run_benchmark("analyze-validation", samples, || {
-        let manifest = discover_routes(DiscoverOptions::new(root.join("app")))?;
+        let manifest = discover_routes(DiscoverOptions::new(&app_dir))?;
         let validation = validate_app(&root, &manifest)?;
         fail_on_diagnostics(&validation.diagnostics)?;
         Ok(())
     })?);
     results.push(run_benchmark("production-build", samples, || {
-        build(BuildArgs {
-            root: root.clone(),
-            target: BuildTarget::Node,
-        })
+        build_with_output(
+            BuildArgs {
+                root: root.clone(),
+                target: BuildTarget::Node,
+            },
+            false,
+        )
     })?);
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&results)?);
     } else {
-        println!("Ruvyxa benchmark ({samples} sample(s))");
-        println!(
-            "{:<20} {:>10} {:>10} {:>10} {:>10}",
-            "scenario", "min", "median", "avg", "max"
-        );
-        for result in &results {
-            println!(
-                "{:<20} {:>9.2}ms {:>9.2}ms {:>9.2}ms {:>9.2}ms",
-                result.name, result.min_ms, result.median_ms, result.avg_ms, result.max_ms
-            );
-        }
+        print_benchmark_table(samples, &results);
+        println!();
     }
 
     Ok(())
@@ -500,14 +764,19 @@ fn duration_ms(duration: Duration) -> f64 {
 }
 
 fn test_parity(args: ProjectArgs) -> anyhow::Result<()> {
+    let config = load_project_config(&args.root)?;
     build(BuildArgs {
         root: args.root.clone(),
         target: BuildTarget::Node,
     })?;
 
-    let dev_manifest = discover_routes(DiscoverOptions::new(args.root.join("app")))?;
-    let prod_manifest =
-        discover_routes(DiscoverOptions::new(args.root.join(".ruvyxa/server/app")))?;
+    let dev_manifest = discover_routes(DiscoverOptions::new(args.root.join(config.app_dir())))?;
+    let prod_manifest = discover_routes(DiscoverOptions::new(
+        args.root
+            .join(config.out_dir())
+            .join("server")
+            .join(config.app_dir()),
+    ))?;
     let dev_routes = parity_routes(&dev_manifest);
     let prod_routes = parity_routes(&prod_manifest);
     let mut failures = Vec::new();
@@ -515,7 +784,7 @@ fn test_parity(args: ProjectArgs) -> anyhow::Result<()> {
     for (key, dev_route) in &dev_routes {
         match prod_routes.get(key) {
             Some(prod_route) if prod_route == dev_route => {
-                println!("PASS {} dev/prod match", key);
+                println!("{} {} dev/prod match", success(), key);
             }
             Some(prod_route) => {
                 failures.push(format!(
@@ -534,12 +803,16 @@ fn test_parity(args: ProjectArgs) -> anyhow::Result<()> {
     }
 
     if failures.is_empty() {
-        println!("Parity passed for {} routes", dev_routes.len());
+        println!(
+            "\n{} Parity passed for {} routes\n",
+            success(),
+            accent(dev_routes.len().to_string())
+        );
         return Ok(());
     }
 
     for failure in failures {
-        eprintln!("FAIL {failure}");
+        eprintln!("{} {failure}", error_label());
     }
 
     anyhow::bail!("dev/prod parity failed")
@@ -598,14 +871,6 @@ fn normalize_route_path(app_dir: &Path, path: &Path) -> String {
         .join("/")
 }
 
-fn exists_label(path: &Path) -> &'static str {
-    if path.exists() {
-        "ok"
-    } else {
-        "missing"
-    }
-}
-
 fn copy_public_assets(root: &Path, assets_dir: &Path) -> anyhow::Result<()> {
     let public = root.join("public");
     if public.exists() {
@@ -657,6 +922,198 @@ fn fail_on_diagnostics(diagnostics: &[Diagnostic]) -> anyhow::Result<()> {
         "build validation failed with {} diagnostic(s)",
         diagnostics.len()
     )
+}
+
+fn print_field(name: &str, value: String) {
+    let padding = spaces(20, name.len());
+    println!("  {}{} {}", label(name), padding, value);
+}
+
+fn print_route_row(kind: &str, styled_kind: String, path: &str, styled_path: String, id: String) {
+    println!(
+        "  {}{} {}{} {}",
+        styled_kind,
+        spaces(10, kind.len()),
+        styled_path,
+        spaces(24, path.len()),
+        id
+    );
+}
+
+fn print_benchmark_table(samples: usize, results: &[BenchmarkResult]) {
+    println!(
+        "\n{}",
+        heading(format!("Ruvyxa benchmark ({samples} sample(s))"))
+    );
+
+    let rows = results
+        .iter()
+        .map(|result| {
+            [
+                result.name.clone(),
+                format!("{:.2}ms", result.min_ms),
+                format!("{:.2}ms", result.median_ms),
+                format!("{:.2}ms", result.avg_ms),
+                format!("{:.2}ms", result.max_ms),
+            ]
+        })
+        .collect::<Vec<_>>();
+    let headers = ["Scenario", "Min", "Median", "Avg", "Max"];
+    let widths = headers
+        .iter()
+        .enumerate()
+        .map(|(index, header)| {
+            rows.iter()
+                .map(|row| row[index].len())
+                .max()
+                .unwrap_or(0)
+                .max(header.len())
+        })
+        .collect::<Vec<_>>();
+
+    print_table_separator(&widths);
+    print_box_row(
+        headers,
+        [
+            label(headers[0]),
+            label(headers[1]),
+            label(headers[2]),
+            label(headers[3]),
+            label(headers[4]),
+        ],
+        &widths,
+    );
+    print_table_separator(&widths);
+
+    for row in rows {
+        print_box_row(
+            [&row[0], &row[1], &row[2], &row[3], &row[4]],
+            [
+                accent(&row[0]),
+                ok_text(&row[1]),
+                ok_text(&row[2]),
+                ok_text(&row[3]),
+                ok_text(&row[4]),
+            ],
+            &widths,
+        );
+    }
+    print_table_separator(&widths);
+}
+
+fn print_table_separator(widths: &[usize]) {
+    print!("  {}", dim("+"));
+    for width in widths {
+        print!("{}", dim("-".repeat(*width + 2)));
+        print!("{}", dim("+"));
+    }
+    println!();
+}
+
+fn print_box_row<const N: usize>(raw: [&str; N], styled: [String; N], widths: &[usize]) {
+    print!("  {}", dim("|"));
+    for index in 0..N {
+        if index == 0 {
+            print!(
+                " {}{} {}",
+                styled[index],
+                spaces(widths[index], raw[index].len()),
+                dim("|")
+            );
+        } else {
+            print!(
+                " {}{} {}",
+                spaces(widths[index], raw[index].len()),
+                styled[index],
+                dim("|")
+            );
+        }
+    }
+    println!();
+}
+
+fn spaces(width: usize, len: usize) -> String {
+    " ".repeat(width.saturating_sub(len))
+}
+
+fn heading(value: impl AsRef<str>) -> String {
+    paint(value, "1;35")
+}
+
+fn label(value: impl AsRef<str>) -> String {
+    paint(value, "90")
+}
+
+fn accent(value: impl AsRef<str>) -> String {
+    paint(value, "36")
+}
+
+fn dim(value: impl AsRef<str>) -> String {
+    paint(value, "90")
+}
+
+fn ok_text(value: impl AsRef<str>) -> String {
+    paint(value, "32")
+}
+
+fn warn_text(value: impl AsRef<str>) -> String {
+    paint(value, "33")
+}
+
+fn error_label() -> String {
+    paint("[error]", "31")
+}
+
+fn success() -> String {
+    ok_text("[ok]")
+}
+
+fn path_text(path: &Path) -> String {
+    paint(path.display().to_string(), "34")
+}
+
+fn exists_status(path: &Path) -> String {
+    if path.exists() {
+        ok_text("ok")
+    } else {
+        warn_text("missing")
+    }
+}
+
+fn tool_status(value: String) -> String {
+    if value == "missing" {
+        warn_text(value)
+    } else {
+        ok_text(value)
+    }
+}
+
+fn compatibility_status(value: String) -> String {
+    if value.starts_with("ok ") {
+        ok_text(value)
+    } else {
+        warn_text(value)
+    }
+}
+
+fn paint(value: impl AsRef<str>, code: &str) -> String {
+    let value = value.as_ref();
+    if !std::io::stdout().is_terminal() {
+        return value.to_string();
+    }
+
+    if std::env::var_os("NO_COLOR").is_some() {
+        return value.to_string();
+    }
+
+    if std::env::var("TERM")
+        .map(|term| term.eq_ignore_ascii_case("dumb"))
+        .unwrap_or(false)
+    {
+        return value.to_string();
+    }
+
+    format!("\x1b[{code}m{value}\x1b[0m")
 }
 
 fn detect_package_manager(root: &Path) -> String {

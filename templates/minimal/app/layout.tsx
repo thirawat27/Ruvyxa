@@ -2,7 +2,7 @@ import "./global.css"
 
 export const meta = {
   title: "Ruvyxa App",
-  description: "Full-stack TypeScript at Rust speed.",
+  description: "A minimal Ruvyxa app.",
 }
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {

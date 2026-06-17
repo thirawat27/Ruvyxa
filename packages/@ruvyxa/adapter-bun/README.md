@@ -1,9 +1,34 @@
 # @ruvyxa/adapter-bun
 
-Bun deployment adapter contract for Ruvyxa.
+Bun runtime adapter metadata for Ruvyxa production builds.
+
+## Install
+
+```bash
+npm install @ruvyxa/adapter-bun
+```
+
+## Usage
 
 ```ts
+import { defineConfig } from "ruvyxa/config"
 import { bunAdapter } from "@ruvyxa/adapter-bun"
 
-export default bunAdapter()
+export default defineConfig({
+  adapter: bunAdapter(),
+})
 ```
+
+## Output Metadata
+
+```json
+{
+  "name": "bun",
+  "target": "node",
+  "platform": "bun",
+  "entry": ".ruvyxa/server/app",
+  "assetsDir": ".ruvyxa/assets"
+}
+```
+
+Use this adapter for Bun-compatible hosting targets that run the production server output.

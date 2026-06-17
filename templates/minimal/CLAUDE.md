@@ -1,10 +1,11 @@
 # Claude Instructions
 
-Read `AGENTS.md` first. This project is a Ruvyxa app using file-based routing under `app/`.
+Read `AGENTS.md` first. This project is a Ruvyxa app with file-based routing under `app/`.
 
-Before shipping changes:
+Before shipping framework-sensitive changes:
 
 ```bash
-ruvyxa analyze
+pnpm check
+pnpm analyze
 pnpm build
 ```

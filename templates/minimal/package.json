@@ -7,9 +7,13 @@
     "dev": "ruvyxa dev",
     "build": "ruvyxa build",
     "start": "ruvyxa start",
+    "preview": "ruvyxa preview",
     "routes": "ruvyxa routes",
     "analyze": "ruvyxa analyze",
-    "parity": "ruvyxa test:parity"
+    "doctor": "ruvyxa doctor",
+    "clean": "ruvyxa clean",
+    "parity": "ruvyxa test:parity",
+    "check": "tsc --noEmit"
   },
   "dependencies": {
     "ruvyxa": "^1.0.1",

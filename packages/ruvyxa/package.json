@@ -1,7 +1,7 @@
 {
   "name": "ruvyxa",
   "version": "1.0.1",
-  "description": "The Ruvyxa CLI and runtime: Rust-powered full-stack TypeScript with SSR, actions, HMR, and production-accurate builds.",
+  "description": "The Ruvyxa CLI and runtime for building, validating, serving, and shipping production-minded web applications.",
   "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
@@ -16,6 +16,7 @@
     "runtime/action-renderer.mjs",
     "runtime/api-renderer.mjs",
     "runtime/client-renderer.mjs",
+    "runtime/config-renderer.mjs",
     "runtime/ssr-renderer.mjs",
     "README.md"
   ],

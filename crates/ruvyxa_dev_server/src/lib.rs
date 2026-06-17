@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
+use std::io::IsTerminal;
 use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
@@ -36,6 +37,8 @@ pub struct ServerConfig {
     pub host: String,
     pub port: u16,
     pub watch: bool,
+    pub cache_route_manifest: bool,
+    pub cache_css: bool,
 }
 
 impl ServerConfig {
@@ -49,6 +52,8 @@ impl ServerConfig {
             host: host.into(),
             port,
             watch: true,
+            cache_route_manifest: true,
+            cache_css: true,
         }
     }
 
@@ -62,6 +67,8 @@ impl ServerConfig {
             host: host.into(),
             port,
             watch: false,
+            cache_route_manifest: true,
+            cache_css: true,
         }
     }
 }
@@ -70,7 +77,58 @@ impl ServerConfig {
 struct AppState {
     config: ServerConfig,
     reload_tx: broadcast::Sender<String>,
+    runtime_cache: Arc<RuntimeCache>,
     action_limiter: Arc<Mutex<ActionRateLimiter>>,
+}
+
+#[derive(Default)]
+struct RuntimeCache {
+    manifest: Mutex<Option<RouteManifest>>,
+    styles: Mutex<Option<String>>,
+}
+
+impl RuntimeCache {
+    fn with_manifest(manifest: RouteManifest) -> Self {
+        Self {
+            manifest: Mutex::new(Some(manifest)),
+            styles: Mutex::new(None),
+        }
+    }
+
+    fn manifest(&self, config: &ServerConfig) -> Result<RouteManifest> {
+        if !config.cache_route_manifest {
+            return discover_routes(DiscoverOptions::new(&config.app_dir));
+        }
+
+        let mut cached = self.manifest.lock().expect("manifest cache mutex poisoned");
+        if let Some(manifest) = cached.as_ref() {
+            return Ok(manifest.clone());
+        }
+
+        let manifest = discover_routes(DiscoverOptions::new(&config.app_dir))?;
+        *cached = Some(manifest.clone());
+        Ok(manifest)
+    }
+
+    fn styles(&self, config: &ServerConfig) -> Result<String> {
+        if !config.cache_css {
+            return collect_css(&config.root, &config.app_dir);
+        }
+
+        let mut cached = self.styles.lock().expect("style cache mutex poisoned");
+        if let Some(styles) = cached.as_ref() {
+            return Ok(styles.clone());
+        }
+
+        let styles = collect_css(&config.root, &config.app_dir)?;
+        *cached = Some(styles.clone());
+        Ok(styles)
+    }
+
+    fn invalidate(&self) {
+        *self.manifest.lock().expect("manifest cache mutex poisoned") = None;
+        *self.styles.lock().expect("style cache mutex poisoned") = None;
+    }
 }
 
 pub async fn serve(config: ServerConfig) -> Result<()> {
@@ -78,9 +136,11 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
     info!(routes = manifest.routes.len(), "discovered routes");
 
     let (reload_tx, _) = broadcast::channel(64);
+    let runtime_cache = Arc::new(RuntimeCache::with_manifest(manifest.clone()));
     let state = AppState {
         config: config.clone(),
         reload_tx,
+        runtime_cache,
         action_limiter: Arc::new(Mutex::new(ActionRateLimiter::default())),
     };
 
@@ -88,6 +148,7 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
         Some(start_watcher(
             &watch_paths(&config),
             state.reload_tx.clone(),
+            state.runtime_cache.clone(),
         )?)
     } else {
         None
@@ -112,18 +173,75 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
     let listener = TcpListener::bind(address).await?;
 
     info!("Ruvyxa server listening on http://{address}");
+    print_server_ready(&config, &manifest, address);
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+fn print_server_ready(config: &ServerConfig, manifest: &RouteManifest, address: SocketAddr) {
+    let mode = if config.watch {
+        "development"
+    } else {
+        "production"
+    };
+    let url = local_display_url(config, address);
+    let page_routes = manifest
+        .routes
+        .iter()
+        .filter(|route| route.kind == RouteKind::Page)
+        .count();
+    let api_routes = manifest
+        .routes
+        .iter()
+        .filter(|route| route.kind == RouteKind::Api)
+        .count();
+
+    println!();
+    println!("{}", heading("Ruvyxa server"));
+    print_field("mode", accent(mode));
+    print_field("local", link(&url));
+    print_field("routes", accent(manifest.routes.len().to_string()));
+    print_field("pages", accent(page_routes.to_string()));
+    print_field("api", accent(api_routes.to_string()));
+    print_field(
+        "hmr",
+        if config.watch {
+            ok("enabled")
+        } else {
+            dim("off")
+        },
+    );
+    println!();
+}
+
+fn local_display_url(config: &ServerConfig, address: SocketAddr) -> String {
+    let host = config.host.trim();
+    let display_host = if host.eq_ignore_ascii_case("localhost")
+        || host == "0.0.0.0"
+        || host == "::"
+        || host == "[::]"
+        || address.ip().is_loopback()
+    {
+        "localhost".to_string()
+    } else if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+
+    format!("http://{}:{}", display_host, address.port())
 }
 
 fn start_watcher(
     watch_paths: &[PathBuf],
     reload_tx: broadcast::Sender<String>,
+    runtime_cache: Arc<RuntimeCache>,
 ) -> Result<RecommendedWatcher> {
     let mut watcher =
         notify::recommended_watcher(move |event: notify::Result<notify::Event>| match event {
             Ok(event) => {
                 let paths = event.paths;
+                runtime_cache.invalidate();
                 let payload = serde_json::json!({
                     "type": classify_hmr_event(&paths),
                     "paths": paths
@@ -159,6 +277,45 @@ fn watch_paths(config: &ServerConfig) -> Vec<PathBuf> {
     .into_iter()
     .filter(|path| path.exists())
     .collect()
+}
+
+fn print_field(name: &str, value: String) {
+    let padding = " ".repeat(12usize.saturating_sub(name.len()));
+    println!("  {}{} {}", dim(name), padding, value);
+}
+
+fn heading(value: impl AsRef<str>) -> String {
+    paint(value, "1;35")
+}
+
+fn accent(value: impl AsRef<str>) -> String {
+    paint(value, "36")
+}
+
+fn dim(value: impl AsRef<str>) -> String {
+    paint(value, "90")
+}
+
+fn ok(value: impl AsRef<str>) -> String {
+    paint(value, "32")
+}
+
+fn link(value: impl AsRef<str>) -> String {
+    paint(value, "34")
+}
+
+fn paint(value: impl AsRef<str>, code: &str) -> String {
+    let value = value.as_ref();
+    if !std::io::stdout().is_terminal()
+        || std::env::var_os("NO_COLOR").is_some()
+        || std::env::var("TERM")
+            .map(|term| term.eq_ignore_ascii_case("dumb"))
+            .unwrap_or(false)
+    {
+        return value.to_string();
+    }
+
+    format!("\x1b[{code}m{value}\x1b[0m")
 }
 
 async fn hmr_ws(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> Response {
@@ -271,7 +428,7 @@ async fn trace_endpoint(
     State(state): State<Arc<AppState>>,
     Query(query): Query<TraceQuery>,
 ) -> Response {
-    let response = match runtime_trace(&state.config, &query.path) {
+    let response = match runtime_trace_cached(&state.config, &state.runtime_cache, &query.path) {
         Ok(trace) => json_response(StatusCode::OK, &trace),
         Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -286,8 +443,9 @@ async fn handle_request<B>(
     State(state): State<Arc<AppState>>,
     request: Request<B>,
 ) -> impl IntoResponse {
-    match render_request(
+    match render_request_cached(
         &state.config,
+        &state.runtime_cache,
         request.uri().path(),
         request.method().as_str(),
     ) {
@@ -300,6 +458,15 @@ async fn handle_request<B>(
 }
 
 pub fn render_request(config: &ServerConfig, request_path: &str, method: &str) -> Result<Response> {
+    render_request_cached(config, &RuntimeCache::default(), request_path, method)
+}
+
+fn render_request_cached(
+    config: &ServerConfig,
+    runtime_cache: &RuntimeCache,
+    request_path: &str,
+    method: &str,
+) -> Result<Response> {
     if let Some(client_response) = serve_client_file(&config.client_dir, request_path)? {
         return Ok(client_response);
     }
@@ -308,7 +475,7 @@ pub fn render_request(config: &ServerConfig, request_path: &str, method: &str) -
         return Ok(public_response);
     }
 
-    let manifest = discover_routes(DiscoverOptions::new(&config.app_dir))?;
+    let manifest = runtime_cache.manifest(config)?;
     let Some(route_match) = find_route(&manifest, request_path) else {
         return Ok(html_response(
             StatusCode::NOT_FOUND,
@@ -318,7 +485,14 @@ pub fn render_request(config: &ServerConfig, request_path: &str, method: &str) -
 
     match route_match.route.kind {
         RouteKind::Page => {
-            let html = render_page(config, route_match.route, request_path, &route_match.params)?;
+            let styles = runtime_cache.styles(config)?;
+            let html = render_page(
+                config,
+                route_match.route,
+                request_path,
+                &route_match.params,
+                &styles,
+            )?;
             Ok(html_response(StatusCode::OK, html))
         }
         RouteKind::Api => render_api(
@@ -331,8 +505,12 @@ pub fn render_request(config: &ServerConfig, request_path: &str, method: &str) -
     }
 }
 
-fn runtime_trace(config: &ServerConfig, request_path: &str) -> Result<RuntimeTrace> {
-    let manifest = discover_routes(DiscoverOptions::new(&config.app_dir))?;
+fn runtime_trace_cached(
+    config: &ServerConfig,
+    runtime_cache: &RuntimeCache,
+    request_path: &str,
+) -> Result<RuntimeTrace> {
+    let manifest = runtime_cache.manifest(config)?;
     let route_match = find_route(&manifest, request_path);
     let (route, params) = match route_match {
         Some(route_match) => (Some(route_match.route.clone()), route_match.params),
@@ -473,6 +651,7 @@ fn render_page(
     route: &RouteEntry,
     request_path: &str,
     params: &BTreeMap<String, String>,
+    styles: &str,
 ) -> Result<String> {
     let source = fs::read_to_string(&route.file).map_err(|source| RuvyxaError::Io {
         message: format!("Failed to read page module {}", route.file.display()),
@@ -490,7 +669,6 @@ fn render_page(
     }
 
     let rendered = render_react_page(config, route, request_path, params)?;
-    let styles = collect_css(&config.root, &config.app_dir)?;
     let asset_links = public_asset_links(&config.public_dir);
     let hmr = if config.watch {
         hmr_client_script()
@@ -1540,7 +1718,7 @@ mod tests {
         std::fs::write(app.join("action.ts"), "export const save = {}").unwrap();
 
         let config = ServerConfig::dev(temp.path(), "localhost", 3000);
-        let trace = runtime_trace(&config, "/blog/hello").unwrap();
+        let trace = runtime_trace_cached(&config, &RuntimeCache::default(), "/blog/hello").unwrap();
 
         assert!(trace.matched);
         assert_eq!(trace.params.get("slug"), Some(&"hello".to_string()));
@@ -1679,5 +1857,42 @@ mod tests {
             prebuilt_client_src(&config, "/"),
             Some("/__ruvyxa/client/home.js".to_string())
         );
+    }
+
+    #[test]
+    fn runtime_cache_reuses_manifest_until_invalidated() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(
+            app.join("page.tsx"),
+            "export default function Home() { return <main /> }",
+        )
+        .unwrap();
+
+        let config = ServerConfig::dev(temp.path(), "localhost", 3000);
+        let cache = RuntimeCache::default();
+
+        assert_eq!(cache.manifest(&config).unwrap().routes.len(), 1);
+
+        let about = app.join("about");
+        std::fs::create_dir_all(&about).unwrap();
+        std::fs::write(
+            about.join("page.tsx"),
+            "export default function About() { return <main /> }",
+        )
+        .unwrap();
+
+        assert_eq!(cache.manifest(&config).unwrap().routes.len(), 1);
+        cache.invalidate();
+        assert_eq!(cache.manifest(&config).unwrap().routes.len(), 2);
+    }
+
+    #[test]
+    fn local_display_url_prefers_localhost_for_loopback() {
+        let config = ServerConfig::dev(".", "localhost", 3001);
+        let address = "[::1]:3001".parse().unwrap();
+
+        assert_eq!(local_display_url(&config, address), "http://localhost:3001");
     }
 }

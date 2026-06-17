@@ -3,16 +3,19 @@ import { defineConfig } from "ruvyxa/config"
 export default defineConfig({
   appDir: "app",
   outDir: ".ruvyxa",
-  runtime: "node",
-  react: true,
   server: {
     port: 3000,
     host: "localhost",
   },
   build: {
     minify: true,
-    sourcemap: true,
+    sourcemap: false,
     splitStrategy: "route",
+    parallelism: 4,
+  },
+  cache: {
+    routeManifest: true,
+    css: true,
   },
   debug: {
     overlay: true,

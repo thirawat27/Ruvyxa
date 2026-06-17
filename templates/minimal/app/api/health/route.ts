@@ -1,3 +1,6 @@
 export function GET() {
-  return Response.json({ ok: true, framework: "Ruvyxa" })
+  return Response.json({
+    ok: true,
+    framework: "Ruvyxa",
+  })
 }

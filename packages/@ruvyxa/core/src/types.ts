@@ -18,11 +18,23 @@ export interface RuvyxaConfig {
     minify?: boolean
     sourcemap?: boolean
     splitStrategy?: "route" | "manual"
+    parallelism?: number
   }
   debug?: {
     overlay?: boolean
     traces?: boolean
   }
+  security?: {
+    actionBodyLimitBytes?: number
+    sameOriginActions?: boolean
+    fetchMetadataActions?: boolean
+    securityHeaders?: boolean
+  }
+  cache?: {
+    routeManifest?: boolean
+    css?: boolean
+  }
+  adapter?: Adapter
   plugins?: RuvyxaPlugin[]
 }
 

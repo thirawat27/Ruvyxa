@@ -3,5 +3,5 @@
   "compilerOptions": {
     "strict": true
   },
-  "include": ["app", "components", "server", "ruvyxa.config.ts"]
+  "include": ["app", "components", "lib", "ruvyxa.config.ts"]
 }

@@ -1,29 +1,63 @@
 # ruvyxa
 
-Rust-powered full-stack TypeScript framework CLI and runtime.
+CLI, runtime bridge, and public framework entrypoints for Ruvyxa apps.
 
 ## Install
 
 ```bash
-npm install ruvyxa
+npm install ruvyxa react react-dom
 ```
 
-The `ruvyxa` npm package includes the TypeScript runtime files and a native CLI binary for the current release platform. Users do not need Rust or Cargo to run the CLI after installing from npm.
+Published installs include the TypeScript runtime files and a native CLI binary for the current platform. Rust and Cargo are only required when developing Ruvyxa from source.
 
-## Usage
+## CLI
 
 ```bash
 npx ruvyxa dev --root .
 npx ruvyxa build --root .
 npx ruvyxa start --root .
+npx ruvyxa doctor --root .
 ```
 
-Framework APIs are re-exported from `@ruvyxa/core`:
+Human-facing commands print the same compact TUI style used by the native server: headings, aligned fields, status labels, and color only on real terminals. Structured commands such as `analyze`, `trace`, and `bench --json` remain machine-readable.
+
+Production builds emit route-level client bundles concurrently and keep manifest output deterministic.
+
+## Imports
 
 ```ts
-import { defineConfig, action, loader } from "ruvyxa"
+import { defineConfig } from "ruvyxa/config"
+import { action, cache, json, loader, notFound, redirect } from "ruvyxa/server"
+import type { Adapter, RuvyxaConfig } from "ruvyxa"
 ```
+
+## Minimal Config
+
+```ts
+import { defineConfig } from "ruvyxa/config"
+
+export default defineConfig({
+  appDir: "app",
+  outDir: ".ruvyxa",
+  server: {
+    host: "localhost",
+    port: 3000,
+  },
+  build: {
+    minify: true,
+    sourcemap: false,
+    splitStrategy: "route",
+    parallelism: 4,
+  },
+  cache: {
+    routeManifest: true,
+    css: true,
+  },
+})
+```
+
+The native CLI consumes these settings for app paths, output paths, server defaults, minification, client bundle parallelism, and runtime cache behavior. `runtime: "node"` and `react: true` are defaults and do not need to be written in new apps.
 
 ## Publish Notes
 
-This package runs `prepack` before publishing. The script builds `dist/` and copies the release binary into `native-bin/` so the published CLI can run outside the monorepo. Platform-specific packages such as `@ruvyxa/cli-win32-x64` can also provide the binary as optional dependencies.
+`prepack` builds the package, copies runtime files, and prepares the native binary path used by the npm CLI shim. Platform-specific `@ruvyxa/cli-*` packages may also provide the binary as optional dependencies.
