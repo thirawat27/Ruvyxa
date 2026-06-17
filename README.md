@@ -54,7 +54,6 @@ my-app/
 │   └── page.tsx
 ├── public/
 │   └── ruvyxa.png
-├── .env.example
 ├── AGENTS.md
 ├── CLAUDE.md
 ├── package.json
