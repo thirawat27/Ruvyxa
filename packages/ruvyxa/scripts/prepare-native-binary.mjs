@@ -6,6 +6,15 @@ import { fileURLToPath } from "node:url"
 
 import { currentPlatform } from "./native-platform.mjs"
 
+// When publishing the main ruvyxa package in CI, the native binary is
+// delivered via the optional @ruvyxa/cli-* platform packages.  Skip the
+// cargo build to avoid transient crates.io failures and unnecessary
+// compilation on a platform that may not match the user's machine.
+if (process.env.SKIP_NATIVE_BUILD === "1") {
+  console.log("[prepare-native-binary] SKIP_NATIVE_BUILD=1 — skipping cargo build")
+  process.exit(0)
+}
+
 const here = dirname(fileURLToPath(import.meta.url))
 const packageRoot = resolve(here, "..")
 const repoRoot = resolve(packageRoot, "../..")
