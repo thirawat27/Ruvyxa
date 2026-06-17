@@ -94,6 +94,10 @@ Server-side renderers load `.env` and `.env.local` from the app root. Document r
 
 `build.json` records the production profile, Unix build time, output directories, hash algorithm, and enabled security defaults.
 
+## npm Publishing
+
+Public npm package metadata is configured for `https://github.com/thirawat27/ruvyxa`. See [docs/publishing.md](docs/publishing.md) for dry-run checks, package contents, publish order, and post-publish verification.
+
 ## Current Limitations
 
 The runtime now uses React SSR, route-level browser hydration bundles, API route execution, hardened server action invocation, runtime tracing, Tailwind CSS compilation, first-party adapter contracts, benchmark reporting, deterministic BLAKE3 asset hashes, default security headers, and esbuild for TS/TSX transformation. The current HMR implementation updates CSS and re-renders component bundles in dev, with full reload fallback for server/runtime edits. Advanced Fast Refresh state preservation and host-specific deployment file emitters are still future work.

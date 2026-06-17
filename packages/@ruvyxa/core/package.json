@@ -1,9 +1,37 @@
 {
   "name": "@ruvyxa/core",
   "version": "0.1.0",
+  "description": "Tiny typed primitives behind Ruvyxa: config, loaders, actions, cache helpers, responses, and adapter contracts.",
+  "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "keywords": [
+    "ruvyxa",
+    "framework",
+    "typescript",
+    "server-actions",
+    "adapter"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thirawat27/ruvyxa.git",
+    "directory": "packages/@ruvyxa/core"
+  },
+  "bugs": {
+    "url": "https://github.com/thirawat27/ruvyxa/issues"
+  },
+  "homepage": "https://github.com/thirawat27/ruvyxa#readme",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -19,9 +47,10 @@
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "format": "tsc -p tsconfig.json --noEmit"
+    "format": "tsc -p tsconfig.json --noEmit",
+    "prepack": "pnpm run build"
   }
 }

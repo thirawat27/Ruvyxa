@@ -1,9 +1,36 @@
 {
   "name": "@ruvyxa/react",
   "version": "0.1.0",
+  "description": "React integration for Ruvyxa apps, built for SSR-first pages and browser hydration without framework noise.",
+  "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "keywords": [
+    "ruvyxa",
+    "react",
+    "ssr",
+    "framework"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thirawat27/ruvyxa.git",
+    "directory": "packages/@ruvyxa/react"
+  },
+  "bugs": {
+    "url": "https://github.com/thirawat27/ruvyxa/issues"
+  },
+  "homepage": "https://github.com/thirawat27/ruvyxa#readme",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -18,6 +45,7 @@
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --passWithNoTests",
-    "format": "tsc -p tsconfig.json --noEmit"
+    "format": "tsc -p tsconfig.json --noEmit",
+    "prepack": "pnpm run build"
   }
 }

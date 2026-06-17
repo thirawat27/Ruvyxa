@@ -1,9 +1,36 @@
 {
   "name": "@ruvyxa/adapter-vercel",
   "version": "0.1.0",
+  "description": "Shape Ruvyxa builds for Vercel-style serverless deployments with typed output metadata.",
+  "license": "MIT",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "keywords": [
+    "ruvyxa",
+    "adapter",
+    "vercel",
+    "serverless"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thirawat27/ruvyxa.git",
+    "directory": "packages/@ruvyxa/adapter-vercel"
+  },
+  "bugs": {
+    "url": "https://github.com/thirawat27/ruvyxa/issues"
+  },
+  "homepage": "https://github.com/thirawat27/ruvyxa#readme",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "exports": {
     ".": {
       "types": "./dist/index.d.ts",
@@ -11,12 +38,13 @@
     }
   },
   "dependencies": {
-    "@ruvyxa/core": "workspace:*"
+    "@ruvyxa/core": "workspace:^"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "format": "tsc -p tsconfig.json --noEmit"
+    "format": "tsc -p tsconfig.json --noEmit",
+    "prepack": "pnpm run build"
   }
 }

@@ -1,9 +1,46 @@
 {
   "name": "ruvyxa",
   "version": "0.1.0",
+  "description": "The Ruvyxa CLI and runtime: Rust-powered full-stack TypeScript with SSR, actions, HMR, and production-accurate builds.",
+  "license": "MIT",
   "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
   "bin": {
     "ruvyxa": "./bin/ruvyxa.js"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "native-src",
+    "runtime/action-renderer.mjs",
+    "runtime/api-renderer.mjs",
+    "runtime/client-renderer.mjs",
+    "runtime/ssr-renderer.mjs",
+    "README.md"
+  ],
+  "keywords": [
+    "framework",
+    "typescript",
+    "react",
+    "rust",
+    "ssr",
+    "fullstack"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thirawat27/ruvyxa.git",
+    "directory": "packages/ruvyxa"
+  },
+  "bugs": {
+    "url": "https://github.com/thirawat27/ruvyxa/issues"
+  },
+  "homepage": "https://github.com/thirawat27/ruvyxa#readme",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "exports": {
     ".": {
@@ -20,13 +57,14 @@
     }
   },
   "dependencies": {
-    "@ruvyxa/core": "workspace:*",
+    "@ruvyxa/core": "workspace:^",
     "esbuild": "^0.27.2"
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run --passWithNoTests",
-    "format": "tsc -p tsconfig.json --noEmit"
+    "format": "tsc -p tsconfig.json --noEmit",
+    "prepack": "pnpm run build && node scripts/prepare-native-source.mjs"
   }
 }
