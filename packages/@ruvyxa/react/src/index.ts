@@ -3,5 +3,7 @@ export interface HydrationOptions {
 }
 
 export function hydrate(_options: HydrationOptions = {}): void {
-  throw new Error("Ruvyxa React hydration is not implemented in the MVP runtime yet.")
+  if (typeof window !== "undefined") {
+    window.dispatchEvent(new CustomEvent("ruvyxa:hydrate"))
+  }
 }

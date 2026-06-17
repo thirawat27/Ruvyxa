@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
@@ -94,7 +94,10 @@ pub fn discover_routes(options: DiscoverOptions) -> Result<RouteManifest> {
             kind,
             file: file.clone(),
             layout_chain: layout_chain(&app_dir, route_dir),
-            server_modules: sibling_module(route_dir, "server.ts"),
+            server_modules: sibling_modules(
+                route_dir,
+                &["server.ts", "server.js", "action.ts", "action.js"],
+            ),
             client_modules: sibling_module(route_dir, "client.tsx"),
             runtime: RuntimeTarget::Node,
         });
@@ -124,6 +127,255 @@ pub fn write_manifest(manifest: &RouteManifest, output_file: &Path) -> Result<()
 pub fn read_manifest(manifest_file: &Path) -> Result<RouteManifest> {
     let json = fs::read_to_string(manifest_file)?;
     serde_json::from_str(&json).map_err(|error| RuvyxaError::Message(error.to_string()))
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ValidationReport {
+    pub routes: usize,
+    pub page_routes: usize,
+    pub api_routes: usize,
+    pub client_modules: usize,
+    pub server_modules: usize,
+    pub diagnostics: Vec<Diagnostic>,
+}
+
+impl ValidationReport {
+    pub fn is_ok(&self) -> bool {
+        self.diagnostics.is_empty()
+    }
+}
+
+pub fn validate_app(root: &Path, manifest: &RouteManifest) -> Result<ValidationReport> {
+    let mut diagnostics = Vec::new();
+    let mut client_modules = BTreeSet::new();
+    let mut server_modules = BTreeSet::new();
+
+    for route in &manifest.routes {
+        match route.kind {
+            RouteKind::Page => {
+                let source = fs::read_to_string(&route.file)?;
+                if !source.contains("export default") {
+                    diagnostics.push(
+                        Diagnostic::new("RUV1004", "Page is missing a default export")
+                            .explain("Every page.tsx file must export a default component.")
+                            .at_file(&route.file)
+                            .suggest("Add `export default function Page() { return <main /> }`."),
+                    );
+                }
+
+                let graph = collect_relative_graph(&route.file);
+                for module in graph {
+                    client_modules.insert(module.clone());
+                    validate_client_module(root, &module, &mut diagnostics)?;
+                }
+            }
+            RouteKind::Api => {
+                let graph = collect_relative_graph(&route.file);
+                for module in graph {
+                    server_modules.insert(module.clone());
+                    validate_server_module(&module, &mut diagnostics)?;
+                }
+            }
+        }
+
+        for module in &route.server_modules {
+            let module = PathBuf::from(module);
+            let graph = collect_relative_graph(&module);
+            for module in graph {
+                server_modules.insert(module.clone());
+                validate_server_module(&module, &mut diagnostics)?;
+            }
+        }
+
+        for module in &route.client_modules {
+            let module = PathBuf::from(module);
+            client_modules.insert(module.clone());
+            validate_client_module(root, &module, &mut diagnostics)?;
+        }
+    }
+
+    Ok(ValidationReport {
+        routes: manifest.routes.len(),
+        page_routes: manifest
+            .routes
+            .iter()
+            .filter(|route| route.kind == RouteKind::Page)
+            .count(),
+        api_routes: manifest
+            .routes
+            .iter()
+            .filter(|route| route.kind == RouteKind::Api)
+            .count(),
+        client_modules: client_modules.len(),
+        server_modules: server_modules.len(),
+        diagnostics,
+    })
+}
+
+fn validate_client_module(
+    root: &Path,
+    file: &Path,
+    diagnostics: &mut Vec<Diagnostic>,
+) -> Result<()> {
+    let Ok(source) = fs::read_to_string(file) else {
+        return Ok(());
+    };
+
+    if source.contains("\"server-only\"") || source.contains("'server-only'") {
+        diagnostics.push(
+            Diagnostic::new("RUV1007", "Server-only module imported into client graph")
+                .explain("This module is reachable from a hydrated page or client module but declares `server-only`.")
+                .at_file(file)
+                .suggest("Move server-only work behind a route handler/server module and pass serializable data to the client."),
+        );
+    }
+
+    for env_name in private_env_reads(&source) {
+        diagnostics.push(
+            Diagnostic::new("RUV1008", "Private environment variable used in client graph")
+                .explain(format!(
+                    "`process.env.{env_name}` is reachable from browser code. Only `RUVYXA_PUBLIC_*` env vars may be exposed to client modules."
+                ))
+                .at_file(file)
+                .suggest("Move the env read into server-only code or rename it to `RUVYXA_PUBLIC_*` if it is safe to expose."),
+        );
+    }
+
+    let normalized_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let normalized_file = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
+
+    if let Ok(relative) = normalized_file.strip_prefix(&normalized_root) {
+        if relative
+            .components()
+            .any(|component| component.as_os_str() == "server")
+        {
+            diagnostics.push(
+                Diagnostic::new("RUV1010", "Server directory module reached by client graph")
+                    .explain("Files under server/ are reserved for server-only code.")
+                    .at_file(file)
+                    .suggest("Move shared browser-safe code outside server/, or import it from a server route only."),
+            );
+        }
+    }
+
+    Ok(())
+}
+
+fn validate_server_module(file: &Path, diagnostics: &mut Vec<Diagnostic>) -> Result<()> {
+    let Ok(source) = fs::read_to_string(file) else {
+        return Ok(());
+    };
+
+    if source.contains("\"client-only\"") || source.contains("'client-only'") {
+        diagnostics.push(
+            Diagnostic::new("RUV1009", "Client-only module imported into server graph")
+                .explain(
+                    "This module is reachable from server runtime code but declares `client-only`.",
+                )
+                .at_file(file)
+                .suggest("Move browser-only code into a client component or client.tsx module."),
+        );
+    }
+
+    Ok(())
+}
+
+fn collect_relative_graph(entry: &Path) -> BTreeSet<PathBuf> {
+    let mut visited = BTreeSet::new();
+    let mut queue = VecDeque::from([entry.to_path_buf()]);
+
+    while let Some(file) = queue.pop_front() {
+        if !visited.insert(file.clone()) {
+            continue;
+        }
+
+        let Ok(source) = fs::read_to_string(&file) else {
+            continue;
+        };
+
+        for specifier in import_specifiers(&source) {
+            if !specifier.starts_with('.') {
+                continue;
+            }
+
+            if let Some(resolved) = resolve_relative_import(&file, &specifier) {
+                queue.push_back(resolved);
+            }
+        }
+    }
+
+    visited
+}
+
+fn import_specifiers(source: &str) -> Vec<String> {
+    let mut imports = Vec::new();
+
+    for line in source.lines() {
+        let line = line.trim();
+
+        if let Some(index) = line.find(" from ") {
+            if let Some(specifier) = quoted_value(&line[index + " from ".len()..]) {
+                imports.push(specifier);
+            }
+        } else if line.starts_with("import ") {
+            if let Some(specifier) = quoted_value(line.trim_start_matches("import").trim()) {
+                imports.push(specifier);
+            }
+        }
+    }
+
+    imports
+}
+
+fn quoted_value(input: &str) -> Option<String> {
+    let quote = input
+        .chars()
+        .find(|character| *character == '"' || *character == '\'')?;
+    let start = input.find(quote)? + 1;
+    let rest = &input[start..];
+    let end = rest.find(quote)?;
+    Some(rest[..end].to_string())
+}
+
+fn resolve_relative_import(from: &Path, specifier: &str) -> Option<PathBuf> {
+    let base = from.parent()?.join(specifier);
+    let candidates = [
+        base.clone(),
+        base.with_extension("ts"),
+        base.with_extension("tsx"),
+        base.with_extension("js"),
+        base.with_extension("jsx"),
+        base.join("index.ts"),
+        base.join("index.tsx"),
+        base.join("index.js"),
+        base.join("index.jsx"),
+    ];
+
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+        .and_then(|candidate| candidate.canonicalize().ok().or(Some(candidate)))
+}
+
+fn private_env_reads(source: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let marker = "process.env.";
+    let mut rest = source;
+
+    while let Some(index) = rest.find(marker) {
+        rest = &rest[index + marker.len()..];
+        let name = rest
+            .chars()
+            .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
+            .collect::<String>();
+
+        if !name.is_empty() && !name.starts_with("RUVYXA_PUBLIC_") {
+            names.push(name);
+        }
+    }
+
+    names
 }
 
 fn route_path_from_dir(relative_dir: &Path) -> Result<String> {
@@ -228,6 +480,13 @@ fn sibling_module(route_dir: &Path, name: &str) -> Vec<String> {
     }
 }
 
+fn sibling_modules(route_dir: &Path, names: &[&str]) -> Vec<String> {
+    names
+        .iter()
+        .flat_map(|name| sibling_module(route_dir, name))
+        .collect()
+}
+
 fn detect_conflicts(routes: &[RouteEntry]) -> Result<()> {
     let mut seen = BTreeMap::<(&str, RouteKind), &RouteEntry>::new();
     let mut conflicts = BTreeSet::new();
@@ -316,5 +575,69 @@ mod tests {
 
         let error = discover_routes(DiscoverOptions::new(&app)).unwrap_err();
         assert!(error.to_string().contains("RUV1003"));
+    }
+
+    #[test]
+    fn includes_action_files_as_server_modules() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        fs::create_dir_all(app.join("todos")).unwrap();
+        fs::write(
+            app.join("todos/page.tsx"),
+            "export default function Todos() {}",
+        )
+        .unwrap();
+        fs::write(app.join("todos/action.ts"), "export const createTodo = {}").unwrap();
+
+        let manifest = discover_routes(DiscoverOptions::new(&app)).unwrap();
+        let route = manifest
+            .routes
+            .iter()
+            .find(|route| route.path == "/todos")
+            .unwrap();
+
+        assert_eq!(route.server_modules.len(), 1);
+        assert!(route.server_modules[0].ends_with("action.ts"));
+    }
+
+    #[test]
+    fn validates_client_and_server_boundaries() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        let server = temp.path().join("server");
+        fs::create_dir_all(&app).unwrap();
+        fs::create_dir_all(&server).unwrap();
+        fs::write(
+            app.join("page.tsx"),
+            r#"
+                import secret from "../server/secret";
+
+                export default function Home() {
+                    return <main>{secret}</main>;
+                }
+            "#,
+        )
+        .unwrap();
+        fs::write(
+            server.join("secret.ts"),
+            r#"
+                import "server-only";
+
+                export default process.env.DATABASE_URL;
+            "#,
+        )
+        .unwrap();
+
+        let manifest = discover_routes(DiscoverOptions::new(&app)).unwrap();
+        let report = validate_app(temp.path(), &manifest).unwrap();
+        let codes = report
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code)
+            .collect::<Vec<_>>();
+
+        assert!(codes.contains(&"RUV1007"));
+        assert!(codes.contains(&"RUV1008"));
+        assert!(codes.contains(&"RUV1010"));
     }
 }

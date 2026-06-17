@@ -1,3 +1,8 @@
+@import "tailwindcss";
+
+@source "../app";
+@source "../components";
+
 :root {
   color-scheme: light;
   font-family:
@@ -54,4 +59,32 @@ nav {
 a {
   color: #0b5cad;
   font-weight: 700;
+}
+
+form {
+  display: grid;
+  gap: 14px;
+  margin-top: 28px;
+  max-width: 420px;
+}
+
+label {
+  display: grid;
+  gap: 8px;
+  font-weight: 700;
+}
+
+input {
+  border: 1px solid #bfc7c2;
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+
+button {
+  background: #17191f;
+  border-radius: 6px;
+  color: #fff;
+  cursor: pointer;
+  font-weight: 700;
+  padding: 10px 14px;
 }

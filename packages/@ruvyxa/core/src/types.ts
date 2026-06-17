@@ -45,3 +45,21 @@ export interface RuvyxaPlugin {
     ctx: PluginContext,
   ): TransformResult | null | Promise<TransformResult | null>
 }
+
+export interface BuildContext {
+  root: string
+  outDir: string
+}
+
+export interface AdapterOutput {
+  name: string
+  target: Adapter["target"]
+  entry: string
+  assetsDir: string
+}
+
+export interface Adapter {
+  name: string
+  target: "node" | "edge" | "serverless" | "static"
+  build(ctx: BuildContext): AdapterOutput | Promise<AdapterOutput>
+}

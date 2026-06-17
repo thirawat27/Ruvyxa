@@ -6,12 +6,19 @@
   "scripts": {
     "dev": "cargo run -p ruvyxa_cli -- dev --root .",
     "build": "cargo run -p ruvyxa_cli -- build --root .",
-    "start": "cargo run -p ruvyxa_cli -- start --root ."
+    "start": "cargo run -p ruvyxa_cli -- start --root .",
+    "routes": "cargo run -p ruvyxa_cli -- routes --root .",
+    "analyze": "cargo run -p ruvyxa_cli -- analyze --root .",
+    "parity": "cargo run -p ruvyxa_cli -- test:parity --root ."
   },
   "dependencies": {
     "@ruvyxa/core": "workspace:*",
     "ruvyxa": "workspace:*",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "tailwindcss": "^4.1.17"
+  },
+  "devDependencies": {
+    "@tailwindcss/cli": "^4.1.17"
   }
 }

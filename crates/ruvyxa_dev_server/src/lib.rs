@@ -6,16 +6,17 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 
+use axum::body::Bytes;
 use axum::extract::ws::{Message, WebSocketUpgrade};
 use axum::extract::{Query, State};
 use axum::http::{header, HeaderName, HeaderValue, Request, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::Router;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use ruvyxa_diagnostics::{Diagnostic, Result, RuvyxaError};
 use ruvyxa_graph::{discover_routes, DiscoverOptions, RouteEntry, RouteKind, RouteManifest};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tracing::{info, warn};
@@ -47,8 +48,8 @@ impl ServerConfig {
     pub fn production(root: impl Into<PathBuf>, host: impl Into<String>, port: u16) -> Self {
         let root = root.into();
         Self {
-            app_dir: root.join(".ruvyxa/app"),
-            public_dir: root.join(".ruvyxa/public"),
+            app_dir: root.join(".ruvyxa/server/app"),
+            public_dir: root.join(".ruvyxa/assets"),
             root,
             host: host.into(),
             port,
@@ -85,6 +86,8 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
     let app = Router::new()
         .route("/__ruvyxa/hmr", get(hmr_ws))
         .route("/__ruvyxa/client", get(client_bundle))
+        .route("/__ruvyxa/action", post(action_endpoint))
+        .route("/__ruvyxa/trace", get(trace_endpoint))
         .fallback(handle_request)
         .with_state(Arc::new(state));
 
@@ -159,6 +162,35 @@ struct ClientBundleQuery {
     path: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct ActionQuery {
+    path: String,
+    name: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct TraceQuery {
+    path: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RuntimeTrace {
+    path: String,
+    matched: bool,
+    route: Option<RouteEntry>,
+    params: BTreeMap<String, String>,
+    runtime: &'static str,
+    assets: TraceAssets,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TraceAssets {
+    public_dir: String,
+    app_dir: String,
+}
+
 async fn client_bundle(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ClientBundleQuery>,
@@ -172,6 +204,40 @@ async fn client_bundle(
             );
             response
         }
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("console.error({:?});", error.to_string()),
+        )
+            .into_response(),
+    }
+}
+
+async fn action_endpoint(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ActionQuery>,
+    body: Bytes,
+) -> Response {
+    match render_server_action(
+        &state.config,
+        &query.path,
+        &query.name,
+        std::str::from_utf8(&body).unwrap_or("{}"),
+    ) {
+        Ok(response) => response,
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("console.error({:?});", error.to_string()),
+        )
+            .into_response(),
+    }
+}
+
+async fn trace_endpoint(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<TraceQuery>,
+) -> Response {
+    match runtime_trace(&state.config, &query.path) {
+        Ok(trace) => json_response(StatusCode::OK, &trace),
         Err(error) => (
             StatusCode::INTERNAL_SERVER_ERROR,
             format!("console.error({:?});", error.to_string()),
@@ -222,6 +288,27 @@ pub fn render_request(config: &ServerConfig, request_path: &str, method: &str) -
     }
 }
 
+fn runtime_trace(config: &ServerConfig, request_path: &str) -> Result<RuntimeTrace> {
+    let manifest = discover_routes(DiscoverOptions::new(&config.app_dir))?;
+    let route_match = find_route(&manifest, request_path);
+    let (route, params) = match route_match {
+        Some(route_match) => (Some(route_match.route.clone()), route_match.params),
+        None => (None, BTreeMap::new()),
+    };
+
+    Ok(RuntimeTrace {
+        path: request_path.to_string(),
+        matched: route.is_some(),
+        route,
+        params,
+        runtime: if config.watch { "dev" } else { "production" },
+        assets: TraceAssets {
+            public_dir: config.public_dir.display().to_string(),
+            app_dir: config.app_dir.display().to_string(),
+        },
+    })
+}
+
 fn serve_public_file(public_dir: &Path, request_path: &str) -> Result<Option<Response>> {
     let trimmed = request_path.trim_start_matches('/');
     if trimmed.is_empty() || trimmed.contains("..") {
@@ -240,6 +327,24 @@ fn serve_public_file(public_dir: &Path, request_path: &str) -> Result<Option<Res
         .headers_mut()
         .insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
     Ok(Some(response))
+}
+
+fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Response {
+    match serde_json::to_string(value) {
+        Ok(body) => {
+            let mut response = (status, body).into_response();
+            response.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/json; charset=utf-8"),
+            );
+            response
+        }
+        Err(error) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            format!("Failed to serialize JSON response: {error}"),
+        )
+            .into_response(),
+    }
 }
 
 fn render_page(
@@ -264,7 +369,7 @@ fn render_page(
     }
 
     let rendered = render_react_page(config, route, request_path, params)?;
-    let styles = collect_css(&config.app_dir)?;
+    let styles = collect_css(&config.root, &config.app_dir)?;
     let asset_links = public_asset_links(&config.public_dir);
     let hmr = if config.watch {
         hmr_client_script()
@@ -313,6 +418,18 @@ struct ClientRenderResult {
     stack: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ActionRenderResult {
+    ok: bool,
+    status: Option<u16>,
+    headers: Option<BTreeMap<String, String>>,
+    body: Option<String>,
+    code: Option<String>,
+    message: Option<String>,
+    stack: Option<String>,
+}
+
 fn render_react_page(
     config: &ServerConfig,
     route: &RouteEntry,
@@ -325,7 +442,7 @@ fn render_react_page(
             .suggest("Run pnpm install from the monorepo root, or install the ruvyxa package in the app.")
     })?;
 
-    let output = Command::new("node")
+    let output = node_command(&config.root)?
         .arg(&renderer)
         .arg(&config.root)
         .arg(&config.app_dir)
@@ -387,6 +504,10 @@ fn find_client_renderer(root: &Path) -> Option<PathBuf> {
     find_runtime_script(root, "client-renderer.mjs")
 }
 
+fn find_action_renderer(root: &Path) -> Option<PathBuf> {
+    find_runtime_script(root, "action-renderer.mjs")
+}
+
 fn find_runtime_script(root: &Path, file_name: &str) -> Option<PathBuf> {
     if let Ok(renderer) = std::env::var("RUVYXA_SSR_RENDERER") {
         let path = PathBuf::from(renderer);
@@ -410,6 +531,69 @@ fn find_runtime_script(root: &Path, file_name: &str) -> Option<PathBuf> {
     None
 }
 
+fn node_command(root: &Path) -> Result<Command> {
+    let mut command = Command::new("node");
+    command.envs(project_env(root)?);
+    Ok(command)
+}
+
+fn project_env(root: &Path) -> Result<BTreeMap<String, String>> {
+    let mut values = BTreeMap::new();
+
+    for file_name in [".env", ".env.local"] {
+        let file = root.join(file_name);
+        if !file.exists() {
+            continue;
+        }
+
+        let source = fs::read_to_string(&file).map_err(|source| RuvyxaError::Io {
+            message: format!("Failed to read {}", file.display()),
+            source,
+        })?;
+
+        for (key, value) in parse_env_source(&source) {
+            values.insert(key, value);
+        }
+    }
+
+    Ok(values)
+}
+
+fn parse_env_source(source: &str) -> BTreeMap<String, String> {
+    let mut values = BTreeMap::new();
+
+    for line in source.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+
+        let Some((key, value)) = line.split_once('=') else {
+            continue;
+        };
+
+        let key = key.trim();
+        if key.is_empty() {
+            continue;
+        }
+
+        values.insert(key.to_string(), unquote_env_value(value.trim()));
+    }
+
+    values
+}
+
+fn unquote_env_value(value: &str) -> String {
+    if value.len() >= 2
+        && ((value.starts_with('"') && value.ends_with('"'))
+            || (value.starts_with('\'') && value.ends_with('\'')))
+    {
+        value[1..value.len() - 1].to_string()
+    } else {
+        value.to_string()
+    }
+}
+
 fn render_api(
     config: &ServerConfig,
     route: &RouteEntry,
@@ -423,7 +607,7 @@ fn render_api(
             .suggest("Run pnpm install from the monorepo root, or install the ruvyxa package in the app.")
     })?;
 
-    let output = Command::new("node")
+    let output = node_command(&config.root)?
         .arg(&renderer)
         .arg(&config.root)
         .arg(&route.file)
@@ -511,7 +695,7 @@ fn render_client_bundle(config: &ServerConfig, request_path: &str) -> Result<Str
             .suggest("Run pnpm install from the monorepo root, or install the ruvyxa package in the app.")
     })?;
 
-    let output = Command::new("node")
+    let output = node_command(&config.root)?
         .arg(&renderer)
         .arg(&config.root)
         .arg(&config.app_dir)
@@ -557,6 +741,114 @@ fn render_client_bundle(config: &ServerConfig, request_path: &str) -> Result<Str
             .suggest("Check the page component, its browser-safe imports, and React dependencies.")
             .into(),
     )
+}
+
+fn render_server_action(
+    config: &ServerConfig,
+    request_path: &str,
+    action_name: &str,
+    payload_json: &str,
+) -> Result<Response> {
+    let manifest = discover_routes(DiscoverOptions::new(&config.app_dir))?;
+    let Some(route_match) = find_route(&manifest, request_path) else {
+        return Ok((StatusCode::NOT_FOUND, "Route not found for action").into_response());
+    };
+
+    if route_match.route.kind != RouteKind::Page {
+        return Ok((
+            StatusCode::METHOD_NOT_ALLOWED,
+            "Actions can only target page routes",
+        )
+            .into_response());
+    }
+
+    let action_file = action_file_for(route_match.route).ok_or_else(|| {
+        Diagnostic::new("RUV1501", "Route action file was not found")
+            .explain(
+                "Server actions are resolved from action.ts or action.js next to the page route.",
+            )
+            .at_file(&route_match.route.file)
+            .suggest(
+                "Create action.ts beside the page and export the action handler you want to call.",
+            )
+    })?;
+
+    let renderer = find_action_renderer(&config.root).ok_or_else(|| {
+        Diagnostic::new("RUV1502", "Action renderer was not found")
+            .explain(
+                "Ruvyxa could not find the Node action renderer used to execute server actions.",
+            )
+            .suggest("Run from the monorepo root or install the ruvyxa package into the app.")
+    })?;
+
+    let output = node_command(&config.root)?
+        .arg(renderer)
+        .arg(&config.root)
+        .arg(action_file)
+        .arg(action_name)
+        .arg(payload_json)
+        .arg(request_path)
+        .output()
+        .map_err(|source| RuvyxaError::Io {
+            message: "Failed to start Node for server action execution".to_string(),
+            source,
+        })?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let result: ActionRenderResult =
+        serde_json::from_str(&stdout).map_err(|error| RuvyxaError::Message(error.to_string()))?;
+
+    if !result.ok {
+        let mut diagnostic = Diagnostic::new(
+            action_error_code(result.code.as_deref()),
+            "Server action execution failed",
+        )
+        .explain(
+            result
+                .message
+                .unwrap_or_else(|| "Unknown server action error".to_string()),
+        )
+        .at_file(&route_match.route.file);
+
+        if let Some(stack) = result.stack {
+            diagnostic = diagnostic.suggest(stack);
+        }
+
+        return Err(diagnostic.into());
+    }
+
+    let status = StatusCode::from_u16(result.status.unwrap_or(200)).unwrap_or(StatusCode::OK);
+    let mut response = (status, result.body.unwrap_or_default()).into_response();
+
+    if let Some(headers) = result.headers {
+        for (key, value) in headers {
+            if let (Ok(name), Ok(value)) = (
+                HeaderName::from_bytes(key.as_bytes()),
+                HeaderValue::from_str(&value),
+            ) {
+                response.headers_mut().insert(name, value);
+            }
+        }
+    }
+
+    Ok(response)
+}
+
+fn action_error_code(code: Option<&str>) -> &'static str {
+    match code {
+        Some("RUV1501") => "RUV1501",
+        Some("RUV1502") => "RUV1502",
+        Some("RUV1503") => "RUV1503",
+        _ => "RUV1500",
+    }
+}
+
+fn action_file_for(route: &RouteEntry) -> Option<PathBuf> {
+    let route_dir = route.file.parent()?;
+    ["action.ts", "action.js"]
+        .into_iter()
+        .map(|name| route_dir.join(name))
+        .find(|path| path.is_file())
 }
 
 struct MatchedRoute<'a> {
@@ -631,7 +923,7 @@ fn split_path(path: &str) -> Vec<&str> {
         .collect()
 }
 
-fn collect_css(app_dir: &Path) -> Result<String> {
+fn collect_css(root: &Path, app_dir: &Path) -> Result<String> {
     let mut css = String::new();
 
     for entry in WalkDir::new(app_dir)
@@ -647,12 +939,70 @@ fn collect_css(app_dir: &Path) -> Result<String> {
             .extension()
             .is_some_and(|extension| extension == "css")
         {
-            css.push_str(&fs::read_to_string(entry.path())?);
+            let source = fs::read_to_string(entry.path())?;
+            if source.contains("@import \"tailwindcss\"")
+                || source.contains("@import 'tailwindcss'")
+            {
+                css.push_str(&compile_tailwind_css(root, entry.path())?);
+            } else {
+                css.push_str(&source);
+            }
             css.push('\n');
         }
     }
 
     Ok(css)
+}
+
+fn compile_tailwind_css(root: &Path, input: &Path) -> Result<String> {
+    let tailwind = find_tailwind_cli(root).ok_or_else(|| {
+        Diagnostic::new("RUV1401", "Tailwind CSS CLI was not found")
+            .explain("A CSS file imports `tailwindcss`, but Ruvyxa could not find `@tailwindcss/cli` in node_modules.")
+            .at_file(input)
+            .suggest("Install Tailwind support with `pnpm add tailwindcss && pnpm add -D @tailwindcss/cli`.")
+    })?;
+    let input_arg = input.strip_prefix(root).unwrap_or(input);
+
+    let output = Command::new(tailwind)
+        .current_dir(root)
+        .arg("-i")
+        .arg(input_arg)
+        .arg("--minify")
+        .output()
+        .map_err(|source| RuvyxaError::Io {
+            message: "Failed to run Tailwind CSS CLI".to_string(),
+            source,
+        })?;
+
+    if output.status.success() {
+        return String::from_utf8(output.stdout)
+            .map_err(|error| RuvyxaError::Message(error.to_string()));
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    Err(Diagnostic::new("RUV1400", "Tailwind CSS compilation failed")
+        .explain(stderr.trim())
+        .at_file(input)
+        .suggest("Check Tailwind directives, content sources, and installed Tailwind package versions.")
+        .into())
+}
+
+fn find_tailwind_cli(root: &Path) -> Option<PathBuf> {
+    let binary = if cfg!(windows) {
+        "tailwindcss.cmd"
+    } else {
+        "tailwindcss"
+    };
+
+    [
+        root.join("node_modules/.bin").join(binary),
+        std::env::current_dir()
+            .ok()
+            .map(|cwd| cwd.join("node_modules/.bin").join(binary))
+            .unwrap_or_default(),
+    ]
+    .into_iter()
+    .find(|path| path.is_file())
 }
 
 fn compose_document(rendered: &str, head_content: &str, hmr: &str) -> String {
@@ -784,21 +1134,8 @@ fn content_type_for(path: &Path) -> &'static str {
 fn public_asset_links(public_dir: &Path) -> String {
     let mut links = Vec::new();
 
-    if public_dir.join("favicon.png").exists() {
-        links.push(
-            r#"<link rel="icon" type="image/png" sizes="32x32" href="/favicon.png">"#.to_string(),
-        );
-    }
-
-    if public_dir.join("apple-touch-icon.png").exists() {
-        links.push(
-            r#"<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png">"#
-                .to_string(),
-        );
-    }
-
-    if public_dir.join("site.webmanifest").exists() {
-        links.push(r#"<link rel="manifest" href="/site.webmanifest">"#.to_string());
+    if public_dir.join("ruvyxa.png").exists() {
+        links.push(r#"<link rel="icon" type="image/png" href="/ruvyxa.png">"#.to_string());
     }
 
     links.join("")
@@ -848,11 +1185,56 @@ mod tests {
         let rendered = r#"<!doctype html><html lang="en"><body><main>Hello</main></body></html>"#;
         let html = compose_document(
             rendered,
-            r#"<link rel="icon" href="/favicon.png">"#,
+            r#"<link rel="icon" href="/ruvyxa.png">"#,
             "<script />",
         );
 
-        assert!(html.contains(r#"<head><link rel="icon" href="/favicon.png"></head>"#));
+        assert!(html.contains(r#"<head><link rel="icon" href="/ruvyxa.png"></head>"#));
         assert!(html.contains("<script /></body>"));
+    }
+
+    #[test]
+    fn builds_runtime_trace_for_matched_routes() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app/blog/[slug]");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::write(
+            app.join("page.tsx"),
+            "export default function BlogPost() { return <main /> }",
+        )
+        .unwrap();
+        std::fs::write(app.join("action.ts"), "export const save = {}").unwrap();
+
+        let config = ServerConfig::dev(temp.path(), "localhost", 3000);
+        let trace = runtime_trace(&config, "/blog/hello").unwrap();
+
+        assert!(trace.matched);
+        assert_eq!(trace.params.get("slug"), Some(&"hello".to_string()));
+        assert_eq!(trace.runtime, "dev");
+        assert!(trace.route.unwrap().server_modules[0].ends_with("action.ts"));
+    }
+
+    #[test]
+    fn parses_env_sources() {
+        let env = parse_env_source(
+            r#"
+            # ignored
+            RUVYXA_PUBLIC_APP_NAME="Ruvyxa"
+            DATABASE_URL='postgres://localhost/db'
+            EMPTY=
+            INVALID
+            "#,
+        );
+
+        assert_eq!(
+            env.get("RUVYXA_PUBLIC_APP_NAME"),
+            Some(&"Ruvyxa".to_string())
+        );
+        assert_eq!(
+            env.get("DATABASE_URL"),
+            Some(&"postgres://localhost/db".to_string())
+        );
+        assert_eq!(env.get("EMPTY"), Some(&"".to_string()));
+        assert!(!env.contains_key("INVALID"));
     }
 }

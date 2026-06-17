@@ -98,6 +98,7 @@ window.__RUVYXA_HYDRATED = true
     jsx: "automatic",
     absWorkingDir: projectRoot,
     plugins: [
+      clientBoundaryPlugin(projectRoot),
       {
         name: "ruvyxa-css-empty-module",
         setup(build) {
@@ -108,6 +109,123 @@ window.__RUVYXA_HYDRATED = true
   })
 
   return outfile
+}
+
+function clientBoundaryPlugin(projectRoot) {
+  return {
+    name: "ruvyxa-client-boundary",
+    setup(build) {
+      build.onResolve({ filter: /^server-only$/ }, (args) => {
+        throw boundaryError(
+          "RUV1007",
+          "Server-only module imported into client bundle",
+          args.importer,
+          'Remove `import "server-only"` from code that is reachable by the browser bundle.',
+        )
+      })
+
+      build.onResolve({ filter: /^client-only$/ }, () => ({
+        path: "ruvyxa:client-only",
+        namespace: "ruvyxa-virtual",
+      }))
+
+      build.onLoad({ filter: /^ruvyxa:client-only$/, namespace: "ruvyxa-virtual" }, () => ({
+        contents: "",
+        loader: "js",
+      }))
+
+      build.onLoad({ filter: /\.[cm]?[jt]sx?$/ }, async (args) => {
+        if (!isProjectSource(projectRoot, args.path)) {
+          return null
+        }
+
+        const normalized = args.path.replaceAll("\\", "/")
+        const contents = await readFile(args.path, "utf8")
+
+        if (isServerOnlyPath(projectRoot, args.path)) {
+          throw boundaryError(
+            "RUV1007",
+            "Server-only file imported into client bundle",
+            args.path,
+            "Move this import behind a server loader/API route, or pass serialized data into the page.",
+          )
+        }
+
+        if (contents.includes('import "server-only"') || contents.includes("import 'server-only'")) {
+          throw boundaryError(
+            "RUV1007",
+            "Server-only module imported into client bundle",
+            args.path,
+            'Move server-only code out of the browser graph or remove `import "server-only"`.',
+          )
+        }
+
+        const privateEnv = findPrivateEnvAccess(contents)
+        if (privateEnv) {
+          throw boundaryError(
+            "RUV1008",
+            "Private environment variable used in client bundle",
+            args.path,
+            `Rename ${privateEnv} to RUVYXA_PUBLIC_* if it is safe for browsers, or move the code to server-only logic.`,
+          )
+        }
+
+        return {
+          contents,
+          loader: loaderFor(normalized),
+        }
+      })
+    },
+  }
+}
+
+function isProjectSource(projectRoot, file) {
+  const relative = path.relative(projectRoot, file)
+  return relative && !relative.startsWith("..") && !path.isAbsolute(relative) && !relative.includes("node_modules")
+}
+
+function isServerOnlyPath(projectRoot, file) {
+  const normalized = path.relative(projectRoot, file).replaceAll("\\", "/")
+  return (
+    normalized === "server.ts" ||
+    normalized === "server.js" ||
+    normalized.startsWith("server/") ||
+    normalized.endsWith("/server.ts") ||
+    normalized.endsWith("/server.js")
+  )
+}
+
+function findPrivateEnvAccess(contents) {
+  const matches = contents.matchAll(/\bprocess\.env\.([A-Z_][A-Z0-9_]*)/g)
+
+  for (const match of matches) {
+    const name = match[1]
+    if (name !== "NODE_ENV" && !name.startsWith("RUVYXA_PUBLIC_")) {
+      return name
+    }
+  }
+
+  return null
+}
+
+function loaderFor(file) {
+  if (file.endsWith(".tsx")) return "tsx"
+  if (file.endsWith(".jsx")) return "jsx"
+  if (file.endsWith(".ts") || file.endsWith(".mts") || file.endsWith(".cts")) return "ts"
+  return "js"
+}
+
+function boundaryError(code, title, file, fix) {
+  return new Error(`${code}: ${title}
+
+File:
+  ${file || "(entrypoint)"}
+
+Why this is a problem:
+  This module is reachable from the browser hydration bundle.
+
+Fix:
+  ${fix}`)
 }
 
 function toImportPath(file) {

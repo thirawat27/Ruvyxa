@@ -1,3 +1,8 @@
+@import "tailwindcss";
+
+@source "../app";
+@source "../components";
+
 :root {
   color-scheme: light;
   font-family:
@@ -37,4 +42,35 @@ p {
 
 a {
   color: #0b6bcb;
+}
+
+nav,
+form,
+label {
+  display: grid;
+  gap: 12px;
+}
+
+nav {
+  margin-top: 24px;
+}
+
+form {
+  margin-top: 24px;
+  max-width: 420px;
+}
+
+input {
+  border: 1px solid #bfc7c2;
+  border-radius: 6px;
+  padding: 10px 12px;
+}
+
+button {
+  background: #191b1f;
+  border-radius: 6px;
+  color: #fff;
+  cursor: pointer;
+  font-weight: 700;
+  padding: 10px 14px;
 }

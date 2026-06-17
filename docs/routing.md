@@ -17,4 +17,10 @@ Run:
 cargo run -p ruvyxa_cli -- routes --root examples/basic-app
 ```
 
-The manifest is written to `.ruvyxa/manifest.json` during build.
+The manifest is written to `.ruvyxa/manifest.json` during build. Production source files are emitted under `.ruvyxa/server/app`.
+
+Inspect a live route match while the server is running:
+
+```bash
+curl "http://localhost:3000/__ruvyxa/trace?path=/blog/hello"
+```

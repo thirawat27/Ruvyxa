@@ -27,11 +27,36 @@ export default function Home() {
 ## Build
 
 ```bash
+cargo run -p ruvyxa_cli -- analyze --root examples/basic-app
 cargo run -p ruvyxa_cli -- build --root examples/basic-app
 cargo run -p ruvyxa_cli -- start --root examples/basic-app
 ```
 
-The production server reads `.ruvyxa/app` and uses the same route matching path as the dev server.
+`analyze` validates route exports, client/server boundaries, and private env usage before production builds. The production server reads `.ruvyxa/server/app`, serves assets from `.ruvyxa/assets`, and uses the same route matching path as the dev server.
+
+## Styling With Tailwind
+
+Ruvyxa apps include Tailwind CSS v4 support in `app/global.css`:
+
+```css
+@import "tailwindcss";
+
+@source "../app";
+@source "../components";
+```
+
+Install dependencies once with `pnpm install`. Ruvyxa runs the local Tailwind CLI when a CSS file imports `tailwindcss`, then injects the compiled CSS into rendered pages.
+
+## Environment Variables
+
+Put documented keys in `.env.example` and local values in `.env` or `.env.local`.
+
+```env
+RUVYXA_PUBLIC_APP_NAME=Ruvyxa
+DATABASE_URL=postgres://user:password@localhost:5432/ruvyxa
+```
+
+Ruvyxa loads `.env` and then `.env.local` into server-side renderers for SSR, API routes, and actions. Only `RUVYXA_PUBLIC_*` variables are allowed in client-reachable code.
 
 ## React SSR
 
@@ -49,4 +74,28 @@ API routes are executed from `route.ts`:
 export function GET() {
   return Response.json({ ok: true })
 }
+```
+
+## Add an Action
+
+Create `app/todos/action.ts`:
+
+```ts
+import { action } from "ruvyxa/server"
+
+export const createTodo = action
+  .input({ parse: (value: any) => ({ title: String(value.title).trim() }) })
+  .handler(async ({ input, invalidate }) => {
+    invalidate("todos")
+    return { title: input.title, completed: false }
+  })
+```
+
+Then post to it from the matching route:
+
+```tsx
+<form method="post" action="/__ruvyxa/action?path=/todos&name=createTodo">
+  <input name="title" />
+  <button type="submit">Create todo</button>
+</form>
 ```

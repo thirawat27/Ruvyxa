@@ -7,14 +7,18 @@
     "dev": "ruvyxa dev",
     "build": "ruvyxa build",
     "start": "ruvyxa start",
-    "routes": "ruvyxa routes"
+    "routes": "ruvyxa routes",
+    "analyze": "ruvyxa analyze",
+    "parity": "ruvyxa test:parity"
   },
   "dependencies": {
     "ruvyxa": "^0.1.0",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0"
+    "react-dom": "^19.0.0",
+    "tailwindcss": "^4.1.17"
   },
   "devDependencies": {
+    "@tailwindcss/cli": "^4.1.17",
     "typescript": "^5.9.3"
   }
 }

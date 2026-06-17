@@ -854,6 +854,7 @@ dependencies = [
  "ruvyxa_graph",
  "serde",
  "serde_json",
+ "tempfile",
  "tokio",
  "tower-http",
  "tracing",
