@@ -5,14 +5,15 @@
 <h1 align="center">Ruvyxa</h1>
 
 <p align="center">
-  The Rust-powered full-stack React framework.<br/>
+  The Rust-powered full-stack framework.<br/>
   File routing. Server-side rendering. Server actions. Production builds. One CLI.
 </p>
 
 <p align="center">
-  <a href="https://github.com/thirawat27/ruvyxa/actions"><img src="https://img.shields.io/github/actions/workflow/status/thirawat27/ruvyxa/ci.yml?branch=main&style=flat-square" alt="CI" /></a>
-  <a href="https://www.npmjs.com/package/ruvyxa"><img src="https://img.shields.io/npm/v/ruvyxa?style=flat-square&color=blue" alt="npm" /></a>
-  <a href="https://github.com/thirawat27/ruvyxa/blob/main/LICENSE"><img src="https://img.shields.io/github/license/thirawat27/ruvyxa?style=flat-square" alt="License" /></a>
+  <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="License" />
+  <img src="https://img.shields.io/badge/node-%3E%3D20-blue?style=flat-square" alt="Node 20+" />
+  <img src="https://img.shields.io/badge/rust-1.80%2B-orange?style=flat-square" alt="Rust 1.80+" />
+  <img src="https://img.shields.io/badge/pnpm-10%2B-yellow?style=flat-square" alt="pnpm 10+" />
 </p>
 
 ---
