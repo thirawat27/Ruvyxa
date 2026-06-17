@@ -10,15 +10,24 @@ permissions:
   contents: write
   id-token: write
 
+concurrency:
+  group: release-${{ github.ref_name }}
+  cancel-in-progress: false
+
 env:
   CARGO_HTTP_TIMEOUT: "120"
   CARGO_NET_RETRY: "10"
   CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
 
+defaults:
+  run:
+    shell: bash
+
 jobs:
   resolve-version:
     name: Resolve release version
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     outputs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
@@ -55,6 +64,7 @@ jobs:
     name: Publish native CLI (${{ matrix.os }})
     needs: resolve-version
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -80,8 +90,31 @@ jobs:
           node-version: 20
           registry-url: https://registry.npmjs.org
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm --filter ${{ matrix.package }} publish --access public --no-git-checks
+          cache-dependency-path: pnpm-lock.yaml
+      - name: Prefetch Rust dependencies
+        run: |
+          for attempt in 1 2 3; do
+            if cargo fetch --locked; then
+              exit 0
+            fi
+            delay=$((attempt * 20))
+            echo "cargo fetch failed on attempt ${attempt}; retrying in ${delay}s"
+            sleep "$delay"
+          done
+          cargo fetch --locked
+      - name: Install JavaScript dependencies
+        run: |
+          for attempt in 1 2 3; do
+            if pnpm install --frozen-lockfile --prefer-offline; then
+              exit 0
+            fi
+            delay=$((attempt * 20))
+            echo "pnpm install failed on attempt ${attempt}; retrying in ${delay}s"
+            sleep "$delay"
+          done
+          pnpm install --frozen-lockfile --prefer-offline
+      - name: Publish ${{ matrix.package }}
+        run: node scripts/publish-if-new.mjs ${{ matrix.package }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
@@ -89,6 +122,7 @@ jobs:
     name: Publish JavaScript packages
     needs: [resolve-version, publish-native]
     runs-on: ubuntu-latest
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v4
@@ -99,25 +133,50 @@ jobs:
           node-version: 20
           registry-url: https://registry.npmjs.org
           cache: pnpm
-      - run: pnpm install --frozen-lockfile
-      - run: pnpm -r build
+          cache-dependency-path: pnpm-lock.yaml
+      - name: Install JavaScript dependencies
+        run: |
+          for attempt in 1 2 3; do
+            if pnpm install --frozen-lockfile --prefer-offline; then
+              exit 0
+            fi
+            delay=$((attempt * 20))
+            echo "pnpm install failed on attempt ${attempt}; retrying in ${delay}s"
+            sleep "$delay"
+          done
+          pnpm install --frozen-lockfile --prefer-offline
+      - name: Build packages
+        run: pnpm -r build
         env:
           SKIP_NATIVE_BUILD: "1"
-      - run: pnpm release:validate
-      - run: pnpm --filter @ruvyxa/core publish --access public --no-git-checks
+      - name: Validate release metadata
+        run: pnpm release:validate
+      - name: Publish @ruvyxa/core
+        run: node scripts/publish-if-new.mjs @ruvyxa/core
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - run: pnpm --filter @ruvyxa/react publish --access public --no-git-checks
+      - name: Publish @ruvyxa/react
+        run: node scripts/publish-if-new.mjs @ruvyxa/react
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - run: pnpm --filter "./packages/@ruvyxa/adapter-*" publish --access public --no-git-checks
+      - name: Publish adapters
+        run: |
+          node scripts/publish-if-new.mjs \
+            @ruvyxa/adapter-bun \
+            @ruvyxa/adapter-cloudflare \
+            @ruvyxa/adapter-netlify \
+            @ruvyxa/adapter-node \
+            @ruvyxa/adapter-static \
+            @ruvyxa/adapter-vercel
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-      - run: pnpm --filter ruvyxa publish --access public --no-git-checks
+      - name: Publish ruvyxa
+        run: node scripts/publish-if-new.mjs ruvyxa
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           SKIP_NATIVE_BUILD: "1"
-      - run: pnpm --filter create-ruvyxa publish --access public --no-git-checks
+      - name: Publish create-ruvyxa
+        run: node scripts/publish-if-new.mjs create-ruvyxa
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
       - name: Release summary
