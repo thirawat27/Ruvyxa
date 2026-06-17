@@ -60,6 +60,28 @@ ruvyxa test:parity
 
 Use this after changing route discovery, build output, layouts, server modules, or actions.
 
+## Benchmark
+
+Measure framework hot paths locally:
+
+```bash
+ruvyxa bench --root examples/basic-app --samples 3
+ruvyxa bench --root examples/basic-app --samples 3 --json
+```
+
+The benchmark suite measures route discovery, analyze validation, and production build timings. Use it before and after optimizer, route graph, HMR, or build changes.
+
+## Security Headers
+
+Runtime responses include conservative defaults:
+
+- `x-content-type-options: nosniff`
+- `referrer-policy: strict-origin-when-cross-origin`
+- `permissions-policy: camera=(), microphone=(), geolocation=()`
+- `cross-origin-opener-policy: same-origin`
+
+Use this as a baseline. Apps that need a custom CSP can add it at the deployment layer until Ruvyxa exposes a typed security config.
+
 ## Doctor
 
 Run `doctor` when setup or dependency state looks wrong:

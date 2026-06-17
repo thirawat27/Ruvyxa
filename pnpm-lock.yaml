@@ -40,7 +40,37 @@ importers:
         specifier: ^4.1.17
         version: 4.3.1
 
+  packages/@ruvyxa/adapter-bun:
+    dependencies:
+      '@ruvyxa/core':
+        specifier: workspace:*
+        version: link:../core
+
+  packages/@ruvyxa/adapter-cloudflare:
+    dependencies:
+      '@ruvyxa/core':
+        specifier: workspace:*
+        version: link:../core
+
+  packages/@ruvyxa/adapter-netlify:
+    dependencies:
+      '@ruvyxa/core':
+        specifier: workspace:*
+        version: link:../core
+
   packages/@ruvyxa/adapter-node:
+    dependencies:
+      '@ruvyxa/core':
+        specifier: workspace:*
+        version: link:../core
+
+  packages/@ruvyxa/adapter-static:
+    dependencies:
+      '@ruvyxa/core':
+        specifier: workspace:*
+        version: link:../core
+
+  packages/@ruvyxa/adapter-vercel:
     dependencies:
       '@ruvyxa/core':
         specifier: workspace:*

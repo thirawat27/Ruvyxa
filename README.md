@@ -5,7 +5,7 @@ Ruvyxa is a Rust-powered full-stack TypeScript framework prototype with file rou
 
 ## What Works Today
 
-- Rust CLI commands: `dev`, `build`, `start`, `routes`, `analyze`, `doctor`, `test:parity`
+- Rust CLI commands: `dev`, `build`, `start`, `routes`, `analyze`, `doctor`, `bench`, `test:parity`
 - File route discovery from `app/`
 - Route manifest generation
 - React-compatible SSR for `page.tsx` through the Ruvyxa SSR renderer
@@ -15,12 +15,13 @@ Ruvyxa is a Rust-powered full-stack TypeScript framework prototype with file rou
 - Tailwind CSS v4 support through `@import "tailwindcss"` in app CSS
 - Single-file PNG brand asset copied from `public/ruvyxa.png` into `.ruvyxa/assets`
 - API route execution for `route.ts` handlers such as `GET`
-- Full-page reload events over WebSocket when files change under `app/`, `components/`, `server/`, or `public/`
-- Browser hydration bundle generation for page routes
-- Server action endpoint for `action.ts` route modules
+- HMR WebSocket events for CSS updates, component updates, and full reload fallbacks
+- Route-level browser hydration bundles with BLAKE3-hashed production output, minification, and esbuild tree shaking
+- Server action endpoint for `action.ts` route modules with body-limit middleware, same-origin checks, Fetch Metadata checks, content-type guards, and rate limiting
+- Default production security headers on HTML, JSON, static assets, client bundles, API responses, and action responses
 - Runtime trace endpoint for route/module debugging
 - `.env` and `.env.local` loading for SSR, API routes, and actions
-- First-party Node adapter contract through `@ruvyxa/adapter-node`
+- First-party adapter contracts for Node, Vercel, Cloudflare, Netlify, Bun, and static output
 - Client bundle boundary diagnostics for `server-only`, `server/` imports, and private `process.env.*`
 - TypeScript public API package stubs
 
@@ -47,6 +48,7 @@ cargo run -p ruvyxa_cli -- routes --root examples/basic-app
 cargo run -p ruvyxa_cli -- analyze --root examples/basic-app
 cargo run -p ruvyxa_cli -- doctor --root examples/basic-app
 cargo run -p ruvyxa_cli -- trace /todos --root examples/basic-app
+cargo run -p ruvyxa_cli -- bench --root examples/basic-app --samples 3
 cargo run -p ruvyxa_cli -- test:parity --root examples/basic-app
 cargo test --workspace
 pnpm -r build
@@ -84,12 +86,14 @@ Server-side renderers load `.env` and `.env.local` from the app root. Document r
 ```txt
 .ruvyxa/
 ├─ server/   # production route source used by ruvyxa start
-├─ client/   # client manifest and hydration metadata
+├─ client/   # hashed route-level hydration bundles and client manifest
 ├─ assets/   # copied public assets
 ├─ manifest.json
 └─ build.json
 ```
 
+`build.json` records the production profile, Unix build time, output directories, hash algorithm, and enabled security defaults.
+
 ## Current Limitations
 
-The runtime now uses React SSR, browser hydration bundles, API route execution, server action invocation, runtime tracing, Tailwind CSS compilation, a Node adapter contract, and esbuild for TS/TSX transformation. It still does not implement component-level HMR, optimized chunking, tree shaking, or managed-host deploy adapters.
+The runtime now uses React SSR, route-level browser hydration bundles, API route execution, hardened server action invocation, runtime tracing, Tailwind CSS compilation, first-party adapter contracts, benchmark reporting, deterministic BLAKE3 asset hashes, default security headers, and esbuild for TS/TSX transformation. The current HMR implementation updates CSS and re-renders component bundles in dev, with full reload fallback for server/runtime edits. Advanced Fast Refresh state preservation and host-specific deployment file emitters are still future work.

@@ -1,18 +1,18 @@
 import type { Adapter, AdapterOutput, BuildContext } from "@ruvyxa/core"
 
-export interface NodeAdapterOptions {
+export interface BunAdapterOptions {
   entry?: string
 }
 
-export function nodeAdapter(options: NodeAdapterOptions = {}): Adapter {
+export function bunAdapter(options: BunAdapterOptions = {}): Adapter {
   return {
-    name: "node",
+    name: "bun",
     target: "node",
     build(ctx: BuildContext): AdapterOutput {
       return {
-        name: "node",
+        name: "bun",
         target: "node",
-        platform: "node",
+        platform: "bun",
         entry: options.entry ?? `${ctx.outDir}/server/app`,
         assetsDir: `${ctx.outDir}/assets`,
       }
@@ -20,4 +20,4 @@ export function nodeAdapter(options: NodeAdapterOptions = {}): Adapter {
   }
 }
 
-export default nodeAdapter
+export default bunAdapter

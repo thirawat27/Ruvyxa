@@ -24,9 +24,22 @@ Output:
 {
   "name": "node",
   "target": "node",
+  "platform": "node",
   "entry": ".ruvyxa/server/app",
   "assetsDir": ".ruvyxa/assets"
 }
 ```
 
-For now, `ruvyxa start` is the supported Node runtime. Additional adapters for serverless, edge, static, and managed hosts can use the same `Adapter` interface.
+First-party adapter packages expose the same contract:
+
+```ts
+import { vercelAdapter } from "@ruvyxa/adapter-vercel"
+import { cloudflareAdapter } from "@ruvyxa/adapter-cloudflare"
+import { netlifyAdapter } from "@ruvyxa/adapter-netlify"
+import { bunAdapter } from "@ruvyxa/adapter-bun"
+import { staticAdapter } from "@ruvyxa/adapter-static"
+```
+
+`ruvyxa build` emits `.ruvyxa/server`, `.ruvyxa/assets`, and BLAKE3-hashed route-level client bundles in `.ruvyxa/client`. `build.json` records the production profile, hash algorithm, output directories, and enabled runtime security defaults.
+
+`ruvyxa start` is the supported Node runtime today; managed-host adapters describe target output for deployment integrations that consume the same build artifacts.

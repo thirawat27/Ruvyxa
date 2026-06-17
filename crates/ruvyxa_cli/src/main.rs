@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
+use std::time::SystemTime;
+use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use clap::{Parser, Subcommand, ValueEnum};
@@ -32,6 +34,7 @@ enum Command {
     Doctor(ProjectArgs),
     Clean(ProjectArgs),
     Trace(TraceArgs),
+    Bench(BenchArgs),
     #[command(name = "test:parity", alias = "parity")]
     TestParity(ProjectArgs),
 }
@@ -78,6 +81,18 @@ struct TraceArgs {
     root: PathBuf,
 }
 
+#[derive(Debug, Parser)]
+struct BenchArgs {
+    #[arg(long, default_value = ".")]
+    root: PathBuf,
+
+    #[arg(long, default_value_t = 3)]
+    samples: usize,
+
+    #[arg(long)]
+    json: bool,
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     tracing_subscriber::fmt()
@@ -106,6 +121,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Doctor(args) => doctor(args).context("doctor failed")?,
         Command::Clean(args) => clean(args).context("clean failed")?,
         Command::Trace(args) => trace(args).context("trace failed")?,
+        Command::Bench(args) => bench(args).context("benchmark failed")?,
         Command::TestParity(args) => test_parity(args).context("parity test failed")?,
     }
 
@@ -138,18 +154,7 @@ fn build(args: BuildArgs) -> anyhow::Result<()> {
     fs::create_dir_all(&client_dir)?;
     write_manifest(&manifest, &out_dir.join("manifest.json"))?;
 
-    let client_manifest = serde_json::json!({
-        "routes": manifest
-            .routes
-            .iter()
-            .filter(|route| route.kind == ruvyxa_graph::RouteKind::Page)
-            .map(|route| serde_json::json!({
-                "path": route.path,
-                "entry": route.file,
-                "hydrationEndpoint": format!("/__ruvyxa/client?path={}", route.path),
-            }))
-            .collect::<Vec<_>>()
-    });
+    let client_manifest = emit_client_bundles(&args.root, &app_dir, &manifest, &client_dir)?;
     fs::write(
         client_dir.join("manifest.json"),
         serde_json::to_string_pretty(&client_manifest)?,
@@ -159,10 +164,22 @@ fn build(args: BuildArgs) -> anyhow::Result<()> {
         "framework": "Ruvyxa",
         "version": env!("CARGO_PKG_VERSION"),
         "target": format!("{:?}", args.target).to_lowercase(),
+        "profile": "production",
+        "createdAtUnix": SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|duration| duration.as_secs())
+            .unwrap_or_default(),
         "routes": manifest.routes.len(),
         "serverDir": "server",
         "clientDir": "client",
-        "assetsDir": "assets"
+        "assetsDir": "assets",
+        "hashAlgorithm": "blake3-128",
+        "security": {
+            "actionBodyLimitBytes": 65536,
+            "sameOriginActions": true,
+            "fetchMetadataActions": true,
+            "securityHeaders": true
+        }
     });
     fs::write(
         out_dir.join("build.json"),
@@ -181,6 +198,108 @@ fn build(args: BuildArgs) -> anyhow::Result<()> {
         out_dir.display()
     );
     Ok(())
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ClientBundleOutput {
+    ok: bool,
+    script: Option<String>,
+    code: Option<String>,
+    message: Option<String>,
+    stack: Option<String>,
+}
+
+fn emit_client_bundles(
+    root: &Path,
+    app_dir: &Path,
+    manifest: &RouteManifest,
+    client_dir: &Path,
+) -> anyhow::Result<serde_json::Value> {
+    let renderer = find_runtime_script(root, "client-renderer.mjs")
+        .context("client renderer was not found for production build")?;
+    let mut routes = Vec::new();
+
+    for route in manifest
+        .routes
+        .iter()
+        .filter(|route| route.kind == ruvyxa_graph::RouteKind::Page)
+    {
+        let output = ProcessCommand::new("node")
+            .env("RUVYXA_CLIENT_MINIFY", "1")
+            .arg(&renderer)
+            .arg(root)
+            .arg(app_dir)
+            .arg(&route.file)
+            .arg(&route.path)
+            .arg("{}")
+            .output()
+            .with_context(|| format!("failed to bundle client route {}", route.path))?;
+
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let result: ClientBundleOutput = serde_json::from_str(&stdout).with_context(|| {
+            format!(
+                "client renderer returned invalid output for {}\nstdout:\n{}",
+                route.path, stdout
+            )
+        })?;
+
+        if !output.status.success() || !result.ok {
+            anyhow::bail!(
+                "client bundle failed for {}: {} {}",
+                route.path,
+                result.code.unwrap_or_else(|| "RUV1300".to_string()),
+                result
+                    .message
+                    .or(result.stack)
+                    .unwrap_or_else(|| "unknown client build error".to_string())
+            );
+        }
+
+        let script = result
+            .script
+            .context("client renderer completed without script output")?;
+        let file_name = format!("{}.js", content_hash(&script));
+        fs::write(client_dir.join(&file_name), script.as_bytes())?;
+
+        routes.push(serde_json::json!({
+            "path": route.path,
+            "entry": route.file,
+            "file": file_name,
+            "src": format!("/__ruvyxa/client/{}", file_name),
+            "bytes": script.len(),
+            "optimized": true,
+            "treeShaken": true,
+            "chunkStrategy": "route"
+        }));
+    }
+
+    Ok(serde_json::json!({
+        "chunkStrategy": "route",
+        "minify": true,
+        "treeShaking": true,
+        "routes": routes
+    }))
+}
+
+fn content_hash(input: &str) -> String {
+    blake3::hash(input.as_bytes()).to_hex()[..16].to_string()
+}
+
+fn find_runtime_script(root: &Path, file_name: &str) -> Option<PathBuf> {
+    let cwd_renderer = std::env::current_dir()
+        .ok()
+        .map(|cwd| cwd.join("packages/ruvyxa/runtime").join(file_name));
+    if let Some(path) = cwd_renderer.filter(|path| path.is_file()) {
+        return Some(path);
+    }
+
+    let package_renderer = root.join("node_modules/ruvyxa/runtime").join(file_name);
+    if package_renderer.is_file() {
+        return Some(package_renderer);
+    }
+
+    None
 }
 
 fn print_routes(args: ProjectArgs) -> anyhow::Result<()> {
@@ -284,6 +403,100 @@ fn trace(args: TraceArgs) -> anyhow::Result<()> {
 
     println!("{}", serde_json::to_string_pretty(route)?);
     Ok(())
+}
+
+fn bench(args: BenchArgs) -> anyhow::Result<()> {
+    let samples = args.samples.max(1);
+    let root = args.root;
+    let mut results = Vec::new();
+
+    results.push(run_benchmark("route-discovery", samples, || {
+        let _manifest = discover_routes(DiscoverOptions::new(root.join("app")))?;
+        Ok(())
+    })?);
+    results.push(run_benchmark("analyze-validation", samples, || {
+        let manifest = discover_routes(DiscoverOptions::new(root.join("app")))?;
+        let validation = validate_app(&root, &manifest)?;
+        fail_on_diagnostics(&validation.diagnostics)?;
+        Ok(())
+    })?);
+    results.push(run_benchmark("production-build", samples, || {
+        build(BuildArgs {
+            root: root.clone(),
+            target: BuildTarget::Node,
+        })
+    })?);
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&results)?);
+    } else {
+        println!("Ruvyxa benchmark ({samples} sample(s))");
+        println!(
+            "{:<20} {:>10} {:>10} {:>10} {:>10}",
+            "scenario", "min", "median", "avg", "max"
+        );
+        for result in &results {
+            println!(
+                "{:<20} {:>9.2}ms {:>9.2}ms {:>9.2}ms {:>9.2}ms",
+                result.name, result.min_ms, result.median_ms, result.avg_ms, result.max_ms
+            );
+        }
+    }
+
+    Ok(())
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BenchmarkResult {
+    name: String,
+    samples: usize,
+    min_ms: f64,
+    median_ms: f64,
+    avg_ms: f64,
+    max_ms: f64,
+}
+
+fn run_benchmark(
+    name: &str,
+    samples: usize,
+    mut run: impl FnMut() -> anyhow::Result<()>,
+) -> anyhow::Result<BenchmarkResult> {
+    let mut timings = Vec::with_capacity(samples);
+
+    for _ in 0..samples {
+        let started = Instant::now();
+        run()?;
+        timings.push(started.elapsed());
+    }
+
+    Ok(summarize_benchmark(name, timings))
+}
+
+fn summarize_benchmark(name: &str, mut timings: Vec<Duration>) -> BenchmarkResult {
+    timings.sort();
+    let samples = timings.len();
+    let min_ms = duration_ms(timings[0]);
+    let max_ms = duration_ms(timings[samples - 1]);
+    let median_ms = duration_ms(timings[samples / 2]);
+    let avg_ms = timings
+        .iter()
+        .map(|duration| duration_ms(*duration))
+        .sum::<f64>()
+        / samples as f64;
+
+    BenchmarkResult {
+        name: name.to_string(),
+        samples,
+        min_ms,
+        median_ms,
+        avg_ms,
+        max_ms,
+    }
+}
+
+fn duration_ms(duration: Duration) -> f64 {
+    duration.as_secs_f64() * 1000.0
 }
 
 fn test_parity(args: ProjectArgs) -> anyhow::Result<()> {
@@ -589,5 +802,36 @@ mod tests {
             duplicate_dependencies(&package),
             vec!["react (^19.0.0, ^18.0.0)"]
         );
+    }
+
+    #[test]
+    fn summarizes_benchmark_samples() {
+        let result = summarize_benchmark(
+            "sample",
+            vec![
+                Duration::from_millis(30),
+                Duration::from_millis(10),
+                Duration::from_millis(20),
+            ],
+        );
+
+        assert_eq!(result.name, "sample");
+        assert_eq!(result.samples, 3);
+        assert_eq!(result.min_ms, 10.0);
+        assert_eq!(result.median_ms, 20.0);
+        assert_eq!(result.max_ms, 30.0);
+    }
+
+    #[test]
+    fn content_hash_is_deterministic() {
+        assert_eq!(
+            content_hash("console.log('a')"),
+            content_hash("console.log('a')")
+        );
+        assert_ne!(
+            content_hash("console.log('a')"),
+            content_hash("console.log('b')")
+        );
+        assert_eq!(content_hash("console.log('a')").len(), 16);
     }
 }

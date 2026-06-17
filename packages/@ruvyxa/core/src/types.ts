@@ -56,6 +56,9 @@ export interface AdapterOutput {
   target: Adapter["target"]
   entry: string
   assetsDir: string
+  platform?: "node" | "vercel" | "cloudflare" | "netlify" | "bun" | "static"
+  configFiles?: string[]
+  functionsDir?: string
 }
 
 export interface Adapter {

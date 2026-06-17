@@ -12,6 +12,7 @@ describe("nodeAdapter", () => {
     expect(output).toEqual({
       name: "node",
       target: "node",
+      platform: "node",
       entry: ".ruvyxa/server/app",
       assetsDir: ".ruvyxa/assets",
     })

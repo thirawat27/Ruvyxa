@@ -34,7 +34,17 @@ export default function TodosPage() {
 }
 ```
 
-The MVP endpoint accepts JSON or form-encoded payloads. It resolves the action from the target route's sibling `action.ts`, so clients cannot choose arbitrary module paths.
+The endpoint accepts JSON or URL-encoded form payloads. It resolves the action from the target route's sibling `action.ts`, so clients cannot choose arbitrary module paths.
+
+## Security Defaults
+
+- Payloads over 64 KiB are rejected with `413` before the action body is extracted.
+- Content types must be `application/json` or `application/x-www-form-urlencoded`.
+- Requests with an `Origin` that does not match the `Host` header are rejected with `403`.
+- Browser Fetch Metadata with `Sec-Fetch-Site: cross-site` is rejected with `403`.
+- Action calls are rate-limited per client/action key in the runtime process.
+- Action responses include the framework's default security headers.
+- Browser-reachable code still cannot import `server/` modules or read private `process.env.*` values.
 
 ## Debug Tips
 

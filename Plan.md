@@ -40,7 +40,19 @@
    - Done when SSR, API routes, and server actions receive `.env`/`.env.local` values and templates include `.env.example`.
 14. Add first deployment adapter
    - Done when `@ruvyxa/adapter-node` exposes the first-party adapter contract and docs describe Node deployment output.
+15. Add optimized route client bundles
+   - Done when production build emits hashed per-route client scripts, a client manifest, minification, and tree-shaking metadata consumed by `ruvyxa start`.
+16. Add component-aware HMR events
+   - Done when the watcher distinguishes CSS updates, component updates, and full reload fallbacks, and the browser runtime handles each event type.
+17. Add managed-host adapters
+   - Done when Vercel, Cloudflare, Netlify, Bun, and static adapter packages expose typed first-party contracts.
+18. Add benchmark suite
+   - Done when `ruvyxa bench` reports route discovery, analyze validation, and production build timings in table or JSON form.
+19. Harden server actions
+   - Done when action requests enforce body size, supported content types, same-origin checks, and route-local action resolution.
+20. Add production hardening defaults
+   - Done when builds use deterministic content hashes, action payload limits are enforced before body extraction, runtime responses include default security headers, and static asset paths reject traversal.
 
 ## Scope Notes
 
-This MVP now implements React SSR, client hydration, API route execution, server action invocation, runtime tracing, dev/prod route parity checks, expanded doctor checks, env file loading, a Node adapter contract, Tailwind CSS v4 compilation, TS/TSX transformation through esbuild-powered Node renderer bridges, and basic client boundary validation. It still does not implement optimized chunking/tree shaking, component-level HMR, managed-host deploy adapters, or the full production-grade action security stack.
+This MVP now implements React SSR, client hydration, route-level optimized client bundles with deterministic BLAKE3 hashes, API route execution, hardened server action invocation, default security headers, runtime tracing, dev/prod route parity checks, benchmark reporting, expanded doctor checks, env file loading, first-party adapter contracts, Tailwind CSS v4 compilation, TS/TSX transformation through esbuild-powered Node renderer bridges, component-aware HMR events, and basic client boundary validation. Advanced Fast Refresh state preservation, source-map-rich optimizer reports, and host-specific deployment file emitters remain future production-hardening work.

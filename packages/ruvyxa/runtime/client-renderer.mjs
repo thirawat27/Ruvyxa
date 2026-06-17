@@ -67,13 +67,18 @@ import React from "react"
 import { hydrateRoot } from "react-dom/client"
 ${imports.join("\n")}
 
-const params = ${paramsJson}
-let tree = React.createElement(Page, { params, requestPath: ${JSON.stringify(requestPath)} })
+const params = globalThis.__RUVYXA_ROUTE_PARAMS__ ?? ${paramsJson}
+const currentRequestPath = globalThis.__RUVYXA_REQUEST_PATH__ ?? ${JSON.stringify(requestPath)}
+let tree = React.createElement(Page, { params, requestPath: currentRequestPath })
 for (const Layout of [${wrappers.join(", ")}].reverse()) {
   tree = React.createElement(Layout, null, tree)
 }
 
-hydrateRoot(document, tree)
+if (globalThis.__RUVYXA_ROOT__) {
+  globalThis.__RUVYXA_ROOT__.render(tree)
+} else {
+  globalThis.__RUVYXA_ROOT__ = hydrateRoot(document, tree)
+}
 window.__RUVYXA_HYDRATED = true
 `
 
@@ -96,6 +101,8 @@ window.__RUVYXA_HYDRATED = true
     format: "iife",
     platform: "browser",
     jsx: "automatic",
+    minify: process.env.RUVYXA_CLIENT_MINIFY === "1",
+    treeShaking: true,
     absWorkingDir: projectRoot,
     plugins: [
       clientBoundaryPlugin(projectRoot),
