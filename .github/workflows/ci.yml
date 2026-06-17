@@ -4,6 +4,11 @@ on:
   push:
   pull_request:
 
+env:
+  CARGO_HTTP_TIMEOUT: "120"
+  CARGO_NET_RETRY: "10"
+  CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
+
 jobs:
   test:
     name: Test (${{ matrix.os }})
@@ -16,6 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
       - uses: pnpm/action-setup@v4
         with:
           version: 10.32.1
