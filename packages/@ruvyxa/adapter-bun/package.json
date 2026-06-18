@@ -1,6 +1,6 @@
 {
   "name": "@ruvyxa/adapter-bun",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Run Ruvyxa on Bun-flavored hosts with typed adapter metadata for entrypoints and assets.",
   "license": "MIT",
   "type": "module",

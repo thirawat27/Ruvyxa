@@ -1,6 +1,6 @@
 {
   "name": "@ruvyxa/cli-linux-arm64",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "Prebuilt Ruvyxa native CLI binary for Linux arm64.",
   "license": "MIT",
   "type": "module",
