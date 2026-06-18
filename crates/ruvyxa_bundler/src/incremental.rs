@@ -299,8 +299,7 @@ impl IncrementalGraphCache {
             fs::create_dir_all(parent)?;
         }
 
-        let json = serde_json::to_string(&self.current)
-            .map_err(std::io::Error::other)?;
+        let json = serde_json::to_string(&self.current).map_err(std::io::Error::other)?;
 
         // Atomic write via temp file + rename.
         let temp_path = self.manifest_path.with_extension("json.tmp");
