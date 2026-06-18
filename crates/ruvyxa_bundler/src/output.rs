@@ -104,10 +104,9 @@ pub fn wrap(linked: String, input: &BundleInput) -> String {
             linked
         }
         BundleTarget::Ssr => {
-            // ESM: externals are imported at the top.
-            format!(
-                "// Ruvyxa SSR bundle\nimport React from \"react\";\nimport {{ renderToString }} from \"react-dom/server\";\n{linked}"
-            )
+            // The linker hoists external ESM imports and exposes the virtual
+            // entry render function as a top-level ESM export.
+            format!("// Ruvyxa SSR bundle\n{linked}")
         }
     }
 }

@@ -576,7 +576,7 @@ fn emit_client_bundles(
     minify: bool,
     configured_parallelism: Option<usize>,
 ) -> anyhow::Result<serde_json::Value> {
-    let compile_cache = ruvyxa_bundler::cache::CompileCache::new(root, true);
+    let bundle_context = ruvyxa_bundler::BundleContext::new(root);
     let page_routes = manifest
         .routes
         .iter()
@@ -598,7 +598,7 @@ fn emit_client_bundles(
         for (chunk_index, chunk) in page_routes.chunks(chunk_size).enumerate() {
             let routes = chunk.to_vec();
             let offset = chunk_index * chunk_size;
-            let compile_cache = compile_cache.clone();
+            let bundle_context = bundle_context.clone();
 
             handles.push(
                 scope.spawn(move || -> anyhow::Result<Vec<(usize, ClientBundle)>> {
@@ -606,7 +606,7 @@ fn emit_client_bundles(
                         .iter()
                         .enumerate()
                         .map(|(index, route)| {
-                            bundle_client_route(root, app_dir, route, minify, &compile_cache)
+                            bundle_client_route(root, app_dir, route, minify, &bundle_context)
                                 .map(|bundle| (offset + index, bundle))
                         })
                         .collect()
@@ -656,7 +656,7 @@ fn bundle_client_route(
     app_dir: &Path,
     route: &RouteEntry,
     minify: bool,
-    compile_cache: &ruvyxa_bundler::cache::CompileCache,
+    bundle_context: &ruvyxa_bundler::BundleContext,
 ) -> anyhow::Result<ClientBundle> {
     use ruvyxa_bundler::{BundleInput, BundleOptions, BundleTarget};
 
@@ -685,7 +685,7 @@ fn bundle_client_route(
         },
     };
 
-    let output = ruvyxa_bundler::bundle_with_cache(input, compile_cache)
+    let output = ruvyxa_bundler::bundle_with_context(input, bundle_context)
         .map_err(|e| anyhow::anyhow!("native bundler error for {}: {e}", route.path))?;
 
     // Report non-fatal diagnostics.

@@ -156,7 +156,6 @@ impl RenderCache {
     }
 
     /// Invalidate entries matching a prefix (e.g., a specific route path).
-    #[allow(dead_code)]
     pub async fn invalidate_prefix(&self, prefix: &str) {
         let mut entries = self.entries.write().await;
         entries.retain(|key, _| !key.starts_with(prefix));
@@ -166,6 +165,15 @@ impl RenderCache {
     pub fn invalidate_all_blocking(&self) {
         let mut entries = self.entries.blocking_write();
         entries.clear();
+    }
+
+    /// Blocking prefix invalidation for use in sync contexts (file watcher).
+    ///
+    /// Only evicts entries whose cache key starts with the given prefix,
+    /// leaving unrelated routes' cached renders intact.
+    pub fn invalidate_prefix_blocking(&self, prefix: &str) {
+        let mut entries = self.entries.blocking_write();
+        entries.retain(|key, _| !key.starts_with(prefix));
     }
 
     /// Get cache statistics.

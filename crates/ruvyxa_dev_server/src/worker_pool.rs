@@ -102,6 +102,21 @@ pub enum WorkerRequest {
     Invalidate { id: String, paths: Vec<String> },
     #[serde(rename = "ping")]
     Ping { id: String },
+    #[serde(rename = "warmup")]
+    Warmup {
+        id: String,
+        #[serde(rename = "projectRoot")]
+        project_root: String,
+        routes: Vec<WarmupRoute>,
+    },
+}
+
+/// A route to pre-warm in the worker's module cache.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct WarmupRoute {
+    pub page_file: String,
+    pub app_dir: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -202,7 +217,8 @@ impl Worker {
             | WorkerRequest::Action { id, .. }
             | WorkerRequest::Client { id, .. }
             | WorkerRequest::Invalidate { id, .. }
-            | WorkerRequest::Ping { id, .. } => id.clone(),
+            | WorkerRequest::Ping { id, .. }
+            | WorkerRequest::Warmup { id, .. } => id.clone(),
         };
 
         let (tx, rx) = oneshot::channel();
@@ -362,6 +378,36 @@ impl NodeWorkerPool {
         let new_worker = Worker::spawn(&self.worker_script, &self.env).await?;
         self.workers[index] = new_worker;
         Ok(())
+    }
+
+    /// Pre-warm module caches in a worker by importing route bundles during idle time.
+    ///
+    /// This eliminates the cold-start penalty for the first request to each route.
+    /// Sends the warmup request to worker 0 only (one warmed cache is enough;
+    /// hot modules will be cached per-worker on first real request).
+    pub async fn warmup(&self, project_root: &str, routes: Vec<WarmupRoute>) {
+        if routes.is_empty() || self.workers.is_empty() {
+            return;
+        }
+
+        let request = WorkerRequest::Warmup {
+            id: next_request_id(),
+            project_root: project_root.to_string(),
+            routes,
+        };
+
+        // Send to first worker only (warmup is best-effort).
+        match self.workers[0].send(&request).await {
+            Ok(response) if response.ok => {
+                debug!("worker warmup completed");
+            }
+            Ok(response) => {
+                debug!(message = ?response.message, "worker warmup returned non-ok");
+            }
+            Err(_) => {
+                // Non-fatal: warmup is an optimization, not a requirement.
+            }
+        }
     }
 
     // --- Convenience methods for each render type ---

@@ -10,12 +10,15 @@ description = "Native TypeScript/JSX bundler and compiler for Ruvyxa"
 [dependencies]
 ruvyxa_diagnostics = { path = "../ruvyxa_diagnostics" }
 anyhow = { workspace = true }
+blake3 = { workspace = true }
+dashmap = { workspace = true }
+memmap2 = { workspace = true }
+parking_lot = { workspace = true }
+rayon = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
-blake3 = { workspace = true }
-rayon = { workspace = true }
-walkdir = { workspace = true }
 thiserror = { workspace = true }
+walkdir = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -35,6 +35,9 @@ pub use router::RadixRouter;
 mod render_cache;
 pub use render_cache::RenderCache;
 
+mod hmr_tracker;
+pub use hmr_tracker::{HmrEventType, HmrTracker, HmrUpdate};
+
 const MAX_ACTION_BODY_BYTES: usize = 64 * 1024;
 const ACTION_RATE_LIMIT_MAX: usize = 60;
 const ACTION_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
@@ -95,6 +98,7 @@ struct AppState {
     action_limiter: Arc<Mutex<ActionRateLimiter>>,
     worker_pool: Arc<NodeWorkerPool>,
     render_cache: Arc<RenderCache>,
+    hmr_tracker: Arc<HmrTracker>,
 }
 
 #[derive(Default)]
@@ -203,6 +207,7 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
 
     let watcher_pool = worker_pool.clone();
     let watcher_render_cache = render_cache.clone();
+    let hmr_tracker = Arc::new(HmrTracker::new());
     let state = AppState {
         config: config.clone(),
         reload_tx,
@@ -210,6 +215,7 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
         action_limiter: Arc::new(Mutex::new(ActionRateLimiter::default())),
         worker_pool,
         render_cache,
+        hmr_tracker,
     };
 
     let _watcher = if config.watch {
@@ -219,6 +225,7 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
             state.runtime_cache.clone(),
             watcher_pool,
             watcher_render_cache,
+            state.hmr_tracker.clone(),
         )?)
     } else {
         None
@@ -327,15 +334,34 @@ fn start_watcher(
     runtime_cache: Arc<RuntimeCache>,
     worker_pool: Arc<NodeWorkerPool>,
     render_cache: Arc<RenderCache>,
+    hmr_tracker: Arc<HmrTracker>,
 ) -> Result<RecommendedWatcher> {
     let mut watcher =
         notify::recommended_watcher(move |event: notify::Result<notify::Event>| match event {
             Ok(event) => {
                 let paths = event.paths;
-                runtime_cache.invalidate();
-                render_cache.invalidate_all_blocking();
 
-                // Invalidate worker bundle caches for changed files
+                // Use HmrTracker for selective invalidation.
+                let hmr_update = hmr_tracker.compute_update(&paths);
+
+                // Selective cache invalidation based on affected routes.
+                if hmr_update.full_reload || hmr_update.affected_routes.is_empty() {
+                    // Full invalidation: manifest may have changed (new/deleted routes).
+                    runtime_cache.invalidate();
+                    render_cache.invalidate_all_blocking();
+                    hmr_tracker.clear();
+                } else {
+                    // Selective invalidation: only evict affected route caches.
+                    // Styles always need refresh if any source file changed.
+                    *runtime_cache.styles.blocking_write() = None;
+
+                    // Selectively invalidate render cache for affected routes only.
+                    for route_path in &hmr_update.affected_routes {
+                        render_cache.invalidate_prefix_blocking(route_path);
+                    }
+                }
+
+                // Invalidate worker bundle caches for changed files.
                 let path_strings: Vec<String> = paths
                     .iter()
                     .map(|path| path.display().to_string())
@@ -347,9 +373,12 @@ fn start_watcher(
                     });
                 });
 
+                // Send targeted HMR payload with affected routes.
                 let payload = serde_json::json!({
-                    "type": classify_hmr_event(&paths),
+                    "type": hmr_update.event_type.as_str(),
                     "paths": path_strings,
+                    "affectedRoutes": hmr_update.affected_routes,
+                    "fullReload": hmr_update.full_reload,
                 })
                 .to_string();
                 let _ = reload_tx.send(payload);
@@ -2082,6 +2111,7 @@ fn hmr_client_script() -> &'static str {
 </script>"#
 }
 
+#[allow(dead_code)]
 fn classify_hmr_event(paths: &[PathBuf]) -> &'static str {
     if paths.is_empty() {
         return "full-reload";
@@ -2108,6 +2138,7 @@ fn classify_hmr_event(paths: &[PathBuf]) -> &'static str {
     }
 }
 
+#[allow(dead_code)]
 fn extension_is(path: &Path, expected: &str) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())

@@ -98,6 +98,16 @@ const createdDirs = new Set()
 // Performance: Cache React dependency resolution per project root.
 const reactResolvedRoots = new Set()
 
+// Performance: Request coalescing — collapse duplicate concurrent renders.
+// Key: coalesce_key (route+params hash), Value: Promise of result.
+// If two SSR requests for the same page arrive concurrently, only one
+// actually renders; the second awaits the same Promise.
+const renderCoalesceMap = new Map()
+
+// Performance: Warm module queue — tracks modules to pre-import on idle.
+const warmupQueue = []
+let warmupTimer = null
+
 let activeRequests = 0
 let isShuttingDown = false
 
@@ -177,15 +187,17 @@ process.stdin.resume()
 async function dispatchRequest(request) {
   switch (request.type) {
     case "ssr":
-      return handleSsr(request)
+      return handleSsrCoalesced(request)
     case "api":
       return handleApi(request)
     case "action":
       return handleAction(request)
     case "client":
       return handleClient(request)
+    case "warmup":
+      return handleWarmup(request)
     case "ping":
-      return { ok: true, pong: true, cacheSize: bundleCache.size, moduleCacheSize: moduleCache.size, activeRequests }
+      return { ok: true, pong: true, cacheSize: bundleCache.size, moduleCacheSize: moduleCache.size, activeRequests, coalesceMapSize: renderCoalesceMap.size }
     case "invalidate":
       invalidateBundleCache(request.paths)
       return { ok: true }
@@ -249,6 +261,62 @@ function ensureReactDeps(resolvedRoot) {
   requireFromProject.resolve("react")
   requireFromProject.resolve("react-dom/server")
   reactResolvedRoots.add(resolvedRoot)
+}
+
+// --- SSR Handler with Request Coalescing ---
+// If two concurrent SSR requests hit the same page+params, only one renders;
+// the duplicate awaits the same promise. This eliminates redundant work
+// during rapid navigation or concurrent crawler hits.
+async function handleSsrCoalesced(request) {
+  const { pageFile, requestPath, params } = request
+  const coalesceKey = `ssr:${pageFile}:${requestPath}:${JSON.stringify(params || {})}`
+
+  // Check if an identical render is already in-flight.
+  if (renderCoalesceMap.has(coalesceKey)) {
+    return renderCoalesceMap.get(coalesceKey)
+  }
+
+  // No duplicate — start the render and register the promise.
+  const renderPromise = handleSsr(request).finally(() => {
+    renderCoalesceMap.delete(coalesceKey)
+  })
+  renderCoalesceMap.set(coalesceKey, renderPromise)
+  return renderPromise
+}
+
+// --- Warmup Handler ---
+// Pre-imports module bundles into V8's module cache during idle time,
+// so the first real request for a route doesn't pay the import cost.
+async function handleWarmup(request) {
+  const { projectRoot, routes } = request
+  const resolvedRoot = path.resolve(projectRoot || process.cwd())
+  let warmed = 0
+
+  if (routes && Array.isArray(routes)) {
+    for (const route of routes) {
+      try {
+        if (route.pageFile) {
+          const layouts = route.appDir
+            ? collectLayouts(route.appDir, path.dirname(route.pageFile))
+            : []
+          const { outfile } = await bundleSsrModule(resolvedRoot, route.pageFile, layouts)
+          await importModule(outfile, false)
+          warmed++
+        }
+      } catch {
+        // Warmup failures are non-fatal — the module will be compiled on first request.
+      }
+    }
+  }
+
+  // Also pre-resolve React deps for the project root.
+  try {
+    ensureReactDeps(resolvedRoot)
+  } catch {
+    // Non-fatal
+  }
+
+  return { ok: true, warmed, moduleCacheSize: moduleCache.size }
 }
 
 // --- SSR Handler ---

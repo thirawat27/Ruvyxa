@@ -11,6 +11,7 @@ axum.workspace = true
 blake3.workspace = true
 chrono.workspace = true
 notify.workspace = true
+parking_lot.workspace = true
 ruvyxa_diagnostics = { path = "../ruvyxa_diagnostics" }
 ruvyxa_graph = { path = "../ruvyxa_graph" }
 ruvyxa_middleware = { path = "../ruvyxa_middleware" }

@@ -21,6 +21,7 @@
 pub mod boundary;
 pub mod cache;
 pub mod compiler;
+pub mod incremental;
 pub mod linker;
 pub mod minifier;
 pub mod output;
@@ -31,6 +32,8 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use crate::cache::CompileCache;
+use crate::incremental::IncrementalGraphCache;
+use crate::resolver::ResolveGraphCache;
 use ruvyxa_diagnostics::Diagnostic;
 use serde::{Deserialize, Serialize};
 
@@ -118,6 +121,77 @@ pub struct BundleOutput {
     pub stats: BundleStats,
 }
 
+/// Shared state for a batch of bundle jobs.
+///
+/// Production builds should keep one context for the whole route batch so
+/// parallel workers reuse compiled transforms, resolved specifiers, and source
+/// file reads for shared layouts/components.
+#[derive(Debug, Clone)]
+pub struct BundleContext {
+    compile_cache: CompileCache,
+    graph_cache: ResolveGraphCache,
+    incremental: IncrementalGraphCache,
+}
+
+impl BundleContext {
+    /// Create a context rooted at the project cache directory.
+    pub fn new(project_root: impl AsRef<std::path::Path>) -> Self {
+        let root = project_root.as_ref();
+        Self {
+            compile_cache: CompileCache::new(root, true),
+            graph_cache: ResolveGraphCache::new(),
+            incremental: IncrementalGraphCache::new(root, true),
+        }
+    }
+
+    /// Create a context from explicit caches.
+    pub fn with_caches(compile_cache: CompileCache, graph_cache: ResolveGraphCache) -> Self {
+        Self {
+            compile_cache,
+            graph_cache,
+            incremental: IncrementalGraphCache::disabled(),
+        }
+    }
+
+    /// Create a context with full cache control.
+    pub fn with_all_caches(
+        compile_cache: CompileCache,
+        graph_cache: ResolveGraphCache,
+        incremental: IncrementalGraphCache,
+    ) -> Self {
+        Self {
+            compile_cache,
+            graph_cache,
+            incremental,
+        }
+    }
+
+    /// Compile cache used by this context.
+    pub fn compile_cache(&self) -> &CompileCache {
+        &self.compile_cache
+    }
+
+    /// Resolver/source cache used by this context.
+    pub fn graph_cache(&self) -> &ResolveGraphCache {
+        &self.graph_cache
+    }
+
+    /// Incremental graph cache for cross-build persistence.
+    pub fn incremental(&self) -> &IncrementalGraphCache {
+        &self.incremental
+    }
+
+    /// Mutable access to the incremental cache (for recording modules).
+    pub fn incremental_mut(&mut self) -> &mut IncrementalGraphCache {
+        &mut self.incremental
+    }
+
+    /// Save the incremental cache to disk (call after a successful build).
+    pub fn save_incremental(&self) -> std::io::Result<()> {
+        self.incremental.save()
+    }
+}
+
 // ─────────────────────────────────────────────
 // Error type
 // ─────────────────────────────────────────────
@@ -163,8 +237,8 @@ impl From<Diagnostic> for BundleError {
 /// Returns a [`BundleError`] if a hard boundary violation is detected, a
 /// module cannot be resolved, or a compile error occurs.
 pub fn bundle(input: BundleInput) -> Result<BundleOutput> {
-    let cache = CompileCache::new(&input.project_root, true);
-    bundle_with_cache(input, &cache)
+    let context = BundleContext::new(&input.project_root);
+    bundle_with_context(input, &context)
 }
 
 /// Bundle a single route using a caller-provided compile cache.
@@ -173,32 +247,47 @@ pub fn bundle(input: BundleInput) -> Result<BundleOutput> {
 /// [`CompileCache`] so common modules are reused across worker threads and
 /// across routes within the same production build.
 pub fn bundle_with_cache(input: BundleInput, cache: &CompileCache) -> Result<BundleOutput> {
+    let graph_cache = ResolveGraphCache::new();
+    bundle_with_parts(input, cache, &graph_cache)
+}
+
+/// Bundle a single route using shared batch context.
+pub fn bundle_with_context(input: BundleInput, context: &BundleContext) -> Result<BundleOutput> {
+    bundle_with_parts(input, context.compile_cache(), context.graph_cache())
+}
+
+fn bundle_with_parts(
+    input: BundleInput,
+    compile_cache: &CompileCache,
+    graph_cache: &ResolveGraphCache,
+) -> Result<BundleOutput> {
     let started = Instant::now();
 
     // 1. Build the virtual entry source that wires layouts → page.
     let (entry_source, entry_label) = output::build_entry_source(&input);
 
     // 2. Resolve the full dependency graph from the entry.
-    let graph = resolver::resolve_graph(
+    let graph = resolver::resolve_graph_with_cache(
         &entry_source,
         &entry_label,
         &input.project_root,
         &input.app_dir,
+        graph_cache,
     )?;
 
     // 3. Compile each module (strip TS types, transform JSX).
-    let compiled = compiler::compile_graph_with_cache(&graph, &input, cache)?;
+    let compiled = compiler::compile_graph_with_cache(&graph, &input, compile_cache)?;
 
     // 4. Enforce server/client boundaries.
     let mut diagnostics = Vec::new();
     boundary::check(&compiled, &input, &mut diagnostics)?;
 
     // 5. Link modules into a single concatenated script.
-    let linked = linker::link(&compiled, &input)?;
+    let linked = linker::link_parallel(&compiled, &input)?;
 
     // 6. Optionally minify.
     let final_code = if input.options.minify {
-        minifier::minify(&linked, input.target)?
+        minifier::minify_parallel(&linked, input.target)?
     } else {
         linked.clone()
     };
@@ -223,7 +312,7 @@ pub fn bundle_with_cache(input: BundleInput, cache: &CompileCache) -> Result<Bun
         let total_offset = wrapper_lines + linker_header_lines;
 
         let mut current_line = total_offset;
-        for module in &compiled {
+        for module in linker::ordered_project_modules(&compiled) {
             if module.is_external {
                 continue;
             }
@@ -253,4 +342,82 @@ pub fn bundle_with_cache(input: BundleInput, cache: &CompileCache) -> Result<Bun
         diagnostics,
         stats,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    fn client_input(
+        root: &std::path::Path,
+        app_dir: &std::path::Path,
+        entry: PathBuf,
+        layouts: Vec<PathBuf>,
+        request_path: &str,
+    ) -> BundleInput {
+        BundleInput {
+            entry,
+            project_root: root.to_path_buf(),
+            app_dir: app_dir.to_path_buf(),
+            layouts,
+            request_path: request_path.to_string(),
+            target: BundleTarget::Client,
+            options: BundleOptions {
+                minify: false,
+                source_map: true,
+                tree_shaking: true,
+            },
+        }
+    }
+
+    #[test]
+    fn bundle_context_reuses_graph_cache_across_routes() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let app = root.join("app");
+        fs::create_dir_all(&app).unwrap();
+
+        let shared = app.join("shared.ts");
+        let layout = app.join("layout.tsx");
+        let page_a = app.join("page-a.tsx");
+        let page_b = app.join("page-b.tsx");
+
+        fs::write(&shared, "export const label = \"Ruvyxa\";").unwrap();
+        fs::write(
+            &layout,
+            "import { label } from \"./shared\";\nexport default function Layout({ children }) { return <section data-label={label}>{children}</section>; }",
+        )
+        .unwrap();
+        fs::write(
+            &page_a,
+            "import { label } from \"./shared\";\nexport default function PageA() { return <main>{label}</main>; }",
+        )
+        .unwrap();
+        fs::write(
+            &page_b,
+            "import { label } from \"./shared\";\nexport default function PageB() { return <main>{label}</main>; }",
+        )
+        .unwrap();
+
+        let context = BundleContext::new(&root);
+
+        let first = bundle_with_context(
+            client_input(&root, &app, page_a, vec![layout.clone()], "/a"),
+            &context,
+        )
+        .unwrap();
+        let second = bundle_with_context(
+            client_input(&root, &app, page_b, vec![layout], "/b"),
+            &context,
+        )
+        .unwrap();
+
+        assert!(first.code.contains("PageA"));
+        assert!(second.code.contains("PageB"));
+        assert!(first.source_map.is_some());
+        assert!(second.source_map.is_some());
+        assert_eq!(context.graph_cache().source_count(), 4);
+        assert!(context.graph_cache().resolution_count() >= 1);
+    }
 }
