@@ -55,7 +55,6 @@ Open [http://localhost:3000](http://localhost:3000).
 ```text
 my-app/
 ├── app/
-│   ├── api/health/route.ts
 │   ├── global.css
 │   ├── layout.tsx
 │   └── page.tsx
