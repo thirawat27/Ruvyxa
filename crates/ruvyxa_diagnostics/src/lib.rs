@@ -49,6 +49,16 @@ impl Diagnostic {
         self
     }
 
+    /// Attach a file path with line and column info.
+    pub fn at_file_with_span(mut self, file: impl Into<PathBuf>, line: u32, column: u32) -> Self {
+        self.span = Some(SourceSpan {
+            file: file.into(),
+            line: Some(line),
+            column: Some(column),
+        });
+        self
+    }
+
     pub fn suggest(mut self, fix: impl Into<String>) -> Self {
         self.suggested_fix = Some(fix.into());
         self
@@ -60,7 +70,17 @@ impl fmt::Display for Diagnostic {
         writeln!(formatter, "{}: {}", self.code, self.title)?;
 
         if let Some(span) = &self.span {
-            writeln!(formatter, "File: {}", span.file.display())?;
+            match (span.line, span.column) {
+                (Some(line), Some(col)) => {
+                    writeln!(formatter, "File: {}:{}:{}", span.file.display(), line, col)?;
+                }
+                (Some(line), None) => {
+                    writeln!(formatter, "File: {}:{}", span.file.display(), line)?;
+                }
+                _ => {
+                    writeln!(formatter, "File: {}", span.file.display())?;
+                }
+            }
         }
 
         if !self.explanation.is_empty() {

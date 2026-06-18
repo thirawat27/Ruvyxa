@@ -5,6 +5,7 @@ members = [
   "crates/ruvyxa_graph",
   "crates/ruvyxa_diagnostics",
   "crates/ruvyxa_middleware",
+  "crates/ruvyxa_bundler",
 ]
 resolver = "2"
 
@@ -21,6 +22,7 @@ blake3 = "1.8"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 clap = { version = "4.5", features = ["derive"] }
 notify = "8.2"
+rayon = "1.10"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 tempfile = "3.23"
@@ -33,3 +35,4 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 walkdir = "2.5"
 wasmtime = "45.0"
 wasmtime-wasi = "45.0"
+

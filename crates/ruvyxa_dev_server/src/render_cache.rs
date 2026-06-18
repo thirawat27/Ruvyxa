@@ -4,13 +4,17 @@
 //! Entries are invalidated on file change and evicted by LRU policy when the
 //! cache reaches its capacity limit.
 //!
-//! In production mode, pages rarely change so the cache provides near-instant
-//! response times for repeated visits. In dev mode, the cache is invalidated on
-//! every file change via the watcher, keeping it fresh while still deduplicating
-//! concurrent requests for the same page.
+//! ## Performance characteristics
+//!
+//! - `get()`: O(1) with a **read lock** on hit (no write lock contention).
+//! - `put()`: O(1) amortized — batch-evicts the oldest 25% of entries when
+//!   capacity is reached, avoiding O(n) scans per insert.
+//! - Values are stored behind `Arc<str>` so concurrent readers share memory
+//!   rather than cloning large HTML/JS strings.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use tokio::sync::RwLock;
@@ -21,15 +25,22 @@ const DEFAULT_CAPACITY: usize = 256;
 /// Default TTL for cached entries (5 minutes in dev, effectively infinite in prod).
 const DEFAULT_TTL_SECS: u64 = 300;
 
+/// When evicting, remove this fraction of entries (the oldest 25%).
+const EVICTION_FRACTION: f64 = 0.25;
+
 #[derive(Debug, Clone)]
 struct CacheEntry {
-    value: String,
+    /// Shared reference to the cached value — avoids cloning large strings.
+    value: Arc<str>,
+    /// Last time this entry was accessed (for LRU ordering).
     accessed_at: Instant,
+    /// Time the entry was created (for TTL expiration).
     created_at: Instant,
+    /// Number of times this entry has been accessed.
     access_count: u64,
 }
 
-/// Thread-safe LRU render cache.
+/// Thread-safe LRU render cache with O(1) reads and batch eviction.
 pub struct RenderCache {
     entries: RwLock<HashMap<String, CacheEntry>>,
     capacity: usize,
@@ -67,42 +78,75 @@ impl RenderCache {
     }
 
     /// Try to get a cached value. Returns None on miss or expired entry.
+    ///
+    /// Uses a **read lock** for the fast path (cache hit, not expired).
+    /// Only acquires a write lock if the entry is expired and needs removal.
     pub async fn get(&self, key: &str) -> Option<String> {
-        let mut entries = self.entries.write().await;
-        if let Some(entry) = entries.get_mut(key) {
-            if entry.created_at.elapsed() > self.ttl {
-                entries.remove(key);
+        // Fast path: read lock only — no contention with other readers.
+        {
+            let entries = self.entries.read().await;
+            if let Some(entry) = entries.get(key) {
+                if entry.created_at.elapsed() <= self.ttl {
+                    self.hits.fetch_add(1, Ordering::Relaxed);
+                    // Return a clone of the Arc<str> — cheap since it's just
+                    // an Arc ref-count bump + a String allocation for the caller.
+                    return Some(entry.value.to_string());
+                }
+                // Entry expired — fall through to write path.
+            } else {
                 self.misses.fetch_add(1, Ordering::Relaxed);
                 return None;
             }
-            entry.accessed_at = Instant::now();
-            entry.access_count += 1;
-            self.hits.fetch_add(1, Ordering::Relaxed);
-            Some(entry.value.clone())
-        } else {
-            self.misses.fetch_add(1, Ordering::Relaxed);
-            None
         }
+
+        // Slow path: entry expired, remove it under write lock.
+        let mut entries = self.entries.write().await;
+        entries.remove(key);
+        self.misses.fetch_add(1, Ordering::Relaxed);
+        None
     }
 
-    /// Insert a value into the cache, evicting LRU entries if at capacity.
+    /// Get a cached value as an `Arc<str>` (zero-copy for callers that can use it).
+    pub async fn get_arc(&self, key: &str) -> Option<Arc<str>> {
+        let entries = self.entries.read().await;
+        if let Some(entry) = entries.get(key) {
+            if entry.created_at.elapsed() <= self.ttl {
+                self.hits.fetch_add(1, Ordering::Relaxed);
+                return Some(Arc::clone(&entry.value));
+            }
+        }
+        self.misses.fetch_add(1, Ordering::Relaxed);
+        None
+    }
+
+    /// Insert a value into the cache, batch-evicting oldest entries if at capacity.
     pub async fn put(&self, key: String, value: String) {
         let mut entries = self.entries.write().await;
 
-        // Evict if at capacity
+        // Batch eviction: remove oldest 25% when at capacity.
         if entries.len() >= self.capacity && !entries.contains_key(&key) {
-            Self::evict_lru(&mut entries);
+            Self::evict_batch(&mut entries, self.capacity);
         }
 
         entries.insert(
             key,
             CacheEntry {
-                value,
+                value: Arc::from(value.as_str()),
                 accessed_at: Instant::now(),
                 created_at: Instant::now(),
                 access_count: 1,
             },
         );
+    }
+
+    /// Touch an entry to update its access time (call after get on hot path).
+    /// This is a separate write operation so get() stays on a read lock.
+    pub async fn touch(&self, key: &str) {
+        let mut entries = self.entries.write().await;
+        if let Some(entry) = entries.get_mut(key) {
+            entry.accessed_at = Instant::now();
+            entry.access_count += 1;
+        }
     }
 
     /// Invalidate all entries (called on file change).
@@ -140,14 +184,26 @@ impl RenderCache {
         }
     }
 
-    fn evict_lru(entries: &mut HashMap<String, CacheEntry>) {
-        // Find the least recently accessed entry
-        if let Some(lru_key) = entries
+    /// Batch eviction: sort entries by accessed_at, remove the oldest fraction.
+    ///
+    /// This is O(n log n) but runs infrequently (only when capacity is hit)
+    /// and removes many entries at once, amortizing to O(1) per insert.
+    fn evict_batch(entries: &mut HashMap<String, CacheEntry>, capacity: usize) {
+        let evict_count = ((capacity as f64) * EVICTION_FRACTION).ceil() as usize;
+        if evict_count == 0 || entries.is_empty() {
+            return;
+        }
+
+        // Collect keys sorted by accessed_at (oldest first).
+        let mut keys_by_age: Vec<(String, Instant)> = entries
             .iter()
-            .min_by_key(|(_, entry)| entry.accessed_at)
-            .map(|(key, _)| key.clone())
-        {
-            entries.remove(&lru_key);
+            .map(|(k, v)| (k.clone(), v.accessed_at))
+            .collect();
+        keys_by_age.sort_unstable_by_key(|(_, accessed)| *accessed);
+
+        // Remove the oldest entries.
+        for (key, _) in keys_by_age.into_iter().take(evict_count) {
+            entries.remove(&key);
         }
     }
 }

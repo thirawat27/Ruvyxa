@@ -391,16 +391,6 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
     Ok(())
 }
 
-#[derive(Debug, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ClientBundleOutput {
-    ok: bool,
-    script: Option<String>,
-    code: Option<String>,
-    message: Option<String>,
-    stack: Option<String>,
-}
-
 struct ClientBundle {
     path: String,
     entry: PathBuf,
@@ -416,8 +406,6 @@ fn emit_client_bundles(
     minify: bool,
     configured_parallelism: Option<usize>,
 ) -> anyhow::Result<serde_json::Value> {
-    let renderer = find_runtime_script(root, "client-renderer.mjs")
-        .context("client renderer was not found for production build")?;
     let page_routes = manifest
         .routes
         .iter()
@@ -439,7 +427,6 @@ fn emit_client_bundles(
         for (chunk_index, chunk) in page_routes.chunks(chunk_size).enumerate() {
             let routes = chunk.to_vec();
             let offset = chunk_index * chunk_size;
-            let renderer = renderer.clone();
 
             handles.push(
                 scope.spawn(move || -> anyhow::Result<Vec<(usize, ClientBundle)>> {
@@ -447,7 +434,7 @@ fn emit_client_bundles(
                         .iter()
                         .enumerate()
                         .map(|(index, route)| {
-                            bundle_client_route(root, app_dir, &renderer, route, minify)
+                            bundle_client_route(root, app_dir, route, minify)
                                 .map(|bundle| (offset + index, bundle))
                         })
                         .collect()
@@ -491,54 +478,58 @@ fn emit_client_bundles(
     }))
 }
 
+/// Bundle a client route using the native Rust bundler (ruvyxa_bundler).
 fn bundle_client_route(
     root: &Path,
     app_dir: &Path,
-    renderer: &Path,
     route: &RouteEntry,
     minify: bool,
 ) -> anyhow::Result<ClientBundle> {
-    let output = ProcessCommand::new("node")
-        .env("RUVYXA_CLIENT_MINIFY", if minify { "1" } else { "0" })
-        .arg(renderer)
-        .arg(root)
-        .arg(app_dir)
-        .arg(&route.file)
-        .arg(&route.path)
-        .arg("{}")
-        .output()
-        .with_context(|| format!("failed to bundle client route {}", route.path))?;
+    use ruvyxa_bundler::{BundleInput, BundleOptions, BundleTarget};
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let result: ClientBundleOutput = serde_json::from_str(&stdout).with_context(|| {
-        format!(
-            "client renderer returned invalid output for {}\nstdout:\n{}",
-            route.path, stdout
-        )
-    })?;
+    let layouts: Vec<PathBuf> = route
+        .layout_chain
+        .iter()
+        .map(|layout_path| {
+            let p = PathBuf::from(layout_path);
+            if p.is_absolute() {
+                p
+            } else {
+                app_dir.join(&p)
+            }
+        })
+        .filter(|p| p.exists())
+        .collect();
 
-    if !output.status.success() || !result.ok {
-        anyhow::bail!(
-            "client bundle failed for {}: {} {}",
-            route.path,
-            result.code.unwrap_or_else(|| "RUV1300".to_string()),
-            result
-                .message
-                .or(result.stack)
-                .unwrap_or_else(|| "unknown client build error".to_string())
-        );
+    let input = BundleInput {
+        entry: route.file.clone(),
+        project_root: root.to_path_buf(),
+        app_dir: app_dir.to_path_buf(),
+        layouts,
+        request_path: route.path.clone(),
+        target: BundleTarget::Client,
+        options: BundleOptions {
+            minify,
+            source_map: false,
+            tree_shaking: true,
+        },
+    };
+
+    let output = ruvyxa_bundler::bundle(input)
+        .map_err(|e| anyhow::anyhow!("native bundler error for {}: {e}", route.path))?;
+
+    // Report non-fatal diagnostics.
+    for diagnostic in &output.diagnostics {
+        tracing::warn!("{diagnostic}");
     }
 
-    let script = result
-        .script
-        .context("client renderer completed without script output")?;
-    let file_name = format!("{}.js", content_hash(&script));
+    let file_name = format!("{}.js", content_hash(&output.code));
 
     Ok(ClientBundle {
         path: route.path.clone(),
         entry: route.file.clone(),
         file_name,
-        script,
+        script: output.code,
     })
 }
 

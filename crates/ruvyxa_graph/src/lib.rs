@@ -151,6 +151,13 @@ pub fn validate_app(root: &Path, manifest: &RouteManifest) -> Result<ValidationR
     let mut client_modules = BTreeSet::new();
     let mut server_modules = BTreeSet::new();
 
+    // Pre-canonicalize root once instead of per-module (avoids repeated syscalls).
+    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+
+    // Track which modules have already been validated to avoid duplicate reads.
+    let mut validated_client: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut validated_server: BTreeSet<PathBuf> = BTreeSet::new();
+
     for route in &manifest.routes {
         match route.kind {
             RouteKind::Page => {
@@ -167,14 +174,19 @@ pub fn validate_app(root: &Path, manifest: &RouteManifest) -> Result<ValidationR
                 let graph = collect_relative_graph(&route.file);
                 for module in graph {
                     client_modules.insert(module.clone());
-                    validate_client_module(root, &module, &mut diagnostics)?;
+                    // Skip if already validated — avoids redundant fs::read + canonicalize.
+                    if validated_client.insert(module.clone()) {
+                        validate_client_module(&canonical_root, &module, &mut diagnostics)?;
+                    }
                 }
             }
             RouteKind::Api => {
                 let graph = collect_relative_graph(&route.file);
                 for module in graph {
                     server_modules.insert(module.clone());
-                    validate_server_module(&module, &mut diagnostics)?;
+                    if validated_server.insert(module.clone()) {
+                        validate_server_module(&module, &mut diagnostics)?;
+                    }
                 }
             }
         }
@@ -184,14 +196,18 @@ pub fn validate_app(root: &Path, manifest: &RouteManifest) -> Result<ValidationR
             let graph = collect_relative_graph(&module);
             for module in graph {
                 server_modules.insert(module.clone());
-                validate_server_module(&module, &mut diagnostics)?;
+                if validated_server.insert(module.clone()) {
+                    validate_server_module(&module, &mut diagnostics)?;
+                }
             }
         }
 
         for module in &route.client_modules {
             let module = PathBuf::from(module);
             client_modules.insert(module.clone());
-            validate_client_module(root, &module, &mut diagnostics)?;
+            if validated_client.insert(module.clone()) {
+                validate_client_module(&canonical_root, &module, &mut diagnostics)?;
+            }
         }
     }
 
@@ -214,7 +230,7 @@ pub fn validate_app(root: &Path, manifest: &RouteManifest) -> Result<ValidationR
 }
 
 fn validate_client_module(
-    root: &Path,
+    canonical_root: &Path,
     file: &Path,
     diagnostics: &mut Vec<Diagnostic>,
 ) -> Result<()> {
@@ -242,21 +258,31 @@ fn validate_client_module(
         );
     }
 
-    let normalized_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let normalized_file = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
-
-    if let Ok(relative) = normalized_file.strip_prefix(&normalized_root) {
-        if relative
+    // Check if file is under the server/ directory.
+    // Try strip_prefix first (cheap), only canonicalize the file if needed.
+    let is_server_dir = if let Ok(relative) = file.strip_prefix(canonical_root) {
+        relative
             .components()
             .any(|component| component.as_os_str() == "server")
-        {
-            diagnostics.push(
-                Diagnostic::new("RUV1010", "Server directory module reached by client graph")
-                    .explain("Files under server/ are reserved for server-only code.")
-                    .at_file(file)
-                    .suggest("Move shared browser-safe code outside server/, or import it from a server route only."),
-            );
+    } else {
+        // Paths don't share a prefix — try canonicalizing the file as fallback.
+        let canonical_file = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
+        if let Ok(relative) = canonical_file.strip_prefix(canonical_root) {
+            relative
+                .components()
+                .any(|component| component.as_os_str() == "server")
+        } else {
+            false
         }
+    };
+
+    if is_server_dir {
+        diagnostics.push(
+            Diagnostic::new("RUV1010", "Server directory module reached by client graph")
+                .explain("Files under server/ are reserved for server-only code.")
+                .at_file(file)
+                .suggest("Move shared browser-safe code outside server/, or import it from a server route only."),
+        );
     }
 
     Ok(())

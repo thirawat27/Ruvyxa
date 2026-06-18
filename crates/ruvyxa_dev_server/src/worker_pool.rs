@@ -22,7 +22,15 @@ use tracing::{debug, error, warn};
 use ruvyxa_diagnostics::{Diagnostic, Result, RuvyxaError};
 
 /// Number of worker processes to maintain in the pool.
-const DEFAULT_POOL_SIZE: usize = 2;
+/// Defaults to the number of available CPU cores (clamped to 2..8) for optimal
+/// concurrency without over-subscribing memory.
+const DEFAULT_POOL_SIZE: usize = 4;
+
+/// Minimum pool size regardless of configuration.
+const MIN_POOL_SIZE: usize = 2;
+
+/// Maximum pool size to prevent excessive memory usage from many Node processes.
+const MAX_POOL_SIZE: usize = 8;
 
 /// Maximum time to wait for a worker response before considering it dead.
 const WORKER_TIMEOUT_MS: u64 = 30_000;
@@ -255,8 +263,13 @@ impl NodeWorkerPool {
         let pool_size = std::env::var("RUVYXA_WORKER_POOL_SIZE")
             .ok()
             .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or(DEFAULT_POOL_SIZE)
-            .max(1);
+            .unwrap_or_else(|| {
+                // Auto-size: use available CPU cores clamped to a reasonable range.
+                std::thread::available_parallelism()
+                    .map(usize::from)
+                    .unwrap_or(DEFAULT_POOL_SIZE)
+            })
+            .clamp(MIN_POOL_SIZE, MAX_POOL_SIZE);
 
         let mut workers = Vec::with_capacity(pool_size);
         for _ in 0..pool_size {
@@ -311,15 +324,31 @@ impl NodeWorkerPool {
         response
     }
 
-    /// Invalidate bundle caches in all workers (called on file change).
+    /// Invalidate bundle caches in all workers concurrently (called on file change).
+    ///
+    /// Sends the invalidation request to all workers in parallel rather than
+    /// sequentially, reducing latency from `n * RTT` to `max(RTT)`.
     pub async fn invalidate(&self, paths: Vec<String>) {
-        let request = WorkerRequest::Invalidate {
-            id: next_request_id(),
-            paths,
-        };
-        for worker in &self.workers {
-            let _ = worker.send(&request).await;
+        // Build one request per worker (each needs its own unique id).
+        let requests: Vec<WorkerRequest> = (0..self.workers.len())
+            .map(|_| WorkerRequest::Invalidate {
+                id: next_request_id(),
+                paths: paths.clone(),
+            })
+            .collect();
+
+        // Send all concurrently — tokio::join! doesn't work for dynamic counts,
+        // so we collect futures and poll them all.
+        let mut set = tokio::task::JoinSet::new();
+        for (i, request) in requests.into_iter().enumerate() {
+            let stdin_tx = self.workers[i].stdin_tx.clone();
+            set.spawn(async move {
+                let line = serde_json::to_string(&request).unwrap_or_default() + "\n";
+                let _ = stdin_tx.send(line).await;
+            });
         }
+        // Wait for all to complete.
+        while set.join_next().await.is_some() {}
     }
 
     /// Restart a dead worker (for self-healing).

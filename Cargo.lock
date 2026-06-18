@@ -1923,13 +1923,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
+name = "ruvyxa_bundler"
+version = "1.0.2"
+dependencies = [
+ "anyhow",
+ "blake3",
+ "rayon",
+ "ruvyxa_diagnostics",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "thiserror 2.0.18",
+ "walkdir",
+]
+
+[[package]]
 name = "ruvyxa_cli"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "anyhow",
  "blake3",
  "chrono",
  "clap",
+ "ruvyxa_bundler",
  "ruvyxa_dev_server",
  "ruvyxa_diagnostics",
  "ruvyxa_graph",
@@ -1944,7 +1960,7 @@ dependencies = [
 
 [[package]]
 name = "ruvyxa_dev_server"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "axum",
  "blake3",
@@ -1964,7 +1980,7 @@ dependencies = [
 
 [[package]]
 name = "ruvyxa_diagnostics"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -1972,7 +1988,7 @@ dependencies = [
 
 [[package]]
 name = "ruvyxa_graph"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "ruvyxa_diagnostics",
  "serde",
@@ -1983,7 +1999,7 @@ dependencies = [
 
 [[package]]
 name = "ruvyxa_middleware"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "axum",
  "ruvyxa_diagnostics",
