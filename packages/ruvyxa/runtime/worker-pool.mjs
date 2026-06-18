@@ -11,8 +11,13 @@
  *   Request:  { id, type: "ssr"|"api"|"action"|"client", ...args }
  *   Response: { id, ...result }
  *
- * This eliminates the ~100-500ms overhead of spawning node + esbuild
- * per request that the old architecture incurred.
+ * Performance optimizations:
+ *   - Module import cache: avoids re-parsing unchanged bundles on every request
+ *   - Directory creation cache: eliminates redundant mkdir syscalls
+ *   - LRU-bounded bundle cache with build locks (no duplicate builds)
+ *   - Lazy React dependency resolution (cached after first check)
+ *   - Graceful shutdown with SIGTERM/SIGINT handling
+ *   - Memory pressure monitoring with automatic cache eviction
  */
 import { createHash } from "node:crypto"
 import { existsSync } from "node:fs"
@@ -24,14 +29,110 @@ import { createInterface } from "node:readline"
 
 import { build } from "esbuild"
 
-// Module-level cache for esbuild bundles (avoids re-bundling unchanged modules)
-const bundleCache = new Map()
-// Track source file mtimes to invalidate bundles on change
-const mtimeCache = new Map()
+// --- Configuration ---
+const MAX_BUNDLE_CACHE_ENTRIES = parseInt(process.env.RUVYXA_CACHE_MAX_ENTRIES || "256", 10)
+const WORKER_REQUEST_TIMEOUT_MS = parseInt(process.env.RUVYXA_WORKER_TIMEOUT_MS || "30000", 10)
+const MEMORY_PRESSURE_THRESHOLD_MB = parseInt(process.env.RUVYXA_MEMORY_LIMIT_MB || "512", 10)
 
+// --- LRU Cache ---
+class LRUCache {
+  #max
+  #map = new Map()
+
+  constructor(max) {
+    this.#max = max
+  }
+
+  get(key) {
+    if (!this.#map.has(key)) return undefined
+    const value = this.#map.get(key)
+    this.#map.delete(key)
+    this.#map.set(key, value)
+    return value
+  }
+
+  set(key, value) {
+    if (this.#map.has(key)) {
+      this.#map.delete(key)
+    } else if (this.#map.size >= this.#max) {
+      const oldest = this.#map.keys().next().value
+      this.#map.delete(oldest)
+    }
+    this.#map.set(key, value)
+  }
+
+  has(key) {
+    return this.#map.has(key)
+  }
+
+  delete(key) {
+    return this.#map.delete(key)
+  }
+
+  clear() {
+    this.#map.clear()
+  }
+
+  get size() {
+    return this.#map.size
+  }
+
+  keys() {
+    return this.#map.keys()
+  }
+}
+
+// --- State ---
+const bundleCache = new LRUCache(MAX_BUNDLE_CACHE_ENTRIES)
+const buildLocks = new Map()
+
+// Performance: Module import cache — avoids re-parsing JS on every request.
+// Key: absolute outfile path, Value: imported module object.
+// Invalidated only when the bundle is re-built.
+const moduleCache = new LRUCache(MAX_BUNDLE_CACHE_ENTRIES)
+
+// Performance: Track directories already created to skip mkdir syscalls.
+const createdDirs = new Set()
+
+// Performance: Cache React dependency resolution per project root.
+const reactResolvedRoots = new Set()
+
+let activeRequests = 0
+let isShuttingDown = false
+
+// --- Graceful Shutdown ---
+function shutdown(signal) {
+  if (isShuttingDown) return
+  isShuttingDown = true
+  if (activeRequests === 0) process.exit(0)
+  setTimeout(() => process.exit(0), 5000).unref()
+}
+
+process.on("SIGTERM", () => shutdown("SIGTERM"))
+process.on("SIGINT", () => shutdown("SIGINT"))
+
+// --- Memory Pressure Monitor ---
+const memoryCheckInterval = setInterval(() => {
+  const heapMB = process.memoryUsage().heapUsed / 1024 / 1024
+  if (heapMB > MEMORY_PRESSURE_THRESHOLD_MB) {
+    const evictCount = Math.ceil(bundleCache.size / 2)
+    const keys = bundleCache.keys()
+    for (let i = 0; i < evictCount; i++) {
+      const { value, done } = keys.next()
+      if (done) break
+      bundleCache.delete(value)
+    }
+    moduleCache.clear()
+  }
+}, 30_000)
+memoryCheckInterval.unref()
+
+// --- Request Processing ---
 const rl = createInterface({ input: process.stdin })
 
 rl.on("line", async (line) => {
+  if (isShuttingDown) return
+
   let request
   try {
     request = JSON.parse(line)
@@ -40,32 +141,17 @@ rl.on("line", async (line) => {
   }
 
   const { id } = request
+  if (!id) return
+
+  activeRequests++
   let result
 
   try {
-    switch (request.type) {
-      case "ssr":
-        result = await handleSsr(request)
-        break
-      case "api":
-        result = await handleApi(request)
-        break
-      case "action":
-        result = await handleAction(request)
-        break
-      case "client":
-        result = await handleClient(request)
-        break
-      case "ping":
-        result = { ok: true, pong: true }
-        break
-      case "invalidate":
-        invalidateBundleCache(request.paths)
-        result = { ok: true }
-        break
-      default:
-        result = { ok: false, code: "RUV1700", message: `Unknown request type: ${request.type}` }
-    }
+    result = await withTimeout(
+      dispatchRequest(request),
+      WORKER_REQUEST_TIMEOUT_MS,
+      `Request ${request.type}:${id} timed out after ${WORKER_REQUEST_TIMEOUT_MS}ms`,
+    )
   } catch (error) {
     result = {
       ok: false,
@@ -73,30 +159,107 @@ rl.on("line", async (line) => {
       message: error instanceof Error ? error.message : String(error),
       stack: error?.stack,
     }
+  } finally {
+    activeRequests--
   }
 
   result.id = id
   process.stdout.write(JSON.stringify(result) + "\n")
+
+  if (isShuttingDown && activeRequests === 0) process.exit(0)
 })
 
-rl.on("close", () => {
-  process.exit(0)
-})
-
-// Keep process alive
+rl.on("close", () => shutdown("stdin-close"))
 process.stdin.resume()
+
+// --- Request Dispatcher ---
+async function dispatchRequest(request) {
+  switch (request.type) {
+    case "ssr":
+      return handleSsr(request)
+    case "api":
+      return handleApi(request)
+    case "action":
+      return handleAction(request)
+    case "client":
+      return handleClient(request)
+    case "ping":
+      return { ok: true, pong: true, cacheSize: bundleCache.size, moduleCacheSize: moduleCache.size, activeRequests }
+    case "invalidate":
+      invalidateBundleCache(request.paths)
+      return { ok: true }
+    default:
+      return { ok: false, code: "RUV1700", message: `Unknown request type: ${request.type}` }
+  }
+}
+
+// --- Timeout Utility ---
+function withTimeout(promise, ms, message) {
+  if (!ms || ms <= 0) return promise
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), ms)
+    timer.unref()
+    promise.then(
+      (value) => { clearTimeout(timer); resolve(value) },
+      (error) => { clearTimeout(timer); reject(error) },
+    )
+  })
+}
+
+// --- Build Lock ---
+async function withBuildLock(cacheKey, buildFn) {
+  if (buildLocks.has(cacheKey)) {
+    return buildLocks.get(cacheKey)
+  }
+  const buildPromise = buildFn()
+  buildLocks.set(cacheKey, buildPromise)
+  try {
+    return await buildPromise
+  } finally {
+    buildLocks.delete(cacheKey)
+  }
+}
+
+// --- Fast mkdir (cached) ---
+async function ensureDir(dir) {
+  if (createdDirs.has(dir)) return
+  await mkdir(dir, { recursive: true })
+  createdDirs.add(dir)
+}
+
+// --- Fast module import (cached) ---
+// Avoids V8 re-parsing the same JS file on every request.
+// Only cache-busts when the bundle is freshly built.
+async function importModule(outfile, forceReload = false) {
+  if (!forceReload) {
+    const cached = moduleCache.get(outfile)
+    if (cached) return cached
+  }
+  // Use timestamp only when we need to bust Node's ESM cache
+  const mod = await import(pathToFileURL(outfile).href + `?t=${Date.now()}`)
+  moduleCache.set(outfile, mod)
+  return mod
+}
+
+// --- Fast React resolution (cached per project root) ---
+function ensureReactDeps(resolvedRoot) {
+  if (reactResolvedRoots.has(resolvedRoot)) return
+  const requireFromProject = createRequire(path.join(resolvedRoot, "package.json"))
+  requireFromProject.resolve("react")
+  requireFromProject.resolve("react-dom/server")
+  reactResolvedRoots.add(resolvedRoot)
+}
 
 // --- SSR Handler ---
 async function handleSsr(request) {
   const { projectRoot, appDir, pageFile, requestPath, params } = request
 
-  const requireFromProject = createRequire(path.join(projectRoot, "package.json"))
-  requireFromProject.resolve("react")
-  requireFromProject.resolve("react-dom/server")
+  const resolvedRoot = path.resolve(projectRoot || process.cwd())
+  ensureReactDeps(resolvedRoot)
 
   const layouts = collectLayouts(appDir, path.dirname(pageFile))
-  const bundleFile = await bundleSsrModule(projectRoot, pageFile, layouts)
-  const mod = await import(pathToFileURL(bundleFile).href + `?t=${Date.now()}`)
+  const { outfile, freshBuild } = await bundleSsrModule(resolvedRoot, pageFile, layouts)
+  const mod = await importModule(outfile, freshBuild)
   const html = await mod.render({ path: requestPath, params: params || {} })
 
   return { ok: true, html }
@@ -106,8 +269,9 @@ async function handleSsr(request) {
 async function handleApi(request) {
   const { projectRoot, routeFile, method, requestPath, params } = request
 
-  const bundleFile = await bundleApiModule(projectRoot, routeFile)
-  const mod = await import(pathToFileURL(bundleFile).href + `?t=${Date.now()}`)
+  const resolvedRoot = path.resolve(projectRoot || process.cwd())
+  const { outfile, freshBuild } = await bundleApiModule(resolvedRoot, routeFile)
+  const mod = await importModule(outfile, freshBuild)
   const handler = mod[method.toUpperCase()]
 
   if (typeof handler !== "function") {
@@ -132,8 +296,9 @@ async function handleApi(request) {
 async function handleAction(request) {
   const { projectRoot, actionFile, actionName, payloadJson, requestPath } = request
 
-  const bundleFile = await bundleActionModule(projectRoot, actionFile)
-  const mod = await import(pathToFileURL(bundleFile).href + `?t=${Date.now()}`)
+  const resolvedRoot = path.resolve(projectRoot || process.cwd())
+  const { outfile, freshBuild } = await bundleActionModule(resolvedRoot, actionFile)
+  const mod = await importModule(outfile, freshBuild)
   const action = mod[actionName]
 
   if (typeof action !== "function" || action.ruvyxa?.kind !== "action") {
@@ -171,9 +336,10 @@ async function handleAction(request) {
 async function handleClient(request) {
   const { projectRoot, appDir, pageFile, requestPath, params } = request
 
+  const resolvedRoot = path.resolve(projectRoot || process.cwd())
   const layouts = collectLayouts(appDir, path.dirname(pageFile))
-  const bundleFile = await bundleClientModule(projectRoot, pageFile, layouts, requestPath, JSON.stringify(params || {}))
-  const script = await readFile(bundleFile, "utf8")
+  const { outfile } = await bundleClientModule(resolvedRoot, pageFile, layouts, requestPath, JSON.stringify(params || {}))
+  const script = await readFile(outfile, "utf8")
 
   return { ok: true, script }
 }
@@ -181,18 +347,19 @@ async function handleClient(request) {
 // --- Bundle Cache Invalidation ---
 function invalidateBundleCache(paths) {
   if (!paths || paths.length === 0) {
-    // Full invalidation
     bundleCache.clear()
-    mtimeCache.clear()
+    moduleCache.clear()
+    buildLocks.clear()
     return
   }
-  // Targeted invalidation: remove entries whose source files match
-  for (const [key] of bundleCache) {
+  for (const key of bundleCache.keys()) {
     for (const changedPath of paths) {
       const normalized = changedPath.replaceAll("\\", "/")
       if (key.includes(normalized)) {
         bundleCache.delete(key)
-        mtimeCache.delete(key)
+        // Also evict from module cache so next import gets fresh code
+        const outfile = bundleCache.get(key)
+        if (outfile) moduleCache.delete(outfile)
         break
       }
     }
@@ -224,9 +391,12 @@ function pushIfExists(collection, file) {
   }
 }
 
+// --- Bundle functions now return { outfile, freshBuild } ---
+// freshBuild=true means V8 module cache needs busting
+
 async function bundleSsrModule(projectRoot, pageFile, layouts) {
   const cacheDir = path.join(projectRoot, ".ruvyxa", "cache", "ssr")
-  await mkdir(cacheDir, { recursive: true })
+  await ensureDir(cacheDir)
 
   const imports = [`import Page from ${JSON.stringify(toImportPath(pageFile))}`]
   const wrappers = []
@@ -268,7 +438,6 @@ export async function render(ctx) {
         reject(error)
       },
       onError(error) {
-        // Non-fatal streaming errors are logged but don't abort
         if (process.env.RUVYXA_DEBUG) console.error("[ssr stream error]", error)
       },
     })
@@ -284,41 +453,48 @@ export async function render(ctx) {
   const outfile = path.join(cacheDir, `${hash}.mjs`)
 
   const cacheKey = `ssr:${pageFile}:${hash}`
-  if (bundleCache.has(cacheKey)) {
-    return bundleCache.get(cacheKey)
-  }
+  const cached = bundleCache.get(cacheKey)
+  if (cached) return { outfile: cached, freshBuild: false }
 
-  await build({
-    stdin: {
-      contents: moduleCode,
-      resolveDir: projectRoot,
-      sourcefile: "ruvyxa:ssr-entry.tsx",
-      loader: "tsx",
-    },
-    outfile,
-    bundle: true,
-    format: "esm",
-    platform: "node",
-    jsx: "automatic",
-    absWorkingDir: projectRoot,
-    external: ["react", "react-dom/server", "node:stream"],
-    plugins: [
-      {
-        name: "ruvyxa-css-empty-module",
-        setup(build) {
-          build.onLoad({ filter: /\.css$/ }, () => ({ contents: "", loader: "js" }))
-        },
+  const result = await withBuildLock(cacheKey, async () => {
+    const rechecked = bundleCache.get(cacheKey)
+    if (rechecked) return { outfile: rechecked, freshBuild: false }
+
+    await build({
+      stdin: {
+        contents: moduleCode,
+        resolveDir: projectRoot,
+        sourcefile: "ruvyxa:ssr-entry.tsx",
+        loader: "tsx",
       },
-    ],
+      outfile,
+      bundle: true,
+      format: "esm",
+      platform: "node",
+      jsx: "automatic",
+      absWorkingDir: projectRoot,
+      external: ["react", "react-dom/server", "node:stream"],
+      logLevel: "silent",
+      plugins: [
+        {
+          name: "ruvyxa-css-empty-module",
+          setup(build) {
+            build.onLoad({ filter: /\.css$/ }, () => ({ contents: "", loader: "js" }))
+          },
+        },
+      ],
+    })
+
+    bundleCache.set(cacheKey, outfile)
+    return { outfile, freshBuild: true }
   })
 
-  bundleCache.set(cacheKey, outfile)
-  return outfile
+  return result
 }
 
 async function bundleApiModule(projectRoot, routeFile) {
   const cacheDir = path.join(projectRoot, ".ruvyxa", "cache", "api")
-  await mkdir(cacheDir, { recursive: true })
+  await ensureDir(cacheDir)
 
   const moduleCode = `export * from ${JSON.stringify(toImportPath(routeFile))}`
   const hash = createHash("sha256")
@@ -329,31 +505,36 @@ async function bundleApiModule(projectRoot, routeFile) {
   const outfile = path.join(cacheDir, `${hash}.mjs`)
 
   const cacheKey = `api:${routeFile}:${hash}`
-  if (bundleCache.has(cacheKey)) {
-    return bundleCache.get(cacheKey)
-  }
+  const cached = bundleCache.get(cacheKey)
+  if (cached) return { outfile: cached, freshBuild: false }
 
-  await build({
-    stdin: {
-      contents: moduleCode,
-      resolveDir: projectRoot,
-      sourcefile: "ruvyxa:api-entry.ts",
-      loader: "ts",
-    },
-    outfile,
-    bundle: true,
-    format: "esm",
-    platform: "node",
-    absWorkingDir: projectRoot,
+  return withBuildLock(cacheKey, async () => {
+    const rechecked = bundleCache.get(cacheKey)
+    if (rechecked) return { outfile: rechecked, freshBuild: false }
+
+    await build({
+      stdin: {
+        contents: moduleCode,
+        resolveDir: projectRoot,
+        sourcefile: "ruvyxa:api-entry.ts",
+        loader: "ts",
+      },
+      outfile,
+      bundle: true,
+      format: "esm",
+      platform: "node",
+      absWorkingDir: projectRoot,
+      logLevel: "silent",
+    })
+
+    bundleCache.set(cacheKey, outfile)
+    return { outfile, freshBuild: true }
   })
-
-  bundleCache.set(cacheKey, outfile)
-  return outfile
 }
 
 async function bundleActionModule(projectRoot, actionFile) {
   const cacheDir = path.join(projectRoot, ".ruvyxa", "cache", "actions")
-  await mkdir(cacheDir, { recursive: true })
+  await ensureDir(cacheDir)
 
   const moduleCode = `export * from ${JSON.stringify(toImportPath(actionFile))}`
   const hash = createHash("sha256")
@@ -364,31 +545,36 @@ async function bundleActionModule(projectRoot, actionFile) {
   const outfile = path.join(cacheDir, `${hash}.mjs`)
 
   const cacheKey = `action:${actionFile}:${hash}`
-  if (bundleCache.has(cacheKey)) {
-    return bundleCache.get(cacheKey)
-  }
+  const cached = bundleCache.get(cacheKey)
+  if (cached) return { outfile: cached, freshBuild: false }
 
-  await build({
-    stdin: {
-      contents: moduleCode,
-      resolveDir: projectRoot,
-      sourcefile: "ruvyxa:action-entry.ts",
-      loader: "ts",
-    },
-    outfile,
-    bundle: true,
-    format: "esm",
-    platform: "node",
-    absWorkingDir: projectRoot,
+  return withBuildLock(cacheKey, async () => {
+    const rechecked = bundleCache.get(cacheKey)
+    if (rechecked) return { outfile: rechecked, freshBuild: false }
+
+    await build({
+      stdin: {
+        contents: moduleCode,
+        resolveDir: projectRoot,
+        sourcefile: "ruvyxa:action-entry.ts",
+        loader: "ts",
+      },
+      outfile,
+      bundle: true,
+      format: "esm",
+      platform: "node",
+      absWorkingDir: projectRoot,
+      logLevel: "silent",
+    })
+
+    bundleCache.set(cacheKey, outfile)
+    return { outfile, freshBuild: true }
   })
-
-  bundleCache.set(cacheKey, outfile)
-  return outfile
 }
 
 async function bundleClientModule(projectRoot, pageFile, layouts, requestPath, paramsJson) {
   const cacheDir = path.join(projectRoot, ".ruvyxa", "cache", "client")
-  await mkdir(cacheDir, { recursive: true })
+  await ensureDir(cacheDir)
 
   const imports = [`import Page from ${JSON.stringify(toImportPath(pageFile))}`]
   const wrappers = []
@@ -426,38 +612,43 @@ window.__RUVYXA_HYDRATED = true
   const outfile = path.join(cacheDir, `${hash}.js`)
 
   const cacheKey = `client:${pageFile}:${hash}`
-  if (bundleCache.has(cacheKey)) {
-    return bundleCache.get(cacheKey)
-  }
+  const cached = bundleCache.get(cacheKey)
+  if (cached) return { outfile: cached, freshBuild: false }
 
-  await build({
-    stdin: {
-      contents: moduleCode,
-      resolveDir: projectRoot,
-      sourcefile: "ruvyxa:client-entry.tsx",
-      loader: "tsx",
-    },
-    outfile,
-    bundle: true,
-    format: "iife",
-    platform: "browser",
-    jsx: "automatic",
-    minify: process.env.RUVYXA_CLIENT_MINIFY === "1",
-    treeShaking: true,
-    absWorkingDir: projectRoot,
-    plugins: [
-      clientBoundaryPlugin(projectRoot),
-      {
-        name: "ruvyxa-css-empty-module",
-        setup(build) {
-          build.onLoad({ filter: /\.css$/ }, () => ({ contents: "", loader: "js" }))
-        },
+  return withBuildLock(cacheKey, async () => {
+    const rechecked = bundleCache.get(cacheKey)
+    if (rechecked) return { outfile: rechecked, freshBuild: false }
+
+    await build({
+      stdin: {
+        contents: moduleCode,
+        resolveDir: projectRoot,
+        sourcefile: "ruvyxa:client-entry.tsx",
+        loader: "tsx",
       },
-    ],
-  })
+      outfile,
+      bundle: true,
+      format: "iife",
+      platform: "browser",
+      jsx: "automatic",
+      minify: process.env.RUVYXA_CLIENT_MINIFY === "1",
+      treeShaking: true,
+      absWorkingDir: projectRoot,
+      logLevel: "silent",
+      plugins: [
+        clientBoundaryPlugin(projectRoot),
+        {
+          name: "ruvyxa-css-empty-module",
+          setup(build) {
+            build.onLoad({ filter: /\.css$/ }, () => ({ contents: "", loader: "js" }))
+          },
+        },
+      ],
+    })
 
-  bundleCache.set(cacheKey, outfile)
-  return outfile
+    bundleCache.set(cacheKey, outfile)
+    return { outfile, freshBuild: true }
+  })
 }
 
 function clientBoundaryPlugin(projectRoot) {

@@ -1,14 +1,47 @@
 import type { Adapter, AdapterOutput, BuildContext } from "@ruvyxa/core"
 
+/**
+ * Options for the Bun adapter.
+ */
 export interface BunAdapterOptions {
+  /** Custom entry point path. Defaults to `${outDir}/server/app`. */
   entry?: string
 }
 
+/**
+ * Create a Bun runtime deployment adapter for Ruvyxa.
+ *
+ * Produces a Bun-optimized server bundle that takes advantage of Bun's
+ * native performance features. Deploys to any Bun-compatible hosting.
+ *
+ * @example
+ * ```ts
+ * import { defineConfig } from "ruvyxa/config"
+ * import { bunAdapter } from "@ruvyxa/adapter-bun"
+ *
+ * export default defineConfig({
+ *   adapter: bunAdapter({ entry: "./bun-entry.ts" })
+ * })
+ * ```
+ */
 export function bunAdapter(options: BunAdapterOptions = {}): Adapter {
+  if (options.entry !== undefined && typeof options.entry !== "string") {
+    throw new Error(
+      `[RUV2001] bunAdapter: "entry" must be a string, got ${typeof options.entry}`,
+    )
+  }
+
+  if (options.entry !== undefined && options.entry.trim() === "") {
+    throw new Error(
+      `[RUV2001] bunAdapter: "entry" must not be an empty string`,
+    )
+  }
+
   return {
     name: "bun",
     target: "node",
     build(ctx: BuildContext): AdapterOutput {
+      validateBuildContext(ctx, "bunAdapter")
       return {
         name: "bun",
         target: "node",
@@ -21,3 +54,16 @@ export function bunAdapter(options: BunAdapterOptions = {}): Adapter {
 }
 
 export default bunAdapter
+
+function validateBuildContext(ctx: BuildContext, adapterName: string): void {
+  if (!ctx.root || typeof ctx.root !== "string") {
+    throw new Error(
+      `[RUV2000] ${adapterName}: BuildContext.root is required and must be a non-empty string`,
+    )
+  }
+  if (!ctx.outDir || typeof ctx.outDir !== "string") {
+    throw new Error(
+      `[RUV2000] ${adapterName}: BuildContext.outDir is required and must be a non-empty string`,
+    )
+  }
+}

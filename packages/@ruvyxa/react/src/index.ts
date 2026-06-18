@@ -1,9 +1,6 @@
-export interface HydrationOptions {
-  root?: Element | Document
-}
-
-export function hydrate(_options: HydrationOptions = {}): void {
-  if (typeof window !== "undefined") {
-    window.dispatchEvent(new CustomEvent("ruvyxa:hydrate"))
-  }
-}
+export { RuvyxaErrorBoundary } from "./error-boundary.js"
+export type { ErrorBoundaryProps, ErrorFallbackProps } from "./error-boundary.js"
+export { useRuvyxaLoader } from "./use-loader.js"
+export type { UseLoaderOptions, UseLoaderResult } from "./use-loader.js"
+export { hydrate, reportHydrationError } from "./hydration.js"
+export type { HydrationOptions, HydrationErrorHandler } from "./hydration.js"

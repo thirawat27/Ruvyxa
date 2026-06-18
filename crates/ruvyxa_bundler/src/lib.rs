@@ -30,6 +30,7 @@ pub mod sourcemap;
 use std::path::PathBuf;
 use std::time::Instant;
 
+use crate::cache::CompileCache;
 use ruvyxa_diagnostics::Diagnostic;
 use serde::{Deserialize, Serialize};
 
@@ -162,6 +163,16 @@ impl From<Diagnostic> for BundleError {
 /// Returns a [`BundleError`] if a hard boundary violation is detected, a
 /// module cannot be resolved, or a compile error occurs.
 pub fn bundle(input: BundleInput) -> Result<BundleOutput> {
+    let cache = CompileCache::new(&input.project_root, true);
+    bundle_with_cache(input, &cache)
+}
+
+/// Bundle a single route using a caller-provided compile cache.
+///
+/// Build orchestrators that emit many route bundles should share one
+/// [`CompileCache`] so common modules are reused across worker threads and
+/// across routes within the same production build.
+pub fn bundle_with_cache(input: BundleInput, cache: &CompileCache) -> Result<BundleOutput> {
     let started = Instant::now();
 
     // 1. Build the virtual entry source that wires layouts → page.
@@ -176,14 +187,14 @@ pub fn bundle(input: BundleInput) -> Result<BundleOutput> {
     )?;
 
     // 3. Compile each module (strip TS types, transform JSX).
-    let compiled = compiler::compile_graph(&graph, &input)?;
+    let compiled = compiler::compile_graph_with_cache(&graph, &input, cache)?;
 
     // 4. Enforce server/client boundaries.
     let mut diagnostics = Vec::new();
     boundary::check(&compiled, &input, &mut diagnostics)?;
 
     // 5. Link modules into a single concatenated script.
-    let linked = linker::link(compiled.clone(), &input)?;
+    let linked = linker::link(&compiled, &input)?;
 
     // 6. Optionally minify.
     let final_code = if input.options.minify {

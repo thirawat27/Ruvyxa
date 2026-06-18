@@ -13,12 +13,14 @@
 //! The compiler version is included so that cache entries are automatically
 //! invalidated when the compiler is updated.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 /// Current compiler version stamp — bump this when the transform logic changes
 /// to automatically invalidate stale cache entries.
-const COMPILER_VERSION: &str = "ruvyxa_bundler:0.1.0";
+const COMPILER_VERSION: &str = concat!("ruvyxa_bundler:", env!("CARGO_PKG_VERSION"), ":cache-v3");
 
 /// On-disk compilation cache.
 #[derive(Debug, Clone)]
@@ -27,6 +29,8 @@ pub struct CompileCache {
     cache_dir: PathBuf,
     /// Whether caching is enabled.
     enabled: bool,
+    /// Process-local hot cache shared by cloned cache handles.
+    memory: Arc<Mutex<HashMap<String, String>>>,
 }
 
 /// Cache lookup result.
@@ -42,7 +46,11 @@ impl CompileCache {
     /// Create a cache instance rooted at `project_root/.ruvyxa/cache/bundler/`.
     pub fn new(project_root: &Path, enabled: bool) -> Self {
         let cache_dir = project_root.join(".ruvyxa").join("cache").join("bundler");
-        Self { cache_dir, enabled }
+        Self {
+            cache_dir,
+            enabled,
+            memory: Arc::new(Mutex::new(HashMap::new())),
+        }
     }
 
     /// Create a disabled (no-op) cache.
@@ -50,6 +58,7 @@ impl CompileCache {
         Self {
             cache_dir: PathBuf::new(),
             enabled: false,
+            memory: Arc::new(Mutex::new(HashMap::new())),
         }
     }
 
@@ -64,9 +73,20 @@ impl CompileCache {
             return CacheLookup::Miss(key);
         }
 
+        if let Ok(memory) = self.memory.lock() {
+            if let Some(cached_js) = memory.get(&key) {
+                return CacheLookup::Hit(cached_js.clone());
+            }
+        }
+
         let path = self.cache_dir.join(format!("{key}.js"));
         match fs::read_to_string(&path) {
-            Ok(cached_js) => CacheLookup::Hit(cached_js),
+            Ok(cached_js) => {
+                if let Ok(mut memory) = self.memory.lock() {
+                    memory.insert(key, cached_js.clone());
+                }
+                CacheLookup::Hit(cached_js)
+            }
             Err(_) => CacheLookup::Miss(key),
         }
     }
@@ -79,12 +99,27 @@ impl CompileCache {
             return;
         }
 
+        if let Ok(mut memory) = self.memory.lock() {
+            memory.insert(key.to_string(), compiled_js.to_string());
+        }
+
         if let Err(_e) = fs::create_dir_all(&self.cache_dir) {
             return;
         }
 
         let path = self.cache_dir.join(format!("{key}.js"));
-        let _ = fs::write(&path, compiled_js.as_bytes());
+        let temp_path = self.cache_dir.join(format!(
+            "{}.{}.tmp",
+            key,
+            sanitize_thread_id(&format!("{:?}", std::thread::current().id()))
+        ));
+
+        if fs::write(&temp_path, compiled_js.as_bytes()).is_ok() {
+            if fs::rename(&temp_path, &path).is_err() && !path.exists() {
+                let _ = fs::write(&path, compiled_js.as_bytes());
+            }
+            let _ = fs::remove_file(&temp_path);
+        }
     }
 
     /// Invalidate (remove) a specific cache entry.
@@ -93,6 +128,9 @@ impl CompileCache {
             return;
         }
         let key = Self::cache_key(source, has_jsx);
+        if let Ok(mut memory) = self.memory.lock() {
+            memory.remove(&key);
+        }
         let path = self.cache_dir.join(format!("{key}.js"));
         let _ = fs::remove_file(&path);
     }
@@ -101,6 +139,9 @@ impl CompileCache {
     pub fn clear(&self) {
         if !self.enabled {
             return;
+        }
+        if let Ok(mut memory) = self.memory.lock() {
+            memory.clear();
         }
         if self.cache_dir.exists() {
             let _ = fs::remove_dir_all(&self.cache_dir);
@@ -161,6 +202,19 @@ impl CompileCache {
             })
             .unwrap_or(0)
     }
+}
+
+fn sanitize_thread_id(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character
+            } else {
+                '-'
+            }
+        })
+        .collect()
 }
 
 #[cfg(test)]

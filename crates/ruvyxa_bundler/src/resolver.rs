@@ -70,6 +70,12 @@ pub fn resolve_graph(
     project_root: &Path,
     app_dir: &Path,
 ) -> Result<Vec<ResolvedModule>> {
+    let project_root = project_root
+        .canonicalize()
+        .unwrap_or_else(|_| project_root.to_path_buf());
+    let app_dir = app_dir
+        .canonicalize()
+        .unwrap_or_else(|_| app_dir.to_path_buf());
     let mut visited: BTreeMap<PathBuf, ResolvedModule> = BTreeMap::new();
     let mut order: Vec<PathBuf> = Vec::new();
     let mut queue: VecDeque<(PathBuf, String)> = VecDeque::new();
@@ -92,16 +98,16 @@ pub fn resolve_graph(
             Vec::new()
         } else {
             let resolve_base = if current_path == entry_key {
-                project_root.to_path_buf()
+                project_root.clone()
             } else {
-                current_path.parent().unwrap_or(project_root).to_path_buf()
+                current_path.parent().unwrap_or(&project_root).to_path_buf()
             };
 
             collect_deps_cached(
                 &source,
                 &resolve_base,
-                project_root,
-                app_dir,
+                &project_root,
+                &app_dir,
                 &mut resolve_cache,
             )?
         };
@@ -151,18 +157,23 @@ fn collect_deps_cached(
     let mut deps = Vec::new();
 
     for specifier in extract_specifiers(source) {
-        if !specifier.starts_with('.') {
-            // Non-relative: external (react, ruvyxa, node:*, etc.)
+        if is_non_js_asset_specifier(&specifier) {
             continue;
         }
 
-        // Check cache first.
-        let resolved = if let Some(cached) = cache.get(base_dir, &specifier) {
-            cached.clone()
+        let resolved = if specifier.starts_with('.') {
+            // Check cache first.
+            if let Some(cached) = cache.get(base_dir, &specifier) {
+                cached.clone()
+            } else {
+                let result = resolve_specifier(base_dir, &specifier);
+                cache.insert(base_dir, &specifier, result.clone());
+                result
+            }
         } else {
-            let result = resolve_specifier(base_dir, &specifier);
-            cache.insert(base_dir, &specifier, result.clone());
-            result
+            // Absolute or project-root-relative paths are framework-generated
+            // local imports. Bare specifiers such as "react" remain external.
+            resolve_project_specifier(project_root, &specifier)
         };
 
         match resolved {
@@ -172,6 +183,9 @@ fn collect_deps_cached(
                 }
             }
             None => {
+                if !specifier.starts_with('.') {
+                    continue;
+                }
                 return Err(BundleError::Unresolved {
                     specifier,
                     importer: base_dir.to_path_buf(),
@@ -181,6 +195,14 @@ fn collect_deps_cached(
     }
 
     Ok(deps)
+}
+
+fn is_non_js_asset_specifier(specifier: &str) -> bool {
+    let lower = specifier.to_ascii_lowercase();
+    matches!(
+        Path::new(&lower).extension().and_then(|ext| ext.to_str()),
+        Some("css" | "scss" | "sass" | "less")
+    )
 }
 
 /// Extract all import/export specifier strings from source text.
@@ -223,10 +245,23 @@ fn quoted_value(s: &str) -> Option<String> {
 /// probing TypeScript/JavaScript extensions in priority order.
 pub fn resolve_specifier(base_dir: &Path, specifier: &str) -> Option<PathBuf> {
     let joined = base_dir.join(specifier);
+    resolve_file_candidate(&joined)
+}
 
+fn resolve_project_specifier(project_root: &Path, specifier: &str) -> Option<PathBuf> {
+    let path = Path::new(specifier);
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        project_root.join(path)
+    };
+    resolve_file_candidate(&candidate)
+}
+
+fn resolve_file_candidate(joined: &Path) -> Option<PathBuf> {
     // Probe extensions in priority order. Each candidate is a stat syscall.
     let candidates = [
-        joined.clone(),
+        joined.to_path_buf(),
         joined.with_extension("ts"),
         joined.with_extension("tsx"),
         joined.with_extension("js"),
@@ -316,5 +351,45 @@ mod tests {
         let cached = cache.get(&base, "./missing");
         assert!(cached.is_some()); // entry exists
         assert!(cached.unwrap().is_none()); // but value is None
+    }
+
+    #[test]
+    fn resolves_absolute_project_imports() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        fs::create_dir_all(&app).unwrap();
+        let page = app.join("page.tsx");
+        fs::write(&page, "export default function Page() {}").unwrap();
+
+        let import_path = page.display().to_string().replace('\\', "/");
+        let source = format!(
+            "import Page from {};",
+            serde_json::to_string(&import_path).unwrap()
+        );
+        let root = temp.path().canonicalize().unwrap();
+        let deps =
+            collect_deps_cached(&source, &root, &root, &app, &mut ResolveCache::default()).unwrap();
+
+        assert_eq!(deps.len(), 1);
+        assert_eq!(deps[0], page.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn ignores_css_side_effect_imports() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(app.join("global.css"), "body { margin: 0; }").unwrap();
+
+        let deps = collect_deps_cached(
+            "import \"./global.css\";",
+            &app,
+            temp.path(),
+            &app,
+            &mut ResolveCache::default(),
+        )
+        .unwrap();
+
+        assert!(deps.is_empty());
     }
 }

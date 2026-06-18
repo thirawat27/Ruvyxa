@@ -440,12 +440,16 @@ fn strip_typescript(source: &str) -> std::result::Result<String, String> {
             // identifier, `)`, `]`, or `?`, this is a type annotation.
             let prev = prev_non_space(&chars, i);
             if prev
-                .map(|c| is_ident_end(c) || c == ')' || c == ']' || c == '?')
+                .map(|c| is_ident_end(c) || c == ')' || c == ']' || c == '}' || c == '?')
                 .unwrap_or(false)
             {
                 // Peek ahead: if followed by a type expression (not `:`), strip it.
                 let after = skip_spaces(&chars, i + 1);
-                if after < len && chars[after] != ':' && chars[after] != '/' {
+                if after < len
+                    && chars[after] != ':'
+                    && chars[after] != '/'
+                    && !is_likely_object_literal_value(chars[after])
+                {
                     let type_end = skip_type_annotation(&chars, after);
                     if type_end > after {
                         i = type_end;
@@ -900,7 +904,7 @@ impl JsxTransformer {
             }
 
             // Nested JSX element
-            if self.at_jsx_open() {
+            if self.at_jsx_child_open() {
                 let child = self.parse_jsx_element()?;
                 children.push(child);
                 continue;
@@ -939,6 +943,16 @@ impl JsxTransformer {
             .collect::<Vec<_>>()
             .join(" ");
         trimmed
+    }
+
+    fn at_jsx_child_open(&self) -> bool {
+        if self.pos >= self.chars.len() || self.chars[self.pos] != '<' {
+            return false;
+        }
+        matches!(
+            self.chars.get(self.pos + 1),
+            Some(next) if next.is_alphabetic() || *next == '_' || *next == '>'
+        )
     }
 
     /// Parse a `{…}` expression content (balanced braces), returns the inner expression.
@@ -1383,6 +1397,21 @@ fn skip_type_atom(chars: &[char], mut i: usize) -> usize {
         return i;
     }
 
+    // Object type literal `{ foo: string }`.
+    if chars[i] == '{' {
+        let mut depth = 1;
+        i += 1;
+        while i < chars.len() && depth > 0 {
+            if chars[i] == '{' {
+                depth += 1;
+            } else if chars[i] == '}' {
+                depth -= 1;
+            }
+            i += 1;
+        }
+        return i;
+    }
+
     // Identifier type.
     if !is_ident_start(chars[i]) && chars[i] != '"' && chars[i] != '\'' {
         return i;
@@ -1405,7 +1434,7 @@ fn skip_type_atom(chars: &[char], mut i: usize) -> usize {
 
     // Generic parameters `<A, B>`.
     if i < chars.len() && chars[i] == '<' {
-        if let Some(end) = try_skip_type_args(chars, i) {
+        if let Some(end) = try_skip_type_args_any_suffix(chars, i) {
             i = end;
         }
     }
@@ -1413,10 +1442,18 @@ fn skip_type_atom(chars: &[char], mut i: usize) -> usize {
     i
 }
 
+fn is_likely_object_literal_value(c: char) -> bool {
+    c == '"' || c == '\'' || c == '`' || c.is_ascii_digit()
+}
+
 /// Try to skip a balanced `< … >` generic type arguments block.
 /// Returns `None` if it doesn't look like type args (e.g. comparison operator).
 fn try_skip_type_args(chars: &[char], start: usize) -> Option<usize> {
     debug_assert_eq!(chars.get(start), Some(&'<'));
+    if matches!(chars.get(start + 1), Some('/' | '>')) {
+        return None;
+    }
+
     let mut depth = 1i32;
     let mut i = start + 1;
 
@@ -1426,7 +1463,11 @@ fn try_skip_type_args(chars: &[char], start: usize) -> Option<usize> {
             '>' => {
                 depth -= 1;
                 if depth == 0 {
-                    return Some(i + 1);
+                    return if is_likely_type_arg_suffix(chars, i + 1) {
+                        Some(i + 1)
+                    } else {
+                        None
+                    };
                 }
             }
             // If we hit something that can't appear in a type arg, bail.
@@ -1441,6 +1482,45 @@ fn try_skip_type_args(chars: &[char], start: usize) -> Option<usize> {
     } else {
         None
     }
+}
+
+fn try_skip_type_args_any_suffix(chars: &[char], start: usize) -> Option<usize> {
+    debug_assert_eq!(chars.get(start), Some(&'<'));
+    if matches!(chars.get(start + 1), Some('/' | '>')) {
+        return None;
+    }
+
+    let mut depth = 1i32;
+    let mut i = start + 1;
+
+    while i < chars.len() && depth > 0 {
+        match chars[i] {
+            '<' => depth += 1,
+            '>' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(i + 1);
+                }
+            }
+            '=' | ';' | '\n' => return None,
+            _ => {}
+        }
+        i += 1;
+    }
+
+    if depth == 0 {
+        Some(i)
+    } else {
+        None
+    }
+}
+
+fn is_likely_type_arg_suffix(chars: &[char], mut i: usize) -> bool {
+    while i < chars.len() && (chars[i] == ' ' || chars[i] == '\t') {
+        i += 1;
+    }
+
+    matches!(chars.get(i), Some('(' | '.' | '['))
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -1590,5 +1670,73 @@ export default function Page({ name }: Props) {
         assert!(out.contains("React.createElement(\"div\""));
         assert!(out.contains("className: \"page\""));
         assert!(out.contains(", name)"));
+    }
+
+    #[test]
+    fn transforms_basic_app_home_page() {
+        let src = r#"
+export default function Home() {
+  return (
+    <main className="page">
+      <img className="logo" src="/ruvyxa.png" alt="Ruvyxa logo" width="144" height="144" />
+      <h1>Hello Ruvyxa</h1>
+      <p>File routing, CSS injection, route manifests, and Rust-powered dev serving.</p>
+      <nav>
+        <a href="/about">About</a>
+        <a href="/blog/hello">Dynamic route</a>
+        <a href="/todos">Server action</a>
+        <a href="/api/health">Health API</a>
+      </nav>
+    </main>
+  )
+}
+"#;
+        let out = transform(src, true).unwrap();
+        assert!(out.contains("React.createElement(\"main\""));
+        assert!(out.contains("React.createElement(\"img\""));
+        assert!(out.contains("React.createElement(\"a\""));
+    }
+
+    #[test]
+    fn transforms_basic_app_root_layout() {
+        let src = r#"
+import "./global.css"
+
+export const meta = {
+  title: "Basic Ruvyxa App",
+  description: "A minimal Ruvyxa example.",
+}
+
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="en">
+      <body>{children}</body>
+    </html>
+  )
+}
+"#;
+        let out = transform(src, true).unwrap();
+        assert!(out.contains("React.createElement(\"html\""));
+        assert!(out.contains("React.createElement(\"body\""));
+        assert!(out.contains("children"));
+        assert!(out.contains("title: \"Basic Ruvyxa App\""));
+        assert!(!out.contains("children.ReactNode"));
+    }
+
+    #[test]
+    fn transforms_inline_jsx_after_text() {
+        let src = r#"
+export default function TodosPage() {
+  return (
+    <p>
+      This route exposes <code>createTodo</code> from <code>action.ts</code>.
+    </p>
+  )
+}
+"#;
+        let out = transform(src, true).unwrap();
+        assert!(out.contains("React.createElement(\"p\""));
+        assert!(out.contains("React.createElement(\"code\", null, \"createTodo\")"));
+        assert!(out.contains("React.createElement(\"code\", null, \"action.ts\")"));
     }
 }

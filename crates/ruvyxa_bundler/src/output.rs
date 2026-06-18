@@ -99,9 +99,9 @@ export async function render(ctx) {{
 pub fn wrap(linked: String, input: &BundleInput) -> String {
     match input.target {
         BundleTarget::Client => {
-            // IIFE: receive React + ReactDOM from the global scope that the
-            // host page injects via script tags.
-            format!("(function() {{\n\"use strict\";\n{linked}\n}})();\n")
+            // Browser hydration is loaded with `<script type="module">`, so
+            // external package imports must remain top-level ESM imports.
+            linked
         }
         BundleTarget::Ssr => {
             // ESM: externals are imported at the top.

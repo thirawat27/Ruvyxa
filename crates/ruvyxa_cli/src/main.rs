@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fs;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
@@ -8,6 +9,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::Context;
 use chrono::Local;
+use clap::builder::styling::{AnsiColor, Effects, Styles};
 use clap::{Parser, Subcommand, ValueEnum};
 use ruvyxa_dev_server::{serve, ServerConfig};
 use ruvyxa_diagnostics::Diagnostic;
@@ -18,26 +20,54 @@ use tracing::info;
 use walkdir::WalkDir;
 
 #[derive(Debug, Parser)]
-#[command(name = "ruvyxa")]
-#[command(about = "Rust-powered full-stack TypeScript framework")]
+#[command(name = "Ruvyxa")]
+#[command(bin_name = "Ruvyxa")]
+#[command(override_usage = "Ruvyxa <COMMAND>")]
+#[command(color = clap::ColorChoice::Auto)]
+#[command(styles = cli_styles())]
 struct Cli {
     #[command(subcommand)]
     command: Command,
 }
 
+fn cli_styles() -> Styles {
+    Styles::styled()
+        .header(AnsiColor::Cyan.on_default().effects(Effects::BOLD))
+        .usage(AnsiColor::Green.on_default().effects(Effects::BOLD))
+        .literal(AnsiColor::BrightBlue.on_default().effects(Effects::BOLD))
+        .placeholder(AnsiColor::Yellow.on_default())
+        .valid(AnsiColor::BrightGreen.on_default())
+        .invalid(AnsiColor::BrightRed.on_default().effects(Effects::BOLD))
+        .error(AnsiColor::BrightRed.on_default().effects(Effects::BOLD))
+}
+
 #[derive(Debug, Subcommand)]
 enum Command {
+    #[command(about = "Run the development server with hot reload and route watching")]
     Dev(ServerArgs),
+    #[command(about = "Build the application for production output")]
     Build(BuildArgs),
+    #[command(about = "Serve an existing production build")]
     Start(ServerArgs),
+    #[command(about = "Preview an existing production build locally")]
     Preview(ServerArgs),
+    #[command(about = "Print the discovered route table")]
     Routes(ProjectArgs),
+    #[command(about = "Validate routes, imports, and server/client boundaries")]
     Analyze(ProjectArgs),
+    #[command(about = "Check project setup, dependencies, and runtime compatibility")]
     Doctor(ProjectArgs),
+    #[command(about = "Remove generated Ruvyxa build output")]
     Clean(ProjectArgs),
+    #[command(about = "Inspect one route manifest entry by path")]
     Trace(TraceArgs),
+    #[command(about = "Benchmark route discovery, analysis, and production build")]
     Bench(BenchArgs),
-    #[command(name = "test:parity", alias = "parity")]
+    #[command(
+        name = "test:parity",
+        alias = "parity",
+        about = "Compare development and production route manifests"
+    )]
     TestParity(ProjectArgs),
 }
 
@@ -64,7 +94,7 @@ struct BuildArgs {
     #[arg(long, default_value = ".")]
     root: PathBuf,
 
-    #[arg(long, value_enum, default_value_t = BuildTarget::Node)]
+    #[arg(long, value_enum, ignore_case = true, default_value_t = BuildTarget::Node)]
     target: BuildTarget,
 }
 
@@ -174,7 +204,7 @@ async fn main() -> anyhow::Result<()> {
         .with_target(false)
         .init();
 
-    let cli = Cli::parse();
+    let cli = Cli::parse_from(normalized_cli_args(std::env::args_os()));
 
     match cli.command {
         Command::Dev(args) => {
@@ -200,6 +230,113 @@ async fn main() -> anyhow::Result<()> {
     }
 
     Ok(())
+}
+
+fn normalized_cli_args(args: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
+    let mut args = args.into_iter().collect::<Vec<_>>();
+    normalize_option_args(&mut args);
+
+    if let Some(command_index) = first_command_arg_index(&args) {
+        normalize_command_arg(&mut args, command_index);
+
+        if args[command_index] == "help" {
+            if let Some(help_target_index) = first_command_arg_index(&args[command_index..]) {
+                normalize_command_arg(&mut args, command_index + help_target_index);
+            }
+        }
+    }
+
+    args
+}
+
+fn normalize_option_args(args: &mut [OsString]) {
+    for arg in args.iter_mut().skip(1) {
+        let Some(normalized) = normalized_option_arg(arg) else {
+            continue;
+        };
+
+        *arg = OsString::from(normalized);
+    }
+}
+
+fn normalized_option_arg(arg: &OsString) -> Option<String> {
+    let arg = arg.to_str()?;
+
+    if arg.eq_ignore_ascii_case("-h") {
+        return Some("-h".to_string());
+    }
+
+    let option = arg.strip_prefix("--")?;
+    let (name, value) = option
+        .split_once('=')
+        .map_or((option, None), |(name, value)| (name, Some(value)));
+    let canonical = canonical_option_name(name)?;
+
+    Some(match value {
+        Some(value) => format!("--{canonical}={value}"),
+        None => format!("--{canonical}"),
+    })
+}
+
+fn canonical_option_name(option: &str) -> Option<&'static str> {
+    match option.to_ascii_lowercase().as_str() {
+        "help" => Some("help"),
+        "root" => Some("root"),
+        "host" => Some("host"),
+        "port" => Some("port"),
+        "target" => Some("target"),
+        "samples" => Some("samples"),
+        "json" => Some("json"),
+        _ => None,
+    }
+}
+
+fn first_command_arg_index(args: &[OsString]) -> Option<usize> {
+    for (index, arg) in args.iter().enumerate().skip(1) {
+        let arg = arg.to_string_lossy();
+
+        if arg == "--" {
+            return None;
+        }
+
+        if arg.starts_with('-') {
+            continue;
+        }
+
+        return Some(index);
+    }
+
+    None
+}
+
+fn normalize_command_arg(args: &mut [OsString], index: usize) {
+    let Some(command) = args[index].to_str() else {
+        return;
+    };
+    let Some(canonical) = canonical_command_name(command) else {
+        return;
+    };
+
+    args[index] = OsString::from(canonical);
+}
+
+fn canonical_command_name(command: &str) -> Option<&'static str> {
+    match command.to_ascii_lowercase().as_str() {
+        "dev" => Some("dev"),
+        "build" => Some("build"),
+        "start" => Some("start"),
+        "preview" => Some("preview"),
+        "routes" => Some("routes"),
+        "analyze" => Some("analyze"),
+        "doctor" => Some("doctor"),
+        "clean" => Some("clean"),
+        "trace" => Some("trace"),
+        "bench" => Some("bench"),
+        "test:parity" => Some("test:parity"),
+        "parity" => Some("parity"),
+        "help" => Some("help"),
+        _ => None,
+    }
 }
 
 fn dev_server_config(args: &ServerArgs, config: &ProjectConfig) -> ServerConfig {
@@ -286,10 +423,8 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
     let client_dir = out_dir.join("client");
     let assets_dir = out_dir.join("assets");
 
-    if out_dir.exists() {
-        fs::remove_dir_all(&out_dir)
-            .with_context(|| format!("failed to clean {}", out_dir.display()))?;
-    }
+    clean_build_outputs_preserving_cache(&out_dir)
+        .with_context(|| format!("failed to clean build output in {}", out_dir.display()))?;
 
     let manifest = discover_routes(DiscoverOptions::new(&app_dir))?;
     let validation = validate_app(&args.root, &manifest)?;
@@ -406,6 +541,7 @@ fn emit_client_bundles(
     minify: bool,
     configured_parallelism: Option<usize>,
 ) -> anyhow::Result<serde_json::Value> {
+    let compile_cache = ruvyxa_bundler::cache::CompileCache::new(root, true);
     let page_routes = manifest
         .routes
         .iter()
@@ -427,6 +563,7 @@ fn emit_client_bundles(
         for (chunk_index, chunk) in page_routes.chunks(chunk_size).enumerate() {
             let routes = chunk.to_vec();
             let offset = chunk_index * chunk_size;
+            let compile_cache = compile_cache.clone();
 
             handles.push(
                 scope.spawn(move || -> anyhow::Result<Vec<(usize, ClientBundle)>> {
@@ -434,7 +571,7 @@ fn emit_client_bundles(
                         .iter()
                         .enumerate()
                         .map(|(index, route)| {
-                            bundle_client_route(root, app_dir, route, minify)
+                            bundle_client_route(root, app_dir, route, minify, &compile_cache)
                                 .map(|bundle| (offset + index, bundle))
                         })
                         .collect()
@@ -484,27 +621,25 @@ fn bundle_client_route(
     app_dir: &Path,
     route: &RouteEntry,
     minify: bool,
+    compile_cache: &ruvyxa_bundler::cache::CompileCache,
 ) -> anyhow::Result<ClientBundle> {
     use ruvyxa_bundler::{BundleInput, BundleOptions, BundleTarget};
 
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let app_dir = app_dir
+        .canonicalize()
+        .unwrap_or_else(|_| app_dir.to_path_buf());
+    let entry = canonical_route_file(&root, &route.file);
     let layouts: Vec<PathBuf> = route
         .layout_chain
         .iter()
-        .map(|layout_path| {
-            let p = PathBuf::from(layout_path);
-            if p.is_absolute() {
-                p
-            } else {
-                app_dir.join(&p)
-            }
-        })
-        .filter(|p| p.exists())
+        .filter_map(|layout_path| resolve_layout_file(&root, &app_dir, layout_path))
         .collect();
 
     let input = BundleInput {
-        entry: route.file.clone(),
-        project_root: root.to_path_buf(),
-        app_dir: app_dir.to_path_buf(),
+        entry,
+        project_root: root,
+        app_dir,
         layouts,
         request_path: route.path.clone(),
         target: BundleTarget::Client,
@@ -515,7 +650,7 @@ fn bundle_client_route(
         },
     };
 
-    let output = ruvyxa_bundler::bundle(input)
+    let output = ruvyxa_bundler::bundle_with_cache(input, compile_cache)
         .map_err(|e| anyhow::anyhow!("native bundler error for {}: {e}", route.path))?;
 
     // Report non-fatal diagnostics.
@@ -535,6 +670,67 @@ fn bundle_client_route(
 
 fn content_hash(input: &str) -> String {
     blake3::hash(input.as_bytes()).to_hex()[..16].to_string()
+}
+
+fn canonical_route_file(root: &Path, file: &Path) -> PathBuf {
+    if file.is_absolute() {
+        return file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
+    }
+
+    file.canonicalize()
+        .or_else(|_| root.join(file).canonicalize())
+        .unwrap_or_else(|_| root.join(file))
+}
+
+fn resolve_layout_file(root: &Path, app_dir: &Path, layout_path: &str) -> Option<PathBuf> {
+    let path = PathBuf::from(layout_path);
+    let mut candidates = Vec::new();
+
+    if path.is_absolute() {
+        candidates.push(path);
+    } else {
+        candidates.push(root.join(&path));
+
+        let app_relative = path
+            .strip_prefix("app")
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|_| path.clone());
+        candidates.push(app_dir.join(app_relative));
+    }
+
+    let mut expanded = Vec::new();
+    for candidate in candidates {
+        expanded.push(candidate.clone());
+        if candidate.extension().is_none() {
+            for extension in ["tsx", "jsx", "ts", "js"] {
+                expanded.push(candidate.with_extension(extension));
+            }
+        }
+    }
+
+    expanded
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+        .and_then(|candidate| candidate.canonicalize().ok().or(Some(candidate)))
+}
+
+fn clean_build_outputs_preserving_cache(out_dir: &Path) -> anyhow::Result<()> {
+    for directory in ["server", "client", "assets"] {
+        let path = out_dir.join(directory);
+        if path.exists() {
+            fs::remove_dir_all(&path)?;
+        }
+    }
+
+    for file in ["manifest.json", "build.json"] {
+        let path = out_dir.join(file);
+        if path.exists() {
+            fs::remove_file(&path)?;
+        }
+    }
+
+    fs::create_dir_all(out_dir)?;
+    Ok(())
 }
 
 fn find_runtime_script(root: &Path, file_name: &str) -> Option<PathBuf> {
@@ -1349,6 +1545,7 @@ fn duplicate_dependencies(package: &serde_json::Value) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use clap::CommandFactory;
     use serde_json::json;
 
     use super::*;
@@ -1418,5 +1615,119 @@ mod tests {
             content_hash("console.log('b')")
         );
         assert_eq!(content_hash("console.log('a')").len(), 16);
+    }
+
+    #[test]
+    fn top_level_help_uses_framework_name_and_command_descriptions() {
+        let help = Cli::command().render_long_help().to_string();
+
+        assert!(help.contains("Usage: Ruvyxa <COMMAND>"));
+        assert!(!help.contains("Ruvyxa Framework"));
+        assert!(!help.contains("+==============================================================+"));
+        assert!(!help.contains("build  |  validate  |  serve"));
+        assert!(!help.contains("Rust-powered full-stack TypeScript framework"));
+        assert!(!help.contains("ruvyxa.exe"));
+        assert!(help.contains("dev          Run the development server with hot reload"));
+        assert!(help.contains("build        Build the application for production output"));
+        assert!(help.contains("test:parity  Compare development and production route manifests"));
+    }
+
+    #[test]
+    fn parses_top_level_commands_case_insensitively() {
+        let cli = Cli::try_parse_from(normalized_cli_args(os_args([
+            "Ruvyxa",
+            "BUILD",
+            "--root",
+            "examples/basic-app",
+        ])))
+        .unwrap();
+
+        assert!(matches!(cli.command, Command::Build(_)));
+    }
+
+    #[test]
+    fn parses_value_enums_case_insensitively() {
+        let cli = Cli::try_parse_from(normalized_cli_args(os_args([
+            "Ruvyxa",
+            "BUILD",
+            "--target",
+            "EDGE",
+            "--root",
+            "examples/basic-app",
+        ])))
+        .unwrap();
+
+        let Command::Build(args) = cli.command else {
+            panic!("expected build command");
+        };
+        assert!(matches!(args.target, BuildTarget::Edge));
+    }
+
+    #[test]
+    fn parses_long_options_case_insensitively() {
+        let cli = Cli::try_parse_from(normalized_cli_args(os_args([
+            "Ruvyxa",
+            "BUILD",
+            "--TARGET=EDGE",
+            "--ROOT",
+            "examples/basic-app",
+        ])))
+        .unwrap();
+
+        let Command::Build(args) = cli.command else {
+            panic!("expected build command");
+        };
+        assert!(matches!(args.target, BuildTarget::Edge));
+        assert_eq!(args.root, PathBuf::from("examples/basic-app"));
+    }
+
+    #[test]
+    fn parses_command_aliases_case_insensitively() {
+        let cli = Cli::try_parse_from(normalized_cli_args(os_args([
+            "Ruvyxa",
+            "PARITY",
+            "--root",
+            "examples/basic-app",
+        ])))
+        .unwrap();
+
+        assert!(matches!(cli.command, Command::TestParity(_)));
+    }
+
+    #[test]
+    fn normalizes_help_target_command_case() {
+        let args = normalized_cli_args(os_args(["Ruvyxa", "HELP", "BUILD"]));
+
+        assert_eq!(args[1], OsString::from("help"));
+        assert_eq!(args[2], OsString::from("build"));
+    }
+
+    #[test]
+    fn normalizes_help_option_case() {
+        let args = normalized_cli_args(os_args(["Ruvyxa", "--HELP"]));
+
+        assert_eq!(args[1], OsString::from("--help"));
+    }
+
+    #[test]
+    fn build_cleanup_preserves_cache_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let out_dir = temp.path().join(".ruvyxa");
+        let cache_dir = out_dir.join("cache").join("bundler");
+        let server_dir = out_dir.join("server");
+        fs::create_dir_all(&cache_dir).unwrap();
+        fs::create_dir_all(&server_dir).unwrap();
+        fs::write(cache_dir.join("cached.js"), "compiled").unwrap();
+        fs::write(out_dir.join("manifest.json"), "{}").unwrap();
+
+        clean_build_outputs_preserving_cache(&out_dir).unwrap();
+
+        assert!(cache_dir.join("cached.js").exists());
+        assert!(!server_dir.exists());
+        assert!(!out_dir.join("manifest.json").exists());
+    }
+
+    fn os_args<const N: usize>(args: [&str; N]) -> Vec<OsString> {
+        args.into_iter().map(OsString::from).collect()
     }
 }
