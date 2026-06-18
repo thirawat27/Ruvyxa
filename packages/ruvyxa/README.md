@@ -29,7 +29,7 @@ Production builds emit route-level client bundles concurrently and keep manifest
 ```ts
 import { defineConfig } from "ruvyxa/config"
 import { action, cache, invalidateCache, json, loader, notFound, redirect } from "ruvyxa/server"
-import type { Adapter, RuvyxaConfig } from "ruvyxa"
+import type { Adapter, PluginContext, RuvyxaConfig, RuvyxaPlugin, TransformResult } from "ruvyxa"
 ```
 
 ## Configuration with Middleware

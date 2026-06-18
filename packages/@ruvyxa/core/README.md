@@ -15,7 +15,15 @@ npm install @ruvyxa/core
 ```ts
 import { defineConfig } from "@ruvyxa/core/config"
 import { action, cache, invalidateCache, json, loader, notFound, redirect } from "@ruvyxa/core/server"
-import type { Adapter, AdapterOutput, BuildContext, RuvyxaConfig } from "@ruvyxa/core"
+import type {
+  Adapter,
+  AdapterOutput,
+  BuildContext,
+  PluginContext,
+  RuvyxaConfig,
+  RuvyxaPlugin,
+  TransformResult,
+} from "@ruvyxa/core"
 ```
 
 ## Server APIs
@@ -104,6 +112,29 @@ export function customAdapter(): Adapter {
         platform: "node",
         entry: `${ctx.outDir}/server/app`,
         assetsDir: `${ctx.outDir}/assets`,
+      }
+    },
+  }
+}
+```
+
+## Plugin Contract
+
+Custom build plugins use the exported `RuvyxaPlugin`, `PluginContext`, and `TransformResult` types:
+
+```ts
+import type { RuvyxaPlugin } from "@ruvyxa/core"
+
+export function bannerPlugin(): RuvyxaPlugin {
+  return {
+    name: "banner",
+    transform(code, id, ctx) {
+      if (ctx.environment !== "client" || !id.endsWith(".tsx")) {
+        return null
+      }
+
+      return {
+        code: `/* client bundle */\n${code}`,
       }
     },
   }
