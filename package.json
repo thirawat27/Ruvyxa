@@ -1,6 +1,6 @@
 {
   "name": "ruvyxa-monorepo",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "private": true,
   "description": "A production-minded web framework built around clarity, speed, control, and predictable application delivery.",
   "license": "MIT",

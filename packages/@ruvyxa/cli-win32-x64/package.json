@@ -1,6 +1,6 @@
 {
   "name": "@ruvyxa/cli-win32-x64",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Prebuilt Ruvyxa native CLI binary for Windows x64.",
   "license": "MIT",
   "type": "module",
