@@ -43,7 +43,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run",
+    "test": "node --test \"../../../tests/packages/adapter-bun/**/*.test.ts\"",
     "format": "tsc -p tsconfig.json --noEmit",
     "prepack": "pnpm run build"
   }

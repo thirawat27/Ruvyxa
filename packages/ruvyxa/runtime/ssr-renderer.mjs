@@ -1,12 +1,9 @@
 #!/usr/bin/env node
-import { createHash } from "node:crypto"
-import { existsSync } from "node:fs"
-import { mkdir } from "node:fs/promises"
 import { createRequire } from "node:module"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
 
-import { build } from "esbuild"
+import { cacheFileName, collectLayouts, compileBundle, runtimeAliases, toImportPath } from "./compiler.mjs"
 
 const [projectRootArg, appDirArg, pageFileArg, requestPath = "/", paramsJson = "{}"] =
   process.argv.slice(2)
@@ -34,34 +31,8 @@ try {
   fail("RUV1100", error instanceof Error ? error.message : String(error), error?.stack)
 }
 
-function collectLayouts(appDir, routeDir) {
-  const layouts = []
-  let current = appDir
-
-  pushIfExists(layouts, path.join(current, "layout.tsx"))
-
-  const relative = path.relative(appDir, routeDir)
-  if (relative && !relative.startsWith("..")) {
-    for (const segment of relative.split(path.sep)) {
-      if (!segment) continue
-      current = path.join(current, segment)
-      pushIfExists(layouts, path.join(current, "layout.tsx"))
-    }
-  }
-
-  return layouts
-}
-
-function pushIfExists(collection, file) {
-  if (existsSync(file)) {
-    collection.push(file)
-  }
-}
-
 async function bundleSsrModule(projectRoot, pageFile, layouts) {
   const cacheDir = path.join(projectRoot, ".ruvyxa", "cache", "ssr")
-  await mkdir(cacheDir, { recursive: true })
-
   const imports = [`import Page from ${JSON.stringify(toImportPath(pageFile))}`]
   const wrappers = []
 
@@ -84,42 +55,19 @@ export async function render(ctx) {
 }
 `
 
-  const hash = createHash("sha256")
-    .update(moduleCode)
-    .update(pageFile)
-    .digest("hex")
-    .slice(0, 16)
-  const outfile = path.join(cacheDir, `${hash}.mjs`)
+  const outfile = path.join(cacheDir, cacheFileName([moduleCode, pageFile], "mjs"))
 
-  await build({
-    stdin: {
-      contents: moduleCode,
-      resolveDir: projectRoot,
-      sourcefile: "ruvyxa:ssr-entry.tsx",
-      loader: "tsx",
-    },
+  await compileBundle({
+    projectRoot,
+    entrySource: moduleCode,
+    sourcefile: "ruvyxa:ssr-entry.tsx",
     outfile,
-    bundle: true,
-    format: "esm",
     platform: "node",
-    jsx: "automatic",
-    absWorkingDir: projectRoot,
     external: ["react", "react-dom/server"],
-    plugins: [
-      {
-        name: "ruvyxa-css-empty-module",
-        setup(build) {
-          build.onLoad({ filter: /\.css$/ }, () => ({ contents: "", loader: "js" }))
-        },
-      },
-    ],
+    aliases: runtimeAliases(path.dirname(new URL(import.meta.url).pathname)),
   })
 
   return outfile
-}
-
-function toImportPath(file) {
-  return path.resolve(file).replaceAll("\\", "/")
 }
 
 function fail(code, message, stack) {

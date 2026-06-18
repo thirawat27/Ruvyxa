@@ -70,7 +70,7 @@ Affected routes:
 |------|-------|-------|
 | `RUV1100` | SSR render failed | ReactDOMServer error during page render |
 | `RUV1200` | API route execution failed | Handler threw an unhandled exception |
-| `RUV1300` | Client bundle failed | esbuild error during hydration bundle |
+| `RUV1300` | Client bundle failed | Ruvyxa compiler error during hydration bundle |
 
 ---
 

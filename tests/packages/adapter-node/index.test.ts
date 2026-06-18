@@ -1,15 +1,16 @@
-import { describe, expect, it } from "vitest"
+import { describe, it } from "node:test"
+import assert from "node:assert/strict"
 
-import { nodeAdapter } from "./index.js"
+import { nodeAdapter } from "../../../packages/@ruvyxa/adapter-node/src/index.ts"
 
 describe("nodeAdapter", () => {
   it("returns node deployment output", async () => {
     const adapter = nodeAdapter()
     const output = await adapter.build({ root: ".", outDir: ".ruvyxa" })
 
-    expect(adapter.name).toBe("node")
-    expect(adapter.target).toBe("node")
-    expect(output).toEqual({
+    assert.equal(adapter.name, "node")
+    assert.equal(adapter.target, "node")
+    assert.deepEqual(output, {
       name: "node",
       target: "node",
       platform: "node",

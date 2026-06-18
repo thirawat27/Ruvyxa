@@ -83,7 +83,7 @@ export default defineConfig({
 
 ## Runtime Architecture
 
-The `ruvyxa` package includes a persistent Node worker pool (`runtime/worker-pool.mjs`) that keeps Node processes alive between requests. This eliminates the ~100-500ms overhead of spawning Node + esbuild per request.
+The `ruvyxa` package includes a persistent Node worker pool (`runtime/worker-pool.mjs`) that keeps Node processes alive between requests. This eliminates the ~100-500ms overhead of spawning Node and loading renderer state per request.
 
 The runtime files included in this package:
 
@@ -91,11 +91,12 @@ The runtime files included in this package:
 |------|---------|
 | `runtime/ssr-renderer.mjs` | Server-side React rendering (streaming) |
 | `runtime/client-renderer.mjs` | Client hydration bundle generation |
+| `runtime/compiler.mjs` | Ruvyxa runtime compiler used by all Node renderers |
 | `runtime/api-renderer.mjs` | API route execution |
 | `runtime/action-renderer.mjs` | Server action execution |
 | `runtime/config-renderer.mjs` | Config file loading |
 | `runtime/worker-pool.mjs` | Persistent IPC worker for all rendering |
 
-## Publish Notes
+## Native CLI
 
-`prepack` builds the package, copies runtime files, and prepares the native binary path used by the npm CLI shim. Platform-specific `@ruvyxa/cli-*` packages may also provide the binary as optional dependencies.
+The `ruvyxa` npm package resolves the native CLI automatically for the current platform. Application users only need to install `ruvyxa`; platform packages such as `@ruvyxa/cli-win32-x64` are optional dependencies used behind the scenes.

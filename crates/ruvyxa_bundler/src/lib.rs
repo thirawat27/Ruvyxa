@@ -2,8 +2,8 @@
 //!
 //! Native TypeScript/JSX compiler and module bundler for the Ruvyxa framework.
 //!
-//! This crate replaces the esbuild/Node.js bridge used during production builds
-//! with a pure-Rust pipeline that integrates directly with [`ruvyxa_diagnostics`]
+//! This crate provides Ruvyxa's native production bundling pipeline and
+//! integrates directly with [`ruvyxa_diagnostics`]
 //! and the route graph from `ruvyxa_graph`.
 //!
 //! ## Pipeline

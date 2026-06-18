@@ -1,12 +1,20 @@
-import { describe, expect, it } from "vitest"
+import { describe, it } from "node:test"
+import assert from "node:assert/strict"
 
-import { netlifyAdapter } from "./index.js"
+import { netlifyAdapter } from "../../../packages/@ruvyxa/adapter-netlify/src/index.ts"
 
 describe("netlifyAdapter", () => {
   it("returns serverless deployment output", async () => {
     const output = await netlifyAdapter().build({ root: ".", outDir: ".ruvyxa" })
 
-    expect(output).toMatchObject({
+    assert.deepEqual({
+      name: output.name,
+      target: output.target,
+      platform: output.platform,
+      entry: output.entry,
+      assetsDir: output.assetsDir,
+      functionsDir: output.functionsDir,
+    }, {
       name: "netlify",
       target: "serverless",
       platform: "netlify",

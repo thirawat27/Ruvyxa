@@ -10,3 +10,7 @@ npx ruvyxa doctor
 ```
 
 The package exists so npm can resolve a platform-specific binary without requiring Rust or Cargo on user machines.
+
+## Binary Resolution
+
+The main `ruvyxa` package tries this optional package on Linux x64 after checking for a bundled native binary. The executable exposed by this package is `ruvyxa`.

@@ -192,6 +192,37 @@ impl ProjectConfig {
     fn out_dir(&self) -> &str {
         self.out_dir.as_deref().unwrap_or(".ruvyxa")
     }
+
+    fn validate_paths(&self) -> anyhow::Result<()> {
+        validate_project_relative_path("appDir", self.app_dir())?;
+        validate_project_relative_path("outDir", self.out_dir())?;
+        Ok(())
+    }
+}
+
+fn validate_project_relative_path(field: &str, value: &str) -> anyhow::Result<()> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        anyhow::bail!("RUV1601 config field `{field}` must not be empty");
+    }
+
+    let path = Path::new(trimmed);
+    if path.is_absolute()
+        || path.components().any(|component| {
+            matches!(
+                component,
+                std::path::Component::Prefix(_)
+                    | std::path::Component::RootDir
+                    | std::path::Component::ParentDir
+            )
+        })
+    {
+        anyhow::bail!(
+            "RUV1601 config field `{field}` must be a project-relative path inside the project root"
+        );
+    }
+
+    Ok(())
 }
 
 #[tokio::main]
@@ -379,7 +410,9 @@ fn production_server_config(args: &ServerArgs, config: &ProjectConfig) -> Server
 
 fn load_project_config(root: &Path) -> anyhow::Result<ProjectConfig> {
     let Some(renderer) = find_runtime_script(root, "config-renderer.mjs") else {
-        return Ok(ProjectConfig::default());
+        let config = ProjectConfig::default();
+        config.validate_paths()?;
+        return Ok(config);
     };
 
     let output = ProcessCommand::new("node")
@@ -397,7 +430,9 @@ fn load_project_config(root: &Path) -> anyhow::Result<ProjectConfig> {
     })?;
 
     if output.status.success() && result.ok {
-        return Ok(result.config.unwrap_or_default());
+        let config = result.config.unwrap_or_default();
+        config.validate_paths()?;
+        return Ok(config);
     }
 
     anyhow::bail!(
@@ -1630,6 +1665,15 @@ mod tests {
         assert!(help.contains("dev          Run the development server with hot reload"));
         assert!(help.contains("build        Build the application for production output"));
         assert!(help.contains("test:parity  Compare development and production route manifests"));
+    }
+
+    #[test]
+    fn config_paths_must_stay_project_relative() {
+        assert!(validate_project_relative_path("outDir", ".ruvyxa").is_ok());
+        assert!(validate_project_relative_path("appDir", "src/app").is_ok());
+        assert!(validate_project_relative_path("outDir", "../outside").is_err());
+        assert!(validate_project_relative_path("outDir", "/tmp/out").is_err());
+        assert!(validate_project_relative_path("appDir", "").is_err());
     }
 
     #[test]

@@ -29,6 +29,6 @@ tsconfig.json
 
 The starter includes production-minded defaults, a health endpoint, environment documentation, and agent instructions without adding demo-only pages. Use the repository `examples/basic-app` when you need examples for dynamic routes, server actions, and loaders.
 
-## Packaging
+## Project Names
 
-The starter template is copied into this package during `prepack` from `templates/minimal`, so npm installs use the same source template that is tested in the monorepo.
+Project names must be valid directory names for the target operating system. On Windows, reserved device names such as `con`, `prn`, and `aux` are rejected, and names cannot end with unsafe trailing characters.

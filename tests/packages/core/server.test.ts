@@ -1,6 +1,7 @@
-import { describe, expect, it, beforeEach } from "vitest"
+import { beforeEach, describe, it } from "node:test"
+import assert from "node:assert/strict"
 
-import { action, cache, cacheStats, invalidateCache, loader, redirect } from "./server.js"
+import { action, cache, cacheStats, invalidateCache, loader, redirect } from "../../../packages/@ruvyxa/core/src/server.ts"
 
 describe("server API", () => {
   beforeEach(() => {
@@ -9,8 +10,8 @@ describe("server API", () => {
 
   it("runs loaders with default context", async () => {
     const getValue = loader(async ({ params }) => params.id ?? "missing")
-    await expect(getValue()).resolves.toBe("missing")
-    await expect(getValue({ params: { id: "123" } })).resolves.toBe("123")
+    assert.equal(await getValue(), "missing")
+    assert.equal(await getValue({ params: { id: "123" } }), "123")
   })
 
   it("validates action input through schema", async () => {
@@ -18,17 +19,17 @@ describe("server API", () => {
       .input({ parse: (value: unknown) => String(value).trim() })
       .handler(async ({ input }) => input.toUpperCase())
 
-    await expect(save(" hello ")).resolves.toBe("HELLO")
+    assert.equal(await save(" hello "), "HELLO")
   })
 
   it("creates redirect responses", () => {
     const response = redirect("/login")
-    expect(response.status).toBe(302)
-    expect(response.headers.get("Location")).toBe("/login")
+    assert.equal(response.status, 302)
+    assert.equal(response.headers.get("Location"), "/login")
   })
 
   it("rejects non-3xx redirect status codes", () => {
-    expect(() => redirect("/login", 200)).toThrow("redirect() status must be 3xx")
+    assert.throws(() => redirect("/login", 200), /redirect\(\) status must be 3xx/)
   })
 })
 
@@ -44,9 +45,9 @@ describe("cache", () => {
     const first = await cache("test-key").ttl("10s").get(producer)
     const second = await cache("test-key").ttl("10s").get(producer)
 
-    expect(first).toBe("value")
-    expect(second).toBe("value")
-    expect(calls).toBe(1)
+    assert.equal(first, "value")
+    assert.equal(second, "value")
+    assert.equal(calls, 1)
   })
 
   it("invalidates by exact key", async () => {
@@ -57,8 +58,8 @@ describe("cache", () => {
     invalidateCache("k1")
     const result = await cache("k1").ttl("10s").get(producer)
 
-    expect(result).toBe("call-2")
-    expect(calls).toBe(2)
+    assert.equal(result, "call-2")
+    assert.equal(calls, 2)
   })
 
   it("invalidates by prefix", async () => {
@@ -73,8 +74,8 @@ describe("cache", () => {
     await cache("users:list").ttl("10s").get(() => { userCalls++; return "new-list" })
     await cache("posts:list").ttl("10s").get(() => { postCalls++; return "new-posts" })
 
-    expect(userCalls).toBe(1) // was invalidated, so producer ran
-    expect(postCalls).toBe(0) // was NOT invalidated, still cached
+    assert.equal(userCalls, 1) // was invalidated, so producer ran
+    assert.equal(postCalls, 0) // was NOT invalidated, still cached
   })
 
   it("reports cache stats", async () => {
@@ -82,8 +83,8 @@ describe("cache", () => {
     await cache("b").ttl("10s").get(() => 2)
 
     const stats = cacheStats()
-    expect(stats.size).toBe(2)
-    expect(stats.maxEntries).toBe(1024)
+    assert.equal(stats.size, 2)
+    assert.equal(stats.maxEntries, 1024)
   })
 
   it("returns stale value when producer fails and stale data exists", async () => {
@@ -93,12 +94,13 @@ describe("cache", () => {
     await new Promise((r) => setTimeout(r, 5))
 
     const result = await cache("fragile").ttl("1ms").get(() => { throw new Error("oops") })
-    expect(result).toBe("good")
+    assert.equal(result, "good")
   })
 
   it("throws when producer fails and no stale data exists", async () => {
-    await expect(
+    await assert.rejects(
       cache("nonexistent").ttl("10s").get(() => { throw new Error("fail") }),
-    ).rejects.toThrow("fail")
+      /fail/,
+    )
   })
 })

@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="examples/basic-app/public/ruvyxa.png" alt="Ruvyxa" width="120" height="120" />
+  <img src="examples/basic-app/public/ruvyxa.png" alt="Ruvyxa" width="240" height="240" />
 </p>
 
 <h1 align="center">Ruvyxa</h1>
@@ -84,6 +84,8 @@ cargo test --workspace
 pnpm -r build
 pnpm -r test
 ```
+
+Standalone JavaScript and TypeScript tests live under `tests/` and are routed by each package's `test` script. See [Testing](docs/testing.md) for the layout.
 
 ---
 

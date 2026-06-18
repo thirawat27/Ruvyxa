@@ -12,9 +12,8 @@
 //! 5. Shorten the long `__ruv_<hex16>__` module namespace identifiers to
 //!    short two-character names (`_ra`, `_rb`, …).
 //!
-//! For production-quality minification the generated bundle can optionally be
-//! further processed by `node --eval "require('esbuild').transform(…)"` as a
-//! post-pass, but that is not required for correctness.
+//! The minifier is part of Ruvyxa's own Rust bundling pipeline and does not
+//! require an external JavaScript bundler.
 
 use std::collections::{BTreeMap, BTreeSet};
 

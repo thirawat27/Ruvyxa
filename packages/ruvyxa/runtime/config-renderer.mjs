@@ -1,9 +1,8 @@
 import { existsSync } from "node:fs"
-import { Buffer } from "node:buffer"
 import path from "node:path"
-import { dirname } from "node:path"
-import { fileURLToPath } from "node:url"
-import { build } from "esbuild"
+import { fileURLToPath, pathToFileURL } from "node:url"
+
+import { cacheFileName, compileBundle, runtimeAliases, toImportPath } from "./compiler.mjs"
 
 const [projectRootArg] = process.argv.slice(2)
 
@@ -12,8 +11,7 @@ if (!projectRootArg) {
 }
 
 const projectRoot = path.resolve(projectRootArg)
-const runtimeDir = dirname(fileURLToPath(import.meta.url))
-const packageRoot = path.resolve(runtimeDir, "..")
+const runtimeDir = path.dirname(fileURLToPath(import.meta.url))
 
 try {
   const configFile = findConfig(projectRoot)
@@ -21,51 +19,29 @@ try {
     ok({})
   }
 
-  const result = await build({
-    entryPoints: [configFile],
-    bundle: true,
+  const moduleCode = `export { default } from ${JSON.stringify(toImportPath(configFile))}`
+  const outfile = path.join(
+    projectRoot,
+    ".ruvyxa",
+    "cache",
+    "config",
+    cacheFileName([moduleCode, configFile], "mjs"),
+  )
+
+  await compileBundle({
+    projectRoot,
+    entrySource: moduleCode,
+    sourcefile: "ruvyxa:config-entry.ts",
+    outfile,
     platform: "node",
-    format: "esm",
-    write: false,
-    absWorkingDir: projectRoot,
-    sourcemap: false,
-    logLevel: "silent",
-    plugins: [ruvyxaConfigFallbackPlugin()],
+    aliases: runtimeAliases(runtimeDir),
   })
 
-  const code = result.outputFiles[0]?.text
-  if (!code) {
-    fail("RUV1602", "Config bundling completed without output.")
-  }
-
-  const dataUrl = `data:text/javascript;base64,${Buffer.from(code).toString("base64")}`
-  const mod = await import(dataUrl)
+  const mod = await import(pathToFileURL(outfile).href + `?t=${Date.now()}`)
   const config = mod.default ?? {}
   ok(sanitizeConfig(config))
 } catch (error) {
   fail("RUV1600", error instanceof Error ? error.message : String(error), error?.stack)
-}
-
-function ruvyxaConfigFallbackPlugin() {
-  return {
-    name: "ruvyxa-config-fallback",
-    setup(build) {
-      build.onResolve({ filter: /^ruvyxa\/config$/ }, (args) => {
-        if (args.resolveDir.includes(`${path.sep}node_modules${path.sep}`)) {
-          return undefined
-        }
-
-        for (const file of [
-          path.join(packageRoot, "dist", "config.js"),
-          path.join(packageRoot, "src", "config.ts"),
-        ]) {
-          if (existsSync(file)) return { path: file }
-        }
-
-        return undefined
-      })
-    },
-  }
 }
 
 function findConfig(root) {

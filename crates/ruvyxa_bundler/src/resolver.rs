@@ -227,6 +227,24 @@ fn extract_specifiers(source: &str) -> Vec<String> {
                 specifiers.push(spec);
             }
         }
+
+        specifiers.extend(call_specifiers(trimmed, "require("));
+        specifiers.extend(call_specifiers(trimmed, "import("));
+    }
+
+    specifiers
+}
+
+fn call_specifiers(line: &str, marker: &str) -> Vec<String> {
+    let mut specifiers = Vec::new();
+    let mut search_start = 0;
+
+    while let Some(relative_index) = line[search_start..].find(marker) {
+        let value_start = search_start + relative_index + marker.len();
+        if let Some(specifier) = quoted_value(&line[value_start..]) {
+            specifiers.push(specifier);
+        }
+        search_start = value_start;
     }
 
     specifiers
@@ -300,6 +318,8 @@ mod tests {
             import type { Bar } from './bar'
             import "./styles.css"
             export { baz } from "../baz"
+            const helper = require("./helper")
+            const lazy = import("./lazy")
         "#;
 
         let specs = extract_specifiers(source);
@@ -308,6 +328,8 @@ mod tests {
         assert!(specs.contains(&"./styles.css".to_string()));
         assert!(specs.contains(&"../baz".to_string()));
         assert!(specs.contains(&"react".to_string()));
+        assert!(specs.contains(&"./helper".to_string()));
+        assert!(specs.contains(&"./lazy".to_string()));
     }
 
     #[test]

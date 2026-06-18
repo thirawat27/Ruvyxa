@@ -5,7 +5,7 @@
 //! via newline-delimited JSON over stdin/stdout.
 //!
 //! Performance impact: eliminates ~100-500ms of per-request overhead from process
-//! creation, V8 startup, and esbuild initialization.
+//! creation, V8 startup, and renderer initialization.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};

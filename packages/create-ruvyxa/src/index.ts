@@ -20,6 +20,9 @@ const INVALID_DIR_CHARS = /[<>:"|?*\x00-\x1f]/
 /** Maximum directory name length (Windows has 260 char path limit). */
 const MAX_DIR_NAME_LENGTH = 128
 
+/** Reserved Windows device names that are invalid as project directory names. */
+const RESERVED_WINDOWS_NAMES = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i
+
 /**
  * Create a new Ruvyxa application from the minimal template.
  *
@@ -50,11 +53,25 @@ export async function createRuvyxaApp(targetDir: string): Promise<void> {
     )
   }
 
+  if (trimmed !== targetDir) {
+    throw new Error(
+      "Project directory name must not start or end with whitespace.\n" +
+      "  Try a name like: my-ruvyxa-app",
+    )
+  }
+
   const dirName = basename(trimmed)
   if (INVALID_DIR_CHARS.test(dirName)) {
     throw new Error(
       `Invalid project name "${dirName}". Directory names cannot contain: < > : " | ? *\n` +
       "  Try a name with only letters, numbers, dashes, and underscores.",
+    )
+  }
+
+  if (RESERVED_WINDOWS_NAMES.test(dirName) || /[. ]$/.test(dirName)) {
+    throw new Error(
+      `Invalid project name "${dirName}". This name is reserved or unsafe on Windows.\n` +
+      "  Try a name like: my-ruvyxa-app",
     )
   }
 

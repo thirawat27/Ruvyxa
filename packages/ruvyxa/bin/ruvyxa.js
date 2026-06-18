@@ -22,7 +22,6 @@ if (!binary) {
 const result = spawnSync(binary, process.argv.slice(2), {
   cwd: process.cwd(),
   stdio: "inherit",
-  shell: process.platform === "win32",
 })
 
 if (result.error) {
@@ -33,6 +32,9 @@ if (result.error) {
 process.exit(result.status ?? 0)
 
 function findBinary() {
+  const sourceBinary = findSourceBinary()
+  if (sourceBinary) return sourceBinary
+
   const bundled = resolve(packageRoot, "native-bin", platformKey, executable)
   if (existsSync(bundled)) return prepareExecutable(bundled)
 
@@ -46,6 +48,14 @@ function findBinary() {
     } catch {
       // Optional platform package is absent on unsupported platforms.
     }
+  }
+
+  return null
+}
+
+function findSourceBinary() {
+  if (!existsSync(resolve(monorepoRoot, "Cargo.toml"))) {
+    return null
   }
 
   for (const profile of ["debug", "release"]) {

@@ -27,12 +27,13 @@ import path from "node:path"
 import { pathToFileURL } from "node:url"
 import { createInterface } from "node:readline"
 
-import { build } from "esbuild"
+import { compileBundle, runtimeAliases, toImportPath } from "./compiler.mjs"
 
 // --- Configuration ---
 const MAX_BUNDLE_CACHE_ENTRIES = parseInt(process.env.RUVYXA_CACHE_MAX_ENTRIES || "256", 10)
 const WORKER_REQUEST_TIMEOUT_MS = parseInt(process.env.RUVYXA_WORKER_TIMEOUT_MS || "30000", 10)
 const MEMORY_PRESSURE_THRESHOLD_MB = parseInt(process.env.RUVYXA_MEMORY_LIMIT_MB || "512", 10)
+const runtimeDir = path.dirname(new URL(import.meta.url).pathname)
 
 // --- LRU Cache ---
 class LRUCache {
@@ -460,29 +461,14 @@ export async function render(ctx) {
     const rechecked = bundleCache.get(cacheKey)
     if (rechecked) return { outfile: rechecked, freshBuild: false }
 
-    await build({
-      stdin: {
-        contents: moduleCode,
-        resolveDir: projectRoot,
-        sourcefile: "ruvyxa:ssr-entry.tsx",
-        loader: "tsx",
-      },
+    await compileBundle({
+      projectRoot,
+      entrySource: moduleCode,
+      sourcefile: "ruvyxa:ssr-entry.tsx",
       outfile,
-      bundle: true,
-      format: "esm",
       platform: "node",
-      jsx: "automatic",
-      absWorkingDir: projectRoot,
       external: ["react", "react-dom/server", "node:stream"],
-      logLevel: "silent",
-      plugins: [
-        {
-          name: "ruvyxa-css-empty-module",
-          setup(build) {
-            build.onLoad({ filter: /\.css$/ }, () => ({ contents: "", loader: "js" }))
-          },
-        },
-      ],
+      aliases: runtimeAliases(runtimeDir),
     })
 
     bundleCache.set(cacheKey, outfile)
@@ -512,19 +498,13 @@ async function bundleApiModule(projectRoot, routeFile) {
     const rechecked = bundleCache.get(cacheKey)
     if (rechecked) return { outfile: rechecked, freshBuild: false }
 
-    await build({
-      stdin: {
-        contents: moduleCode,
-        resolveDir: projectRoot,
-        sourcefile: "ruvyxa:api-entry.ts",
-        loader: "ts",
-      },
+    await compileBundle({
+      projectRoot,
+      entrySource: moduleCode,
+      sourcefile: "ruvyxa:api-entry.ts",
       outfile,
-      bundle: true,
-      format: "esm",
       platform: "node",
-      absWorkingDir: projectRoot,
-      logLevel: "silent",
+      aliases: runtimeAliases(runtimeDir),
     })
 
     bundleCache.set(cacheKey, outfile)
@@ -552,19 +532,13 @@ async function bundleActionModule(projectRoot, actionFile) {
     const rechecked = bundleCache.get(cacheKey)
     if (rechecked) return { outfile: rechecked, freshBuild: false }
 
-    await build({
-      stdin: {
-        contents: moduleCode,
-        resolveDir: projectRoot,
-        sourcefile: "ruvyxa:action-entry.ts",
-        loader: "ts",
-      },
+    await compileBundle({
+      projectRoot,
+      entrySource: moduleCode,
+      sourcefile: "ruvyxa:action-entry.ts",
       outfile,
-      bundle: true,
-      format: "esm",
       platform: "node",
-      absWorkingDir: projectRoot,
-      logLevel: "silent",
+      aliases: runtimeAliases(runtimeDir),
     })
 
     bundleCache.set(cacheKey, outfile)
@@ -619,31 +593,15 @@ window.__RUVYXA_HYDRATED = true
     const rechecked = bundleCache.get(cacheKey)
     if (rechecked) return { outfile: rechecked, freshBuild: false }
 
-    await build({
-      stdin: {
-        contents: moduleCode,
-        resolveDir: projectRoot,
-        sourcefile: "ruvyxa:client-entry.tsx",
-        loader: "tsx",
-      },
+    await compileBundle({
+      projectRoot,
+      entrySource: moduleCode,
+      sourcefile: "ruvyxa:client-entry.tsx",
       outfile,
-      bundle: true,
-      format: "iife",
       platform: "browser",
-      jsx: "automatic",
       minify: process.env.RUVYXA_CLIENT_MINIFY === "1",
-      treeShaking: true,
-      absWorkingDir: projectRoot,
-      logLevel: "silent",
-      plugins: [
-        clientBoundaryPlugin(projectRoot),
-        {
-          name: "ruvyxa-css-empty-module",
-          setup(build) {
-            build.onLoad({ filter: /\.css$/ }, () => ({ contents: "", loader: "js" }))
-          },
-        },
-      ],
+      external: ["react", "react-dom/client"],
+      aliases: runtimeAliases(runtimeDir),
     })
 
     bundleCache.set(cacheKey, outfile)
@@ -753,8 +711,4 @@ function parsePayload(payloadJson) {
     return parsed.input
   }
   return parsed
-}
-
-function toImportPath(file) {
-  return path.resolve(file).replaceAll("\\", "/")
 }

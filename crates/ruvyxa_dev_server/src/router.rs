@@ -339,7 +339,7 @@ mod tests {
         assert_eq!(m.params["locale"], "en");
 
         let m = router.find(&manifest, "/lang").unwrap();
-        assert!(m.params.get("locale").is_none() || m.params["locale"].is_empty());
+        assert!(!m.params.contains_key("locale") || m.params["locale"].is_empty());
     }
 
     #[test]

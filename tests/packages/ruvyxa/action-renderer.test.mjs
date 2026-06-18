@@ -1,10 +1,10 @@
 import { execFile } from "node:child_process"
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
+import assert from "node:assert/strict"
 import path from "node:path"
+import { describe, it } from "node:test"
 import { fileURLToPath } from "node:url"
 import { promisify } from "node:util"
-
-import { describe, expect, it } from "vitest"
 
 const execFileAsync = promisify(execFile)
 const workspaceRoot = path.resolve(fileURLToPath(new URL("../../..", import.meta.url)))
@@ -16,9 +16,9 @@ describe("action renderer", () => {
     await withFixture(async ({ actionFile }) => {
       const result = await runRenderer(actionFile, "createTodo", JSON.stringify({ title: "Test" }))
 
-      expect(result.ok).toBe(true)
-      expect(result.status).toBe(200)
-      expect(JSON.parse(result.body)).toEqual({
+      assert.equal(result.ok, true)
+      assert.equal(result.status, 200)
+      assert.deepEqual(JSON.parse(result.body), {
         data: { title: "Test", completed: false },
         invalidated: ["todos"],
       })
@@ -29,8 +29,8 @@ describe("action renderer", () => {
     await withFixture(async ({ actionFile }) => {
       const result = await runRenderer(actionFile, "createTodo", "title=Form+Todo")
 
-      expect(result.ok).toBe(true)
-      expect(JSON.parse(result.body).data.title).toBe("Form Todo")
+      assert.equal(result.ok, true)
+      assert.equal(JSON.parse(result.body).data.title, "Form Todo")
     })
   })
 
@@ -38,8 +38,8 @@ describe("action renderer", () => {
     await withFixture(async ({ actionFile }) => {
       const result = await runRenderer(actionFile, "missingAction", "{}")
 
-      expect(result.ok).toBe(true)
-      expect(result.status).toBe(404)
+      assert.equal(result.ok, true)
+      assert.equal(result.status, 404)
     })
   })
 })

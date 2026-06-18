@@ -2,6 +2,7 @@
   "name": "ruvyxa-monorepo",
   "version": "1.0.2",
   "private": true,
+  "type": "module",
   "description": "A production-minded web framework built around clarity, speed, control, and predictable application delivery.",
   "license": "MIT",
   "packageManager": "pnpm@10.32.1",
@@ -17,8 +18,7 @@
   },
   "devDependencies": {
     "@types/node": "^25.9.3",
-    "typescript": "^6.0.3",
-    "vitest": "^4.1.9"
+    "typescript": "^6.0.3"
   },
   "engines": {
     "node": ">=22.0.0"

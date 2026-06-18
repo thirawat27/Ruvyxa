@@ -1,10 +1,8 @@
 #!/usr/bin/env node
-import { createHash } from "node:crypto"
-import { mkdir } from "node:fs/promises"
 import path from "node:path"
 import { pathToFileURL } from "node:url"
 
-import { build } from "esbuild"
+import { cacheFileName, compileBundle, runtimeAliases, toImportPath } from "./compiler.mjs"
 
 const [
   projectRootArg,
@@ -61,28 +59,16 @@ try {
 
 async function bundleApiModule(projectRoot, routeFile) {
   const cacheDir = path.join(projectRoot, ".ruvyxa", "cache", "api")
-  await mkdir(cacheDir, { recursive: true })
-
   const moduleCode = `export * from ${JSON.stringify(toImportPath(routeFile))}`
-  const hash = createHash("sha256")
-    .update(moduleCode)
-    .update(routeFile)
-    .digest("hex")
-    .slice(0, 16)
-  const outfile = path.join(cacheDir, `${hash}.mjs`)
+  const outfile = path.join(cacheDir, cacheFileName([moduleCode, routeFile], "mjs"))
 
-  await build({
-    stdin: {
-      contents: moduleCode,
-      resolveDir: projectRoot,
-      sourcefile: "ruvyxa:api-entry.ts",
-      loader: "ts",
-    },
+  await compileBundle({
+    projectRoot,
+    entrySource: moduleCode,
+    sourcefile: "ruvyxa:api-entry.ts",
     outfile,
-    bundle: true,
-    format: "esm",
     platform: "node",
-    absWorkingDir: projectRoot,
+    aliases: runtimeAliases(path.dirname(new URL(import.meta.url).pathname)),
   })
 
   return outfile
@@ -94,10 +80,6 @@ function normalizeResponse(result) {
   }
 
   return Response.json(result)
-}
-
-function toImportPath(file) {
-  return path.resolve(file).replaceAll("\\", "/")
 }
 
 function fail(code, message, stack) {

@@ -623,7 +623,8 @@ mod tests {
     fn export_star_from() {
         let dep = PathBuf::from("/app/utils.ts");
         let dep_id = module_id(&dep);
-        let result = try_rewrite_export("export * from \"./utils\"", &[dep.clone()], &[]);
+        let result =
+            try_rewrite_export("export * from \"./utils\"", std::slice::from_ref(&dep), &[]);
         assert_eq!(result, Some(format!("Object.assign(__exports, {dep_id});")));
     }
 
@@ -633,7 +634,7 @@ mod tests {
         let dep_id = module_id(&dep);
         let result = try_rewrite_export(
             "export { foo, bar as baz } from \"./helpers\"",
-            &[dep.clone()],
+            std::slice::from_ref(&dep),
             &[],
         );
         let r = result.unwrap();

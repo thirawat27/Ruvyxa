@@ -54,11 +54,11 @@ Client bundles are split per route, not per app. Each page gets its own hydratio
 
 ### Tree Shaking
 
-esbuild eliminates dead code from each route bundle. Only imports actually used by the page are included in the output.
+The Ruvyxa bundler eliminates dead code from each route bundle. Only imports actually used by the page are included in the output.
 
 ### Minification
 
-Production bundles are minified by esbuild with default optimizations (whitespace removal, identifier shortening, dead-code elimination).
+Production bundles are minified by the Ruvyxa minifier with whitespace removal, identifier shortening, and dead-code elimination.
 
 ### Content Hashing
 

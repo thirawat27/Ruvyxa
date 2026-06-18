@@ -70,6 +70,8 @@ pnpm release:validate
 pnpm pack:smoke
 ```
 
+JavaScript and TypeScript tests are centralized under `tests/`; package scripts route to their own subset. See [Testing](testing.md) before adding or moving test files.
+
 ---
 
 ## Dry Run

@@ -16,6 +16,7 @@
     "runtime/action-renderer.mjs",
     "runtime/api-renderer.mjs",
     "runtime/client-renderer.mjs",
+    "runtime/compiler.mjs",
     "runtime/config-renderer.mjs",
     "runtime/ssr-renderer.mjs",
     "runtime/worker-pool.mjs",
@@ -61,8 +62,7 @@
     }
   },
   "dependencies": {
-    "@ruvyxa/core": "workspace:^",
-    "esbuild": "^0.27.2"
+    "@ruvyxa/core": "workspace:^"
   },
   "optionalDependencies": {
     "@ruvyxa/cli-darwin-arm64": "workspace:^",
@@ -74,7 +74,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run --passWithNoTests",
+    "test": "node --test \"../../tests/packages/ruvyxa/**/*.test.mjs\"",
     "format": "tsc -p tsconfig.json --noEmit",
     "prepack": "pnpm run build && node scripts/prepare-native-binary.mjs"
   }

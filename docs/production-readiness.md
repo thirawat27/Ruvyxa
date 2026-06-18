@@ -22,6 +22,12 @@ All of the following must pass before a release:
 
 ---
 
+## Test Layout
+
+Standalone JavaScript and TypeScript tests are centralized under `tests/`, grouped by package. Package `test` scripts point to their own subset in `tests/packages/...`; Rust unit tests remain inline in their crates. See [Testing](testing.md) for details.
+
+---
+
 ## Runtime Guarantees
 
 ### Route Semantics
@@ -44,7 +50,7 @@ Production builds emit a deterministic structure:
 ### Client Bundles
 
 - Route-level splitting (one bundle per page)
-- Minified and tree-shaken by esbuild
+- Minified and tree-shaken by the Ruvyxa bundler
 - BLAKE3 content-addressed file names (immutable caching)
 
 ### Server Actions
