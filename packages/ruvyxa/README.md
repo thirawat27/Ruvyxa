@@ -8,7 +8,7 @@ CLI, runtime bridge, and public framework entrypoints for Ruvyxa apps.
 npm install ruvyxa react react-dom
 ```
 
-Published installs include the TypeScript runtime files and a native CLI binary for the current platform. Rust and Cargo are only required when developing Ruvyxa from source.
+Published installs include the TypeScript runtime files, a persistent Node worker pool, and a native CLI binary for the current platform. Rust and Cargo are only required when developing Ruvyxa from source.
 
 ## CLI
 
@@ -27,11 +27,11 @@ Production builds emit route-level client bundles concurrently and keep manifest
 
 ```ts
 import { defineConfig } from "ruvyxa/config"
-import { action, cache, json, loader, notFound, redirect } from "ruvyxa/server"
+import { action, cache, invalidateCache, json, loader, notFound, redirect } from "ruvyxa/server"
 import type { Adapter, RuvyxaConfig } from "ruvyxa"
 ```
 
-## Minimal Config
+## Configuration with Middleware
 
 ```ts
 import { defineConfig } from "ruvyxa/config"
@@ -53,10 +53,48 @@ export default defineConfig({
     routeManifest: true,
     css: true,
   },
+  middleware: {
+    builtin: {
+      timing: true,
+      logging: true,
+      cors: {
+        origins: ["http://localhost:5173"],
+        methods: ["GET", "POST", "PUT", "DELETE"],
+        credentials: true,
+      },
+    },
+    plugins: [
+      {
+        name: "auth-guard",
+        path: "plugins/auth.wasm",
+        phase: "request",
+        hotReload: true,
+        routes: ["/api/*"],
+        permissions: {
+          env: ["AUTH_SECRET"],
+          timeoutMs: 5000,
+          maxMemoryBytes: 67108864,
+        },
+      },
+    ],
+  },
 })
 ```
 
-The native CLI consumes these settings for app paths, output paths, server defaults, minification, client bundle parallelism, and runtime cache behavior. `runtime: "node"` and `react: true` are defaults and do not need to be written in new apps.
+## Runtime Architecture
+
+The `ruvyxa` package includes a persistent Node worker pool (`runtime/worker-pool.mjs`) that keeps Node processes alive between requests. This eliminates the ~100-500ms overhead of spawning Node + esbuild per request.
+
+The runtime files included in this package:
+
+| File | Purpose |
+|------|---------|
+| `runtime/ssr-renderer.mjs` | Server-side React rendering (streaming) |
+| `runtime/client-renderer.mjs` | Client hydration bundle generation |
+| `runtime/api-renderer.mjs` | API route execution |
+| `runtime/action-renderer.mjs` | Server action execution |
+| `runtime/config-renderer.mjs` | Config file loading |
+| `runtime/worker-pool.mjs` | Persistent IPC worker for all rendering |
 
 ## Publish Notes
 

@@ -22,5 +22,8 @@
     "@tailwindcss/cli": "^4.1.17",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
   }
 }

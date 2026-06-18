@@ -7,6 +7,7 @@ use std::time::SystemTime;
 use std::time::{Duration, Instant};
 
 use anyhow::Context;
+use chrono::Local;
 use clap::{Parser, Subcommand, ValueEnum};
 use ruvyxa_dev_server::{serve, ServerConfig};
 use ruvyxa_diagnostics::Diagnostic;
@@ -107,6 +108,8 @@ struct ProjectConfig {
     security: SecurityConfigOptions,
     #[serde(default)]
     cache: CacheConfigOptions,
+    #[serde(default)]
+    middleware: ruvyxa_middleware::MiddlewareConfig,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -214,6 +217,7 @@ fn dev_server_config(args: &ServerArgs, config: &ProjectConfig) -> ServerConfig 
     server.client_dir = out_dir.join("client");
     server.cache_route_manifest = config.cache.route_manifest.unwrap_or(true);
     server.cache_css = config.cache.css.unwrap_or(true);
+    server.middleware = config.middleware.clone();
     server
 }
 
@@ -232,6 +236,7 @@ fn production_server_config(args: &ServerArgs, config: &ProjectConfig) -> Server
     server.client_dir = out_dir.join("client");
     server.cache_route_manifest = config.cache.route_manifest.unwrap_or(true);
     server.cache_css = config.cache.css.unwrap_or(true);
+    server.middleware = config.middleware.clone();
     server
 }
 
@@ -273,6 +278,7 @@ fn build(args: BuildArgs) -> anyhow::Result<()> {
 }
 
 fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> {
+    let started = Instant::now();
     let config = load_project_config(&args.root)?;
     let app_dir = args.root.join(config.app_dir());
     let out_dir = args.root.join(config.out_dir());
@@ -296,6 +302,7 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
     )?;
     copy_optional_dir(&args.root.join("server"), &server_dir.join("server"))?;
     copy_public_assets(&args.root, &assets_dir)?;
+    let asset_files = count_files(&assets_dir);
     fs::create_dir_all(&client_dir)?;
     write_manifest(&manifest, &out_dir.join("manifest.json"))?;
 
@@ -351,16 +358,35 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
         "build complete"
     );
     if show_summary {
-        println!(
-            "\n{}\n  {} {}\n  {} {}\n  {} Built into {}\n",
-            heading("Ruvyxa build"),
-            label("target"),
+        let page_routes = manifest
+            .routes
+            .iter()
+            .filter(|route| route.kind == ruvyxa_graph::RouteKind::Page)
+            .count();
+        let api_routes = manifest.routes.len().saturating_sub(page_routes);
+        let client_bundles = client_manifest
+            .get("routes")
+            .and_then(|routes| routes.as_array())
+            .map(Vec::len)
+            .unwrap_or_default();
+
+        print_tui_header("Ruvyxa build");
+        print_field("status", ok_text("built"));
+        print_field(
+            "target",
             accent(format!("{:?}", args.target).to_lowercase()),
-            label("routes"),
-            accent(manifest.routes.len().to_string()),
-            success(),
-            path_text(&out_dir)
         );
+        print_field("profile", accent("production"));
+        print_field("root", path_text(&args.root));
+        print_field("app dir", path_text(&app_dir));
+        print_field("out dir", path_text(&out_dir));
+        print_field("routes", accent(manifest.routes.len().to_string()));
+        print_field("pages", accent(page_routes.to_string()));
+        print_field("api", accent(api_routes.to_string()));
+        print_field("client bundles", accent(client_bundles.to_string()));
+        print_field("asset files", accent(asset_files.to_string()));
+        print_field("duration", accent(format_duration(started.elapsed())));
+        println!("  {} Built into {}\n", success(), path_text(&out_dir));
     }
     Ok(())
 }
@@ -538,17 +564,41 @@ fn find_runtime_script(root: &Path, file_name: &str) -> Option<PathBuf> {
 
 fn print_routes(args: ProjectArgs) -> anyhow::Result<()> {
     let config = load_project_config(&args.root)?;
-    let manifest = discover_routes(DiscoverOptions::new(args.root.join(config.app_dir())))?;
+    let app_dir = args.root.join(config.app_dir());
+    let manifest = discover_routes(DiscoverOptions::new(&app_dir))?;
+    let page_routes = manifest
+        .routes
+        .iter()
+        .filter(|route| route.kind == ruvyxa_graph::RouteKind::Page)
+        .count();
+    let api_routes = manifest.routes.len().saturating_sub(page_routes);
 
-    println!("\n{}", heading("Ruvyxa routes"));
-    print_route_row("kind", label("kind"), "path", label("path"), label("id"));
+    print_tui_header("Ruvyxa routes");
+    print_field("root", path_text(&args.root));
+    print_field("app dir", path_text(&app_dir));
+    print_field("routes", accent(manifest.routes.len().to_string()));
+    print_field("pages", accent(page_routes.to_string()));
+    print_field("api", accent(api_routes.to_string()));
+    println!();
+    print_route_row(
+        "kind",
+        label("kind"),
+        "path",
+        label("path"),
+        "file",
+        label("file"),
+        label("id"),
+    );
     for route in manifest.routes {
         let kind = format!("{:?}", route.kind);
+        let file = display_path_relative(&args.root, &route.file);
         print_route_row(
             &kind,
             accent(&kind),
             &route.path,
             route.path.clone(),
+            &file,
+            dim(&file),
             dim(route.id),
         );
     }
@@ -580,7 +630,8 @@ fn doctor(args: ProjectArgs) -> anyhow::Result<()> {
     let package_json = args.root.join("package.json");
     let tsconfig = args.root.join("tsconfig.json");
 
-    println!("\n{}", heading("Ruvyxa doctor"));
+    print_tui_header("Ruvyxa doctor");
+    print_field("ruvyxa", accent(env!("CARGO_PKG_VERSION")));
     print_field("root", path_text(&args.root));
     print_field("config", exists_status(&args.root.join("ruvyxa.config.ts")));
     print_field("app dir", path_text(&app_dir));
@@ -593,6 +644,8 @@ fn doctor(args: ProjectArgs) -> anyhow::Result<()> {
         accent(detect_package_manager(&args.root)),
     );
     print_field("node", tool_status(tool_version("node", &["--version"])));
+    print_field("rustc", tool_status(tool_version("rustc", &["--version"])));
+    print_field("cargo", tool_status(tool_version("cargo", &["--version"])));
     print_field("bun", tool_status(tool_version("bun", &["--version"])));
     print_field("deno", tool_status(tool_version("deno", &["--version"])));
 
@@ -651,12 +704,25 @@ fn doctor(args: ProjectArgs) -> anyhow::Result<()> {
 }
 
 fn clean(args: ProjectArgs) -> anyhow::Result<()> {
+    let started = Instant::now();
     let config = load_project_config(&args.root)?;
     let out_dir = args.root.join(config.out_dir());
-    if out_dir.exists() {
+    let removed = out_dir.exists();
+    if removed {
         fs::remove_dir_all(&out_dir)?;
     }
-    println!("\n{} Removed {}\n", success(), path_text(&out_dir));
+    print_tui_header("Ruvyxa clean");
+    print_field(
+        "status",
+        if removed {
+            ok_text("removed")
+        } else {
+            dim("already clean")
+        },
+    );
+    print_field("out dir", path_text(&out_dir));
+    print_field("duration", accent(format_duration(started.elapsed())));
+    println!();
     Ok(())
 }
 
@@ -674,6 +740,7 @@ fn trace(args: TraceArgs) -> anyhow::Result<()> {
 }
 
 fn bench(args: BenchArgs) -> anyhow::Result<()> {
+    let started = Instant::now();
     let samples = args.samples.max(1);
     let root = args.root;
     let config = load_project_config(&root)?;
@@ -703,7 +770,7 @@ fn bench(args: BenchArgs) -> anyhow::Result<()> {
     if args.json {
         println!("{}", serde_json::to_string_pretty(&results)?);
     } else {
-        print_benchmark_table(samples, &results);
+        print_benchmark_table(samples, &results, &root, &app_dir, started.elapsed());
         println!();
     }
 
@@ -764,7 +831,22 @@ fn duration_ms(duration: Duration) -> f64 {
 }
 
 fn test_parity(args: ProjectArgs) -> anyhow::Result<()> {
+    let started = Instant::now();
     let config = load_project_config(&args.root)?;
+    print_tui_header("Ruvyxa parity");
+    print_field("root", path_text(&args.root));
+    print_field("dev app", path_text(&args.root.join(config.app_dir())));
+    print_field(
+        "prod app",
+        path_text(
+            &args
+                .root
+                .join(config.out_dir())
+                .join("server")
+                .join(config.app_dir()),
+        ),
+    );
+    println!();
     build(BuildArgs {
         root: args.root.clone(),
         target: BuildTarget::Node,
@@ -804,9 +886,10 @@ fn test_parity(args: ProjectArgs) -> anyhow::Result<()> {
 
     if failures.is_empty() {
         println!(
-            "\n{} Parity passed for {} routes\n",
+            "\n{} Parity passed for {} routes in {}\n",
             success(),
-            accent(dev_routes.len().to_string())
+            accent(dev_routes.len().to_string()),
+            accent(format_duration(started.elapsed()))
         );
         return Ok(());
     }
@@ -909,6 +992,18 @@ fn copy_dir_all(from: &Path, to: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn count_files(path: &Path) -> usize {
+    if !path.exists() {
+        return 0;
+    }
+
+    WalkDir::new(path)
+        .into_iter()
+        .filter_map(std::result::Result::ok)
+        .filter(|entry| entry.file_type().is_file())
+        .count()
+}
+
 fn fail_on_diagnostics(diagnostics: &[Diagnostic]) -> anyhow::Result<()> {
     if diagnostics.is_empty() {
         return Ok(());
@@ -929,22 +1024,40 @@ fn print_field(name: &str, value: String) {
     println!("  {}{} {}", label(name), padding, value);
 }
 
-fn print_route_row(kind: &str, styled_kind: String, path: &str, styled_path: String, id: String) {
+fn print_route_row(
+    kind: &str,
+    styled_kind: String,
+    path: &str,
+    styled_path: String,
+    file: &str,
+    styled_file: String,
+    id: String,
+) {
     println!(
-        "  {}{} {}{} {}",
+        "  {}{} {}{} {}{} {}",
         styled_kind,
         spaces(10, kind.len()),
         styled_path,
         spaces(24, path.len()),
+        styled_file,
+        spaces(32, file.len()),
         id
     );
 }
 
-fn print_benchmark_table(samples: usize, results: &[BenchmarkResult]) {
-    println!(
-        "\n{}",
-        heading(format!("Ruvyxa benchmark ({samples} sample(s))"))
-    );
+fn print_benchmark_table(
+    samples: usize,
+    results: &[BenchmarkResult],
+    root: &Path,
+    app_dir: &Path,
+    elapsed: Duration,
+) {
+    print_tui_header(format!("Ruvyxa benchmark ({samples} sample(s))"));
+    print_field("root", path_text(root));
+    print_field("app dir", path_text(app_dir));
+    print_field("scenarios", accent(results.len().to_string()));
+    print_field("duration", accent(format_duration(elapsed)));
+    println!();
 
     let rows = results
         .iter()
@@ -1001,6 +1114,11 @@ fn print_benchmark_table(samples: usize, results: &[BenchmarkResult]) {
     print_table_separator(&widths);
 }
 
+fn print_tui_header(title: impl AsRef<str>) {
+    println!("\n{}", heading(title));
+    print_field("time", accent(current_timestamp()));
+}
+
 fn print_table_separator(widths: &[usize]) {
     print!("  {}", dim("+"));
     for width in widths {
@@ -1034,6 +1152,18 @@ fn print_box_row<const N: usize>(raw: [&str; N], styled: [String; N], widths: &[
 
 fn spaces(width: usize, len: usize) -> String {
     " ".repeat(width.saturating_sub(len))
+}
+
+fn current_timestamp() -> String {
+    Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+fn format_duration(duration: Duration) -> String {
+    if duration.as_secs() > 0 {
+        format!("{:.2}s", duration.as_secs_f64())
+    } else {
+        format!("{:.0}ms", duration.as_secs_f64() * 1000.0)
+    }
 }
 
 fn heading(value: impl AsRef<str>) -> String {
@@ -1070,6 +1200,13 @@ fn success() -> String {
 
 fn path_text(path: &Path) -> String {
     paint(path.display().to_string(), "34")
+}
+
+fn display_path_relative(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .display()
+        .to_string()
 }
 
 fn exists_status(path: &Path) -> String {

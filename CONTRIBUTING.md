@@ -8,8 +8,8 @@ Thanks for your interest in contributing. This guide covers development setup, c
 
 ### Prerequisites
 
-- [Rust](https://rustup.rs/) (1.80+)
-- [Node.js](https://nodejs.org/) (20+)
+- [Rust](https://rustup.rs/) (1.96+)
+- [Node.js](https://nodejs.org/) (22+)
 - [pnpm](https://pnpm.io/) (10+)
 
 ### Clone and Install

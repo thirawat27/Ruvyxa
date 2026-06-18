@@ -49,7 +49,7 @@ npm whoami
 npm org ls ruvyxa
 ```
 
-4. Node 20+, pnpm 10+, Rust toolchain installed on the build machine.
+4. Node 22+, pnpm 10+, Rust toolchain installed on the build machine.
 
 ---
 

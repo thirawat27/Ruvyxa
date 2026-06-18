@@ -4,6 +4,7 @@ members = [
   "crates/ruvyxa_dev_server",
   "crates/ruvyxa_graph",
   "crates/ruvyxa_diagnostics",
+  "crates/ruvyxa_middleware",
 ]
 resolver = "2"
 
@@ -11,12 +12,13 @@ resolver = "2"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/thirawat27/ruvyxa"
-rust-version = "1.80"
+rust-version = "1.96"
 
 [workspace.dependencies]
 anyhow = "1.0"
 axum = { version = "0.8", features = ["ws"] }
 blake3 = "1.8"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 clap = { version = "4.5", features = ["derive"] }
 notify = "8.2"
 serde = { version = "1.0", features = ["derive"] }
@@ -24,7 +26,10 @@ serde_json = "1.0"
 tempfile = "3.23"
 thiserror = "2.0"
 tokio = { version = "1.48", features = ["full"] }
+tower = { version = "0.5" }
 tower-http = { version = "0.6", features = ["fs", "trace", "compression-gzip", "compression-br"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 walkdir = "2.5"
+wasmtime = "45.0"
+wasmtime-wasi = "45.0"

@@ -1,25 +1,27 @@
 [package]
-name = "ruvyxa_dev_server"
+name = "ruvyxa_middleware"
 version = "1.0.1"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
+description = "Tower-based middleware and Wasmtime WASI plugin runtime for Ruvyxa"
 
 [dependencies]
 axum.workspace = true
-blake3.workspace = true
-chrono.workspace = true
-notify.workspace = true
 ruvyxa_diagnostics = { path = "../ruvyxa_diagnostics" }
-ruvyxa_graph = { path = "../ruvyxa_graph" }
-ruvyxa_middleware = { path = "../ruvyxa_middleware" }
 serde.workspace = true
 serde_json.workspace = true
 tokio.workspace = true
+tower.workspace = true
 tower-http.workspace = true
 tracing.workspace = true
-walkdir.workspace = true
+wasmtime = { workspace = true, optional = true }
+wasmtime-wasi = { workspace = true, optional = true }
+
+[features]
+default = ["wasm-plugins"]
+wasm-plugins = ["dep:wasmtime", "dep:wasmtime-wasi"]
 
 [dev-dependencies]
 tempfile.workspace = true

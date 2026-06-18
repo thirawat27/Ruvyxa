@@ -14,8 +14,51 @@ npm install @ruvyxa/core
 
 ```ts
 import { defineConfig } from "@ruvyxa/core/config"
-import { action, cache, json, loader, notFound, redirect } from "@ruvyxa/core/server"
+import { action, cache, invalidateCache, json, loader, notFound, redirect } from "@ruvyxa/core/server"
 import type { Adapter, AdapterOutput, BuildContext, RuvyxaConfig } from "@ruvyxa/core"
+```
+
+## Server APIs
+
+### Loader with caching
+
+```ts
+import { loader } from "@ruvyxa/core/server"
+
+export const getPosts = loader(async ({ cache }) => {
+  return cache("posts").ttl("5m").get(async () => {
+    return await db.posts.findMany()
+  })
+})
+```
+
+### Action with validation
+
+```ts
+import { action } from "@ruvyxa/core/server"
+
+export const createPost = action
+  .input({ parse: (v) => ({ title: String(v.title) }) })
+  .handler(async ({ input, invalidate }) => {
+    invalidate("posts")
+    return await db.posts.create(input)
+  })
+```
+
+### Cache utility
+
+The `cache()` function provides real in-memory TTL caching:
+
+```ts
+import { cache, invalidateCache } from "@ruvyxa/core/server"
+
+// Cache with TTL (supports "30s", "5m", "1h", "1d")
+const data = await cache("key").ttl("10m").get(async () => fetchExpensiveData())
+
+// Invalidate by key or prefix
+invalidateCache("key")       // exact match
+invalidateCache("posts")     // also clears "posts:123"
+invalidateCache()            // clear all
 ```
 
 ## Config Shape

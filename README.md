@@ -11,24 +11,31 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/license-MIT-green?style=flat-square" alt="License" />
-  <img src="https://img.shields.io/badge/node-%3E%3D20-blue?style=flat-square" alt="Node 22" />
-  <img src="https://img.shields.io/badge/rust-1.80%2B-orange?style=flat-square" alt="Rust 1.80+" />
+  <img src="https://img.shields.io/badge/node-%3E%3D22-blue?style=flat-square" alt="Node 22+" />
+  <img src="https://img.shields.io/badge/rust-1.96%2B-orange?style=flat-square" alt="Rust 1.96+" />
   <img src="https://img.shields.io/badge/pnpm-10%2B-yellow?style=flat-square" alt="pnpm 10+" />
+  <img src="https://img.shields.io/badge/TypeScript-6.0-blue?style=flat-square" alt="TypeScript 6.0" />
 </p>
 
 ---
 
 ## Why Ruvyxa
 
-- **Clean starter** - new apps start with the same small surface you expect from Next.js-style app routers.
-- **Fast core** - Rust handles routing, validation, production builds, and the dev server.
-- **Cached runtime hot path** - server instances reuse route manifests and compiled CSS until file changes invalidate them.
-- **Parallel production bundling** - page client bundles are emitted concurrently and written back in deterministic route order.
-- **Honest builds** - `ruvyxa analyze` catches server/client boundary leaks before output is emitted.
-- **SSR-first React** - pages render on the server, with route-level client bundles when needed.
-- **Secure server actions** - validation hooks, origin checks, Fetch Metadata guards, a 64 KB body limit, and rate limiting are built in.
-- **Dev/prod parity** - `dev` and `start` share routing, rendering, static asset, and security-header semantics.
-- **Readable CLI output** - commands print compact summaries, aligned tables, and color only when the terminal supports it.
+- **Clean starter** — new apps start with the same small surface you expect from Next.js-style app routers.
+- **Fast core** — Rust handles routing, validation, production builds, and the dev server. A persistent Node worker pool eliminates per-request subprocess overhead.
+- **Radix-tree routing** — O(path-depth) route resolution regardless of the number of registered routes.
+- **Streaming SSR** — React pages render via `renderToPipeableStream` with Suspense support and fast TTFB.
+- **LRU render cache** — pages and client bundles are cached in-memory, invalidated automatically on file change.
+- **Gzip + Brotli compression** — all responses compressed automatically via tower-http middleware.
+- **Tower-based middleware** — composable CORS, rate-limiting, timing, logging, and custom headers via `ruvyxa.config.ts`.
+- **Wasm plugin runtime** — sandboxed WebAssembly plugins powered by Wasmtime with hot-reload, configurable permissions, and execution limits.
+- **Parallel production bundling** — page client bundles are emitted concurrently and written back in deterministic route order.
+- **Honest builds** — `ruvyxa analyze` catches server/client boundary leaks before output is emitted.
+- **SSR-first React** — pages render on the server, with route-level client bundles for hydration.
+- **Secure server actions** — validation hooks, origin checks, Fetch Metadata guards, a 64 KB body limit, and rate limiting are built in.
+- **Dev/prod parity** — `dev` and `start` share routing, rendering, static asset, and security-header semantics.
+- **ETag / 304 support** — static assets include blake3-based ETags for efficient browser caching.
+- **Async I/O** — file serving uses `tokio::fs` to avoid blocking the async runtime under concurrent load.
 
 ---
 
@@ -54,8 +61,6 @@ my-app/
 │   └── page.tsx
 ├── public/
 │   └── ruvyxa.png
-├── AGENTS.md
-├── CLAUDE.md
 ├── package.json
 ├── ruvyxa.config.ts
 └── tsconfig.json
@@ -124,7 +129,6 @@ export const createTodo = action
       if (!value || typeof value !== "object" || !("title" in value)) {
         throw new Error("Title is required")
       }
-
       return { title: String(value.title).trim() }
     },
   })
@@ -134,13 +138,82 @@ export const createTodo = action
   })
 ```
 
-Ruvyxa checks server/client boundaries during analysis and production builds.
+The `cache()` utility provides real in-memory TTL caching with human-readable durations (`"30s"`, `"5m"`, `"1h"`, `"1d"`).
+
+---
+
+## Middleware
+
+Ruvyxa ships a tower-based middleware system configurable via `ruvyxa.config.ts`:
+
+```ts
+import { defineConfig } from "ruvyxa/config"
+
+export default defineConfig({
+  middleware: {
+    builtin: {
+      timing: true,           // X-Response-Time header
+      logging: true,          // structured request logging
+      cors: {
+        origins: ["https://myapp.com"],
+        methods: ["GET", "POST", "PUT", "DELETE"],
+        credentials: true,
+        maxAge: 86400,
+      },
+      rateLimit: {
+        maxRequests: 100,
+        windowSecs: 60,
+        keyBy: "ip",
+      },
+      headers: {
+        "X-Powered-By": "Ruvyxa",
+      },
+    },
+  },
+})
+```
+
+All middleware is applied as standard Tower layers, compatible with any axum/tower ecosystem middleware.
+
+---
+
+## Wasm Plugins
+
+Sandboxed WebAssembly plugins run in isolated Wasmtime instances with configurable security:
+
+```ts
+export default defineConfig({
+  middleware: {
+    plugins: [
+      {
+        name: "auth-guard",
+        path: "plugins/auth-guard.wasm",
+        phase: "request",        // "request" or "response"
+        hotReload: true,         // reload on file change
+        routes: ["/api/*"],      // route filter
+        config: { apiKeyHeader: "X-Api-Key" },
+        permissions: {
+          env: ["AUTH_SECRET"],   // allowed env vars
+          fsRead: [],            // no filesystem access
+          net: [],               // no network access
+          timeoutMs: 5000,       // execution limit
+          maxMemoryBytes: 67108864, // 64MB memory limit
+        },
+      },
+    ],
+  },
+})
+```
+
+**Security model:**
+- Each plugin runs in its own Wasmtime `Store` with fuel-based execution limits
+- No filesystem, network, or environment access unless explicitly granted
+- Memory-bounded execution prevents resource exhaustion
+- Hot-reload on `.wasm` file change without server restart
 
 ---
 
 ## Configuration
-
-Most apps only need paths and server defaults:
 
 ```ts
 import { defineConfig } from "ruvyxa/config"
@@ -162,10 +235,12 @@ export default defineConfig({
     routeManifest: true,
     css: true,
   },
+  middleware: {
+    builtin: { timing: true, logging: true },
+    plugins: [],
+  },
 })
 ```
-
-The CLI reads `ruvyxa.config.ts` for `appDir`, `outDir`, server defaults, build minification, build parallelism, and runtime cache settings. `runtime: "node"` and `react: true` are default framework behavior and are not required in starter projects.
 
 ---
 
@@ -185,7 +260,37 @@ The CLI reads `ruvyxa.config.ts` for `appDir`, `outDir`, server defaults, build 
 | `ruvyxa test:parity` | Compare dev and production route metadata |
 | `ruvyxa clean` | Remove `.ruvyxa/` |
 
-Human-facing commands use one compact TUI style: short headings, aligned fields, status labels, and terminal color only when stdout is a TTY. JSON commands stay machine-readable.
+---
+
+## Architecture
+
+```text
+┌─────────────────────────────────────────────────────────────┐
+│                     ruvyxa (npm package)                     │
+│  CLI launcher → native Rust binary (ruvyxa_cli)             │
+│  Runtime: worker-pool.mjs (persistent Node IPC)             │
+└─────────────────┬───────────────────────────────────────────┘
+                  │
+┌─────────────────┴───────────────────────────────────────────┐
+│                   Rust Workspace (crates/)                   │
+├─────────────────────────────────────────────────────────────┤
+│ ruvyxa_cli          │ CLI commands, build orchestration      │
+│ ruvyxa_dev_server   │ axum server, worker pool, radix router │
+│ ruvyxa_middleware   │ tower layers, wasmtime wasm plugins    │
+│ ruvyxa_graph        │ route discovery, import graph, validation │
+│ ruvyxa_diagnostics  │ structured errors with RUV#### codes  │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Performance features:**
+- Persistent Node worker pool (eliminates 100-500ms/request subprocess overhead)
+- Radix-trie route matching (O(depth) instead of O(n))
+- LRU render cache with TTL (sub-ms repeated page loads)
+- Async file I/O via tokio::fs (no thread starvation)
+- Streaming SSR with `renderToPipeableStream`
+- Gzip + Brotli compression (tower-http)
+- ETag / 304 Not Modified (blake3 hashing)
+- RwLock-based runtime cache (concurrent readers)
 
 ---
 
@@ -199,8 +304,6 @@ Human-facing commands use one compact TUI style: short headings, aligned fields,
 ├── manifest.json  # Route manifest
 └── build.json     # Build metadata and security defaults
 ```
-
-The client manifest records route-level bundle metadata and the parallelism used during build.
 
 ---
 
@@ -244,4 +347,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup, verification commands, a
 
 ## License
 
-[MIT](LICENSE)
+[MIT](LICENSE) Copyright (c) 2026 Thirawat Sinlapasomsak

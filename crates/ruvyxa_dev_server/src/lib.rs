@@ -15,13 +15,14 @@ use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Request, StatusCode
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::Router;
+use chrono::Local;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use ruvyxa_diagnostics::{Diagnostic, Result, RuvyxaError};
 use ruvyxa_graph::{discover_routes, DiscoverOptions, RouteEntry, RouteKind, RouteManifest};
+use ruvyxa_middleware::{MiddlewareConfig, MiddlewareStack};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
-use tower_http::compression::CompressionLayer;
 use tracing::{info, warn};
 use walkdir::WalkDir;
 
@@ -49,6 +50,7 @@ pub struct ServerConfig {
     pub watch: bool,
     pub cache_route_manifest: bool,
     pub cache_css: bool,
+    pub middleware: MiddlewareConfig,
 }
 
 impl ServerConfig {
@@ -64,6 +66,7 @@ impl ServerConfig {
             watch: true,
             cache_route_manifest: true,
             cache_css: true,
+            middleware: MiddlewareConfig::default(),
         }
     }
 
@@ -79,6 +82,7 @@ impl ServerConfig {
             watch: false,
             cache_route_manifest: true,
             cache_css: true,
+            middleware: MiddlewareConfig::default(),
         }
     }
 }
@@ -229,8 +233,11 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
         )
         .route("/__ruvyxa/trace", get(trace_endpoint))
         .fallback(handle_request)
-        .layer(CompressionLayer::new())
         .with_state(Arc::new(state));
+
+    // Apply middleware stack from config (compression, CORS, timing, logging, custom headers)
+    let middleware_stack = MiddlewareStack::new(config.middleware.clone());
+    let app = middleware_stack.apply(app);
 
     let address: SocketAddr = format!("{}:{}", config.host, config.port)
         .to_socket_addrs()
@@ -265,8 +272,13 @@ fn print_server_ready(config: &ServerConfig, manifest: &RouteManifest, address: 
 
     println!();
     println!("{}", heading("Ruvyxa server"));
+    print_field("time", accent(current_timestamp()));
     print_field("mode", accent(mode));
     print_field("local", link(&url));
+    print_field("root", path_text(&config.root));
+    print_field("app dir", path_text(&config.app_dir));
+    print_field("public", path_text(&config.public_dir));
+    print_field("client", path_text(&config.client_dir));
     print_field("routes", accent(manifest.routes.len().to_string()));
     print_field("pages", accent(page_routes.to_string()));
     print_field("api", accent(api_routes.to_string()));
@@ -278,6 +290,16 @@ fn print_server_ready(config: &ServerConfig, manifest: &RouteManifest, address: 
             dim("off")
         },
     );
+    print_field(
+        "cache",
+        accent(format!(
+            "routes {}, css {}",
+            enabled_text(config.cache_route_manifest),
+            enabled_text(config.cache_css)
+        )),
+    );
+    print_field("watch paths", accent(watch_paths(config).len().to_string()));
+    print_field("middleware", accent(middleware_summary(&config.middleware)));
     println!();
 }
 
@@ -364,6 +386,50 @@ fn print_field(name: &str, value: String) {
     println!("  {}{} {}", dim(name), padding, value);
 }
 
+fn current_timestamp() -> String {
+    Local::now().format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+fn enabled_text(enabled: bool) -> &'static str {
+    if enabled {
+        "on"
+    } else {
+        "off"
+    }
+}
+
+fn middleware_summary(config: &MiddlewareConfig) -> String {
+    let mut enabled = Vec::new();
+
+    if config.builtin.timing {
+        enabled.push("timing");
+    }
+    if config.builtin.logging {
+        enabled.push("logging");
+    }
+    if config.builtin.cors.is_some() {
+        enabled.push("cors");
+    }
+    if config.builtin.rate_limit.is_some() {
+        enabled.push("rate-limit");
+    }
+    if !config.builtin.headers.is_empty() {
+        enabled.push("headers");
+    }
+    if !config.layers.is_empty() {
+        enabled.push("layers");
+    }
+    if !config.plugins.is_empty() {
+        enabled.push("plugins");
+    }
+
+    if enabled.is_empty() {
+        "none".to_string()
+    } else {
+        enabled.join(", ")
+    }
+}
+
 fn heading(value: impl AsRef<str>) -> String {
     paint(value, "1;35")
 }
@@ -382,6 +448,10 @@ fn ok(value: impl AsRef<str>) -> String {
 
 fn link(value: impl AsRef<str>) -> String {
     paint(value, "34")
+}
+
+fn path_text(path: &Path) -> String {
+    paint(path.display().to_string(), "34")
 }
 
 fn paint(value: impl AsRef<str>, code: &str) -> String {
@@ -2277,7 +2347,9 @@ mod tests {
         std::fs::write(app.join("action.ts"), "export const save = {}").unwrap();
 
         let config = ServerConfig::dev(temp.path(), "localhost", 3000);
-        let trace = runtime_trace_cached(&config, &RuntimeCache::default(), "/blog/hello").await.unwrap();
+        let trace = runtime_trace_cached(&config, &RuntimeCache::default(), "/blog/hello")
+            .await
+            .unwrap();
 
         assert!(trace.matched);
         assert_eq!(trace.params.get("slug"), Some(&"hello".to_string()));
