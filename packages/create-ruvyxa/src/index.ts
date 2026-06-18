@@ -8,8 +8,11 @@ export type { PackageManager, PackageManagerInfo } from "./detect-pm.js"
 
 /** Required files that must exist in the template for a valid scaffold. */
 const REQUIRED_TEMPLATE_FILES = [
+  "AGENTS.md",
+  "CLAUDE.md",
   "app/page.tsx",
   "app/layout.tsx",
+  "app/globals.css",
   "package.json",
   "ruvyxa.config.ts",
 ] as const

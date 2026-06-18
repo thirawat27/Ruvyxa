@@ -65,7 +65,7 @@ pnpm install
 pnpm -r build
 pnpm -r check
 pnpm -r test
-cargo run -p ruvyxa_cli -- test:parity --root examples/basic-app
+cargo run -p ruvyxa_cli -- check --root examples/basic-app
 pnpm release:validate
 pnpm pack:smoke
 ```

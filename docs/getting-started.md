@@ -230,7 +230,7 @@ DATABASE_URL=postgres://localhost:5432/mydb
 Rules:
 - `RUVYXA_PUBLIC_*` variables are available everywhere.
 - All other variables are server-only (SSR, API routes, actions, loaders).
-- `ruvyxa analyze` will catch private env usage in client-reachable code at build time.
+- `ruvyxa check` catches private env usage in client-reachable code before deploy.
 
 ---
 
@@ -248,14 +248,14 @@ The build step validates your app, bundles client-side code with tree-shaking an
 ## Validate Before Deploy
 
 ```bash
-npx ruvyxa analyze
+npx ruvyxa check
 ```
 
-This checks for:
-- Missing default exports in pages
-- Server-only modules imported into client code
-- Private environment variables leaked to the browser
-- Invalid route segments
+This runs the app-level production readiness gate:
+- TypeScript type checking when `tsconfig.json` is present
+- Production build validation
+- Dev/prod route parity
+- Runtime smoke rendering for every page route
 
 Fix all diagnostics before deploying.
 

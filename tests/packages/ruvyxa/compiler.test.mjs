@@ -94,6 +94,118 @@ describe("runtime compiler", () => {
       assert.doesNotMatch(output, /ignored/)
     })
   })
+
+  it("handles JSX returned from ternaries and map callbacks", async () => {
+    await withFixture(async ({ root, outDir }) => {
+      const pageFile = path.join(root, "page.tsx")
+      const outfile = path.join(outDir, "jsx-expressions.mjs")
+      await writeFile(
+        pageFile,
+        `
+          export default function Page({ items = ["one"], active = true }) {
+            return (
+              <main>
+                {active ? <strong>Active</strong> : <span>Idle</span>}
+                <ul>{items.map((item) => <li key={item}>{item}</li>)}</ul>
+              </main>
+            )
+          }
+        `,
+      )
+
+      await compileBundle({
+        projectRoot: exampleRoot,
+        entrySource: `
+          import React from "react"
+          import Page from ${JSON.stringify(toImportPath(pageFile))}
+          export default Page
+        `,
+        sourcefile: "ruvyxa:jsx-expression-entry.tsx",
+        outfile,
+        platform: "browser",
+        external: ["react"],
+      })
+
+      const output = await readFile(outfile, "utf8")
+      assert.match(output, /React\.createElement\("strong"/)
+      assert.match(output, /items\.map\(\(item\) => React\.createElement\("li"/)
+      assert.doesNotMatch(output, /=> <li/)
+    })
+  })
+
+  it("ignores import, export, and private env examples inside strings", async () => {
+    await withFixture(async ({ root, outDir }) => {
+      const pageFile = path.join(root, "page.tsx")
+      const outfile = path.join(outDir, "string-examples.mjs")
+      await writeFile(
+        pageFile,
+        `
+          const snippet = \`
+            import secret from "./missing"
+            export function POST() {}
+            export const createTodo = action
+            process.env.DATABASE_URL
+          \`
+
+          export default function Page() {
+            return <main>{snippet}</main>
+          }
+        `,
+      )
+
+      await compileBundle({
+        projectRoot: exampleRoot,
+        entrySource: `
+          import React from "react"
+          import Page from ${JSON.stringify(toImportPath(pageFile))}
+          export default Page
+        `,
+        sourcefile: "ruvyxa:string-example-entry.tsx",
+        outfile,
+        platform: "browser",
+        external: ["react"],
+      })
+
+      const output = await readFile(outfile, "utf8")
+      assert.match(output, /process\.env\.DATABASE_URL/)
+      assert.doesNotMatch(output, /__exports\.POST/)
+      assert.doesNotMatch(output, /__exports\.createTodo/)
+    })
+  })
+
+  it("drops side-effect asset imports from wrapped modules", async () => {
+    await withFixture(async ({ root, outDir }) => {
+      const pageFile = path.join(root, "page.tsx")
+      const outfile = path.join(outDir, "asset-import.mjs")
+      await writeFile(path.join(root, "global.css"), "body { margin: 0; }\n")
+      await writeFile(
+        pageFile,
+        `
+          import "./global.css"
+
+          export default function Page() {
+            return <main>ok</main>
+          }
+        `,
+      )
+
+      await compileBundle({
+        projectRoot: exampleRoot,
+        entrySource: `
+          import React from "react"
+          import Page from ${JSON.stringify(toImportPath(pageFile))}
+          export default Page
+        `,
+        sourcefile: "ruvyxa:asset-import-entry.tsx",
+        outfile,
+        platform: "browser",
+        external: ["react"],
+      })
+
+      const output = await readFile(outfile, "utf8")
+      assert.doesNotMatch(output, /import "\.\/global\.css"/)
+    })
+  })
 })
 
 async function withFixture(run) {

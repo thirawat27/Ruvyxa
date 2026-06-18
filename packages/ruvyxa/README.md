@@ -14,12 +14,13 @@ Published installs include the TypeScript runtime files, a persistent Node worke
 
 ```bash
 npx ruvyxa dev --root .
+npx ruvyxa check --root .
 npx ruvyxa build --root .
 npx ruvyxa start --root .
 npx ruvyxa doctor --root .
 ```
 
-Human-facing commands print the same compact TUI style used by the native server: headings, aligned fields, status labels, and color only on real terminals. Structured commands such as `analyze`, `trace`, and `bench --json` remain machine-readable.
+Human-facing commands print the same compact TUI style used by the native server: headings, aligned fields, status labels, and color only on real terminals. Use `check` as the app-level production readiness gate. Structured commands such as `analyze`, `trace`, and `bench --json` remain machine-readable.
 
 Production builds emit route-level client bundles concurrently and keep manifest output deterministic.
 

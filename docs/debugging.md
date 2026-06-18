@@ -78,13 +78,23 @@ Affected routes:
 
 ### `ruvyxa analyze`
 
-Validates the entire app before production builds:
+Validates the import graph and route conventions:
 
 ```bash
 ruvyxa analyze
 ```
 
-Reports all boundary violations, missing exports, and invalid routes as structured JSON with diagnostics.
+Reports all boundary violations, missing exports, and invalid routes as structured JSON with diagnostics. Use `ruvyxa check` as the normal before-deploy command; use `analyze` when you need the raw diagnostic payload.
+
+### `ruvyxa check`
+
+Runs the recommended app-level production readiness checks:
+
+```bash
+ruvyxa check
+```
+
+Use this before deploys. It combines TypeScript type checking, production build validation, dev/prod parity, and runtime page smoke rendering.
 
 ### `ruvyxa doctor`
 
@@ -128,7 +138,7 @@ Returns:
 
 ### `ruvyxa test:parity`
 
-Compares dev and production route graphs to ensure consistency:
+Compares dev and production route graphs and smoke-renders every page route in both modes:
 
 ```bash
 ruvyxa test:parity

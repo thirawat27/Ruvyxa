@@ -30,7 +30,7 @@
 - **Tower-based middleware** — composable CORS, rate-limiting, timing, logging, and custom headers via `ruvyxa.config.ts`.
 - **Wasm plugin runtime** — sandboxed WebAssembly plugins powered by Wasmtime with hot-reload, configurable permissions, and execution limits.
 - **Parallel production bundling** — page client bundles are emitted concurrently and written back in deterministic route order.
-- **Honest builds** — `ruvyxa analyze` catches server/client boundary leaks before output is emitted.
+- **Honest checks** — `ruvyxa check` runs type checking, build validation, dev/prod parity, and page smoke rendering before deploy.
 - **SSR-first React** — pages render on the server, with route-level client bundles for hydration.
 - **Secure server actions** — validation hooks, origin checks, Fetch Metadata guards, a 64 KB body limit, and rate limiting are built in.
 - **Dev/prod parity** — `dev` and `start` share routing, rendering, static asset, and security-header semantics.
@@ -252,14 +252,15 @@ export default defineConfig({
 |---------|---------|
 | `ruvyxa dev` | Start the development server with HMR |
 | `ruvyxa build` | Validate and emit `.ruvyxa/` production output |
+| `ruvyxa check` | Run app-level production readiness checks |
 | `ruvyxa start` | Serve production output with the same runtime semantics as dev |
 | `ruvyxa preview` | Alias-style production preview command |
 | `ruvyxa routes` | Show discovered page and API routes |
-| `ruvyxa analyze` | Print structured validation JSON and fail on diagnostics |
+| `ruvyxa analyze` | Print structured validation JSON for boundary and route diagnostics |
 | `ruvyxa doctor` | Check dependencies, route counts, environment docs, and native CLI status |
 | `ruvyxa trace <path>` | Print route matching details for a URL |
 | `ruvyxa bench` | Benchmark discovery, validation, and builds |
-| `ruvyxa test:parity` | Compare dev and production route metadata |
+| `ruvyxa test:parity` | Compare dev/prod routes and smoke-render page routes |
 | `ruvyxa clean` | Remove `.ruvyxa/` |
 
 ---

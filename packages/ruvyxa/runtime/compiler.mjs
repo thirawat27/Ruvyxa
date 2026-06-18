@@ -316,22 +316,26 @@ function rewriteModule(module) {
 
   let source = shouldTransformJsx(module) ? transformJsx(module.source) : module.source
   source = stripTypes(source)
+  const codeOnly = maskNonCode(source)
 
   const lines = []
   const lineMap = []
   const exported = []
   const reExportAll = []
 
-  for (const [sourceLine, rawLine] of source.split("\n").entries()) {
-    const line = rawLine.trim()
+  const sourceLines = source.split("\n")
+  const codeLines = codeOnly.split("\n")
+  for (let sourceLine = 0; sourceLine < sourceLines.length; sourceLine++) {
+    const rawLine = sourceLines[sourceLine]
+    const line = (codeLines[sourceLine] ?? "").trim()
     if (!line) {
-      lines.push("")
+      lines.push(rawLine)
       lineMap.push(sourceLine)
       continue
     }
 
-    if (line.startsWith("import ")) {
-      const rewritten = rewriteImport(line, module)
+    if (/^import\b/.test(line)) {
+      const rewritten = rewriteImport(rawLine.trim(), module)
       if (rewritten) {
         lines.push(rewritten)
         lineMap.push(sourceLine)
@@ -339,8 +343,8 @@ function rewriteModule(module) {
       continue
     }
 
-    if (line.startsWith("export ")) {
-      const result = rewriteExport(line, module, exported, reExportAll)
+    if (/^export\b/.test(line)) {
+      const result = rewriteExport(rawLine.trim(), module, exported, reExportAll)
       if (result) {
         lines.push(result)
         lineMap.push(sourceLine)
@@ -468,7 +472,9 @@ function rewriteImportClause(clause, sourceRef) {
 }
 
 function rewriteDynamicImports(line, module) {
-  return line.replace(/\bimport\s*\(\s*["']([^"']+)["']\s*\)/g, (match, specifier) => {
+  const codeOnly = maskNonCode(line, { preserveImportCallSpecifiers: true })
+  return line.replace(/\bimport\s*\(\s*["']([^"']+)["']\s*\)/g, (match, specifier, offset) => {
+    if (codeOnly.slice(offset, offset + match.length).trim() !== match) return match
     const source = module.deps.get(specifier)
     if (!source || source.external) return match
     return `Promise.resolve(${source.id})`
@@ -492,6 +498,10 @@ function parseNamedBindings(clause) {
 }
 
 function extractSpecifiers(source) {
+  const codeOnly = maskNonCode(source, {
+    preserveImportExportSpecifiers: true,
+    preserveImportCallSpecifiers: true,
+  })
   const specifiers = []
   const patterns = [
     /\bimport\s+(?:type\s+)?[\s\S]*?\s+from\s+["']([^"']+)["']/g,
@@ -501,8 +511,8 @@ function extractSpecifiers(source) {
     /^\s*import\s+["']([^"']+)["']/gm,
   ]
   for (const pattern of patterns) {
-    for (const match of source.matchAll(pattern)) {
-      if (isTypeOnlySpecifier(source, match.index ?? 0)) continue
+    for (const match of codeOnly.matchAll(pattern)) {
+      if (isTypeOnlySpecifier(codeOnly, match.index ?? 0)) continue
       specifiers.push(match[1])
     }
   }
@@ -601,12 +611,11 @@ function checkClientBoundary(root, filePath, source) {
   if (normalized === "server.ts" || normalized.startsWith("server/") || normalized.endsWith("/server.ts")) {
     throw new Error(`RUV1007: Server-only file imported into client bundle: ${filePath}`)
   }
-  if (source.includes('import "server-only"') || source.includes("import 'server-only'")) {
+  if (extractSpecifiers(source).includes("server-only")) {
     throw new Error(`RUV1007: Server-only module imported into client bundle: ${filePath}`)
   }
-  const privateEnv = source.match(/\bprocess\.env\.([A-Z_][A-Z0-9_]*)/)
-  if (privateEnv && privateEnv[1] !== "NODE_ENV" && !privateEnv[1].startsWith("RUVYXA_PUBLIC_")) {
-    throw new Error(`RUV1008: Private environment variable ${privateEnv[1]} used in client bundle: ${filePath}`)
+  for (const envName of privateEnvReads(source)) {
+    throw new Error(`RUV1008: Private environment variable ${envName} used in client bundle: ${filePath}`)
   }
 }
 
@@ -686,7 +695,7 @@ class JsxTransformer {
       if (this.source[this.index] === "{") {
         const expr = this.readBalanced("{", "}")
         const inner = expr.slice(1, -1).trim()
-        if (inner && !isJsxComment(inner)) children.push(inner)
+        if (inner && !isJsxComment(inner)) children.push(transformJsxExpression(inner))
         continue
       }
       const text = this.readText()
@@ -699,7 +708,7 @@ class JsxTransformer {
   readProp() {
     if (this.source.startsWith("{...", this.index)) {
       const expr = this.readBalanced("{", "}")
-      return { spread: expr.slice(4, -1).trim() }
+      return { spread: transformJsxExpression(expr.slice(4, -1).trim()) }
     }
     const name = this.readName()
     this.skipWhitespace()
@@ -717,7 +726,7 @@ class JsxTransformer {
     }
     if (this.source[this.index] === "{") {
       const expr = this.readBalanced("{", "}")
-      return [name, expr.slice(1, -1).trim()]
+      return [name, transformJsxExpression(expr.slice(1, -1).trim())]
     }
     return [name, "true"]
   }
@@ -804,6 +813,106 @@ function formatProps(props) {
 
 function isJsxComment(value) {
   return value.startsWith("/*") && value.endsWith("*/")
+}
+
+function transformJsxExpression(value) {
+  return maybeContainsJsx(value) ? transformJsx(value) : value
+}
+
+function maybeContainsJsx(value) {
+  return /<[A-Za-z][\w:.-]*(\s|>|\/)/.test(value) || value.includes("<>")
+}
+
+function privateEnvReads(source) {
+  const names = []
+  const codeOnly = maskNonCode(source)
+  for (const match of codeOnly.matchAll(/\bprocess\.env\.([A-Z_][A-Z0-9_]*)/g)) {
+    const name = match[1]
+    if (name !== "NODE_ENV" && !name.startsWith("RUVYXA_PUBLIC_")) names.push(name)
+  }
+  return names
+}
+
+function maskNonCode(source, options = {}) {
+  const preserveImportExportSpecifiers = options.preserveImportExportSpecifiers === true
+  const preserveImportCallSpecifiers = options.preserveImportCallSpecifiers === true
+  let output = ""
+  let index = 0
+
+  while (index < source.length) {
+    const char = source[index]
+    const next = source[index + 1]
+
+    if (char === "/" && next === "/") {
+      const end = source.indexOf("\n", index + 2)
+      const stop = end === -1 ? source.length : end
+      output += " ".repeat(stop - index)
+      index = stop
+      continue
+    }
+
+    if (char === "/" && next === "*") {
+      const end = source.indexOf("*/", index + 2)
+      const stop = end === -1 ? source.length : end + 2
+      output += maskRange(source.slice(index, stop))
+      index = stop
+      continue
+    }
+
+    if (char === "\"" || char === "'") {
+      const end = readStringEnd(source, index, char)
+      const literal = source.slice(index, end)
+      const previous = source.slice(Math.max(0, index - 32), index)
+      const preserve =
+        (preserveImportExportSpecifiers && /\b(?:from|import)\s*$/.test(previous)) ||
+        (preserveImportCallSpecifiers && /\bimport\s*\(\s*$/.test(previous))
+      output += preserve ? literal : maskRange(literal)
+      index = end
+      continue
+    }
+
+    if (char === "`") {
+      const end = readTemplateEnd(source, index)
+      output += maskRange(source.slice(index, end))
+      index = end
+      continue
+    }
+
+    output += char
+    index++
+  }
+
+  return output
+}
+
+function readStringEnd(source, start, quote) {
+  let index = start + 1
+  while (index < source.length) {
+    const char = source[index++]
+    if (char === "\\") {
+      index++
+      continue
+    }
+    if (char === quote) break
+  }
+  return index
+}
+
+function readTemplateEnd(source, start) {
+  let index = start + 1
+  while (index < source.length) {
+    const char = source[index++]
+    if (char === "\\") {
+      index++
+      continue
+    }
+    if (char === "`") break
+  }
+  return index
+}
+
+function maskRange(value) {
+  return value.replace(/[^\n]/g, " ")
 }
 
 function pushIfExists(collection, file) {

@@ -238,7 +238,12 @@ fn validate_client_module(
         return Ok(());
     };
 
-    if source.contains("\"server-only\"") || source.contains("'server-only'") {
+    let code = code_without_strings_and_comments(&source);
+
+    if import_specifiers(&source)
+        .iter()
+        .any(|specifier| specifier == "server-only")
+    {
         diagnostics.push(
             Diagnostic::new("RUV1007", "Server-only module imported into client graph")
                 .explain("This module is reachable from a hydrated page or client module but declares `server-only`.")
@@ -247,7 +252,7 @@ fn validate_client_module(
         );
     }
 
-    for env_name in private_env_reads(&source) {
+    for env_name in private_env_reads(&code) {
         diagnostics.push(
             Diagnostic::new("RUV1008", "Private environment variable used in client graph")
                 .explain(format!(
@@ -258,19 +263,15 @@ fn validate_client_module(
         );
     }
 
-    // Check if file is under the server/ directory.
+    // Check if file is under the project-level server/ directory.
     // Try strip_prefix first (cheap), only canonicalize the file if needed.
     let is_server_dir = if let Ok(relative) = file.strip_prefix(canonical_root) {
-        relative
-            .components()
-            .any(|component| component.as_os_str() == "server")
+        relative_starts_with_server(relative)
     } else {
         // Paths don't share a prefix — try canonicalizing the file as fallback.
         let canonical_file = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
         if let Ok(relative) = canonical_file.strip_prefix(canonical_root) {
-            relative
-                .components()
-                .any(|component| component.as_os_str() == "server")
+            relative_starts_with_server(relative)
         } else {
             false
         }
@@ -293,7 +294,10 @@ fn validate_server_module(file: &Path, diagnostics: &mut Vec<Diagnostic>) -> Res
         return Ok(());
     };
 
-    if source.contains("\"client-only\"") || source.contains("'client-only'") {
+    if import_specifiers(&source)
+        .iter()
+        .any(|specifier| specifier == "client-only")
+    {
         diagnostics.push(
             Diagnostic::new("RUV1009", "Client-only module imported into server graph")
                 .explain(
@@ -335,6 +339,7 @@ fn collect_relative_graph(entry: &Path) -> BTreeSet<PathBuf> {
 }
 
 fn import_specifiers(source: &str) -> Vec<String> {
+    let source = code_for_import_specifiers(source);
     let mut imports = Vec::new();
 
     for line in source.lines() {
@@ -402,6 +407,206 @@ fn private_env_reads(source: &str) -> Vec<String> {
     }
 
     names
+}
+
+fn relative_starts_with_server(relative: &Path) -> bool {
+    relative
+        .components()
+        .next()
+        .is_some_and(|component| component.as_os_str() == "server")
+}
+
+fn code_without_strings_and_comments(source: &str) -> String {
+    let mut output = String::with_capacity(source.len());
+    let mut chars = source.char_indices().peekable();
+
+    while let Some((_, character)) = chars.next() {
+        match character {
+            '"' | '\'' => {
+                output.push(' ');
+                skip_quoted_string(character, &mut chars, &mut output);
+            }
+            '`' => {
+                output.push(' ');
+                skip_template_literal(&mut chars, &mut output);
+            }
+            '/' if chars.peek().is_some_and(|(_, next)| *next == '/') => {
+                output.push(' ');
+                chars.next();
+                output.push(' ');
+                skip_line_comment(&mut chars, &mut output);
+            }
+            '/' if chars.peek().is_some_and(|(_, next)| *next == '*') => {
+                output.push(' ');
+                chars.next();
+                output.push(' ');
+                skip_block_comment(&mut chars, &mut output);
+            }
+            _ => output.push(character),
+        }
+    }
+
+    output
+}
+
+fn code_for_import_specifiers(source: &str) -> String {
+    let mut output = String::with_capacity(source.len());
+    let mut chars = source.char_indices().peekable();
+
+    while let Some((_, character)) = chars.next() {
+        match character {
+            '"' | '\'' => {
+                if should_preserve_import_string(&output) {
+                    output.push(character);
+                    copy_quoted_string(character, &mut chars, &mut output);
+                } else {
+                    output.push(' ');
+                    skip_quoted_string(character, &mut chars, &mut output);
+                }
+            }
+            '`' => {
+                output.push(' ');
+                skip_template_literal(&mut chars, &mut output);
+            }
+            '/' if chars.peek().is_some_and(|(_, next)| *next == '/') => {
+                output.push(' ');
+                chars.next();
+                output.push(' ');
+                skip_line_comment(&mut chars, &mut output);
+            }
+            '/' if chars.peek().is_some_and(|(_, next)| *next == '*') => {
+                output.push(' ');
+                chars.next();
+                output.push(' ');
+                skip_block_comment(&mut chars, &mut output);
+            }
+            _ => output.push(character),
+        }
+    }
+
+    output
+}
+
+fn should_preserve_import_string(output: &str) -> bool {
+    let trimmed = output.trim_end();
+    trimmed.ends_with(" from")
+        || trimmed.ends_with("import")
+        || trimmed.ends_with("import(")
+        || trimmed.ends_with("require(")
+}
+
+fn copy_quoted_string(
+    quote: char,
+    chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>,
+    output: &mut String,
+) {
+    let mut escaped = false;
+    for (_, character) in chars.by_ref() {
+        output.push(character);
+
+        if escaped {
+            escaped = false;
+            continue;
+        }
+
+        if character == '\\' {
+            escaped = true;
+            continue;
+        }
+
+        if character == quote {
+            break;
+        }
+    }
+}
+
+fn skip_quoted_string(
+    quote: char,
+    chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>,
+    output: &mut String,
+) {
+    let mut escaped = false;
+    for (_, character) in chars.by_ref() {
+        if character == '\n' {
+            output.push('\n');
+        } else {
+            output.push(' ');
+        }
+
+        if escaped {
+            escaped = false;
+            continue;
+        }
+
+        if character == '\\' {
+            escaped = true;
+            continue;
+        }
+
+        if character == quote {
+            break;
+        }
+    }
+}
+
+fn skip_template_literal(
+    chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>,
+    output: &mut String,
+) {
+    let mut escaped = false;
+    for (_, character) in chars.by_ref() {
+        if character == '\n' {
+            output.push('\n');
+        } else {
+            output.push(' ');
+        }
+
+        if escaped {
+            escaped = false;
+            continue;
+        }
+
+        if character == '\\' {
+            escaped = true;
+            continue;
+        }
+
+        if character == '`' {
+            break;
+        }
+    }
+}
+
+fn skip_line_comment(
+    chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>,
+    output: &mut String,
+) {
+    for (_, character) in chars.by_ref() {
+        if character == '\n' {
+            output.push('\n');
+            break;
+        }
+        output.push(' ');
+    }
+}
+
+fn skip_block_comment(
+    chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>,
+    output: &mut String,
+) {
+    let mut previous = '\0';
+    for (_, character) in chars.by_ref() {
+        if character == '\n' {
+            output.push('\n');
+        } else {
+            output.push(' ');
+        }
+
+        if previous == '*' && character == '/' {
+            break;
+        }
+        previous = character;
+    }
 }
 
 fn route_path_from_dir(relative_dir: &Path) -> Result<String> {
@@ -665,5 +870,50 @@ mod tests {
         assert!(codes.contains(&"RUV1007"));
         assert!(codes.contains(&"RUV1008"));
         assert!(codes.contains(&"RUV1010"));
+    }
+
+    #[test]
+    fn ignores_doc_snippets_when_validating_client_env_and_imports() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(
+            app.join("page.tsx"),
+            r#"
+                const docs = `
+                  import secret from "../server/secret";
+                  import "server-only";
+                  process.env.DATABASE_URL;
+                `;
+
+                export default function Docs() {
+                    return <main>{docs}</main>;
+                }
+            "#,
+        )
+        .unwrap();
+
+        let manifest = discover_routes(DiscoverOptions::new(&app)).unwrap();
+        let report = validate_app(temp.path(), &manifest).unwrap();
+
+        assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+    }
+
+    #[test]
+    fn allows_server_as_a_url_route_segment() {
+        let temp = tempfile::tempdir().unwrap();
+        let app_server = temp.path().join("app/server");
+        fs::create_dir_all(&app_server).unwrap();
+        fs::write(
+            app_server.join("page.tsx"),
+            "export default function ServerDocs() { return <main /> }",
+        )
+        .unwrap();
+
+        let manifest = discover_routes(DiscoverOptions::new(temp.path().join("app"))).unwrap();
+        let report = validate_app(temp.path(), &manifest).unwrap();
+
+        assert_eq!(manifest.routes[0].path, "/server");
+        assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
     }
 }

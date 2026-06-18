@@ -34,8 +34,61 @@ export interface RuvyxaConfig {
     routeManifest?: boolean
     css?: boolean
   }
+  middleware?: MiddlewareConfig
   adapter?: Adapter
+  adapterOptions?: Record<string, unknown>
   plugins?: RuvyxaPlugin[]
+}
+
+export interface MiddlewareConfig {
+  builtin?: BuiltinMiddlewareConfig
+  layers?: LayerConfig[]
+  plugins?: MiddlewarePluginConfig[]
+}
+
+export interface BuiltinMiddlewareConfig {
+  cors?: CorsConfig
+  timing?: boolean
+  logging?: boolean
+  rateLimit?: RateLimitConfig
+  headers?: Record<string, string>
+}
+
+export interface CorsConfig {
+  origins?: string[]
+  methods?: string[]
+  headers?: string[]
+  credentials?: boolean
+  maxAge?: number
+}
+
+export interface RateLimitConfig {
+  maxRequests: number
+  windowSecs: number
+  keyBy?: string
+}
+
+export interface LayerConfig {
+  kind: string
+  options?: unknown
+}
+
+export interface MiddlewarePluginConfig {
+  name: string
+  path: string
+  hotReload?: boolean
+  phase?: "request" | "response"
+  routes?: string[]
+  config?: unknown
+  permissions?: PluginPermissions
+}
+
+export interface PluginPermissions {
+  env?: string[]
+  fsRead?: string[]
+  net?: string[]
+  timeoutMs?: number
+  maxMemoryBytes?: number
 }
 
 export interface TransformResult {

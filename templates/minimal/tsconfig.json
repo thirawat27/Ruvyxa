@@ -8,10 +8,9 @@
     "skipLibCheck": true,
     "esModuleInterop": true,
     "forceConsistentCasingInFileNames": true,
-    "baseUrl": ".",
     "paths": {
       "~/*": ["./*"]
     }
   },
-  "include": ["app", "components", "lib", "ruvyxa.config.ts"]
+  "include": ["app", "ruvyxa.config.ts", "node_modules/ruvyxa/dist/types.d.ts"]
 }

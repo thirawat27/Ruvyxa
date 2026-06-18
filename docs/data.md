@@ -133,13 +133,13 @@ export default function Page() {
 
 ## Validation
 
-Run `ruvyxa analyze` before building to catch boundary violations:
+Run `ruvyxa check` before deploying to catch boundary violations, type errors, and dev/prod parity issues:
 
 ```bash
-ruvyxa analyze
+ruvyxa check
 ```
 
-This walks the entire import graph of every page and reports any server-only code or private env vars that are reachable from client bundles.
+This walks the import graph of every page, reports server-only code or private env vars that are reachable from client bundles, and smoke-renders page routes in both dev and production mode.
 
 ---
 

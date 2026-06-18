@@ -29,6 +29,7 @@ This command:
 2. Builds production output to `.ruvyxa/`.
 3. Discovers routes from `.ruvyxa/server/app` (the production source).
 4. Compares every route between dev and production.
+5. Smoke-renders every page route in both modes.
 
 ---
 
@@ -45,6 +46,8 @@ For each route, the parity check verifies:
 | Client modules | `client.tsx` siblings |
 | Runtime target | `node`, `edge`, or `static` |
 
+For page routes, it also renders a representative URL in development and production mode and fails if either render path returns an error.
+
 ---
 
 ## Example Output
@@ -55,6 +58,10 @@ PASS  Page  /about      dev/prod match
 PASS  Page  /blog/:slug dev/prod match
 PASS  Page  /todos      dev/prod match
 PASS  Api   /api/health dev/prod match
+PASS  Render /          dev/prod smoke render
+PASS  Render /about     dev/prod smoke render
+PASS  Render /blog/test dev/prod smoke render
+PASS  Render /todos     dev/prod smoke render
 Parity passed for 5 routes
 ```
 
@@ -80,7 +87,7 @@ Run the parity check after changing:
 - Client module detection
 - Action file conventions
 
-The CI workflow runs parity as part of the release gate.
+The CI workflow runs `ruvyxa check`, which includes parity, as part of the release gate. Run `ruvyxa test:parity` directly when you only need to debug route behavior.
 
 ---
 

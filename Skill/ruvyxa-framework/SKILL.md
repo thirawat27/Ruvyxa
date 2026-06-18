@@ -30,7 +30,7 @@ This skill is plain Markdown and does not depend on any AI provider, IDE, MCP se
 - Keep Node.js 22 as the JavaScript runtime requirement. Do not lower package `engines.node`, docs, CI, or template requirements.
 - Use Ruvyxa's public APIs and CLI. Do not modify Ruvyxa framework source code, package internals, native implementation files, renderer scripts, or adapter package internals.
 - If the task requires changing Ruvyxa framework source code, stop and ask for a framework-development guide instead of continuing with this app-user skill.
-- Preserve dev/prod parity from the app side: verify with `pnpm build`, `pnpm start`, and `pnpm parity` when route/runtime behavior changes.
+- Preserve dev/prod parity from the app side: verify with `pnpm check` before handoff, and use `pnpm parity` when route/runtime behavior needs focused debugging.
 - Keep server-only imports out of browser-reachable code.
 - Keep private environment variables out of client graphs; expose only `RUVYXA_PUBLIC_*` values to browser code.
 - Keep `analyze` output machine-readable. Do not work around validation by hiding unsafe imports.
@@ -41,7 +41,7 @@ This skill is plain Markdown and does not depend on any AI provider, IDE, MCP se
 - Keep browser-reachable code free of private env reads and server-only imports.
 - Put route-local server logic in `server.ts` or `action.ts`; put browser modules in `client.tsx`.
 - Prefix browser-safe env vars with `RUVYXA_PUBLIC_`.
-- Run `pnpm analyze` after changing routes, imports, env usage, or server/client boundaries.
+- Run `pnpm check` after changing routes, imports, env usage, or server/client boundaries.
 
 ## Common App Tasks
 
@@ -59,14 +59,13 @@ For normal app changes, run:
 
 ```bash
 pnpm check
-pnpm analyze
-pnpm build
 ```
 
-For route, runtime, middleware, or deployment-sensitive changes, also run:
+For route, runtime, middleware, or deployment-sensitive failures that need drill-down, also run:
 
 ```bash
 pnpm parity
+pnpm analyze
 pnpm doctor
 ```
 

@@ -11,7 +11,7 @@ use anyhow::Context;
 use chrono::Local;
 use clap::builder::styling::{AnsiColor, Effects, Styles};
 use clap::{Parser, Subcommand, ValueEnum};
-use ruvyxa_dev_server::{serve, ServerConfig};
+use ruvyxa_dev_server::{render_request, serve, ServerConfig};
 use ruvyxa_diagnostics::Diagnostic;
 use ruvyxa_graph::{
     discover_routes, validate_app, write_manifest, DiscoverOptions, RouteEntry, RouteManifest,
@@ -47,6 +47,8 @@ enum Command {
     Dev(ServerArgs),
     #[command(about = "Build the application for production output")]
     Build(BuildArgs),
+    #[command(about = "Run app-level production readiness checks")]
+    Check(ProjectArgs),
     #[command(about = "Serve an existing production build")]
     Start(ServerArgs),
     #[command(about = "Preview an existing production build locally")]
@@ -66,12 +68,12 @@ enum Command {
     #[command(
         name = "test:parity",
         alias = "parity",
-        about = "Compare development and production route manifests"
+        about = "Compare dev/prod routes and smoke-render page routes"
     )]
     TestParity(ProjectArgs),
 }
 
-#[derive(Debug, Parser)]
+#[derive(Debug, Clone, Parser)]
 struct ProjectArgs {
     #[arg(long, default_value = ".")]
     root: PathBuf,
@@ -245,6 +247,7 @@ async fn main() -> anyhow::Result<()> {
                 .context("dev server failed")?;
         }
         Command::Build(args) => build(args).context("build failed")?,
+        Command::Check(args) => check(args).context("check failed")?,
         Command::Start(args) | Command::Preview(args) => {
             let config = load_project_config(&args.root)?;
             serve(production_server_config(&args, &config))
@@ -355,6 +358,7 @@ fn canonical_command_name(command: &str) -> Option<&'static str> {
     match command.to_ascii_lowercase().as_str() {
         "dev" => Some("dev"),
         "build" => Some("build"),
+        "check" => Some("check"),
         "start" => Some("start"),
         "preview" => Some("preview"),
         "routes" => Some("routes"),
@@ -846,6 +850,46 @@ fn analyze(args: ProjectArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn check(args: ProjectArgs) -> anyhow::Result<()> {
+    let started = Instant::now();
+    print_tui_header("Ruvyxa check");
+    print_field("root", path_text(&args.root));
+    println!();
+
+    run_typecheck(&args.root)?;
+    test_parity(args)?;
+
+    println!(
+        "{} Production readiness checks passed in {}\n",
+        success(),
+        accent(format_duration(started.elapsed()))
+    );
+    Ok(())
+}
+
+fn run_typecheck(root: &Path) -> anyhow::Result<()> {
+    if !root.join("tsconfig.json").exists() {
+        println!("{} TypeScript skipped (no tsconfig.json)", success());
+        return Ok(());
+    }
+
+    let tsc = local_binary_upwards(root, "tsc").unwrap_or_else(|| PathBuf::from("tsc"));
+    let output = ProcessCommand::new(&tsc)
+        .arg("--noEmit")
+        .current_dir(root)
+        .output()
+        .with_context(|| format!("failed to run TypeScript type check with {}", tsc.display()))?;
+
+    if output.status.success() {
+        println!("{} TypeScript type check passed", success());
+        return Ok(());
+    }
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    anyhow::bail!("TypeScript type check failed\nstdout:\n{stdout}\nstderr:\n{stderr}")
+}
+
 fn doctor(args: ProjectArgs) -> anyhow::Result<()> {
     let config = load_project_config(&args.root)?;
     let app_dir = args.root.join(config.app_dir());
@@ -1106,6 +1150,26 @@ fn test_parity(args: ProjectArgs) -> anyhow::Result<()> {
         }
     }
 
+    failures.extend(smoke_render_parity(
+        &dev_server_config(
+            &ServerArgs {
+                root: args.root.clone(),
+                host: None,
+                port: None,
+            },
+            &config,
+        ),
+        &production_server_config(
+            &ServerArgs {
+                root: args.root.clone(),
+                host: None,
+                port: None,
+            },
+            &config,
+        ),
+        &dev_manifest,
+    ));
+
     if failures.is_empty() {
         println!(
             "\n{} Parity passed for {} routes in {}\n",
@@ -1152,6 +1216,84 @@ fn parity_route(manifest: &RouteManifest, route: &RouteEntry) -> ParityRoute {
         server_modules: normalize_module_paths(manifest, &route.server_modules),
         client_modules: normalize_module_paths(manifest, &route.client_modules),
         runtime: format!("{:?}", route.runtime),
+    }
+}
+
+fn smoke_render_parity(
+    dev_config: &ServerConfig,
+    prod_config: &ServerConfig,
+    manifest: &RouteManifest,
+) -> Vec<String> {
+    let mut failures = Vec::new();
+
+    for route in manifest
+        .routes
+        .iter()
+        .filter(|route| route.kind == ruvyxa_graph::RouteKind::Page)
+    {
+        let request_path = parity_smoke_path(&route.path);
+
+        match render_request(dev_config, &request_path, "GET") {
+            Ok(response) if !response.status().is_server_error() => {
+                println!("{} Page {} dev render ok", success(), route.path);
+            }
+            Ok(response) => failures.push(format!(
+                "Page {} dev runtime render returned {} for {}",
+                route.path,
+                response.status(),
+                request_path
+            )),
+            Err(error) => failures.push(format!(
+                "Page {} dev runtime render failed for {}: {error}",
+                route.path, request_path
+            )),
+        }
+
+        match render_request(prod_config, &request_path, "GET") {
+            Ok(response) if !response.status().is_server_error() => {
+                println!("{} Page {} prod render ok", success(), route.path);
+            }
+            Ok(response) => failures.push(format!(
+                "Page {} prod runtime render returned {} for {}",
+                route.path,
+                response.status(),
+                request_path
+            )),
+            Err(error) => failures.push(format!(
+                "Page {} prod runtime render failed for {}: {error}",
+                route.path, request_path
+            )),
+        }
+    }
+
+    failures
+}
+
+fn parity_smoke_path(route_path: &str) -> String {
+    if route_path == "/" {
+        return "/".to_string();
+    }
+
+    let segments = route_path
+        .trim_start_matches('/')
+        .split('/')
+        .filter_map(|segment| {
+            if segment.starts_with('*') {
+                Some("smoke/path")
+            } else if segment.starts_with(':') && segment.ends_with('?') {
+                None
+            } else if segment.starts_with(':') {
+                Some("smoke")
+            } else {
+                Some(segment)
+            }
+        })
+        .collect::<Vec<_>>();
+
+    if segments.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", segments.join("/"))
     }
 }
 
@@ -1513,6 +1655,26 @@ fn tool_version(command: &str, args: &[&str]) -> String {
     }
 }
 
+fn local_binary_upwards(root: &Path, binary: &str) -> Option<PathBuf> {
+    let binary = if cfg!(windows) {
+        format!("{binary}.cmd")
+    } else {
+        binary.to_string()
+    };
+    let mut current = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+
+    loop {
+        let candidate = current.join("node_modules").join(".bin").join(&binary);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+
+        if !current.pop() {
+            return None;
+        }
+    }
+}
+
 fn read_package_json(path: &Path) -> anyhow::Result<serde_json::Value> {
     let source =
         fs::read_to_string(path).with_context(|| format!("failed to read {}", path.display()))?;
@@ -1664,7 +1826,8 @@ mod tests {
         assert!(!help.contains("ruvyxa.exe"));
         assert!(help.contains("dev          Run the development server with hot reload"));
         assert!(help.contains("build        Build the application for production output"));
-        assert!(help.contains("test:parity  Compare development and production route manifests"));
+        assert!(help.contains("check        Run app-level production readiness checks"));
+        assert!(help.contains("test:parity  Compare dev/prod routes and smoke-render page routes"));
     }
 
     #[test]
@@ -1687,6 +1850,19 @@ mod tests {
         .unwrap();
 
         assert!(matches!(cli.command, Command::Build(_)));
+    }
+
+    #[test]
+    fn parses_check_command_case_insensitively() {
+        let cli = Cli::try_parse_from(normalized_cli_args(os_args([
+            "Ruvyxa",
+            "CHECK",
+            "--root",
+            "examples/basic-app",
+        ])))
+        .unwrap();
+
+        assert!(matches!(cli.command, Command::Check(_)));
     }
 
     #[test]
@@ -1751,6 +1927,14 @@ mod tests {
         let args = normalized_cli_args(os_args(["Ruvyxa", "--HELP"]));
 
         assert_eq!(args[1], OsString::from("--help"));
+    }
+
+    #[test]
+    fn builds_smoke_paths_for_dynamic_routes() {
+        assert_eq!(parity_smoke_path("/"), "/");
+        assert_eq!(parity_smoke_path("/blog/:slug"), "/blog/smoke");
+        assert_eq!(parity_smoke_path("/docs/*path"), "/docs/smoke/path");
+        assert_eq!(parity_smoke_path("/shop/:category?"), "/shop");
     }
 
     #[test]

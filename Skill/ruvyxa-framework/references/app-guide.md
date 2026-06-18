@@ -33,7 +33,7 @@ Every page must export a default component.
 - Private env reads such as `process.env.SECRET` must stay in server-only modules.
 - Browser-safe values must use `RUVYXA_PUBLIC_*`.
 - Keep database, filesystem, secret, and privileged network calls in server modules, loaders, actions, or API routes.
-- Run `pnpm analyze` after moving imports or adding env reads.
+- Run `pnpm check` after moving imports or adding env reads.
 
 ## Public APIs
 
@@ -69,8 +69,9 @@ Ruvyxa apps should use Node.js 22:
 ## Verification Choices
 
 - Component or type-only changes: run `pnpm check`.
-- Route/import/env changes: run `pnpm analyze` and `pnpm build`.
-- Dev/prod behavior changes: run `pnpm parity`.
+- Route/import/env changes: run `pnpm check`.
+- Dev/prod behavior failures: run `pnpm parity` to isolate route behavior.
+- Raw diagnostics: run `pnpm analyze`.
 - Environment problems: run `pnpm doctor`.
 - Manual runtime check: run `pnpm dev` during development and `pnpm start` after `pnpm build`.
 

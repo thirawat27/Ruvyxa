@@ -6,6 +6,14 @@ Ruvyxa 1.0 is production-ready when the full CI pipeline passes. This document d
 
 ## Quality Gates
 
+For application projects, use the single app-level gate first:
+
+```bash
+ruvyxa check
+```
+
+It runs TypeScript type checking when `tsconfig.json` is present, builds production output, compares dev/prod route behavior, and smoke-renders every page route.
+
 All of the following must pass before a release:
 
 | Gate | Command |
@@ -18,7 +26,8 @@ All of the following must pass before a release:
 | TypeScript tests | `pnpm -r test` |
 | Package metadata | `pnpm release:validate` |
 | Pack smoke test | `pnpm pack:smoke` |
-| Dev/prod parity | `ruvyxa test:parity --root examples/basic-app` |
+| App deploy gate | `ruvyxa check --root examples/basic-app` |
+| Dev/prod parity drill-down | `ruvyxa test:parity --root examples/basic-app` |
 
 ---
 
@@ -113,7 +122,7 @@ pnpm -r check
 pnpm -r test
 
 # 4. Integration checks
-cargo run -p ruvyxa_cli -- test:parity --root examples/basic-app
+cargo run -p ruvyxa_cli -- check --root examples/basic-app
 pnpm release:validate
 pnpm pack:smoke
 

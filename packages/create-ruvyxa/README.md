@@ -1,6 +1,6 @@
 # create-ruvyxa
 
-Create a clean Ruvyxa app with a small app-router style starter.
+Create a clean Ruvyxa app with a minimal Next-style app-router starter.
 
 ## Usage
 
@@ -14,20 +14,18 @@ pnpm dev
 The generated project starts with:
 
 ```text
-app/global.css
-app/layout.tsx
-app/api/health/route.ts
-app/page.tsx
-public/ruvyxa.png
-.env.example
 AGENTS.md
 CLAUDE.md
+app/globals.css
+app/layout.tsx
+app/page.tsx
+public/ruvyxa.png
 package.json
 ruvyxa.config.ts
 tsconfig.json
 ```
 
-The starter includes production-minded defaults, a health endpoint, environment documentation, and agent instructions without adding demo-only pages. Use the repository `examples/basic-app` when you need examples for dynamic routes, server actions, and loaders.
+The starter stays intentionally small: one page, one layout, one global stylesheet, static assets, config, TypeScript settings, and agent instructions. Use the repository `examples/basic-app` when you need examples for API routes, dynamic routes, server actions, loaders, middleware, and production checks.
 
 ## Project Names
 
