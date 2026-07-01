@@ -98,6 +98,7 @@ Routes are discovered from `app/`:
 | `app/about/page.tsx` | `/about` |
 | `app/blog/[slug]/page.tsx` | `/blog/:slug` |
 | `app/docs/[...path]/page.tsx` | `/docs/*path` |
+| `app/shop/[[...path]]/page.tsx` | `/shop/*path?` |
 | `app/(marketing)/pricing/page.tsx` | `/pricing` |
 | `app/api/health/route.ts` | `/api/health` |
 

@@ -1982,76 +1982,11 @@ fn action_file_for(route: &RouteEntry) -> Option<PathBuf> {
         .find(|path| path.is_file())
 }
 
-struct MatchedRoute<'a> {
-    route: &'a RouteEntry,
-    params: BTreeMap<String, String>,
-}
-
-fn find_route<'a>(manifest: &'a RouteManifest, request_path: &str) -> Option<MatchedRoute<'a>> {
-    manifest.routes.iter().find_map(|route| {
-        route_params(&route.path, request_path).map(|params| MatchedRoute { route, params })
-    })
-}
-
-fn route_params(pattern: &str, request_path: &str) -> Option<BTreeMap<String, String>> {
-    let pattern_parts = split_path(pattern);
-    let request_parts = split_path(request_path);
-    let mut params = BTreeMap::new();
-
-    let mut pattern_index = 0;
-    let mut request_index = 0;
-
-    while pattern_index < pattern_parts.len() {
-        let pattern_part = pattern_parts[pattern_index];
-
-        if pattern_part.starts_with('*') {
-            let name = pattern_part.trim_start_matches('*');
-            params.insert(name.to_string(), request_parts[request_index..].join("/"));
-            return Some(params);
-        }
-
-        if pattern_part.ends_with('?') && pattern_part.starts_with(':') {
-            let name = pattern_part
-                .trim_start_matches(':')
-                .trim_end_matches('?')
-                .to_string();
-            pattern_index += 1;
-            if request_index < request_parts.len() {
-                params.insert(name, request_parts[request_index].to_string());
-                request_index += 1;
-            }
-            continue;
-        }
-
-        let request_part = request_parts.get(request_index)?;
-
-        if !pattern_part.starts_with(':') && pattern_part != *request_part {
-            return None;
-        }
-
-        if pattern_part.starts_with(':') {
-            params.insert(
-                pattern_part.trim_start_matches(':').to_string(),
-                (*request_part).to_string(),
-            );
-        }
-
-        pattern_index += 1;
-        request_index += 1;
-    }
-
-    if request_index == request_parts.len() {
-        Some(params)
-    } else {
-        None
-    }
-}
-
-fn split_path(path: &str) -> Vec<&str> {
-    path.trim_matches('/')
-        .split('/')
-        .filter(|segment| !segment.is_empty())
-        .collect()
+fn find_route<'a>(
+    manifest: &'a RouteManifest,
+    request_path: &str,
+) -> Option<router::RouteMatch<'a>> {
+    RadixRouter::compile(manifest).find(manifest, request_path)
 }
 
 fn collect_css(root: &Path, app_dir: &Path) -> Result<String> {
@@ -2490,41 +2425,6 @@ fn public_asset_links(public_dir: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn matches_static_and_dynamic_routes() {
-        assert!(route_params("/", "/").is_some());
-        assert!(route_params("/blog/:slug", "/blog/hello").is_some());
-        assert!(route_params("/docs/*slug", "/docs/a/b/c").is_some());
-        assert!(route_params("/shop/:category?", "/shop").is_some());
-        assert!(route_params("/shop/:category?", "/shop/books").is_some());
-        assert!(route_params("/blog/:slug", "/blog").is_none());
-    }
-
-    #[test]
-    fn extracts_route_params() {
-        assert_eq!(
-            route_params("/blog/:slug", "/blog/hello")
-                .unwrap()
-                .get("slug"),
-            Some(&"hello".to_string())
-        );
-        assert_eq!(
-            route_params("/docs/*slug", "/docs/a/b/c")
-                .unwrap()
-                .get("slug"),
-            Some(&"a/b/c".to_string())
-        );
-        assert!(route_params("/shop/:category?", "/shop")
-            .unwrap()
-            .is_empty());
-        assert_eq!(
-            route_params("/shop/:category?", "/shop/books")
-                .unwrap()
-                .get("category"),
-            Some(&"books".to_string())
-        );
-    }
 
     #[test]
     fn composes_react_rendered_html_documents() {

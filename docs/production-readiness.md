@@ -56,6 +56,12 @@ Production builds emit a deterministic structure:
 | `.ruvyxa/manifest.json` | Full route manifest |
 | `.ruvyxa/build.json` | Build metadata and security config |
 
+Builds are staged before they replace the active output. Route validation,
+server/client boundary checks, asset copying, client bundle generation, and
+metadata writing must all succeed before `.ruvyxa/server`, `.ruvyxa/client`,
+`.ruvyxa/assets`, `.ruvyxa/manifest.json`, or `.ruvyxa/build.json` are swapped
+into place. The `.ruvyxa/cache/` directory is preserved across builds.
+
 ### Client Bundles
 
 - Route-level splitting (one bundle per page)

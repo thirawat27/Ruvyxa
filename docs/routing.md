@@ -51,25 +51,31 @@ export default function BlogPost({ params }: { params: { slug: string } }) {
 
 ## Catch-All Routes
 
-Use `[...name]` to match any number of segments:
+Use `[...name]` to match one or more segments:
 
 ```
 app/docs/[...path]/page.tsx  →  /docs/*path
 ```
 
-This matches `/docs/intro`, `/docs/guides/routing`, `/docs/a/b/c`, etc.
+This matches `/docs/intro`, `/docs/guides/routing`, `/docs/a/b/c`, etc.,
+but not `/docs`.
 
 ---
 
-## Optional Segments
+## Optional Catch-All Routes
 
-Use `[[name]]` for an optional dynamic segment:
+Use `[[...name]]` when the catch-all may consume zero segments:
 
 ```
-app/shop/[[category]]/page.tsx  →  /shop/:category?
+app/shop/[[...category]]/page.tsx  →  /shop/*category?
 ```
 
-This matches both `/shop` and `/shop/electronics`.
+This matches `/shop`, `/shop/electronics`, and
+`/shop/electronics/phones`. Ruvyxa currently passes a matched catch-all value
+as a slash-joined string (for example, `"electronics/phones"`).
+
+`[[name]]` is not a valid App Router convention and fails discovery with
+`RUV1002`.
 
 ---
 
@@ -94,6 +100,22 @@ Prefix a folder with `@` to create a named slot (excluded from URL):
 ```
 app/@sidebar/page.tsx  →  (not routable, used as a slot)
 ```
+
+Slot trees are excluded from standalone route discovery. Full parallel-route
+rendering semantics are not implemented yet.
+
+---
+
+## Private Folders
+
+Prefix a folder with `_` to keep the entire subtree out of routing:
+
+```
+app/blog/_components/page.tsx  →  (not routable)
+```
+
+Use private folders to colocate implementation files without accidentally
+publishing a URL.
 
 ---
 
@@ -171,7 +193,10 @@ The trace endpoint returns the matched route, parsed params, layout chain, serve
 
 ## Conflict Detection
 
-Ruvyxa detects and reports duplicate route paths at discovery time. If two folders resolve to the same URL path, you'll get a diagnostic with the conflicting file locations.
+Ruvyxa detects and reports overlapping route paths at discovery time. This
+includes route groups that resolve to the same URL, dynamic routes that differ
+only by parameter name, and a `page.tsx` plus `route.ts` at the same segment.
+The build fails with `RUV1003` and identifies the conflicting file.
 
 ---
 

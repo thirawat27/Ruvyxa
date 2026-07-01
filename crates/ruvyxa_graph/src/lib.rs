@@ -69,6 +69,14 @@ pub fn discover_routes(options: DiscoverOptions) -> Result<RouteManifest> {
 
     for entry in WalkDir::new(&app_dir)
         .into_iter()
+        .filter_entry(|entry| {
+            if !entry.file_type().is_dir() || entry.path() == app_dir {
+                return true;
+            }
+
+            let name = entry.file_name().to_string_lossy();
+            !name.starts_with('_') && !name.starts_with('@')
+        })
         .filter_map(std::result::Result::ok)
     {
         if !entry.file_type().is_file() {
@@ -610,23 +618,25 @@ fn skip_block_comment(
 }
 
 fn route_path_from_dir(relative_dir: &Path) -> Result<String> {
-    let mut segments = Vec::new();
+    let visible_segments = relative_dir
+        .components()
+        .filter_map(|component| {
+            let Component::Normal(segment) = component else {
+                return None;
+            };
+            let segment = segment.to_string_lossy();
 
-    for component in relative_dir.components() {
-        let Component::Normal(segment) = component else {
-            continue;
-        };
-        let segment = segment.to_string_lossy();
+            if (segment.starts_with('(') && segment.ends_with(')')) || segment.starts_with('@') {
+                None
+            } else {
+                Some(segment.into_owned())
+            }
+        })
+        .collect::<Vec<_>>();
+    let mut segments = Vec::with_capacity(visible_segments.len());
 
-        if segment.starts_with('(') && segment.ends_with(')') {
-            continue;
-        }
-
-        if segment.starts_with('@') {
-            continue;
-        }
-
-        segments.push(route_segment(&segment)?);
+    for (index, segment) in visible_segments.iter().enumerate() {
+        segments.push(route_segment(segment, index + 1 == visible_segments.len())?);
     }
 
     if segments.is_empty() {
@@ -636,30 +646,57 @@ fn route_path_from_dir(relative_dir: &Path) -> Result<String> {
     }
 }
 
-fn route_segment(segment: &str) -> Result<String> {
-    if segment.starts_with("[[") && segment.ends_with("]]") {
-        let name = &segment[2..segment.len() - 2];
-        return Ok(format!(":{name}?"));
+fn route_segment(segment: &str, is_last: bool) -> Result<String> {
+    if segment.starts_with("[[...") && segment.ends_with("]]") {
+        let name = &segment[5..segment.len() - 2];
+        validate_dynamic_name(name)?;
+        if !is_last {
+            return Err(catch_all_must_be_last());
+        }
+        return Ok(format!("*{name}?"));
     }
 
     if segment.starts_with("[...") && segment.ends_with(']') {
         let name = &segment[4..segment.len() - 1];
+        validate_dynamic_name(name)?;
+        if !is_last {
+            return Err(catch_all_must_be_last());
+        }
         return Ok(format!("*{name}"));
     }
 
     if segment.starts_with('[') && segment.ends_with(']') {
         let name = &segment[1..segment.len() - 1];
+        validate_dynamic_name(name)?;
         return Ok(format!(":{name}"));
     }
 
     if segment.contains('[') || segment.contains(']') {
         return Err(Diagnostic::new("RUV1002", "Invalid dynamic route segment")
-            .explain("Dynamic route segments must use [name], [...name], or [[name]].")
+            .explain("Dynamic route segments must use [name], [...name], or [[...name]].")
             .suggest("Rename the route folder to a valid dynamic segment.")
             .into());
     }
 
     Ok(segment.to_string())
+}
+
+fn validate_dynamic_name(name: &str) -> Result<()> {
+    if !name.is_empty() && !name.contains(['[', ']']) && !name.starts_with('.') {
+        return Ok(());
+    }
+
+    Err(Diagnostic::new("RUV1002", "Invalid dynamic route segment")
+        .explain("Dynamic route parameter names must be non-empty and cannot contain brackets or begin with a dot.")
+        .suggest("Use [name], [...name], or [[...name]] with a non-empty parameter name.")
+        .into())
+}
+
+fn catch_all_must_be_last() -> RuvyxaError {
+    Diagnostic::new("RUV1002", "Catch-all route must be the final URL segment")
+        .explain("Catch-all routes consume every remaining URL segment and cannot have a child URL segment.")
+        .suggest("Move the catch-all folder to the end of the route or remove the child segment.")
+        .into()
 }
 
 fn route_id(app_dir: &Path, file: &Path) -> String {
@@ -719,25 +756,40 @@ fn sibling_modules(route_dir: &Path, names: &[&str]) -> Vec<String> {
 }
 
 fn detect_conflicts(routes: &[RouteEntry]) -> Result<()> {
-    let mut seen = BTreeMap::<(&str, RouteKind), &RouteEntry>::new();
-    let mut conflicts = BTreeSet::new();
+    let mut seen = BTreeMap::<String, &RouteEntry>::new();
 
     for route in routes {
-        let key = (route.path.as_str(), route.kind);
+        let key = route_match_shape(&route.path);
         if let Some(previous) = seen.insert(key, route) {
-            conflicts.insert(previous.path.clone());
-            conflicts.insert(route.path.clone());
+            let mut diagnostic = Diagnostic::new("RUV1003", "Conflicting route paths")
+                .explain(format!(
+                    "{} and {} resolve to the same URL match shape. Route parameter names and page/API kinds do not make overlapping routes distinct.",
+                    previous.file.display(),
+                    route.file.display()
+                ))
+                .at_file(&route.file)
+                .suggest("Keep only one route for this URL shape or move one route to a distinct URL segment.");
+            diagnostic.affected_routes = vec![previous.id.clone(), route.id.clone()];
+            return Err(diagnostic.into());
         }
     }
 
-    if !conflicts.is_empty() {
-        return Err(Diagnostic::new("RUV1003", "Duplicate route paths")
-            .explain("Two or more route files resolve to the same URL path and route kind.")
-            .suggest("Rename one of the route directories or move it into a route group.")
-            .into());
-    }
-
     Ok(())
+}
+
+fn route_match_shape(path: &str) -> String {
+    path.split('/')
+        .map(|segment| {
+            if segment.starts_with(':') {
+                ":"
+            } else if segment.starts_with('*') {
+                "*"
+            } else {
+                segment
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 #[cfg(test)]
@@ -775,14 +827,14 @@ mod tests {
     }
 
     #[test]
-    fn supports_catch_all_optional_and_route_groups() {
+    fn supports_catch_all_optional_catch_all_and_route_groups() {
         let temp = tempfile::tempdir().unwrap();
         let app = temp.path().join("app");
         fs::create_dir_all(app.join("docs/[...slug]")).unwrap();
-        fs::create_dir_all(app.join("shop/[[category]]")).unwrap();
+        fs::create_dir_all(app.join("shop/[[...category]]")).unwrap();
         fs::create_dir_all(app.join("(marketing)/pricing")).unwrap();
         fs::write(app.join("docs/[...slug]/page.tsx"), "").unwrap();
-        fs::write(app.join("shop/[[category]]/page.tsx"), "").unwrap();
+        fs::write(app.join("shop/[[...category]]/page.tsx"), "").unwrap();
         fs::write(app.join("(marketing)/pricing/page.tsx"), "").unwrap();
 
         let manifest = discover_routes(DiscoverOptions::new(&app)).unwrap();
@@ -792,7 +844,40 @@ mod tests {
             .map(|route| route.path.as_str())
             .collect::<Vec<_>>();
 
-        assert_eq!(paths, vec!["/docs/*slug", "/pricing", "/shop/:category?"]);
+        assert_eq!(paths, vec!["/docs/*slug", "/pricing", "/shop/*category?"]);
+    }
+
+    #[test]
+    fn rejects_non_next_optional_segments_and_non_terminal_catch_all() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        fs::create_dir_all(app.join("shop/[[category]]")).unwrap();
+        fs::write(app.join("shop/[[category]]/page.tsx"), "").unwrap();
+
+        let error = discover_routes(DiscoverOptions::new(&app)).unwrap_err();
+        assert!(error.to_string().contains("RUV1002"));
+
+        fs::remove_dir_all(app.join("shop")).unwrap();
+        fs::create_dir_all(app.join("docs/[...slug]/edit")).unwrap();
+        fs::write(app.join("docs/[...slug]/edit/page.tsx"), "").unwrap();
+
+        let error = discover_routes(DiscoverOptions::new(&app)).unwrap_err();
+        assert!(error.to_string().contains("RUV1002"));
+    }
+
+    #[test]
+    fn private_folders_and_parallel_slots_do_not_create_routes() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        fs::create_dir_all(app.join("_private")).unwrap();
+        fs::create_dir_all(app.join("@modal")).unwrap();
+        fs::write(app.join("page.tsx"), "").unwrap();
+        fs::write(app.join("_private/page.tsx"), "").unwrap();
+        fs::write(app.join("@modal/page.tsx"), "").unwrap();
+
+        let manifest = discover_routes(DiscoverOptions::new(&app)).unwrap();
+        assert_eq!(manifest.routes.len(), 1);
+        assert_eq!(manifest.routes[0].path, "/");
     }
 
     #[test]
@@ -805,6 +890,31 @@ mod tests {
         fs::write(app.join("(marketing)/pricing/page.tsx"), "").unwrap();
 
         let error = discover_routes(DiscoverOptions::new(&app)).unwrap_err();
+        assert!(error.to_string().contains("RUV1003"));
+    }
+
+    #[test]
+    fn detects_routes_with_equivalent_dynamic_shapes() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        fs::create_dir_all(app.join("blog/[slug]")).unwrap();
+        fs::create_dir_all(app.join("blog/[id]")).unwrap();
+        fs::write(app.join("blog/[slug]/page.tsx"), "").unwrap();
+        fs::write(app.join("blog/[id]/page.tsx"), "").unwrap();
+
+        let error = discover_routes(DiscoverOptions::new(&app)).unwrap_err();
+        assert!(error.to_string().contains("RUV1003"));
+    }
+
+    #[test]
+    fn rejects_page_and_route_handler_at_the_same_segment() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app/api");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(app.join("page.tsx"), "").unwrap();
+        fs::write(app.join("route.ts"), "").unwrap();
+
+        let error = discover_routes(DiscoverOptions::new(temp.path().join("app"))).unwrap_err();
         assert!(error.to_string().contains("RUV1003"));
     }
 

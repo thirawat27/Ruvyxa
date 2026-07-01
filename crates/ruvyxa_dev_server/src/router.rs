@@ -21,10 +21,10 @@ struct TrieNode {
     static_children: Vec<(String, TrieNode)>,
     /// Dynamic parameter child (`:param`).
     param_child: Option<Box<ParamChild>>,
-    /// Optional parameter child (`:param?`).
-    optional_param_child: Option<Box<ParamChild>>,
     /// Catch-all wildcard child (`*rest`).
     wildcard: Option<Box<WildcardChild>>,
+    /// Optional catch-all wildcard child (`*rest?`).
+    optional_wildcard: Option<Box<WildcardChild>>,
     /// Route stored at this node (if a route terminates here).
     route_index: Option<usize>,
 }
@@ -80,8 +80,8 @@ impl TrieNode {
         Self {
             static_children: Vec::new(),
             param_child: None,
-            optional_param_child: None,
             wildcard: None,
+            optional_wildcard: None,
             route_index: None,
         }
     }
@@ -106,26 +106,14 @@ impl TrieNode {
                 });
                 child.node.insert(&segments[1..], route_index);
             }
-            PatternSegment::OptionalParam(name) => {
-                // Optional params can match with or without the segment.
-                // Store the remaining pattern in the optional child.
-                let child = self.optional_param_child.get_or_insert_with(|| {
-                    Box::new(ParamChild {
-                        name: name.clone(),
-                        node: TrieNode::new(),
-                    })
-                });
-                child.node.insert(&segments[1..], route_index);
-                // Also register the remaining segments at this level (for when the param is absent)
-                if segments.len() == 1 {
-                    // If this is the last segment, this node is also a valid endpoint
-                    self.route_index = self.route_index.or(Some(route_index));
-                } else {
-                    self.insert(&segments[1..], route_index);
-                }
-            }
             PatternSegment::Wildcard(name) => {
                 self.wildcard = Some(Box::new(WildcardChild {
+                    name: name.clone(),
+                    route_index,
+                }));
+            }
+            PatternSegment::OptionalWildcard(name) => {
+                self.optional_wildcard = Some(Box::new(WildcardChild {
                     name: name.clone(),
                     route_index,
                 }));
@@ -158,15 +146,13 @@ impl TrieNode {
     ) -> Option<usize> {
         // If we've consumed all path segments, check if this node has a route
         if index >= parts.len() {
-            // Check optional param child — it can match zero segments
-            if self.route_index.is_none() {
-                if let Some(optional) = &self.optional_param_child {
-                    if let Some(result) = optional.node.lookup(parts, index, params) {
-                        return Some(result);
-                    }
-                }
+            if let Some(route_index) = self.route_index {
+                return Some(route_index);
             }
-            return self.route_index;
+            return self
+                .optional_wildcard
+                .as_ref()
+                .map(|wildcard| wildcard.route_index);
         }
 
         let segment = parts[index];
@@ -185,23 +171,15 @@ impl TrieNode {
             params.remove(&param_child.name);
         }
 
-        // 3. Try optional parameter child
-        if let Some(optional) = &self.optional_param_child {
-            // Try with the segment consumed
-            params.insert(optional.name.clone(), segment.to_string());
-            if let Some(result) = optional.node.lookup(parts, index + 1, params) {
-                return Some(result);
-            }
-            params.remove(&optional.name);
-
-            // Try without consuming the segment (optional skipped)
-            if let Some(result) = optional.node.lookup(parts, index, params) {
-                return Some(result);
-            }
+        // 3. Try required catch-all.
+        if let Some(wildcard) = &self.wildcard {
+            let rest = parts[index..].join("/");
+            params.insert(wildcard.name.clone(), rest);
+            return Some(wildcard.route_index);
         }
 
-        // 4. Try wildcard (catch-all, lowest priority)
-        if let Some(wildcard) = &self.wildcard {
+        // 4. Try optional catch-all (lowest priority).
+        if let Some(wildcard) = &self.optional_wildcard {
             let rest = parts[index..].join("/");
             params.insert(wildcard.name.clone(), rest);
             return Some(wildcard.route_index);
@@ -232,22 +210,23 @@ impl TrieNode {
 enum PatternSegment {
     Static(String),
     Param(String),
-    OptionalParam(String),
     Wildcard(String),
+    OptionalWildcard(String),
 }
 
 fn parse_pattern(pattern: &str) -> Vec<PatternSegment> {
     split_path(pattern)
         .into_iter()
         .map(|segment| {
-            if segment.starts_with('*') {
+            if segment.starts_with('*') && segment.ends_with('?') {
+                PatternSegment::OptionalWildcard(
+                    segment
+                        .trim_start_matches('*')
+                        .trim_end_matches('?')
+                        .to_string(),
+                )
+            } else if segment.starts_with('*') {
                 PatternSegment::Wildcard(segment.trim_start_matches('*').to_string())
-            } else if segment.starts_with(':') && segment.ends_with('?') {
-                let name = segment
-                    .trim_start_matches(':')
-                    .trim_end_matches('?')
-                    .to_string();
-                PatternSegment::OptionalParam(name)
             } else if segment.starts_with(':') {
                 PatternSegment::Param(segment.trim_start_matches(':').to_string())
             } else {
@@ -331,15 +310,15 @@ mod tests {
     }
 
     #[test]
-    fn test_optional_params() {
-        let manifest = make_manifest(vec![("/lang/:locale?", RouteKind::Page)]);
+    fn test_optional_catch_all() {
+        let manifest = make_manifest(vec![("/shop/*slug?", RouteKind::Page)]);
         let router = RadixRouter::compile(&manifest);
 
-        let m = router.find(&manifest, "/lang/en").unwrap();
-        assert_eq!(m.params["locale"], "en");
+        let m = router.find(&manifest, "/shop/clothes/tops").unwrap();
+        assert_eq!(m.params["slug"], "clothes/tops");
 
-        let m = router.find(&manifest, "/lang").unwrap();
-        assert!(!m.params.contains_key("locale") || m.params["locale"].is_empty());
+        let m = router.find(&manifest, "/shop").unwrap();
+        assert!(m.params.is_empty());
     }
 
     #[test]
@@ -352,6 +331,8 @@ mod tests {
 
         let m = router.find(&manifest, "/docs/guides/routing").unwrap();
         assert_eq!(m.params["path"], "guides/routing");
+
+        assert!(router.find(&manifest, "/docs").is_none());
     }
 
     #[test]
@@ -367,5 +348,21 @@ mod tests {
 
         let m = router.find(&manifest, "/blog/other").unwrap();
         assert_eq!(m.route.path, "/blog/:slug");
+    }
+
+    #[test]
+    fn test_static_takes_priority_over_optional_catch_all() {
+        let manifest = make_manifest(vec![
+            ("/shop", RouteKind::Page),
+            ("/shop/*slug?", RouteKind::Page),
+        ]);
+        let router = RadixRouter::compile(&manifest);
+
+        let m = router.find(&manifest, "/shop").unwrap();
+        assert_eq!(m.route.path, "/shop");
+
+        let m = router.find(&manifest, "/shop/clothes").unwrap();
+        assert_eq!(m.route.path, "/shop/*slug?");
+        assert_eq!(m.params["slug"], "clothes");
     }
 }

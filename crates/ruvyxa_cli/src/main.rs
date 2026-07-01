@@ -458,16 +458,20 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
     let config = load_project_config(&args.root)?;
     let app_dir = args.root.join(config.app_dir());
     let out_dir = args.root.join(config.out_dir());
-    let server_dir = out_dir.join("server");
-    let client_dir = out_dir.join("client");
-    let assets_dir = out_dir.join("assets");
-
-    clean_build_outputs_preserving_cache(&out_dir)
-        .with_context(|| format!("failed to clean build output in {}", out_dir.display()))?;
 
     let manifest = discover_routes(DiscoverOptions::new(&app_dir))?;
     let validation = validate_app(&args.root, &manifest)?;
     fail_on_diagnostics(&validation.diagnostics)?;
+
+    let staging_dir = create_build_staging_dir(&out_dir).with_context(|| {
+        format!(
+            "failed to create build staging dir in {}",
+            out_dir.display()
+        )
+    })?;
+    let server_dir = staging_dir.join("server");
+    let client_dir = staging_dir.join("client");
+    let assets_dir = staging_dir.join("assets");
 
     copy_dir_all(&app_dir, &server_dir.join("app"))?;
     copy_optional_dir(
@@ -478,7 +482,7 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
     copy_public_assets(&args.root, &assets_dir)?;
     let asset_files = count_files(&assets_dir);
     fs::create_dir_all(&client_dir)?;
-    write_manifest(&manifest, &out_dir.join("manifest.json"))?;
+    write_manifest(&manifest, &staging_dir.join("manifest.json"))?;
 
     let client_manifest = emit_client_bundles(
         &args.root,
@@ -521,9 +525,12 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
         }
     });
     fs::write(
-        out_dir.join("build.json"),
+        staging_dir.join("build.json"),
         serde_json::to_string_pretty(&build_info)?,
     )?;
+
+    commit_staged_build_outputs(&staging_dir, &out_dir)
+        .with_context(|| format!("failed to commit build output into {}", out_dir.display()))?;
 
     info!(
         target = ?args.target,
@@ -564,6 +571,9 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
     }
     Ok(())
 }
+
+const BUILD_OUTPUT_DIRS: [&str; 3] = ["server", "client", "assets"];
+const BUILD_OUTPUT_FILES: [&str; 2] = ["manifest.json", "build.json"];
 
 struct ClientBundle {
     path: String,
@@ -753,22 +763,137 @@ fn resolve_layout_file(root: &Path, app_dir: &Path, layout_path: &str) -> Option
         .and_then(|candidate| candidate.canonicalize().ok().or(Some(candidate)))
 }
 
-fn clean_build_outputs_preserving_cache(out_dir: &Path) -> anyhow::Result<()> {
-    for directory in ["server", "client", "assets"] {
-        let path = out_dir.join(directory);
-        if path.exists() {
-            fs::remove_dir_all(&path)?;
-        }
-    }
+fn create_build_staging_dir(out_dir: &Path) -> anyhow::Result<PathBuf> {
+    create_build_temp_dir(out_dir, ".build-staging")
+}
 
-    for file in ["manifest.json", "build.json"] {
-        let path = out_dir.join(file);
-        if path.exists() {
-            fs::remove_file(&path)?;
-        }
-    }
-
+fn create_build_temp_dir(out_dir: &Path, prefix: &str) -> anyhow::Result<PathBuf> {
     fs::create_dir_all(out_dir)?;
+    let created_at = SystemTime::now()
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let temp_dir = out_dir.join(format!("{prefix}-{}-{created_at}", std::process::id()));
+    if temp_dir.exists() {
+        fs::remove_dir_all(&temp_dir)?;
+    }
+    fs::create_dir_all(&temp_dir)?;
+    Ok(temp_dir)
+}
+
+fn commit_staged_build_outputs(staging_dir: &Path, out_dir: &Path) -> anyhow::Result<()> {
+    let backup_dir = create_build_temp_dir(out_dir, ".build-rollback")?;
+    let moved_existing = match move_named_build_outputs(out_dir, &backup_dir) {
+        Ok(moved) => moved,
+        Err(error) => {
+            let _ = fs::remove_dir_all(&backup_dir);
+            return Err(error);
+        }
+    };
+    let commit_result = move_named_build_outputs(staging_dir, out_dir);
+
+    match commit_result {
+        Ok(_) => {
+            fs::remove_dir_all(&backup_dir)?;
+            if staging_dir.exists() {
+                fs::remove_dir_all(staging_dir)?;
+            }
+            Ok(())
+        }
+        Err(error) => {
+            let _ = remove_named_build_outputs(out_dir);
+            let rollback_result =
+                restore_named_build_outputs(&backup_dir, out_dir, &moved_existing);
+            let _ = fs::remove_dir_all(&backup_dir);
+            if let Err(rollback_error) = rollback_result {
+                return Err(error).with_context(|| {
+                    format!(
+                        "rollback also failed while restoring previous output: {rollback_error}"
+                    )
+                });
+            }
+            Err(error)
+        }
+    }
+}
+
+fn move_named_build_outputs(from: &Path, to: &Path) -> anyhow::Result<Vec<String>> {
+    fs::create_dir_all(to)?;
+    let mut moved = Vec::new();
+
+    for name in BUILD_OUTPUT_DIRS.into_iter().chain(BUILD_OUTPUT_FILES) {
+        let source = from.join(name);
+        if !source.exists() {
+            continue;
+        }
+        let destination = to.join(name);
+        if destination.exists() {
+            remove_path(&destination)?;
+        }
+        if let Err(error) = fs::rename(&source, &destination) {
+            let rollback_result = restore_named_build_outputs(to, from, &moved);
+            let mut move_error: anyhow::Error = error.into();
+            move_error = move_error.context(format!(
+                "failed to move {} to {}",
+                source.display(),
+                destination.display()
+            ));
+            if let Err(rollback_error) = rollback_result {
+                return Err(move_error).with_context(|| {
+                    format!("rollback of partially moved outputs also failed: {rollback_error}")
+                });
+            }
+            return Err(move_error);
+        }
+        moved.push(name.to_string());
+    }
+
+    Ok(moved)
+}
+
+fn restore_named_build_outputs(
+    backup_dir: &Path,
+    out_dir: &Path,
+    moved_existing: &[String],
+) -> anyhow::Result<()> {
+    for name in moved_existing {
+        let source = backup_dir.join(name);
+        if !source.exists() {
+            continue;
+        }
+        let destination = out_dir.join(name);
+        if destination.exists() {
+            remove_path(&destination)?;
+        }
+        fs::rename(&source, &destination).with_context(|| {
+            format!(
+                "failed to restore {} to {}",
+                source.display(),
+                destination.display()
+            )
+        })?;
+    }
+
+    Ok(())
+}
+
+fn remove_named_build_outputs(out_dir: &Path) -> anyhow::Result<()> {
+    for name in BUILD_OUTPUT_DIRS.into_iter().chain(BUILD_OUTPUT_FILES) {
+        let path = out_dir.join(name);
+        if path.exists() {
+            remove_path(&path)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn remove_path(path: &Path) -> anyhow::Result<()> {
+    if path.is_dir() {
+        fs::remove_dir_all(path)?;
+    } else {
+        fs::remove_file(path)?;
+    }
     Ok(())
 }
 
@@ -1278,10 +1403,10 @@ fn parity_smoke_path(route_path: &str) -> String {
         .trim_start_matches('/')
         .split('/')
         .filter_map(|segment| {
-            if segment.starts_with('*') {
-                Some("smoke/path")
-            } else if segment.starts_with(':') && segment.ends_with('?') {
+            if segment.starts_with('*') && segment.ends_with('?') {
                 None
+            } else if segment.starts_with('*') {
+                Some("smoke/path")
             } else if segment.starts_with(':') {
                 Some("smoke")
             } else {
@@ -1934,28 +2059,76 @@ mod tests {
         assert_eq!(parity_smoke_path("/"), "/");
         assert_eq!(parity_smoke_path("/blog/:slug"), "/blog/smoke");
         assert_eq!(parity_smoke_path("/docs/*path"), "/docs/smoke/path");
-        assert_eq!(parity_smoke_path("/shop/:category?"), "/shop");
+        assert_eq!(parity_smoke_path("/shop/*category?"), "/shop");
     }
 
     #[test]
-    fn build_cleanup_preserves_cache_directory() {
+    fn staged_build_commit_replaces_outputs_and_preserves_cache_directory() {
         let temp = tempfile::tempdir().unwrap();
         let out_dir = temp.path().join(".ruvyxa");
         let cache_dir = out_dir.join("cache").join("bundler");
-        let server_dir = out_dir.join("server");
-        fs::create_dir_all(&cache_dir).unwrap();
-        fs::create_dir_all(&server_dir).unwrap();
-        fs::write(cache_dir.join("cached.js"), "compiled").unwrap();
-        fs::write(out_dir.join("manifest.json"), "{}").unwrap();
+        let old_server_dir = out_dir.join("server");
+        let old_assets_dir = out_dir.join("assets");
+        let staging_dir = create_build_staging_dir(&out_dir).unwrap();
+        let new_server_dir = staging_dir.join("server");
+        let new_client_dir = staging_dir.join("client");
 
-        clean_build_outputs_preserving_cache(&out_dir).unwrap();
+        fs::create_dir_all(&cache_dir).unwrap();
+        fs::create_dir_all(&old_server_dir).unwrap();
+        fs::create_dir_all(&old_assets_dir).unwrap();
+        fs::create_dir_all(&new_server_dir).unwrap();
+        fs::create_dir_all(&new_client_dir).unwrap();
+        fs::write(cache_dir.join("cached.js"), "compiled").unwrap();
+        fs::write(old_server_dir.join("old.js"), "old").unwrap();
+        fs::write(old_assets_dir.join("old.txt"), "old").unwrap();
+        fs::write(out_dir.join("manifest.json"), "{}").unwrap();
+        fs::write(out_dir.join("build.json"), "{}").unwrap();
+        fs::write(new_server_dir.join("new.js"), "new").unwrap();
+        fs::write(new_client_dir.join("new.js"), "new").unwrap();
+        fs::write(staging_dir.join("manifest.json"), "{\"routes\":[]}").unwrap();
+        fs::write(staging_dir.join("build.json"), "{\"framework\":\"Ruvyxa\"}").unwrap();
+
+        commit_staged_build_outputs(&staging_dir, &out_dir).unwrap();
 
         assert!(cache_dir.join("cached.js").exists());
-        assert!(!server_dir.exists());
-        assert!(!out_dir.join("manifest.json").exists());
+        assert!(out_dir.join("server/new.js").exists());
+        assert!(out_dir.join("client/new.js").exists());
+        assert!(!out_dir.join("server/old.js").exists());
+        assert!(!out_dir.join("assets").exists());
+        assert!(out_dir.join("manifest.json").exists());
+        assert!(out_dir.join("build.json").exists());
+        assert!(!staging_dir.exists());
+        assert!(!has_temp_build_dir(&out_dir, ".build-rollback"));
+    }
+
+    #[test]
+    fn staged_build_commit_removes_old_output_when_staging_omits_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let out_dir = temp.path().join(".ruvyxa");
+        let staging_dir = create_build_staging_dir(&out_dir).unwrap();
+
+        fs::create_dir_all(out_dir.join("assets")).unwrap();
+        fs::write(out_dir.join("assets/old.txt"), "old").unwrap();
+        fs::write(staging_dir.join("manifest.json"), "{}").unwrap();
+        fs::write(staging_dir.join("build.json"), "{}").unwrap();
+
+        commit_staged_build_outputs(&staging_dir, &out_dir).unwrap();
+
+        assert!(!out_dir.join("assets").exists());
+        assert!(out_dir.join("manifest.json").exists());
     }
 
     fn os_args<const N: usize>(args: [&str; N]) -> Vec<OsString> {
         args.into_iter().map(OsString::from).collect()
+    }
+
+    fn has_temp_build_dir(out_dir: &Path, prefix: &str) -> bool {
+        fs::read_dir(out_dir)
+            .unwrap()
+            .filter_map(std::result::Result::ok)
+            .any(|entry| {
+                entry.file_type().is_ok_and(|file_type| file_type.is_dir())
+                    && entry.file_name().to_string_lossy().starts_with(prefix)
+            })
     }
 }
