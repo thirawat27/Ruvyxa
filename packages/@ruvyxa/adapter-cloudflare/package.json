@@ -1,6 +1,6 @@
 {
   "name": "@ruvyxa/adapter-cloudflare",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Shape Ruvyxa builds for Cloudflare edge targets with typed worker and asset output metadata.",
   "license": "MIT",
   "type": "module",

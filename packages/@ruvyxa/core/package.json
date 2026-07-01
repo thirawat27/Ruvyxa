@@ -1,6 +1,6 @@
 {
   "name": "@ruvyxa/core",
-  "version": "1.0.3",
+  "version": "1.0.4",
   "description": "Tiny typed primitives behind Ruvyxa: config, loaders, actions, cache helpers, responses, and adapter contracts.",
   "license": "MIT",
   "type": "module",
