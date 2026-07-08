@@ -153,7 +153,10 @@ impl RenderCache {
     pub async fn invalidate_prefix(&self, prefix: &str) {
         let mut entries = self.entries.write().await;
         entries.retain(|key, _| !key.starts_with(prefix));
-        self.order.write().await.retain(|key| !key.starts_with(prefix));
+        self.order
+            .write()
+            .await
+            .retain(|key| !key.starts_with(prefix));
     }
 
     /// Blocking invalidation for use in sync contexts (file watcher).
@@ -167,7 +170,9 @@ impl RenderCache {
     pub fn invalidate_prefix_blocking(&self, prefix: &str) {
         let mut entries = self.entries.blocking_write();
         entries.retain(|key, _| !key.starts_with(prefix));
-        self.order.blocking_write().retain(|key| !key.starts_with(prefix));
+        self.order
+            .blocking_write()
+            .retain(|key| !key.starts_with(prefix));
     }
 
     /// Get cache statistics.

@@ -2423,7 +2423,13 @@ fn extract_code_frame(file: &Path, line: Option<u32>) -> Option<String> {
         let num = i + 1;
         let prefix = if i == idx { ">" } else { " " };
         let marker = if i == idx { "  ← error" } else { "" };
-        frame.push_str(&format!(" {prefix} {:>width$} │ {}{}\n", num, line_text, marker, width = max_digits));
+        frame.push_str(&format!(
+            " {prefix} {:>width$} │ {}{}\n",
+            num,
+            line_text,
+            marker,
+            width = max_digits
+        ));
     }
     Some(frame)
 }
@@ -2445,7 +2451,9 @@ fn error_response(status: StatusCode, diagnostics: &Diagnostic, is_dev: bool) ->
 }
 
 fn is_dev_mode() -> bool {
-    std::env::var("RUVYXA_DEV").map(|v| v == "1").unwrap_or(false)
+    std::env::var("RUVYXA_DEV")
+        .map(|v| v == "1")
+        .unwrap_or(false)
 }
 
 fn error_page(message: &str) -> String {
@@ -2471,9 +2479,25 @@ fn dev_error_overlay(
 ) -> String {
     let title = message.lines().next().unwrap_or("Error");
     let body = message;
-    let frame_html = code_frame.map(|f| format!(r#"<div class="code-frame"><pre>{}</pre></div>"#, escape_html(f))).unwrap_or_default();
-    let stack_html = stack.map(|s| format!(r#"<details class="stack"><summary>Stack Trace</summary><pre>{}</pre></details>"#, escape_html(s))).unwrap_or_default();
-    let suggestion_html = suggestion.map(|s| format!(r#"<div class="suggestion">💡 {}</div>"#, escape_html(s))).unwrap_or_default();
+    let frame_html = code_frame
+        .map(|f| {
+            format!(
+                r#"<div class="code-frame"><pre>{}</pre></div>"#,
+                escape_html(f)
+            )
+        })
+        .unwrap_or_default();
+    let stack_html = stack
+        .map(|s| {
+            format!(
+                r#"<details class="stack"><summary>Stack Trace</summary><pre>{}</pre></details>"#,
+                escape_html(s)
+            )
+        })
+        .unwrap_or_default();
+    let suggestion_html = suggestion
+        .map(|s| format!(r#"<div class="suggestion">💡 {}</div>"#, escape_html(s)))
+        .unwrap_or_default();
 
     format!(
         r#"<!doctype html>

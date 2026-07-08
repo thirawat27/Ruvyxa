@@ -7,7 +7,7 @@ import { fileURLToPath, pathToFileURL } from "node:url"
 import { compileBundle, toImportPath } from "../../../packages/ruvyxa/runtime/compiler.mjs"
 
 const workspaceRoot = path.resolve(fileURLToPath(new URL("../../..", import.meta.url)))
-const exampleRoot = path.join(workspaceRoot, "examples/basic-app")
+const exampleRoot = path.join(workspaceRoot, "examples/kitchen-sink")
 
 describe("runtime compiler", () => {
   it("resolves local dynamic imports without an external bundler", async () => {

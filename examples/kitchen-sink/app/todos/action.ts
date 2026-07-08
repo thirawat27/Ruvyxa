@@ -6,12 +6,8 @@ export const createTodo = action
       if (!value || typeof value !== "object" || !("title" in value)) {
         throw new Error("Todo title is required")
       }
-
       const title = String(value.title).trim()
-      if (!title) {
-        throw new Error("Todo title is required")
-      }
-
+      if (!title) throw new Error("Todo title is required")
       return { title }
     },
   })

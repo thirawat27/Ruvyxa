@@ -222,14 +222,21 @@ impl WasmPluginRuntime {
             let config_json = plugin.config_json.clone();
             let permissions = plugin.permissions.clone();
 
-            let result = tokio::task::spawn_blocking(move || {
-                match Self::invoke_on_request_blocking(&engine, &module, &req, &config_json, &permissions) {
-                    Ok(r) => Ok(r),
-                    Err(e) => Err(RuvyxaError::Message(e)),
-                }
-            })
-            .await
-            .map_err(|e| RuvyxaError::Message(format!("Plugin task panicked: {e}")))??;
+            let result =
+                tokio::task::spawn_blocking(move || {
+                    match Self::invoke_on_request_blocking(
+                        &engine,
+                        &module,
+                        &req,
+                        &config_json,
+                        &permissions,
+                    ) {
+                        Ok(r) => Ok(r),
+                        Err(e) => Err(RuvyxaError::Message(e)),
+                    }
+                })
+                .await
+                .map_err(|e| RuvyxaError::Message(format!("Plugin task panicked: {e}")))??;
 
             if result.action != "continue" {
                 return Ok(Some(result));
@@ -261,14 +268,22 @@ impl WasmPluginRuntime {
             let config_json = plugin.config_json.clone();
             let permissions = plugin.permissions.clone();
 
-            let result = tokio::task::spawn_blocking(move || {
-                match Self::invoke_on_response_blocking(&engine, &module, &req, &res, &config_json, &permissions) {
-                    Ok(r) => Ok(r),
-                    Err(e) => Err(RuvyxaError::Message(e)),
-                }
-            })
-            .await
-            .map_err(|e| RuvyxaError::Message(format!("Plugin task panicked: {e}")))??;
+            let result =
+                tokio::task::spawn_blocking(move || {
+                    match Self::invoke_on_response_blocking(
+                        &engine,
+                        &module,
+                        &req,
+                        &res,
+                        &config_json,
+                        &permissions,
+                    ) {
+                        Ok(r) => Ok(r),
+                        Err(e) => Err(RuvyxaError::Message(e)),
+                    }
+                })
+                .await
+                .map_err(|e| RuvyxaError::Message(format!("Plugin task panicked: {e}")))??;
 
             if result.action != "continue" {
                 return Ok(Some(result));
@@ -375,13 +390,8 @@ impl WasmPluginRuntime {
         })
         .to_string();
 
-        let result_json = Self::call_plugin_func(
-            &mut store,
-            &instance,
-            "on_response",
-            &input,
-            config_json,
-        )?;
+        let result_json =
+            Self::call_plugin_func(&mut store, &instance, "on_response", &input, config_json)?;
 
         serde_json::from_str(&result_json)
             .map_err(|e| format!("Failed to parse plugin result: {e}"))

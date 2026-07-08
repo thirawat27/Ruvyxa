@@ -25,20 +25,6 @@ const config: RuvyxaConfig = {
     overlay: true,
     traces: true,
   },
-
-  // Optional knobs:
-  // runtime: "node",
-  // react: true,
-  // typescript: { strict: true },
-  // css: { modules: false, nesting: true },
-  // security: {
-  //   actionBodyLimitBytes: 64 * 1024,
-  //   sameOriginActions: true,
-  //   fetchMetadataActions: true,
-  //   securityHeaders: true,
-  // },
-  // adapter: nodeAdapter(),
-  // plugins: [],
 }
 
 export default defineConfig(config)

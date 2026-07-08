@@ -1,5 +1,5 @@
 {
-  "name": "basic-ruvyxa-app",
+  "name": "kitchen-sink",
   "version": "1.0.0",
   "private": true,
   "type": "module",
@@ -9,17 +9,16 @@
     "start": "cargo run -p ruvyxa_cli -- start --root .",
     "routes": "cargo run -p ruvyxa_cli -- routes --root .",
     "analyze": "cargo run -p ruvyxa_cli -- analyze --root .",
-    "parity": "cargo run -p ruvyxa_cli -- test:parity --root ."
+    "check": "cargo run -p ruvyxa_cli -- check --root .",
+    "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@ruvyxa/core": "workspace:*",
     "ruvyxa": "workspace:*",
     "react": "^19.0.0",
-    "react-dom": "^19.0.0",
-    "tailwindcss": "^4.1.17"
+    "react-dom": "^19.0.0"
   },
   "devDependencies": {
-    "@tailwindcss/cli": "^4.1.17",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0"
   },
