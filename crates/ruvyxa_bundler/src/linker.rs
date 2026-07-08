@@ -1,7 +1,9 @@
 //! Module linker: concatenates compiled modules into a single JS string.
 //!
 //! Each project-local module is wrapped in a closure-style IIFE namespace so
-//! that top-level declarations do not leak across module boundaries:
+//! that top-level declarations do not leak across module boundaries.
+//! Circular dependencies are detected before linking and reported as a
+//! [`BundleError::CircularDependency`] with the full cycle path.
 //!
 //! ```js
 //! // ── module.tsx ──
@@ -42,10 +44,86 @@ use blake3::hash;
 use rayon::prelude::*;
 
 use crate::compiler::CompiledModule;
-use crate::{BundleInput, BundleTarget, Result};
+use crate::{BundleError, BundleInput, BundleTarget, Result};
+
+/// Detect circular dependencies in the module graph.
+///
+/// If a cycle is found, returns `Err(BundleError::CircularDependency)` with a
+/// human-readable path: `a -> b -> c -> a`.
+pub fn detect_cycles(modules: &[CompiledModule]) -> Result<()> {
+    let module_map: BTreeMap<PathBuf, &CompiledModule> = modules
+        .iter()
+        .filter(|m| !m.is_external)
+        .map(|m| (m.path.clone(), m))
+        .collect();
+
+    let mut visited: BTreeSet<PathBuf> = BTreeSet::new();
+    let mut stack: Vec<PathBuf> = Vec::new();
+
+    for module in modules.iter().filter(|m| !m.is_external) {
+        if !visited.contains(&module.path) {
+            dfs_detect_cycle(&module.path, &module_map, &mut visited, &mut stack)?;
+        }
+    }
+
+    Ok(())
+}
+
+fn dfs_detect_cycle(
+    path: &PathBuf,
+    module_map: &BTreeMap<PathBuf, &CompiledModule>,
+    visited: &mut BTreeSet<PathBuf>,
+    stack: &mut Vec<PathBuf>,
+) -> Result<()> {
+    if stack.contains(path) {
+        let cycle_start = stack.iter().position(|p| p == path).unwrap_or(0);
+        let mut parts: Vec<String> = stack[cycle_start..]
+            .iter()
+            .map(|p| {
+                p.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| p.display().to_string())
+            })
+            .collect();
+        // Close the cycle by repeating the start.
+        let start_name = parts[0].clone();
+        parts.push(start_name);
+        let cycle_str = parts.join(" -> ");
+        return Err(BundleError::CircularDependency { cycle: cycle_str });
+    }
+
+    if visited.contains(path) {
+        return Ok(());
+    }
+
+    stack.push(path.clone());
+
+    if let Some(module) = module_map.get(path) {
+        for dep in &module.deps {
+            if module_map.contains_key(dep) {
+                dfs_detect_cycle(dep, module_map, visited, stack)?;
+            }
+        }
+    }
+
+    stack.pop();
+    visited.insert(path.clone());
+
+    Ok(())
+}
 
 /// Link all compiled modules into a single concatenated JS string.
+///
+/// Detects circular dependencies first; returns
+/// [`BundleError::CircularDependency`] if a cycle is found.
 pub fn link(modules: &[CompiledModule], input: &BundleInput) -> Result<String> {
+    detect_cycles(modules)?;
+    link_inner(modules, input)
+}
+
+/// Inner link implementation — does NOT check for cycles.
+/// Called by `link` and `link_parallel` after cycle detection.
+fn link_inner(modules: &[CompiledModule], input: &BundleInput) -> Result<String> {
     let project_modules = ordered_project_modules(modules);
 
     // Pre-calculate output capacity to avoid reallocations.
@@ -112,13 +190,17 @@ pub fn link(modules: &[CompiledModule], input: &BundleInput) -> Result<String> {
 /// import/export rewriting can proceed concurrently via rayon.
 ///
 /// For small graphs (<8 modules), falls back to sequential linking to avoid
-/// rayon scheduling overhead.
+/// rayon scheduling overhead. Circular dependencies are detected before linking.
 pub fn link_parallel(modules: &[CompiledModule], input: &BundleInput) -> Result<String> {
+    // Cycle detection runs regardless of graph size — cheap O(V+E) DFS.
+    detect_cycles(modules)?;
+
     let project_modules = ordered_project_modules(modules);
 
     // For small graphs, sequential is faster (avoids rayon overhead).
+    // Note: we already detected cycles above so pass directly to `link` internals.
     if project_modules.len() < 8 {
-        return link(modules, input);
+        return link_inner(modules, input);
     }
 
     // Phase 1: Compute external imports (sequential — cheap BTreeSet scan).
@@ -1089,5 +1171,73 @@ export default function Layout({ children }) {
             "export const render = {}.render;",
             module_id(&entry)
         )));
+    }
+
+    #[test]
+    fn detect_cycles_finds_simple_cycle() {
+        let a = PathBuf::from("/app/a.ts");
+        let b = PathBuf::from("/app/b.ts");
+
+        let modules = vec![
+            CompiledModule {
+                path: a.clone(),
+                js: "import B from './b';".into(),
+                deps: vec![b.clone()],
+                is_external: false,
+            },
+            CompiledModule {
+                path: b.clone(),
+                js: "import A from './a';".into(),
+                deps: vec![a.clone()],
+                is_external: false,
+            },
+        ];
+
+        let result = detect_cycles(&modules);
+        assert!(result.is_err(), "circular dep should be an error");
+        let err = result.unwrap_err().to_string();
+        assert!(
+            err.contains("circular dependency"),
+            "error message should mention circular dependency: {err}"
+        );
+    }
+
+    #[test]
+    fn detect_cycles_no_false_positive_on_diamond() {
+        // Diamond: page → A, page → B, A → shared, B → shared
+        let page = PathBuf::from("/app/page.ts");
+        let a = PathBuf::from("/app/a.ts");
+        let b = PathBuf::from("/app/b.ts");
+        let shared = PathBuf::from("/app/shared.ts");
+
+        let modules = vec![
+            CompiledModule {
+                path: page.clone(),
+                js: String::new(),
+                deps: vec![a.clone(), b.clone()],
+                is_external: false,
+            },
+            CompiledModule {
+                path: a.clone(),
+                js: String::new(),
+                deps: vec![shared.clone()],
+                is_external: false,
+            },
+            CompiledModule {
+                path: b.clone(),
+                js: String::new(),
+                deps: vec![shared.clone()],
+                is_external: false,
+            },
+            CompiledModule {
+                path: shared.clone(),
+                js: String::new(),
+                deps: vec![],
+                is_external: false,
+            },
+        ];
+
+        // Diamond graph is NOT circular.
+        assert!(detect_cycles(&modules).is_ok(), "diamond is not circular");
     }
 }

@@ -67,6 +67,9 @@ function sanitizeConfig(config) {
       sourcemap: booleanValue(config.build?.sourcemap),
       splitStrategy: stringValue(config.build?.splitStrategy),
       parallelism: numberValue(config.build?.parallelism),
+      jsxRuntime: stringValue(config.build?.jsxRuntime),
+      esTarget: stringValue(config.build?.esTarget),
+      emitChunkManifest: booleanValue(config.build?.emitChunkManifest),
     }),
     debug: objectValue(config.debug, {
       overlay: booleanValue(config.debug?.overlay),

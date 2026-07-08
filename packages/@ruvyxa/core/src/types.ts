@@ -17,8 +17,11 @@ export interface RuvyxaConfig {
   build?: {
     minify?: boolean
     sourcemap?: boolean
-    splitStrategy?: "route" | "manual"
+    splitStrategy?: "single" | "route" | "manual"
     parallelism?: number
+    jsxRuntime?: "classic" | "automatic"
+    esTarget?: "es2018" | "es2019" | "es2020" | "es2022" | "esnext"
+    emitChunkManifest?: boolean
   }
   debug?: {
     overlay?: boolean

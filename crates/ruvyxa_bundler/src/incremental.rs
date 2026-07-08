@@ -452,7 +452,7 @@ mod tests {
 
         // Reload and compute dirty set when utils changes.
         let cache2 = IncrementalGraphCache::new(tmp.path(), true);
-        let dirty = cache2.compute_dirty_set(&[utils.clone()]);
+        let dirty = cache2.compute_dirty_set(std::slice::from_ref(&utils));
 
         // utils is directly dirty, Button imports utils, page imports Button.
         assert!(dirty.contains(&utils));
@@ -501,7 +501,7 @@ mod tests {
 
         // Only utils changed — page_b and helpers should NOT be dirty.
         let cache2 = IncrementalGraphCache::new(tmp.path(), true);
-        let dirty = cache2.compute_dirty_set(&[utils.clone()]);
+        let dirty = cache2.compute_dirty_set(std::slice::from_ref(&utils));
 
         assert!(dirty.contains(&utils));
         assert!(dirty.contains(&page_a));

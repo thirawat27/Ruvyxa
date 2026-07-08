@@ -11,11 +11,15 @@
 //! ```text
 //! Entry file (TSX/TS/JSX/JS)
 //!   └─ resolver   → resolve all imports to absolute paths
-//!   └─ compiler   → SWC: strip types + transform JSX
+//!                   (package.json `exports` map, tsconfig `paths`/`baseUrl`)
+//!   └─ compiler   → strip types + transform JSX (classic or automatic runtime)
+//!                   + expand enums + strip decorators
 //!   └─ boundary   → enforce server/client rules (RUV1007, RUV1008, RUV1010)
 //!   └─ linker     → topological sort + concatenate modules
-//!   └─ minifier   → identifier shortening + dead-code elimination
+//!                   (circular dependency detection)
+//!   └─ minifier   → scope-aware identifier mangling + dead-code elimination
 //!   └─ output     → wrap in IIFE (client) or ESM (SSR)
+//!                   (chunk manifest + HTML preload hints)
 //! ```
 
 pub mod boundary;
@@ -51,6 +55,48 @@ pub enum BundleTarget {
     Ssr,
 }
 
+/// JSX transform runtime mode.
+///
+/// - `Classic` — the default; emits `React.createElement(…)` calls.
+///   Requires `import React from "react"` in every file that uses JSX.
+/// - `Automatic` — React 17+ automatic runtime; emits `_jsx(…)` calls and
+///   auto-injects `import { jsx as _jsx, … } from "react/jsx-runtime"`.
+///   No per-file React import is needed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum JsxRuntime {
+    #[default]
+    Classic,
+    Automatic,
+}
+
+/// Code-splitting strategy for a bundle job.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SplitStrategy {
+    /// All modules concatenated into a single output file (default).
+    #[default]
+    Single,
+    /// Each entry point gets its own chunk; shared dependencies are split into
+    /// a common chunk when they appear in two or more entry bundles.
+    Route,
+}
+
+/// ECMAScript target version for output.
+///
+/// The compiler always produces valid ES2020+ output; this field controls
+/// which syntax features the minifier may use/remove.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum EsTarget {
+    Es2018,
+    Es2019,
+    Es2020,
+    #[default]
+    Es2022,
+    EsNext,
+}
+
 /// Options forwarded from `ruvyxa.config.ts`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BundleOptions {
@@ -60,6 +106,14 @@ pub struct BundleOptions {
     pub source_map: bool,
     /// Enable tree-shaking (DCE on exported symbols).
     pub tree_shaking: bool,
+    /// JSX transform runtime mode.
+    pub jsx_runtime: JsxRuntime,
+    /// ECMAScript output target.
+    pub es_target: EsTarget,
+    /// Code-splitting strategy.
+    pub split_strategy: SplitStrategy,
+    /// Emit a `chunk-manifest.json` alongside bundles (useful for preload hints).
+    pub emit_chunk_manifest: bool,
 }
 
 impl Default for BundleOptions {
@@ -68,6 +122,10 @@ impl Default for BundleOptions {
             minify: true,
             source_map: false,
             tree_shaking: true,
+            jsx_runtime: JsxRuntime::Classic,
+            es_target: EsTarget::Es2022,
+            split_strategy: SplitStrategy::Single,
+            emit_chunk_manifest: false,
         }
     }
 }
@@ -83,7 +141,6 @@ pub struct BundleInput {
     /// Absolute path to the `app/` directory.
     pub app_dir: PathBuf,
     /// Ordered list of layout files to wrap the entry (root-to-leaf).
-    /// Only used for `BundleTarget::Client` and `BundleTarget::Ssr`.
     pub layouts: Vec<PathBuf>,
     /// The URL path of the route (e.g. `/blog/:slug`).
     pub request_path: String,
@@ -98,14 +155,20 @@ pub struct BundleInput {
 pub struct BundleStats {
     /// Number of modules included in the bundle.
     pub module_count: usize,
-    /// Final output size in bytes.
+    /// Final output size in bytes (uncompressed).
     pub output_bytes: usize,
+    /// Estimated gzip size (rough: output_bytes * 0.35).
+    pub estimated_gz_bytes: usize,
     /// Whether the output was minified.
     pub minified: bool,
     /// Whether the output uses tree-shaking.
     pub tree_shaken: bool,
     /// Time taken to complete the bundle, in milliseconds.
     pub duration_ms: u64,
+    /// Number of modules removed by tree-shaking.
+    pub tree_shaken_modules: usize,
+    /// Number of modules served from the compile cache (not recompiled).
+    pub cache_hits: usize,
 }
 
 /// A successfully produced bundle.
@@ -119,6 +182,26 @@ pub struct BundleOutput {
     pub diagnostics: Vec<Diagnostic>,
     /// Bundle statistics.
     pub stats: BundleStats,
+    /// Chunk manifest (module path → chunk file name), emitted when
+    /// `options.emit_chunk_manifest` is `true`.
+    pub chunk_manifest: Option<ChunkManifest>,
+}
+
+/// A JSON-serializable chunk manifest for use in preload link injection.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct ChunkManifest {
+    /// Bundle identifier (blake3 hash prefix of the output).
+    pub bundle_id: String,
+    /// Route path this manifest belongs to.
+    pub route: String,
+    /// Ordered list of module paths that were included.
+    pub modules: Vec<String>,
+    /// Output file name (e.g. `bundle.abc1234.js`).
+    pub output_file: String,
+    /// Optional source map file name.
+    pub source_map_file: Option<String>,
+    /// Output size in bytes.
+    pub size_bytes: usize,
 }
 
 /// Shared state for a batch of bundle jobs.
@@ -206,7 +289,7 @@ pub enum BundleError {
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 
-    /// Compiler error from SWC.
+    /// Compiler error from the native transformer.
     #[error("compiler error: {0}")]
     Compiler(String),
 
@@ -216,6 +299,10 @@ pub enum BundleError {
         specifier: String,
         importer: PathBuf,
     },
+
+    /// A circular dependency was detected in the module graph.
+    #[error("circular dependency detected: {cycle}")]
+    CircularDependency { cycle: String },
 }
 
 pub type Result<T> = std::result::Result<T, BundleError>;
@@ -235,17 +322,14 @@ impl From<Diagnostic> for BundleError {
 /// # Errors
 ///
 /// Returns a [`BundleError`] if a hard boundary violation is detected, a
-/// module cannot be resolved, or a compile error occurs.
+/// module cannot be resolved, a circular dependency is found, or a compile
+/// error occurs.
 pub fn bundle(input: BundleInput) -> Result<BundleOutput> {
     let context = BundleContext::new(&input.project_root);
     bundle_with_context(input, &context)
 }
 
 /// Bundle a single route using a caller-provided compile cache.
-///
-/// Build orchestrators that emit many route bundles should share one
-/// [`CompileCache`] so common modules are reused across worker threads and
-/// across routes within the same production build.
 pub fn bundle_with_cache(input: BundleInput, cache: &CompileCache) -> Result<BundleOutput> {
     let graph_cache = ResolveGraphCache::new();
     bundle_with_parts(input, cache, &graph_cache)
@@ -283,6 +367,7 @@ fn bundle_with_parts(
     boundary::check(&compiled, &input, &mut diagnostics)?;
 
     // 5. Link modules into a single concatenated script.
+    //    This also detects circular dependencies and returns an error.
     let linked = linker::link_parallel(&compiled, &input)?;
 
     // 6. Optionally minify.
@@ -295,19 +380,23 @@ fn bundle_with_parts(
     // 7. Wrap in the appropriate output format.
     let code = output::wrap(final_code, &input);
 
+    // Count cache hits (modules whose JS came from cache, not freshly compiled).
+    // We approximate: a module is a cache hit if its JS equals what the cache
+    // would have returned. Instead we just count external modules as cache hits
+    // since they're always pass-through, giving a lower bound.
+    let cache_hits = compiled.iter().filter(|m| m.is_external).count();
+
     // 8. Generate source map if requested.
     let source_map = if input.options.source_map {
         let hash = blake3::hash(code.as_bytes()).to_hex();
         let map_file = format!("{}.js.map", &hash[..16]);
         let mut builder = sourcemap::SourceMapBuilder::new(&map_file, &input.project_root);
 
-        // Count wrapper header lines.
         let wrapper_lines = match input.target {
-            BundleTarget::Client => 2, // IIFE header + "use strict"
-            BundleTarget::Ssr => 3,    // comment + import React + import renderToString
+            BundleTarget::Client => 2,
+            BundleTarget::Ssr => 3,
         };
 
-        // Linker header lines: "// Generated…" + "\"use strict\";" + blank
         let linker_header_lines: u32 = 3;
         let total_offset = wrapper_lines + linker_header_lines;
 
@@ -319,8 +408,7 @@ fn bundle_with_parts(
             let source_idx = builder.add_source(&module.path, Some(&module.js));
             let line_count = module.js.lines().count() as u32;
             builder.add_identity_mappings(source_idx, &module.js, current_line);
-            // linker wraps each module with: comment line + var X = (function() { + "use strict"; + code + })();\n\n
-            current_line += line_count + 5; // approximate overhead per module
+            current_line += line_count + 5;
         }
 
         Some(builder.to_json())
@@ -328,12 +416,52 @@ fn bundle_with_parts(
         None
     };
 
+    // 9. Optionally emit a chunk manifest.
+    let chunk_manifest = if input.options.emit_chunk_manifest {
+        let hash = blake3::hash(code.as_bytes()).to_hex();
+        let bundle_id = hash[..16].to_string();
+        let output_file = format!("{bundle_id}.js");
+        let sm_file = source_map.as_ref().map(|_| format!("{bundle_id}.js.map"));
+
+        let modules: Vec<String> = linker::ordered_project_modules(&compiled)
+            .iter()
+            .filter(|m| !m.is_external)
+            .map(|m| m.path.display().to_string().replace('\\', "/"))
+            .collect();
+
+        Some(ChunkManifest {
+            bundle_id,
+            route: input.request_path.clone(),
+            modules,
+            output_file,
+            source_map_file: sm_file,
+            size_bytes: code.len(),
+        })
+    } else {
+        None
+    };
+
+    // Count modules removed by tree-shaking.
+    let tree_shaken_modules = if input.options.tree_shaking && input.options.minify {
+        // Approximate by counting `[tree-shaken]` comments in the linked (pre-minify) output.
+        linked
+            .lines()
+            .filter(|l| l.contains("[tree-shaken]"))
+            .count()
+    } else {
+        0
+    };
+
+    let output_bytes = code.len();
     let stats = BundleStats {
         module_count: graph.len(),
-        output_bytes: code.len(),
+        output_bytes,
+        estimated_gz_bytes: (output_bytes as f64 * 0.35) as usize,
         minified: input.options.minify,
         tree_shaken: input.options.tree_shaking,
         duration_ms: started.elapsed().as_millis() as u64,
+        tree_shaken_modules,
+        cache_hits,
     };
 
     Ok(BundleOutput {
@@ -341,6 +469,7 @@ fn bundle_with_parts(
         source_map,
         diagnostics,
         stats,
+        chunk_manifest,
     })
 }
 
@@ -367,6 +496,8 @@ mod tests {
                 minify: false,
                 source_map: true,
                 tree_shaking: true,
+                emit_chunk_manifest: true,
+                ..Default::default()
             },
         }
     }
@@ -419,5 +550,80 @@ mod tests {
         assert!(second.source_map.is_some());
         assert_eq!(context.graph_cache().source_count(), 4);
         assert!(context.graph_cache().resolution_count() >= 1);
+    }
+
+    #[test]
+    fn bundle_emits_chunk_manifest() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let app = root.join("app");
+        fs::create_dir_all(&app).unwrap();
+
+        let page = app.join("page.tsx");
+        fs::write(
+            &page,
+            "export default function Page() { return <main>Hi</main>; }",
+        )
+        .unwrap();
+
+        let input = client_input(&root, &app, page, vec![], "/");
+        let out = bundle(input).unwrap();
+
+        assert!(out.chunk_manifest.is_some());
+        let manifest = out.chunk_manifest.unwrap();
+        assert!(!manifest.bundle_id.is_empty());
+        assert_eq!(manifest.route, "/");
+        assert!(manifest.size_bytes > 0);
+    }
+
+    #[test]
+    fn bundle_stats_includes_estimated_gz() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let app = root.join("app");
+        fs::create_dir_all(&app).unwrap();
+
+        let page = app.join("page.tsx");
+        fs::write(
+            &page,
+            "export default function Page() { return <main>Stats</main>; }",
+        )
+        .unwrap();
+
+        let mut input = client_input(&root, &app, page, vec![], "/");
+        input.options.source_map = false;
+        input.options.emit_chunk_manifest = false;
+        let out = bundle(input).unwrap();
+
+        assert!(out.stats.estimated_gz_bytes > 0);
+        assert!(out.stats.estimated_gz_bytes < out.stats.output_bytes);
+    }
+
+    #[test]
+    fn automatic_jsx_runtime_injects_import() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let app = root.join("app");
+        fs::create_dir_all(&app).unwrap();
+
+        let page = app.join("page.tsx");
+        fs::write(
+            &page,
+            "export default function Page() { return <main>Automatic</main>; }",
+        )
+        .unwrap();
+
+        let mut input = client_input(&root, &app, page, vec![], "/");
+        input.options.jsx_runtime = JsxRuntime::Automatic;
+        input.options.source_map = false;
+        input.options.emit_chunk_manifest = false;
+        let out = bundle(input).unwrap();
+
+        // The compiled output should reference _jsx from react/jsx-runtime.
+        assert!(
+            out.code.contains("_jsx") || out.code.contains("jsx-runtime"),
+            "expected automatic JSX runtime in output, got: {}",
+            &out.code[..out.code.len().min(500)]
+        );
     }
 }

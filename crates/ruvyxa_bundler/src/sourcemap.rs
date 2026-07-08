@@ -47,6 +47,11 @@ pub struct SourceMapBuilder {
     mappings: Vec<Mapping>,
     /// Project root used to relativize paths.
     source_root: PathBuf,
+    /// Symbol name table (for the optional `names` array).
+    names: Vec<String>,
+    /// Indices into `sources` that belong to generated/framework code and
+    /// should be ignored by debuggers (`x_google_ignoreList`).
+    ignore_list: Vec<u32>,
 }
 
 impl SourceMapBuilder {
@@ -58,6 +63,32 @@ impl SourceMapBuilder {
             sources_content: Vec::new(),
             mappings: Vec::new(),
             source_root: source_root.into(),
+            names: Vec::new(),
+            ignore_list: Vec::new(),
+        }
+    }
+
+    /// Register a symbol name in the `names` table and return its index.
+    ///
+    /// The returned index can be used as the optional 5th VLQ segment in a
+    /// [`Mapping`] to attach a name to a generated position.
+    pub fn add_name(&mut self, name: impl Into<String>) -> u32 {
+        let name = name.into();
+        if let Some(idx) = self.names.iter().position(|n| *n == name) {
+            return idx as u32;
+        }
+        let idx = self.names.len() as u32;
+        self.names.push(name);
+        idx
+    }
+
+    /// Mark a source index as an "ignore-listed" library file.
+    ///
+    /// DevTools that support `x_google_ignoreList` will skip these files in
+    /// call stacks and source panels, keeping focus on user code.
+    pub fn add_to_ignore_list(&mut self, source_idx: u32) {
+        if !self.ignore_list.contains(&source_idx) {
+            self.ignore_list.push(source_idx);
         }
     }
 
@@ -119,20 +150,32 @@ impl SourceMapBuilder {
     pub fn to_json(&self) -> String {
         let mappings_str = self.encode_mappings();
 
+        let sources_content: Vec<&str> = self
+            .sources_content
+            .iter()
+            .map(|c| c.as_deref().unwrap_or(""))
+            .collect();
+
+        // Build ignore list only if non-empty.
+        let ignore_list: Option<Vec<u32>> = if self.ignore_list.is_empty() {
+            None
+        } else {
+            let mut sorted = self.ignore_list.clone();
+            sorted.sort_unstable();
+            Some(sorted)
+        };
+
         let map = SourceMapJson {
             version: 3,
             file: &self.file,
             source_root: "",
             sources: &self.sources,
-            sources_content: &self
-                .sources_content
-                .iter()
-                .map(|c| c.as_deref().unwrap_or(""))
-                .collect::<Vec<_>>(),
+            sources_content: &sources_content,
+            names: &self.names,
             mappings: &mappings_str,
+            x_google_ignore_list: ignore_list.as_deref(),
         };
 
-        // Use serde for correct JSON output.
         serde_json::to_string(&map).unwrap_or_else(|_| "{}".into())
     }
 
@@ -193,16 +236,25 @@ impl SourceMapBuilder {
     }
 }
 
-/// Source Map v3 JSON structure.
+/// Source Map v3 JSON structure (extended with `names` and `x_google_ignoreList`).
 #[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
 struct SourceMapJson<'a> {
     version: u8,
     file: &'a str,
+    #[serde(rename = "sourceRoot")]
     source_root: &'a str,
     sources: &'a [String],
+    #[serde(rename = "sourcesContent")]
     sources_content: &'a [&'a str],
+    names: &'a [String],
     mappings: &'a str,
+    /// Indices of sources that should be ignored by DevTools step-through.
+    /// Introduced by Chrome and now supported broadly.
+    #[serde(
+        rename = "x_google_ignoreList",
+        skip_serializing_if = "Option::is_none"
+    )]
+    x_google_ignore_list: Option<&'a [u32]>,
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -385,5 +437,64 @@ mod tests {
         assert_eq!(idx1, idx2);
         assert_ne!(idx1, idx3);
         assert_eq!(builder.sources.len(), 2);
+    }
+
+    #[test]
+    fn names_array_in_output() {
+        let mut builder = SourceMapBuilder::new("bundle.js", PathBuf::from("/p"));
+        let n1 = builder.add_name("MyComponent");
+        let n2 = builder.add_name("helper");
+        let n3 = builder.add_name("MyComponent"); // duplicate — should return same idx
+        assert_eq!(n1, 0);
+        assert_eq!(n2, 1);
+        assert_eq!(n1, n3, "duplicate names should return the same index");
+
+        let json = builder.to_json();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let names = parsed["names"].as_array().unwrap();
+        assert_eq!(names.len(), 2);
+        assert_eq!(names[0].as_str().unwrap(), "MyComponent");
+        assert_eq!(names[1].as_str().unwrap(), "helper");
+    }
+
+    #[test]
+    fn x_google_ignore_list_emitted_when_set() {
+        let mut builder = SourceMapBuilder::new("bundle.js", PathBuf::from("/p"));
+        let idx = builder.add_source(Path::new("/p/generated.ts"), None);
+        builder.add_to_ignore_list(idx);
+
+        let json = builder.to_json();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        let ignore_list = parsed["x_google_ignoreList"].as_array().unwrap();
+        assert_eq!(ignore_list.len(), 1);
+        assert_eq!(ignore_list[0].as_u64().unwrap(), 0);
+    }
+
+    #[test]
+    fn x_google_ignore_list_omitted_when_empty() {
+        let builder = SourceMapBuilder::new("bundle.js", PathBuf::from("/p"));
+        let json = builder.to_json();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert!(
+            parsed.get("x_google_ignoreList").is_none(),
+            "should omit x_google_ignoreList when empty"
+        );
+    }
+
+    #[test]
+    fn source_map_json_contains_names_field() {
+        let builder = SourceMapBuilder::new("bundle.js", PathBuf::from("/p"));
+        let json = builder.to_json();
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        // Even when empty, `names` field should be present as [].
+        assert!(
+            parsed.get("names").is_some(),
+            "names field should always be present"
+        );
+        assert_eq!(
+            parsed["names"].as_array().unwrap().len(),
+            0,
+            "names should be empty when none were added"
+        );
     }
 }

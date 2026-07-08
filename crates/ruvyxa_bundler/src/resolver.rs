@@ -1,6 +1,17 @@
 //! Module resolver: walks `import`/`require` specifiers and produces a
 //! topologically-ordered list of (absolute-path, source-code) pairs.
 //!
+//! ## Resolution order
+//!
+//! For a given specifier the resolver tries the following strategies in order:
+//!
+//! 1. **Relative path** (starts with `./` or `../`) — probes TypeScript/JS
+//!    extensions via [`resolve_specifier`].
+//! 2. **Absolute path** — used for framework-generated virtual imports.
+//! 3. **tsconfig.json `paths`/`baseUrl`** — checked before `node_modules`.
+//! 4. **Bare specifier** — treated as an external `node_modules` dependency;
+//!    `package.json` `exports` fields are consulted for sub-path resolution.
+//!
 //! ## Performance
 //!
 //! The resolver uses a **lock-free concurrent resolution cache** backed by
@@ -18,6 +29,8 @@
 //!    to avoid unnecessary copies and exploit OS page cache.
 //! 4. **Batch stat elision** — resolved paths are fingerprinted by (mtime, len)
 //!    and served from cache on subsequent builds without re-statting.
+//! 5. **tsconfig path aliases** — `@/components/Button` resolves to the mapped
+//!    project path without hitting `node_modules`.
 //!
 //! For large module graphs (100+ modules), this reduces resolution wall-time
 //! by 3–5× compared to the sequential BFS approach.
@@ -193,6 +206,277 @@ impl ResolveGraphCache {
     }
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// tsconfig.json path alias support
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// A parsed subset of `tsconfig.json` relevant to module resolution.
+#[derive(Debug, Clone, Default)]
+pub struct TsConfigPaths {
+    /// Base URL for non-relative imports (usually the project root or `src/`).
+    pub base_url: Option<PathBuf>,
+    /// Path alias mappings, e.g. `"@/*" → ["./src/*"]`.
+    pub paths: Vec<(String, Vec<String>)>,
+}
+
+impl TsConfigPaths {
+    /// Load and parse `tsconfig.json` (or `jsconfig.json`) from the given root.
+    ///
+    /// Only `compilerOptions.baseUrl` and `compilerOptions.paths` are read.
+    /// Returns an empty config if the file is missing or malformed.
+    pub fn load(project_root: &Path) -> Self {
+        let candidates = [
+            project_root.join("tsconfig.json"),
+            project_root.join("jsconfig.json"),
+        ];
+
+        for path in &candidates {
+            if let Ok(content) = fs::read_to_string(path) {
+                if let Some(config) = parse_tsconfig_paths(&content, project_root) {
+                    return config;
+                }
+            }
+        }
+
+        TsConfigPaths::default()
+    }
+
+    /// Attempt to resolve a specifier using the path aliases.
+    ///
+    /// Returns `Some(absolute_path)` if an alias matches and the target file
+    /// exists, `None` otherwise.
+    pub fn resolve(&self, specifier: &str) -> Option<PathBuf> {
+        // 1. Try exact path aliases.
+        for (pattern, targets) in &self.paths {
+            let pattern_without_star = pattern.trim_end_matches('*');
+            let is_wildcard = pattern.ends_with('*');
+
+            let suffix = if is_wildcard {
+                specifier.strip_prefix(pattern_without_star)
+            } else if specifier == pattern {
+                Some("")
+            } else {
+                None
+            };
+
+            if let Some(suffix) = suffix {
+                for target in targets {
+                    let target_without_star = target.trim_end_matches('*');
+                    let candidate_str = format!("{target_without_star}{suffix}");
+
+                    let candidate = if let Some(base) = &self.base_url {
+                        base.join(&candidate_str)
+                    } else {
+                        PathBuf::from(&candidate_str)
+                    };
+
+                    if let Some(resolved) = resolve_file_candidate(&candidate) {
+                        return Some(resolved);
+                    }
+                }
+            }
+        }
+
+        // 2. Try baseUrl-relative resolution (for non-relative, non-bare specifiers).
+        if !specifier.starts_with('.') && !specifier.starts_with('/') {
+            if let Some(base) = &self.base_url {
+                let candidate = base.join(specifier);
+                if let Some(resolved) = resolve_file_candidate(&candidate) {
+                    return Some(resolved);
+                }
+            }
+        }
+
+        None
+    }
+}
+
+/// Minimally parse tsconfig.json to extract `compilerOptions.baseUrl` and
+/// `compilerOptions.paths` without pulling in a full JSON parser.
+///
+/// We use `serde_json` which is already in scope.
+fn parse_tsconfig_paths(content: &str, project_root: &Path) -> Option<TsConfigPaths> {
+    // Strip JSON comments (tsconfig files may use `//` comments).
+    let stripped = strip_json_comments(content);
+
+    let value: serde_json::Value = serde_json::from_str(&stripped).ok()?;
+    let compiler_options = value.get("compilerOptions")?;
+
+    let base_url = compiler_options
+        .get("baseUrl")
+        .and_then(|v| v.as_str())
+        .map(|s| {
+            let p = Path::new(s);
+            if p.is_absolute() {
+                p.to_path_buf()
+            } else {
+                project_root.join(p)
+            }
+        });
+
+    let mut paths: Vec<(String, Vec<String>)> = Vec::new();
+
+    if let Some(paths_obj) = compiler_options.get("paths").and_then(|v| v.as_object()) {
+        for (pattern, targets) in paths_obj {
+            if let Some(arr) = targets.as_array() {
+                let target_strs: Vec<String> = arr
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .map(|s| {
+                        // Resolve relative to the tsconfig location (project_root).
+                        if s.starts_with("./") || s.starts_with("../") {
+                            project_root.join(s).to_string_lossy().replace('\\', "/")
+                        } else {
+                            s.to_string()
+                        }
+                    })
+                    .collect();
+                paths.push((pattern.clone(), target_strs));
+            }
+        }
+    }
+
+    Some(TsConfigPaths { base_url, paths })
+}
+
+/// Strip `//` line comments from a JSON string so `serde_json` can parse it.
+fn strip_json_comments(input: &str) -> String {
+    let mut out = String::with_capacity(input.len());
+    let mut in_string = false;
+    let mut chars = input.chars().peekable();
+
+    while let Some(ch) = chars.next() {
+        if in_string {
+            if ch == '\\' {
+                out.push(ch);
+                if let Some(next) = chars.next() {
+                    out.push(next);
+                }
+            } else {
+                if ch == '"' {
+                    in_string = false;
+                }
+                out.push(ch);
+            }
+        } else {
+            match ch {
+                '"' => {
+                    in_string = true;
+                    out.push(ch);
+                }
+                '/' if chars.peek() == Some(&'/') => {
+                    // Line comment — consume until newline.
+                    for c in chars.by_ref() {
+                        if c == '\n' {
+                            out.push('\n');
+                            break;
+                        }
+                    }
+                }
+                _ => out.push(ch),
+            }
+        }
+    }
+
+    out
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// package.json `exports` field support
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Attempt to resolve a bare package specifier (e.g. `"react/server"`) using
+/// the package's `package.json` `exports` map.
+///
+/// Returns `Some(absolute_path)` if the exports map resolves the sub-path,
+/// `None` if there is no exports map or the sub-path isn't listed.
+fn resolve_package_exports(project_root: &Path, specifier: &str) -> Option<PathBuf> {
+    let (pkg_name, export_key) = package_name_and_export_key(specifier)?;
+
+    let pkg_dir = project_root.join("node_modules").join(pkg_name);
+    let pkg_json_path = pkg_dir.join("package.json");
+
+    let content = fs::read_to_string(&pkg_json_path).ok()?;
+    let pkg: serde_json::Value = serde_json::from_str(&content).ok()?;
+
+    let exports = pkg.get("exports")?;
+
+    // Resolve: exports[cond_key] → first "import" or "default" condition.
+    let resolved_rel = resolve_exports_entry(exports, &export_key)?;
+
+    let abs = pkg_dir.join(&resolved_rel);
+    abs.canonicalize().ok().or(Some(abs))
+}
+
+/// Split a package specifier into the package directory name and `exports` key.
+///
+/// Examples:
+/// - `react` -> (`react`, `.`)
+/// - `react/jsx-runtime` -> (`react`, `./jsx-runtime`)
+/// - `@scope/pkg` -> (`@scope/pkg`, `.`)
+/// - `@scope/pkg/sub/path` -> (`@scope/pkg`, `./sub/path`)
+fn package_name_and_export_key(specifier: &str) -> Option<(String, String)> {
+    if specifier.is_empty() || specifier.starts_with('.') || specifier.starts_with('/') {
+        return None;
+    }
+
+    if specifier.starts_with('@') {
+        let mut parts = specifier.splitn(3, '/');
+        let scope = parts.next()?;
+        let name = parts.next()?;
+        let subpath = parts.next();
+        let pkg_name = format!("{scope}/{name}");
+        let export_key = subpath
+            .filter(|s| !s.is_empty())
+            .map(|s| format!("./{s}"))
+            .unwrap_or_else(|| ".".to_string());
+        return Some((pkg_name, export_key));
+    }
+
+    let (pkg_name, export_key) = if let Some((name, subpath)) = specifier.split_once('/') {
+        (name.to_string(), format!("./{subpath}"))
+    } else {
+        (specifier.to_string(), ".".to_string())
+    };
+
+    Some((pkg_name, export_key))
+}
+
+/// Walk the exports map to find the file for a given sub-path under the
+/// `"import"` or `"default"` condition.
+fn resolve_exports_entry(exports: &serde_json::Value, key: &str) -> Option<String> {
+    match exports {
+        serde_json::Value::String(s) => Some(s.trim_start_matches("./").to_string()),
+        serde_json::Value::Object(map) => {
+            // Try exact key match first (e.g. `"."` or `"./server"`).
+            if let Some(val) = map.get(key) {
+                return resolve_exports_condition(val);
+            }
+            // Try condition keys (e.g. `"import"`, `"default"`).
+            resolve_exports_condition(exports)
+        }
+        _ => None,
+    }
+}
+
+fn resolve_exports_condition(val: &serde_json::Value) -> Option<String> {
+    match val {
+        serde_json::Value::String(s) => Some(s.trim_start_matches("./").to_string()),
+        serde_json::Value::Object(map) => {
+            // Prefer "import" > "module" > "default" for ESM builds.
+            for key in &["import", "module", "default", "require"] {
+                if let Some(v) = map.get(*key) {
+                    if let Some(s) = resolve_exports_condition(v) {
+                        return Some(s);
+                    }
+                }
+            }
+            None
+        }
+        _ => None,
+    }
+}
+
 /// Read a source file, using memory-mapping for large files.
 fn read_source_fast(path: &Path, len: u64) -> Result<String> {
     if len >= MMAP_THRESHOLD_BYTES {
@@ -346,6 +630,10 @@ fn collect_deps_cached(
     _app_dir: &Path,
     cache: &ResolveGraphCache,
 ) -> Result<Vec<PathBuf>> {
+    // Load tsconfig paths once per resolve call (cheap — cached on disk).
+    // In practice the tsconfig rarely changes between module resolves in a single build.
+    let tsconfig = TsConfigPaths::load(project_root);
+
     let specifiers = extract_specifiers(source);
     let mut deps = Vec::with_capacity(specifiers.len());
     let base_dir_str = base_dir.to_string_lossy();
@@ -356,7 +644,7 @@ fn collect_deps_cached(
         }
 
         let resolved = if specifier.starts_with('.') {
-            // Check cache first (lock-free read via DashMap).
+            // Relative import: check resolution cache first (lock-free DashMap read).
             if let Some(cached) = cache.resolution(&base_dir_str, &specifier) {
                 cached
             } else {
@@ -364,10 +652,27 @@ fn collect_deps_cached(
                 cache.insert_resolution(&base_dir_str, &specifier, result.clone());
                 result
             }
-        } else {
-            // Absolute or project-root-relative paths are framework-generated
-            // local imports. Bare specifiers such as "react" remain external.
+        } else if specifier.starts_with('/') {
+            // Absolute path — framework-generated imports.
             resolve_project_specifier(project_root, &specifier)
+        } else {
+            // Non-relative specifier: try tsconfig paths/baseUrl first, then
+            // project-root-relative, then package.json exports.
+            let tsconfig_result = tsconfig.resolve(&specifier);
+            if tsconfig_result.is_some() {
+                tsconfig_result
+            } else if let Some(project_local) = resolve_project_specifier(project_root, &specifier)
+            {
+                if is_project_local(&project_local, project_root) {
+                    Some(project_local)
+                } else {
+                    // Try package.json exports map for bare specifiers.
+                    resolve_package_exports(project_root, &specifier).or(Some(project_local))
+                }
+            } else {
+                // Try package.json exports map (e.g. `react/server`).
+                resolve_package_exports(project_root, &specifier)
+            }
         };
 
         match resolved {
@@ -375,9 +680,12 @@ fn collect_deps_cached(
                 if is_project_local(&abs_path, project_root) {
                     deps.push(abs_path);
                 }
+                // External paths (node_modules) are intentionally not added to deps —
+                // they're not bundled, just left as ESM imports.
             }
             None => {
                 if !specifier.starts_with('.') {
+                    // Bare specifier that couldn't be resolved — treated as external.
                     continue;
                 }
                 return Err(BundleError::Unresolved {
@@ -479,11 +787,17 @@ fn resolve_file_candidate(joined: &Path) -> Option<PathBuf> {
         joined.with_extension("js"),
         joined.with_extension("jsx"),
         joined.with_extension("mts"),
+        joined.with_extension("cts"),
         joined.with_extension("mjs"),
+        joined.with_extension("cjs"),
         joined.join("index.ts"),
         joined.join("index.tsx"),
         joined.join("index.js"),
         joined.join("index.jsx"),
+        joined.join("index.mts"),
+        joined.join("index.cts"),
+        joined.join("index.mjs"),
+        joined.join("index.cjs"),
     ];
 
     candidates
@@ -726,5 +1040,132 @@ export default function Card() { return <div className={cn("card")} /> }"#,
 
         // Cache should have stored the source reads (no duplicate reads)
         assert!(cache.source_count() >= 4); // page, Button, Card, utils
+    }
+
+    #[test]
+    fn tsconfig_paths_resolve_alias() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let src = root.join("src");
+        let components = src.join("components");
+        fs::create_dir_all(&components).unwrap();
+
+        let button = components.join("Button.tsx");
+        fs::write(&button, "export default function Button() {}").unwrap();
+
+        // Write tsconfig.json with @/* path alias.
+        let tsconfig = serde_json::json!({
+            "compilerOptions": {
+                "baseUrl": ".",
+                "paths": {
+                    "@/*": ["./src/*"]
+                }
+            }
+        });
+        fs::write(
+            root.join("tsconfig.json"),
+            serde_json::to_string(&tsconfig).unwrap(),
+        )
+        .unwrap();
+
+        let tc = TsConfigPaths::load(root);
+        let resolved = tc.resolve("@/components/Button");
+
+        assert!(
+            resolved.is_some(),
+            "should resolve @/components/Button via tsconfig paths"
+        );
+        let resolved_path = resolved.unwrap();
+        assert!(
+            resolved_path.to_string_lossy().contains("Button"),
+            "resolved path should point to Button: {}",
+            resolved_path.display()
+        );
+    }
+
+    #[test]
+    fn tsconfig_baseurl_resolution() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let lib = root.join("lib");
+        fs::create_dir_all(&lib).unwrap();
+        fs::write(lib.join("utils.ts"), "export const x = 1;").unwrap();
+
+        let tsconfig = serde_json::json!({
+            "compilerOptions": {
+                "baseUrl": "."
+            }
+        });
+        fs::write(
+            root.join("tsconfig.json"),
+            serde_json::to_string(&tsconfig).unwrap(),
+        )
+        .unwrap();
+
+        let tc = TsConfigPaths::load(root);
+        // "lib/utils" should resolve via baseUrl.
+        let resolved = tc.resolve("lib/utils");
+        assert!(resolved.is_some(), "should resolve lib/utils via baseUrl");
+    }
+
+    #[test]
+    fn strip_json_comments_handles_line_comments() {
+        let input = r#"{
+            // this is a comment
+            "key": "value" // inline comment
+        }"#;
+        let stripped = strip_json_comments(input);
+        let parsed: serde_json::Value = serde_json::from_str(&stripped).unwrap();
+        assert_eq!(parsed["key"], "value");
+    }
+
+    #[test]
+    fn package_name_and_export_key_handles_subpaths() {
+        assert_eq!(
+            package_name_and_export_key("react/jsx-runtime"),
+            Some(("react".to_string(), "./jsx-runtime".to_string()))
+        );
+        assert_eq!(
+            package_name_and_export_key("@scope/pkg"),
+            Some(("@scope/pkg".to_string(), ".".to_string()))
+        );
+        assert_eq!(
+            package_name_and_export_key("@scope/pkg/runtime/jsx"),
+            Some(("@scope/pkg".to_string(), "./runtime/jsx".to_string()))
+        );
+    }
+
+    #[test]
+    fn resolves_package_exports_subpath() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let pkg = root.join("node_modules").join("pkg");
+        fs::create_dir_all(pkg.join("dist")).unwrap();
+        fs::write(pkg.join("dist").join("runtime.mjs"), "export const x = 1;").unwrap();
+        fs::write(
+            pkg.join("package.json"),
+            r#"{"type":"module","exports":{"./runtime":{"import":"./dist/runtime.mjs"}}}"#,
+        )
+        .unwrap();
+
+        let resolved = resolve_package_exports(root, "pkg/runtime").unwrap();
+        assert!(resolved.ends_with("dist/runtime.mjs"));
+    }
+
+    #[test]
+    fn resolves_scoped_package_exports() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let pkg = root.join("node_modules").join("@scope").join("pkg");
+        fs::create_dir_all(pkg.join("dist")).unwrap();
+        fs::write(pkg.join("dist").join("index.js"), "export default 1;").unwrap();
+        fs::write(
+            pkg.join("package.json"),
+            r#"{"exports":{".":{"default":"./dist/index.js"}}}"#,
+        )
+        .unwrap();
+
+        let resolved = resolve_package_exports(root, "@scope/pkg").unwrap();
+        assert!(resolved.ends_with("dist/index.js"));
     }
 }

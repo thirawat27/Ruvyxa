@@ -7,11 +7,18 @@
 //! ## Cache key
 //!
 //! ```text
-//! blake3(source_content || has_jsx_flag || compiler_version)
+//! blake3(source_content || "\0" || jsx_flag || "\0" || jsx_runtime || "\0" || compiler_version)
 //! ```
 //!
 //! The compiler version is included so that cache entries are automatically
 //! invalidated when the compiler is updated.
+//!
+//! ## Memory cache (LRU eviction)
+//!
+//! The in-process cache holds up to [`MEMORY_CACHE_LIMIT`] entries.  When the
+//! limit is reached the least-recently-used entry is evicted to bound memory
+//! consumption.  Disk entries are not evicted automatically — run
+//! `ruvyxa clean` or call [`CompileCache::clear`] to purge them.
 
 use std::collections::HashMap;
 use std::fs;
@@ -19,14 +26,34 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::JsxRuntime;
+
+/// Maximum number of entries kept in the in-process memory cache.
+const MEMORY_CACHE_LIMIT: usize = 512;
+
 /// Current compiler version stamp — bump this when the transform logic changes
 /// to automatically invalidate stale cache entries.
-const COMPILER_VERSION: &str = concat!("ruvyxa_bundler:", env!("CARGO_PKG_VERSION"), ":cache-v3");
+const COMPILER_VERSION: &str = concat!(
+    "ruvyxa_bundler:",
+    env!("CARGO_PKG_VERSION"),
+    ":cache-ruvyxa"
+);
 
 /// Atomic counter for unique temp file names.
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
-/// On-disk compilation cache.
+/// LRU-ordered in-memory cache entry.
+#[derive(Debug)]
+struct MemEntry {
+    value: String,
+    /// Monotonically increasing generation counter for LRU tracking.
+    last_used: u64,
+}
+
+/// Atomic generation counter for LRU tracking.
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+
+/// On-disk compilation cache with an in-process LRU memory layer.
 #[derive(Debug, Clone)]
 pub struct CompileCache {
     /// Directory where cached `.js` files are stored.
@@ -34,7 +61,7 @@ pub struct CompileCache {
     /// Whether caching is enabled.
     enabled: bool,
     /// Process-local hot cache shared by cloned cache handles.
-    memory: Arc<Mutex<HashMap<String, String>>>,
+    memory: Arc<Mutex<HashMap<String, MemEntry>>>,
 }
 
 /// Cache lookup result.
@@ -66,29 +93,40 @@ impl CompileCache {
         }
     }
 
-    /// Look up a source file's compiled output in the cache.
+    /// Look up a source file's compiled output in the cache (classic JSX mode).
+    pub fn lookup(&self, source: &str, has_jsx: bool) -> CacheLookup {
+        self.lookup_with_options(source, has_jsx, JsxRuntime::Classic)
+    }
+
+    /// Look up with explicit JSX runtime selection.
     ///
     /// Returns [`CacheLookup::Hit`] with the cached JS if found,
     /// or [`CacheLookup::Miss`] with the computed cache key otherwise.
-    pub fn lookup(&self, source: &str, has_jsx: bool) -> CacheLookup {
-        let key = Self::cache_key(source, has_jsx);
+    pub fn lookup_with_options(
+        &self,
+        source: &str,
+        has_jsx: bool,
+        jsx_runtime: JsxRuntime,
+    ) -> CacheLookup {
+        let key = Self::cache_key_with_options(source, has_jsx, jsx_runtime);
 
         if !self.enabled {
             return CacheLookup::Miss(key);
         }
 
-        if let Ok(memory) = self.memory.lock() {
-            if let Some(cached_js) = memory.get(&key) {
-                return CacheLookup::Hit(cached_js.clone());
+        // Fast path: memory cache (LRU-updated on hit).
+        if let Ok(mut memory) = self.memory.lock() {
+            if let Some(entry) = memory.get_mut(&key) {
+                entry.last_used = GENERATION.fetch_add(1, Ordering::Relaxed);
+                return CacheLookup::Hit(entry.value.clone());
             }
         }
 
+        // Disk cache.
         let path = self.cache_dir.join(format!("{key}.js"));
         match fs::read_to_string(&path) {
             Ok(cached_js) => {
-                if let Ok(mut memory) = self.memory.lock() {
-                    memory.insert(key, cached_js.clone());
-                }
+                self.insert_to_memory(key, cached_js.clone());
                 CacheLookup::Hit(cached_js)
             }
             Err(_) => CacheLookup::Miss(key),
@@ -103,9 +141,7 @@ impl CompileCache {
             return;
         }
 
-        if let Ok(mut memory) = self.memory.lock() {
-            memory.insert(key.to_string(), compiled_js.to_string());
-        }
+        self.insert_to_memory(key.to_string(), compiled_js.to_string());
 
         if let Err(_e) = fs::create_dir_all(&self.cache_dir) {
             return;
@@ -126,6 +162,30 @@ impl CompileCache {
         }
     }
 
+    /// Insert a value into the in-memory LRU cache, evicting the LRU entry
+    /// when the cache has grown past [`MEMORY_CACHE_LIMIT`].
+    fn insert_to_memory(&self, key: String, value: String) {
+        if let Ok(mut memory) = self.memory.lock() {
+            if memory.len() >= MEMORY_CACHE_LIMIT && !memory.contains_key(&key) {
+                // Evict the least-recently-used entry.
+                if let Some(lru_key) = memory
+                    .iter()
+                    .min_by_key(|(_, v)| v.last_used)
+                    .map(|(k, _)| k.clone())
+                {
+                    memory.remove(&lru_key);
+                }
+            }
+            memory.insert(
+                key,
+                MemEntry {
+                    value,
+                    last_used: GENERATION.fetch_add(1, Ordering::Relaxed),
+                },
+            );
+        }
+    }
+
     /// Invalidate (remove) a specific cache entry.
     pub fn invalidate(&self, source: &str, has_jsx: bool) {
         if !self.enabled {
@@ -139,7 +199,7 @@ impl CompileCache {
         let _ = fs::remove_file(&path);
     }
 
-    /// Remove all cached entries.
+    /// Remove all cached entries (memory + disk).
     pub fn clear(&self) {
         if !self.enabled {
             return;
@@ -152,14 +212,24 @@ impl CompileCache {
         }
     }
 
-    /// Compute the cache key for a given source and JSX flag.
-    ///
-    /// Key = blake3(source || "\0" || jsx_flag || "\0" || compiler_version)[..32] as hex.
+    /// Compute the cache key for a given source and JSX flag (classic mode).
     pub fn cache_key(source: &str, has_jsx: bool) -> String {
+        Self::cache_key_with_options(source, has_jsx, JsxRuntime::Classic)
+    }
+
+    /// Compute the cache key for a given source, JSX flag, and JSX runtime mode.
+    ///
+    /// Key = blake3(source || "\0" || jsx_flag || "\0" || jsx_runtime || "\0" || compiler_version)[..32] as hex.
+    pub fn cache_key_with_options(source: &str, has_jsx: bool, jsx_runtime: JsxRuntime) -> String {
         let mut hasher = blake3::Hasher::new();
         hasher.update(source.as_bytes());
         hasher.update(b"\0");
         hasher.update(if has_jsx { b"jsx" } else { b"ts" });
+        hasher.update(b"\0");
+        hasher.update(match jsx_runtime {
+            JsxRuntime::Classic => b"classic",
+            JsxRuntime::Automatic => b"automatic",
+        });
         hasher.update(b"\0");
         hasher.update(COMPILER_VERSION.as_bytes());
         let hash = hasher.finalize();
@@ -206,6 +276,11 @@ impl CompileCache {
             })
             .unwrap_or(0)
     }
+
+    /// Return the current number of entries in the memory cache.
+    pub fn memory_entry_count(&self) -> usize {
+        self.memory.lock().map(|m| m.len()).unwrap_or(0)
+    }
 }
 
 #[cfg(test)]
@@ -235,6 +310,13 @@ mod tests {
     }
 
     #[test]
+    fn cache_key_differs_by_jsx_runtime() {
+        let k1 = CompileCache::cache_key_with_options("const x = 1;", true, JsxRuntime::Classic);
+        let k2 = CompileCache::cache_key_with_options("const x = 1;", true, JsxRuntime::Automatic);
+        assert_ne!(k1, k2);
+    }
+
+    #[test]
     fn disabled_cache_always_misses() {
         let cache = CompileCache::disabled();
         match cache.lookup("const x = 1;", false) {
@@ -252,16 +334,13 @@ mod tests {
         let has_jsx = false;
         let compiled = "var x = 1;";
 
-        // Initially miss.
         let key = match cache.lookup(source, has_jsx) {
             CacheLookup::Miss(k) => k,
             CacheLookup::Hit(_) => panic!("should be miss initially"),
         };
 
-        // Store.
         cache.store(&key, compiled);
 
-        // Now should hit.
         match cache.lookup(source, has_jsx) {
             CacheLookup::Hit(cached) => assert_eq!(cached, compiled),
             CacheLookup::Miss(_) => panic!("should be hit after store"),
@@ -278,13 +357,10 @@ mod tests {
         let key = CompileCache::cache_key(source, false);
         cache.store(&key, compiled);
 
-        // Confirm hit.
         assert!(matches!(cache.lookup(source, false), CacheLookup::Hit(_)));
 
-        // Invalidate.
         cache.invalidate(source, false);
 
-        // Now miss.
         assert!(matches!(cache.lookup(source, false), CacheLookup::Miss(_)));
     }
 
@@ -311,5 +387,55 @@ mod tests {
 
         assert_eq!(cache.entry_count(), 2);
         assert_eq!(cache.total_bytes(), 12); // 5 + 7 bytes
+    }
+
+    #[test]
+    fn lru_eviction_bounds_memory_cache() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = CompileCache::new(tmp.path(), true);
+
+        // Fill the memory cache to the limit.
+        for i in 0..MEMORY_CACHE_LIMIT {
+            let src = format!("const x{i} = {i};");
+            let key = CompileCache::cache_key(&src, false);
+            cache.store(&key, &format!("var x{i} = {i};"));
+        }
+
+        assert_eq!(cache.memory_entry_count(), MEMORY_CACHE_LIMIT);
+
+        // Add one more — should evict an existing entry.
+        let extra_src = "const extra = 999;";
+        let key = CompileCache::cache_key(extra_src, false);
+        cache.store(&key, "var extra = 999;");
+
+        assert_eq!(
+            cache.memory_entry_count(),
+            MEMORY_CACHE_LIMIT,
+            "memory cache should not grow past the limit"
+        );
+    }
+
+    #[test]
+    fn store_and_retrieve_automatic_jsx() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = CompileCache::new(tmp.path(), true);
+
+        let source = "const el = <div/>;";
+        let compiled_auto = "_jsx(\"div\", {})";
+
+        let key = CompileCache::cache_key_with_options(source, true, JsxRuntime::Automatic);
+        cache.store(&key, compiled_auto);
+
+        // Automatic mode should hit.
+        match cache.lookup_with_options(source, true, JsxRuntime::Automatic) {
+            CacheLookup::Hit(v) => assert_eq!(v, compiled_auto),
+            CacheLookup::Miss(_) => panic!("should be hit for automatic mode"),
+        }
+
+        // Classic mode should miss (different cache key).
+        assert!(matches!(
+            cache.lookup_with_options(source, true, JsxRuntime::Classic),
+            CacheLookup::Miss(_)
+        ));
     }
 }

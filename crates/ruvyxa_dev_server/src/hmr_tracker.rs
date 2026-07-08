@@ -257,14 +257,14 @@ mod tests {
         assert_eq!(tracker.tracked_file_count(), 4); // page, button, utils, blog/page
 
         // Changing utils affects both routes.
-        let update = tracker.compute_update(&[utils.clone()]);
+        let update = tracker.compute_update(std::slice::from_ref(&utils));
         assert!(update.affected_routes.contains(&"/".to_string()));
         assert!(update.affected_routes.contains(&"/blog".to_string()));
         assert_eq!(update.affected_routes.len(), 2);
         assert_eq!(update.event_type, HmrEventType::ComponentUpdate);
 
         // Changing Button only affects "/".
-        let update = tracker.compute_update(&[button.clone()]);
+        let update = tracker.compute_update(std::slice::from_ref(&button));
         assert_eq!(update.affected_routes, vec!["/"]);
     }
 
@@ -299,7 +299,7 @@ mod tests {
 
         tracker.register_route("/", &[page.clone(), old_dep.clone()]);
         assert!(tracker
-            .compute_update(&[old_dep.clone()])
+            .compute_update(std::slice::from_ref(&old_dep))
             .affected_routes
             .contains(&"/".to_string()));
 

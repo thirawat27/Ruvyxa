@@ -158,6 +158,9 @@ struct BuildConfigOptions {
     sourcemap: Option<bool>,
     split_strategy: Option<String>,
     parallelism: Option<usize>,
+    jsx_runtime: Option<String>,
+    es_target: Option<String>,
+    emit_chunk_manifest: Option<bool>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -484,14 +487,8 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
     fs::create_dir_all(&client_dir)?;
     write_manifest(&manifest, &staging_dir.join("manifest.json"))?;
 
-    let client_manifest = emit_client_bundles(
-        &args.root,
-        &app_dir,
-        &manifest,
-        &client_dir,
-        config.build.minify.unwrap_or(true),
-        config.build.parallelism,
-    )?;
+    let client_manifest =
+        emit_client_bundles(&args.root, &app_dir, &manifest, &client_dir, &config.build)?;
     fs::write(
         client_dir.join("manifest.json"),
         serde_json::to_string_pretty(&client_manifest)?,
@@ -520,7 +517,10 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
         "build": {
             "minify": config.build.minify.unwrap_or(true),
             "sourcemap": config.build.sourcemap.unwrap_or(false),
-            "splitStrategy": config.build.split_strategy.unwrap_or_else(|| "route".to_string()),
+            "splitStrategy": config.build.split_strategy.as_deref().unwrap_or("route"),
+            "jsxRuntime": config.build.jsx_runtime.as_deref().unwrap_or("classic"),
+            "esTarget": config.build.es_target.as_deref().unwrap_or("es2022"),
+            "emitChunkManifest": config.build.emit_chunk_manifest.unwrap_or(false),
             "parallelism": client_manifest.get("parallelism").cloned().unwrap_or(serde_json::Value::Null)
         }
     });
@@ -580,6 +580,11 @@ struct ClientBundle {
     entry: PathBuf,
     file_name: String,
     script: String,
+    source_map_file: Option<String>,
+    source_map: Option<String>,
+    output_bytes: usize,
+    estimated_gz_bytes: usize,
+    duration_ms: u64,
 }
 
 fn emit_client_bundles(
@@ -587,8 +592,7 @@ fn emit_client_bundles(
     app_dir: &Path,
     manifest: &RouteManifest,
     client_dir: &Path,
-    minify: bool,
-    configured_parallelism: Option<usize>,
+    build: &BuildConfigOptions,
 ) -> anyhow::Result<serde_json::Value> {
     let bundle_context = ruvyxa_bundler::BundleContext::new(root);
     let page_routes = manifest
@@ -600,7 +604,8 @@ fn emit_client_bundles(
     let available_parallelism = std::thread::available_parallelism()
         .map(usize::from)
         .unwrap_or(1);
-    let parallelism = configured_parallelism
+    let parallelism = build
+        .parallelism
         .unwrap_or(available_parallelism)
         .clamp(1, page_routes.len().max(1));
     let chunk_size = page_routes.len().max(1).div_ceil(parallelism);
@@ -620,7 +625,7 @@ fn emit_client_bundles(
                         .iter()
                         .enumerate()
                         .map(|(index, route)| {
-                            bundle_client_route(root, app_dir, route, minify, &bundle_context)
+                            bundle_client_route(root, app_dir, route, build, &bundle_context)
                                 .map(|bundle| (offset + index, bundle))
                         })
                         .collect()
@@ -643,22 +648,35 @@ fn emit_client_bundles(
     let mut routes = Vec::new();
     for (_, bundle) in bundles {
         fs::write(client_dir.join(&bundle.file_name), bundle.script.as_bytes())?;
+        if let (Some(source_map_file), Some(source_map)) =
+            (&bundle.source_map_file, &bundle.source_map)
+        {
+            fs::write(client_dir.join(source_map_file), source_map.as_bytes())?;
+        }
         routes.push(serde_json::json!({
             "path": bundle.path,
             "entry": bundle.entry,
             "file": bundle.file_name,
             "src": format!("/__ruvyxa/client/{}", bundle.file_name),
+            "sourceMap": bundle.source_map_file,
             "bytes": bundle.script.len(),
+            "outputBytes": bundle.output_bytes,
+            "estimatedGzBytes": bundle.estimated_gz_bytes,
+            "durationMs": bundle.duration_ms,
             "optimized": true,
             "treeShaken": true,
-            "chunkStrategy": "route"
+            "chunkStrategy": build.split_strategy.as_deref().unwrap_or("route")
         }));
     }
 
     Ok(serde_json::json!({
-        "chunkStrategy": "route",
-        "minify": minify,
+        "chunkStrategy": build.split_strategy.as_deref().unwrap_or("route"),
+        "minify": build.minify.unwrap_or(true),
+        "sourcemap": build.sourcemap.unwrap_or(false),
         "treeShaking": true,
+        "jsxRuntime": build.jsx_runtime.as_deref().unwrap_or("classic"),
+        "esTarget": build.es_target.as_deref().unwrap_or("es2022"),
+        "emitChunkManifest": build.emit_chunk_manifest.unwrap_or(false),
         "parallelism": parallelism,
         "routes": routes
     }))
@@ -669,7 +687,7 @@ fn bundle_client_route(
     root: &Path,
     app_dir: &Path,
     route: &RouteEntry,
-    minify: bool,
+    build: &BuildConfigOptions,
     bundle_context: &ruvyxa_bundler::BundleContext,
 ) -> anyhow::Result<ClientBundle> {
     use ruvyxa_bundler::{BundleInput, BundleOptions, BundleTarget};
@@ -693,9 +711,13 @@ fn bundle_client_route(
         request_path: route.path.clone(),
         target: BundleTarget::Client,
         options: BundleOptions {
-            minify,
-            source_map: false,
+            minify: build.minify.unwrap_or(true),
+            source_map: build.sourcemap.unwrap_or(false),
             tree_shaking: true,
+            jsx_runtime: parse_jsx_runtime(build.jsx_runtime.as_deref())?,
+            es_target: parse_es_target(build.es_target.as_deref())?,
+            split_strategy: parse_split_strategy(build.split_strategy.as_deref())?,
+            emit_chunk_manifest: build.emit_chunk_manifest.unwrap_or(false),
         },
     };
 
@@ -707,14 +729,59 @@ fn bundle_client_route(
         tracing::warn!("{diagnostic}");
     }
 
-    let file_name = format!("{}.js", content_hash(&output.code));
+    let hash = content_hash(&output.code);
+    let file_name = format!("{hash}.js");
+    let source_map_file = output.source_map.as_ref().map(|_| format!("{hash}.js.map"));
+    let script = if let Some(source_map_file) = &source_map_file {
+        format!("{}\n//# sourceMappingURL={source_map_file}\n", output.code)
+    } else {
+        output.code.clone()
+    };
 
     Ok(ClientBundle {
         path: route.path.clone(),
         entry: route.file.clone(),
         file_name,
-        script: output.code,
+        script,
+        source_map_file,
+        source_map: output.source_map,
+        output_bytes: output.stats.output_bytes,
+        estimated_gz_bytes: output.stats.estimated_gz_bytes,
+        duration_ms: output.stats.duration_ms,
     })
+}
+
+fn parse_jsx_runtime(value: Option<&str>) -> anyhow::Result<ruvyxa_bundler::JsxRuntime> {
+    match value.unwrap_or("classic").to_ascii_lowercase().as_str() {
+        "classic" => Ok(ruvyxa_bundler::JsxRuntime::Classic),
+        "automatic" => Ok(ruvyxa_bundler::JsxRuntime::Automatic),
+        other => anyhow::bail!(
+            "RUV1601 build.jsxRuntime must be `classic` or `automatic`, got `{other}`"
+        ),
+    }
+}
+
+fn parse_es_target(value: Option<&str>) -> anyhow::Result<ruvyxa_bundler::EsTarget> {
+    match value.unwrap_or("es2022").to_ascii_lowercase().as_str() {
+        "es2018" => Ok(ruvyxa_bundler::EsTarget::Es2018),
+        "es2019" => Ok(ruvyxa_bundler::EsTarget::Es2019),
+        "es2020" => Ok(ruvyxa_bundler::EsTarget::Es2020),
+        "es2022" => Ok(ruvyxa_bundler::EsTarget::Es2022),
+        "esnext" => Ok(ruvyxa_bundler::EsTarget::EsNext),
+        other => anyhow::bail!(
+            "RUV1601 build.esTarget must be es2018, es2019, es2020, es2022, or esnext, got `{other}`"
+        ),
+    }
+}
+
+fn parse_split_strategy(value: Option<&str>) -> anyhow::Result<ruvyxa_bundler::SplitStrategy> {
+    match value.unwrap_or("route").to_ascii_lowercase().as_str() {
+        "single" | "manual" => Ok(ruvyxa_bundler::SplitStrategy::Single),
+        "route" => Ok(ruvyxa_bundler::SplitStrategy::Route),
+        other => anyhow::bail!(
+            "RUV1601 build.splitStrategy must be `single`, `route`, or `manual`, got `{other}`"
+        ),
+    }
 }
 
 fn content_hash(input: &str) -> String {
@@ -1937,6 +2004,33 @@ mod tests {
             content_hash("console.log('b')")
         );
         assert_eq!(content_hash("console.log('a')").len(), 16);
+    }
+
+    #[test]
+    fn parses_native_bundler_build_options() {
+        assert!(matches!(
+            parse_jsx_runtime(Some("automatic")).unwrap(),
+            ruvyxa_bundler::JsxRuntime::Automatic
+        ));
+        assert!(matches!(
+            parse_es_target(Some("esnext")).unwrap(),
+            ruvyxa_bundler::EsTarget::EsNext
+        ));
+        assert!(matches!(
+            parse_split_strategy(Some("route")).unwrap(),
+            ruvyxa_bundler::SplitStrategy::Route
+        ));
+        assert!(matches!(
+            parse_split_strategy(Some("manual")).unwrap(),
+            ruvyxa_bundler::SplitStrategy::Single
+        ));
+    }
+
+    #[test]
+    fn rejects_invalid_native_bundler_build_options() {
+        assert!(parse_jsx_runtime(Some("runtime-x")).is_err());
+        assert!(parse_es_target(Some("es5")).is_err());
+        assert!(parse_split_strategy(Some("vendor")).is_err());
     }
 
     #[test]
