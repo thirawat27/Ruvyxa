@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="examples/basic-app/public/ruvyxa.png" alt="Ruvyxa" width="240" height="240" />
+  <img src="examples/kitchen-sink/public/ruvyxa.png" alt="Ruvyxa" width="240" height="240" />
 </p>
 
 <h1 align="center">Ruvyxa</h1>
