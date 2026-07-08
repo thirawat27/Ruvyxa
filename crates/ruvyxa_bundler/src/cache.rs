@@ -16,11 +16,15 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 /// Current compiler version stamp — bump this when the transform logic changes
 /// to automatically invalidate stale cache entries.
 const COMPILER_VERSION: &str = concat!("ruvyxa_bundler:", env!("CARGO_PKG_VERSION"), ":cache-v3");
+
+/// Atomic counter for unique temp file names.
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// On-disk compilation cache.
 #[derive(Debug, Clone)]
@@ -109,9 +113,9 @@ impl CompileCache {
 
         let path = self.cache_dir.join(format!("{key}.js"));
         let temp_path = self.cache_dir.join(format!(
-            "{}.{}.tmp",
+            "{}.tmp{}.tmp",
             key,
-            sanitize_thread_id(&format!("{:?}", std::thread::current().id()))
+            TEMP_COUNTER.fetch_add(1, Ordering::Relaxed)
         ));
 
         if fs::write(&temp_path, compiled_js.as_bytes()).is_ok() {
@@ -202,19 +206,6 @@ impl CompileCache {
             })
             .unwrap_or(0)
     }
-}
-
-fn sanitize_thread_id(value: &str) -> String {
-    value
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() {
-                character
-            } else {
-                '-'
-            }
-        })
-        .collect()
 }
 
 #[cfg(test)]

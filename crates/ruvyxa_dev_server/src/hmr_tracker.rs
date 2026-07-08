@@ -78,6 +78,32 @@ impl HmrTracker {
         }
     }
 
+    /// Populate tracker from a route manifest (called at startup and on manifest change).
+    pub fn populate_from_manifest(&self, routes: &[ruvyxa_graph::RouteEntry]) {
+        let mut file_to_routes = self.file_to_routes.write();
+        let mut route_to_files = self.route_to_files.write();
+        file_to_routes.clear();
+        route_to_files.clear();
+
+        for route in routes {
+            let mut files = BTreeSet::new();
+            files.insert(route.file.clone());
+            for layout in &route.layout_chain {
+                files.insert(PathBuf::from(layout));
+            }
+            for server_module in &route.server_modules {
+                files.insert(PathBuf::from(server_module));
+            }
+            for file in &files {
+                file_to_routes
+                    .entry(file.clone())
+                    .or_default()
+                    .insert(route.path.clone());
+            }
+            route_to_files.insert(route.path.clone(), files);
+        }
+    }
+
     /// Register a route's dependency graph.
     ///
     /// Called after a route is successfully rendered to record which source

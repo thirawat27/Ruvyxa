@@ -425,9 +425,8 @@ function invalidateBundleCache(paths) {
     for (const changedPath of paths) {
       const normalized = changedPath.replaceAll("\\", "/")
       if (key.includes(normalized)) {
-        bundleCache.delete(key)
-        // Also evict from module cache so next import gets fresh code
         const outfile = bundleCache.get(key)
+        bundleCache.delete(key)
         if (outfile) moduleCache.delete(outfile)
         break
       }
@@ -675,87 +674,6 @@ window.__RUVYXA_HYDRATED = true
     bundleCache.set(cacheKey, outfile)
     return { outfile, freshBuild: true }
   })
-}
-
-function clientBoundaryPlugin(projectRoot) {
-  return {
-    name: "ruvyxa-client-boundary",
-    setup(build) {
-      build.onResolve({ filter: /^server-only$/ }, (args) => {
-        throw new Error(
-          `[RUV1007] Server-only module imported into client bundle from ${args.importer}`,
-        )
-      })
-
-      build.onResolve({ filter: /^client-only$/ }, () => ({
-        path: "ruvyxa:client-only",
-        namespace: "ruvyxa-virtual",
-      }))
-
-      build.onLoad({ filter: /^ruvyxa:client-only$/, namespace: "ruvyxa-virtual" }, () => ({
-        contents: "",
-        loader: "js",
-      }))
-
-      build.onLoad({ filter: /\.[cm]?[jt]sx?$/ }, async (args) => {
-        if (!isProjectSource(projectRoot, args.path)) {
-          return null
-        }
-
-        const contents = await readFile(args.path, "utf8")
-
-        if (isServerOnlyPath(projectRoot, args.path)) {
-          throw new Error(
-            `[RUV1007] Server-only file imported into client bundle: ${args.path}`,
-          )
-        }
-
-        if (contents.includes('import "server-only"') || contents.includes("import 'server-only'")) {
-          throw new Error(
-            `[RUV1007] Server-only module imported into client bundle: ${args.path}`,
-          )
-        }
-
-        const privateEnv = findPrivateEnvAccess(contents)
-        if (privateEnv) {
-          throw new Error(
-            `[RUV1008] Private environment variable ${privateEnv} used in client bundle: ${args.path}`,
-          )
-        }
-
-        return { contents, loader: loaderForExt(args.path) }
-      })
-    },
-  }
-}
-
-function isProjectSource(projectRoot, filePath) {
-  const normalized = filePath.replaceAll("\\", "/")
-  const normalizedRoot = projectRoot.replaceAll("\\", "/")
-  return normalized.startsWith(normalizedRoot) && !normalized.includes("/node_modules/")
-}
-
-function isServerOnlyPath(projectRoot, filePath) {
-  const relative = path.relative(projectRoot, filePath).replaceAll("\\", "/")
-  return relative.split("/").includes("server")
-}
-
-function findPrivateEnvAccess(source) {
-  const regex = /process\.env\.([A-Z_][A-Z0-9_]*)/g
-  let match
-  while ((match = regex.exec(source)) !== null) {
-    if (!match[1].startsWith("RUVYXA_PUBLIC_")) {
-      return match[1]
-    }
-  }
-  return null
-}
-
-function loaderForExt(filePath) {
-  if (filePath.endsWith(".tsx")) return "tsx"
-  if (filePath.endsWith(".ts")) return "ts"
-  if (filePath.endsWith(".jsx")) return "jsx"
-  return "js"
 }
 
 function normalizeResponse(result) {

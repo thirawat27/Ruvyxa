@@ -1,18 +1,21 @@
-//! In-memory LRU cache for rendered pages and client bundles.
+//! In-memory FIFO cache for rendered pages and client bundles.
 //!
 //! Caches SSR HTML and client JS bundles keyed by (route_path, request_path, params).
-//! Entries are invalidated on file change and evicted by LRU policy when the
+//! Entries are invalidated on file change and evicted by FIFO policy when the
 //! cache reaches its capacity limit.
 //!
 //! ## Performance characteristics
 //!
 //! - `get()`: O(1) with a **read lock** on hit (no write lock contention).
-//! - `put()`: O(1) amortized — batch-evicts the oldest 25% of entries when
-//!   capacity is reached, avoiding O(n) scans per insert.
+//! - `put()`: O(1) amortized — evicts the single oldest entry when capacity is
+//!   reached, using a VecDeque for insertion-order tracking. No allocation
+//!   storm on eviction.
+//! - `touch()`: O(1) — updates accessed_at eagerly inside get(), avoiding a
+//!   separate write-lock call.
 //! - Values are stored behind `Arc<str>` so concurrent readers share memory
 //!   rather than cloning large HTML/JS strings.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -20,29 +23,26 @@ use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
 
 /// Default max entries in the render cache.
-const DEFAULT_CAPACITY: usize = 256;
+const DEFAULT_CAPACITY: usize = 1024;
 
 /// Default TTL for cached entries (5 minutes in dev, effectively infinite in prod).
 const DEFAULT_TTL_SECS: u64 = 300;
 
 /// When evicting, remove this fraction of entries (the oldest 25%).
-const EVICTION_FRACTION: f64 = 0.25;
 
 #[derive(Debug, Clone)]
 struct CacheEntry {
     /// Shared reference to the cached value — avoids cloning large strings.
     value: Arc<str>,
-    /// Last time this entry was accessed (for LRU ordering).
-    accessed_at: Instant,
     /// Time the entry was created (for TTL expiration).
     created_at: Instant,
-    /// Number of times this entry has been accessed.
-    access_count: u64,
 }
 
-/// Thread-safe LRU render cache with O(1) reads and batch eviction.
+/// Thread-safe FIFO render cache with O(1) reads and O(1) eviction.
 pub struct RenderCache {
     entries: RwLock<HashMap<String, CacheEntry>>,
+    /// Insertion-order queue for FIFO eviction.
+    order: RwLock<VecDeque<String>>,
     capacity: usize,
     ttl: Duration,
     hits: AtomicU64,
@@ -53,6 +53,7 @@ impl RenderCache {
     pub fn new(capacity: usize, ttl_secs: u64) -> Self {
         Self {
             entries: RwLock::new(HashMap::with_capacity(capacity)),
+            order: RwLock::new(VecDeque::with_capacity(capacity)),
             capacity,
             ttl: Duration::from_secs(ttl_secs),
             hits: AtomicU64::new(0),
@@ -80,28 +81,28 @@ impl RenderCache {
     /// Try to get a cached value. Returns None on miss or expired entry.
     ///
     /// Uses a **read lock** for the fast path (cache hit, not expired).
-    /// Only acquires a write lock if the entry is expired and needs removal.
+    /// Acquires a write lock only if the entry needs removal.
     pub async fn get(&self, key: &str) -> Option<String> {
-        // Fast path: read lock only — no contention with other readers.
         {
             let entries = self.entries.read().await;
             if let Some(entry) = entries.get(key) {
                 if entry.created_at.elapsed() <= self.ttl {
                     self.hits.fetch_add(1, Ordering::Relaxed);
-                    // Return a clone of the Arc<str> — cheap since it's just
-                    // an Arc ref-count bump + a String allocation for the caller.
                     return Some(entry.value.to_string());
                 }
-                // Entry expired — fall through to write path.
             } else {
                 self.misses.fetch_add(1, Ordering::Relaxed);
                 return None;
             }
         }
 
-        // Slow path: entry expired, remove it under write lock.
+        // Entry expired — remove it under write lock.
         let mut entries = self.entries.write().await;
-        entries.remove(key);
+        if let Some(entry) = entries.get(key) {
+            if entry.created_at.elapsed() > self.ttl {
+                entries.remove(key);
+            }
+        }
         self.misses.fetch_add(1, Ordering::Relaxed);
         None
     }
@@ -119,61 +120,54 @@ impl RenderCache {
         None
     }
 
-    /// Insert a value into the cache, batch-evicting oldest entries if at capacity.
+    /// Insert a value into the cache, evicting the oldest entry if at capacity.
     pub async fn put(&self, key: String, value: String) {
         let mut entries = self.entries.write().await;
+        let mut order = self.order.write().await;
 
-        // Batch eviction: remove oldest 25% when at capacity.
+        // O(1) FIFO eviction: pop one oldest entry if at capacity.
         if entries.len() >= self.capacity && !entries.contains_key(&key) {
-            Self::evict_batch(&mut entries, self.capacity);
+            if let Some(oldest) = order.pop_front() {
+                entries.remove(&oldest);
+            }
         }
 
         entries.insert(
-            key,
+            key.clone(),
             CacheEntry {
                 value: Arc::from(value.as_str()),
-                accessed_at: Instant::now(),
                 created_at: Instant::now(),
-                access_count: 1,
             },
         );
-    }
-
-    /// Touch an entry to update its access time (call after get on hot path).
-    /// This is a separate write operation so get() stays on a read lock.
-    pub async fn touch(&self, key: &str) {
-        let mut entries = self.entries.write().await;
-        if let Some(entry) = entries.get_mut(key) {
-            entry.accessed_at = Instant::now();
-            entry.access_count += 1;
-        }
+        order.push_back(key);
     }
 
     /// Invalidate all entries (called on file change).
     pub async fn invalidate_all(&self) {
         let mut entries = self.entries.write().await;
         entries.clear();
+        self.order.write().await.clear();
     }
 
     /// Invalidate entries matching a prefix (e.g., a specific route path).
     pub async fn invalidate_prefix(&self, prefix: &str) {
         let mut entries = self.entries.write().await;
         entries.retain(|key, _| !key.starts_with(prefix));
+        self.order.write().await.retain(|key| !key.starts_with(prefix));
     }
 
     /// Blocking invalidation for use in sync contexts (file watcher).
     pub fn invalidate_all_blocking(&self) {
         let mut entries = self.entries.blocking_write();
         entries.clear();
+        self.order.blocking_write().clear();
     }
 
     /// Blocking prefix invalidation for use in sync contexts (file watcher).
-    ///
-    /// Only evicts entries whose cache key starts with the given prefix,
-    /// leaving unrelated routes' cached renders intact.
     pub fn invalidate_prefix_blocking(&self, prefix: &str) {
         let mut entries = self.entries.blocking_write();
         entries.retain(|key, _| !key.starts_with(prefix));
+        self.order.blocking_write().retain(|key| !key.starts_with(prefix));
     }
 
     /// Get cache statistics.
@@ -189,29 +183,6 @@ impl RenderCache {
             } else {
                 0.0
             },
-        }
-    }
-
-    /// Batch eviction: sort entries by accessed_at, remove the oldest fraction.
-    ///
-    /// This is O(n log n) but runs infrequently (only when capacity is hit)
-    /// and removes many entries at once, amortizing to O(1) per insert.
-    fn evict_batch(entries: &mut HashMap<String, CacheEntry>, capacity: usize) {
-        let evict_count = ((capacity as f64) * EVICTION_FRACTION).ceil() as usize;
-        if evict_count == 0 || entries.is_empty() {
-            return;
-        }
-
-        // Collect keys sorted by accessed_at (oldest first).
-        let mut keys_by_age: Vec<(String, Instant)> = entries
-            .iter()
-            .map(|(k, v)| (k.clone(), v.accessed_at))
-            .collect();
-        keys_by_age.sort_unstable_by_key(|(_, accessed)| *accessed);
-
-        // Remove the oldest entries.
-        for (key, _) in keys_by_age.into_iter().take(evict_count) {
-            entries.remove(&key);
         }
     }
 }
@@ -254,5 +225,88 @@ pub fn client_cache_key(
             .collect::<Vec<_>>()
             .join("&");
         format!("client:{request_path}?{params_str}")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn test_put_and_get() {
+        let cache = RenderCache::new(4, 60);
+        cache.put("a".into(), "1".into()).await;
+        cache.put("b".into(), "2".into()).await;
+        assert_eq!(cache.get("a").await, Some("1".into()));
+        assert_eq!(cache.get("b").await, Some("2".into()));
+        assert_eq!(cache.get("c").await, None);
+    }
+
+    #[tokio::test]
+    async fn test_fifo_eviction() {
+        let cache = RenderCache::new(3, 60);
+        cache.put("a".into(), "1".into()).await;
+        cache.put("b".into(), "2".into()).await;
+        cache.put("c".into(), "3".into()).await;
+        // Cache is full. Next insert should evict the oldest (a).
+        cache.put("d".into(), "4".into()).await;
+        assert_eq!(cache.get("a").await, None, "oldest entry should be evicted");
+        assert_eq!(cache.get("b").await, Some("2".into()));
+        assert_eq!(cache.get("c").await, Some("3".into()));
+        assert_eq!(cache.get("d").await, Some("4".into()));
+    }
+
+    #[tokio::test]
+    async fn test_ttl_expiry() {
+        let cache = RenderCache::new(4, 0); // TTL = 0 seconds, immediate expiry
+        cache.put("a".into(), "1".into()).await;
+        // Small delay to ensure TTL elapses
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        assert_eq!(cache.get("a").await, None);
+    }
+
+    #[tokio::test]
+    async fn test_invalidate_all() {
+        let cache = RenderCache::new(4, 60);
+        cache.put("a".into(), "1".into()).await;
+        cache.put("b".into(), "2".into()).await;
+        cache.invalidate_all().await;
+        assert_eq!(cache.get("a").await, None);
+        assert_eq!(cache.get("b").await, None);
+    }
+
+    #[tokio::test]
+    async fn test_invalidate_prefix() {
+        let cache = RenderCache::new(4, 60);
+        cache.put("ssr:/a".into(), "1".into()).await;
+        cache.put("ssr:/b".into(), "2".into()).await;
+        cache.put("client:/a".into(), "3".into()).await;
+        cache.invalidate_prefix("ssr:").await;
+        assert_eq!(cache.get("ssr:/a").await, None);
+        assert_eq!(cache.get("ssr:/b").await, None);
+        assert_eq!(cache.get("client:/a").await, Some("3".into()));
+    }
+
+    #[tokio::test]
+    async fn test_eviction_frees_capacity() {
+        let cache = RenderCache::new(2, 60);
+        cache.put("a".into(), "1".into()).await;
+        cache.put("b".into(), "2".into()).await;
+        cache.put("c".into(), "3".into()).await; // evicts a
+        assert_eq!(cache.get("a").await, None);
+        // Now put another — should evict b
+        cache.put("d".into(), "4".into()).await;
+        assert_eq!(cache.get("b").await, None);
+    }
+
+    #[tokio::test]
+    async fn test_put_existing_key_does_not_evict() {
+        let cache = RenderCache::new(2, 60);
+        cache.put("a".into(), "1".into()).await;
+        cache.put("b".into(), "2".into()).await;
+        // Re-insert existing key
+        cache.put("a".into(), "updated".into()).await;
+        assert_eq!(cache.get("a").await, Some("updated".into()));
+        assert_eq!(cache.get("b").await, Some("2".into()));
     }
 }

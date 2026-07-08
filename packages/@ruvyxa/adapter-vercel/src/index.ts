@@ -1,4 +1,5 @@
 import type { Adapter, AdapterOutput, BuildContext } from "@ruvyxa/core"
+import { validateBuildContext } from "@ruvyxa/core"
 
 /**
  * Options for the Vercel adapter.
@@ -58,16 +59,3 @@ export function vercelAdapter(options: VercelAdapterOptions = {}): Adapter {
 }
 
 export default vercelAdapter
-
-function validateBuildContext(ctx: BuildContext, adapterName: string): void {
-  if (!ctx.root || typeof ctx.root !== "string") {
-    throw new Error(
-      `[RUV2000] ${adapterName}: BuildContext.root is required and must be a non-empty string`,
-    )
-  }
-  if (!ctx.outDir || typeof ctx.outDir !== "string") {
-    throw new Error(
-      `[RUV2000] ${adapterName}: BuildContext.outDir is required and must be a non-empty string`,
-    )
-  }
-}

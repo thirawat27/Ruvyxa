@@ -76,6 +76,9 @@ File names are BLAKE3 hashes of their content (first 16 hex characters). This en
 - Route discovery runs in Rust, not JavaScript.
 - File watching uses native OS notifications (`notify` crate).
 - HMR events are classified by type (CSS update, component update, full reload) to minimize browser work.
+- **Render cache**: FIFO eviction via `VecDeque`, capacity 1024, TTL 5 min dev / 30 min prod. Configurable via `RUVYXA_RENDER_CACHE_SIZE`.
+- **Worker pool**: Auto-sizes to `available_parallelism()` (clamped 2–8). Configurable via `RUVYXA_WORKER_POOL_SIZE`. Timeout is 10s for fast dead-worker detection.
+- **Async file I/O**: SSR hot-path file reads use `tokio::task::spawn_blocking` to avoid blocking the async runtime.
 
 ### Production Server
 

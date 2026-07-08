@@ -209,6 +209,7 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
     let watcher_pool = worker_pool.clone();
     let watcher_render_cache = render_cache.clone();
     let hmr_tracker = Arc::new(HmrTracker::new());
+    hmr_tracker.populate_from_manifest(&manifest.routes);
     let state = AppState {
         config: config.clone(),
         reload_tx,
@@ -810,8 +811,20 @@ async fn handle_request<B>(
     {
         Ok(response) => response,
         Err(error) => {
-            let body = error_page(&error.to_string());
-            html_response(StatusCode::INTERNAL_SERVER_ERROR, body)
+            let is_dev = is_dev_mode();
+            match &error {
+                RuvyxaError::Diagnostic(diag) => {
+                    error_response(StatusCode::INTERNAL_SERVER_ERROR, diag, is_dev)
+                }
+                _ => {
+                    let body = if is_dev {
+                        dev_error_overlay(&error.to_string(), None, None, None)
+                    } else {
+                        plain_error_page(&error.to_string())
+                    };
+                    html_response(StatusCode::INTERNAL_SERVER_ERROR, body)
+                }
+            }
         }
     }
 }
@@ -991,10 +1004,19 @@ async fn render_page_pooled(
         return Ok(cached);
     }
 
-    let source = fs::read_to_string(&route.file).map_err(|source| RuvyxaError::Io {
-        message: format!("Failed to read page module {}", route.file.display()),
-        source,
-    })?;
+    let source_fut = {
+        let file = route.file.clone();
+        tokio::task::spawn_blocking(move || {
+            fs::read_to_string(&file).map_err(|source| RuvyxaError::Io {
+                message: format!("Failed to read page module {}", file.display()),
+                source,
+            })
+        })
+    };
+
+    let source = source_fut
+        .await
+        .map_err(|e| RuvyxaError::Message(format!("Page read task panicked: {e}")))??;
 
     if !source.contains("export default") {
         return Err(
@@ -2383,10 +2405,201 @@ fn url_encode_component(input: &str) -> String {
     output
 }
 
+fn extract_code_frame(file: &Path, line: Option<u32>) -> Option<String> {
+    let line = line?;
+    let source = fs::read_to_string(file).ok()?;
+    let lines: Vec<&str> = source.lines().collect();
+    let total = lines.len();
+    let idx = line.saturating_sub(1) as usize;
+    if idx >= total {
+        return None;
+    }
+    let start = idx.saturating_sub(2);
+    let end = (idx + 3).min(total);
+    let mut frame = String::new();
+    let max_digits = end.to_string().len().max(2);
+    for (i, line_text) in lines[start..end].iter().enumerate() {
+        let i = start + i;
+        let num = i + 1;
+        let prefix = if i == idx { ">" } else { " " };
+        let marker = if i == idx { "  ← error" } else { "" };
+        frame.push_str(&format!(" {prefix} {:>width$} │ {}{}\n", num, line_text, marker, width = max_digits));
+    }
+    Some(frame)
+}
+
+fn error_response(status: StatusCode, diagnostics: &Diagnostic, is_dev: bool) -> Response {
+    if !is_dev {
+        return html_response(status, plain_error_page(&diagnostics.to_string()));
+    }
+    let code_frame = diagnostics
+        .span
+        .as_ref()
+        .and_then(|span| extract_code_frame(&span.file, span.line));
+    let suggestion = diagnostics.suggested_fix.as_deref();
+    let explanation = &diagnostics.explanation;
+    let title = &diagnostics.title;
+    let message = format!("{title}\n\n{explanation}");
+    let body = dev_error_overlay(&message, code_frame.as_deref(), None, suggestion);
+    html_response(status, body)
+}
+
+fn is_dev_mode() -> bool {
+    std::env::var("RUVYXA_DEV").map(|v| v == "1").unwrap_or(false)
+}
+
 fn error_page(message: &str) -> String {
+    if is_dev_mode() {
+        dev_error_overlay(message, None, None, None)
+    } else {
+        plain_error_page(message)
+    }
+}
+
+fn plain_error_page(message: &str) -> String {
     format!(
         "<!doctype html><html><body><main><h1>Ruvyxa Error</h1><pre>{}</pre></main></body></html>",
         escape_html(message)
+    )
+}
+
+fn dev_error_overlay(
+    message: &str,
+    code_frame: Option<&str>,
+    stack: Option<&str>,
+    suggestion: Option<&str>,
+) -> String {
+    let title = message.lines().next().unwrap_or("Error");
+    let body = message;
+    let frame_html = code_frame.map(|f| format!(r#"<div class="code-frame"><pre>{}</pre></div>"#, escape_html(f))).unwrap_or_default();
+    let stack_html = stack.map(|s| format!(r#"<details class="stack"><summary>Stack Trace</summary><pre>{}</pre></details>"#, escape_html(s))).unwrap_or_default();
+    let suggestion_html = suggestion.map(|s| format!(r#"<div class="suggestion">💡 {}</div>"#, escape_html(s))).unwrap_or_default();
+
+    format!(
+        r#"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ruvyxa Error - {title}</title>
+<style>
+  *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  body {{
+    background: #1a1a2e;
+    color: #e0e0e0;
+    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
+    font-size: 14px;
+    line-height: 1.6;
+    min-height: 100vh;
+    display: flex;
+    flex-direction: column;
+  }}
+  .overlay {{
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    padding: 24px;
+    max-width: 960px;
+    margin: 0 auto;
+    width: 100%;
+  }}
+  .header {{
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 20px;
+    padding-bottom: 16px;
+    border-bottom: 1px solid #333;
+  }}
+  .badge {{
+    background: #e53935;
+    color: #fff;
+    padding: 4px 10px;
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+  }}
+  .title {{
+    color: #ef5350;
+    font-size: 16px;
+    font-weight: 600;
+  }}
+  .body {{
+    background: #16213e;
+    border: 1px solid #333;
+    border-radius: 8px;
+    padding: 16px;
+    margin-bottom: 16px;
+    white-space: pre-wrap;
+    word-break: break-word;
+    color: #ffcdd2;
+  }}
+  .code-frame {{
+    background: #0d1b2a;
+    border: 1px solid #e53935;
+    border-radius: 6px;
+    padding: 12px;
+    margin-bottom: 16px;
+    overflow-x: auto;
+  }}
+  .code-frame pre {{
+    font-size: 13px;
+    line-height: 1.5;
+    color: #e0e0e0;
+    tab-size: 2;
+  }}
+  .suggestion {{
+    background: #1b2838;
+    border: 1px solid #4caf50;
+    border-radius: 6px;
+    padding: 12px 16px;
+    margin-bottom: 16px;
+    color: #a5d6a7;
+  }}
+  .stack {{
+    background: #16213e;
+    border: 1px solid #333;
+    border-radius: 6px;
+    padding: 12px;
+    margin-bottom: 16px;
+  }}
+  .stack summary {{
+    cursor: pointer;
+    color: #90caf9;
+    font-weight: 500;
+    margin-bottom: 8px;
+  }}
+  .stack pre {{
+    font-size: 12px;
+    color: #b0bec5;
+    white-space: pre-wrap;
+  }}
+  .footer {{
+    margin-top: auto;
+    padding-top: 16px;
+    border-top: 1px solid #333;
+    font-size: 12px;
+    color: #666;
+    text-align: center;
+  }}
+</style>
+</head>
+<body>
+<div class="overlay">
+  <div class="header">
+    <span class="badge">Ruvyxa Error</span>
+    <span class="title">{title}</span>
+  </div>
+  <div class="body">{body}</div>
+  {frame_html}
+  {suggestion_html}
+  {stack_html}
+  <div class="footer">Ruvyxa Dev Server — fix the error and save to hot-reload</div>
+</div>
+</body>
+</html>"#
     )
 }
 

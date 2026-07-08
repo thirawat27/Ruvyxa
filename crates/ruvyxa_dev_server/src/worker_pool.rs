@@ -33,7 +33,7 @@ const MIN_POOL_SIZE: usize = 2;
 const MAX_POOL_SIZE: usize = 8;
 
 /// Maximum time to wait for a worker response before considering it dead.
-const WORKER_TIMEOUT_MS: u64 = 30_000;
+const WORKER_TIMEOUT_MS: u64 = 10_000;
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 

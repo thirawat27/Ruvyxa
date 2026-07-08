@@ -5,5 +5,5 @@
       "~/*": ["./*"]
     }
   },
-  "include": ["app", "components", "server", "ruvyxa.config.ts", "node_modules/ruvyxa/dist/types.d.ts"]
+  "include": ["app", "ruvyxa.config.ts"]
 }

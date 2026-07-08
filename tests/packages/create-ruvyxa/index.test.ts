@@ -15,6 +15,7 @@ describe("createRuvyxaApp", () => {
       await createRuvyxaApp(target)
 
       assert.deepEqual(await listFiles(target), [
+        ".gitignore",
         "AGENTS.md",
         "CLAUDE.md",
         "app/globals.css",

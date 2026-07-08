@@ -15,4 +15,5 @@ export type {
   RuvyxaPlugin,
   TransformResult,
 } from "./types.js"
+export { validateBuildContext } from "./utils.js"
 export { action, cache, cacheStats, invalidateCache, json, loader, notFound, redirect } from "./server.js"

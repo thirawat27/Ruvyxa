@@ -56,7 +56,7 @@ use std::sync::Arc;
 use ruvyxa_diagnostics::{Diagnostic, Result, RuvyxaError};
 use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
-use tracing::{error, info, warn};
+use tracing::{error, info};
 use wasmtime::*;
 use wasmtime_wasi::p1::WasiP1Ctx;
 use wasmtime_wasi::WasiCtxBuilder;
@@ -216,19 +216,23 @@ impl WasmPluginRuntime {
                 continue;
             }
 
-            match self.invoke_on_request(plugin, request) {
-                Ok(result) => {
-                    if result.action != "continue" {
-                        return Ok(Some(result));
-                    }
+            let engine = self.engine.clone();
+            let module = plugin.module.clone();
+            let req = request.clone();
+            let config_json = plugin.config_json.clone();
+            let permissions = plugin.permissions.clone();
+
+            let result = tokio::task::spawn_blocking(move || {
+                match Self::invoke_on_request_blocking(&engine, &module, &req, &config_json, &permissions) {
+                    Ok(r) => Ok(r),
+                    Err(e) => Err(RuvyxaError::Message(e)),
                 }
-                Err(error) => {
-                    warn!(
-                        plugin = %plugin.name,
-                        %error,
-                        "plugin request handler failed, continuing"
-                    );
-                }
+            })
+            .await
+            .map_err(|e| RuvyxaError::Message(format!("Plugin task panicked: {e}")))??;
+
+            if result.action != "continue" {
+                return Ok(Some(result));
             }
         }
         Ok(None)
@@ -250,19 +254,24 @@ impl WasmPluginRuntime {
                 continue;
             }
 
-            match self.invoke_on_response(plugin, request, response) {
-                Ok(result) => {
-                    if result.action != "continue" {
-                        return Ok(Some(result));
-                    }
+            let engine = self.engine.clone();
+            let module = plugin.module.clone();
+            let req = request.clone();
+            let res = response.clone();
+            let config_json = plugin.config_json.clone();
+            let permissions = plugin.permissions.clone();
+
+            let result = tokio::task::spawn_blocking(move || {
+                match Self::invoke_on_response_blocking(&engine, &module, &req, &res, &config_json, &permissions) {
+                    Ok(r) => Ok(r),
+                    Err(e) => Err(RuvyxaError::Message(e)),
                 }
-                Err(error) => {
-                    warn!(
-                        plugin = %plugin.name,
-                        %error,
-                        "plugin response handler failed, continuing"
-                    );
-                }
+            })
+            .await
+            .map_err(|e| RuvyxaError::Message(format!("Plugin task panicked: {e}")))??;
+
+            if result.action != "continue" {
+                return Ok(Some(result));
             }
         }
         Ok(None)
@@ -318,38 +327,41 @@ impl WasmPluginRuntime {
         }
     }
 
-    fn invoke_on_request(
-        &self,
-        plugin: &LoadedPlugin,
+    fn invoke_on_request_blocking(
+        engine: &Engine,
+        module: &Module,
         request: &PluginRequest,
+        config_json: &str,
+        permissions: &PluginPermissions,
     ) -> std::result::Result<PluginResult, String> {
-        let mut store = self.create_store(plugin)?;
-        let instance = self.instantiate(&mut store, plugin)?;
+        let mut store = Self::create_store(engine, permissions)?;
+        let instance = Self::instantiate(engine, &mut store, module)?;
 
-        // Serialize request to JSON and pass to the plugin
         let request_json = serde_json::to_string(request)
             .map_err(|e| format!("Failed to serialize request: {e}"))?;
 
-        let result_json = self.call_plugin_func(
+        let result_json = Self::call_plugin_func(
             &mut store,
             &instance,
             "on_request",
             &request_json,
-            &plugin.config_json,
+            config_json,
         )?;
 
         serde_json::from_str(&result_json)
             .map_err(|e| format!("Failed to parse plugin result: {e}"))
     }
 
-    fn invoke_on_response(
-        &self,
-        plugin: &LoadedPlugin,
+    fn invoke_on_response_blocking(
+        engine: &Engine,
+        module: &Module,
         request: &PluginRequest,
         response: &PluginResponse,
+        config_json: &str,
+        permissions: &PluginPermissions,
     ) -> std::result::Result<PluginResult, String> {
-        let mut store = self.create_store(plugin)?;
-        let instance = self.instantiate(&mut store, plugin)?;
+        let mut store = Self::create_store(engine, permissions)?;
+        let instance = Self::instantiate(engine, &mut store, module)?;
 
         let request_json = serde_json::to_string(request)
             .map_err(|e| format!("Failed to serialize request: {e}"))?;
@@ -359,88 +371,82 @@ impl WasmPluginRuntime {
         let input = serde_json::json!({
             "request": request_json,
             "response": response_json,
-            "config": plugin.config_json,
+            "config": config_json,
         })
         .to_string();
 
-        let result_json = self.call_plugin_func(
+        let result_json = Self::call_plugin_func(
             &mut store,
             &instance,
             "on_response",
             &input,
-            &plugin.config_json,
+            config_json,
         )?;
 
         serde_json::from_str(&result_json)
             .map_err(|e| format!("Failed to parse plugin result: {e}"))
     }
 
-    fn create_store(&self, plugin: &LoadedPlugin) -> std::result::Result<Store<WasiP1Ctx>, String> {
+    fn create_store(
+        engine: &Engine,
+        permissions: &PluginPermissions,
+    ) -> std::result::Result<Store<WasiP1Ctx>, String> {
         let mut wasi_builder = WasiCtxBuilder::new();
 
-        // Apply permissions
-        for var in &plugin.permissions.env {
+        for var in &permissions.env {
             if let Ok(value) = std::env::var(var) {
                 wasi_builder.env(var, &value);
             }
         }
 
-        // Build WASI context
         let wasi_ctx = wasi_builder.build_p1();
-        let mut store = Store::new(&self.engine, wasi_ctx);
+        let mut store = Store::new(engine, wasi_ctx);
 
-        // Set fuel limit for execution timeout
-        let fuel = plugin.permissions.timeout_ms * 1_000_000; // rough approximation
+        let fuel = permissions.timeout_ms * 1_000_000;
         store.set_fuel(fuel).ok();
 
         Ok(store)
     }
 
     fn instantiate(
-        &self,
+        engine: &Engine,
         store: &mut Store<WasiP1Ctx>,
-        plugin: &LoadedPlugin,
+        module: &Module,
     ) -> std::result::Result<Instance, String> {
-        let mut linker = Linker::new(&self.engine);
+        let mut linker = Linker::new(engine);
         wasmtime_wasi::p1::add_to_linker_sync(&mut linker, |ctx| ctx)
             .map_err(|e| format!("Failed to link WASI: {e}"))?;
 
         linker
-            .instantiate(&mut *store, &plugin.module)
-            .map_err(|e| format!("Failed to instantiate plugin '{}': {e}", plugin.name))
+            .instantiate(&mut *store, module)
+            .map_err(|e| format!("Failed to instantiate: {e}"))
     }
 
     fn call_plugin_func(
-        &self,
         store: &mut Store<WasiP1Ctx>,
         instance: &Instance,
         func_name: &str,
         input: &str,
         _config: &str,
     ) -> std::result::Result<String, String> {
-        // Get memory and the exported function
         let memory = instance
             .get_memory(&mut *store, "memory")
             .ok_or_else(|| "Plugin does not export 'memory'".to_string())?;
 
-        // Look for the function
         let func = instance
             .get_typed_func::<(i32, i32), i32>(&mut *store, func_name)
             .map_err(|_| format!("Plugin does not export function '{func_name}'"))?;
 
-        // Write input to memory
         let input_bytes = input.as_bytes();
         let input_ptr = 0i32;
         memory
             .write(&mut *store, input_ptr as usize, input_bytes)
             .map_err(|e| format!("Failed to write to plugin memory: {e}"))?;
 
-        // Call the function
         let result_ptr = func
             .call(&mut *store, (input_ptr, input_bytes.len() as i32))
             .map_err(|e| format!("Plugin function '{func_name}' trapped: {e}"))?;
 
-        // Read result from memory (simplified: read until null or max)
         let mut result_buf = vec![0u8; 4096];
         memory
             .read(&*store, result_ptr as usize, &mut result_buf)
@@ -455,7 +461,6 @@ impl WasmPluginRuntime {
         .to_string();
 
         if result_str.is_empty() {
-            // Plugin returned nothing — treat as "continue"
             Ok(serde_json::to_string(&PluginResult::default()).unwrap())
         } else {
             Ok(result_str)

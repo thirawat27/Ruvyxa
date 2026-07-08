@@ -51,6 +51,7 @@ export async function compileBundle({
     key: entryKey,
     filePath: null,
     source: entrySource,
+    sourcefile,
     baseDir: root,
     root,
     modules,
@@ -106,6 +107,7 @@ async function visitModule(context) {
     key,
     filePath,
     source,
+    sourcefile,
     baseDir,
     root,
     modules,
@@ -148,6 +150,7 @@ async function visitModule(context) {
         key: resolved,
         filePath: resolved,
         source: depSource,
+        sourcefile,
         baseDir: path.dirname(resolved),
         root,
         modules,
@@ -219,7 +222,10 @@ function linkModules(modules, externals, { minify, outfile, sourceMap }) {
   }
 
   const entry = modules[0]
-  push(`export default ${entry.id}.default;`)
+  const entryRewritten = rewrittenModules.get(entry.id)
+  if (entryRewritten && entryRewritten.exportedNames.includes("default")) {
+    push(`export default ${entry.id}.default;`)
+  }
   push(`Object.assign(globalThis.__RUVYXA_LAST_EXPORTS__ ??= {}, ${entry.id});`)
   for (const name of collectLinkedExportNames(entry.id, rewrittenModules)) {
     if (name !== "default") push(`export const ${name} = ${entry.id}.${name};`)
@@ -780,7 +786,12 @@ class JsxTransformer {
   }
 
   expect(char) {
-    if (this.source[this.index] !== char) throw new Error(`Expected ${char}`)
+    if (this.source[this.index] !== char) {
+      const line = this.source.slice(0, this.index).split("\n").length
+      const col = this.index - (this.source.lastIndexOf("\n", this.index - 1) + 1)
+      const ctx = this.source.slice(Math.max(0, this.index - 20), this.index + 20).replace(/\n/g, "\\n")
+      throw new Error(`Expected '${char}' at line ${line}:${col} near "...${ctx}..."`)
+    }
     this.index++
   }
 }

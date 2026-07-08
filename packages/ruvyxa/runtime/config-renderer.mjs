@@ -86,6 +86,7 @@ function sanitizeConfig(config) {
       name: stringValue(config.adapter?.name),
       target: stringValue(config.adapter?.target),
     }),
+    adapterOptions: safeJsonValue(config.adapterOptions),
   }
 }
 
@@ -105,6 +106,16 @@ function numberValue(value) {
 
 function booleanValue(value) {
   return typeof value === "boolean" ? value : undefined
+}
+
+function safeJsonValue(value) {
+  if (value === undefined) return undefined
+  try {
+    JSON.stringify(value)
+    return value
+  } catch {
+    return undefined
+  }
 }
 
 function ok(config) {

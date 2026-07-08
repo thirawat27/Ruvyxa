@@ -69,8 +69,42 @@ Affected routes:
 | Code | Title | Cause |
 |------|-------|-------|
 | `RUV1100` | SSR render failed | ReactDOMServer error during page render |
+| `RUV1102` | SSR renderer not found | Internal renderer worker-pool.mjs missing |
+
+### API Routes
+
+| Code | Title | Cause |
+|------|-------|-------|
 | `RUV1200` | API route execution failed | Handler threw an unhandled exception |
+| `RUV1201` | No available server port | All configured ports are in use |
+| `RUV1202` | API renderer not found | Internal renderer script missing |
+
+### Client Bundles
+
+| Code | Title | Cause |
+|------|-------|-------|
 | `RUV1300` | Client bundle failed | Ruvyxa compiler error during hydration bundle |
+| `RUV1301` | Module compile error | Compiler failed on a specific module |
+| `RUV1302` | Client renderer not found | Internal renderer script missing |
+| `RUV1303` | Client route not found | Route has no matching client page |
+| `RUV1304` | Non-page client bundle | Client bundle requested for API-only route |
+
+### Server Actions
+
+| Code | Title | Cause |
+|------|-------|-------|
+| `RUV1500` | Action runtime error | Validation failure or handler exception |
+| `RUV1501` | Action module not found | Route has no `action.ts` file |
+| `RUV1502` | Action renderer not found | Internal renderer script missing |
+| `RUV1503` | Renderer args missing | Internal invocation error |
+
+### Config & CLI
+
+| Code | Title | Cause |
+|------|-------|-------|
+| `RUV1600` | Config error | Invalid configuration value |
+| `RUV1601` | Empty config field | Required config field is empty or not relative |
+| `RUV1702` | Worker pool script not found | `worker-pool.mjs` missing from node_modules |
 
 ---
 
@@ -195,6 +229,22 @@ Check the diagnostic output for the Tailwind stderr message. Common causes:
 - Invalid `@source` paths in your CSS
 - Syntax errors in custom CSS
 - Missing content files
+
+---
+
+## Dev Error Overlay
+
+In development mode (`RUVYXA_DEV=1`), Ruvyxa displays errors in a Next.js-style overlay instead of a plain text page:
+
+- **Dark theme** with red error badge and title
+- **Code frame** — source context lines surrounding the error location, with `>` marker and `← error` indicator
+- **Suggested fix** — green-highlighted hint when a diagnostic includes one
+- **Collapsible stack trace** — hidden by default, expand on click
+- **Footer** — `Ruvyxa Dev Server — fix the error and save to hot-reload`
+
+The overlay is triggered automatically for any `RuvyxaError::Diagnostic` returned during SSR rendering, API execution, or client bundle generation. Non-diagnostic errors fall back to a plain overlay with the error message.
+
+Production mode (`ruvyxa start`) always returns the plain text error page. No overlay is injected into production responses.
 
 ---
 
