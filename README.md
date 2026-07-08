@@ -24,10 +24,11 @@
 - **Clean starter** — new apps start with the same small surface you expect from Next.js-style app routers.
 - **Fast core** — Rust handles routing, validation, production builds, and the dev server. A persistent Node worker pool eliminates per-request subprocess overhead.
 - **Radix-tree routing** — O(path-depth) route resolution regardless of the number of registered routes.
-- **Streaming SSR** — React pages render via `renderToPipeableStream` with Suspense support and fast TTFB.
-- **LRU render cache** — pages and client bundles are cached in-memory, invalidated automatically on file change.
+- **SSR** — React pages render on the server via `renderToString` with layout nesting and route-level hydration bundles.
+- **FIFO render cache** — pages and client bundles are cached in-memory (up to 1024 entries), invalidated automatically on file change.
+- **Native Rust bundler** — TypeScript/JSX compilation, module resolution, tree-shaking, minification, and source map generation — all in a zero-dependency Rust binary.
 - **Gzip + Brotli compression** — all responses compressed automatically via tower-http middleware.
-- **Tower-based middleware** — composable CORS, rate-limiting, timing, logging, and custom headers via `ruvyxa.config.ts`.
+- **Tower-based middleware** — composable CORS, timing, logging, and custom headers via `ruvyxa.config.ts`.
 - **Wasm plugin runtime** — sandboxed WebAssembly plugins powered by Wasmtime with hot-reload, configurable permissions, and execution limits.
 - **Parallel production bundling** — page client bundles are emitted concurrently and written back in deterministic route order.
 - **Honest checks** — `ruvyxa check` runs type checking, build validation, dev/prod parity, and page smoke rendering before deploy.
@@ -65,7 +66,7 @@ my-app/
 └── tsconfig.json
 ```
 
-For a fuller integration app with dynamic routes, API routes, loaders, and server actions, see [examples/basic-app](examples/basic-app).
+For a fuller integration app with dynamic routes, API routes, loaders, and server actions, see [examples/kitchen-sink](examples/kitchen-sink).
 
 ---
 
@@ -73,7 +74,7 @@ For a fuller integration app with dynamic routes, API routes, loaders, and serve
 
 ```bash
 pnpm install
-cargo run -p ruvyxa_cli -- dev --root examples/basic-app
+cargo run -p ruvyxa_cli -- dev --root examples/kitchen-sink
 ```
 
 Build all packages:
@@ -162,11 +163,6 @@ export default defineConfig({
         credentials: true,
         maxAge: 86400,
       },
-      rateLimit: {
-        maxRequests: 100,
-        windowSecs: 60,
-        keyBy: "ip",
-      },
       headers: {
         "X-Powered-By": "Ruvyxa",
       },
@@ -176,6 +172,7 @@ export default defineConfig({
 ```
 
 All middleware is applied as standard Tower layers, compatible with any axum/tower ecosystem middleware.
+Server actions additionally include built-in rate limiting, origin checks, and Fetch Metadata guards.
 
 ---
 
@@ -223,6 +220,7 @@ import { defineConfig } from "ruvyxa/config"
 export default defineConfig({
   appDir: "app",
   outDir: ".ruvyxa",
+  runtime: "node",              // "node" | "edge" | "static"
   server: {
     host: "localhost",
     port: 3000,
@@ -230,12 +228,22 @@ export default defineConfig({
   build: {
     minify: true,
     sourcemap: false,
-    splitStrategy: "route",
+    splitStrategy: "route",     // "route" | "manual"
     parallelism: 4,
   },
   cache: {
     routeManifest: true,
     css: true,
+  },
+  css: {
+    modules: false,
+    nesting: false,
+  },
+  security: {
+    actionBodyLimitBytes: 65536,
+    sameOriginActions: true,
+    fetchMetadataActions: true,
+    securityHeaders: true,
   },
   middleware: {
     builtin: { timing: true, logging: true },
@@ -251,7 +259,7 @@ export default defineConfig({
 | Command | Purpose |
 |---------|---------|
 | `ruvyxa dev` | Start the development server with HMR |
-| `ruvyxa build` | Validate and emit `.ruvyxa/` production output |
+| `ruvyxa build` | Validate and emit `.ruvyxa/` production output (`--target node|edge|static`) |
 | `ruvyxa check` | Run app-level production readiness checks |
 | `ruvyxa start` | Serve production output with the same runtime semantics as dev |
 | `ruvyxa preview` | Alias-style production preview command |
@@ -277,6 +285,8 @@ export default defineConfig({
 ┌─────────────────┴───────────────────────────────────────────┐
 │                   Rust Workspace (crates/)                   │
 ├─────────────────────────────────────────────────────────────┤
+│ ruvyxa_bundler      │ native TS/JSX bundler: compiler,       │
+│                     │ minifier, linker, resolver, source maps│
 │ ruvyxa_cli          │ CLI commands, build orchestration      │
 │ ruvyxa_dev_server   │ axum server, worker pool, radix router │
 │ ruvyxa_middleware   │ tower layers, wasmtime wasm plugins    │
@@ -288,9 +298,9 @@ export default defineConfig({
 **Performance features:**
 - Persistent Node worker pool (eliminates 100-500ms/request subprocess overhead)
 - Radix-trie route matching (O(depth) instead of O(n))
-- LRU render cache with TTL (sub-ms repeated page loads)
+- FIFO render cache with TTL (sub-ms repeated page loads)
 - Async file I/O via tokio::fs (no thread starvation)
-- Streaming SSR with `renderToPipeableStream`
+- SSR via `renderToString` with layout nesting
 - Gzip + Brotli compression (tower-http)
 - ETag / 304 Not Modified (blake3 hashing)
 - RwLock-based runtime cache (concurrent readers)
