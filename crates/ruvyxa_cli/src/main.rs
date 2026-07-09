@@ -17,7 +17,8 @@ use clap::{Parser, Subcommand, ValueEnum};
 use ruvyxa_dev_server::{render_request, serve, ServerConfig};
 use ruvyxa_diagnostics::Diagnostic;
 use ruvyxa_graph::{
-    discover_routes, validate_app, write_manifest, DiscoverOptions, RouteEntry, RouteManifest,
+    discover_routes, validate_app, write_manifest, DiscoverOptions, RenderStrategy, RouteEntry,
+    RouteManifest,
 };
 use tracing::info;
 use walkdir::WalkDir;
@@ -405,6 +406,7 @@ fn dev_server_config(args: &ServerArgs, config: &ProjectConfig) -> ServerConfig 
     server.app_dir = args.root.join(config.app_dir());
     server.public_dir = args.root.join("public");
     server.client_dir = out_dir.join("client");
+    server.prerender_dir = out_dir.join("prerender");
     server.cache_route_manifest = config.cache.route_manifest.unwrap_or(true);
     server.cache_css = config.cache.css.unwrap_or(true);
     server.middleware = config.middleware.clone();
@@ -424,6 +426,7 @@ fn production_server_config(args: &ServerArgs, config: &ProjectConfig) -> Server
     server.app_dir = out_dir.join("server").join(config.app_dir());
     server.public_dir = out_dir.join("assets");
     server.client_dir = out_dir.join("client");
+    server.prerender_dir = out_dir.join("prerender");
     server.cache_route_manifest = config.cache.route_manifest.unwrap_or(true);
     server.cache_css = config.cache.css.unwrap_or(true);
     server.middleware = config.middleware.clone();
@@ -515,6 +518,16 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
         serde_json::to_string_pretty(&client_manifest)?,
     )?;
 
+    // ─── SSG / ISR / PPR pre-rendering at build time ──────────────────────────
+    let prerender_dir = staging_dir.join("prerender");
+    let prerendered = prerender_static_routes(
+        &args.root,
+        &app_dir,
+        &manifest,
+        &prerender_dir,
+        &client_dir,
+    )?;
+
     let build_info = serde_json::json!({
         "framework": "Ruvyxa",
         "version": env!("CARGO_PKG_VERSION"),
@@ -544,6 +557,14 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
             "esTarget": config.build.es_target.as_deref().unwrap_or("es2022"),
             "emitChunkManifest": config.build.emit_chunk_manifest.unwrap_or(false),
             "parallelism": client_manifest.get("parallelism").cloned().unwrap_or(serde_json::Value::Null)
+        },
+        "rendering": {
+            "prerendered": prerendered.len(),
+            "routes": prerendered.iter().map(|p| serde_json::json!({
+                "path": p.path,
+                "strategy": format!("{:?}", p.strategy).to_lowercase(),
+                "revalidate": p.revalidate,
+            })).collect::<Vec<_>>()
         }
     });
     fs::write(
@@ -588,14 +609,293 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
         print_field("api", accent(api_routes.to_string()));
         print_field("client bundles", accent(client_bundles.to_string()));
         print_field("asset files", accent(asset_files.to_string()));
+        if !prerendered.is_empty() {
+            print_field("prerendered", accent(prerendered.len().to_string()));
+        }
         print_field("duration", accent(format_duration(started.elapsed())));
         println!("  {} Built into {}\n", success(), path_text(&out_dir));
     }
     Ok(())
 }
 
-const BUILD_OUTPUT_DIRS: [&str; 3] = ["server", "client", "assets"];
+const BUILD_OUTPUT_DIRS: [&str; 4] = ["server", "client", "assets", "prerender"];
 const BUILD_OUTPUT_FILES: [&str; 2] = ["manifest.json", "build.json"];
+
+/// A route that was pre-rendered at build time.
+#[derive(Debug)]
+struct PrerenderedRoute {
+    path: String,
+    strategy: RenderStrategy,
+    revalidate: Option<u64>,
+    html_file: PathBuf,
+}
+
+/// Pre-render all SSG, ISR, and PPR routes at build time.
+///
+/// For each qualifying route:
+/// - SSG static routes: rendered once, saved as `.html`
+/// - SSG dynamic routes (with `getStaticParams`): calls the export to discover params, renders each
+/// - ISR routes: same as SSG but metadata records the revalidation interval
+/// - PPR routes: renders the static shell (Suspense fallbacks, not dynamic content)
+/// - CSR routes: emits a minimal shell HTML (no server rendering)
+///
+/// Returns a list of all pre-rendered routes with their metadata.
+fn prerender_static_routes(
+    root: &Path,
+    app_dir: &Path,
+    manifest: &RouteManifest,
+    prerender_dir: &Path,
+    _client_dir: &Path,
+) -> anyhow::Result<Vec<PrerenderedRoute>> {
+    use ruvyxa_graph::RouteKind;
+
+    let routes_to_prerender: Vec<&RouteEntry> = manifest
+        .routes
+        .iter()
+        .filter(|route| {
+            route.kind == RouteKind::Page
+                && matches!(
+                    route.render.strategy,
+                    RenderStrategy::Ssg
+                        | RenderStrategy::Isr
+                        | RenderStrategy::Ppr
+                        | RenderStrategy::Csr
+                )
+        })
+        .collect();
+
+    if routes_to_prerender.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    fs::create_dir_all(prerender_dir)?;
+
+    let Some(renderer_script) = find_runtime_script(root, "ssg-renderer.mjs") else {
+        // If the SSG renderer isn't available, skip pre-rendering with a warning
+        tracing::warn!(
+            "SSG renderer script not found; skipping pre-rendering of {} routes",
+            routes_to_prerender.len()
+        );
+        return Ok(Vec::new());
+    };
+
+    let mut prerendered = Vec::new();
+
+    for route in routes_to_prerender {
+        match route.render.strategy {
+            RenderStrategy::Csr => {
+                // CSR: emit minimal shell HTML (no SSR content)
+                let html_path = prerender_html_path(prerender_dir, &route.path);
+                if let Some(parent) = html_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                let shell = csr_shell_html(&route.path);
+                fs::write(&html_path, &shell)?;
+                prerendered.push(PrerenderedRoute {
+                    path: route.path.clone(),
+                    strategy: RenderStrategy::Csr,
+                    revalidate: None,
+                    html_file: html_path,
+                });
+            }
+            RenderStrategy::Ssg | RenderStrategy::Isr | RenderStrategy::Ppr => {
+                // For dynamic routes with getStaticParams, resolve static paths first
+                let paths_to_render = if route.render.has_static_params
+                    && route.path.contains(':')
+                    || route.path.contains('*')
+                {
+                    resolve_static_params(root, app_dir, route, &renderer_script)?
+                } else if !route.path.contains(':') && !route.path.contains('*') {
+                    // Pure static route — render the single path
+                    vec![route.path.clone()]
+                } else {
+                    // Dynamic route without getStaticParams — skip (will be rendered at request time)
+                    continue;
+                };
+
+                for render_path in &paths_to_render {
+                    let html_path = prerender_html_path(prerender_dir, render_path);
+                    if let Some(parent) = html_path.parent() {
+                        fs::create_dir_all(parent)?;
+                    }
+
+                    let mode = match route.render.strategy {
+                        RenderStrategy::Ppr => "ppr",
+                        _ => "full",
+                    };
+
+                    let output = ProcessCommand::new("node")
+                        .arg(&renderer_script)
+                        .arg(root)
+                        .arg(app_dir)
+                        .arg(&route.file)
+                        .arg(render_path)
+                        .arg(mode)
+                        .output()
+                        .with_context(|| {
+                            format!("SSG renderer failed for route {}", render_path)
+                        })?;
+
+                    if !output.status.success() {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        let stdout = String::from_utf8_lossy(&output.stdout);
+                        anyhow::bail!(
+                            "Pre-rendering failed for {}: {}{}",
+                            render_path,
+                            stderr,
+                            stdout
+                        );
+                    }
+
+                    let result: serde_json::Value =
+                        serde_json::from_slice(&output.stdout).with_context(|| {
+                            format!("SSG renderer returned invalid JSON for {}", render_path)
+                        })?;
+
+                    if result.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+                        let message = result
+                            .get("message")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("unknown error");
+                        anyhow::bail!("Pre-rendering failed for {}: {}", render_path, message);
+                    }
+
+                    let html = result
+                        .get("html")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or_default();
+
+                    fs::write(&html_path, html)?;
+                    prerendered.push(PrerenderedRoute {
+                        path: render_path.clone(),
+                        strategy: route.render.strategy,
+                        revalidate: route.render.revalidate,
+                        html_file: html_path,
+                    });
+                }
+            }
+            _ => {}
+        }
+    }
+
+    // Write pre-render manifest for the production server
+    let prerender_manifest = serde_json::json!({
+        "routes": prerendered.iter().map(|p| serde_json::json!({
+            "path": p.path,
+            "strategy": format!("{:?}", p.strategy).to_lowercase(),
+            "revalidate": p.revalidate,
+            "htmlFile": p.html_file.file_name().and_then(|n| n.to_str()).unwrap_or_default(),
+        })).collect::<Vec<_>>()
+    });
+    fs::write(
+        prerender_dir.join("manifest.json"),
+        serde_json::to_string_pretty(&prerender_manifest)?,
+    )?;
+
+    info!(
+        prerendered = prerendered.len(),
+        "pre-rendered static routes"
+    );
+
+    Ok(prerendered)
+}
+
+/// Resolve static params for a dynamic SSG route by calling getStaticParams
+/// via the SSG renderer.
+fn resolve_static_params(
+    root: &Path,
+    app_dir: &Path,
+    route: &RouteEntry,
+    renderer_script: &Path,
+) -> anyhow::Result<Vec<String>> {
+    let output = ProcessCommand::new("node")
+        .arg(renderer_script)
+        .arg(root)
+        .arg(app_dir)
+        .arg(&route.file)
+        .arg("__resolve_params__")
+        .arg("params")
+        .output()
+        .with_context(|| format!("Failed to resolve static params for {}", route.path))?;
+
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        anyhow::bail!(
+            "getStaticParams failed for {}: {}",
+            route.path,
+            stderr
+        );
+    }
+
+    let result: serde_json::Value = serde_json::from_slice(&output.stdout)
+        .with_context(|| format!("Invalid JSON from getStaticParams for {}", route.path))?;
+
+    if result.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        let message = result
+            .get("message")
+            .and_then(|v| v.as_str())
+            .unwrap_or("unknown error");
+        anyhow::bail!("getStaticParams failed for {}: {}", route.path, message);
+    }
+
+    let params_list = result
+        .get("params")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+
+    // Convert param objects to actual URL paths using the route pattern
+    let paths = params_list
+        .iter()
+        .filter_map(|params| {
+            let params = params.as_object()?;
+            let mut path = route.path.clone();
+            for (key, value) in params {
+                let value_str = value.as_str().unwrap_or_default();
+                // Replace :param with value
+                path = path.replace(&format!(":{key}"), value_str);
+                // Replace *param (catch-all) with value
+                path = path.replace(&format!("*{key}"), value_str);
+            }
+            // Remove any optional catch-all markers
+            path = path.replace('?', "");
+            Some(path)
+        })
+        .collect();
+
+    Ok(paths)
+}
+
+/// Generate the output HTML file path for a pre-rendered route.
+fn prerender_html_path(prerender_dir: &Path, route_path: &str) -> PathBuf {
+    let sanitized = route_path.trim_start_matches('/');
+    if sanitized.is_empty() {
+        prerender_dir.join("index.html")
+    } else {
+        prerender_dir.join(sanitized).join("index.html")
+    }
+}
+
+/// Generate a minimal CSR shell HTML document.
+fn csr_shell_html(route_path: &str) -> String {
+    format!(
+        r#"<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Loading...</title>
+  <script>window.__RUVYXA_REQUEST_PATH__ = {path_json};</script>
+</head>
+<body>
+  <div id="__ruvyxa"></div>
+  <script type="module" src="/__ruvyxa/client/{encoded_path}.js"></script>
+</body>
+</html>"#,
+        path_json = serde_json::to_string(route_path).unwrap_or_else(|_| "\"\"".to_string()),
+        encoded_path = route_path.trim_start_matches('/').replace('/', "__"),
+    )
+}
 
 struct ClientBundle {
     path: String,

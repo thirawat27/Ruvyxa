@@ -109,6 +109,22 @@ pub enum WorkerRequest {
         project_root: String,
         routes: Vec<WarmupRoute>,
     },
+    /// Pre-render a page (used for ISR background revalidation at runtime).
+    #[serde(rename = "ssg")]
+    Ssg {
+        id: String,
+        #[serde(rename = "projectRoot")]
+        project_root: String,
+        #[serde(rename = "appDir")]
+        app_dir: String,
+        #[serde(rename = "pageFile")]
+        page_file: String,
+        #[serde(rename = "requestPath")]
+        request_path: String,
+        params: BTreeMap<String, String>,
+        /// "full" | "ppr" — controls whether to wait for all content or just the shell.
+        mode: String,
+    },
 }
 
 /// A route to pre-warm in the worker's module cache.
@@ -218,7 +234,8 @@ impl Worker {
             | WorkerRequest::Client { id, .. }
             | WorkerRequest::Invalidate { id, .. }
             | WorkerRequest::Ping { id, .. }
-            | WorkerRequest::Warmup { id, .. } => id.clone(),
+            | WorkerRequest::Warmup { id, .. }
+            | WorkerRequest::Ssg { id, .. } => id.clone(),
         };
 
         let (tx, rx) = oneshot::channel();
@@ -484,6 +501,28 @@ impl NodeWorkerPool {
             page_file: page_file.display().to_string(),
             request_path: request_path.to_string(),
             params: params.clone(),
+        };
+        self.send(request).await
+    }
+
+    /// Pre-render a page (SSG/ISR background revalidation).
+    pub async fn render_ssg(
+        &self,
+        project_root: &Path,
+        app_dir: &Path,
+        page_file: &Path,
+        request_path: &str,
+        params: &BTreeMap<String, String>,
+        mode: &str,
+    ) -> Result<WorkerResponse> {
+        let request = WorkerRequest::Ssg {
+            id: next_request_id(),
+            project_root: project_root.display().to_string(),
+            app_dir: app_dir.display().to_string(),
+            page_file: page_file.display().to_string(),
+            request_path: request_path.to_string(),
+            params: params.clone(),
+            mode: mode.to_string(),
         };
         self.send(request).await
     }

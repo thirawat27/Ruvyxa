@@ -246,7 +246,7 @@ fn split_path(path: &str) -> Vec<&str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ruvyxa_graph::{RouteEntry, RouteKind, RouteManifest, RuntimeTarget};
+    use ruvyxa_graph::{RenderMeta, RouteEntry, RouteKind, RouteManifest, RuntimeTarget};
     use std::path::PathBuf;
 
     fn make_manifest(routes: Vec<(&str, RouteKind)>) -> RouteManifest {
@@ -261,6 +261,7 @@ mod tests {
                 server_modules: Vec::new(),
                 client_modules: Vec::new(),
                 runtime: RuntimeTarget::Node,
+                render: RenderMeta::default(),
             })
             .collect();
 

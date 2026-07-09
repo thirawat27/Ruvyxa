@@ -188,6 +188,8 @@ async function dispatchRequest(request) {
   switch (request.type) {
     case "ssr":
       return handleSsrCoalesced(request)
+    case "ssg":
+      return handleSsgCoalesced(request)
     case "api":
       return handleApi(request)
     case "action":
@@ -328,6 +330,39 @@ async function handleSsr(request) {
 
   const layouts = collectLayouts(appDir, path.dirname(pageFile))
   const { outfile, freshBuild } = await bundleSsrModule(resolvedRoot, pageFile, layouts)
+  const mod = await importModule(outfile, freshBuild)
+  const html = await mod.render({ path: requestPath, params: params || {} })
+
+  return { ok: true, html }
+}
+
+// --- SSG Handler with Request Coalescing ---
+async function handleSsgCoalesced(request) {
+  const { pageFile, requestPath, params, mode } = request
+  const coalesceKey = `ssg:${pageFile}:${requestPath}:${JSON.stringify(params || {})}:${mode || "full"}`
+
+  if (renderCoalesceMap.has(coalesceKey)) {
+    return renderCoalesceMap.get(coalesceKey)
+  }
+
+  const renderPromise = handleSsg(request).finally(() => {
+    renderCoalesceMap.delete(coalesceKey)
+  })
+  renderCoalesceMap.set(coalesceKey, renderPromise)
+  return renderPromise
+}
+
+// --- SSG Handler ---
+// Renders a page at build time (or for ISR background revalidation).
+// mode: "full" = wait for all content, "ppr" = shell only (Suspense fallbacks).
+async function handleSsg(request) {
+  const { projectRoot, appDir, pageFile, requestPath, params, mode } = request
+
+  const resolvedRoot = path.resolve(projectRoot || process.cwd())
+  ensureReactDeps(resolvedRoot)
+
+  const layouts = collectLayouts(appDir, path.dirname(pageFile))
+  const { outfile, freshBuild } = await bundleSsgModule(resolvedRoot, pageFile, layouts, mode || "full")
   const mod = await importModule(outfile, freshBuild)
   const html = await mod.render({ path: requestPath, params: params || {} })
 
@@ -668,6 +703,92 @@ window.__RUVYXA_HYDRATED = true
       platform: "browser",
       minify: process.env.RUVYXA_CLIENT_MINIFY === "1",
       external: ["react", "react-dom/client"],
+      aliases: runtimeAliases(runtimeDir),
+    })
+
+    bundleCache.set(cacheKey, outfile)
+    return { outfile, freshBuild: true }
+  })
+}
+
+// --- SSG Bundle ---
+// Bundles a page for static generation. mode controls onShellReady vs onAllReady.
+async function bundleSsgModule(projectRoot, pageFile, layouts, mode) {
+  const cacheDir = path.join(projectRoot, ".ruvyxa", "cache", "ssg")
+  await ensureDir(cacheDir)
+
+  const imports = [`import Page from ${JSON.stringify(toImportPath(pageFile))}`]
+  const wrappers = []
+
+  layouts.forEach((layoutFile, index) => {
+    imports.push(`import Layout${index} from ${JSON.stringify(toImportPath(layoutFile))}`)
+    wrappers.push(`Layout${index}`)
+  })
+
+  const readyEvent = mode === "ppr" ? "onShellReady" : "onAllReady"
+
+  const moduleCode = `
+import React from "react"
+import { renderToPipeableStream } from "react-dom/server"
+import { Writable } from "node:stream"
+${imports.join("\n")}
+
+export async function render(ctx) {
+  let tree = React.createElement(Page, { params: ctx.params ?? {}, requestPath: ctx.path })
+  for (const Layout of [${wrappers.join(", ")}].reverse()) {
+    tree = React.createElement(Layout, null, tree)
+  }
+
+  return new Promise((resolve, reject) => {
+    const chunks = []
+    const writable = new Writable({
+      write(chunk, encoding, callback) {
+        chunks.push(chunk)
+        callback()
+      },
+    })
+
+    const { pipe } = renderToPipeableStream(tree, {
+      ${readyEvent}() {
+        pipe(writable)
+        writable.on("finish", () => {
+          resolve("<!doctype html>" + Buffer.concat(chunks).toString("utf8"))
+        })
+      },
+      onShellError(error) {
+        reject(error)
+      },
+      onError(error) {
+        ${mode === "ppr" ? "// PPR: non-fatal streaming errors for dynamic slots" : "reject(error)"}
+      },
+    })
+  })
+}
+`
+
+  const hash = createHash("sha256")
+    .update(moduleCode)
+    .update(pageFile)
+    .update(mode)
+    .digest("hex")
+    .slice(0, 16)
+  const outfile = path.join(cacheDir, `${hash}.mjs`)
+
+  const cacheKey = `ssg:${pageFile}:${hash}`
+  const cached = bundleCache.get(cacheKey)
+  if (cached) return { outfile: cached, freshBuild: false }
+
+  return withBuildLock(cacheKey, async () => {
+    const rechecked = bundleCache.get(cacheKey)
+    if (rechecked) return { outfile: rechecked, freshBuild: false }
+
+    await compileBundle({
+      projectRoot,
+      entrySource: moduleCode,
+      sourcefile: "ruvyxa:ssg-entry.tsx",
+      outfile,
+      platform: "node",
+      external: ["react", "react-dom/server", "node:stream"],
       aliases: runtimeAliases(runtimeDir),
     })
 

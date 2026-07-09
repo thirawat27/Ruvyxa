@@ -17,6 +17,12 @@ const config: RuvyxaConfig = {
     parallelism: 4,
   },
 
+  rendering: {
+    defaultStrategy: "ssr",
+    fallback: "blocking",
+    defaultRevalidate: 60,
+  },
+
   cache: {
     routeManifest: true,
     css: true,

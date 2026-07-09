@@ -36,6 +36,35 @@ export default function Home() {
           <code>RUVYXA_PUBLIC_*</code>
         </a>
       </div>
+
+      <h2>Rendering Strategies</h2>
+      <div className="feature-grid">
+        <a className="feature-card" href="/static-page">
+          <h3>SSG (Static)</h3>
+          <p>Pre-rendered at build time</p>
+          <code>No Node.js at runtime</code>
+        </a>
+        <a className="feature-card" href="/ssg-blog">
+          <h3>SSG (Dynamic)</h3>
+          <p>getStaticParams + [slug]</p>
+          <code>Build-time params</code>
+        </a>
+        <a className="feature-card" href="/isr-page">
+          <h3>ISR</h3>
+          <p>Revalidates every 60s</p>
+          <code>Stale-while-revalidate</code>
+        </a>
+        <a className="feature-card" href="/csr-page">
+          <h3>CSR</h3>
+          <p>"use client" — browser only</p>
+          <code>No SSR overhead</code>
+        </a>
+        <a className="feature-card" href="/ppr-page">
+          <h3>PPR</h3>
+          <p>Static shell + streaming</p>
+          <code>Best of both worlds</code>
+        </a>
+      </div>
     </main>
   )
 }

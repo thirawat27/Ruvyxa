@@ -18,7 +18,7 @@ use axum::Router;
 use chrono::Local;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use ruvyxa_diagnostics::{Diagnostic, Result, RuvyxaError};
-use ruvyxa_graph::{discover_routes, DiscoverOptions, RouteEntry, RouteKind, RouteManifest};
+use ruvyxa_graph::{discover_routes, DiscoverOptions, RenderStrategy, RouteEntry, RouteKind, RouteManifest};
 use ruvyxa_middleware::{MiddlewareConfig, MiddlewareStack};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
@@ -49,6 +49,8 @@ pub struct ServerConfig {
     pub app_dir: PathBuf,
     pub public_dir: PathBuf,
     pub client_dir: PathBuf,
+    /// Directory containing pre-rendered HTML files from the build step.
+    pub prerender_dir: PathBuf,
     pub host: String,
     pub port: u16,
     pub watch: bool,
@@ -64,6 +66,7 @@ impl ServerConfig {
             app_dir: root.join("app"),
             public_dir: root.join("public"),
             client_dir: root.join(".ruvyxa/client"),
+            prerender_dir: root.join(".ruvyxa/prerender"),
             root,
             host: host.into(),
             port,
@@ -80,6 +83,7 @@ impl ServerConfig {
             app_dir: root.join(".ruvyxa/server/app"),
             public_dir: root.join(".ruvyxa/assets"),
             client_dir: root.join(".ruvyxa/client"),
+            prerender_dir: root.join(".ruvyxa/prerender"),
             root,
             host: host.into(),
             port,
@@ -968,7 +972,7 @@ async fn render_request_pooled(
     match route_match.route.kind {
         RouteKind::Page => {
             let styles = state.runtime_cache.styles(&state.config).await?;
-            let html = render_page_pooled(
+            let html = render_page_by_strategy(
                 state,
                 route_match.route,
                 request_path,
@@ -989,6 +993,320 @@ async fn render_request_pooled(
             .await
         }
     }
+}
+
+/// Dispatch page rendering based on the route's declared rendering strategy.
+async fn render_page_by_strategy(
+    state: &AppState,
+    route: &RouteEntry,
+    request_path: &str,
+    params: &BTreeMap<String, String>,
+    styles: &str,
+) -> Result<String> {
+    match route.render.strategy {
+        RenderStrategy::Ssr => {
+            render_page_pooled(state, route, request_path, params, styles).await
+        }
+        RenderStrategy::Ssg => {
+            // In dev mode, SSG pages are rendered on-demand like SSR but cached indefinitely.
+            render_page_ssg(state, route, request_path, params, styles).await
+        }
+        RenderStrategy::Isr => {
+            render_page_isr(state, route, request_path, params, styles).await
+        }
+        RenderStrategy::Csr => {
+            render_page_csr(state, route, request_path, params, styles).await
+        }
+        RenderStrategy::Ppr => {
+            render_page_ppr(state, route, request_path, params, styles).await
+        }
+    }
+}
+
+/// SSG in dev mode: render once and cache (no TTL eviction).
+/// In production: serve pre-rendered HTML directly from disk.
+async fn render_page_ssg(
+    state: &AppState,
+    route: &RouteEntry,
+    request_path: &str,
+    params: &BTreeMap<String, String>,
+    styles: &str,
+) -> Result<String> {
+    // In production, try to serve the pre-rendered HTML file directly
+    if !state.config.watch {
+        if let Some(html) = serve_prerendered_html(&state.config.prerender_dir, request_path) {
+            return Ok(html);
+        }
+    }
+
+    let cache_key = format!("ssg:{}", render_cache::ssr_cache_key(request_path, params));
+    if let Some(cached) = state.render_cache.get(&cache_key).await {
+        return Ok(cached);
+    }
+
+    // Render via worker pool (same as SSR but with the SSG bundle type)
+    let response = state
+        .worker_pool
+        .render_ssg(
+            &state.config.root,
+            &state.config.app_dir,
+            &route.file,
+            request_path,
+            params,
+            "full",
+        )
+        .await?;
+
+    if !response.ok {
+        let code = response.code.unwrap_or_else(|| "RUV1500".to_string());
+        let message = response
+            .message
+            .unwrap_or_else(|| "SSG render failed".to_string());
+        return Err(Diagnostic::new("RUV1500", "SSG render failed")
+            .explain(format!("{code}: {message}"))
+            .at_file(&route.file)
+            .into());
+    }
+
+    let rendered = response
+        .html
+        .ok_or_else(|| RuvyxaError::Message("SSG render produced no HTML".to_string()))?;
+
+    let asset_links = public_asset_links(&state.config.public_dir);
+    let hmr = if state.config.watch { hmr_client_script() } else { "" };
+    let client_script = client_hydration_script(&state.config, route, request_path, params);
+    let head_content = format!(r#"{asset_links}<style data-ruvyxa-css>{styles}</style>"#);
+    let html = compose_document(&rendered, &head_content, &format!("{client_script}{hmr}"));
+
+    state.render_cache.put(cache_key, html.clone()).await;
+    Ok(html)
+}
+
+/// ISR: serve from cache if available (stale-while-revalidate), trigger
+/// background revalidation when the entry is older than the revalidate interval.
+/// In production: serve pre-rendered HTML and schedule background revalidation.
+async fn render_page_isr(
+    state: &AppState,
+    route: &RouteEntry,
+    request_path: &str,
+    params: &BTreeMap<String, String>,
+    styles: &str,
+) -> Result<String> {
+    let cache_key = format!("isr:{}", render_cache::ssr_cache_key(request_path, params));
+
+    // Try to serve stale content immediately (from cache or prerendered file)
+    if let Some(cached) = state.render_cache.get(&cache_key).await {
+        // Trigger background revalidation
+        spawn_isr_revalidation(state, route, request_path, params, styles, &cache_key);
+        return Ok(cached);
+    }
+
+    // In production, try the pre-rendered HTML file
+    if !state.config.watch {
+        if let Some(html) = serve_prerendered_html(&state.config.prerender_dir, request_path) {
+            // Store in cache and schedule revalidation
+            state.render_cache.put(cache_key.clone(), html.clone()).await;
+            spawn_isr_revalidation(state, route, request_path, params, styles, &cache_key);
+            return Ok(html);
+        }
+    }
+
+    // No cached version — render synchronously (blocking fallback)
+    let html = render_isr_background(state, route, request_path, params, styles).await?;
+    state.render_cache.put(cache_key, html.clone()).await;
+    Ok(html)
+}
+
+/// ISR background render (used both for first render and revalidation).
+async fn render_isr_background(
+    state: &AppState,
+    route: &RouteEntry,
+    request_path: &str,
+    params: &BTreeMap<String, String>,
+    styles: &str,
+) -> Result<String> {
+    let response = state
+        .worker_pool
+        .render_ssg(
+            &state.config.root,
+            &state.config.app_dir,
+            &route.file,
+            request_path,
+            params,
+            "full",
+        )
+        .await?;
+
+    if !response.ok {
+        let message = response.message.unwrap_or_default();
+        return Err(RuvyxaError::Message(format!("ISR revalidation failed: {message}")));
+    }
+
+    let rendered = response
+        .html
+        .ok_or_else(|| RuvyxaError::Message("ISR render produced no HTML".to_string()))?;
+
+    let asset_links = public_asset_links(&state.config.public_dir);
+    let hmr = if state.config.watch { hmr_client_script() } else { "" };
+    let client_script = client_hydration_script(&state.config, route, request_path, params);
+    let head_content = format!(r#"{asset_links}<style data-ruvyxa-css>{styles}</style>"#);
+    Ok(compose_document(&rendered, &head_content, &format!("{client_script}{hmr}")))
+}
+
+/// Spawn a background task to revalidate an ISR page.
+fn spawn_isr_revalidation(
+    state: &AppState,
+    route: &RouteEntry,
+    request_path: &str,
+    params: &BTreeMap<String, String>,
+    styles: &str,
+    cache_key: &str,
+) {
+    let revalidate_state = state.clone();
+    let revalidate_route = route.clone();
+    let revalidate_path = request_path.to_string();
+    let revalidate_params = params.clone();
+    let revalidate_styles = styles.to_string();
+    let revalidate_key = cache_key.to_string();
+
+    tokio::spawn(async move {
+        if let Ok(html) = render_isr_background(
+            &revalidate_state,
+            &revalidate_route,
+            &revalidate_path,
+            &revalidate_params,
+            &revalidate_styles,
+        )
+        .await
+        {
+            revalidate_state
+                .render_cache
+                .put(revalidate_key, html)
+                .await;
+        }
+    });
+}
+
+/// Try to serve a pre-rendered HTML file from the prerender directory.
+/// Returns `Some(html)` if the file exists, `None` otherwise.
+fn serve_prerendered_html(prerender_dir: &Path, request_path: &str) -> Option<String> {
+    let sanitized = request_path.trim_start_matches('/');
+    let html_path = if sanitized.is_empty() {
+        prerender_dir.join("index.html")
+    } else {
+        prerender_dir.join(sanitized).join("index.html")
+    };
+
+    fs::read_to_string(&html_path).ok()
+}
+
+/// CSR: emit a minimal HTML shell with no server-rendered content.
+/// The page loads entirely in the browser via the client bundle.
+/// In production: serve the pre-built CSR shell HTML.
+async fn render_page_csr(
+    state: &AppState,
+    route: &RouteEntry,
+    request_path: &str,
+    params: &BTreeMap<String, String>,
+    styles: &str,
+) -> Result<String> {
+    // In production, serve the pre-rendered CSR shell
+    if !state.config.watch {
+        if let Some(html) = serve_prerendered_html(&state.config.prerender_dir, request_path) {
+            return Ok(html);
+        }
+    }
+
+    let asset_links = public_asset_links(&state.config.public_dir);
+    let hmr = if state.config.watch { hmr_client_script() } else { "" };
+    let client_script = client_hydration_script(&state.config, route, request_path, params);
+
+    let params_json = serde_json::to_string(params).unwrap_or_else(|_| "{}".to_string());
+    let path_json = serde_json::to_string(request_path).unwrap_or_else(|_| "\"\"".to_string());
+
+    let shell = format!(
+        r#"<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  {asset_links}
+  <style data-ruvyxa-css>{styles}</style>
+  <script>
+    window.__RUVYXA_ROUTE_PARAMS__ = {params_json};
+    window.__RUVYXA_REQUEST_PATH__ = {path_json};
+  </script>
+</head>
+<body>
+  <div id="__ruvyxa"></div>
+  {client_script}
+  {hmr}
+</body>
+</html>"#
+    );
+
+    Ok(shell)
+}
+
+/// PPR: render the static shell (Suspense fallbacks) and stream dynamic slots.
+/// In dev mode, we render with onShellReady to get the shell quickly, then
+/// the remaining content streams in via the client hydration.
+/// In production: serve the pre-rendered shell from disk.
+async fn render_page_ppr(
+    state: &AppState,
+    route: &RouteEntry,
+    request_path: &str,
+    params: &BTreeMap<String, String>,
+    styles: &str,
+) -> Result<String> {
+    // In production, serve the pre-rendered PPR shell
+    if !state.config.watch {
+        if let Some(html) = serve_prerendered_html(&state.config.prerender_dir, request_path) {
+            return Ok(html);
+        }
+    }
+
+    let cache_key = format!("ppr:{}", render_cache::ssr_cache_key(request_path, params));
+    if let Some(cached) = state.render_cache.get(&cache_key).await {
+        return Ok(cached);
+    }
+
+    // PPR mode: render with onShellReady (Suspense boundaries show fallback)
+    let response = state
+        .worker_pool
+        .render_ssg(
+            &state.config.root,
+            &state.config.app_dir,
+            &route.file,
+            request_path,
+            params,
+            "ppr",
+        )
+        .await?;
+
+    if !response.ok {
+        let code = response.code.unwrap_or_else(|| "RUV1550".to_string());
+        let message = response
+            .message
+            .unwrap_or_else(|| "PPR render failed".to_string());
+        return Err(Diagnostic::new("RUV1550", "PPR render failed")
+            .explain(format!("{code}: {message}"))
+            .at_file(&route.file)
+            .into());
+    }
+
+    let rendered = response
+        .html
+        .ok_or_else(|| RuvyxaError::Message("PPR render produced no HTML".to_string()))?;
+
+    let asset_links = public_asset_links(&state.config.public_dir);
+    let hmr = if state.config.watch { hmr_client_script() } else { "" };
+    let client_script = client_hydration_script(&state.config, route, request_path, params);
+    let head_content = format!(r#"{asset_links}<style data-ruvyxa-css>{styles}</style>"#);
+    let html = compose_document(&rendered, &head_content, &format!("{client_script}{hmr}"));
+
+    state.render_cache.put(cache_key, html.clone()).await;
+    Ok(html)
 }
 
 async fn render_page_pooled(

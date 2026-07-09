@@ -24,6 +24,9 @@ pub struct RouteEntry {
     pub server_modules: Vec<String>,
     pub client_modules: Vec<String>,
     pub runtime: RuntimeTarget,
+    /// Rendering strategy and metadata for this route.
+    #[serde(default)]
+    pub render: RenderMeta,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -39,6 +42,48 @@ pub enum RuntimeTarget {
     Node,
     Edge,
     Static,
+}
+
+/// Per-route rendering strategy — determines when and how the HTML is generated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum RenderStrategy {
+    /// Server-Side Rendering: HTML generated on every request (default).
+    #[default]
+    Ssr,
+    /// Static Site Generation: HTML pre-rendered at build time.
+    Ssg,
+    /// Incremental Static Regeneration: pre-rendered at build time, revalidated
+    /// in the background after a TTL expires.
+    Isr,
+    /// Client-Side Rendering: minimal shell HTML served, full rendering happens
+    /// in the browser via hydration without server-rendered content.
+    Csr,
+    /// Partial Pre-Rendering: static shell pre-rendered at build time with
+    /// dynamic "holes" that stream in at request time.
+    Ppr,
+}
+
+/// Metadata that controls the rendering strategy for a route.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+pub struct RenderMeta {
+    /// The rendering strategy for this route.
+    pub strategy: RenderStrategy,
+    /// ISR revalidation interval in seconds (only meaningful for `Isr`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub revalidate: Option<u64>,
+    /// Whether the page exports `getStaticParams` for dynamic SSG routes.
+    #[serde(default)]
+    pub has_static_params: bool,
+    /// Static paths discovered from `getStaticParams` at build time.
+    /// Empty until the build phase populates them.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub static_paths: Vec<String>,
+    /// For PPR: whether the page uses `<Suspense>` boundaries that mark
+    /// dynamic slots to be streamed at request time.
+    #[serde(default)]
+    pub has_dynamic_slots: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,6 +153,11 @@ pub fn discover_routes(options: DiscoverOptions) -> Result<RouteManifest> {
             ),
             client_modules: sibling_module(route_dir, "client.tsx"),
             runtime: RuntimeTarget::Node,
+            render: if kind == RouteKind::Page {
+                detect_render_strategy(&file)
+            } else {
+                RenderMeta::default()
+            },
         });
     }
 
@@ -753,6 +803,121 @@ fn sibling_modules(route_dir: &Path, names: &[&str]) -> Vec<String> {
         .iter()
         .flat_map(|name| sibling_module(route_dir, name))
         .collect()
+}
+
+/// Detect the rendering strategy for a page by scanning its source for known exports/directives.
+///
+/// Detection rules (first match wins):
+/// 1. `"use client"` directive at top → CSR
+/// 2. `export const ppr = true` → PPR
+/// 3. `export const revalidate = <number>` → ISR with that interval
+/// 4. `export function getStaticParams` or `export async function getStaticParams` → SSG
+/// 5. Route has no dynamic segments and no data fetching → SSG candidate (static routes)
+/// 6. Default → SSR
+fn detect_render_strategy(file: &Path) -> RenderMeta {
+    let Ok(source) = fs::read_to_string(file) else {
+        return RenderMeta::default();
+    };
+
+    let code = code_without_strings_and_comments(&source);
+
+    // 1. Check for "use client" directive (must be in original source, at top)
+    let trimmed = source.trim_start();
+    if trimmed.starts_with("\"use client\"") || trimmed.starts_with("'use client'") {
+        return RenderMeta {
+            strategy: RenderStrategy::Csr,
+            ..Default::default()
+        };
+    }
+
+    // 2. Check for PPR opt-in: export const ppr = true
+    if has_export_const_bool(&code, "ppr", true) {
+        return RenderMeta {
+            strategy: RenderStrategy::Ppr,
+            has_dynamic_slots: true,
+            ..Default::default()
+        };
+    }
+
+    // 3. Check for ISR: export const revalidate = <number>
+    if let Some(seconds) = parse_export_const_number(&code, "revalidate") {
+        let has_static_params = has_export_function(&code, "getStaticParams");
+        return RenderMeta {
+            strategy: RenderStrategy::Isr,
+            revalidate: Some(seconds),
+            has_static_params,
+            ..Default::default()
+        };
+    }
+
+    // 4. Check for SSG: export function getStaticParams / export async function getStaticParams
+    if has_export_function(&code, "getStaticParams") {
+        return RenderMeta {
+            strategy: RenderStrategy::Ssg,
+            has_static_params: true,
+            ..Default::default()
+        };
+    }
+
+    // 5. Default: SSR
+    RenderMeta::default()
+}
+
+/// Check if `export const <name> = true|false` exists.
+fn has_export_const_bool(code: &str, name: &str, expected: bool) -> bool {
+    let pattern = format!("export const {name}");
+    for line in code.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with(&pattern) {
+            let after = trimmed[pattern.len()..].trim();
+            if let Some(rest) = after.strip_prefix('=') {
+                let value = rest.trim().trim_end_matches(';').trim();
+                if expected && value == "true" {
+                    return true;
+                }
+                if !expected && value == "false" {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Parse `export const <name> = <number>` and return the number.
+fn parse_export_const_number(code: &str, name: &str) -> Option<u64> {
+    let pattern = format!("export const {name}");
+    for line in code.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with(&pattern) {
+            let after = trimmed[pattern.len()..].trim();
+            if let Some(rest) = after.strip_prefix('=') {
+                let value = rest.trim().trim_end_matches(';').trim();
+                if let Ok(n) = value.parse::<u64>() {
+                    return Some(n);
+                }
+            }
+        }
+    }
+    None
+}
+
+/// Check if `export function <name>` or `export async function <name>` exists.
+fn has_export_function(code: &str, name: &str) -> bool {
+    let patterns = [
+        format!("export function {name}"),
+        format!("export async function {name}"),
+        format!("export const {name}"),
+    ];
+    for line in code.lines() {
+        let trimmed = line.trim();
+        for pattern in &patterns {
+            if trimmed.starts_with(pattern.as_str()) {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn detect_conflicts(routes: &[RouteEntry]) -> Result<()> {

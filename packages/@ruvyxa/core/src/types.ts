@@ -24,6 +24,7 @@ export interface RuvyxaConfig {
     esTarget?: "es2018" | "es2019" | "es2020" | "es2022" | "esnext"
     emitChunkManifest?: boolean
   }
+  rendering?: RenderingConfig
   debug?: {
     overlay?: boolean
     traces?: boolean
@@ -42,6 +43,77 @@ export interface RuvyxaConfig {
   adapter?: Adapter
   adapterOptions?: Record<string, unknown>
   plugins?: RuvyxaPlugin[]
+}
+
+// ─── Rendering Strategy ───────────────────────────────────────────────────────
+
+/**
+ * Rendering strategy for a route. Determines when and how HTML is generated.
+ *
+ * - `"ssr"` — Server-Side Rendering: HTML generated on every request (default).
+ * - `"ssg"` — Static Site Generation: HTML pre-rendered at build time.
+ * - `"isr"` — Incremental Static Regeneration: pre-rendered at build, revalidated after TTL.
+ * - `"csr"` — Client-Side Rendering: minimal shell served, full render in browser.
+ * - `"ppr"` — Partial Pre-Rendering: static shell at build time + dynamic streaming at request time.
+ */
+export type RenderStrategy = "ssr" | "ssg" | "isr" | "csr" | "ppr"
+
+/**
+ * Global rendering configuration in `ruvyxa.config.ts`.
+ */
+export interface RenderingConfig {
+  /**
+   * Default rendering strategy for pages that don't declare one explicitly.
+   * @default "ssr"
+   */
+  defaultStrategy?: RenderStrategy
+  /**
+   * Fallback behavior for SSG/ISR pages when a path is not pre-rendered.
+   * - `"blocking"` — server-render on first request, then cache (default).
+   * - `"static"` — return 404 for paths not pre-rendered at build time.
+   * @default "blocking"
+   */
+  fallback?: "blocking" | "static"
+  /**
+   * Default ISR revalidation interval in seconds (used when a page exports
+   * `revalidate` without a value or inherits ISR from config).
+   * @default 60
+   */
+  defaultRevalidate?: number
+}
+
+// ─── Per-Page Exports ─────────────────────────────────────────────────────────
+
+/**
+ * Context passed to `getStaticParams` at build time.
+ */
+export interface StaticParamsContext {
+  /** All route entries discovered in the app. */
+  routes: Array<{ path: string; id: string }>
+}
+
+/**
+ * Type for the `getStaticParams` page export used by SSG and ISR routes
+ * with dynamic segments.
+ *
+ * @example
+ * ```tsx
+ * export const getStaticParams: GetStaticParams = async () => {
+ *   const posts = await fetchPosts()
+ *   return posts.map(post => ({ slug: post.slug }))
+ * }
+ * ```
+ */
+export type GetStaticParams<TParams extends Record<string, string> = Record<string, string>> = (
+  ctx: StaticParamsContext,
+) => TParams[] | Promise<TParams[]>
+
+/**
+ * Props provided to a page component during rendering.
+ */
+export interface PageProps<TParams extends Record<string, string> = Record<string, string>> {
+  params: TParams
+  requestPath: string
 }
 
 export interface MiddlewareConfig {
