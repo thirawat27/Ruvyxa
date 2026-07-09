@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://i.postimg.cc/0yGQbz2h/ruvyxa.png" alt="Ruvyxa" width="240" height="240" />
+  <img src="https://postimg.cc/DSZFNyGc" alt="Ruvyxa" width="240" height="240" />
 </p>
 
 <h1 align="center">Ruvyxa</h1>
@@ -367,6 +367,7 @@ export default defineConfig({
 - [Deployment](docs/deployment.md)
 - [Debugging & Diagnostics](docs/debugging.md)
 - [Performance](docs/performance.md)
+- [Bundler Comparison](docs/bundler-comparison.md)
 - [Dev/Prod Parity](docs/parity.md)
 - [Production Readiness](docs/production-readiness.md)
 - [Publishing](docs/publishing.md)
