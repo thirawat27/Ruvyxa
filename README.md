@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="https://postimg.cc/DSZFNyGc" alt="Ruvyxa" width="240" height="240" />
+  <img src="templates/minimal/public/ruvyxa.png" alt="Ruvyxa" width="240" height="240" />
 </p>
 
 <h1 align="center">Ruvyxa</h1>
