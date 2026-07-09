@@ -58,7 +58,7 @@ export default defineConfig({
 | ---------------------------- | ---------------------------------- |
 | `@ruvyxa/adapter-node`       | Node.js (self-hosted, Docker, PM2) |
 | `@ruvyxa/adapter-vercel`     | Vercel Functions                   |
-| `@ruvyxa/adapter-cloudflare` | Cloudflare Workers / Pages        |
+| `@ruvyxa/adapter-cloudflare` | Cloudflare Workers / Pages         |
 | `@ruvyxa/adapter-netlify`    | Netlify Functions                  |
 | `@ruvyxa/adapter-bun`        | Bun runtime                        |
 | `@ruvyxa/adapter-static`     | Static site export (no server)     |
@@ -80,7 +80,7 @@ import { nodeAdapter } from '@ruvyxa/adapter-node'
 
 export default defineConfig({
   adapter: nodeAdapter({
-    entry: '.ruvyxa/server/app',  // optional, defaults to this
+    entry: '.ruvyxa/server/app', // optional, defaults to this
   }),
 })
 ```
@@ -88,7 +88,13 @@ export default defineConfig({
 Output metadata:
 
 ```json
-{ "name": "node", "target": "node", "platform": "node", "entry": ".ruvyxa/server/app", "assetsDir": ".ruvyxa/assets" }
+{
+  "name": "node",
+  "target": "node",
+  "platform": "node",
+  "entry": ".ruvyxa/server/app",
+  "assetsDir": ".ruvyxa/assets"
+}
 ```
 
 ### Docker example
@@ -117,7 +123,7 @@ import { vercelAdapter } from '@ruvyxa/adapter-vercel'
 
 export default defineConfig({
   adapter: vercelAdapter({
-    functionsDir: '.ruvyxa/functions',  // optional
+    functionsDir: '.ruvyxa/functions', // optional
   }),
 })
 ```
@@ -134,7 +140,7 @@ import { cloudflareAdapter } from '@ruvyxa/adapter-cloudflare'
 
 export default defineConfig({
   adapter: cloudflareAdapter({
-    workerEntry: '.ruvyxa/server/app',  // optional
+    workerEntry: '.ruvyxa/server/app', // optional
   }),
 })
 ```
@@ -150,7 +156,7 @@ import { netlifyAdapter } from '@ruvyxa/adapter-netlify'
 
 export default defineConfig({
   adapter: netlifyAdapter({
-    functionsDir: '.ruvyxa/netlify/functions',  // optional
+    functionsDir: '.ruvyxa/netlify/functions', // optional
   }),
 })
 ```
@@ -182,7 +188,7 @@ import { staticAdapter } from '@ruvyxa/adapter-static'
 
 export default defineConfig({
   adapter: staticAdapter({
-    outputDir: '.ruvyxa/static',  // optional
+    outputDir: '.ruvyxa/static', // optional
   }),
 })
 ```
@@ -197,8 +203,8 @@ Pre-renders all pages at build time and outputs static HTML + JS + CSS. Deploy t
 
 ## Environment Variables in Production
 
-Set environment variables using your platform's standard method. Ruvyxa loads `.env` and `.env.local`
-at server startup.
+Set environment variables using your platform's standard method. Ruvyxa loads `.env` and
+`.env.local` at server startup.
 
 - `RUVYXA_PUBLIC_*` — available in both server and client code
 - All other variables — server-only (SSR, loaders, actions, API routes)

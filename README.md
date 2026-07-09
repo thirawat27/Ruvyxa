@@ -39,8 +39,8 @@
   via `ruvyxa.config.ts`.
 - **Wasm plugin runtime** — sandboxed WebAssembly plugins powered by Wasmtime with hot-reload,
   configurable permissions, execution timeouts, and memory limits.
-- **Parallel production bundling** — page client bundles are emitted concurrently via scoped
-  threads and written back in deterministic route order.
+- **Parallel production bundling** — page client bundles are emitted concurrently via scoped threads
+  and written back in deterministic route order.
 - **Honest checks** — `ruvyxa check` runs type checking, build validation, dev/prod parity, and page
   smoke rendering before deploy.
 - **Multiple rendering strategies** — SSR (default), SSG, ISR, CSR, and PPR — configurable per-route
@@ -179,8 +179,8 @@ export const createTodo = action
 
 **Supported content types:** `application/json`, `application/x-www-form-urlencoded`.
 
-**Security defaults:** body size limit (64 KB), same-origin check, Fetch Metadata guards,
-per-client rate limiting (60 req/min), module isolation.
+**Security defaults:** body size limit (64 KB), same-origin check, Fetch Metadata guards, per-client
+rate limiting (60 req/min), module isolation.
 
 ---
 
@@ -318,13 +318,13 @@ export default defineConfig({
 
 ## Rendering Strategies
 
-| Strategy | Export                    | Behavior                                       |
-| -------- | ------------------------- | ---------------------------------------------- |
-| SSR      | default                   | Rendered per request (default)                   |
-| SSG      | (via config or route)      | Pre-rendered at build time, served as HTML     |
-| ISR      | `export const revalidate` | Stale-while-revalidate with configurable TTL     |
-| CSR      | `'use client'` directive  | Minimal shell, full render in browser           |
-| PPR      | `export const ppr = true` | Static shell + streamed dynamic slots          |
+| Strategy | Export                    | Behavior                                     |
+| -------- | ------------------------- | -------------------------------------------- |
+| SSR      | default                   | Rendered per request (default)               |
+| SSG      | (via config or route)     | Pre-rendered at build time, served as HTML   |
+| ISR      | `export const revalidate` | Stale-while-revalidate with configurable TTL |
+| CSR      | `'use client'` directive  | Minimal shell, full render in browser        |
+| PPR      | `export const ppr = true` | Static shell + streamed dynamic slots        |
 
 Routes with `getStaticParams` export generate static paths at build time.
 
@@ -332,20 +332,20 @@ Routes with `getStaticParams` export generate static paths at build time.
 
 ## CLI
 
-| Command               | Purpose                                                                   |
-| --------------------- | ------------------------------------------------------------------------- |
-| `ruvyxa dev`          | Start the development server with HMR and file watching                      |
-| `ruvyxa build`        | Build production output to `.ruvyxa/` (supports `--target node          | edge | static`) |
-| `ruvyxa check`        | Run app-level production readiness checks (typecheck, build, parity, smoke)|
-| `ruvyxa start`        | Serve production output with the same runtime semantics as dev             |
-| `ruvyxa preview`      | Alias for `ruvyxa start` (preview production build locally)              |
-| `ruvyxa routes`       | Print the discovered route table                                           |
-| `ruvyxa analyze`      | Validate routes, imports, and server/client boundaries (structured JSON)   |
-| `ruvyxa doctor`        | Check project health, dependencies, environment, and native CLI status   |
-| `ruvyxa trace <path>` | Print route matching details for a URL                                    |
-| `ruvyxa bench`        | Benchmark route discovery, analysis, validation, and production builds     |
-| `ruvyxa test:parity`  | Compare dev/prod routes and smoke-render page routes                      |
-| `ruvyxa clean`        | Remove `.ruvyxa/` build output                                            |
+| Command               | Purpose                                                                     |
+| --------------------- | --------------------------------------------------------------------------- |
+| `ruvyxa dev`          | Start the development server with HMR and file watching                     |
+| `ruvyxa build`        | Build production output to `.ruvyxa/` (supports `--target node              | edge | static`) |
+| `ruvyxa check`        | Run app-level production readiness checks (typecheck, build, parity, smoke) |
+| `ruvyxa start`        | Serve production output with the same runtime semantics as dev              |
+| `ruvyxa preview`      | Alias for `ruvyxa start` (preview production build locally)                 |
+| `ruvyxa routes`       | Print the discovered route table                                            |
+| `ruvyxa analyze`      | Validate routes, imports, and server/client boundaries (structured JSON)    |
+| `ruvyxa doctor`       | Check project health, dependencies, environment, and native CLI status      |
+| `ruvyxa trace <path>` | Print route matching details for a URL                                      |
+| `ruvyxa bench`        | Benchmark route discovery, analysis, validation, and production builds      |
+| `ruvyxa test:parity`  | Compare dev/prod routes and smoke-render page routes                        |
+| `ruvyxa clean`        | Remove `.ruvyxa/` build output                                              |
 
 ---
 
@@ -412,10 +412,10 @@ Routes with `getStaticParams` export generate static paths at build time.
 | [`@ruvyxa/react`](packages/@ruvyxa/react)                           | React integration package (error boundary, hydration, useLoader)           |
 | [`@ruvyxa/adapter-node`](packages/@ruvyxa/adapter-node)             | Node deployment adapter                                                    |
 | [`@ruvyxa/adapter-vercel`](packages/@ruvyxa/adapter-vercel)         | Vercel serverless adapter                                                  |
-| [`@ruvyxa/adapter-cloudflare`](packages/@ruvyxa/adapter-cloudflare) | Cloudflare edge adapter                                                  |
+| [`@ruvyxa/adapter-cloudflare`](packages/@ruvyxa/adapter-cloudflare) | Cloudflare edge adapter                                                    |
 | [`@ruvyxa/adapter-netlify`](packages/@ruvyxa/adapter-netlify)       | Netlify functions adapter                                                  |
 | [`@ruvyxa/adapter-bun`](packages/@ruvyxa/adapter-bun)               | Bun runtime adapter                                                        |
-| [`@ruvyxa/adapter-static`](packages/@ruvyxa/adapter-static)       | Static output adapter                                                      |
+| [`@ruvyxa/adapter-static`](packages/@ruvyxa/adapter-static)         | Static output adapter                                                      |
 
 ---
 

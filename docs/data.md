@@ -44,7 +44,7 @@ Use the `cache` helper for time-based caching with optional stale-while-revalida
 export const getPost = loader(async ({ params, cache }) => {
   return cache(`post:${params.slug}`)
     .ttl('5m')
-    .swr('1h')           // serve stale while revalidating in background
+    .swr('1h') // serve stale while revalidating in background
     .get(async () => {
       return db.posts.findBySlug(params.slug)
     })
@@ -60,21 +60,21 @@ export const getPost = loader(async ({ params, cache }) => {
 | `"1h"`  | 1 hour     |
 | `"1d"`  | 1 day      |
 
-The cache uses a FIFO eviction policy (1024 max entries) with periodic cleanup every 60 seconds.
-It is per-process and invalidated on server restart. For distributed caching, connect your own
-client inside the loader body.
+The cache uses a FIFO eviction policy (1024 max entries) with periodic cleanup every 60 seconds. It
+is per-process and invalidated on server restart. For distributed caching, connect your own client
+inside the loader body.
 
 ### Cache API
 
-| Function                    | Description                        |
-| --------------------------- | ---------------------------------- |
-| `cache(key)`                | Create a cache builder for a key   |
-| `.ttl(value)`               | Set time-to-live                   |
-| `.swr(value)`               | Set stale-while-revalidate window  |
-| `.get(producer)`            | Get cached value or run producer   |
-| `invalidateCache(key)`      | Invalidate by exact key or prefix  |
-| `invalidateCache()`         | Clear entire cache                 |
-| `cacheStats()`              | Get current cache size / max       |
+| Function               | Description                       |
+| ---------------------- | --------------------------------- |
+| `cache(key)`           | Create a cache builder for a key  |
+| `.ttl(value)`          | Set time-to-live                  |
+| `.swr(value)`          | Set stale-while-revalidate window |
+| `.get(producer)`       | Get cached value or run producer  |
+| `invalidateCache(key)` | Invalidate by exact key or prefix |
+| `invalidateCache()`    | Clear entire cache                |
+| `cacheStats()`         | Get current cache size / max      |
 
 ---
 
@@ -86,7 +86,9 @@ A single `server.ts` can export multiple loaders:
 import { loader } from 'ruvyxa/server'
 
 export const getPost = loader(async ({ params }) => db.posts.findBySlug(params.slug))
-export const getRelatedPosts = loader(async ({ params }) => db.posts.findRelated(params.slug, { limit: 5 }))
+export const getRelatedPosts = loader(async ({ params }) =>
+  db.posts.findRelated(params.slug, { limit: 5 }),
+)
 ```
 
 ---
@@ -126,7 +128,7 @@ Ruvyxa enforces a strict server/client boundary at build time:
 ```ts
 // server.ts — safe: runs only on the server
 import { loader } from 'ruvyxa/server'
-import { db } from '../../lib/db'     // server-only database client
+import { db } from '../../lib/db' // server-only database client
 
 export const getData = loader(async () => db.query('SELECT * FROM posts'))
 ```
@@ -135,10 +137,10 @@ export const getData = loader(async () => db.query('SELECT * FROM posts'))
 
 ```tsx
 // page.tsx — unsafe: this code reaches the browser
-import { db } from '../../lib/db'     // RUV1007 if db imports "server-only"
+import { db } from '../../lib/db' // RUV1007 if db imports "server-only"
 
 export default function Page() {
-  const url = process.env.DATABASE_URL  // RUV1008: private env in client
+  const url = process.env.DATABASE_URL // RUV1008: private env in client
   return <p>{url}</p>
 }
 ```

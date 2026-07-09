@@ -1,7 +1,7 @@
 # Publishing to npm
 
-This document covers the npm publishing process for all Ruvyxa packages. In general, use the
-GitHub Actions release workflow rather than publishing manually.
+This document covers the npm publishing process for all Ruvyxa packages. In general, use the GitHub
+Actions release workflow rather than publishing manually.
 
 ---
 
@@ -9,12 +9,12 @@ GitHub Actions release workflow rather than publishing manually.
 
 ### Core
 
-| Package         | Description                                           |
-| --------------- | ----------------------------------------------------- |
-| `ruvyxa`        | CLI + runtime bridge (the main user-facing package)     |
-| `create-ruvyxa` | Project scaffolding (`npm create ruvyxa`)             |
-| `@ruvyxa/core`  | Shared primitives: config, server APIs, cache helpers  |
-| `@ruvyxa/react` | React integration (error boundary, hydration, useLoader)  |
+| Package         | Description                                              |
+| --------------- | -------------------------------------------------------- |
+| `ruvyxa`        | CLI + runtime bridge (the main user-facing package)      |
+| `create-ruvyxa` | Project scaffolding (`npm create ruvyxa`)                |
+| `@ruvyxa/core`  | Shared primitives: config, server APIs, cache helpers    |
+| `@ruvyxa/react` | React integration (error boundary, hydration, useLoader) |
 
 ### Adapters
 
@@ -22,7 +22,7 @@ GitHub Actions release workflow rather than publishing manually.
 | ---------------------------- | ------------------ |
 | `@ruvyxa/adapter-node`       | Node.js            |
 | `@ruvyxa/adapter-vercel`     | Vercel             |
-| `@ruvyxa/adapter-cloudflare` | Cloudflare Workers  |
+| `@ruvyxa/adapter-cloudflare` | Cloudflare Workers |
 | `@ruvyxa/adapter-netlify`    | Netlify            |
 | `@ruvyxa/adapter-bun`        | Bun                |
 | `@ruvyxa/adapter-static`     | Static export      |

@@ -12,7 +12,7 @@ manual registration, no configuration file.
 | `page.tsx`   | A renderable page route              |
 | `page.jsx`   | A renderable page route (JSX)        |
 | `route.ts`   | An API route (no UI)                 |
-| `route.js`   | An API route (no UI, JS)            |
+| `route.js`   | An API route (no UI, JS)             |
 | `layout.tsx` | A layout that wraps child pages      |
 | `server.ts`  | A server-side data loader            |
 | `server.js`  | A server-side data loader (JS)       |
@@ -74,8 +74,8 @@ Use `[[...name]]` when the catch-all may consume zero segments:
 app/shop/[[...category]]/page.tsx  →  /shop/*category?
 ```
 
-Matches `/shop`, `/shop/electronics`, and `/shop/electronics/phones`. The catch-all value is
-passed as a slash-joined string (e.g., `"electronics/phones"`).
+Matches `/shop`, `/shop/electronics`, and `/shop/electronics/phones`. The catch-all value is passed
+as a slash-joined string (e.g., `"electronics/phones"`).
 
 `[[name]]` (single optional segment) is not a valid convention and fails with `RUV1002`.
 

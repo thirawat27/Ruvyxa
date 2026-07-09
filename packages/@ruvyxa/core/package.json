@@ -1,6 +1,6 @@
 {
   "name": "@ruvyxa/core",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "Tiny typed primitives behind Ruvyxa: config, loaders, actions, cache helpers, responses, and adapter contracts.",
   "license": "Apache-2.0",
   "type": "module",
@@ -13,14 +13,29 @@
     "url": "git+https://github.com/thirawat27/ruvyxa.git",
     "directory": "packages/@ruvyxa/core"
   },
-  "bugs": { "url": "https://github.com/thirawat27/ruvyxa/issues" },
+  "bugs": {
+    "url": "https://github.com/thirawat27/ruvyxa/issues"
+  },
   "homepage": "https://github.com/thirawat27/ruvyxa#readme",
-  "engines": { "node": ">=22.0.0" },
-  "publishConfig": { "access": "public" },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
   "exports": {
-    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
-    "./server": { "types": "./dist/server.d.ts", "default": "./dist/server.js" },
-    "./config": { "types": "./dist/config.d.ts", "default": "./dist/config.js" }
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./server": {
+      "types": "./dist/server.d.ts",
+      "default": "./dist/server.js"
+    },
+    "./config": {
+      "types": "./dist/config.d.ts",
+      "default": "./dist/config.js"
+    }
   },
   "scripts": {
     "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json",

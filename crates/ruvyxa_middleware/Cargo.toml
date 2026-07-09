@@ -1,6 +1,6 @@
 [package]
 name = "ruvyxa_middleware"
-version = "1.0.5"
+version = "1.0.6"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true

@@ -1,5 +1,85 @@
 # Changelog
 
+## v1.0.6 (2026-07-09)
+
+### Highlights
+
+- SSG, ISR, and PPR pre-rendering support added to the rendering pipeline
+- New runtime SSG renderer for server-side page pre-rendering at build time
+- CSR minimal shell HTML generation for client-side rendered pages
+- Revalidation metadata tracking for ISR routes
+- Dev server and build output updated with prerendered routes manifest
+- Kitchen-sink examples demonstrating SSG, ISR, PPR, and CSR rendering strategies
+- Codebase-wide formatting standardization with Prettier configuration
+- `render_api` refactored to use structured request object for improved maintainability
+- Documentation overhaul across all guides (rendering strategies, cache, security, middleware)
+- pnpm requirement upgraded from 10+ to 11+
+
+### Rust Crates
+
+- **ruvyxa_cli**:
+  - SSG/ISR/PPR pre-rendering at build time with dynamic route support
+  - `getStaticParams` resolution for dynamic routes during build
+  - Build output includes prerendered routes manifest and prerender stats
+  - Code formatting improvements
+- **ruvyxa_dev_server**:
+  - Prerender directory support in dev server and production configs
+  - `render_api` refactored to accept `RenderApiRequest` struct instead of multiple params
+  - Reduced parameter passing complexity and improved type safety
+  - Worker pool and router enhancements
+- **ruvyxa_graph**:
+  - Route manifest generation updates for prerendering
+  - Enhanced route discovery
+
+### npm Packages
+
+- All packages updated with version bumps
+- **@ruvyxa/core**: Added `RenderStrategy` enum and rendering configuration to types
+- **ruvyxa/runtime**:
+  - New `ssg-renderer.mjs` for server-side page rendering
+  - `worker-pool.mjs` modernized with improved concurrent request handling
+  - All runtime modules formatted to new Prettier standards
+- All adapter packages updated with `tsconfig.check.json` and formatting
+- All CLI binary packages updated
+
+### Examples
+
+- **kitchen-sink**:
+  - New SSG blog with `[slug]` dynamic routes (`app/ssg-blog/`)
+  - New ISR page with revalidation (`app/isr-page/`)
+  - New PPR page with partial pre-rendering (`app/ppr-page/`)
+  - New CSR page with client-side rendering (`app/static-page/`)
+  - Static page example
+  - Updated layout, routing, and configurations
+
+### Documentation
+
+- Updated README with rendering strategies, pnpm 11+ requirement, expanded crate descriptions
+- Updated CONTRIBUTING with correct Rust verification flags and adapter guidelines
+- Enhanced `docs/architecture/project-structure.md` with crate capabilities and features
+- Updated `docs/routing.md`, `docs/data.md`, `docs/actions.md` with rendering strategy details
+- Revamped `docs/debugging.md`, `docs/deployment.md`, `docs/performance.md`
+- Expanded `docs/production-readiness.md` with cache configuration and security
+- Improved `docs/publishing.md` and `docs/parity.md`
+- `docs/testing.md` updated with API renderer test documentation
+
+### Infrastructure
+
+- Added `.prettierrc` and `.prettierignore` for consistent code formatting
+- pnpm requirement changed from `^10.32.1` to `^11.7.0`
+- Package metadata validation uses dynamic license from root `package.json`
+- All `package.json` files updated with version and dependency sync
+- TypeScript config check files added to adapter packages
+- GitHub Actions workflows updated for formatting consistency
+
+### Testing
+
+- New `api-renderer.test.mjs` test suite for API rendering
+- Updated `compiler.test.mjs`, `client-renderer.test.mjs`, `action-renderer.test.mjs`
+- Updated adapter tests for all 6 deployment targets
+- Updated core config and server tests
+- `test-full-flow.ps1` updated with expanded coverage
+
 ## v1.0.5 (2026-07-09)
 
 ### Highlights
@@ -450,3 +530,4 @@ The following commits occurred before the v1.0.0 tag and represent the initial p
 | `v1.0.3` | 2026-07-08 | Minor      |
 | `v1.0.4` | 2026-07-01 | Minor      |
 | `v1.0.5` | 2026-07-09 | Minor      |
+| `v1.0.6` | 2026-07-09 | Patch      |

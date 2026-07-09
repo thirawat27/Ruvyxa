@@ -51,9 +51,9 @@ Affected routes:
 
 ### SSR & Rendering
 
-| Code      | Title                  | Cause                                     |
-| --------- | ---------------------- | ----------------------------------------- |
-| `RUV1100` | SSR render failed      | ReactDOMServer error during page render   |
+| Code      | Title                  | Cause                                        |
+| --------- | ---------------------- | -------------------------------------------- |
+| `RUV1100` | SSR render failed      | ReactDOMServer error during page render      |
 | `RUV1102` | SSR renderer not found | Internal renderer `ssr-renderer.mjs` missing |
 
 ### API Routes
@@ -66,13 +66,13 @@ Affected routes:
 
 ### Client Bundles
 
-| Code      | Title                     | Cause                                        |
-| --------- | ------------------------- | -------------------------------------------- |
+| Code      | Title                     | Cause                                         |
+| --------- | ------------------------- | --------------------------------------------- |
 | `RUV1300` | Client bundle failed      | Ruvyxa compiler error during hydration bundle |
-| `RUV1301` | Module compile error      | Compiler failed on a specific module         |
-| `RUV1302` | Client renderer not found | Internal renderer script missing             |
-| `RUV1303` | Client route not found    | Route has no matching client page            |
-| `RUV1304` | Non-page client bundle    | Client bundle requested for API-only route   |
+| `RUV1301` | Module compile error      | Compiler failed on a specific module          |
+| `RUV1302` | Client renderer not found | Internal renderer script missing              |
+| `RUV1303` | Client route not found    | Route has no matching client page             |
+| `RUV1304` | Non-page client bundle    | Client bundle requested for API-only route    |
 
 ### Tailwind CSS
 
@@ -83,18 +83,18 @@ Affected routes:
 
 ### Server Actions
 
-| Code      | Title                     | Cause                                   |
-| --------- | ------------------------- | --------------------------------------- |
-| `RUV1500` | Action runtime error      | Validation failure or handler exception |
-| `RUV1501` | Action module not found   | Route has no `action.ts` or `action.js` |
+| Code      | Title                     | Cause                                           |
+| --------- | ------------------------- | ----------------------------------------------- |
+| `RUV1500` | Action runtime error      | Validation failure or handler exception         |
+| `RUV1501` | Action module not found   | Route has no `action.ts` or `action.js`         |
 | `RUV1502` | Action renderer not found | Internal renderer `action-renderer.mjs` missing |
-| `RUV1503` | Renderer args missing     | Internal invocation error               |
+| `RUV1503` | Renderer args missing     | Internal invocation error                       |
 
 ### Config & CLI
 
-| Code      | Title              | Cause            |
-| --------- | ------------------ | ---------------- |
-| `RUV1600` | Config error       | Invalid configuration value |
+| Code      | Title              | Cause                                                          |
+| --------- | ------------------ | -------------------------------------------------------------- |
+| `RUV1600` | Config error       | Invalid configuration value                                    |
 | `RUV1601` | Empty config field | Required config field is empty or not relative to project root |
 
 ### Build Plugins
@@ -117,7 +117,7 @@ Affected routes:
 | Code      | Title                        | Cause                                                   |
 | --------- | ---------------------------- | ------------------------------------------------------- |
 | `RUV2100` | Wasm plugin load error       | Plugin `.wasm` file could not be loaded or compiled     |
-| `RUV2101` | Wasm plugin execution error   | Plugin hook threw or was killed by timeout/memory limit |
+| `RUV2101` | Wasm plugin execution error  | Plugin hook threw or was killed by timeout/memory limit |
 | `RUV2102` | Wasm plugin hot-reload error | Watcher failed to reload `.wasm` file on change         |
 
 ---
@@ -133,8 +133,8 @@ ruvyxa analyze
 ```
 
 Reports all boundary violations, missing exports, and invalid routes as structured JSON with
-diagnostics. Use `ruvyxa check` as the normal before-deploy command; use `analyze` when you need
-the raw diagnostic payload.
+diagnostics. Use `ruvyxa check` as the normal before-deploy command; use `analyze` when you need the
+raw diagnostic payload.
 
 ### `ruvyxa check`
 
@@ -205,8 +205,8 @@ import 'server-only'
 export const db = createClient(process.env.DATABASE_URL)
 ```
 
-If `page.tsx` (hydrated in the browser) imports `lib/db.ts` either directly or transitively,
-Ruvyxa reports `RUV1007`.
+If `page.tsx` (hydrated in the browser) imports `lib/db.ts` either directly or transitively, Ruvyxa
+reports `RUV1007`.
 
 **Fix:** Move the database call into `server.ts` and pass data as props to the page.
 
@@ -214,7 +214,7 @@ Ruvyxa reports `RUV1007`.
 
 ```tsx
 // page.tsx
-const apiKey = process.env.API_SECRET  // RUV1008
+const apiKey = process.env.API_SECRET // RUV1008
 ```
 
 **Fix:** Read the variable in a loader (`server.ts`) and pass only the result to the page.

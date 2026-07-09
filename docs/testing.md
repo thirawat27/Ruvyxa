@@ -24,17 +24,17 @@ Rust unit tests stay inline in their owning crates because they test private Rus
 
 ## Test Files
 
-| File                                             | Tests                             |
-| ------------------------------------------------ | --------------------------------- |
-| `tests/packages/ruvyxa/action-renderer.test.mjs` | Action endpoint rendering         |
-| `tests/packages/ruvyxa/api-renderer.test.mjs`   | API route forwarding              |
-| `tests/packages/ruvyxa/client-renderer.test.mjs` | Client bundle boundary diagnostics|
-| `tests/packages/ruvyxa/compiler.test.mjs`        | Runtime compiler, source maps,    |
-|                                                  | incremental writes, JSX edge cases|
-| `tests/packages/core/config.test.ts`            | Config API shape                  |
-| `tests/packages/core/server.test.ts`            | Loader/action/cache API           |
-| `tests/packages/create-ruvyxa/index.test.ts`    | Scaffold validation               |
-| `tests/packages/adapter-*/index.test.ts`        | Adapter contract tests            |
+| File                                             | Tests                              |
+| ------------------------------------------------ | ---------------------------------- |
+| `tests/packages/ruvyxa/action-renderer.test.mjs` | Action endpoint rendering          |
+| `tests/packages/ruvyxa/api-renderer.test.mjs`    | API route forwarding               |
+| `tests/packages/ruvyxa/client-renderer.test.mjs` | Client bundle boundary diagnostics |
+| `tests/packages/ruvyxa/compiler.test.mjs`        | Runtime compiler, source maps,     |
+|                                                  | incremental writes, JSX edge cases |
+| `tests/packages/core/config.test.ts`             | Config API shape                   |
+| `tests/packages/core/server.test.ts`             | Loader/action/cache API            |
+| `tests/packages/create-ruvyxa/index.test.ts`     | Scaffold validation                |
+| `tests/packages/adapter-*/index.test.ts`         | Adapter contract tests             |
 
 ---
 

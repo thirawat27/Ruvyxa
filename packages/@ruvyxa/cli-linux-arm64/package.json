@@ -1,6 +1,6 @@
 {
   "name": "@ruvyxa/cli-linux-arm64",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "Prebuilt Ruvyxa native CLI binary for Linux arm64.",
   "license": "Apache-2.0",
   "type": "module",
@@ -13,9 +13,17 @@
     "url": "git+https://github.com/thirawat27/ruvyxa.git",
     "directory": "packages/@ruvyxa/cli-linux-arm64"
   },
-  "bugs": { "url": "https://github.com/thirawat27/ruvyxa/issues" },
+  "bugs": {
+    "url": "https://github.com/thirawat27/ruvyxa/issues"
+  },
   "homepage": "https://github.com/thirawat27/ruvyxa#readme",
-  "publishConfig": { "access": "public" },
-  "scripts": { "prepack": "node ../../ruvyxa/scripts/prepare-platform-package.mjs" },
-  "engines": { "node": ">=22.0.0" }
+  "publishConfig": {
+    "access": "public"
+  },
+  "scripts": {
+    "prepack": "node ../../ruvyxa/scripts/prepare-platform-package.mjs"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
 }

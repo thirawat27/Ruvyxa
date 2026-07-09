@@ -1,6 +1,6 @@
 {
   "name": "@ruvyxa/react",
-  "version": "1.0.5",
+  "version": "1.0.6",
   "description": "React integration for Ruvyxa apps, built for SSR-first pages and browser hydration without framework noise.",
   "license": "Apache-2.0",
   "type": "module",
@@ -13,13 +13,29 @@
     "url": "git+https://github.com/thirawat27/ruvyxa.git",
     "directory": "packages/@ruvyxa/react"
   },
-  "bugs": { "url": "https://github.com/thirawat27/ruvyxa/issues" },
+  "bugs": {
+    "url": "https://github.com/thirawat27/ruvyxa/issues"
+  },
   "homepage": "https://github.com/thirawat27/ruvyxa#readme",
-  "engines": { "node": ">=22.0.0" },
-  "publishConfig": { "access": "public" },
-  "exports": { ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" } },
-  "peerDependencies": { "react": "^19.0.0", "react-dom": "^19.0.0" },
-  "devDependencies": { "@types/react": "^19.0.0" },
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "peerDependencies": {
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",

@@ -50,15 +50,22 @@ export default defineConfig({
   outDir: '.ruvyxa',
   server: { port: 3000, host: 'localhost' },
   build: {
-    minify: true, sourcemap: false, treeShaking: true,
-    splitStrategy: 'route', jsxRuntime: 'classic',
-    esTarget: 'es2022', parallelism: 4, emitChunkManifest: false,
+    minify: true,
+    sourcemap: false,
+    treeShaking: true,
+    splitStrategy: 'route',
+    jsxRuntime: 'classic',
+    esTarget: 'es2022',
+    parallelism: 4,
+    emitChunkManifest: false,
   },
   cache: { routeManifest: true, css: true },
   debug: { overlay: true, traces: true },
   security: {
-    actionBodyLimitBytes: 65536, sameOriginActions: true,
-    fetchMetadataActions: true, securityHeaders: true,
+    actionBodyLimitBytes: 65536,
+    sameOriginActions: true,
+    fetchMetadataActions: true,
+    securityHeaders: true,
   },
 })
 ```

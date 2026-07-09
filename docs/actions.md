@@ -162,12 +162,12 @@ Actions return structured responses:
 
 ## Diagnostic Codes
 
-| Code      | Meaning                                                                  |
-| --------- | ------------------------------------------------------------------------ |
-| `RUV1500` | Action runtime error — validation failure or handler exception           |
-| `RUV1501` | Route has no `action.ts` or `action.js` file                             |
-| `RUV1502` | Action renderer script (`action-renderer.mjs`) not found                 |
-| `RUV1503` | Internal renderer invocation missing arguments                           |
+| Code      | Meaning                                                        |
+| --------- | -------------------------------------------------------------- |
+| `RUV1500` | Action runtime error — validation failure or handler exception |
+| `RUV1501` | Route has no `action.ts` or `action.js` file                   |
+| `RUV1502` | Action renderer script (`action-renderer.mjs`) not found       |
+| `RUV1503` | Internal renderer invocation missing arguments                 |
 
 ---
 

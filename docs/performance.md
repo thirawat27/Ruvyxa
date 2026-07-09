@@ -16,11 +16,11 @@ ruvyxa bench --root .
 
 ### What it measures
 
-| Benchmark            | What's timed                                                      |
-| ------------------ | ----------------------------------------------------------------- |
-| `route-discovery`  | Walking `app/` and building the route manifest                    |
-| `analyze-validation` | Route discovery + full server/client boundary validation              |
-| `production-build` | Complete `.ruvyxa/` output: server copy, client bundles, manifests |
+| Benchmark            | What's timed                                                       |
+| -------------------- | ------------------------------------------------------------------ |
+| `route-discovery`    | Walking `app/` and building the route manifest                     |
+| `analyze-validation` | Route discovery + full server/client boundary validation           |
+| `production-build`   | Complete `.ruvyxa/` output: server copy, client bundles, manifests |
 
 ### Options
 
@@ -80,14 +80,14 @@ File names are BLAKE3 hashes (first 16 hex characters). Enables:
 - `durationMs`, `cacheHits`, `treeShakenModules`
 - `cache.compileEntries`, `cache.compileBytes`
 
-Set `build.emitChunkManifest: true` to also write `.ruvyxa/client/chunk-manifest.json` with
-dynamic import split points for deployment adapters.
+Set `build.emitChunkManifest: true` to also write `.ruvyxa/client/chunk-manifest.json` with dynamic
+import split points for deployment adapters.
 
 ### Parallel Production Bundling
 
 Client bundles are emitted concurrently using `std::thread::scope` with scoped threads. The
-parallelism level defaults to `available_parallelism()` and is configurable via
-`build.parallelism`. Bundles are written in deterministic route order.
+parallelism level defaults to `available_parallelism()` and is configurable via `build.parallelism`.
+Bundles are written in deterministic route order.
 
 ---
 

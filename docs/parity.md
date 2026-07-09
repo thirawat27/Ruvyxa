@@ -36,17 +36,17 @@ This command (also aliased as `ruvyxa parity`):
 
 ## What's Compared
 
-| Property       | Must match                      |
-| -------------- | ------------------------------- |
-| Route kind     | `page` or `api`                 |
-| Route path     | The resolved URL pattern        |
-| Layout chain   | All layouts that wrap the route |
+| Property       | Must match                        |
+| -------------- | --------------------------------- |
+| Route kind     | `page` or `api`                   |
+| Route path     | The resolved URL pattern          |
+| Layout chain   | All layouts that wrap the route   |
 | Server modules | `server.ts`, `action.ts` siblings |
-| Client modules | `client.tsx` siblings           |
-| Runtime target | `node`, `edge`, or `static`   |
+| Client modules | `client.tsx` siblings             |
+| Runtime target | `node`, `edge`, or `static`       |
 
-For page routes, it also renders a representative URL in both modes and fails if either returns
-an error.
+For page routes, it also renders a representative URL in both modes and fails if either returns an
+error.
 
 ---
 
@@ -83,18 +83,16 @@ Run the parity check after changing:
 - Server module detection
 - Client module detection
 
-The CI and release workflows run `ruvyxa check` (which includes parity) as part of the quality
-gate.
+The CI and release workflows run `ruvyxa check` (which includes parity) as part of the quality gate.
 
 ---
 
 ## How It Works Internally
 
-Both `ServerConfig::dev` and `ServerConfig::production` pass through the same
-`discover_routes()` function, the same `RadixRouter`, and the same `render_request()` pipeline
-via the persistent Node worker pool. The parity test verifies that route discovery output is
-identical for both source directories (`app/` vs `.ruvyxa/server/app`) and then smoke-renders
-every page route in both modes.
+Both `ServerConfig::dev` and `ServerConfig::production` pass through the same `discover_routes()`
+function, the same `RadixRouter`, and the same `render_request()` pipeline via the persistent Node
+worker pool. The parity test verifies that route discovery output is identical for both source
+directories (`app/` vs `.ruvyxa/server/app`) and then smoke-renders every page route in both modes.
 
 ---
 

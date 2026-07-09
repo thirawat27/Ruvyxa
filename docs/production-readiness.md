@@ -18,17 +18,17 @@ compares dev/prod route behavior, and smoke-renders every page route.
 
 All of the following must pass before a release:
 
-| Gate                       | Command                                           |
-| -------------------------- | ------------------------------------------------- |
-| Rust formatting            | `cargo fmt --all -- --check`                      |
-| Rust tests                 | `cargo test --workspace --locked`                 |
-| Rust lints                 | `cargo clippy --workspace -- -- -D warnings`      |
-| TypeScript build           | `pnpm -r build`                                   |
-| TypeScript type check      | `pnpm -r check`                                   |
-| TypeScript tests           | `pnpm -r test`                                    |
-| Package metadata           | `pnpm release:validate`                           |
-| Pack smoke test            | `pnpm pack:smoke`                                 |
-| App deploy gate            | `cargo run -p ruvyxa_cli -- check --root examples/kitchen-sink` |
+| Gate                       | Command                                                               |
+| -------------------------- | --------------------------------------------------------------------- |
+| Rust formatting            | `cargo fmt --all -- --check`                                          |
+| Rust tests                 | `cargo test --workspace --locked`                                     |
+| Rust lints                 | `cargo clippy --workspace -- -- -D warnings`                          |
+| TypeScript build           | `pnpm -r build`                                                       |
+| TypeScript type check      | `pnpm -r check`                                                       |
+| TypeScript tests           | `pnpm -r test`                                                        |
+| Package metadata           | `pnpm release:validate`                                               |
+| Pack smoke test            | `pnpm pack:smoke`                                                     |
+| App deploy gate            | `cargo run -p ruvyxa_cli -- check --root examples/kitchen-sink`       |
 | Dev/prod parity drill-down | `cargo run -p ruvyxa_cli -- test:parity --root examples/kitchen-sink` |
 
 ---
@@ -37,9 +37,9 @@ All of the following must pass before a release:
 
 Standalone JavaScript and TypeScript tests are centralized under `tests/`, grouped by package.
 Package `test` scripts point to their own subset in `tests/packages/...`. Integration tests for
-runtime renderers (`action-renderer.mjs`, `api-renderer.mjs`, `client-renderer.mjs`,
-`compiler.mjs`) live under `tests/packages/ruvyxa/`. Rust unit tests remain inline in their
-crates. See [Testing](testing.md) for details.
+runtime renderers (`action-renderer.mjs`, `api-renderer.mjs`, `client-renderer.mjs`, `compiler.mjs`)
+live under `tests/packages/ruvyxa/`. Rust unit tests remain inline in their crates. See
+[Testing](testing.md) for details.
 
 ---
 
@@ -53,11 +53,11 @@ crates. See [Testing](testing.md) for details.
 
 ### Build Output
 
-| Directory               | Contents                          |
-| ----------------------- | --------------------------------- |
-| `.ruvyxa/server/`       | Production route source for SSR   |
+| Directory               | Contents                           |
+| ----------------------- | ---------------------------------- |
+| `.ruvyxa/server/`       | Production route source for SSR    |
 | `.ruvyxa/client/`       | Route-level hydration bundles      |
-| `.ruvyxa/assets/`       | Static files from `public/`      |
+| `.ruvyxa/assets/`       | Static files from `public/`        |
 | `.ruvyxa/prerender/`    | Pre-rendered HTML files            |
 | `.ruvyxa/manifest.json` | Full route manifest                |
 | `.ruvyxa/build.json`    | Build metadata and config snapshot |
