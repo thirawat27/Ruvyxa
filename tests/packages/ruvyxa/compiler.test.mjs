@@ -2,7 +2,6 @@ import assert from "node:assert/strict"
 import { spawn } from "node:child_process"
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import path from "node:path"
-import { createInterface } from "node:readline/promises"
 import { describe, it } from "node:test"
 import { fileURLToPath, pathToFileURL } from "node:url"
 
@@ -249,268 +248,9 @@ describe("runtime compiler", () => {
       assert.match(transformed.result.code, /Transformed/)
     })
   })
-
-  it("serves multiple hooks through persistent plugin runner mode", async () => {
-    await withFixture(async ({ root }) => {
-      const pageFile = path.join(root, "page.tsx")
-      await writeFile(pageFile, "export const label = \"Before\"\n")
-      await writeFile(
-        path.join(root, "ruvyxa.config.ts"),
-        `
-          import { defineConfig, plugin } from "ruvyxa/config"
-
-          export default defineConfig({
-            plugins: [
-              plugin("persistent-replace", {
-                resolveId(id) {
-                  if (id === "$page") return ${JSON.stringify(pageFile.replaceAll("\\", "/"))}
-                  return null
-                },
-                transform(code, id) {
-                  if (!id.endsWith("page.tsx")) return null
-                  return code.replace("Before", "After")
-                },
-              }),
-            ],
-          })
-        `,
-      )
-
-      const results = await runPersistentJson(pluginRunner, [root, "--persistent"], [
-        {
-          hook: "resolveId",
-          payload: {
-            id: "$page",
-            environment: "client",
-          },
-        },
-        {
-          hook: "transform",
-          payload: {
-            code: await readFile(pageFile, "utf8"),
-            id: pageFile,
-            environment: "client",
-          },
-        },
-      ])
-
-      assert.equal(results[0].ok, true)
-      assert.equal(results[0].result, pageFile.replaceAll("\\", "/"))
-      assert.equal(results[1].ok, true)
-      assert.match(results[1].result.code, /After/)
-    })
-  })
-
-  it("loads plugin factories and passes stable hook context", async () => {
-    await withFixture(async ({ root }) => {
-      const pageFile = path.join(root, "page.tsx")
-      await writeFile(pageFile, "export const label = \"Before\"\n")
-      await writeFile(
-        path.join(root, "ruvyxa.config.ts"),
-        `
-          import { defineConfig, definePlugin } from "ruvyxa/config"
-
-          const replaceLabel = definePlugin(({ root }) => ({
-            name: "factory-replace",
-            timeoutMs: 1000,
-            transform(code, id, ctx) {
-              if (ctx.root !== root || ctx.environment !== "client" || ctx.id !== id) return null
-              return code.replace("Before", "After")
-            },
-          }))
-
-          export default defineConfig({
-            plugins: [replaceLabel, false, null],
-          })
-        `,
-      )
-
-      const config = await runJson(configRenderer, [root], {})
-      assert.equal(config.ok, true)
-      assert.equal(config.config.plugins[0].name, "factory-replace")
-      assert.equal(config.config.plugins[0].transform, true)
-
-      const transformed = await runJson(pluginRunner, [root, "transform"], {
-        code: await readFile(pageFile, "utf8"),
-        id: pageFile,
-        environment: "client",
-      })
-
-      assert.equal(transformed.ok, true)
-      assert.match(transformed.result.code, /After/)
-    })
-  })
-
-  it("loads concise plugin shorthand", async () => {
-    await withFixture(async ({ root }) => {
-      const pageFile = path.join(root, "page.tsx")
-      await writeFile(pageFile, "export const label = \"Before\"\n")
-      await writeFile(
-        path.join(root, "ruvyxa.config.ts"),
-        `
-          import { defineConfig, plugin } from "ruvyxa/config"
-
-          export default defineConfig({
-            plugins: [
-              plugin("short-replace", (code, id) => {
-                if (!id.endsWith("page.tsx")) return null
-                return code.replace("Before", "After")
-              }),
-            ],
-          })
-        `,
-      )
-
-      const config = await runJson(configRenderer, [root], {})
-      assert.equal(config.ok, true)
-      assert.equal(config.config.plugins[0].name, "short-replace")
-      assert.equal(config.config.plugins[0].transform, true)
-
-      const transformed = await runJson(pluginRunner, [root, "transform"], {
-        code: await readFile(pageFile, "utf8"),
-        id: pageFile,
-        environment: "client",
-      })
-
-      assert.equal(transformed.ok, true)
-      assert.match(transformed.result.code, /After/)
-    })
-  })
-
-  it("loads plugin packages from string names", async () => {
-    await withFixture(async ({ root }) => {
-      const pageFile = path.join(root, "page.tsx")
-      const pluginDir = path.join(root, "node_modules", "ruvyxa-plugin-auto-replace")
-      await mkdir(pluginDir, { recursive: true })
-      await writeFile(pageFile, "export const label = \"Before\"\n")
-      await writeFile(
-        path.join(pluginDir, "package.json"),
-        JSON.stringify({
-          name: "ruvyxa-plugin-auto-replace",
-          type: "module",
-          main: "./index.mjs",
-        }),
-      )
-      await writeFile(
-        path.join(pluginDir, "index.mjs"),
-        `
-          export default {
-            name: "auto-replace",
-            transform(code, id) {
-              if (!id.endsWith("page.tsx")) return null
-              return code.replace("Before", "After")
-            },
-          }
-        `,
-      )
-      await writeFile(
-        path.join(root, "ruvyxa.config.ts"),
-        `
-          import { defineConfig } from "ruvyxa/config"
-
-          export default defineConfig({
-            plugins: ["auto-replace"],
-          })
-        `,
-      )
-
-      const config = await runJson(configRenderer, [root], {})
-      assert.equal(config.ok, true)
-      assert.equal(config.config.plugins[0].name, "auto-replace")
-      assert.equal(config.config.plugins[0].transform, true)
-
-      const transformed = await runJson(pluginRunner, [root, "transform"], {
-        code: await readFile(pageFile, "utf8"),
-        id: pageFile,
-        environment: "client",
-      })
-
-      assert.equal(transformed.ok, true)
-      assert.match(transformed.result.code, /After/)
-    })
-  })
-
-  it("reports plugin hook failures with plugin and hook names", async () => {
-    await withFixture(async ({ root }) => {
-      await writeFile(
-        path.join(root, "ruvyxa.config.ts"),
-        `
-          import { defineConfig } from "ruvyxa/config"
-
-          export default defineConfig({
-            plugins: [
-              {
-                name: "broken-transform",
-                transform() {
-                  throw new Error("intentional failure")
-                },
-              },
-            ],
-          })
-        `,
-      )
-
-      const failed = await runJsonResult(pluginRunner, [root, "transform"], {
-        code: "export const label = 'Before'",
-        id: path.join(root, "page.tsx"),
-        environment: "client",
-      })
-
-      assert.notEqual(failed.code, 0)
-      assert.equal(failed.parsed.ok, false)
-      assert.equal(failed.parsed.code, "RUV1703")
-      assert.match(failed.parsed.message, /broken-transform/)
-      assert.match(failed.parsed.message, /transform/)
-      assert.match(failed.parsed.message, /intentional failure/)
-    })
-  })
-
-  it("times out long-running plugin hooks", async () => {
-    await withFixture(async ({ root }) => {
-      await writeFile(
-        path.join(root, "ruvyxa.config.ts"),
-        `
-          import { defineConfig } from "ruvyxa/config"
-
-          export default defineConfig({
-            plugins: [
-              {
-                name: "stalled-transform",
-                timeoutMs: 5,
-                async transform() {
-                  await new Promise(() => {})
-                },
-              },
-            ],
-          })
-        `,
-      )
-
-      const failed = await runJsonResult(pluginRunner, [root, "transform"], {
-        code: "export const label = 'Before'",
-        id: path.join(root, "page.tsx"),
-        environment: "client",
-      })
-
-      assert.notEqual(failed.code, 0)
-      assert.equal(failed.parsed.ok, false)
-      assert.equal(failed.parsed.code, "RUV1703")
-      assert.match(failed.parsed.message, /stalled-transform/)
-      assert.match(failed.parsed.message, /timed out after 5ms/)
-    })
-  })
 })
 
 function runJson(script, args, payload) {
-  return runJsonResult(script, args, payload).then((result) => {
-    if (result.code === 0 && result.parsed.ok) {
-      return result.parsed
-    }
-    throw new Error(`script failed (${result.code}): ${result.stdout || result.stderr}`)
-  })
-}
-
-function runJsonResult(script, args, payload) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [script, ...args], {
       stdio: ["pipe", "pipe", "pipe"],
@@ -529,57 +269,17 @@ function runJsonResult(script, args, payload) {
     child.on("close", (code) => {
       try {
         const parsed = JSON.parse(stdout)
-        resolve({ code, parsed, stdout, stderr })
+        if (code === 0 && parsed.ok) {
+          resolve(parsed)
+        } else {
+          reject(new Error(`script failed (${code}): ${stdout || stderr}`))
+        }
       } catch (error) {
         reject(new Error(`invalid JSON from script: ${error.message}; stdout=${stdout}; stderr=${stderr}`))
       }
     })
     child.stdin.end(JSON.stringify(payload))
   })
-}
-
-async function runPersistentJson(script, args, requests) {
-  const child = spawn(process.execPath, [script, ...args], {
-    stdio: ["pipe", "pipe", "pipe"],
-  })
-  const lines = createInterface({
-    input: child.stdout,
-    crlfDelay: Infinity,
-  })
-  const lineIterator = lines[Symbol.asyncIterator]()
-  let stderr = ""
-  child.stderr.setEncoding("utf8")
-  child.stderr.on("data", (chunk) => {
-    stderr += chunk
-  })
-
-  try {
-    const results = []
-    for (const request of requests) {
-      child.stdin.write(`${JSON.stringify(request)}\n`)
-      const line = await lineIterator.next()
-      if (line.done) {
-        throw new Error(`persistent plugin runner exited early; stderr=${stderr}`)
-      }
-      results.push(JSON.parse(line.value))
-    }
-
-    child.stdin.end()
-    await new Promise((resolve, reject) => {
-      child.on("error", reject)
-      child.on("close", (code) => {
-        if (code === 0) resolve()
-        else reject(new Error(`persistent plugin runner failed (${code}); stderr=${stderr}`))
-      })
-    })
-
-    return results
-  } finally {
-    lines.close()
-    if (!child.killed) {
-      child.kill()
-    }
-  }
 }
 
 async function withFixture(run) {

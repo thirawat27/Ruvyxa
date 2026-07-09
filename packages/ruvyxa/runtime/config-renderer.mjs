@@ -3,7 +3,6 @@ import path from "node:path"
 import { fileURLToPath, pathToFileURL } from "node:url"
 
 import { cacheFileName, compileBundle, runtimeAliases, toImportPath } from "./compiler.mjs"
-import { normalizePlugins, pluginDescriptors } from "./plugin-utils.mjs"
 
 const [projectRootArg] = process.argv.slice(2)
 
@@ -40,7 +39,7 @@ try {
 
   const mod = await import(pathToFileURL(outfile).href + `?t=${Date.now()}`)
   const config = mod.default ?? {}
-  ok(await sanitizeConfig(config))
+  ok(sanitizeConfig(config))
 } catch (error) {
   fail("RUV1600", error instanceof Error ? error.message : String(error), error?.stack)
 }
@@ -53,12 +52,7 @@ function findConfig(root) {
   return null
 }
 
-async function sanitizeConfig(config) {
-  const plugins = await normalizePlugins(config.plugins, {
-    root: projectRoot,
-    command: "unknown",
-  })
-
+function sanitizeConfig(config) {
   return {
     appDir: stringValue(config.appDir),
     outDir: stringValue(config.outDir),
@@ -97,7 +91,7 @@ async function sanitizeConfig(config) {
       target: stringValue(config.adapter?.target),
     }),
     adapterOptions: safeJsonValue(config.adapterOptions),
-    plugins: pluginDescriptors(plugins),
+    plugins: pluginDescriptors(config.plugins),
   }
 }
 
@@ -127,6 +121,20 @@ function safeJsonValue(value) {
   } catch {
     return undefined
   }
+}
+
+function pluginDescriptors(value) {
+  if (!Array.isArray(value)) return undefined
+  const plugins = value
+    .filter((plugin) => plugin && typeof plugin === "object" && typeof plugin.name === "string")
+    .map((plugin) => ({
+      name: plugin.name,
+      enforce: stringValue(plugin.enforce),
+      resolveId: typeof plugin.resolveId === "function",
+      transform: typeof plugin.transform === "function",
+    }))
+
+  return plugins.length > 0 ? plugins : undefined
 }
 
 function ok(config) {

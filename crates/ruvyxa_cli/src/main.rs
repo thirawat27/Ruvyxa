@@ -1,18 +1,12 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
-use std::io::BufRead;
-use std::io::BufReader;
 use std::io::IsTerminal;
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::Child;
-use std::process::ChildStdin;
-use std::process::ChildStdout;
 use std::process::Command as ProcessCommand;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::time::SystemTime;
 use std::time::{Duration, Instant};
 
@@ -633,7 +627,6 @@ struct JsConfigPluginBridge {
     runner: PathBuf,
     has_resolve_id: bool,
     has_transform: bool,
-    worker: Arc<Mutex<Option<PersistentPluginRunner>>>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -644,19 +637,6 @@ struct PluginRunnerOutput {
     code: Option<String>,
     message: Option<String>,
     stack: Option<String>,
-}
-
-struct PersistentPluginRunner {
-    child: Child,
-    stdin: ChildStdin,
-    stdout: BufReader<ChildStdout>,
-}
-
-impl Drop for PersistentPluginRunner {
-    fn drop(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
-    }
 }
 
 impl ruvyxa_bundler::plugin::NativeBundlerPlugin for JsConfigPluginBridge {
@@ -728,54 +708,45 @@ impl JsConfigPluginBridge {
         hook: &str,
         payload: serde_json::Value,
     ) -> ruvyxa_bundler::Result<Option<serde_json::Value>> {
-        let mut worker = self.worker.lock().map_err(|err| {
+        let mut child = ProcessCommand::new("node")
+            .arg(&self.runner)
+            .arg(&self.project_root)
+            .arg(hook)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|err| {
+                ruvyxa_bundler::BundleError::Compiler(format!(
+                    "failed to start JS plugin runner: {err}"
+                ))
+            })?;
+
+        let stdin = child.stdin.as_mut().ok_or_else(|| {
+            ruvyxa_bundler::BundleError::Compiler("failed to open JS plugin runner stdin".into())
+        })?;
+        stdin
+            .write_all(payload.to_string().as_bytes())
+            .map_err(|err| {
+                ruvyxa_bundler::BundleError::Compiler(format!(
+                    "failed to send JS plugin payload: {err}"
+                ))
+            })?;
+
+        let output = child.wait_with_output().map_err(|err| {
             ruvyxa_bundler::BundleError::Compiler(format!(
-                "failed to lock JS plugin runner: {err}"
+                "failed to wait for JS plugin runner: {err}"
             ))
         })?;
-
-        if worker.is_none() {
-            *worker = Some(self.start_worker()?);
-        }
-
-        let runner = worker.as_mut().ok_or_else(|| {
-            ruvyxa_bundler::BundleError::Compiler("JS plugin runner was not initialized".into())
-        })?;
-        let request = serde_json::json!({
-            "hook": hook,
-            "payload": payload,
-        });
-        writeln!(runner.stdin, "{request}").map_err(|err| {
-            ruvyxa_bundler::BundleError::Compiler(format!(
-                "failed to send JS plugin payload: {err}"
-            ))
-        })?;
-        runner.stdin.flush().map_err(|err| {
-            ruvyxa_bundler::BundleError::Compiler(format!(
-                "failed to flush JS plugin payload: {err}"
-            ))
-        })?;
-
-        let mut stdout = String::new();
-        let bytes = runner.stdout.read_line(&mut stdout).map_err(|err| {
-            ruvyxa_bundler::BundleError::Compiler(format!(
-                "failed to read JS plugin runner output: {err}"
-            ))
-        })?;
-        if bytes == 0 {
-            *worker = None;
-            return Err(ruvyxa_bundler::BundleError::Compiler(
-                "JS plugin runner exited without output".into(),
-            ));
-        }
-
+        let stdout = String::from_utf8_lossy(&output.stdout);
         let result: PluginRunnerOutput = serde_json::from_str(&stdout).map_err(|err| {
+            let stderr = String::from_utf8_lossy(&output.stderr);
             ruvyxa_bundler::BundleError::Compiler(format!(
-                "JS plugin runner returned invalid output: {err}; stdout: {stdout}"
+                "JS plugin runner returned invalid output: {err}; stdout: {stdout}; stderr: {stderr}"
             ))
         })?;
 
-        if result.ok {
+        if output.status.success() && result.ok {
             return Ok(result.result);
         }
 
@@ -785,38 +756,8 @@ impl JsConfigPluginBridge {
             result
                 .message
                 .or(result.stack)
-                .unwrap_or_else(|| "unknown JS plugin error".to_string())
+                .unwrap_or_else(|| { String::from_utf8_lossy(&output.stderr).trim().to_string() })
         )))
-    }
-
-    fn start_worker(&self) -> ruvyxa_bundler::Result<PersistentPluginRunner> {
-        let mut child = ProcessCommand::new("node")
-            .arg(&self.runner)
-            .arg(&self.project_root)
-            .arg("--persistent")
-            .env("RUVYXA_COMMAND", "build")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|err| {
-                ruvyxa_bundler::BundleError::Compiler(format!(
-                    "failed to start JS plugin runner: {err}"
-                ))
-            })?;
-
-        let stdin = child.stdin.take().ok_or_else(|| {
-            ruvyxa_bundler::BundleError::Compiler("failed to open JS plugin runner stdin".into())
-        })?;
-        let stdout = child.stdout.take().ok_or_else(|| {
-            ruvyxa_bundler::BundleError::Compiler("failed to open JS plugin runner stdout".into())
-        })?;
-
-        Ok(PersistentPluginRunner {
-            child,
-            stdin,
-            stdout: BufReader::new(stdout),
-        })
     }
 }
 
@@ -844,7 +785,6 @@ fn bundle_context_for_build(
         runner,
         has_resolve_id,
         has_transform,
-        worker: Arc::new(Mutex::new(None)),
     };
 
     Ok(ruvyxa_bundler::BundleContext::with_plugins(

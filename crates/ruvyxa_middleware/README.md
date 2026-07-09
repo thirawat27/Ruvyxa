@@ -28,10 +28,9 @@ Each plugin runs in an isolated Wasmtime `Store`:
 
 - **Fuel-based execution limits** — prevents infinite loops
 - **Memory bounds** — configurable max memory (default 64MB)
-- **Read-only filesystem grants** — `permissions.fsRead` becomes WASI preopened directories resolved from the project root
-- **Network fail-closed** — `permissions.net` is rejected until host networking is implemented
+- **No filesystem access** unless explicitly granted via `permissions.fsRead`
+- **No network access** unless explicitly granted via `permissions.net`
 - **No environment access** unless explicitly granted via `permissions.env`
-- **Route filters** — exact paths, `:params`, and catch-all wildcards are supported
 - **Hot-reload** — file watcher detects `.wasm` changes and reloads without server restart
 
 ## Plugin Phases
