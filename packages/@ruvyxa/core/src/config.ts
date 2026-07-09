@@ -7,8 +7,11 @@ export type {
   MiddlewareConfig,
   MiddlewarePluginConfig,
   PluginPermissions,
+  PluginContext,
   RateLimitConfig,
   RuvyxaConfig,
+  RuvyxaPlugin,
+  TransformResult,
 } from "./types.js"
 
 export function defineConfig<TConfig extends RuvyxaConfig>(config: TConfig): TConfig {

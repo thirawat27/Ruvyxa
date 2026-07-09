@@ -448,12 +448,50 @@ fn rewrite_module_into(
             None => line,
         };
 
-        write_rewritten_line(out, content, indent);
+        let dynamic_rewritten = rewrite_dynamic_imports(content, deps);
+        write_rewritten_line(out, &dynamic_rewritten, indent);
     }
 
     for assignment in pending_exports {
         write_rewritten_line(out, &assignment, indent);
     }
+}
+
+fn rewrite_dynamic_imports(line: &str, deps: &[PathBuf]) -> String {
+    let mut out = String::with_capacity(line.len());
+    let mut search_start = 0;
+    let marker = "import(";
+
+    while let Some(relative_index) = line[search_start..].find(marker) {
+        let marker_start = search_start + relative_index;
+        let value_start = marker_start + marker.len();
+        out.push_str(&line[search_start..marker_start]);
+
+        let Some((specifier, consumed)) = quoted_value_with_len(&line[value_start..]) else {
+            out.push_str(marker);
+            search_start = value_start;
+            continue;
+        };
+
+        if let Some(dep_path) = find_dep_for_specifier(&specifier, deps) {
+            out.push_str("Promise.resolve(");
+            out.push_str(&module_id(dep_path));
+            out.push(')');
+            let after_value = value_start + consumed;
+            if line[after_value..].starts_with(')') {
+                search_start = after_value + 1;
+            } else {
+                search_start = after_value;
+            }
+        } else {
+            out.push_str(marker);
+            out.push_str(&line[value_start..value_start + consumed]);
+            search_start = value_start + consumed;
+        }
+    }
+
+    out.push_str(&line[search_start..]);
+    out
 }
 
 fn write_rewritten_line(out: &mut String, content: &str, indent: bool) {
@@ -772,20 +810,28 @@ fn split_from_specifier(line: &str) -> Option<(String, String)> {
 
 /// Extract a quoted string value: `"foo"` → `foo`, `'bar'` → `bar`.
 fn extract_quoted_string(s: &str) -> Option<String> {
-    let s = s.trim().trim_end_matches(';');
+    quoted_value_with_len(s).map(|(value, _)| value)
+}
+
+fn quoted_value_with_len(s: &str) -> Option<(String, usize)> {
+    let leading_ws = s.len() - s.trim_start().len();
+    let s = s.trim_start().trim_end_matches(';');
     let quote = s.chars().next()?;
     if quote != '"' && quote != '\'' {
         return None;
     }
     let end = s[1..].find(quote)?;
-    Some(s[1..1 + end].to_string())
+    Some((s[1..1 + end].to_string(), leading_ws + end + 2))
 }
 
 /// Find the dependency path that matches a given specifier.
 ///
 /// Matches by checking if the dep path ends with the specifier (after
 /// stripping extensions and normalizing separators).
-fn find_dep_for_specifier<'a>(specifier: &str, deps: &'a [PathBuf]) -> Option<&'a PathBuf> {
+pub(crate) fn find_dep_for_specifier<'a>(
+    specifier: &str,
+    deps: &'a [PathBuf],
+) -> Option<&'a PathBuf> {
     let normalized = specifier.replace('\\', "/");
 
     deps.iter().find(|dep| {
@@ -1037,6 +1083,21 @@ mod tests {
     fn side_effect_import_commented() {
         let result = try_rewrite_import("import \"./styles.css\"", &[], &[], false);
         assert!(result.unwrap().starts_with("// [bundled]"));
+    }
+
+    #[test]
+    fn rewrites_local_dynamic_import_to_module_namespace_promise() {
+        let dep = PathBuf::from("/app/lazy.ts");
+        let dep_id = module_id(&dep);
+        let result = rewrite_dynamic_imports(
+            "const mod = await import(\"./lazy\");",
+            std::slice::from_ref(&dep),
+        );
+
+        assert_eq!(
+            result,
+            format!("const mod = await Promise.resolve({dep_id});")
+        );
     }
 
     #[test]

@@ -35,7 +35,9 @@ use std::path::PathBuf;
 
 use rayon::prelude::*;
 
+use crate::ast;
 use crate::cache::{CacheLookup, CompileCache};
+use crate::plugin::{PluginContext, PluginPipeline};
 use crate::resolver::ResolvedModule;
 use crate::{BundleError, BundleInput, JsxRuntime, Result};
 use ruvyxa_diagnostics::{Diagnostic, SourceSpan};
@@ -71,9 +73,19 @@ pub fn compile_graph_with_cache(
     input: &BundleInput,
     cache: &CompileCache,
 ) -> Result<Vec<CompiledModule>> {
+    compile_graph_with_pipeline(graph, input, cache, &PluginPipeline::empty())
+}
+
+/// Compile every module using the provided cache and native plugin pipeline.
+pub fn compile_graph_with_pipeline(
+    graph: &[ResolvedModule],
+    input: &BundleInput,
+    cache: &CompileCache,
+    plugins: &PluginPipeline,
+) -> Result<Vec<CompiledModule>> {
     let results: Vec<Result<CompiledModule>> = graph
         .par_iter()
-        .map(|module| compile_module(module, input, cache))
+        .map(|module| compile_module(module, input, cache, plugins))
         .collect();
 
     results.into_iter().collect()
@@ -117,7 +129,12 @@ pub fn compile_graph_resilient(
     let results: Vec<(usize, Result<CompiledModule>)> = graph
         .par_iter()
         .enumerate()
-        .map(|(idx, module)| (idx, compile_module(module, input, cache)))
+        .map(|(idx, module)| {
+            (
+                idx,
+                compile_module(module, input, cache, &PluginPipeline::empty()),
+            )
+        })
         .collect();
 
     let mut compiled = Vec::with_capacity(graph.len());
@@ -230,6 +247,7 @@ fn compile_module(
     module: &ResolvedModule,
     input: &BundleInput,
     cache: &CompileCache,
+    plugins: &PluginPipeline,
 ) -> Result<CompiledModule> {
     let ext = module
         .path
@@ -237,22 +255,31 @@ fn compile_module(
         .and_then(|e| e.to_str())
         .unwrap_or("");
 
-    // Virtual entry (label starts with "ruvyxa:") or plain JS: pass through.
+    let plugin_ctx = PluginContext {
+        project_root: input.project_root.clone(),
+        importer: Some(module.path.clone()),
+        target: input.target,
+    };
+    let source = plugins.transform(&module.source, &module.path, &plugin_ctx)?;
+
+    // Virtual entry (label starts with "ruvyxa:") or plain JS: pass through
+    // after native plugin transforms.
     if matches!(ext, "js" | "mjs" | "cjs") || module.path.to_string_lossy().contains("ruvyxa:") {
         return Ok(CompiledModule {
             path: module.path.clone(),
-            js: module.source.clone(),
+            js: source,
             deps: module.deps.clone(),
             is_external: module.is_external,
             cache_hit: false,
         });
     }
 
-    let has_jsx = matches!(ext, "tsx" | "jsx");
+    let transform_plan = ast::parse_module(&source);
+    let has_jsx = matches!(ext, "tsx" | "jsx") || transform_plan.has_jsx;
     let jsx_runtime = input.options.jsx_runtime;
 
     // Cache key includes JSX runtime mode so switching modes invalidates entries.
-    match cache.lookup_with_options(&module.source, has_jsx, jsx_runtime) {
+    match cache.lookup_with_options(&source, has_jsx, jsx_runtime) {
         CacheLookup::Hit(cached_js) => Ok(CompiledModule {
             path: module.path.clone(),
             js: cached_js,
@@ -261,10 +288,9 @@ fn compile_module(
             cache_hit: true,
         }),
         CacheLookup::Miss(key) => {
-            let js =
-                transform_with_options(&module.source, has_jsx, jsx_runtime).map_err(|msg| {
-                    BundleError::Compiler(format!("{}: {}", module.path.display(), msg))
-                })?;
+            let js = transform_with_options(&source, has_jsx, jsx_runtime).map_err(|msg| {
+                BundleError::Compiler(format!("{}: {}", module.path.display(), msg))
+            })?;
 
             cache.store(&key, &js);
 

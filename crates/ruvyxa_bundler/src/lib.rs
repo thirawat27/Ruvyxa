@@ -22,6 +22,7 @@
 //!                   (chunk manifest + HTML preload hints)
 //! ```
 
+pub mod ast;
 pub mod boundary;
 pub mod cache;
 pub mod compiler;
@@ -29,6 +30,7 @@ pub mod incremental;
 pub mod linker;
 pub mod minifier;
 pub mod output;
+pub mod plugin;
 pub mod resolver;
 pub mod sourcemap;
 
@@ -37,6 +39,7 @@ use std::time::Instant;
 
 use crate::cache::CompileCache;
 use crate::incremental::IncrementalGraphCache;
+use crate::plugin::PluginPipeline;
 use crate::resolver::ResolveGraphCache;
 use ruvyxa_diagnostics::Diagnostic;
 use serde::{Deserialize, Serialize};
@@ -185,6 +188,8 @@ pub struct BundleOutput {
     /// Chunk manifest (module path → chunk file name), emitted when
     /// `options.emit_chunk_manifest` is `true`.
     pub chunk_manifest: Option<ChunkManifest>,
+    /// Additional chunks discovered by split-point analysis.
+    pub chunks: Vec<OutputChunk>,
 }
 
 /// A JSON-serializable chunk manifest for use in preload link injection.
@@ -202,6 +207,41 @@ pub struct ChunkManifest {
     pub source_map_file: Option<String>,
     /// Output size in bytes.
     pub size_bytes: usize,
+    /// Dynamic import split points discovered in this route bundle.
+    pub dynamic_imports: Vec<DynamicImportChunk>,
+}
+
+/// A dynamic import split point.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct DynamicImportChunk {
+    /// Source module containing the dynamic import.
+    pub importer: String,
+    /// Resolved dynamically imported module path.
+    pub module: String,
+    /// Content-addressed chunk file name reserved for this split point.
+    pub file: String,
+}
+
+/// Additional chunk file produced by the bundler.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct OutputChunk {
+    /// Content-addressed file name.
+    pub file_name: String,
+    /// JavaScript source for the chunk.
+    pub code: String,
+    /// Ordered module paths represented by this chunk.
+    pub modules: Vec<String>,
+    /// Chunk category.
+    pub kind: OutputChunkKind,
+}
+
+/// Chunk category.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum OutputChunkKind {
+    #[default]
+    DynamicImport,
+    SharedRoute,
 }
 
 /// Shared state for a batch of bundle jobs.
@@ -214,6 +254,7 @@ pub struct BundleContext {
     compile_cache: CompileCache,
     graph_cache: ResolveGraphCache,
     incremental: IncrementalGraphCache,
+    plugins: PluginPipeline,
 }
 
 impl BundleContext {
@@ -224,6 +265,7 @@ impl BundleContext {
             compile_cache: CompileCache::new(root, true),
             graph_cache: ResolveGraphCache::new(),
             incremental: IncrementalGraphCache::new(root, true),
+            plugins: PluginPipeline::empty(),
         }
     }
 
@@ -233,6 +275,7 @@ impl BundleContext {
             compile_cache,
             graph_cache,
             incremental: IncrementalGraphCache::disabled(),
+            plugins: PluginPipeline::empty(),
         }
     }
 
@@ -246,6 +289,22 @@ impl BundleContext {
             compile_cache,
             graph_cache,
             incremental,
+            plugins: PluginPipeline::empty(),
+        }
+    }
+
+    /// Create a context with explicit caches and a native plugin pipeline.
+    pub fn with_plugins(
+        compile_cache: CompileCache,
+        graph_cache: ResolveGraphCache,
+        incremental: IncrementalGraphCache,
+        plugins: PluginPipeline,
+    ) -> Self {
+        Self {
+            compile_cache,
+            graph_cache,
+            incremental,
+            plugins,
         }
     }
 
@@ -262,6 +321,11 @@ impl BundleContext {
     /// Incremental graph cache for cross-build persistence.
     pub fn incremental(&self) -> &IncrementalGraphCache {
         &self.incremental
+    }
+
+    /// Native plugin pipeline used by this context.
+    pub fn plugins(&self) -> &PluginPipeline {
+        &self.plugins
     }
 
     /// Mutable access to the incremental cache (for recording modules).
@@ -332,18 +396,24 @@ pub fn bundle(input: BundleInput) -> Result<BundleOutput> {
 /// Bundle a single route using a caller-provided compile cache.
 pub fn bundle_with_cache(input: BundleInput, cache: &CompileCache) -> Result<BundleOutput> {
     let graph_cache = ResolveGraphCache::new();
-    bundle_with_parts(input, cache, &graph_cache)
+    bundle_with_parts(input, cache, &graph_cache, &PluginPipeline::empty())
 }
 
 /// Bundle a single route using shared batch context.
 pub fn bundle_with_context(input: BundleInput, context: &BundleContext) -> Result<BundleOutput> {
-    bundle_with_parts(input, context.compile_cache(), context.graph_cache())
+    bundle_with_parts(
+        input,
+        context.compile_cache(),
+        context.graph_cache(),
+        context.plugins(),
+    )
 }
 
 fn bundle_with_parts(
     input: BundleInput,
     compile_cache: &CompileCache,
     graph_cache: &ResolveGraphCache,
+    plugins: &PluginPipeline,
 ) -> Result<BundleOutput> {
     let started = Instant::now();
 
@@ -351,16 +421,18 @@ fn bundle_with_parts(
     let (entry_source, entry_label) = output::build_entry_source(&input);
 
     // 2. Resolve the full dependency graph from the entry.
-    let graph = resolver::resolve_graph_with_cache(
+    let graph = resolver::resolve_graph_with_plugins(
         &entry_source,
         &entry_label,
         &input.project_root,
         &input.app_dir,
         graph_cache,
+        plugins,
+        input.target,
     )?;
 
     // 3. Compile each module (strip TS types, transform JSX).
-    let compiled = compiler::compile_graph_with_cache(&graph, &input, compile_cache)?;
+    let compiled = compiler::compile_graph_with_pipeline(&graph, &input, compile_cache, plugins)?;
 
     // 4. Enforce server/client boundaries.
     let mut diagnostics = Vec::new();
@@ -419,6 +491,8 @@ fn bundle_with_parts(
         None
     };
 
+    let chunks = build_dynamic_output_chunks(&compiled, &input)?;
+
     // 9. Optionally emit a chunk manifest.
     let chunk_manifest = if input.options.emit_chunk_manifest {
         let hash = blake3::hash(code.as_bytes()).to_hex();
@@ -432,6 +506,8 @@ fn bundle_with_parts(
             .map(|m| m.path.display().to_string().replace('\\', "/"))
             .collect();
 
+        let dynamic_imports = dynamic_import_chunks(&compiled, &chunks);
+
         Some(ChunkManifest {
             bundle_id,
             route: input.request_path.clone(),
@@ -439,6 +515,7 @@ fn bundle_with_parts(
             output_file,
             source_map_file: sm_file,
             size_bytes: code.len(),
+            dynamic_imports,
         })
     } else {
         None
@@ -474,7 +551,121 @@ fn bundle_with_parts(
         diagnostics,
         stats,
         chunk_manifest,
+        chunks,
     })
+}
+
+fn build_dynamic_output_chunks(
+    compiled: &[compiler::CompiledModule],
+    input: &BundleInput,
+) -> Result<Vec<OutputChunk>> {
+    use std::collections::{BTreeMap, BTreeSet};
+
+    let module_map: BTreeMap<PathBuf, &compiler::CompiledModule> = compiled
+        .iter()
+        .filter(|module| !module.is_external)
+        .map(|module| (module.path.clone(), module))
+        .collect();
+    let mut dynamic_roots = BTreeSet::<PathBuf>::new();
+
+    for module in compiled.iter().filter(|module| !module.is_external) {
+        let ast = ast::parse_module(&module.js);
+        for specifier in ast.dynamic_import_specifiers() {
+            if let Some(dep) = linker::find_dep_for_specifier(&specifier, &module.deps) {
+                dynamic_roots.insert(dep.clone());
+            }
+        }
+    }
+
+    let mut chunks = Vec::new();
+    for root in dynamic_roots {
+        let mut selected = BTreeSet::new();
+        collect_transitive_modules(&root, &module_map, &mut selected);
+        let modules = compiled
+            .iter()
+            .filter(|module| selected.contains(&module.path))
+            .cloned()
+            .collect::<Vec<_>>();
+
+        if modules.is_empty() {
+            continue;
+        }
+
+        let mut linked = linker::link_parallel(&modules, input)?;
+        linked.push_str("export default ");
+        linked.push_str(&linker::module_id(&root));
+        linked.push_str(";\n");
+
+        let code = if input.options.minify {
+            minifier::minify_parallel_with_options(&linked, input.target, false)?
+        } else {
+            linked
+        };
+        let hash = blake3::hash(code.as_bytes()).to_hex();
+        let file_name = format!("chunk.{}.js", &hash[..16]);
+        let modules = modules
+            .iter()
+            .map(|module| module.path.display().to_string().replace('\\', "/"))
+            .collect::<Vec<_>>();
+
+        chunks.push(OutputChunk {
+            file_name,
+            code,
+            modules,
+            kind: OutputChunkKind::DynamicImport,
+        });
+    }
+
+    Ok(chunks)
+}
+
+fn collect_transitive_modules(
+    path: &PathBuf,
+    module_map: &std::collections::BTreeMap<PathBuf, &compiler::CompiledModule>,
+    selected: &mut std::collections::BTreeSet<PathBuf>,
+) {
+    if !selected.insert(path.clone()) {
+        return;
+    }
+
+    let Some(module) = module_map.get(path) else {
+        return;
+    };
+
+    for dep in &module.deps {
+        if module_map.contains_key(dep) {
+            collect_transitive_modules(dep, module_map, selected);
+        }
+    }
+}
+
+fn dynamic_import_chunks(
+    compiled: &[compiler::CompiledModule],
+    output_chunks: &[OutputChunk],
+) -> Vec<DynamicImportChunk> {
+    let mut dynamic_imports = Vec::new();
+    for module in compiled.iter().filter(|module| !module.is_external) {
+        let ast = ast::parse_module(&module.js);
+        for specifier in ast.dynamic_import_specifiers() {
+            if let Some(dep) = linker::find_dep_for_specifier(&specifier, &module.deps) {
+                let module_path = dep.display().to_string().replace('\\', "/");
+                let file = output_chunks
+                    .iter()
+                    .find(|chunk| chunk.modules.iter().any(|m| m == &module_path))
+                    .map(|chunk| chunk.file_name.clone())
+                    .unwrap_or_else(|| {
+                        let hash = blake3::hash(module_path.as_bytes()).to_hex();
+                        format!("chunk.{}.js", &hash[..16])
+                    });
+                dynamic_imports.push(DynamicImportChunk {
+                    importer: module.path.display().to_string().replace('\\', "/"),
+                    module: module_path,
+                    file,
+                });
+            }
+        }
+    }
+    dynamic_imports
 }
 
 #[cfg(test)]
@@ -578,6 +769,34 @@ mod tests {
         assert!(!manifest.bundle_id.is_empty());
         assert_eq!(manifest.route, "/");
         assert!(manifest.size_bytes > 0);
+    }
+
+    #[test]
+    fn bundle_manifest_records_dynamic_import_split_points() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let app = root.join("app");
+        fs::create_dir_all(&app).unwrap();
+
+        let page = app.join("page.tsx");
+        let lazy = app.join("lazy.ts");
+        fs::write(
+            &page,
+            "export default async function Page() { const mod = await import(\"./lazy\"); return <main>{mod.label}</main>; }",
+        )
+        .unwrap();
+        fs::write(&lazy, "export const label = \"Lazy\";").unwrap();
+
+        let input = client_input(&root, &app, page, vec![], "/");
+        let out = bundle(input).unwrap();
+        let manifest = out.chunk_manifest.unwrap();
+
+        assert_eq!(manifest.dynamic_imports.len(), 1);
+        assert!(manifest.dynamic_imports[0].module.ends_with("lazy.ts"));
+        assert!(manifest.dynamic_imports[0].file.starts_with("chunk."));
+        assert_eq!(out.chunks.len(), 1);
+        assert_eq!(manifest.dynamic_imports[0].file, out.chunks[0].file_name);
+        assert!(out.chunks[0].code.contains("export default"));
     }
 
     #[test]

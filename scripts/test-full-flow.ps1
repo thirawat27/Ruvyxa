@@ -28,12 +28,24 @@ function Stop-RuvyxaServer {
     if ($Process -and !$Process.HasExited) { $Process | Stop-Process -Force }
 }
 
+function Invoke-Native {
+    param([string[]]$Arguments)
+    $previousPreference = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+        & $Ruvyxa @Arguments 2>&1
+        $script:LastNativeExitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousPreference
+    }
+}
+
 # Helper: run ruvyxa command, check exit code
 function Run-Cli {
     param([string]$Desc, [string]$Subcommand)
     Write-Host "--- $Desc ---" -ForegroundColor Yellow
-    & $Ruvyxa $Subcommand --root "$App" 2>&1
-    if ($LASTEXITCODE -ne 0) { throw "$Desc FAILED (exit $LASTEXITCODE)" }
+    Invoke-Native -Arguments @($Subcommand, "--root", "$App")
+    if ($script:LastNativeExitCode -ne 0) { throw "$Desc FAILED (exit $script:LastNativeExitCode)" }
     Write-Host "[OK]" -ForegroundColor Green
     Write-Host ""
 }
@@ -63,12 +75,12 @@ function Test-DevError {
     Write-Host ""
 }
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 #  WELCOME
-# ═══════════════════════════════════════════════════════════════════════════════
-Write-Host "╔══════════════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "║    Ruvyxa Full Integration Test Suite       ║" -ForegroundColor Cyan
-Write-Host "╚══════════════════════════════════════════════╝" -ForegroundColor Cyan
+# ==============================================================================
+Write-Host "===============================================" -ForegroundColor Cyan
+Write-Host "    Ruvyxa Full Integration Test Suite" -ForegroundColor Cyan
+Write-Host "===============================================" -ForegroundColor Cyan
 Write-Host "App under test: $App" -ForegroundColor Gray
 Write-Host ""
 
@@ -77,9 +89,9 @@ Get-Process -Name "ruvyxa" -ErrorAction SilentlyContinue | Stop-Process -Force
 Start-Sleep -Seconds 1
 Write-Host ""
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 #  1. CREATE PROJECT (demonstration only)
-# ═══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 Write-Host "=== 1. create-ruvyxa (npm package) ===" -ForegroundColor Yellow
 $CreateRoot = Join-Path $env:TEMP "ruvyxa-create-demo-$(Get-Random)"
 $CreateApp = Join-Path $CreateRoot "demo-app"
@@ -90,9 +102,9 @@ Write-Host "     (use examples/basic-app for remaining tests; created demo at $C
 Remove-Item $CreateRoot -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host ""
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  2. CLI COMMANDS — happy path
-# ═══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+#  2. CLI COMMANDS - happy path
+# ==============================================================================
 Write-Host "=== CLI COMMANDS (happy path) ===" -ForegroundColor Cyan
 Write-Host ""
 
@@ -101,36 +113,36 @@ Run-Cli "routes"  "routes"
 
 # check may fail on CSS type imports (pre-existing TS limitation with .css imports)
 Write-Host "--- check ---" -ForegroundColor Yellow
-& $Ruvyxa check --root "$App" 2>&1
-if ($LASTEXITCODE -eq 0) {
+Invoke-Native -Arguments @("check", "--root", "$App")
+if ($script:LastNativeExitCode -eq 0) {
     Write-Host "[OK]" -ForegroundColor Green
 } else {
-    Write-Host "[WARN] check failed — likely CSS type resolution (pre-existing issue)" -ForegroundColor DarkYellow
+    throw "check FAILED (exit $script:LastNativeExitCode)"
 }
 Write-Host ""
 Run-Cli "doctor"  "doctor"
 
 # trace needs a path arg
 Write-Host "--- trace / ---" -ForegroundColor Yellow
-& $Ruvyxa trace "/" --root "$App" 2>&1
-if ($LASTEXITCODE -ne 0) { throw "trace FAILED" }
+Invoke-Native -Arguments @("trace", "/", "--root", "$App")
+if ($script:LastNativeExitCode -ne 0) { throw "trace FAILED" }
 Write-Host "[OK]" -ForegroundColor Green
 Write-Host ""
 
 # bench with 1 sample
 Write-Host "--- bench (1 sample) ---" -ForegroundColor Yellow
-& $Ruvyxa bench --samples 1 --root "$App" 2>&1
-if ($LASTEXITCODE -ne 0) { throw "bench FAILED" }
+Invoke-Native -Arguments @("bench", "--samples", "1", "--root", "$App")
+if ($script:LastNativeExitCode -ne 0) { throw "bench FAILED" }
 Write-Host "[OK]" -ForegroundColor Green
 Write-Host ""
 
-# ─── BUILD ─────────────────────────────────────────────────────────────────────
+# --- BUILD ---------------------------------------------------------------------
 Write-Host "--- build + start ---" -ForegroundColor Yellow
-& $Ruvyxa build --root "$App" 2>&1
-if ($LASTEXITCODE -ne 0) { throw "build failed" }
+Invoke-Native -Arguments @("build", "--root", "$App")
+if ($script:LastNativeExitCode -ne 0) { throw "build failed" }
 Write-Host "[OK] build" -ForegroundColor Green
 
-# ─── START (production server) ─────────────────────────────────────────────────
+# --- START (production server) -------------------------------------------------
 $ProdPort = 3991
 $server = Start-Process -NoNewWindow -FilePath $Ruvyxa `
     -ArgumentList "start --root $App --port $ProdPort" `
@@ -146,9 +158,9 @@ try {
 } finally { $server | Stop-Process -Force -ErrorAction SilentlyContinue }
 Write-Host ""
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  3. DEV SERVER — normal + error overlay
-# ═══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+#  3. DEV SERVER - normal + error overlay
+# ==============================================================================
 Write-Host "=== DEV SERVER ===" -ForegroundColor Cyan
 Write-Host ""
 
@@ -178,13 +190,13 @@ try {
 finally { $server | Stop-Process -Force -ErrorAction SilentlyContinue }
 Write-Host ""
 
-# ═══════════════════════════════════════════════════════════════════════════════
-#  4. ERROR SCENARIOS — build-time diagnostics
-# ═══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
+#  4. ERROR SCENARIOS - build-time diagnostics
+# ==============================================================================
 Write-Host "=== BUILD-TIME ERROR SCENARIOS ===" -ForegroundColor Cyan
 Write-Host ""
 
-# E1: Missing default export — create a page without export default
+# E1: Missing default export - create a page without export default
 $BadPageDir = Join-Path $App "app\bad-page"
 mkdir $BadPageDir -Force | Out-Null
 @"
@@ -192,9 +204,9 @@ export function NotDefault() {
   return null
 }
 "@ | Set-Content -Path "$BadPageDir\page.tsx" -Force 
-$result = & $Ruvyxa analyze --root "$App" 2>&1 | Out-String
+$result = Invoke-Native -Arguments @("analyze", "--root", "$App") | Out-String
 if ($result -match "RUV1004") {
-    Write-Host "[OK] E1: Missing default export → RUV1004 detected" -ForegroundColor Green
+    Write-Host "[OK] E1: Missing default export -> RUV1004 detected" -ForegroundColor Green
 } else {
     Write-Host "[WARN] E1: RUV1004 not found in output" -ForegroundColor DarkYellow
 }
@@ -202,49 +214,52 @@ Remove-Item $BadPageDir -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host ""
 
 # E2: Server-only in client graph
-$LibDir = Join-Path $App "lib"
+$LibDir = Join-Path $App "app\full-flow-lib"
 New-Item -ItemType Directory -Path $LibDir -Force | Out-Null
 @"
 import "server-only"
 export const db = {}
-"@ | Set-Content -Path "$LibDir\db.ts" -Force 
+"@ | Set-Content -LiteralPath "$LibDir\db.ts" -Force 
 
 # Inject import into a page to trigger RUV1007
 $OrigPage = Get-Content "$App\app\page.tsx" -Raw
 @"
-import { db } from "../lib/db"
+import { db } from "./full-flow-lib/db"
 export default function Home() {
   return <main>{JSON.stringify(db)}</main>
 }
-"@ | Set-Content -Path "$App\app\page.tsx" -Force 
-$result = & $Ruvyxa analyze --root "$App" 2>&1 | Out-String
+"@ | Set-Content -LiteralPath "$App\app\page.tsx" -Force 
+$result = Invoke-Native -Arguments @("analyze", "--root", "$App") | Out-String
 if ($result -match "RUV1007") {
-    Write-Host "[OK] E2: Server-only in client → RUV1007 detected" -ForegroundColor Green
+    Write-Host "[OK] E2: Server-only in client -> RUV1007 detected" -ForegroundColor Green
 } else {
     Write-Host "[WARN] E2: RUV1007 not found" -ForegroundColor DarkYellow
 }
 # Restore
-Set-Content -LiteralPath "$App\app\page.tsx" -Value $OrigPage -Force
+Set-Content -LiteralPath "$App\app\page.tsx" -Value $OrigPage -Force -NoNewline
 Remove-Item $LibDir -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host ""
 
-# E3: Invalid route segment — catch-all not in final position
-$BadSegDir = Join-Path $App "app/blog/[...slug]/extra"
-[System.IO.Directory]::CreateDirectory((Join-Path $App "app/blog")) | Out-Null
+# E3: Invalid route segment - catch-all not in final position
+$BadSegRoot = Join-Path $App "app/full-flow-bad-segment"
+$BadSegDir = Join-Path $BadSegRoot "[...slug]/extra"
+[System.IO.Directory]::CreateDirectory($BadSegRoot) | Out-Null
 [System.IO.Directory]::CreateDirectory($BadSegDir) | Out-Null
 Set-Content -LiteralPath "$BadSegDir\page.tsx" -Value "export default function CatchAll() { return null }" -Force
-$result = & $Ruvyxa analyze --root "$App" 2>&1 | Out-String
+$result = Invoke-Native -Arguments @("analyze", "--root", "$App") | Out-String
 if ($result -match "RUV1002") {
-    Write-Host "[OK] E3: Invalid route segment → RUV1002 detected" -ForegroundColor Green
+    Write-Host "[OK] E3: Invalid route segment -> RUV1002 detected" -ForegroundColor Green
 } else {
-    Write-Host "[WARN] E3: RUV1002 not found" -ForegroundColor DarkYellow
+    Remove-Item -LiteralPath $BadSegRoot -Recurse -Force -ErrorAction SilentlyContinue
+    throw "E3 FAILED: RUV1002 not found"
 }
-Remove-Item -LiteralPath "$App\app\blog" -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $BadSegRoot -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host ""
 
-# E4: Conflicting routes — use .NET to bypass PowerShell wildcard issues
-$Blog1 = Join-Path $App "app/blog/[slug]"
-$Blog2 = Join-Path $App "app/blog/[post]"
+# E4: Conflicting routes - use .NET to bypass PowerShell wildcard issues
+$ConflictRoot = Join-Path $App "app/full-flow-conflict"
+$Blog1 = Join-Path $ConflictRoot "[slug]"
+$Blog2 = Join-Path $ConflictRoot "[post]"
 [System.IO.Directory]::CreateDirectory($Blog1) | Out-Null
 @"
 export default function Post() { return <div>Post</div> }
@@ -253,19 +268,22 @@ export default function Post() { return <div>Post</div> }
 @"
 export default function Post2() { return <div>Post2</div> }
 "@ | Set-Content -LiteralPath "$Blog2\page.tsx" -Force
-$result = & $Ruvyxa analyze --root "$App" 2>&1 | Out-String
+$result = Invoke-Native -Arguments @("analyze", "--root", "$App") | Out-String
 if ($result -match "RUV1003") {
-    Write-Host "[OK] E4: Conflicting routes → RUV1003 detected" -ForegroundColor Green
+    Write-Host "[OK] E4: Conflicting routes -> RUV1003 detected" -ForegroundColor Green
+} else {
+    Remove-Item -LiteralPath $ConflictRoot -Recurse -Force -ErrorAction SilentlyContinue
+    throw "E4 FAILED: RUV1003 not found"
 }
-Remove-Item -LiteralPath "$App\app\blog" -Recurse -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $ConflictRoot -Recurse -Force -ErrorAction SilentlyContinue
 Write-Host ""
 
-# E5: Start without build — test on a temp project
+# E5: Start without build - test on a temp project
 $NoBuildApp = Join-Path $env:TEMP "ruvyxa-nobuild-$(Get-Random)"
 node "$RepoRoot\packages\create-ruvyxa\bin\create-ruvyxa.js" "$NoBuildApp" | Out-Null
-$result = & $Ruvyxa start --root "$NoBuildApp" --port 3997 2>&1 | Out-String
+$result = Invoke-Native -Arguments @("start", "--root", "$NoBuildApp", "--port", "3997") | Out-String
 if ($result -match "Error|not found|build") {
-    Write-Host "[OK] E5: Start without build → error" -ForegroundColor Green
+    Write-Host "[OK] E5: Start without build -> error" -ForegroundColor Green
 } else {
     Write-Host "[WARN] E5: Unexpected output" -ForegroundColor DarkYellow
 }
@@ -278,36 +296,36 @@ $OrigConfig = Get-Content "$App\ruvyxa.config.ts" -Raw
 import { defineConfig } from "ruvyxa/config"
 export default defineConfig({ appDir: "", outDir: ".ruvyxa" })
 "@ | Set-Content -Path "$App\ruvyxa.config.ts" -Force 
-$result = & $Ruvyxa analyze --root "$App" 2>&1 | Out-String
+$result = Invoke-Native -Arguments @("analyze", "--root", "$App") | Out-String
 if ($result -match "RUV1601|must not be empty") {
-    Write-Host "[OK] E6: Invalid config → RUV1601 detected" -ForegroundColor Green
+    Write-Host "[OK] E6: Invalid config -> RUV1601 detected" -ForegroundColor Green
 }
-Set-Content -Path "$App\ruvyxa.config.ts" -Value $OrigConfig -Force
+Set-Content -Path "$App\ruvyxa.config.ts" -Value $OrigConfig -Force -NoNewline
 Write-Host ""
 
-# ═══════════════════════════════════════════════════════════════════════════════
+# ==============================================================================
 #  SUMMARY
-# ═══════════════════════════════════════════════════════════════════════════════
-Write-Host "╔══════════════════════════════════════════════╗" -ForegroundColor Cyan
-Write-Host "║       All integration tests completed!       ║" -ForegroundColor Cyan
-Write-Host "╚══════════════════════════════════════════════╝" -ForegroundColor Cyan
+# ==============================================================================
+Write-Host "===============================================" -ForegroundColor Cyan
+Write-Host "       All integration tests completed!" -ForegroundColor Cyan
+Write-Host "===============================================" -ForegroundColor Cyan
 Write-Host ""
 Write-Host "CLI commands:" -ForegroundColor White
-Write-Host "  ✔ analyze" -ForegroundColor Green
-Write-Host "  ✔ routes" -ForegroundColor Green
-Write-Host "  ✔ check" -ForegroundColor Green
-Write-Host "  ✔ doctor" -ForegroundColor Green
-Write-Host "  ✔ trace /" -ForegroundColor Green
-Write-Host "  ✔ bench" -ForegroundColor Green
-Write-Host "  ✔ build" -ForegroundColor Green
-Write-Host "  ✔ start (production server)" -ForegroundColor Green
-Write-Host "  ✔ dev (normal page 200)" -ForegroundColor Green
-Write-Host "  ✔ dev (404 route)" -ForegroundColor Green
+Write-Host "  [OK] analyze" -ForegroundColor Green
+Write-Host "  [OK] routes" -ForegroundColor Green
+Write-Host "  [OK] check" -ForegroundColor Green
+Write-Host "  [OK] doctor" -ForegroundColor Green
+Write-Host "  [OK] trace /" -ForegroundColor Green
+Write-Host "  [OK] bench" -ForegroundColor Green
+Write-Host "  [OK] build" -ForegroundColor Green
+Write-Host "  [OK] start (production server)" -ForegroundColor Green
+Write-Host "  [OK] dev (normal page 200)" -ForegroundColor Green
+Write-Host "  [OK] dev (404 route)" -ForegroundColor Green
 Write-Host ""
 Write-Host "Error scenarios:" -ForegroundColor White
-Write-Host "  ✔ E1: Missing default export       → RUV1004" -ForegroundColor Green
-Write-Host "  ✔ E2: Server-only in client graph  → RUV1007" -ForegroundColor Green
-Write-Host "  ✔ E3: Invalid route segment        → RUV1002" -ForegroundColor Green
-Write-Host "  ✔ E4: Conflicting routes            → RUV1003" -ForegroundColor Green
-Write-Host "  ✔ E5: Start without build          → error" -ForegroundColor Green
-Write-Host "  ✔ E6: Invalid config               → RUV1601" -ForegroundColor Green
+Write-Host "  [OK] E1: Missing default export       -> RUV1004" -ForegroundColor Green
+Write-Host "  [OK] E2: Server-only in client graph  -> RUV1007" -ForegroundColor Green
+Write-Host "  [OK] E3: Invalid route segment        -> RUV1002" -ForegroundColor Green
+Write-Host "  [OK] E4: Conflicting routes           -> RUV1003" -ForegroundColor Green
+Write-Host "  [OK] E5: Start without build          -> error" -ForegroundColor Green
+Write-Host "  [OK] E6: Invalid config               -> RUV1601" -ForegroundColor Green

@@ -10,11 +10,12 @@ the wider JavaScript toolchain.
 | Area | Ruvyxa today | Strength | Tradeoff |
 |------|--------------|----------|----------|
 | Runtime | Native Rust CLI and bundler | Fast startup and one binary for users | Smaller ecosystem than JS bundlers |
-| Route builds | One hydration bundle per page route | Predictable cache keys and simple deploy output | Shared chunk extraction is not yet implemented |
-| Compilation | TypeScript stripping and JSX transform | No external bundler dependency | Text-based transform is less complete than AST compilers |
+| Route builds | One hydration bundle per page route plus shared route chunk metadata | Predictable cache keys and simple deploy output | Runtime still loads the route script as the compatibility entry |
+| Compilation | AST-backed module facts drive TypeScript stripping and JSX transform | Resolver/compiler share one structured view of imports, exports, JSX, decorators, and TS-only syntax | Still intentionally smaller than a full SWC-compatible parser |
 | Resolution | Relative imports, `tsconfig` paths/baseUrl, package `exports` | Covers common app imports | Advanced conditional exports and loader pipelines are limited |
 | Optimization | Tree-shaking, minification, BLAKE3 content hashing | Deterministic production bundles | Tree-shaking is conservative compared with Rollup/Parcel |
 | Caching | In-process and disk compile cache | Rebuilds avoid repeated transforms | No remote/cache-server story yet |
+| Extensibility | Native Rust plugin pipeline for resolve/transform hooks | Adapters and embedded callers can extend bundling without forking the compiler | JavaScript config plugin execution is not wired to the Rust process yet |
 | Safety | Server/client boundary diagnostics | Framework-specific correctness checks | General-purpose plugin ecosystem is smaller |
 
 ## What Ruvyxa Borrows
@@ -22,13 +23,13 @@ the wider JavaScript toolchain.
 | Source | Useful idea | Applied in Ruvyxa |
 |--------|-------------|-------------------|
 | Vite | Keep dev and build behavior aligned and avoid unnecessary full-app work during local development | Ruvyxa keeps route discovery and SSR semantics shared between `dev`, `build`, and `start`; bundler caches avoid repeated compilation |
-| Rollup | Prefer ESM-aware dead-code elimination and deterministic chunks | Ruvyxa keeps tree-shaking enabled by default and now exposes `build.treeShaking` for explicit control |
+| Rollup | Prefer ESM-aware dead-code elimination and deterministic chunks | Ruvyxa keeps tree-shaking enabled by default, exposes `build.treeShaking`, and records shared/dynamic chunk metadata |
 | webpack | Rich build stats, long-term caching, and configurable optimization | Build manifests now report module count, output bytes, gzip estimate, cache hits, tree-shaken exports, and compile cache size |
 | Turbopack | Rust-based incremental thinking and target-aware framework builds | Ruvyxa keeps bundling native and framework-aware, with route target metadata and persistent cache directories preserved across staged builds |
 | esbuild | Fast native transforms with simple defaults | Ruvyxa keeps a zero-extra-bundler path and defaults to minified production output |
 | Rspack | Rust performance while respecting familiar bundler expectations | Ruvyxa keeps typed config and manifest fields instead of hidden flags |
-| Parcel | Content hashing, automatic production optimization, and useful manifests | Ruvyxa emits BLAKE3-hashed client bundles and can emit `client/chunk-manifest.json` via `build.emitChunkManifest` |
-| SWC | Rust compiler platform and explicit transform configuration | Ruvyxa exposes `jsxRuntime` and `esTarget` as build config, while keeping the heavier AST/compiler rewrite as future work |
+| Parcel | Content hashing, automatic production optimization, and useful manifests | Ruvyxa emits BLAKE3-hashed client bundles, shared route chunk metadata, and `client/chunk-manifest.json` via `build.emitChunkManifest` |
+| SWC | Rust compiler platform and explicit transform configuration | Ruvyxa exposes `jsxRuntime` and `esTarget`, with AST-backed module facts feeding resolver and compiler passes |
 
 ## Recommended Defaults
 
@@ -55,14 +56,14 @@ adapters, or performance tooling that needs per-route bundle metadata.
 
 ## Roadmap Candidates
 
-These are intentionally not marked as complete until implemented and tested.
+These are intentionally scoped to the next high-value gaps after the native
+bundler upgrades already landed.
 
 | Candidate | Borrowed from | Why it matters |
 |-----------|---------------|----------------|
-| Shared route chunks | Rollup, webpack, Parcel | Avoid duplicated shared components/layouts across route bundles |
-| Dynamic `import()` split points | Rollup, webpack, Parcel | Load expensive modules on demand |
-| AST-backed parser/transform | SWC, esbuild, Rollup | Better correctness for complex TypeScript/JSX syntax |
-| Bundler plugin hooks wired into the native pipeline | Vite, Rollup, webpack, Rspack | Let users transform files without forking Ruvyxa |
+| Runtime loading for extracted shared chunks | Rollup, webpack, Parcel | Let production HTML preload and execute shared chunks before route scripts |
+| Executing JavaScript config plugins inside the Rust CLI | Vite, Rollup | Bridge typed `RuvyxaPlugin` config objects into native `resolve_id` and `transform` hooks |
+| Full parser compatibility suite | SWC, esbuild, Rollup | Expand the AST-backed facts into broader TypeScript/JSX grammar coverage |
 | Dependency pre-bundling | Vite, esbuild | Faster dev startup for dependency-heavy apps |
 | Persistent cache invalidation by config dependency graph | webpack, Rspack, Parcel, Turbopack | Safer cache reuse when config, package metadata, or tsconfig changes |
 

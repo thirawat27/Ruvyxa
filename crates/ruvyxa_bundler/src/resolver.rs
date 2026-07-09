@@ -43,7 +43,9 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use rayon::prelude::*;
 
-use crate::{BundleError, Result};
+use crate::ast;
+use crate::plugin::{PluginContext, PluginPipeline};
+use crate::{BundleError, BundleTarget, Result};
 
 /// A resolved module: its canonical path and raw source text.
 #[derive(Debug, Clone)]
@@ -528,6 +530,27 @@ pub fn resolve_graph_with_cache(
     app_dir: &Path,
     cache: &ResolveGraphCache,
 ) -> Result<Vec<ResolvedModule>> {
+    resolve_graph_with_plugins(
+        entry_source,
+        entry_label,
+        project_root,
+        app_dir,
+        cache,
+        &PluginPipeline::empty(),
+        BundleTarget::Client,
+    )
+}
+
+/// Walk the import graph using a shared resolver/source cache and plugin hooks.
+pub fn resolve_graph_with_plugins(
+    entry_source: &str,
+    entry_label: &str,
+    project_root: &Path,
+    app_dir: &Path,
+    cache: &ResolveGraphCache,
+    plugins: &PluginPipeline,
+    target: BundleTarget,
+) -> Result<Vec<ResolvedModule>> {
     let project_root = project_root
         .canonicalize()
         .unwrap_or_else(|_| project_root.to_path_buf());
@@ -543,8 +566,15 @@ pub fn resolve_graph_with_cache(
     let entry_key = PathBuf::from(entry_label);
 
     // Phase 1: Resolve the entry module (always sequential — it's a single node).
-    let entry_deps =
-        collect_deps_cached(entry_source, &project_root, &project_root, &app_dir, cache)?;
+    let entry_deps = collect_deps_cached(
+        entry_source,
+        &project_root,
+        &project_root,
+        &app_dir,
+        cache,
+        plugins,
+        target,
+    )?;
 
     order.push(entry_key.clone());
     visited_set.insert(entry_key.clone());
@@ -579,7 +609,15 @@ pub fn resolve_graph_with_cache(
                     Vec::new()
                 } else {
                     let resolve_base = dep_path.parent().unwrap_or(&project_root).to_path_buf();
-                    collect_deps_cached(&source, &resolve_base, &project_root, &app_dir, cache)?
+                    collect_deps_cached(
+                        &source,
+                        &resolve_base,
+                        &project_root,
+                        &app_dir,
+                        cache,
+                        plugins,
+                        target,
+                    )?
                 };
 
                 Ok((
@@ -629,6 +667,8 @@ fn collect_deps_cached(
     project_root: &Path,
     _app_dir: &Path,
     cache: &ResolveGraphCache,
+    plugins: &PluginPipeline,
+    target: BundleTarget,
 ) -> Result<Vec<PathBuf>> {
     // Load tsconfig paths once per resolve call (cheap — cached on disk).
     // In practice the tsconfig rarely changes between module resolves in a single build.
@@ -643,7 +683,16 @@ fn collect_deps_cached(
             continue;
         }
 
-        let resolved = if specifier.starts_with('.') {
+        let plugin_ctx = PluginContext {
+            project_root: project_root.to_path_buf(),
+            importer: Some(base_dir.to_path_buf()),
+            target,
+        };
+        let plugin_resolved = plugins.resolve_id(&specifier, Some(base_dir), &plugin_ctx)?;
+
+        let resolved = if let Some(path) = plugin_resolved {
+            Some(path)
+        } else if specifier.starts_with('.') {
             // Relative import: check resolution cache first (lock-free DashMap read).
             if let Some(cached) = cache.resolution(&base_dir_str, &specifier) {
                 cached
@@ -712,47 +761,11 @@ fn is_non_js_asset_specifier(specifier: &str) -> bool {
 /// This is a lightweight line-oriented scanner — not a full AST parse.  It
 /// handles the common patterns used inside Ruvyxa projects.
 fn extract_specifiers(source: &str) -> Vec<String> {
-    let mut specifiers = Vec::new();
-
-    for line in source.lines() {
-        let trimmed = line.trim();
-
-        // import … from "…" | export … from "…"
-        if let Some(idx) = trimmed.find(" from ") {
-            if let Some(spec) = quoted_value(&trimmed[idx + 6..]) {
-                specifiers.push(spec);
-            }
-        }
-        // import "…" (side-effect)
-        else if let Some(after_import) = trimmed.strip_prefix("import ") {
-            if let Some(spec) = quoted_value(after_import) {
-                specifiers.push(spec);
-            }
-        }
-
-        specifiers.extend(call_specifiers(trimmed, "require("));
-        specifiers.extend(call_specifiers(trimmed, "import("));
-    }
-
-    specifiers
-}
-
-fn call_specifiers(line: &str, marker: &str) -> Vec<String> {
-    let mut specifiers = Vec::new();
-    let mut search_start = 0;
-
-    while let Some(relative_index) = line[search_start..].find(marker) {
-        let value_start = search_start + relative_index + marker.len();
-        if let Some(specifier) = quoted_value(&line[value_start..]) {
-            specifiers.push(specifier);
-        }
-        search_start = value_start;
-    }
-
-    specifiers
+    ast::parse_module(source).import_specifiers()
 }
 
 /// Extract the string value between the first pair of quotes.
+#[cfg(test)]
 fn quoted_value(s: &str) -> Option<String> {
     let quote = s.chars().find(|c| *c == '"' || *c == '\'')?;
     let start = s.find(quote)? + 1;
@@ -897,8 +910,16 @@ mod tests {
             serde_json::to_string(&import_path).unwrap()
         );
         let root = temp.path().canonicalize().unwrap();
-        let deps =
-            collect_deps_cached(&source, &root, &root, &app, &ResolveGraphCache::new()).unwrap();
+        let deps = collect_deps_cached(
+            &source,
+            &root,
+            &root,
+            &app,
+            &ResolveGraphCache::new(),
+            &PluginPipeline::empty(),
+            BundleTarget::Client,
+        )
+        .unwrap();
 
         assert_eq!(deps.len(), 1);
         assert_eq!(deps[0], page.canonicalize().unwrap());
@@ -917,6 +938,8 @@ mod tests {
             temp.path(),
             &app,
             &ResolveGraphCache::new(),
+            &PluginPipeline::empty(),
+            BundleTarget::Client,
         )
         .unwrap();
 
