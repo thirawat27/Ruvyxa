@@ -51,6 +51,8 @@ pub struct CompiledModule {
     pub deps: Vec<PathBuf>,
     /// Whether this module comes from `node_modules` (external).
     pub is_external: bool,
+    /// Whether this module's compiled output came from the compile cache.
+    pub cache_hit: bool,
 }
 
 /// Compile every module in the resolved graph.
@@ -179,6 +181,7 @@ pub fn compile_graph_resilient(
                     js: stub_js,
                     deps: Vec::new(),
                     is_external: source_module.is_external,
+                    cache_hit: false,
                 });
             }
         }
@@ -241,6 +244,7 @@ fn compile_module(
             js: module.source.clone(),
             deps: module.deps.clone(),
             is_external: module.is_external,
+            cache_hit: false,
         });
     }
 
@@ -254,6 +258,7 @@ fn compile_module(
             js: cached_js,
             deps: module.deps.clone(),
             is_external: module.is_external,
+            cache_hit: true,
         }),
         CacheLookup::Miss(key) => {
             let js =
@@ -268,6 +273,7 @@ fn compile_module(
                 js,
                 deps: module.deps.clone(),
                 is_external: module.is_external,
+                cache_hit: false,
             })
         }
     }

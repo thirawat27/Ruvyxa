@@ -47,6 +47,10 @@ describe("config API", () => {
       adapterOptions: {
         region: "iad1",
       },
+      build: {
+        treeShaking: false,
+        emitChunkManifest: true,
+      },
     }
 
     const defined = defineConfig(config)
@@ -54,5 +58,7 @@ describe("config API", () => {
     assert.equal(defined.middleware?.builtin?.timing, true)
     assert.equal(defined.middleware?.plugins?.[0]?.phase, "request")
     assert.equal(defined.adapterOptions?.region, "iad1")
+    assert.equal(defined.build?.treeShaking, false)
+    assert.equal(defined.build?.emitChunkManifest, true)
   })
 })

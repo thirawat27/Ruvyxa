@@ -370,21 +370,24 @@ fn bundle_with_parts(
     //    This also detects circular dependencies and returns an error.
     let linked = linker::link_parallel(&compiled, &input)?;
 
-    // 6. Optionally minify.
-    let final_code = if input.options.minify {
-        minifier::minify_parallel(&linked, input.target)?
+    // 6. Optionally tree-shake, then minify. Tree-shaking is controlled
+    // independently from whitespace/identifier minification.
+    let optimized_linked = if input.options.tree_shaking {
+        minifier::tree_shake_exports(&linked)
     } else {
         linked.clone()
+    };
+    let final_code = if input.options.minify {
+        minifier::minify_parallel_with_options(&optimized_linked, input.target, false)?
+    } else {
+        optimized_linked.clone()
     };
 
     // 7. Wrap in the appropriate output format.
     let code = output::wrap(final_code, &input);
 
-    // Count cache hits (modules whose JS came from cache, not freshly compiled).
-    // We approximate: a module is a cache hit if its JS equals what the cache
-    // would have returned. Instead we just count external modules as cache hits
-    // since they're always pass-through, giving a lower bound.
-    let cache_hits = compiled.iter().filter(|m| m.is_external).count();
+    // Count modules whose JS came from the compile cache, not freshly compiled.
+    let cache_hits = compiled.iter().filter(|m| m.cache_hit).count();
 
     // 8. Generate source map if requested.
     let source_map = if input.options.source_map {
@@ -442,9 +445,10 @@ fn bundle_with_parts(
     };
 
     // Count modules removed by tree-shaking.
-    let tree_shaken_modules = if input.options.tree_shaking && input.options.minify {
-        // Approximate by counting `[tree-shaken]` comments in the linked (pre-minify) output.
-        linked
+    let tree_shaken_modules = if input.options.tree_shaking {
+        // Approximate by counting `[tree-shaken]` comments before minification
+        // strips comments.
+        optimized_linked
             .lines()
             .filter(|l| l.contains("[tree-shaken]"))
             .count()

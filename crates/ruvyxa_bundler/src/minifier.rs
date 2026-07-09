@@ -31,7 +31,20 @@ use crate::{BundleTarget, Result};
 
 /// Apply all minification passes to `source` and return the result.
 pub fn minify(source: &str, _target: BundleTarget) -> Result<String> {
-    let stage0 = tree_shake(source);
+    minify_with_options(source, _target, true)
+}
+
+/// Apply minification with explicit tree-shaking control.
+pub fn minify_with_options(
+    source: &str,
+    _target: BundleTarget,
+    tree_shaking: bool,
+) -> Result<String> {
+    let stage0 = if tree_shaking {
+        tree_shake(source)
+    } else {
+        source.to_string()
+    };
     let stage1 = strip_line_comments(&stage0);
     let stage2 = collapse_whitespace(&stage1);
     let stage3 = shorten_module_ids(&stage2);
@@ -44,8 +57,21 @@ pub fn minify(source: &str, _target: BundleTarget) -> Result<String> {
 ///
 /// Falls back to sequential `minify()` for small bundles (<8 modules).
 pub fn minify_parallel(source: &str, _target: BundleTarget) -> Result<String> {
+    minify_parallel_with_options(source, _target, true)
+}
+
+/// Parallel minification with explicit tree-shaking control.
+pub fn minify_parallel_with_options(
+    source: &str,
+    _target: BundleTarget,
+    tree_shaking: bool,
+) -> Result<String> {
     // Phase 1: Tree-shake (global pass — needs cross-module member usage data).
-    let tree_shaken = tree_shake(source);
+    let tree_shaken = if tree_shaking {
+        tree_shake(source)
+    } else {
+        source.to_string()
+    };
 
     // Phase 2: Split into segments for parallel processing.
     let segments = split_into_segments(&tree_shaken);
@@ -80,6 +106,11 @@ pub fn minify_parallel(source: &str, _target: BundleTarget) -> Result<String> {
     // Phase 5: Shorten module IDs (global text replacement).
     let final_output = shorten_module_ids(&joined);
     Ok(final_output)
+}
+
+/// Apply only the tree-shaking pass.
+pub fn tree_shake_exports(source: &str) -> String {
+    tree_shake(source)
 }
 
 /// Split a linked bundle into independent segments at module IIFE boundaries.
@@ -467,6 +498,22 @@ var __ruv_bbbb2222bbbb2222__ = (function() {
         let result = tree_shake(src);
         // `default` is never shaken — it's always considered used.
         assert!(result.contains("__exports.default = Page;"));
+    }
+
+    #[test]
+    fn minify_can_disable_tree_shaking() {
+        let src = r#"var __ruv_aaaa1111aaaa1111__ = (function() {
+  "use strict";
+  var __exports = {};
+  const unused = 2;
+  __exports.unused = unused;
+  return __exports;
+})();
+"#;
+        let result = minify_with_options(src, BundleTarget::Client, false).unwrap();
+
+        assert!(result.contains("unused"));
+        assert!(!result.contains("[tree-shaken]"));
     }
 
     #[test]

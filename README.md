@@ -228,6 +228,7 @@ export default defineConfig({
   build: {
     minify: true,
     sourcemap: false,
+    treeShaking: true,
     splitStrategy: "route",     // "route" | "manual"
     parallelism: 4,
   },
@@ -346,6 +347,7 @@ export default defineConfig({
 - [Deployment](docs/deployment.md)
 - [Debugging & Diagnostics](docs/debugging.md)
 - [Performance](docs/performance.md)
+- [Bundler Comparison](docs/bundler-comparison.md)
 - [Dev/Prod Parity](docs/parity.md)
 - [Production Readiness](docs/production-readiness.md)
 - [Publishing](docs/publishing.md)

@@ -16,6 +16,7 @@ This produces:
 .ruvyxa/
 ├── server/       # Server-side route source
 ├── client/       # BLAKE3-hashed hydration bundles
+│   └── manifest.json
 ├── assets/       # Static files from public/
 ├── manifest.json # Route manifest
 └── build.json    # Build metadata
@@ -208,6 +209,13 @@ Remember:
   "profile": "production",
   "routes": 5,
   "hashAlgorithm": "blake3-128",
+  "build": {
+    "minify": true,
+    "sourcemap": false,
+    "treeShaking": true,
+    "splitStrategy": "route",
+    "parallelism": 4
+  },
   "security": {
     "actionBodyLimitBytes": 65536,
     "sameOriginActions": true,
@@ -217,6 +225,11 @@ Remember:
 }
 ```
 
+`.ruvyxa/client/manifest.json` contains route-level bundle metrics, including
+module count, output bytes, estimated gzip bytes, cache hits, and
+tree-shaken export counts. When `build.emitChunkManifest` is enabled, Ruvyxa
+also writes `.ruvyxa/client/chunk-manifest.json`.
+
 ---
 
 ## Related
@@ -224,3 +237,4 @@ Remember:
 - [Getting Started](getting-started.md) — initial project setup
 - [Production Readiness](production-readiness.md) — release checklist
 - [Performance](performance.md) — build benchmarks and optimization
+- [Bundler Comparison](bundler-comparison.md) — bundler tradeoffs and roadmap candidates

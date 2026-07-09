@@ -12,6 +12,7 @@ const config: RuvyxaConfig = {
   build: {
     minify: true,
     sourcemap: false,
+    treeShaking: true,
     splitStrategy: "route",
     parallelism: 4,
   },
@@ -28,3 +29,4 @@ const config: RuvyxaConfig = {
 }
 
 export default defineConfig(config)
+

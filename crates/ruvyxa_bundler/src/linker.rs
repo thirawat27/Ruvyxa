@@ -1067,6 +1067,7 @@ mod tests {
             js: "import React from \"react\";\nexport default function Page() {}".to_string(),
             deps: Vec::new(),
             is_external: false,
+            cache_hit: false,
         };
 
         let output = link(&[module], &input).unwrap();
@@ -1095,12 +1096,14 @@ mod tests {
                     .to_string(),
                 deps: vec![helper.clone()],
                 is_external: false,
+                cache_hit: false,
             },
             CompiledModule {
                 path: helper.clone(),
                 js: "export const label = \"ready\";".to_string(),
                 deps: Vec::new(),
                 is_external: false,
+                cache_hit: false,
             },
         ];
 
@@ -1134,6 +1137,7 @@ export default function Layout({ children }) {
             .to_string(),
             deps: Vec::new(),
             is_external: false,
+            cache_hit: false,
         };
 
         let output = link(&[module], &input).unwrap();
@@ -1163,6 +1167,7 @@ export default function Layout({ children }) {
             js: "export async function render(ctx) {\n  return String(ctx.path);\n}".to_string(),
             deps: Vec::new(),
             is_external: false,
+            cache_hit: false,
         };
 
         let output = link(&[module], &input).unwrap();
@@ -1184,12 +1189,14 @@ export default function Layout({ children }) {
                 js: "import B from './b';".into(),
                 deps: vec![b.clone()],
                 is_external: false,
+                cache_hit: false,
             },
             CompiledModule {
                 path: b.clone(),
                 js: "import A from './a';".into(),
                 deps: vec![a.clone()],
                 is_external: false,
+                cache_hit: false,
             },
         ];
 
@@ -1216,24 +1223,28 @@ export default function Layout({ children }) {
                 js: String::new(),
                 deps: vec![a.clone(), b.clone()],
                 is_external: false,
+                cache_hit: false,
             },
             CompiledModule {
                 path: a.clone(),
                 js: String::new(),
                 deps: vec![shared.clone()],
                 is_external: false,
+                cache_hit: false,
             },
             CompiledModule {
                 path: b.clone(),
                 js: String::new(),
                 deps: vec![shared.clone()],
                 is_external: false,
+                cache_hit: false,
             },
             CompiledModule {
                 path: shared.clone(),
                 js: String::new(),
                 deps: vec![],
                 is_external: false,
+                cache_hit: false,
             },
         ];
 

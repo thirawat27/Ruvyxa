@@ -47,6 +47,7 @@ export default defineConfig({
   build: {
     minify: true,
     sourcemap: false,
+    treeShaking: true,
     splitStrategy: "route",
     parallelism: 4,
   },

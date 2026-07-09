@@ -156,6 +156,7 @@ struct ServerConfigOptions {
 struct BuildConfigOptions {
     minify: Option<bool>,
     sourcemap: Option<bool>,
+    tree_shaking: Option<bool>,
     split_strategy: Option<String>,
     parallelism: Option<usize>,
     jsx_runtime: Option<String>,
@@ -517,6 +518,7 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
         "build": {
             "minify": config.build.minify.unwrap_or(true),
             "sourcemap": config.build.sourcemap.unwrap_or(false),
+            "treeShaking": config.build.tree_shaking.unwrap_or(true),
             "splitStrategy": config.build.split_strategy.as_deref().unwrap_or("route"),
             "jsxRuntime": config.build.jsx_runtime.as_deref().unwrap_or("classic"),
             "esTarget": config.build.es_target.as_deref().unwrap_or("es2022"),
@@ -585,6 +587,10 @@ struct ClientBundle {
     output_bytes: usize,
     estimated_gz_bytes: usize,
     duration_ms: u64,
+    module_count: usize,
+    cache_hits: usize,
+    tree_shaken_modules: usize,
+    chunk_manifest: Option<serde_json::Value>,
 }
 
 fn emit_client_bundles(
@@ -646,6 +652,14 @@ fn emit_client_bundles(
     bundles.sort_by_key(|(index, _)| *index);
 
     let mut routes = Vec::new();
+    let mut route_chunk_manifests = Vec::new();
+    let mut total_output_bytes = 0usize;
+    let mut total_estimated_gz_bytes = 0usize;
+    let mut total_duration_ms = 0u64;
+    let mut total_modules = 0usize;
+    let mut total_cache_hits = 0usize;
+    let mut total_tree_shaken_modules = 0usize;
+
     for (_, bundle) in bundles {
         fs::write(client_dir.join(&bundle.file_name), bundle.script.as_bytes())?;
         if let (Some(source_map_file), Some(source_map)) =
@@ -653,7 +667,18 @@ fn emit_client_bundles(
         {
             fs::write(client_dir.join(source_map_file), source_map.as_bytes())?;
         }
-        routes.push(serde_json::json!({
+        total_output_bytes += bundle.output_bytes;
+        total_estimated_gz_bytes += bundle.estimated_gz_bytes;
+        total_duration_ms += bundle.duration_ms;
+        total_modules += bundle.module_count;
+        total_cache_hits += bundle.cache_hits;
+        total_tree_shaken_modules += bundle.tree_shaken_modules;
+
+        if let Some(chunk_manifest) = &bundle.chunk_manifest {
+            route_chunk_manifests.push(chunk_manifest.clone());
+        }
+
+        let mut route_info = serde_json::json!({
             "path": bundle.path,
             "entry": bundle.entry,
             "file": bundle.file_name,
@@ -663,21 +688,49 @@ fn emit_client_bundles(
             "outputBytes": bundle.output_bytes,
             "estimatedGzBytes": bundle.estimated_gz_bytes,
             "durationMs": bundle.duration_ms,
+            "moduleCount": bundle.module_count,
+            "cacheHits": bundle.cache_hits,
+            "treeShakenModules": bundle.tree_shaken_modules,
             "optimized": true,
-            "treeShaken": true,
+            "treeShaken": build.tree_shaking.unwrap_or(true),
             "chunkStrategy": build.split_strategy.as_deref().unwrap_or("route")
-        }));
+        });
+
+        if let Some(chunk_manifest) = bundle.chunk_manifest {
+            route_info["chunkManifest"] = chunk_manifest;
+        }
+
+        routes.push(route_info);
+    }
+
+    if build.emit_chunk_manifest.unwrap_or(false) {
+        fs::write(
+            client_dir.join("chunk-manifest.json"),
+            serde_json::to_string_pretty(&serde_json::json!({
+                "routes": route_chunk_manifests
+            }))?,
+        )?;
     }
 
     Ok(serde_json::json!({
         "chunkStrategy": build.split_strategy.as_deref().unwrap_or("route"),
         "minify": build.minify.unwrap_or(true),
         "sourcemap": build.sourcemap.unwrap_or(false),
-        "treeShaking": true,
+        "treeShaking": build.tree_shaking.unwrap_or(true),
         "jsxRuntime": build.jsx_runtime.as_deref().unwrap_or("classic"),
         "esTarget": build.es_target.as_deref().unwrap_or("es2022"),
         "emitChunkManifest": build.emit_chunk_manifest.unwrap_or(false),
         "parallelism": parallelism,
+        "moduleCount": total_modules,
+        "outputBytes": total_output_bytes,
+        "estimatedGzBytes": total_estimated_gz_bytes,
+        "durationMs": total_duration_ms,
+        "cacheHits": total_cache_hits,
+        "treeShakenModules": total_tree_shaken_modules,
+        "cache": {
+            "compileEntries": bundle_context.compile_cache().entry_count(),
+            "compileBytes": bundle_context.compile_cache().total_bytes()
+        },
         "routes": routes
     }))
 }
@@ -713,7 +766,7 @@ fn bundle_client_route(
         options: BundleOptions {
             minify: build.minify.unwrap_or(true),
             source_map: build.sourcemap.unwrap_or(false),
-            tree_shaking: true,
+            tree_shaking: build.tree_shaking.unwrap_or(true),
             jsx_runtime: parse_jsx_runtime(build.jsx_runtime.as_deref())?,
             es_target: parse_es_target(build.es_target.as_deref())?,
             split_strategy: parse_split_strategy(build.split_strategy.as_deref())?,
@@ -748,6 +801,13 @@ fn bundle_client_route(
         output_bytes: output.stats.output_bytes,
         estimated_gz_bytes: output.stats.estimated_gz_bytes,
         duration_ms: output.stats.duration_ms,
+        module_count: output.stats.module_count,
+        cache_hits: output.stats.cache_hits,
+        tree_shaken_modules: output.stats.tree_shaken_modules,
+        chunk_manifest: output
+            .chunk_manifest
+            .map(serde_json::to_value)
+            .transpose()?,
     })
 }
 
@@ -2024,6 +2084,14 @@ mod tests {
             parse_split_strategy(Some("manual")).unwrap(),
             ruvyxa_bundler::SplitStrategy::Single
         ));
+
+        let config: BuildConfigOptions = serde_json::from_value(json!({
+            "treeShaking": false,
+            "emitChunkManifest": true
+        }))
+        .unwrap();
+        assert_eq!(config.tree_shaking, Some(false));
+        assert_eq!(config.emit_chunk_manifest, Some(true));
     }
 
     #[test]
@@ -2031,6 +2099,41 @@ mod tests {
         assert!(parse_jsx_runtime(Some("runtime-x")).is_err());
         assert!(parse_es_target(Some("es5")).is_err());
         assert!(parse_split_strategy(Some("vendor")).is_err());
+    }
+
+    #[test]
+    fn emit_client_bundles_writes_chunk_manifest_when_enabled() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let app = root.join("app");
+        let client_dir = root.join(".ruvyxa").join("client");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(&client_dir).unwrap();
+        std::fs::write(
+            app.join("page.tsx"),
+            "export default function Page() { return <main>Home</main>; }",
+        )
+        .unwrap();
+
+        let manifest = discover_routes(DiscoverOptions::new(&app)).unwrap();
+        let build = BuildConfigOptions {
+            minify: Some(false),
+            sourcemap: Some(false),
+            tree_shaking: Some(true),
+            split_strategy: Some("route".to_string()),
+            parallelism: Some(1),
+            jsx_runtime: Some("classic".to_string()),
+            es_target: Some("es2022".to_string()),
+            emit_chunk_manifest: Some(true),
+        };
+
+        let client_manifest =
+            emit_client_bundles(root, &app, &manifest, &client_dir, &build).unwrap();
+
+        assert!(client_dir.join("chunk-manifest.json").is_file());
+        assert_eq!(client_manifest["emitChunkManifest"], true);
+        assert!(client_manifest["moduleCount"].as_u64().unwrap() > 0);
+        assert!(client_manifest["routes"][0]["chunkManifest"].is_object());
     }
 
     #[test]

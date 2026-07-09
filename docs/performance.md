@@ -55,6 +55,8 @@ Client bundles are split per route, not per app. Each page gets its own hydratio
 ### Tree Shaking
 
 The Ruvyxa bundler eliminates dead code from each route bundle. Only imports actually used by the page are included in the output.
+This is enabled by default and can be disabled with `build.treeShaking: false`
+when debugging optimizer behavior.
 
 ### Minification
 
@@ -66,6 +68,23 @@ File names are BLAKE3 hashes of their content (first 16 hex characters). This en
 - Immutable caching (`Cache-Control: public, max-age=31536000, immutable`)
 - Automatic cache-busting on content change
 - Deterministic builds — same input always produces the same hash
+
+### Build Stats
+
+`client/manifest.json` records per-route and aggregate build metrics:
+
+- `moduleCount`
+- `outputBytes`
+- `estimatedGzBytes`
+- `durationMs`
+- `cacheHits`
+- `treeShakenModules`
+- `cache.compileEntries`
+- `cache.compileBytes`
+
+Set `build.emitChunkManifest: true` to also write
+`.ruvyxa/client/chunk-manifest.json` for deployment adapters and performance
+tooling.
 
 ---
 
@@ -119,5 +138,6 @@ Integrate with your CI pipeline to detect regressions:
 ## Related
 
 - [Debugging](debugging.md) — the `bench` command and diagnostics
+- [Bundler Comparison](bundler-comparison.md) — comparison with Vite, Rollup, webpack, Turbopack, and related bundlers
 - [Production Readiness](production-readiness.md) — release performance baselines
 - [Dev/Prod Parity](parity.md) — ensuring both modes behave identically

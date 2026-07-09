@@ -17,6 +17,7 @@ export interface RuvyxaConfig {
   build?: {
     minify?: boolean
     sourcemap?: boolean
+    treeShaking?: boolean
     splitStrategy?: "single" | "route" | "manual"
     parallelism?: number
     jsxRuntime?: "classic" | "automatic"

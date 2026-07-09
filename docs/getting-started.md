@@ -53,6 +53,7 @@ export default defineConfig({
   build: {
     minify: true,
     sourcemap: false,
+    treeShaking: true,
     splitStrategy: "route",
     parallelism: 4,
   },
@@ -243,6 +244,10 @@ npx ruvyxa start
 
 The build step validates your app, bundles client-side code with tree-shaking and minification, and emits everything to `.ruvyxa/`. The production server serves from this directory with the same route semantics as dev.
 
+Build metadata includes per-route module counts, output sizes, estimated gzip
+sizes, optimizer counts, and compile cache size. Set `build.emitChunkManifest`
+to `true` when deployment tooling needs `client/chunk-manifest.json`.
+
 ---
 
 ## Validate Before Deploy
@@ -268,3 +273,4 @@ Fix all diagnostics before deploying.
 - [Server Actions](actions.md) — mutations, validation, and security
 - [Deployment](deployment.md) — adapters for Node, Vercel, Cloudflare, and more
 - [Debugging](debugging.md) — diagnostics, tracing, and the doctor command
+- [Bundler Comparison](bundler-comparison.md) — Ruvyxa tradeoffs versus Vite, Rollup, webpack, Turbopack, and related tools

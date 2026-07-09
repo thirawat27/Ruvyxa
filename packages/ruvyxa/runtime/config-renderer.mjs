@@ -65,6 +65,7 @@ function sanitizeConfig(config) {
     build: objectValue(config.build, {
       minify: booleanValue(config.build?.minify),
       sourcemap: booleanValue(config.build?.sourcemap),
+      treeShaking: booleanValue(config.build?.treeShaking),
       splitStrategy: stringValue(config.build?.splitStrategy),
       parallelism: numberValue(config.build?.parallelism),
       jsxRuntime: stringValue(config.build?.jsxRuntime),

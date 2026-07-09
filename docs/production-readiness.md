@@ -65,8 +65,9 @@ into place. The `.ruvyxa/cache/` directory is preserved across builds.
 ### Client Bundles
 
 - Route-level splitting (one bundle per page)
-- Minified and tree-shaken by the Ruvyxa bundler
+- Minified and tree-shaken by the Ruvyxa bundler by default
 - BLAKE3 content-addressed file names (immutable caching)
+- Per-route bundle metrics in `.ruvyxa/client/manifest.json`
 
 ### Server Actions
 
