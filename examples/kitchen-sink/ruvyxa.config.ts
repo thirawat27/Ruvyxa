@@ -1,11 +1,11 @@
-import { defineConfig, type RuvyxaConfig } from "ruvyxa/config"
+import { defineConfig, type RuvyxaConfig } from 'ruvyxa/config'
 
 const config: RuvyxaConfig = {
-  appDir: "app",
-  outDir: ".ruvyxa",
+  appDir: 'app',
+  outDir: '.ruvyxa',
 
   server: {
-    host: "localhost",
+    host: 'localhost',
     port: 3000,
   },
 
@@ -13,13 +13,13 @@ const config: RuvyxaConfig = {
     minify: true,
     sourcemap: false,
     treeShaking: true,
-    splitStrategy: "route",
+    splitStrategy: 'route',
     parallelism: 4,
   },
 
   rendering: {
-    defaultStrategy: "ssr",
-    fallback: "blocking",
+    defaultStrategy: 'ssr',
+    fallback: 'blocking',
     defaultRevalidate: 60,
   },
 
@@ -35,4 +35,3 @@ const config: RuvyxaConfig = {
 }
 
 export default defineConfig(config)
-

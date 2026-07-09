@@ -143,7 +143,7 @@ pub fn discover_routes(options: DiscoverOptions) -> Result<RouteManifest> {
 
         routes.push(RouteEntry {
             id,
-            path,
+            path: path.clone(),
             kind,
             file: file.clone(),
             layout_chain: layout_chain(&app_dir, route_dir),
@@ -154,7 +154,7 @@ pub fn discover_routes(options: DiscoverOptions) -> Result<RouteManifest> {
             client_modules: sibling_module(route_dir, "client.tsx"),
             runtime: RuntimeTarget::Node,
             render: if kind == RouteKind::Page {
-                detect_render_strategy(&file)
+                detect_render_strategy(&file, &path)
             } else {
                 RenderMeta::default()
             },
@@ -814,7 +814,7 @@ fn sibling_modules(route_dir: &Path, names: &[&str]) -> Vec<String> {
 /// 4. `export function getStaticParams` or `export async function getStaticParams` → SSG
 /// 5. Route has no dynamic segments and no data fetching → SSG candidate (static routes)
 /// 6. Default → SSR
-fn detect_render_strategy(file: &Path) -> RenderMeta {
+fn detect_render_strategy(file: &Path, route_path: &str) -> RenderMeta {
     let Ok(source) = fs::read_to_string(file) else {
         return RenderMeta::default();
     };
@@ -859,8 +859,36 @@ fn detect_render_strategy(file: &Path) -> RenderMeta {
         };
     }
 
-    // 5. Default: SSR
+    // 5. Static routes with no dynamic data markers can be pre-rendered.
+    if !route_has_dynamic_segments(route_path) && !has_dynamic_data_markers(&code) {
+        return RenderMeta {
+            strategy: RenderStrategy::Ssg,
+            ..Default::default()
+        };
+    }
+
+    // 6. Default: SSR
     RenderMeta::default()
+}
+
+fn route_has_dynamic_segments(route_path: &str) -> bool {
+    route_path
+        .split('/')
+        .any(|segment| segment.starts_with(':') || segment.starts_with('*'))
+}
+
+fn has_dynamic_data_markers(code: &str) -> bool {
+    const MARKERS: &[&str] = &[
+        "fetch(",
+        "headers(",
+        "cookies(",
+        "searchParams",
+        "Date.now(",
+        "Math.random(",
+        "process.env.",
+    ];
+
+    MARKERS.iter().any(|marker| code.contains(marker))
 }
 
 /// Check if `export const <name> = true|false` exists.
@@ -1104,6 +1132,70 @@ mod tests {
 
         assert_eq!(route.server_modules.len(), 1);
         assert!(route.server_modules[0].ends_with("action.ts"));
+    }
+
+    #[test]
+    fn classifies_static_pages_without_data_markers_as_ssg() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        fs::create_dir_all(app.join("static-page")).unwrap();
+        fs::write(
+            app.join("static-page/page.tsx"),
+            r#"
+                export default function StaticPage() {
+                    return <code>.ruvyxa/prerender/static-page/index.html</code>;
+                }
+            "#,
+        )
+        .unwrap();
+
+        let manifest = discover_routes(DiscoverOptions::new(&app)).unwrap();
+        let route = manifest
+            .routes
+            .iter()
+            .find(|route| route.path == "/static-page")
+            .unwrap();
+
+        assert_eq!(route.render.strategy, RenderStrategy::Ssg);
+        assert!(!route.render.has_static_params);
+    }
+
+    #[test]
+    fn keeps_dynamic_and_data_fetching_pages_as_ssr_without_static_params() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        fs::create_dir_all(app.join("blog/[slug]")).unwrap();
+        fs::create_dir_all(app.join("latest")).unwrap();
+        fs::write(
+            app.join("blog/[slug]/page.tsx"),
+            "export default function Post() {}",
+        )
+        .unwrap();
+        fs::write(
+            app.join("latest/page.tsx"),
+            r#"
+                export default async function Latest() {
+                    const response = await fetch("https://example.com/news");
+                    return <main>{response.status}</main>;
+                }
+            "#,
+        )
+        .unwrap();
+
+        let manifest = discover_routes(DiscoverOptions::new(&app)).unwrap();
+        let dynamic = manifest
+            .routes
+            .iter()
+            .find(|route| route.path == "/blog/:slug")
+            .unwrap();
+        let latest = manifest
+            .routes
+            .iter()
+            .find(|route| route.path == "/latest")
+            .unwrap();
+
+        assert_eq!(dynamic.render.strategy, RenderStrategy::Ssr);
+        assert_eq!(latest.render.strategy, RenderStrategy::Ssr);
     }
 
     #[test]

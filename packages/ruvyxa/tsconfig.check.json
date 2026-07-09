@@ -1,0 +1,12 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "../..",
+    "noEmit": true,
+    "paths": {
+      "@ruvyxa/core": ["../../packages/@ruvyxa/core/src/index.ts"],
+      "@ruvyxa/core/config": ["../../packages/@ruvyxa/core/src/config.ts"],
+      "@ruvyxa/core/server": ["../../packages/@ruvyxa/core/src/server.ts"]
+    }
+  }
+}

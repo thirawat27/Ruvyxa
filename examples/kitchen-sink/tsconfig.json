@@ -2,6 +2,12 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "paths": {
+      "ruvyxa": ["../../packages/ruvyxa/src/index.ts"],
+      "ruvyxa/config": ["../../packages/ruvyxa/src/config.ts"],
+      "ruvyxa/server": ["../../packages/ruvyxa/src/server.ts"],
+      "@ruvyxa/core": ["../../packages/@ruvyxa/core/src/index.ts"],
+      "@ruvyxa/core/config": ["../../packages/@ruvyxa/core/src/config.ts"],
+      "@ruvyxa/core/server": ["../../packages/@ruvyxa/core/src/server.ts"],
       "~/*": ["./*"]
     }
   },

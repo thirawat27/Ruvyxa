@@ -1,14 +1,20 @@
 #!/usr/bin/env node
-import { readFile } from "node:fs/promises"
-import path from "node:path"
+import { readFile } from 'node:fs/promises'
+import path from 'node:path'
 
-import { cacheFileName, collectLayouts, compileBundle, runtimeAliases, toImportPath } from "./compiler.mjs"
+import {
+  cacheFileName,
+  collectLayouts,
+  compileBundle,
+  runtimeAliases,
+  toImportPath,
+} from './compiler.mjs'
 
-const [projectRootArg, appDirArg, pageFileArg, requestPath = "/", paramsJson = "{}"] =
+const [projectRootArg, appDirArg, pageFileArg, requestPath = '/', paramsJson = '{}'] =
   process.argv.slice(2)
 
 if (!projectRootArg || !appDirArg || !pageFileArg) {
-  fail("RUV1301", "Client renderer requires projectRoot, appDir, and pageFile arguments.")
+  fail('RUV1301', 'Client renderer requires projectRoot, appDir, and pageFile arguments.')
 }
 
 const projectRoot = path.resolve(projectRootArg)
@@ -17,15 +23,21 @@ const pageFile = path.resolve(pageFileArg)
 
 try {
   const layouts = collectLayouts(appDir, path.dirname(pageFile))
-  const bundleFile = await bundleClientModule(projectRoot, pageFile, layouts, requestPath, paramsJson)
-  const script = await readFile(bundleFile, "utf8")
+  const bundleFile = await bundleClientModule(
+    projectRoot,
+    pageFile,
+    layouts,
+    requestPath,
+    paramsJson,
+  )
+  const script = await readFile(bundleFile, 'utf8')
   process.stdout.write(JSON.stringify({ ok: true, script }))
 } catch (error) {
-  fail("RUV1300", error instanceof Error ? error.message : String(error), error?.stack)
+  fail('RUV1300', error instanceof Error ? error.message : String(error), error?.stack)
 }
 
 async function bundleClientModule(projectRoot, pageFile, layouts, requestPath, paramsJson) {
-  const cacheDir = path.join(projectRoot, ".ruvyxa", "cache", "client")
+  const cacheDir = path.join(projectRoot, '.ruvyxa', 'cache', 'client')
   const imports = [`import Page from ${JSON.stringify(toImportPath(pageFile))}`]
   const wrappers = []
 
@@ -37,12 +49,12 @@ async function bundleClientModule(projectRoot, pageFile, layouts, requestPath, p
   const moduleCode = `
 import React from "react"
 import { hydrateRoot } from "react-dom/client"
-${imports.join("\n")}
+${imports.join('\n')}
 
 const params = globalThis.__RUVYXA_ROUTE_PARAMS__ ?? ${paramsJson}
 const currentRequestPath = globalThis.__RUVYXA_REQUEST_PATH__ ?? ${JSON.stringify(requestPath)}
 let tree = React.createElement(Page, { params, requestPath: currentRequestPath })
-for (const Layout of [${wrappers.join(", ")}].reverse()) {
+for (const Layout of [${wrappers.join(', ')}].reverse()) {
   tree = React.createElement(Layout, null, tree)
 }
 
@@ -54,16 +66,16 @@ if (globalThis.__RUVYXA_ROOT__) {
 window.__RUVYXA_HYDRATED = true
 `
 
-  const outfile = path.join(cacheDir, cacheFileName([moduleCode, pageFile], "js"))
+  const outfile = path.join(cacheDir, cacheFileName([moduleCode, pageFile], 'js'))
 
   await compileBundle({
     projectRoot,
     entrySource: moduleCode,
-    sourcefile: "ruvyxa:client-entry.tsx",
+    sourcefile: 'ruvyxa:client-entry.tsx',
     outfile,
-    platform: "browser",
-    minify: process.env.RUVYXA_CLIENT_MINIFY === "1",
-    external: ["react", "react-dom/client"],
+    platform: 'browser',
+    minify: process.env.RUVYXA_CLIENT_MINIFY === '1',
+    external: ['react', 'react-dom/client'],
     aliases: runtimeAliases(path.dirname(new URL(import.meta.url).pathname)),
   })
 

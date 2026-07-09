@@ -1,1 +1,29 @@
-{  "name": "@ruvyxa/adapter-static",  "version": "1.0.5",  "description": "Prepare Ruvyxa routes and assets for static output targets through the first-party adapter contract.",  "license": "MIT",  "type": "module",  "main": "./dist/index.js",  "types": "./dist/index.d.ts",  "files": [    "dist",    "README.md"  ],  "keywords": [    "ruvyxa",    "adapter",    "static",    "deployment"  ],  "repository": {    "type": "git",    "url": "git+https://github.com/thirawat27/ruvyxa.git",    "directory": "packages/@ruvyxa/adapter-static"  },  "bugs": {    "url": "https://github.com/thirawat27/ruvyxa/issues"  },  "homepage": "https://github.com/thirawat27/ruvyxa#readme",  "engines": {    "node": ">=22.0.0"  },  "publishConfig": {    "access": "public"  },  "exports": {    ".": {      "types": "./dist/index.d.ts",      "default": "./dist/index.js"    }  },  "dependencies": {    "@ruvyxa/core": "workspace:^"  },  "scripts": {    "build": "tsc -p tsconfig.json",    "check": "tsc -p tsconfig.json --noEmit",    "test": "node --test \"../../../tests/packages/adapter-static/**/*.test.ts\"",    "format": "tsc -p tsconfig.json --noEmit",    "prepack": "pnpm run build"  }}
+{
+  "name": "@ruvyxa/adapter-static",
+  "version": "1.0.5",
+  "description": "Prepare Ruvyxa routes and assets for static output targets through the first-party adapter contract.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist", "README.md"],
+  "keywords": ["ruvyxa", "adapter", "static", "deployment"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thirawat27/ruvyxa.git",
+    "directory": "packages/@ruvyxa/adapter-static"
+  },
+  "bugs": { "url": "https://github.com/thirawat27/ruvyxa/issues" },
+  "homepage": "https://github.com/thirawat27/ruvyxa#readme",
+  "engines": { "node": ">=22.0.0" },
+  "publishConfig": { "access": "public" },
+  "exports": { ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" } },
+  "dependencies": { "@ruvyxa/core": "workspace:^" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.check.json",
+    "test": "node --test \"../../../tests/packages/adapter-static/**/*.test.ts\"",
+    "format": "tsc -p tsconfig.check.json",
+    "prepack": "pnpm run build"
+  }
+}

@@ -8,7 +8,9 @@ CLI, runtime bridge, and public framework entrypoints for Ruvyxa apps.
 npm install ruvyxa react react-dom
 ```
 
-Published installs include the TypeScript runtime files, a persistent Node worker pool, and a native CLI binary for the current platform. Rust and Cargo are only required when developing Ruvyxa from source.
+Published installs include the TypeScript runtime files, a persistent Node worker pool, and a native
+CLI binary for the current platform. Rust and Cargo are only required when developing Ruvyxa from
+source.
 
 ## CLI
 
@@ -27,38 +29,42 @@ npx ruvyxa test:parity --root .  # Dev/prod route parity check
 npx ruvyxa clean --root .        # Remove .ruvyxa/ output
 ```
 
-Human-facing commands print the same compact TUI style used by the native server: headings, aligned fields, status labels, and color only on real terminals. Use `check` as the app-level production readiness gate. Structured commands such as `analyze`, `trace`, and `bench --json` remain machine-readable.
+Human-facing commands print the same compact TUI style used by the native server: headings, aligned
+fields, status labels, and color only on real terminals. Use `check` as the app-level production
+readiness gate. Structured commands such as `analyze`, `trace`, and `bench --json` remain
+machine-readable.
 
-Production builds emit route-level client bundles concurrently and keep manifest output deterministic.
+Production builds emit route-level client bundles concurrently and keep manifest output
+deterministic.
 
 ## Imports
 
 ```ts
-import { defineConfig } from "ruvyxa/config"
-import { action, cache, invalidateCache, json, loader, notFound, redirect } from "ruvyxa/server"
-import type { Adapter, PluginContext, RuvyxaConfig, RuvyxaPlugin, TransformResult } from "ruvyxa"
-import type { ConfigPlugin } from "ruvyxa/config"
+import { defineConfig } from 'ruvyxa/config'
+import { action, cache, invalidateCache, json, loader, notFound, redirect } from 'ruvyxa/server'
+import type { Adapter, PluginContext, RuvyxaConfig, RuvyxaPlugin, TransformResult } from 'ruvyxa'
+import type { ConfigPlugin } from 'ruvyxa/config'
 ```
 
 ## Configuration with Middleware
 
 ```ts
-import { defineConfig } from "ruvyxa/config"
+import { defineConfig } from 'ruvyxa/config'
 
 export default defineConfig({
-  appDir: "app",
-  outDir: ".ruvyxa",
+  appDir: 'app',
+  outDir: '.ruvyxa',
   server: {
-    host: "localhost",
+    host: 'localhost',
     port: 3000,
   },
   build: {
     minify: true,
     sourcemap: false,
     treeShaking: true,
-    splitStrategy: "route",
-    jsxRuntime: "classic",
-    esTarget: "es2022",
+    splitStrategy: 'route',
+    jsxRuntime: 'classic',
+    esTarget: 'es2022',
     parallelism: 4,
     emitChunkManifest: false,
   },
@@ -77,20 +83,20 @@ export default defineConfig({
       timing: true,
       logging: true,
       cors: {
-        origins: ["http://localhost:5173"],
-        methods: ["GET", "POST", "PUT", "DELETE"],
+        origins: ['http://localhost:5173'],
+        methods: ['GET', 'POST', 'PUT', 'DELETE'],
         credentials: true,
       },
     },
     plugins: [
       {
-        name: "auth-guard",
-        path: "plugins/auth.wasm",
-        phase: "request",
+        name: 'auth-guard',
+        path: 'plugins/auth.wasm',
+        phase: 'request',
         hotReload: true,
-        routes: ["/api/*"],
+        routes: ['/api/*'],
         permissions: {
-          env: ["AUTH_SECRET"],
+          env: ['AUTH_SECRET'],
           timeoutMs: 5000,
           maxMemoryBytes: 67108864,
         },
@@ -102,27 +108,32 @@ export default defineConfig({
 
 ## Runtime Architecture
 
-The `ruvyxa` package includes a persistent Node worker pool (`runtime/worker-pool.mjs`) that keeps Node processes alive between requests. This eliminates the ~100-500ms overhead of spawning Node and loading renderer state per request.
+The `ruvyxa` package includes a persistent Node worker pool (`runtime/worker-pool.mjs`) that keeps
+Node processes alive between requests. This eliminates the ~100-500ms overhead of spawning Node and
+loading renderer state per request.
 
 The runtime files included in this package:
 
-| File | Purpose |
-|------|---------|
-| `runtime/worker-pool.mjs` | Persistent IPC worker for all rendering |
-| `runtime/ssr-renderer.mjs` | Server-side React rendering |
-| `runtime/client-renderer.mjs` | Client hydration bundle generation |
-| `runtime/compiler.mjs` | Ruvyxa runtime compiler used by all Node renderers |
-| `runtime/api-renderer.mjs` | API route execution |
-| `runtime/action-renderer.mjs` | Server action execution |
-| `runtime/config-renderer.mjs` | Config file loading |
-| `runtime/plugin-runner.mjs` | JS build plugin hook runner |
+| File                          | Purpose                                            |
+| ----------------------------- | -------------------------------------------------- |
+| `runtime/worker-pool.mjs`     | Persistent IPC worker for all rendering            |
+| `runtime/ssr-renderer.mjs`    | Server-side React rendering                        |
+| `runtime/client-renderer.mjs` | Client hydration bundle generation                 |
+| `runtime/compiler.mjs`        | Ruvyxa runtime compiler used by all Node renderers |
+| `runtime/api-renderer.mjs`    | API route execution                                |
+| `runtime/action-renderer.mjs` | Server action execution                            |
+| `runtime/config-renderer.mjs` | Config file loading                                |
+| `runtime/plugin-runner.mjs`   | JS build plugin hook runner                        |
 
 ## Native CLI
 
-The `ruvyxa` npm package resolves the native CLI binary automatically for the current platform. Resolution order:
+The `ruvyxa` npm package resolves the native CLI binary automatically for the current platform.
+Resolution order:
 
-1. **Source checkout** — `target/debug/ruvyxa` or `target/release/ruvyxa` when working in the monorepo
+1. **Source checkout** — `target/debug/ruvyxa` or `target/release/ruvyxa` when working in the
+   monorepo
 2. **Bundled binary** — `native-bin/<platform>-<arch>/ruvyxa(.exe)` shipped with the npm package
-3. **Optional platform package** — `@ruvyxa/cli-<platform>-<arch>` as a fallback (e.g., `@ruvyxa/cli-win32-x64`)
+3. **Optional platform package** — `@ruvyxa/cli-<platform>-<arch>` as a fallback (e.g.,
+   `@ruvyxa/cli-win32-x64`)
 
 Application users only need to install `ruvyxa`. No Rust toolchain required.

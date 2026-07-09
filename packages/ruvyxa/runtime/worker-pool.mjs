@@ -19,20 +19,20 @@
  *   - Graceful shutdown with SIGTERM/SIGINT handling
  *   - Memory pressure monitoring with automatic cache eviction
  */
-import { createHash } from "node:crypto"
-import { existsSync } from "node:fs"
-import { mkdir, readFile } from "node:fs/promises"
-import { createRequire } from "node:module"
-import path from "node:path"
-import { pathToFileURL } from "node:url"
-import { createInterface } from "node:readline"
+import { createHash } from 'node:crypto'
+import { existsSync } from 'node:fs'
+import { mkdir, readFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
+import path from 'node:path'
+import { pathToFileURL } from 'node:url'
+import { createInterface } from 'node:readline'
 
-import { compileBundle, runtimeAliases, toImportPath } from "./compiler.mjs"
+import { compileBundle, runtimeAliases, toImportPath } from './compiler.mjs'
 
 // --- Configuration ---
-const MAX_BUNDLE_CACHE_ENTRIES = parseInt(process.env.RUVYXA_CACHE_MAX_ENTRIES || "256", 10)
-const WORKER_REQUEST_TIMEOUT_MS = parseInt(process.env.RUVYXA_WORKER_TIMEOUT_MS || "30000", 10)
-const MEMORY_PRESSURE_THRESHOLD_MB = parseInt(process.env.RUVYXA_MEMORY_LIMIT_MB || "512", 10)
+const MAX_BUNDLE_CACHE_ENTRIES = parseInt(process.env.RUVYXA_CACHE_MAX_ENTRIES || '256', 10)
+const WORKER_REQUEST_TIMEOUT_MS = parseInt(process.env.RUVYXA_WORKER_TIMEOUT_MS || '30000', 10)
+const MEMORY_PRESSURE_THRESHOLD_MB = parseInt(process.env.RUVYXA_MEMORY_LIMIT_MB || '512', 10)
 const runtimeDir = path.dirname(new URL(import.meta.url).pathname)
 
 // --- LRU Cache ---
@@ -119,8 +119,8 @@ function shutdown(signal) {
   setTimeout(() => process.exit(0), 5000).unref()
 }
 
-process.on("SIGTERM", () => shutdown("SIGTERM"))
-process.on("SIGINT", () => shutdown("SIGINT"))
+process.on('SIGTERM', () => shutdown('SIGTERM'))
+process.on('SIGINT', () => shutdown('SIGINT'))
 
 // --- Memory Pressure Monitor ---
 const memoryCheckInterval = setInterval(() => {
@@ -141,7 +141,7 @@ memoryCheckInterval.unref()
 // --- Request Processing ---
 const rl = createInterface({ input: process.stdin })
 
-rl.on("line", async (line) => {
+rl.on('line', async (line) => {
   if (isShuttingDown) return
 
   let request
@@ -166,7 +166,7 @@ rl.on("line", async (line) => {
   } catch (error) {
     result = {
       ok: false,
-      code: "RUV1700",
+      code: 'RUV1700',
       message: error instanceof Error ? error.message : String(error),
       stack: error?.stack,
     }
@@ -175,36 +175,43 @@ rl.on("line", async (line) => {
   }
 
   result.id = id
-  process.stdout.write(JSON.stringify(result) + "\n")
+  process.stdout.write(JSON.stringify(result) + '\n')
 
   if (isShuttingDown && activeRequests === 0) process.exit(0)
 })
 
-rl.on("close", () => shutdown("stdin-close"))
+rl.on('close', () => shutdown('stdin-close'))
 process.stdin.resume()
 
 // --- Request Dispatcher ---
 async function dispatchRequest(request) {
   switch (request.type) {
-    case "ssr":
+    case 'ssr':
       return handleSsrCoalesced(request)
-    case "ssg":
+    case 'ssg':
       return handleSsgCoalesced(request)
-    case "api":
+    case 'api':
       return handleApi(request)
-    case "action":
+    case 'action':
       return handleAction(request)
-    case "client":
+    case 'client':
       return handleClient(request)
-    case "warmup":
+    case 'warmup':
       return handleWarmup(request)
-    case "ping":
-      return { ok: true, pong: true, cacheSize: bundleCache.size, moduleCacheSize: moduleCache.size, activeRequests, coalesceMapSize: renderCoalesceMap.size }
-    case "invalidate":
+    case 'ping':
+      return {
+        ok: true,
+        pong: true,
+        cacheSize: bundleCache.size,
+        moduleCacheSize: moduleCache.size,
+        activeRequests,
+        coalesceMapSize: renderCoalesceMap.size,
+      }
+    case 'invalidate':
       invalidateBundleCache(request.paths)
       return { ok: true }
     default:
-      return { ok: false, code: "RUV1700", message: `Unknown request type: ${request.type}` }
+      return { ok: false, code: 'RUV1700', message: `Unknown request type: ${request.type}` }
   }
 }
 
@@ -215,8 +222,14 @@ function withTimeout(promise, ms, message) {
     const timer = setTimeout(() => reject(new Error(message)), ms)
     timer.unref()
     promise.then(
-      (value) => { clearTimeout(timer); resolve(value) },
-      (error) => { clearTimeout(timer); reject(error) },
+      (value) => {
+        clearTimeout(timer)
+        resolve(value)
+      },
+      (error) => {
+        clearTimeout(timer)
+        reject(error)
+      },
     )
   })
 }
@@ -259,9 +272,9 @@ async function importModule(outfile, forceReload = false) {
 // --- Fast React resolution (cached per project root) ---
 function ensureReactDeps(resolvedRoot) {
   if (reactResolvedRoots.has(resolvedRoot)) return
-  const requireFromProject = createRequire(path.join(resolvedRoot, "package.json"))
-  requireFromProject.resolve("react")
-  requireFromProject.resolve("react-dom/server")
+  const requireFromProject = createRequire(path.join(resolvedRoot, 'package.json'))
+  requireFromProject.resolve('react')
+  requireFromProject.resolve('react-dom/server')
   reactResolvedRoots.add(resolvedRoot)
 }
 
@@ -339,7 +352,7 @@ async function handleSsr(request) {
 // --- SSG Handler with Request Coalescing ---
 async function handleSsgCoalesced(request) {
   const { pageFile, requestPath, params, mode } = request
-  const coalesceKey = `ssg:${pageFile}:${requestPath}:${JSON.stringify(params || {})}:${mode || "full"}`
+  const coalesceKey = `ssg:${pageFile}:${requestPath}:${JSON.stringify(params || {})}:${mode || 'full'}`
 
   if (renderCoalesceMap.has(coalesceKey)) {
     return renderCoalesceMap.get(coalesceKey)
@@ -362,7 +375,12 @@ async function handleSsg(request) {
   ensureReactDeps(resolvedRoot)
 
   const layouts = collectLayouts(appDir, path.dirname(pageFile))
-  const { outfile, freshBuild } = await bundleSsgModule(resolvedRoot, pageFile, layouts, mode || "full")
+  const { outfile, freshBuild } = await bundleSsgModule(
+    resolvedRoot,
+    pageFile,
+    layouts,
+    mode || 'full',
+  )
   const mod = await importModule(outfile, freshBuild)
   const html = await mod.render({ path: requestPath, params: params || {} })
 
@@ -371,23 +389,28 @@ async function handleSsg(request) {
 
 // --- API Handler ---
 async function handleApi(request) {
-  const { projectRoot, routeFile, method, requestPath, params } = request
+  const { projectRoot, routeFile, method, requestPath, params, headers: requestHeaders = {}, body: requestBody } = request
 
   const resolvedRoot = path.resolve(projectRoot || process.cwd())
   const { outfile, freshBuild } = await bundleApiModule(resolvedRoot, routeFile)
   const mod = await importModule(outfile, freshBuild)
   const handler = mod[method.toUpperCase()]
 
-  if (typeof handler !== "function") {
+  if (typeof handler !== 'function') {
     return {
       ok: true,
       status: 405,
-      headers: { "content-type": "text/plain; charset=utf-8" },
+      headers: { 'content-type': 'text/plain; charset=utf-8' },
       body: `Method ${method.toUpperCase()} is not allowed`,
     }
   }
 
-  const req = new Request(`http://localhost${requestPath}`, { method: method.toUpperCase() })
+  const upperMethod = method.toUpperCase()
+  const requestInit = { method: upperMethod, headers: requestHeaders }
+  if (requestBody != null && upperMethod !== 'GET' && upperMethod !== 'HEAD') {
+    requestInit.body = requestBody
+  }
+  const req = new Request(`http://localhost${requestPath}`, requestInit)
   const result = await handler({ request: req, params: params || {} })
   const response = normalizeResponse(result)
   const body = await response.text()
@@ -405,11 +428,11 @@ async function handleAction(request) {
   const mod = await importModule(outfile, freshBuild)
   const action = mod[actionName]
 
-  if (typeof action !== "function" || action.ruvyxa?.kind !== "action") {
+  if (typeof action !== 'function' || action.ruvyxa?.kind !== 'action') {
     return {
       ok: true,
       status: 404,
-      headers: { "content-type": "application/json; charset=utf-8" },
+      headers: { 'content-type': 'application/json; charset=utf-8' },
       body: JSON.stringify({
         error: `Action ${actionName} was not found in ${path.basename(actionFile)}`,
       }),
@@ -419,8 +442,8 @@ async function handleAction(request) {
   const input = parsePayload(payloadJson)
   const invalidated = []
   const req = new Request(`http://localhost${requestPath}`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
     body: JSON.stringify(input),
   })
   const result = await action(input, {
@@ -442,8 +465,14 @@ async function handleClient(request) {
 
   const resolvedRoot = path.resolve(projectRoot || process.cwd())
   const layouts = collectLayouts(appDir, path.dirname(pageFile))
-  const { outfile } = await bundleClientModule(resolvedRoot, pageFile, layouts, requestPath, JSON.stringify(params || {}))
-  const script = await readFile(outfile, "utf8")
+  const { outfile } = await bundleClientModule(
+    resolvedRoot,
+    pageFile,
+    layouts,
+    requestPath,
+    JSON.stringify(params || {}),
+  )
+  const script = await readFile(outfile, 'utf8')
 
   return { ok: true, script }
 }
@@ -458,7 +487,7 @@ function invalidateBundleCache(paths) {
   }
   for (const key of bundleCache.keys()) {
     for (const changedPath of paths) {
-      const normalized = changedPath.replaceAll("\\", "/")
+      const normalized = changedPath.replaceAll('\\', '/')
       if (key.includes(normalized)) {
         const outfile = bundleCache.get(key)
         bundleCache.delete(key)
@@ -474,14 +503,14 @@ function collectLayouts(appDir, routeDir) {
   const layouts = []
   let current = appDir
 
-  pushIfExists(layouts, path.join(current, "layout.tsx"))
+  pushIfExists(layouts, path.join(current, 'layout.tsx'))
 
   const relative = path.relative(appDir, routeDir)
-  if (relative && !relative.startsWith("..")) {
+  if (relative && !relative.startsWith('..')) {
     for (const segment of relative.split(path.sep)) {
       if (!segment) continue
       current = path.join(current, segment)
-      pushIfExists(layouts, path.join(current, "layout.tsx"))
+      pushIfExists(layouts, path.join(current, 'layout.tsx'))
     }
   }
 
@@ -498,7 +527,7 @@ function pushIfExists(collection, file) {
 // freshBuild=true means V8 module cache needs busting
 
 async function bundleSsrModule(projectRoot, pageFile, layouts) {
-  const cacheDir = path.join(projectRoot, ".ruvyxa", "cache", "ssr")
+  const cacheDir = path.join(projectRoot, '.ruvyxa', 'cache', 'ssr')
   await ensureDir(cacheDir)
 
   const imports = [`import Page from ${JSON.stringify(toImportPath(pageFile))}`]
@@ -513,11 +542,11 @@ async function bundleSsrModule(projectRoot, pageFile, layouts) {
 import React from "react"
 import { renderToPipeableStream } from "react-dom/server"
 import { Writable } from "node:stream"
-${imports.join("\n")}
+${imports.join('\n')}
 
 export async function render(ctx) {
   let tree = React.createElement(Page, { params: ctx.params ?? {}, requestPath: ctx.path })
-  for (const Layout of [${wrappers.join(", ")}].reverse()) {
+  for (const Layout of [${wrappers.join(', ')}].reverse()) {
     tree = React.createElement(Layout, null, tree)
   }
 
@@ -548,11 +577,7 @@ export async function render(ctx) {
 }
 `
 
-  const hash = createHash("sha256")
-    .update(moduleCode)
-    .update(pageFile)
-    .digest("hex")
-    .slice(0, 16)
+  const hash = createHash('sha256').update(moduleCode).update(pageFile).digest('hex').slice(0, 16)
   const outfile = path.join(cacheDir, `${hash}.mjs`)
 
   const cacheKey = `ssr:${pageFile}:${hash}`
@@ -566,10 +591,10 @@ export async function render(ctx) {
     await compileBundle({
       projectRoot,
       entrySource: moduleCode,
-      sourcefile: "ruvyxa:ssr-entry.tsx",
+      sourcefile: 'ruvyxa:ssr-entry.tsx',
       outfile,
-      platform: "node",
-      external: ["react", "react-dom/server", "node:stream"],
+      platform: 'node',
+      external: ['react', 'react-dom/server', 'node:stream'],
       aliases: runtimeAliases(runtimeDir),
     })
 
@@ -581,15 +606,11 @@ export async function render(ctx) {
 }
 
 async function bundleApiModule(projectRoot, routeFile) {
-  const cacheDir = path.join(projectRoot, ".ruvyxa", "cache", "api")
+  const cacheDir = path.join(projectRoot, '.ruvyxa', 'cache', 'api')
   await ensureDir(cacheDir)
 
   const moduleCode = `export * from ${JSON.stringify(toImportPath(routeFile))}`
-  const hash = createHash("sha256")
-    .update(moduleCode)
-    .update(routeFile)
-    .digest("hex")
-    .slice(0, 16)
+  const hash = createHash('sha256').update(moduleCode).update(routeFile).digest('hex').slice(0, 16)
   const outfile = path.join(cacheDir, `${hash}.mjs`)
 
   const cacheKey = `api:${routeFile}:${hash}`
@@ -603,9 +624,9 @@ async function bundleApiModule(projectRoot, routeFile) {
     await compileBundle({
       projectRoot,
       entrySource: moduleCode,
-      sourcefile: "ruvyxa:api-entry.ts",
+      sourcefile: 'ruvyxa:api-entry.ts',
       outfile,
-      platform: "node",
+      platform: 'node',
       aliases: runtimeAliases(runtimeDir),
     })
 
@@ -615,15 +636,11 @@ async function bundleApiModule(projectRoot, routeFile) {
 }
 
 async function bundleActionModule(projectRoot, actionFile) {
-  const cacheDir = path.join(projectRoot, ".ruvyxa", "cache", "actions")
+  const cacheDir = path.join(projectRoot, '.ruvyxa', 'cache', 'actions')
   await ensureDir(cacheDir)
 
   const moduleCode = `export * from ${JSON.stringify(toImportPath(actionFile))}`
-  const hash = createHash("sha256")
-    .update(moduleCode)
-    .update(actionFile)
-    .digest("hex")
-    .slice(0, 16)
+  const hash = createHash('sha256').update(moduleCode).update(actionFile).digest('hex').slice(0, 16)
   const outfile = path.join(cacheDir, `${hash}.mjs`)
 
   const cacheKey = `action:${actionFile}:${hash}`
@@ -637,9 +654,9 @@ async function bundleActionModule(projectRoot, actionFile) {
     await compileBundle({
       projectRoot,
       entrySource: moduleCode,
-      sourcefile: "ruvyxa:action-entry.ts",
+      sourcefile: 'ruvyxa:action-entry.ts',
       outfile,
-      platform: "node",
+      platform: 'node',
       aliases: runtimeAliases(runtimeDir),
     })
 
@@ -649,7 +666,7 @@ async function bundleActionModule(projectRoot, actionFile) {
 }
 
 async function bundleClientModule(projectRoot, pageFile, layouts, requestPath, paramsJson) {
-  const cacheDir = path.join(projectRoot, ".ruvyxa", "cache", "client")
+  const cacheDir = path.join(projectRoot, '.ruvyxa', 'cache', 'client')
   await ensureDir(cacheDir)
 
   const imports = [`import Page from ${JSON.stringify(toImportPath(pageFile))}`]
@@ -663,12 +680,12 @@ async function bundleClientModule(projectRoot, pageFile, layouts, requestPath, p
   const moduleCode = `
 import React from "react"
 import { hydrateRoot } from "react-dom/client"
-${imports.join("\n")}
+${imports.join('\n')}
 
 const params = globalThis.__RUVYXA_ROUTE_PARAMS__ ?? ${paramsJson}
 const currentRequestPath = globalThis.__RUVYXA_REQUEST_PATH__ ?? ${JSON.stringify(requestPath)}
 let tree = React.createElement(Page, { params, requestPath: currentRequestPath })
-for (const Layout of [${wrappers.join(", ")}].reverse()) {
+for (const Layout of [${wrappers.join(', ')}].reverse()) {
   tree = React.createElement(Layout, null, tree)
 }
 
@@ -680,11 +697,7 @@ if (globalThis.__RUVYXA_ROOT__) {
 window.__RUVYXA_HYDRATED = true
 `
 
-  const hash = createHash("sha256")
-    .update(moduleCode)
-    .update(pageFile)
-    .digest("hex")
-    .slice(0, 16)
+  const hash = createHash('sha256').update(moduleCode).update(pageFile).digest('hex').slice(0, 16)
   const outfile = path.join(cacheDir, `${hash}.js`)
 
   const cacheKey = `client:${pageFile}:${hash}`
@@ -698,11 +711,11 @@ window.__RUVYXA_HYDRATED = true
     await compileBundle({
       projectRoot,
       entrySource: moduleCode,
-      sourcefile: "ruvyxa:client-entry.tsx",
+      sourcefile: 'ruvyxa:client-entry.tsx',
       outfile,
-      platform: "browser",
-      minify: process.env.RUVYXA_CLIENT_MINIFY === "1",
-      external: ["react", "react-dom/client"],
+      platform: 'browser',
+      minify: process.env.RUVYXA_CLIENT_MINIFY === '1',
+      external: ['react', 'react-dom/client'],
       aliases: runtimeAliases(runtimeDir),
     })
 
@@ -714,7 +727,7 @@ window.__RUVYXA_HYDRATED = true
 // --- SSG Bundle ---
 // Bundles a page for static generation. mode controls onShellReady vs onAllReady.
 async function bundleSsgModule(projectRoot, pageFile, layouts, mode) {
-  const cacheDir = path.join(projectRoot, ".ruvyxa", "cache", "ssg")
+  const cacheDir = path.join(projectRoot, '.ruvyxa', 'cache', 'ssg')
   await ensureDir(cacheDir)
 
   const imports = [`import Page from ${JSON.stringify(toImportPath(pageFile))}`]
@@ -725,17 +738,17 @@ async function bundleSsgModule(projectRoot, pageFile, layouts, mode) {
     wrappers.push(`Layout${index}`)
   })
 
-  const readyEvent = mode === "ppr" ? "onShellReady" : "onAllReady"
+  const readyEvent = mode === 'ppr' ? 'onShellReady' : 'onAllReady'
 
   const moduleCode = `
 import React from "react"
 import { renderToPipeableStream } from "react-dom/server"
 import { Writable } from "node:stream"
-${imports.join("\n")}
+${imports.join('\n')}
 
 export async function render(ctx) {
   let tree = React.createElement(Page, { params: ctx.params ?? {}, requestPath: ctx.path })
-  for (const Layout of [${wrappers.join(", ")}].reverse()) {
+  for (const Layout of [${wrappers.join(', ')}].reverse()) {
     tree = React.createElement(Layout, null, tree)
   }
 
@@ -759,18 +772,18 @@ export async function render(ctx) {
         reject(error)
       },
       onError(error) {
-        ${mode === "ppr" ? "// PPR: non-fatal streaming errors for dynamic slots" : "reject(error)"}
+        ${mode === 'ppr' ? '// PPR: non-fatal streaming errors for dynamic slots' : 'reject(error)'}
       },
     })
   })
 }
 `
 
-  const hash = createHash("sha256")
+  const hash = createHash('sha256')
     .update(moduleCode)
     .update(pageFile)
     .update(mode)
-    .digest("hex")
+    .digest('hex')
     .slice(0, 16)
   const outfile = path.join(cacheDir, `${hash}.mjs`)
 
@@ -785,10 +798,10 @@ export async function render(ctx) {
     await compileBundle({
       projectRoot,
       entrySource: moduleCode,
-      sourcefile: "ruvyxa:ssg-entry.tsx",
+      sourcefile: 'ruvyxa:ssg-entry.tsx',
       outfile,
-      platform: "node",
-      external: ["react", "react-dom/server", "node:stream"],
+      platform: 'node',
+      external: ['react', 'react-dom/server', 'node:stream'],
       aliases: runtimeAliases(runtimeDir),
     })
 
@@ -810,11 +823,11 @@ function normalizeActionResult(result, invalidated) {
 function parsePayload(payloadJson) {
   let parsed
   try {
-    parsed = JSON.parse(payloadJson || "{}")
+    parsed = JSON.parse(payloadJson || '{}')
   } catch {
     parsed = Object.fromEntries(new URLSearchParams(payloadJson))
   }
-  if (parsed && typeof parsed === "object" && "input" in parsed) {
+  if (parsed && typeof parsed === 'object' && 'input' in parsed) {
     return parsed.input
   }
   return parsed

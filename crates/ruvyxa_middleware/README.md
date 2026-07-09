@@ -55,4 +55,4 @@ Each plugin runs in an isolated Wasmtime `Store`:
 
 ## License
 
-MIT
+Apache 2.0

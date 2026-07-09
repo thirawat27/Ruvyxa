@@ -1,8 +1,8 @@
-import "./globals.css"
+import './globals.css'
 
 export const meta = {
-  title: "Ruvyxa Kitchen Sink",
-  description: "Comprehensive Ruvyxa framework example",
+  title: 'Ruvyxa Kitchen Sink',
+  description: 'Comprehensive Ruvyxa framework example',
 }
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
@@ -11,7 +11,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body>
         <header className="site-header">
           <nav className="nav" aria-label="Example routes">
-            <a className="brand" href="/">Ruvyxa</a>
+            <a className="brand" href="/">
+              Ruvyxa
+            </a>
             <div className="nav-links">
               <a href="/">Home</a>
               <a href="/about">About</a>

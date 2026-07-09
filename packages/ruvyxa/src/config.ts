@@ -1,1 +1,1 @@
-export * from "@ruvyxa/core/config"
+export * from '@ruvyxa/core/config'

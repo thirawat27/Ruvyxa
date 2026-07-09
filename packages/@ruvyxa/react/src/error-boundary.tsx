@@ -1,4 +1,4 @@
-import { Component, type ErrorInfo, type ReactNode } from "react"
+import { Component, type ErrorInfo, type ReactNode } from 'react'
 
 /**
  * Props passed to the fallback component when an error is caught.

@@ -1,7 +1,7 @@
 export interface RuvyxaConfig {
   appDir?: string
   outDir?: string
-  runtime?: "node" | "edge" | "static"
+  runtime?: 'node' | 'edge' | 'static'
   react?: boolean
   typescript?: {
     strict?: boolean
@@ -18,10 +18,10 @@ export interface RuvyxaConfig {
     minify?: boolean
     sourcemap?: boolean
     treeShaking?: boolean
-    splitStrategy?: "single" | "route" | "manual"
+    splitStrategy?: 'single' | 'route' | 'manual'
     parallelism?: number
-    jsxRuntime?: "classic" | "automatic"
-    esTarget?: "es2018" | "es2019" | "es2020" | "es2022" | "esnext"
+    jsxRuntime?: 'classic' | 'automatic'
+    esTarget?: 'es2018' | 'es2019' | 'es2020' | 'es2022' | 'esnext'
     emitChunkManifest?: boolean
   }
   rendering?: RenderingConfig
@@ -56,7 +56,7 @@ export interface RuvyxaConfig {
  * - `"csr"` — Client-Side Rendering: minimal shell served, full render in browser.
  * - `"ppr"` — Partial Pre-Rendering: static shell at build time + dynamic streaming at request time.
  */
-export type RenderStrategy = "ssr" | "ssg" | "isr" | "csr" | "ppr"
+export type RenderStrategy = 'ssr' | 'ssg' | 'isr' | 'csr' | 'ppr'
 
 /**
  * Global rendering configuration in `ruvyxa.config.ts`.
@@ -73,7 +73,7 @@ export interface RenderingConfig {
    * - `"static"` — return 404 for paths not pre-rendered at build time.
    * @default "blocking"
    */
-  fallback?: "blocking" | "static"
+  fallback?: 'blocking' | 'static'
   /**
    * Default ISR revalidation interval in seconds (used when a page exports
    * `revalidate` without a value or inherits ISR from config).
@@ -153,7 +153,7 @@ export interface MiddlewarePluginConfig {
   name: string
   path: string
   hotReload?: boolean
-  phase?: "request" | "response"
+  phase?: 'request' | 'response'
   routes?: string[]
   config?: unknown
   permissions?: PluginPermissions
@@ -173,12 +173,12 @@ export interface TransformResult {
 }
 
 export interface PluginContext {
-  environment: "client" | "server" | "edge" | "worker" | "shared"
+  environment: 'client' | 'server' | 'edge' | 'worker' | 'shared'
 }
 
 export interface RuvyxaPlugin {
   name: string
-  enforce?: "pre" | "post"
+  enforce?: 'pre' | 'post'
   resolveId?(id: string): string | null | Promise<string | null>
   transform?(
     code: string,
@@ -194,16 +194,16 @@ export interface BuildContext {
 
 export interface AdapterOutput {
   name: string
-  target: Adapter["target"]
+  target: Adapter['target']
   entry: string
   assetsDir: string
-  platform?: "node" | "vercel" | "cloudflare" | "netlify" | "bun" | "static"
+  platform?: 'node' | 'vercel' | 'cloudflare' | 'netlify' | 'bun' | 'static'
   configFiles?: string[]
   functionsDir?: string
 }
 
 export interface Adapter {
   name: string
-  target: "node" | "edge" | "serverless" | "static"
+  target: 'node' | 'edge' | 'serverless' | 'static'
   build(ctx: BuildContext): AdapterOutput | Promise<AdapterOutput>
 }

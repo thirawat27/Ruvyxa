@@ -1,19 +1,17 @@
 #!/usr/bin/env node
-import { spawnSync } from "node:child_process"
-import { chmod, cp, mkdir, readFile, rm } from "node:fs/promises"
-import { dirname, resolve } from "node:path"
-import { fileURLToPath } from "node:url"
+import { spawnSync } from 'node:child_process'
+import { chmod, cp, mkdir, readFile, rm } from 'node:fs/promises'
+import { dirname, resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-import { currentPlatform } from "./native-platform.mjs"
+import { currentPlatform } from './native-platform.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const ruvyxaPackageRoot = resolve(here, "..")
-const repoRoot = resolve(ruvyxaPackageRoot, "../..")
+const ruvyxaPackageRoot = resolve(here, '..')
+const repoRoot = resolve(ruvyxaPackageRoot, '../..')
 const platformPackageRoot = process.cwd()
-const packageJson = JSON.parse(
-  await readFile(resolve(platformPackageRoot, "package.json"), "utf8"),
-)
-const expectedKey = packageJson.name.replace("@ruvyxa/cli-", "")
+const packageJson = JSON.parse(await readFile(resolve(platformPackageRoot, 'package.json'), 'utf8'))
+const expectedKey = packageJson.name.replace('@ruvyxa/cli-', '')
 const platform = currentPlatform()
 
 if (platform.key !== expectedKey) {
@@ -22,24 +20,21 @@ if (platform.key !== expectedKey) {
   )
 }
 
-const build = spawnSync("cargo", ["build", "--release", "-p", "ruvyxa_cli"], {
+const build = spawnSync('cargo', ['build', '--release', '-p', 'ruvyxa_cli'], {
   cwd: repoRoot,
-  stdio: "inherit",
-  shell: process.platform === "win32",
+  stdio: 'inherit',
+  shell: process.platform === 'win32',
 })
 
 if (build.status !== 0) {
   process.exit(build.status ?? 1)
 }
 
-await rm(resolve(platformPackageRoot, "bin"), { recursive: true, force: true })
-await mkdir(resolve(platformPackageRoot, "bin"), { recursive: true })
-const target = resolve(platformPackageRoot, "bin", platform.executable)
-await cp(
-  resolve(repoRoot, "target", "release", platform.executable),
-  target,
-)
+await rm(resolve(platformPackageRoot, 'bin'), { recursive: true, force: true })
+await mkdir(resolve(platformPackageRoot, 'bin'), { recursive: true })
+const target = resolve(platformPackageRoot, 'bin', platform.executable)
+await cp(resolve(repoRoot, 'target', 'release', platform.executable), target)
 
-if (process.platform !== "win32") {
+if (process.platform !== 'win32') {
   await chmod(target, 0o755)
 }

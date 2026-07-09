@@ -11,8 +11,8 @@ npm install @ruvyxa/adapter-netlify
 ## Usage
 
 ```ts
-import { defineConfig } from "ruvyxa/config"
-import { netlifyAdapter } from "@ruvyxa/adapter-netlify"
+import { defineConfig } from 'ruvyxa/config'
+import { netlifyAdapter } from '@ruvyxa/adapter-netlify'
 
 export default defineConfig({
   adapter: netlifyAdapter(),

@@ -1,22 +1,22 @@
-import assert from "node:assert/strict"
-import { spawn } from "node:child_process"
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
-import path from "node:path"
-import { describe, it } from "node:test"
-import { fileURLToPath, pathToFileURL } from "node:url"
+import assert from 'node:assert/strict'
+import { spawn } from 'node:child_process'
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import path from 'node:path'
+import { describe, it } from 'node:test'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
-import { compileBundle, toImportPath } from "../../../packages/ruvyxa/runtime/compiler.mjs"
+import { compileBundle, toImportPath } from '../../../packages/ruvyxa/runtime/compiler.mjs'
 
-const workspaceRoot = path.resolve(fileURLToPath(new URL("../../..", import.meta.url)))
-const exampleRoot = path.join(workspaceRoot, "examples/kitchen-sink")
-const configRenderer = path.join(workspaceRoot, "packages/ruvyxa/runtime/config-renderer.mjs")
-const pluginRunner = path.join(workspaceRoot, "packages/ruvyxa/runtime/plugin-runner.mjs")
+const workspaceRoot = path.resolve(fileURLToPath(new URL('../../..', import.meta.url)))
+const exampleRoot = path.join(workspaceRoot, 'examples/kitchen-sink')
+const configRenderer = path.join(workspaceRoot, 'packages/ruvyxa/runtime/config-renderer.mjs')
+const pluginRunner = path.join(workspaceRoot, 'packages/ruvyxa/runtime/plugin-runner.mjs')
 
-describe("runtime compiler", () => {
-  it("resolves local dynamic imports without an external bundler", async () => {
+describe('runtime compiler', () => {
+  it('resolves local dynamic imports without an external bundler', async () => {
     await withFixture(async ({ root, outDir }) => {
-      await writeFile(path.join(root, "lazy.ts"), "export const value = 42\n")
-      const outfile = path.join(outDir, "dynamic.mjs")
+      await writeFile(path.join(root, 'lazy.ts'), 'export const value = 42\n')
+      const outfile = path.join(outDir, 'dynamic.mjs')
 
       await compileBundle({
         projectRoot: root,
@@ -26,9 +26,9 @@ describe("runtime compiler", () => {
             return mod.value
           }
         `,
-        sourcefile: "ruvyxa:dynamic-entry.ts",
+        sourcefile: 'ruvyxa:dynamic-entry.ts',
         outfile,
-        platform: "node",
+        platform: 'node',
       })
 
       const mod = await import(pathToFileURL(outfile).href + `?t=${Date.now()}`)
@@ -36,27 +36,27 @@ describe("runtime compiler", () => {
     })
   })
 
-  it("emits source maps and skips unchanged bundle writes", async () => {
+  it('emits source maps and skips unchanged bundle writes', async () => {
     await withFixture(async ({ root, outDir }) => {
-      const pageFile = path.join(root, "page.ts")
-      const outfile = path.join(outDir, "mapped.mjs")
-      await writeFile(pageFile, "export const answer = 42\n")
+      const pageFile = path.join(root, 'page.ts')
+      const outfile = path.join(outDir, 'mapped.mjs')
+      await writeFile(pageFile, 'export const answer = 42\n')
 
       const input = {
         projectRoot: root,
         entrySource: `export * from ${JSON.stringify(toImportPath(pageFile))}`,
-        sourcefile: "ruvyxa:mapped-entry.ts",
+        sourcefile: 'ruvyxa:mapped-entry.ts',
         outfile,
-        platform: "node",
+        platform: 'node',
       }
 
       await compileBundle(input)
       const before = await stat(outfile)
-      const map = JSON.parse(await readFile(`${outfile}.map`, "utf8"))
+      const map = JSON.parse(await readFile(`${outfile}.map`, 'utf8'))
       assert.equal(map.version, 3)
       assert.equal(map.file, path.basename(outfile))
-      assert.ok(map.sources.some((source) => source.endsWith("/page.ts")))
-      assert.ok(map.sourcesContent.some((source) => source.includes("answer = 42")))
+      assert.ok(map.sources.some((source) => source.endsWith('/page.ts')))
+      assert.ok(map.sourcesContent.some((source) => source.includes('answer = 42')))
 
       await new Promise((resolve) => setTimeout(resolve, 25))
       await compileBundle(input)
@@ -65,10 +65,10 @@ describe("runtime compiler", () => {
     })
   })
 
-  it("handles TSX fragments, spread props, and JSX comments", async () => {
+  it('handles TSX fragments, spread props, and JSX comments', async () => {
     await withFixture(async ({ root, outDir }) => {
-      const pageFile = path.join(root, "page.tsx")
-      const outfile = path.join(outDir, "jsx.mjs")
+      const pageFile = path.join(root, 'page.tsx')
+      const outfile = path.join(outDir, 'jsx.mjs')
       await writeFile(
         pageFile,
         `
@@ -85,23 +85,23 @@ describe("runtime compiler", () => {
           import Page from ${JSON.stringify(toImportPath(pageFile))}
           export default Page
         `,
-        sourcefile: "ruvyxa:jsx-entry.tsx",
+        sourcefile: 'ruvyxa:jsx-entry.tsx',
         outfile,
-        platform: "browser",
-        external: ["react"],
+        platform: 'browser',
+        external: ['react'],
       })
 
-      const output = await readFile(outfile, "utf8")
+      const output = await readFile(outfile, 'utf8')
       assert.match(output, /React\.Fragment/)
       assert.match(output, /Object\.assign/)
       assert.doesNotMatch(output, /ignored/)
     })
   })
 
-  it("handles JSX returned from ternaries and map callbacks", async () => {
+  it('handles JSX returned from ternaries and map callbacks', async () => {
     await withFixture(async ({ root, outDir }) => {
-      const pageFile = path.join(root, "page.tsx")
-      const outfile = path.join(outDir, "jsx-expressions.mjs")
+      const pageFile = path.join(root, 'page.tsx')
+      const outfile = path.join(outDir, 'jsx-expressions.mjs')
       await writeFile(
         pageFile,
         `
@@ -123,23 +123,61 @@ describe("runtime compiler", () => {
           import Page from ${JSON.stringify(toImportPath(pageFile))}
           export default Page
         `,
-        sourcefile: "ruvyxa:jsx-expression-entry.tsx",
+        sourcefile: 'ruvyxa:jsx-expression-entry.tsx',
         outfile,
-        platform: "browser",
-        external: ["react"],
+        platform: 'browser',
+        external: ['react'],
       })
 
-      const output = await readFile(outfile, "utf8")
+      const output = await readFile(outfile, 'utf8')
       assert.match(output, /React\.createElement\("strong"/)
       assert.match(output, /items\.map\(\(item\) => React\.createElement\("li"/)
       assert.doesNotMatch(output, /=> <li/)
     })
   })
 
-  it("ignores import, export, and private env examples inside strings", async () => {
+  it('handles fragments in ternaries and dotted paths in code elements', async () => {
     await withFixture(async ({ root, outDir }) => {
-      const pageFile = path.join(root, "page.tsx")
-      const outfile = path.join(outDir, "string-examples.mjs")
+      const pageFile = path.join(root, 'page.tsx')
+      const outfile = path.join(outDir, 'jsx-edge-cases.mjs')
+      await writeFile(
+        pageFile,
+        `
+          export default function Page({ ready = true }) {
+            return (
+              <main>
+                {ready ? <><span>Ready</span></> : <><span>Waiting</span></>}
+                <code>.ruvyxa/prerender/static-page/index.html</code>
+              </main>
+            )
+          }
+        `,
+      )
+
+      await compileBundle({
+        projectRoot: exampleRoot,
+        entrySource: `
+          import React from 'react'
+          import Page from ${JSON.stringify(toImportPath(pageFile))}
+          export default Page
+        `,
+        sourcefile: 'ruvyxa:jsx-edge-cases-entry.tsx',
+        outfile,
+        platform: 'browser',
+        external: ['react'],
+      })
+
+      const output = await readFile(outfile, 'utf8')
+      assert.match(output, /React\.createElement\(React\.Fragment/)
+      assert.match(output, /\.ruvyxa\/prerender\/static-page\/index\.html/)
+      assert.doesNotMatch(output, /\? <>/)
+    })
+  })
+
+  it('ignores import, export, and private env examples inside strings', async () => {
+    await withFixture(async ({ root, outDir }) => {
+      const pageFile = path.join(root, 'page.tsx')
+      const outfile = path.join(outDir, 'string-examples.mjs')
       await writeFile(
         pageFile,
         `
@@ -163,24 +201,24 @@ describe("runtime compiler", () => {
           import Page from ${JSON.stringify(toImportPath(pageFile))}
           export default Page
         `,
-        sourcefile: "ruvyxa:string-example-entry.tsx",
+        sourcefile: 'ruvyxa:string-example-entry.tsx',
         outfile,
-        platform: "browser",
-        external: ["react"],
+        platform: 'browser',
+        external: ['react'],
       })
 
-      const output = await readFile(outfile, "utf8")
+      const output = await readFile(outfile, 'utf8')
       assert.match(output, /process\.env\.DATABASE_URL/)
       assert.doesNotMatch(output, /__exports\.POST/)
       assert.doesNotMatch(output, /__exports\.createTodo/)
     })
   })
 
-  it("drops side-effect asset imports from wrapped modules", async () => {
+  it('drops side-effect asset imports from wrapped modules', async () => {
     await withFixture(async ({ root, outDir }) => {
-      const pageFile = path.join(root, "page.tsx")
-      const outfile = path.join(outDir, "asset-import.mjs")
-      await writeFile(path.join(root, "global.css"), "body { margin: 0; }\n")
+      const pageFile = path.join(root, 'page.tsx')
+      const outfile = path.join(outDir, 'asset-import.mjs')
+      await writeFile(path.join(root, 'global.css'), 'body { margin: 0; }\n')
       await writeFile(
         pageFile,
         `
@@ -199,23 +237,23 @@ describe("runtime compiler", () => {
           import Page from ${JSON.stringify(toImportPath(pageFile))}
           export default Page
         `,
-        sourcefile: "ruvyxa:asset-import-entry.tsx",
+        sourcefile: 'ruvyxa:asset-import-entry.tsx',
         outfile,
-        platform: "browser",
-        external: ["react"],
+        platform: 'browser',
+        external: ['react'],
       })
 
-      const output = await readFile(outfile, "utf8")
+      const output = await readFile(outfile, 'utf8')
       assert.doesNotMatch(output, /import "\.\/global\.css"/)
     })
   })
 
-  it("loads config plugin metadata and executes transform hooks", async () => {
+  it('loads config plugin metadata and executes transform hooks', async () => {
     await withFixture(async ({ root }) => {
-      const pageFile = path.join(root, "page.tsx")
-      await writeFile(pageFile, "export const label = \"Original\"\n")
+      const pageFile = path.join(root, 'page.tsx')
+      await writeFile(pageFile, 'export const label = "Original"\n')
       await writeFile(
-        path.join(root, "ruvyxa.config.ts"),
+        path.join(root, 'ruvyxa.config.ts'),
         `
           import { defineConfig } from "ruvyxa/config"
 
@@ -235,17 +273,38 @@ describe("runtime compiler", () => {
 
       const config = await runJson(configRenderer, [root], {})
       assert.equal(config.ok, true)
-      assert.equal(config.config.plugins[0].name, "replace-label")
+      assert.equal(config.config.plugins[0].name, 'replace-label')
       assert.equal(config.config.plugins[0].transform, true)
 
-      const transformed = await runJson(pluginRunner, [root, "transform"], {
-        code: await readFile(pageFile, "utf8"),
+      const transformed = await runJson(pluginRunner, [root, 'transform'], {
+        code: await readFile(pageFile, 'utf8'),
         id: pageFile,
-        environment: "client",
+        environment: 'client',
       })
 
       assert.equal(transformed.ok, true)
       assert.match(transformed.result.code, /Transformed/)
+    })
+  })
+
+  it('returns JSON for missing and failing config files', async () => {
+    await withFixture(async ({ root }) => {
+      const missing = await runJson(configRenderer, [root], {})
+      assert.equal(missing.ok, true)
+      assert.deepEqual(missing.config, {})
+
+      await writeFile(
+        path.join(root, 'ruvyxa.config.ts'),
+        `
+          throw new Error("bad config")
+          export default {}
+        `,
+      )
+
+      const failed = await runJsonResult(configRenderer, [root], {})
+      assert.equal(failed.exitCode, 1)
+      assert.equal(failed.parsed.ok, false)
+      assert.match(failed.parsed.message, /bad config/)
     })
   })
 })
@@ -253,20 +312,20 @@ describe("runtime compiler", () => {
 function runJson(script, args, payload) {
   return new Promise((resolve, reject) => {
     const child = spawn(process.execPath, [script, ...args], {
-      stdio: ["pipe", "pipe", "pipe"],
+      stdio: ['pipe', 'pipe', 'pipe'],
     })
-    let stdout = ""
-    let stderr = ""
-    child.stdout.setEncoding("utf8")
-    child.stderr.setEncoding("utf8")
-    child.stdout.on("data", (chunk) => {
+    let stdout = ''
+    let stderr = ''
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
+    child.stdout.on('data', (chunk) => {
       stdout += chunk
     })
-    child.stderr.on("data", (chunk) => {
+    child.stderr.on('data', (chunk) => {
       stderr += chunk
     })
-    child.on("error", reject)
-    child.on("close", (code) => {
+    child.on('error', reject)
+    child.on('close', (code) => {
       try {
         const parsed = JSON.parse(stdout)
         if (code === 0 && parsed.ok) {
@@ -275,7 +334,42 @@ function runJson(script, args, payload) {
           reject(new Error(`script failed (${code}): ${stdout || stderr}`))
         }
       } catch (error) {
-        reject(new Error(`invalid JSON from script: ${error.message}; stdout=${stdout}; stderr=${stderr}`))
+        reject(
+          new Error(
+            `invalid JSON from script: ${error.message}; stdout=${stdout}; stderr=${stderr}`,
+          ),
+        )
+      }
+    })
+    child.stdin.end(JSON.stringify(payload))
+  })
+}
+
+function runJsonResult(script, args, payload) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [script, ...args], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    })
+    let stdout = ''
+    let stderr = ''
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk
+    })
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk
+    })
+    child.on('error', reject)
+    child.on('close', (exitCode) => {
+      try {
+        resolve({ exitCode, parsed: JSON.parse(stdout), stderr })
+      } catch (error) {
+        reject(
+          new Error(
+            `invalid JSON from script: ${error.message}; stdout=${stdout}; stderr=${stderr}`,
+          ),
+        )
       }
     })
     child.stdin.end(JSON.stringify(payload))
@@ -283,8 +377,8 @@ function runJson(script, args, payload) {
 }
 
 async function withFixture(run) {
-  const root = await mkdtemp(path.join(exampleRoot, ".ruvyxa-compiler-test-"))
-  const outDir = path.join(root, ".ruvyxa", "cache")
+  const root = await mkdtemp(path.join(exampleRoot, '.ruvyxa-compiler-test-'))
+  const outDir = path.join(root, '.ruvyxa', 'cache')
   await mkdir(outDir, { recursive: true })
 
   try {

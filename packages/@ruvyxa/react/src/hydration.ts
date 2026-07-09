@@ -1,10 +1,13 @@
 /**
  * Handler function for hydration errors.
  */
-export type HydrationErrorHandler = (error: unknown, context: {
-  componentStack?: string
-  digest?: string
-}) => void
+export type HydrationErrorHandler = (
+  error: unknown,
+  context: {
+    componentStack?: string
+    digest?: string
+  },
+) => void
 
 /**
  * Options for the hydrate() helper.
@@ -42,8 +45,8 @@ export function hydrate(options: HydrationOptions = {}): void {
     globalErrorHandler = options.onError
   }
 
-  if (typeof window !== "undefined") {
-    window.dispatchEvent(new CustomEvent("ruvyxa:hydrate"))
+  if (typeof window !== 'undefined') {
+    window.dispatchEvent(new CustomEvent('ruvyxa:hydrate'))
   }
 }
 
@@ -69,7 +72,7 @@ export function reportHydrationError(
   }
 
   // In non-production environments, also log to console for visibility
-  if (typeof globalThis !== "undefined" && (globalThis as Record<string, unknown>).__RUVYXA_DEV__) {
-    console.error("[ruvyxa] Hydration error:", error, context)
+  if (typeof globalThis !== 'undefined' && (globalThis as Record<string, unknown>).__RUVYXA_DEV__) {
+    console.error('[ruvyxa] Hydration error:', error, context)
   }
 }

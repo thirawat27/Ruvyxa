@@ -1,11 +1,11 @@
-import { arch, platform } from "node:process"
+import { arch, platform } from 'node:process'
 
 export const supportedPlatforms = {
-  "darwin-arm64": { os: "darwin", cpu: "arm64", executable: "ruvyxa" },
-  "darwin-x64": { os: "darwin", cpu: "x64", executable: "ruvyxa" },
-  "linux-arm64": { os: "linux", cpu: "arm64", executable: "ruvyxa" },
-  "linux-x64": { os: "linux", cpu: "x64", executable: "ruvyxa" },
-  "win32-x64": { os: "win32", cpu: "x64", executable: "ruvyxa.exe" },
+  'darwin-arm64': { os: 'darwin', cpu: 'arm64', executable: 'ruvyxa' },
+  'darwin-x64': { os: 'darwin', cpu: 'x64', executable: 'ruvyxa' },
+  'linux-arm64': { os: 'linux', cpu: 'arm64', executable: 'ruvyxa' },
+  'linux-x64': { os: 'linux', cpu: 'x64', executable: 'ruvyxa' },
+  'win32-x64': { os: 'win32', cpu: 'x64', executable: 'ruvyxa.exe' },
 }
 
 export function currentPlatformKey() {

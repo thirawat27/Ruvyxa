@@ -1,18 +1,18 @@
-import { execFile } from "node:child_process"
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises"
-import assert from "node:assert/strict"
-import path from "node:path"
-import { describe, it } from "node:test"
-import { fileURLToPath } from "node:url"
-import { promisify } from "node:util"
+import { execFile } from 'node:child_process'
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import assert from 'node:assert/strict'
+import path from 'node:path'
+import { describe, it } from 'node:test'
+import { fileURLToPath } from 'node:url'
+import { promisify } from 'node:util'
 
 const execFileAsync = promisify(execFile)
-const workspaceRoot = path.resolve(fileURLToPath(new URL("../../..", import.meta.url)))
-const exampleRoot = path.join(workspaceRoot, "examples/kitchen-sink")
-const renderer = path.join(workspaceRoot, "packages/ruvyxa/runtime/client-renderer.mjs")
+const workspaceRoot = path.resolve(fileURLToPath(new URL('../../..', import.meta.url)))
+const exampleRoot = path.join(workspaceRoot, 'examples/kitchen-sink')
+const renderer = path.join(workspaceRoot, 'packages/ruvyxa/runtime/client-renderer.mjs')
 
-describe("client renderer boundary diagnostics", () => {
-  it("bundles a browser hydration script for a clean page", async () => {
+describe('client renderer boundary diagnostics', () => {
+  it('bundles a browser hydration script for a clean page', async () => {
     await withFixture(async ({ appDir, pageFile }) => {
       const result = await runRenderer(appDir, pageFile)
       assert.equal(result.ok, true)
@@ -21,9 +21,12 @@ describe("client renderer boundary diagnostics", () => {
     })
   })
 
-  it("blocks server-only marker imports from the client bundle", async () => {
+  it('blocks server-only marker imports from the client bundle', async () => {
     await withFixture(async ({ appDir, pageFile }) => {
-      await writeFile(pageFile, 'import "server-only"\nexport default function Page() { return <main /> }\n')
+      await writeFile(
+        pageFile,
+        'import "server-only"\nexport default function Page() { return <main /> }\n',
+      )
 
       const result = await runRenderer(appDir, pageFile, { reject: false })
       assert.equal(result.ok, false)
@@ -31,7 +34,7 @@ describe("client renderer boundary diagnostics", () => {
     })
   })
 
-  it("blocks private environment variables from the client bundle", async () => {
+  it('blocks private environment variables from the client bundle', async () => {
     await withFixture(async ({ appDir, pageFile }) => {
       await writeFile(
         pageFile,
@@ -46,16 +49,16 @@ describe("client renderer boundary diagnostics", () => {
 })
 
 async function withFixture(run) {
-  const root = await mkdtemp(path.join(exampleRoot, ".ruvyxa-test-"))
-  const appDir = path.join(root, "app")
-  const pageFile = path.join(appDir, "page.tsx")
+  const root = await mkdtemp(path.join(exampleRoot, '.ruvyxa-test-'))
+  const appDir = path.join(root, 'app')
+  const pageFile = path.join(appDir, 'page.tsx')
 
   await mkdir(appDir, { recursive: true })
   await writeFile(
-    path.join(appDir, "layout.tsx"),
-    "export default function Layout({ children }) { return <html><body>{children}</body></html> }\n",
+    path.join(appDir, 'layout.tsx'),
+    'export default function Layout({ children }) { return <html><body>{children}</body></html> }\n',
   )
-  await writeFile(pageFile, "export default function Page() { return <main>Hello</main> }\n")
+  await writeFile(pageFile, 'export default function Page() { return <main>Hello</main> }\n')
 
   try {
     await run({ root, appDir, pageFile })
@@ -67,8 +70,8 @@ async function withFixture(run) {
 async function runRenderer(appDir, pageFile, options = {}) {
   try {
     const { stdout } = await execFileAsync(
-      "node",
-      [renderer, exampleRoot, appDir, pageFile, "/", "{}"],
+      'node',
+      [renderer, exampleRoot, appDir, pageFile, '/', '{}'],
       {
         cwd: workspaceRoot,
         maxBuffer: 10 * 1024 * 1024,

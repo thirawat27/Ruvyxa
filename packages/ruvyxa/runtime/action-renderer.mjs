@@ -1,19 +1,14 @@
 #!/usr/bin/env node
-import path from "node:path"
-import { pathToFileURL } from "node:url"
+import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 
-import { cacheFileName, compileBundle, runtimeAliases, toImportPath } from "./compiler.mjs"
+import { cacheFileName, compileBundle, runtimeAliases, toImportPath } from './compiler.mjs'
 
-const [
-  projectRootArg,
-  actionFileArg,
-  actionName = "",
-  payloadJson = "{}",
-  requestPath = "/",
-] = process.argv.slice(2)
+const [projectRootArg, actionFileArg, actionName = '', payloadJson = '{}', requestPath = '/'] =
+  process.argv.slice(2)
 
 if (!projectRootArg || !actionFileArg || !actionName) {
-  fail("RUV1503", "Action renderer requires projectRoot, actionFile, and actionName arguments.")
+  fail('RUV1503', 'Action renderer requires projectRoot, actionFile, and actionName arguments.')
 }
 
 const projectRoot = path.resolve(projectRootArg)
@@ -24,12 +19,12 @@ try {
   const mod = await import(pathToFileURL(bundleFile).href + `?t=${Date.now()}`)
   const action = mod[actionName]
 
-  if (typeof action !== "function" || action.ruvyxa?.kind !== "action") {
+  if (typeof action !== 'function' || action.ruvyxa?.kind !== 'action') {
     process.stdout.write(
       JSON.stringify({
         ok: true,
         status: 404,
-        headers: { "content-type": "application/json; charset=utf-8" },
+        headers: { 'content-type': 'application/json; charset=utf-8' },
         body: JSON.stringify({
           error: `Action ${actionName} was not found in ${path.basename(actionFile)}`,
         }),
@@ -41,8 +36,8 @@ try {
   const input = parsePayload(payloadJson)
   const invalidated = []
   const request = new Request(`http://localhost${requestPath}`, {
-    method: "POST",
-    headers: { "content-type": "application/json" },
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
     body: JSON.stringify(input),
   })
   const result = await action(input, {
@@ -64,20 +59,20 @@ try {
     }),
   )
 } catch (error) {
-  fail("RUV1500", error instanceof Error ? error.message : String(error), error?.stack)
+  fail('RUV1500', error instanceof Error ? error.message : String(error), error?.stack)
 }
 
 async function bundleActionModule(projectRoot, actionFile) {
-  const cacheDir = path.join(projectRoot, ".ruvyxa", "cache", "actions")
+  const cacheDir = path.join(projectRoot, '.ruvyxa', 'cache', 'actions')
   const moduleCode = `export * from ${JSON.stringify(toImportPath(actionFile))}`
-  const outfile = path.join(cacheDir, cacheFileName([moduleCode, actionFile], "mjs"))
+  const outfile = path.join(cacheDir, cacheFileName([moduleCode, actionFile], 'mjs'))
 
   await compileBundle({
     projectRoot,
     entrySource: moduleCode,
-    sourcefile: "ruvyxa:action-entry.ts",
+    sourcefile: 'ruvyxa:action-entry.ts',
     outfile,
-    platform: "node",
+    platform: 'node',
     aliases: runtimeAliases(path.dirname(new URL(import.meta.url).pathname)),
   })
 
@@ -87,12 +82,12 @@ async function bundleActionModule(projectRoot, actionFile) {
 function parsePayload(payloadJson) {
   let parsed
   try {
-    parsed = JSON.parse(payloadJson || "{}")
+    parsed = JSON.parse(payloadJson || '{}')
   } catch {
     parsed = Object.fromEntries(new URLSearchParams(payloadJson))
   }
 
-  if (parsed && typeof parsed === "object" && "input" in parsed) {
+  if (parsed && typeof parsed === 'object' && 'input' in parsed) {
     return parsed.input
   }
   return parsed

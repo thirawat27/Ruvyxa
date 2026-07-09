@@ -3,8 +3,12 @@ export default function TodosPage() {
     <main className="page">
       <p className="eyebrow">Server action</p>
       <h1>Todos</h1>
-      <p>This demonstrates server actions via <code>action.ts</code>.</p>
-      <p>The form POSTs to <code>/__ruvyxa/action?path=/todos&name=createTodo</code>.</p>
+      <p>
+        This demonstrates server actions via <code>action.ts</code>.
+      </p>
+      <p>
+        The form POSTs to <code>/__ruvyxa/action?path=/todos&name=createTodo</code>.
+      </p>
 
       <form method="post" action="/__ruvyxa/action?path=/todos&name=createTodo">
         <label>

@@ -69,6 +69,8 @@ pub enum WorkerRequest {
         method: String,
         #[serde(rename = "requestPath")]
         request_path: String,
+        headers: BTreeMap<String, String>,
+        body: Option<String>,
         params: BTreeMap<String, String>,
     },
     #[serde(rename = "action")]
@@ -454,6 +456,8 @@ impl NodeWorkerPool {
         route_file: &Path,
         method: &str,
         request_path: &str,
+        headers: &BTreeMap<String, String>,
+        body: Option<&str>,
         params: &BTreeMap<String, String>,
     ) -> Result<WorkerResponse> {
         let request = WorkerRequest::Api {
@@ -462,6 +466,8 @@ impl NodeWorkerPool {
             route_file: route_file.display().to_string(),
             method: method.to_string(),
             request_path: request_path.to_string(),
+            headers: headers.clone(),
+            body: body.map(str::to_string),
             params: params.clone(),
         };
         self.send(request).await

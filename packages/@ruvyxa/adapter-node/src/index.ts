@@ -1,5 +1,5 @@
-import type { Adapter, AdapterOutput, BuildContext } from "@ruvyxa/core"
-import { validateBuildContext } from "@ruvyxa/core"
+import type { Adapter, AdapterOutput, BuildContext } from '@ruvyxa/core'
+import { validateBuildContext } from '@ruvyxa/core'
 
 /**
  * Options for the Node.js adapter.
@@ -26,27 +26,23 @@ export interface NodeAdapterOptions {
  * ```
  */
 export function nodeAdapter(options: NodeAdapterOptions = {}): Adapter {
-  if (options.entry !== undefined && typeof options.entry !== "string") {
-    throw new Error(
-      `[RUV2001] nodeAdapter: "entry" must be a string, got ${typeof options.entry}`,
-    )
+  if (options.entry !== undefined && typeof options.entry !== 'string') {
+    throw new Error(`[RUV2001] nodeAdapter: "entry" must be a string, got ${typeof options.entry}`)
   }
 
-  if (options.entry !== undefined && options.entry.trim() === "") {
-    throw new Error(
-      `[RUV2001] nodeAdapter: "entry" must not be an empty string`,
-    )
+  if (options.entry !== undefined && options.entry.trim() === '') {
+    throw new Error(`[RUV2001] nodeAdapter: "entry" must not be an empty string`)
   }
 
   return {
-    name: "node",
-    target: "node",
+    name: 'node',
+    target: 'node',
     build(ctx: BuildContext): AdapterOutput {
-      validateBuildContext(ctx, "nodeAdapter")
+      validateBuildContext(ctx, 'nodeAdapter')
       return {
-        name: "node",
-        target: "node",
-        platform: "node",
+        name: 'node',
+        target: 'node',
+        platform: 'node',
         entry: options.entry ?? `${ctx.outDir}/server/app`,
         assetsDir: `${ctx.outDir}/assets`,
       }

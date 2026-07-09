@@ -8,32 +8,32 @@ This document covers the npm publishing process for all Ruvyxa packages.
 
 ### Core
 
-| Package | Description |
-|---------|-------------|
-| `ruvyxa` | CLI + runtime (the main user-facing package) |
-| `create-ruvyxa` | Project scaffolding (`npm create ruvyxa`) |
-| `@ruvyxa/core` | Shared primitives: config, loaders, actions, adapters |
-| `@ruvyxa/react` | React SSR and hydration integration |
+| Package         | Description                                           |
+| --------------- | ----------------------------------------------------- |
+| `ruvyxa`        | CLI + runtime (the main user-facing package)          |
+| `create-ruvyxa` | Project scaffolding (`npm create ruvyxa`)             |
+| `@ruvyxa/core`  | Shared primitives: config, loaders, actions, adapters |
+| `@ruvyxa/react` | React SSR and hydration integration                   |
 
 ### Adapters
 
-| Package | Platform |
-|---------|----------|
-| `@ruvyxa/adapter-node` | Node.js |
-| `@ruvyxa/adapter-vercel` | Vercel |
+| Package                      | Platform           |
+| ---------------------------- | ------------------ |
+| `@ruvyxa/adapter-node`       | Node.js            |
+| `@ruvyxa/adapter-vercel`     | Vercel             |
 | `@ruvyxa/adapter-cloudflare` | Cloudflare Workers |
-| `@ruvyxa/adapter-netlify` | Netlify |
-| `@ruvyxa/adapter-bun` | Bun |
-| `@ruvyxa/adapter-static` | Static export |
+| `@ruvyxa/adapter-netlify`    | Netlify            |
+| `@ruvyxa/adapter-bun`        | Bun                |
+| `@ruvyxa/adapter-static`     | Static export      |
 
 ### Native CLI Binaries
 
-| Package | Platform |
-|---------|----------|
-| `@ruvyxa/cli-win32-x64` | Windows x64 |
-| `@ruvyxa/cli-linux-x64` | Linux x64 |
-| `@ruvyxa/cli-linux-arm64` | Linux arm64 |
-| `@ruvyxa/cli-darwin-x64` | macOS x64 |
+| Package                    | Platform    |
+| -------------------------- | ----------- |
+| `@ruvyxa/cli-win32-x64`    | Windows x64 |
+| `@ruvyxa/cli-linux-x64`    | Linux x64   |
+| `@ruvyxa/cli-linux-arm64`  | Linux arm64 |
+| `@ruvyxa/cli-darwin-x64`   | macOS x64   |
 | `@ruvyxa/cli-darwin-arm64` | macOS arm64 |
 
 ---
@@ -70,7 +70,8 @@ pnpm release:validate
 pnpm pack:smoke
 ```
 
-JavaScript and TypeScript tests are centralized under `tests/`; package scripts route to their own subset. See [Testing](testing.md) before adding or moving test files.
+JavaScript and TypeScript tests are centralized under `tests/`; package scripts route to their own
+subset. See [Testing](testing.md) before adding or moving test files.
 
 ---
 
@@ -148,12 +149,12 @@ pnpm --filter ruvyxa publish --access public --tag next
 
 Platform-specific CLI packages must be built and published from matching runners:
 
-| Package | Runner |
-|---------|--------|
-| `@ruvyxa/cli-win32-x64` | Windows x64 |
-| `@ruvyxa/cli-linux-x64` | Linux x64 |
-| `@ruvyxa/cli-linux-arm64` | Linux arm64 |
-| `@ruvyxa/cli-darwin-x64` | macOS x64 |
+| Package                    | Runner      |
+| -------------------------- | ----------- |
+| `@ruvyxa/cli-win32-x64`    | Windows x64 |
+| `@ruvyxa/cli-linux-x64`    | Linux x64   |
+| `@ruvyxa/cli-linux-arm64`  | Linux arm64 |
+| `@ruvyxa/cli-darwin-x64`   | macOS x64   |
 | `@ruvyxa/cli-darwin-arm64` | macOS arm64 |
 
 The GitHub release workflow handles this automatically via matrix builds.
@@ -175,18 +176,21 @@ npx ruvyxa start --port 4000
 ```
 
 Check:
+
 - `create-ruvyxa` scaffolds without errors.
 - `ruvyxa doctor` reports healthy state.
 - `ruvyxa build` produces valid output.
 - `ruvyxa start` serves the app.
 
-If a platform binary is missing, `npx ruvyxa` will print the missing platform key — publish the corresponding `@ruvyxa/cli-*` package to fix it.
+If a platform binary is missing, `npx ruvyxa` will print the missing platform key — publish the
+corresponding `@ruvyxa/cli-*` package to fix it.
 
 ---
 
 ## Automated Releases
 
-Prefer the GitHub Actions release workflow (`.github/workflows/release.yml`) over manual publishing. It:
+Prefer the GitHub Actions release workflow (`.github/workflows/release.yml`) over manual publishing.
+It:
 
 - Runs all quality gates
 - Builds binaries on each target platform

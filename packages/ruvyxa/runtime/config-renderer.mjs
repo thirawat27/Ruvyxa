@@ -1,13 +1,13 @@
-import { existsSync } from "node:fs"
-import path from "node:path"
-import { fileURLToPath, pathToFileURL } from "node:url"
+import { existsSync } from 'node:fs'
+import path from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
-import { cacheFileName, compileBundle, runtimeAliases, toImportPath } from "./compiler.mjs"
+import { cacheFileName, compileBundle, runtimeAliases, toImportPath } from './compiler.mjs'
 
 const [projectRootArg] = process.argv.slice(2)
 
 if (!projectRootArg) {
-  fail("RUV1601", "Config renderer requires a project root argument.")
+  fail('RUV1601', 'Config renderer requires a project root argument.')
 }
 
 const projectRoot = path.resolve(projectRootArg)
@@ -16,36 +16,41 @@ const runtimeDir = path.dirname(fileURLToPath(import.meta.url))
 try {
   const configFile = findConfig(projectRoot)
   if (!configFile) {
-    ok({})
+    await ok({})
   }
 
   const moduleCode = `export { default } from ${JSON.stringify(toImportPath(configFile))}`
   const outfile = path.join(
     projectRoot,
-    ".ruvyxa",
-    "cache",
-    "config",
-    cacheFileName([moduleCode, configFile], "mjs"),
+    '.ruvyxa',
+    'cache',
+    'config',
+    cacheFileName([moduleCode, configFile], 'mjs'),
   )
 
   await compileBundle({
     projectRoot,
     entrySource: moduleCode,
-    sourcefile: "ruvyxa:config-entry.ts",
+    sourcefile: 'ruvyxa:config-entry.ts',
     outfile,
-    platform: "node",
+    platform: 'node',
     aliases: runtimeAliases(runtimeDir),
   })
 
   const mod = await import(pathToFileURL(outfile).href + `?t=${Date.now()}`)
   const config = mod.default ?? {}
-  ok(sanitizeConfig(config))
+  await ok(sanitizeConfig(config))
 } catch (error) {
-  fail("RUV1600", error instanceof Error ? error.message : String(error), error?.stack)
+  await fail('RUV1600', error instanceof Error ? error.message : String(error), error?.stack)
 }
 
 function findConfig(root) {
-  for (const fileName of ["ruvyxa.config.ts", "ruvyxa.config.mts", "ruvyxa.config.js", "ruvyxa.config.mjs"]) {
+  for (const fileName of [
+    'ruvyxa.config.ts',
+    'ruvyxa.config.mts',
+    'ruvyxa.config.js',
+    'ruvyxa.config.mjs',
+  ]) {
     const file = path.join(root, fileName)
     if (existsSync(file)) return file
   }
@@ -96,13 +101,15 @@ function sanitizeConfig(config) {
 }
 
 function objectValue(source, value) {
-  if (!source || typeof source !== "object") return undefined
-  const filtered = Object.fromEntries(Object.entries(value).filter(([, item]) => item !== undefined))
+  if (!source || typeof source !== 'object') return undefined
+  const filtered = Object.fromEntries(
+    Object.entries(value).filter(([, item]) => item !== undefined),
+  )
   return Object.keys(filtered).length > 0 ? filtered : undefined
 }
 
 function stringValue(value) {
-  return typeof value === "string" ? value : undefined
+  return typeof value === 'string' ? value : undefined
 }
 
 function numberValue(value) {
@@ -110,7 +117,7 @@ function numberValue(value) {
 }
 
 function booleanValue(value) {
-  return typeof value === "boolean" ? value : undefined
+  return typeof value === 'boolean' ? value : undefined
 }
 
 function safeJsonValue(value) {
@@ -126,23 +133,35 @@ function safeJsonValue(value) {
 function pluginDescriptors(value) {
   if (!Array.isArray(value)) return undefined
   const plugins = value
-    .filter((plugin) => plugin && typeof plugin === "object" && typeof plugin.name === "string")
+    .filter((plugin) => plugin && typeof plugin === 'object' && typeof plugin.name === 'string')
     .map((plugin) => ({
       name: plugin.name,
       enforce: stringValue(plugin.enforce),
-      resolveId: typeof plugin.resolveId === "function",
-      transform: typeof plugin.transform === "function",
+      resolveId: typeof plugin.resolveId === 'function',
+      transform: typeof plugin.transform === 'function',
     }))
 
   return plugins.length > 0 ? plugins : undefined
 }
 
-function ok(config) {
-  process.stdout.write(JSON.stringify({ ok: true, config }))
+async function ok(config) {
+  await writeJson({ ok: true, config })
   process.exit(0)
 }
 
-function fail(code, message, stack) {
-  process.stdout.write(JSON.stringify({ ok: false, code, message, stack }))
+async function fail(code, message, stack) {
+  await writeJson({ ok: false, code, message, stack })
   process.exit(1)
+}
+
+function writeJson(payload) {
+  return new Promise((resolve, reject) => {
+    process.stdout.write(JSON.stringify(payload), (error) => {
+      if (error) {
+        reject(error)
+      } else {
+        resolve()
+      }
+    })
+  })
 }

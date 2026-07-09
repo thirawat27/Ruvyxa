@@ -1,12 +1,14 @@
 # Data Loading
 
-Ruvyxa keeps data fetching on the server by default. Co-locate a `server.ts` file next to any page to define loaders that run during SSR — never in the browser.
+Ruvyxa keeps data fetching on the server by default. Co-locate a `server.ts` file next to any page
+to define loaders that run during SSR — never in the browser.
 
 ---
 
 ## Loaders
 
-A loader is a server-side function that fetches data for a page. Place it in `server.ts` beside the page that needs the data:
+A loader is a server-side function that fetches data for a page. Place it in `server.ts` beside the
+page that needs the data:
 
 ```
 app/blog/[slug]/
@@ -16,7 +18,7 @@ app/blog/[slug]/
 
 ```ts
 // app/blog/[slug]/server.ts
-import { loader } from "ruvyxa/server"
+import { loader } from 'ruvyxa/server'
 
 export const getPost = loader(async ({ params }) => {
   const post = await db.posts.findBySlug(params.slug)
@@ -26,11 +28,11 @@ export const getPost = loader(async ({ params }) => {
 
 ### What loaders receive
 
-| Property | Type | Description |
-|----------|------|-------------|
-| `params` | `Record<string, string>` | Matched dynamic route parameters |
-| `request` | `Request` | The incoming HTTP request |
-| `cache` | `CacheHelper` | Built-in caching utility |
+| Property  | Type                     | Description                      |
+| --------- | ------------------------ | -------------------------------- |
+| `params`  | `Record<string, string>` | Matched dynamic route parameters |
+| `request` | `Request`                | The incoming HTTP request        |
+| `cache`   | `CacheHelper`            | Built-in caching utility         |
 
 ---
 
@@ -40,22 +42,25 @@ Use the `cache` helper for time-based caching of expensive operations:
 
 ```ts
 export const getPost = loader(async ({ params, cache }) => {
-  return cache(`post:${params.slug}`).ttl("5m").get(async () => {
-    return db.posts.findBySlug(params.slug)
-  })
+  return cache(`post:${params.slug}`)
+    .ttl('5m')
+    .get(async () => {
+      return db.posts.findBySlug(params.slug)
+    })
 })
 ```
 
 ### TTL format
 
-| Value | Duration |
-|-------|----------|
+| Value   | Duration   |
+| ------- | ---------- |
 | `"30s"` | 30 seconds |
-| `"5m"` | 5 minutes |
-| `"1h"` | 1 hour |
-| `"1d"` | 1 day |
+| `"5m"`  | 5 minutes  |
+| `"1h"`  | 1 hour     |
+| `"1d"`  | 1 day      |
 
-The cache is per-process and invalidated on server restart. For distributed caching, connect your own Redis or Memcached client inside the loader body.
+The cache is per-process and invalidated on server restart. For distributed caching, connect your
+own Redis or Memcached client inside the loader body.
 
 ---
 
@@ -64,7 +69,7 @@ The cache is per-process and invalidated on server restart. For distributed cach
 A single `server.ts` can export multiple loaders:
 
 ```ts
-import { loader } from "ruvyxa/server"
+import { loader } from 'ruvyxa/server'
 
 export const getPost = loader(async ({ params }) => {
   return db.posts.findBySlug(params.slug)
@@ -82,7 +87,7 @@ export const getRelatedPosts = loader(async ({ params }) => {
 Loaders run on the server, so they have access to all environment variables:
 
 ```ts
-import { loader } from "ruvyxa/server"
+import { loader } from 'ruvyxa/server'
 
 export const getUser = loader(async ({ params }) => {
   const res = await fetch(`${process.env.API_BASE_URL}/users/${params.id}`, {
@@ -92,7 +97,8 @@ export const getUser = loader(async ({ params }) => {
 })
 ```
 
-Private env vars (`process.env.DATABASE_URL`, `process.env.API_SECRET`, etc.) are never exposed to the browser.
+Private env vars (`process.env.DATABASE_URL`, `process.env.API_SECRET`, etc.) are never exposed to
+the browser.
 
 ---
 
@@ -103,17 +109,18 @@ Ruvyxa enforces a strict server/client boundary at build time:
 - Loader code in `server.ts` is server-only. It never reaches the browser bundle.
 - Page code in `page.tsx` is server-rendered but also hydrated in the browser.
 - If a page imports a module marked `"server-only"`, the build fails with `RUV1007`.
-- If browser-reachable code reads a private `process.env.*` variable, the build fails with `RUV1008`.
+- If browser-reachable code reads a private `process.env.*` variable, the build fails with
+  `RUV1008`.
 
 ### Safe patterns
 
 ```ts
 // server.ts — safe: runs only on the server
-import { loader } from "ruvyxa/server"
-import { db } from "../../lib/db" // server-only database client
+import { loader } from 'ruvyxa/server'
+import { db } from '../../lib/db' // server-only database client
 
 export const getData = loader(async () => {
-  return db.query("SELECT * FROM posts")
+  return db.query('SELECT * FROM posts')
 })
 ```
 
@@ -121,7 +128,7 @@ export const getData = loader(async () => {
 
 ```tsx
 // page.tsx — unsafe: this code reaches the browser
-import { db } from "../../lib/db" // RUV1007 if db imports "server-only"
+import { db } from '../../lib/db' // RUV1007 if db imports "server-only"
 
 export default function Page() {
   const url = process.env.DATABASE_URL // RUV1008: private env in client
@@ -133,23 +140,25 @@ export default function Page() {
 
 ## Validation
 
-Run `ruvyxa check` before deploying to catch boundary violations, type errors, and dev/prod parity issues:
+Run `ruvyxa check` before deploying to catch boundary violations, type errors, and dev/prod parity
+issues:
 
 ```bash
 ruvyxa check
 ```
 
-This walks the import graph of every page, reports server-only code or private env vars that are reachable from client bundles, and smoke-renders page routes in both dev and production mode.
+This walks the import graph of every page, reports server-only code or private env vars that are
+reachable from client bundles, and smoke-renders page routes in both dev and production mode.
 
 ---
 
 ## Common Mistakes
 
-| Mistake | Diagnostic | Fix |
-|---------|-----------|-----|
-| Importing `server-only` module from a page | `RUV1007` | Move the import into `server.ts` |
-| Reading `process.env.SECRET` in page code | `RUV1008` | Use the value in a loader and pass data as props |
-| Putting shared utilities in `server/` folder | `RUV1010` | Move browser-safe code outside `server/` |
+| Mistake                                      | Diagnostic | Fix                                              |
+| -------------------------------------------- | ---------- | ------------------------------------------------ |
+| Importing `server-only` module from a page   | `RUV1007`  | Move the import into `server.ts`                 |
+| Reading `process.env.SECRET` in page code    | `RUV1008`  | Use the value in a loader and pass data as props |
+| Putting shared utilities in `server/` folder | `RUV1010`  | Move browser-safe code outside `server/`         |
 
 ---
 

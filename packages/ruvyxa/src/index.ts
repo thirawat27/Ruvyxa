@@ -1,1 +1,1 @@
-export * from "@ruvyxa/core"
+export * from '@ruvyxa/core'

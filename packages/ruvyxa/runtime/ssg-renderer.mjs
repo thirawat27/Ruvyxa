@@ -16,18 +16,24 @@
  * Otherwise it renders the page and returns:
  *   { ok: true, html: "..." }
  */
-import { createRequire } from "node:module"
-import path from "node:path"
-import { pathToFileURL } from "node:url"
-import { Writable } from "node:stream"
+import { createRequire } from 'node:module'
+import path from 'node:path'
+import { pathToFileURL } from 'node:url'
+import { Writable } from 'node:stream'
 
-import { cacheFileName, collectLayouts, compileBundle, runtimeAliases, toImportPath } from "./compiler.mjs"
+import {
+  cacheFileName,
+  collectLayouts,
+  compileBundle,
+  runtimeAliases,
+  toImportPath,
+} from './compiler.mjs'
 
-const [projectRootArg, appDirArg, pageFileArg, requestPath = "/", mode = "full"] =
+const [projectRootArg, appDirArg, pageFileArg, requestPath = '/', mode = 'full'] =
   process.argv.slice(2)
 
 if (!projectRootArg || !appDirArg || !pageFileArg) {
-  fail("RUV1501", "SSG renderer requires projectRoot, appDir, and pageFile arguments.")
+  fail('RUV1501', 'SSG renderer requires projectRoot, appDir, and pageFile arguments.')
 }
 
 const projectRoot = path.resolve(projectRootArg)
@@ -36,11 +42,11 @@ const pageFile = path.resolve(pageFileArg)
 const runtimeDir = path.dirname(new URL(import.meta.url).pathname)
 
 try {
-  const requireFromProject = createRequire(path.join(projectRoot, "package.json"))
-  requireFromProject.resolve("react")
-  requireFromProject.resolve("react-dom/server")
+  const requireFromProject = createRequire(path.join(projectRoot, 'package.json'))
+  requireFromProject.resolve('react')
+  requireFromProject.resolve('react-dom/server')
 
-  if (requestPath === "__resolve_params__") {
+  if (requestPath === '__resolve_params__') {
     // Resolve static params mode
     const params = await resolveStaticParams()
     process.stdout.write(JSON.stringify({ ok: true, params }))
@@ -50,31 +56,31 @@ try {
     process.stdout.write(JSON.stringify({ ok: true, html }))
   }
 } catch (error) {
-  fail("RUV1500", error instanceof Error ? error.message : String(error), error?.stack)
+  fail('RUV1500', error instanceof Error ? error.message : String(error), error?.stack)
 }
 
 /**
  * Resolve getStaticParams from the page module.
  */
 async function resolveStaticParams() {
-  const cacheDir = path.join(projectRoot, ".ruvyxa", "cache", "ssg")
+  const cacheDir = path.join(projectRoot, '.ruvyxa', 'cache', 'ssg')
   const moduleCode = `export { getStaticParams } from ${JSON.stringify(toImportPath(pageFile))}`
 
-  const outfile = path.join(cacheDir, cacheFileName([moduleCode, pageFile, "params"], "mjs"))
+  const outfile = path.join(cacheDir, cacheFileName([moduleCode, pageFile, 'params'], 'mjs'))
 
   await compileBundle({
     projectRoot,
     entrySource: moduleCode,
-    sourcefile: "ruvyxa:ssg-params-entry.ts",
+    sourcefile: 'ruvyxa:ssg-params-entry.ts',
     outfile,
-    platform: "node",
-    external: ["react", "react-dom/server", "node:stream"],
+    platform: 'node',
+    external: ['react', 'react-dom/server', 'node:stream'],
     aliases: runtimeAliases(runtimeDir),
   })
 
   const mod = await import(pathToFileURL(outfile).href + `?t=${Date.now()}`)
 
-  if (typeof mod.getStaticParams !== "function") {
+  if (typeof mod.getStaticParams !== 'function') {
     return []
   }
 
@@ -90,7 +96,7 @@ async function resolveStaticParams() {
  */
 async function renderPage(renderPath, renderMode) {
   const layouts = collectLayouts(appDir, path.dirname(pageFile))
-  const cacheDir = path.join(projectRoot, ".ruvyxa", "cache", "ssg")
+  const cacheDir = path.join(projectRoot, '.ruvyxa', 'cache', 'ssg')
 
   const imports = [`import Page from ${JSON.stringify(toImportPath(pageFile))}`]
   const wrappers = []
@@ -101,21 +107,21 @@ async function renderPage(renderPath, renderMode) {
   })
 
   // Extract params from the renderPath by comparing with the route pattern
-  const paramsJson = "{}"
+  const paramsJson = '{}'
 
   let moduleCode
-  if (renderMode === "ppr") {
+  if (renderMode === 'ppr') {
     // PPR mode: render with renderToPipeableStream but only wait for the shell
     // (Suspense boundaries will show their fallback content)
     moduleCode = `
 import React from "react"
 import { renderToPipeableStream } from "react-dom/server"
 import { Writable } from "node:stream"
-${imports.join("\n")}
+${imports.join('\n')}
 
 export async function render(ctx) {
   let tree = React.createElement(Page, { params: ctx.params ?? {}, requestPath: ctx.path })
-  for (const Layout of [${wrappers.join(", ")}].reverse()) {
+  for (const Layout of [${wrappers.join(', ')}].reverse()) {
     tree = React.createElement(Layout, null, tree)
   }
 
@@ -152,11 +158,11 @@ export async function render(ctx) {
 import React from "react"
 import { renderToPipeableStream } from "react-dom/server"
 import { Writable } from "node:stream"
-${imports.join("\n")}
+${imports.join('\n')}
 
 export async function render(ctx) {
   let tree = React.createElement(Page, { params: ctx.params ?? {}, requestPath: ctx.path })
-  for (const Layout of [${wrappers.join(", ")}].reverse()) {
+  for (const Layout of [${wrappers.join(', ')}].reverse()) {
     tree = React.createElement(Layout, null, tree)
   }
 
@@ -188,15 +194,15 @@ export async function render(ctx) {
 `
   }
 
-  const outfile = path.join(cacheDir, cacheFileName([moduleCode, pageFile, renderPath], "mjs"))
+  const outfile = path.join(cacheDir, cacheFileName([moduleCode, pageFile, renderPath], 'mjs'))
 
   await compileBundle({
     projectRoot,
     entrySource: moduleCode,
-    sourcefile: "ruvyxa:ssg-entry.tsx",
+    sourcefile: 'ruvyxa:ssg-entry.tsx',
     outfile,
-    platform: "node",
-    external: ["react", "react-dom/server", "node:stream"],
+    platform: 'node',
+    external: ['react', 'react-dom/server', 'node:stream'],
     aliases: runtimeAliases(runtimeDir),
   })
 

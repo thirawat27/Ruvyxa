@@ -8,7 +8,7 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use axum::body::Bytes;
+use axum::body::{to_bytes, Body, Bytes};
 use axum::extract::ws::{Message, WebSocketUpgrade};
 use axum::extract::{DefaultBodyLimit, Query, State};
 use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Request, StatusCode};
@@ -41,6 +41,7 @@ mod hmr_tracker;
 pub use hmr_tracker::{HmrEventType, HmrTracker, HmrUpdate};
 
 const MAX_ACTION_BODY_BYTES: usize = 64 * 1024;
+const MAX_API_BODY_BYTES: usize = 1024 * 1024;
 const ACTION_RATE_LIMIT_MAX: usize = 60;
 const ACTION_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
 const PORT_FALLBACK_SCAN_LIMIT: u16 = 100;
@@ -802,16 +803,40 @@ async fn trace_endpoint(
     with_security_headers(response)
 }
 
-async fn handle_request<B>(
+async fn handle_request(
     State(state): State<Arc<AppState>>,
-    request: Request<B>,
+    request: Request<Body>,
 ) -> impl IntoResponse {
-    let headers = request.headers().clone();
+    let (parts, body) = request.into_parts();
+    let headers = parts.headers.clone();
+    let method = parts.method.as_str().to_string();
+    let request_path = parts.uri.path().to_string();
+    let request_body = if request_method_allows_body(&method) {
+        match to_bytes(body, MAX_API_BODY_BYTES).await {
+            Ok(bytes) if bytes.is_empty() => None,
+            Ok(bytes) => Some(String::from_utf8_lossy(&bytes).into_owned()),
+            Err(error) => {
+                return with_security_headers(
+                    (
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        format!(
+                            "Request body exceeded the API body limit or could not be read: {error}"
+                        ),
+                    )
+                        .into_response(),
+                );
+            }
+        }
+    } else {
+        None
+    };
+
     match render_request_pooled(
         &state,
-        request.uri().path(),
-        request.method().as_str(),
+        &request_path,
+        &method,
         &headers,
+        request_body.as_deref(),
     )
     .await
     {
@@ -833,6 +858,22 @@ async fn handle_request<B>(
             }
         }
     }
+}
+
+fn request_method_allows_body(method: &str) -> bool {
+    !method.eq_ignore_ascii_case("GET") && !method.eq_ignore_ascii_case("HEAD")
+}
+
+fn worker_request_headers(headers: &HeaderMap) -> BTreeMap<String, String> {
+    headers
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|value| (name.as_str().to_string(), value.to_string()))
+        })
+        .collect()
 }
 
 pub fn render_request(config: &ServerConfig, request_path: &str, method: &str) -> Result<Response> {
@@ -942,6 +983,7 @@ async fn render_request_pooled(
     request_path: &str,
     method: &str,
     request_headers: &HeaderMap,
+    request_body: Option<&str>,
 ) -> Result<Response> {
     if let Some(client_response) = serve_client_file(
         &state.config.client_dir,
@@ -985,11 +1027,14 @@ async fn render_request_pooled(
             Ok(html_response(StatusCode::OK, html))
         }
         RouteKind::Api => {
+            let headers = worker_request_headers(request_headers);
             render_api_pooled(
                 state,
                 route_match.route,
                 request_path,
                 method,
+                &headers,
+                request_body,
                 &route_match.params,
             )
             .await
@@ -1418,6 +1463,8 @@ async fn render_api_pooled(
     route: &RouteEntry,
     request_path: &str,
     method: &str,
+    headers: &BTreeMap<String, String>,
+    body: Option<&str>,
     params: &BTreeMap<String, String>,
 ) -> Result<Response> {
     let response = state
@@ -1427,6 +1474,8 @@ async fn render_api_pooled(
             &route.file,
             method,
             request_path,
+            headers,
+            body,
             params,
         )
         .await?;

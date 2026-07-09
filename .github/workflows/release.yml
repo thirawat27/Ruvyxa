@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - "v*.*.*"
+      - 'v*.*.*'
   workflow_dispatch:
 
 permissions:
@@ -15,8 +15,8 @@ concurrency:
   cancel-in-progress: false
 
 env:
-  CARGO_HTTP_TIMEOUT: "120"
-  CARGO_NET_RETRY: "10"
+  CARGO_HTTP_TIMEOUT: '120'
+  CARGO_NET_RETRY: '10'
   CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
 
 defaults:
@@ -70,20 +70,20 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            package: "@ruvyxa/cli-win32-x64"
+            package: '@ruvyxa/cli-win32-x64'
           - os: ubuntu-latest
-            package: "@ruvyxa/cli-linux-x64"
+            package: '@ruvyxa/cli-linux-x64'
           - os: ubuntu-24.04-arm
-            package: "@ruvyxa/cli-linux-arm64"
+            package: '@ruvyxa/cli-linux-arm64'
           - os: macos-latest
-            package: "@ruvyxa/cli-darwin-arm64"
+            package: '@ruvyxa/cli-darwin-arm64'
 
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: "ruvyxa-release-${{ matrix.os }}"
+          shared-key: 'ruvyxa-release-${{ matrix.os }}'
       - uses: pnpm/action-setup@v5
       - uses: actions/setup-node@v4
         with:
@@ -146,7 +146,7 @@ jobs:
       - name: Build packages
         run: pnpm -r build
         env:
-          SKIP_NATIVE_BUILD: "1"
+          SKIP_NATIVE_BUILD: '1'
       - name: Validate release metadata
         run: pnpm release:validate
       - name: Publish @ruvyxa/core
@@ -172,7 +172,7 @@ jobs:
         run: node scripts/publish-if-new.mjs ruvyxa
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          SKIP_NATIVE_BUILD: "1"
+          SKIP_NATIVE_BUILD: '1'
       - name: Publish create-ruvyxa
         run: node scripts/publish-if-new.mjs create-ruvyxa
         env:

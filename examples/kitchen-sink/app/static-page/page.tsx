@@ -14,16 +14,19 @@ export default function StaticPage() {
     <main className="page-wide">
       <h1>SSG: Static Page</h1>
       <p>
-        This page was pre-rendered at <strong>build time</strong>. The production
-        server serves it directly as an HTML file — no Node.js worker is invoked
-        per request.
+        This page was pre-rendered at <strong>build time</strong>. The production server serves it
+        directly as an HTML file — no Node.js worker is invoked per request.
       </p>
 
       <section>
         <h2>How it works</h2>
         <ul>
-          <li>At build time, Ruvyxa calls <code>ssg-renderer.mjs</code> to render this page</li>
-          <li>The output HTML is saved to <code>{'.ruvyxa/prerender/static-page/index.html'}</code></li>
+          <li>
+            At build time, Ruvyxa calls <code>ssg-renderer.mjs</code> to render this page
+          </li>
+          <li>
+            The output HTML is saved to <code>{'.ruvyxa/prerender/static-page/index.html'}</code>
+          </li>
           <li>The production server serves it directly with no runtime cost</li>
         </ul>
       </section>

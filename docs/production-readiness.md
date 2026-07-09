@@ -1,6 +1,7 @@
 # Production Readiness
 
-Ruvyxa 1.0 is production-ready when the full CI pipeline passes. This document defines the quality gates, runtime guarantees, and release checklist.
+Ruvyxa 1.0 is production-ready when the full CI pipeline passes. This document defines the quality
+gates, runtime guarantees, and release checklist.
 
 ---
 
@@ -12,28 +13,31 @@ For application projects, use the single app-level gate first:
 ruvyxa check
 ```
 
-It runs TypeScript type checking when `tsconfig.json` is present, builds production output, compares dev/prod route behavior, and smoke-renders every page route.
+It runs TypeScript type checking when `tsconfig.json` is present, builds production output, compares
+dev/prod route behavior, and smoke-renders every page route.
 
 All of the following must pass before a release:
 
-| Gate | Command |
-|------|---------|
-| Rust formatting | `cargo fmt --all -- --check` |
-| Rust tests | `cargo test --workspace` |
-| Rust lints | `cargo clippy --workspace -- -D warnings` |
-| TypeScript build | `pnpm -r build` |
-| TypeScript type check | `pnpm -r check` |
-| TypeScript tests | `pnpm -r test` |
-| Package metadata | `pnpm release:validate` |
-| Pack smoke test | `pnpm pack:smoke` |
-| App deploy gate | `ruvyxa check --root examples/kitchen-sink` |
+| Gate                       | Command                                           |
+| -------------------------- | ------------------------------------------------- |
+| Rust formatting            | `cargo fmt --all -- --check`                      |
+| Rust tests                 | `cargo test --workspace`                          |
+| Rust lints                 | `cargo clippy --workspace -- -D warnings`         |
+| TypeScript build           | `pnpm -r build`                                   |
+| TypeScript type check      | `pnpm -r check`                                   |
+| TypeScript tests           | `pnpm -r test`                                    |
+| Package metadata           | `pnpm release:validate`                           |
+| Pack smoke test            | `pnpm pack:smoke`                                 |
+| App deploy gate            | `ruvyxa check --root examples/kitchen-sink`       |
 | Dev/prod parity drill-down | `ruvyxa test:parity --root examples/kitchen-sink` |
 
 ---
 
 ## Test Layout
 
-Standalone JavaScript and TypeScript tests are centralized under `tests/`, grouped by package. Package `test` scripts point to their own subset in `tests/packages/...`; Rust unit tests remain inline in their crates. See [Testing](testing.md) for details.
+Standalone JavaScript and TypeScript tests are centralized under `tests/`, grouped by package.
+Package `test` scripts point to their own subset in `tests/packages/...`; Rust unit tests remain
+inline in their crates. See [Testing](testing.md) for details.
 
 ---
 
@@ -41,26 +45,27 @@ Standalone JavaScript and TypeScript tests are centralized under `tests/`, group
 
 ### Route Semantics
 
-- `ruvyxa dev`, `ruvyxa build`, and `ruvyxa start` share the same route discovery and matching algorithm.
+- `ruvyxa dev`, `ruvyxa build`, and `ruvyxa start` share the same route discovery and matching
+  algorithm.
 - The parity check enforces this at CI time.
 
 ### Build Output
 
 Production builds emit a deterministic structure:
 
-| Directory | Contents |
-|-----------|----------|
-| `.ruvyxa/server/` | Production route source for SSR |
-| `.ruvyxa/client/` | Route-level hydration bundles |
-| `.ruvyxa/assets/` | Static files from `public/` |
-| `.ruvyxa/manifest.json` | Full route manifest |
-| `.ruvyxa/build.json` | Build metadata and security config |
+| Directory               | Contents                           |
+| ----------------------- | ---------------------------------- |
+| `.ruvyxa/server/`       | Production route source for SSR    |
+| `.ruvyxa/client/`       | Route-level hydration bundles      |
+| `.ruvyxa/assets/`       | Static files from `public/`        |
+| `.ruvyxa/manifest.json` | Full route manifest                |
+| `.ruvyxa/build.json`    | Build metadata and security config |
 
-Builds are staged before they replace the active output. Route validation,
-server/client boundary checks, asset copying, client bundle generation, and
-metadata writing must all succeed before `.ruvyxa/server`, `.ruvyxa/client`,
-`.ruvyxa/assets`, `.ruvyxa/manifest.json`, or `.ruvyxa/build.json` are swapped
-into place. The `.ruvyxa/cache/` directory is preserved across builds.
+Builds are staged before they replace the active output. Route validation, server/client boundary
+checks, asset copying, client bundle generation, and metadata writing must all succeed before
+`.ruvyxa/server`, `.ruvyxa/client`, `.ruvyxa/assets`, `.ruvyxa/manifest.json`, or
+`.ruvyxa/build.json` are swapped into place. The `.ruvyxa/cache/` directory is preserved across
+builds.
 
 ### Client Bundles
 
@@ -101,13 +106,13 @@ Resolution order:
 
 ### Supported Platforms
 
-| Package | OS | Architecture |
-|---------|----|-------------|
-| `@ruvyxa/cli-win32-x64` | Windows | x64 |
-| `@ruvyxa/cli-linux-x64` | Linux | x64 |
-| `@ruvyxa/cli-linux-arm64` | Linux | arm64 |
-| `@ruvyxa/cli-darwin-x64` | macOS | x64 |
-| `@ruvyxa/cli-darwin-arm64` | macOS | arm64 (Apple Silicon) |
+| Package                    | OS      | Architecture          |
+| -------------------------- | ------- | --------------------- |
+| `@ruvyxa/cli-win32-x64`    | Windows | x64                   |
+| `@ruvyxa/cli-linux-x64`    | Linux   | x64                   |
+| `@ruvyxa/cli-linux-arm64`  | Linux   | arm64                 |
+| `@ruvyxa/cli-darwin-x64`   | macOS   | x64                   |
+| `@ruvyxa/cli-darwin-arm64` | macOS   | arm64 (Apple Silicon) |
 
 ---
 
@@ -150,7 +155,8 @@ Use the GitHub Actions workflow (`.github/workflows/release.yml`) for actual rel
 3. Publishes npm packages with provenance.
 4. Creates a GitHub release with changelog.
 
-Never publish manually to npm unless the CI pipeline is unavailable and the full checklist above passes locally.
+Never publish manually to npm unless the CI pipeline is unavailable and the full checklist above
+passes locally.
 
 ---
 

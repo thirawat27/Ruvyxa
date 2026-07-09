@@ -1,6 +1,7 @@
 # Contributing to Ruvyxa
 
-Thanks for your interest in contributing. This guide covers development setup, conventions, and how to submit changes.
+Thanks for your interest in contributing. This guide covers development setup, conventions, and how
+to submit changes.
 
 ---
 
@@ -83,7 +84,8 @@ ruvyxa/
 
 ### General
 
-- Keep dev and production behavior aligned. Shared logic goes in shared paths, not command-specific branches.
+- Keep dev and production behavior aligned. Shared logic goes in shared paths, not command-specific
+  branches.
 - Build validation must catch boundary leaks before output is emitted.
 - Update `templates/minimal/` when a feature affects new projects.
 - Update `examples/kitchen-sink/` when a feature needs demonstration.
@@ -188,4 +190,5 @@ Be respectful. Keep discussions technical and constructive. We're building somet
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the [MIT License](LICENSE).
+By contributing, you agree that your contributions will be licensed under the
+[Apache 2.0 License](LICENSE).

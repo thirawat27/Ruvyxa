@@ -16,7 +16,7 @@ export type LoaderHandler<TResult> = (ctx: LoaderContext) => TResult | Promise<T
 export interface Loader<TResult> {
   (ctx?: Partial<LoaderContext>): Promise<TResult>
   ruvyxa: {
-    kind: "loader"
+    kind: 'loader'
   }
 }
 
@@ -24,14 +24,14 @@ export function loader<TResult>(handler: LoaderHandler<TResult>): Loader<TResult
   const callable = async (ctx: Partial<LoaderContext> = {}) => {
     return handler({
       params: ctx.params ?? {},
-      request: ctx.request ?? new Request("http://localhost/"),
+      request: ctx.request ?? new Request('http://localhost/'),
       cache,
     })
   }
 
   return Object.assign(callable, {
     ruvyxa: {
-      kind: "loader" as const,
+      kind: 'loader' as const,
     },
   })
 }
@@ -50,7 +50,7 @@ export interface ActionBuilder<TInput = unknown> {
 export interface ServerAction<TInput, TResult> {
   (input: TInput, ctx?: Partial<ActionContext<TInput>>): Promise<TResult>
   ruvyxa: {
-    kind: "action"
+    kind: 'action'
   }
 }
 
@@ -66,7 +66,7 @@ function createActionBuilder<TInput>(schema?: Schema<TInput>): ActionBuilder<TIn
         const input = schema ? schema.parse(rawInput) : rawInput
         return handler({
           input,
-          request: ctx.request ?? new Request("http://localhost/"),
+          request: ctx.request ?? new Request('http://localhost/'),
           user: ctx.user,
           invalidate: ctx.invalidate ?? (() => {}),
         })
@@ -74,7 +74,7 @@ function createActionBuilder<TInput>(schema?: Schema<TInput>): ActionBuilder<TIn
 
       return Object.assign(callable, {
         ruvyxa: {
-          kind: "action" as const,
+          kind: 'action' as const,
         },
       })
     },
@@ -196,10 +196,10 @@ const cacheStore = new CacheStore()
 
 // Periodic cleanup every 60s to reclaim memory from fully expired entries
 let cleanupTimer: ReturnType<typeof setInterval> | undefined
-if (typeof setInterval !== "undefined") {
+if (typeof setInterval !== 'undefined') {
   cleanupTimer = setInterval(() => cacheStore.prune(), 60_000)
   // Don't hold the process open
-  if (cleanupTimer && typeof cleanupTimer === "object" && "unref" in cleanupTimer) {
+  if (cleanupTimer && typeof cleanupTimer === 'object' && 'unref' in cleanupTimer) {
     ;(cleanupTimer as { unref(): void }).unref()
   }
 }
@@ -209,15 +209,15 @@ function parseTtl(value: string): number {
   if (!match) return 60_000 // default 60s
   const amount = parseInt(match[1], 10)
   switch (match[2]) {
-    case "ms":
+    case 'ms':
       return amount
-    case "s":
+    case 's':
       return amount * 1000
-    case "m":
+    case 'm':
       return amount * 60_000
-    case "h":
+    case 'h':
       return amount * 3_600_000
-    case "d":
+    case 'd':
       return amount * 86_400_000
     default:
       return 60_000
@@ -310,7 +310,7 @@ export function invalidateCache(keyOrPrefix?: string): void {
     return
   }
   for (const key of cacheStore.keys()) {
-    if (key === keyOrPrefix || key.startsWith(keyOrPrefix + ":")) {
+    if (key === keyOrPrefix || key.startsWith(keyOrPrefix + ':')) {
       cacheStore.delete(key)
     }
   }
@@ -335,7 +335,7 @@ export function redirect(location: string, status = 302): Response {
   })
 }
 
-export function notFound(message = "Not found"): Response {
+export function notFound(message = 'Not found'): Response {
   return new Response(message, { status: 404 })
 }
 

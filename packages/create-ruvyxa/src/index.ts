@@ -1,20 +1,20 @@
-import { access, constants, cp, readdir, stat } from "node:fs/promises"
-import { existsSync } from "node:fs"
-import { dirname, resolve, basename } from "node:path"
-import { fileURLToPath } from "node:url"
+import { access, constants, cp, readdir, stat } from 'node:fs/promises'
+import { existsSync } from 'node:fs'
+import { dirname, resolve, basename } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
-export { detectPackageManager } from "./detect-pm.js"
-export type { PackageManager, PackageManagerInfo } from "./detect-pm.js"
+export { detectPackageManager } from './detect-pm.js'
+export type { PackageManager, PackageManagerInfo } from './detect-pm.js'
 
 /** Required files that must exist in the template for a valid scaffold. */
 const REQUIRED_TEMPLATE_FILES = [
-  "AGENTS.md",
-  "CLAUDE.md",
-  "app/page.tsx",
-  "app/layout.tsx",
-  "app/globals.css",
-  "package.json",
-  "ruvyxa.config.ts",
+  'AGENTS.md',
+  'CLAUDE.md',
+  'app/page.tsx',
+  'app/layout.tsx',
+  'app/globals.css',
+  'package.json',
+  'ruvyxa.config.ts',
 ] as const
 
 /** Characters that are invalid in directory names across platforms. */
@@ -41,25 +41,21 @@ const RESERVED_WINDOWS_NAMES = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i
  */
 export async function createRuvyxaApp(targetDir: string): Promise<void> {
   // --- Input Validation ---
-  if (!targetDir || typeof targetDir !== "string") {
-    throw new Error(
-      "Project directory name is required.\n" +
-      "  Usage: npx create-ruvyxa my-app",
-    )
+  if (!targetDir || typeof targetDir !== 'string') {
+    throw new Error('Project directory name is required.\n' + '  Usage: npx create-ruvyxa my-app')
   }
 
   const trimmed = targetDir.trim()
-  if (trimmed === "") {
+  if (trimmed === '') {
     throw new Error(
-      "Project directory name must not be empty.\n" +
-      "  Usage: npx create-ruvyxa my-app",
+      'Project directory name must not be empty.\n' + '  Usage: npx create-ruvyxa my-app',
     )
   }
 
   if (trimmed !== targetDir) {
     throw new Error(
-      "Project directory name must not start or end with whitespace.\n" +
-      "  Try a name like: my-ruvyxa-app",
+      'Project directory name must not start or end with whitespace.\n' +
+        '  Try a name like: my-ruvyxa-app',
     )
   }
 
@@ -67,28 +63,28 @@ export async function createRuvyxaApp(targetDir: string): Promise<void> {
   if (INVALID_DIR_CHARS.test(dirName)) {
     throw new Error(
       `Invalid project name "${dirName}". Directory names cannot contain: < > : " | ? *\n` +
-      "  Try a name with only letters, numbers, dashes, and underscores.",
+        '  Try a name with only letters, numbers, dashes, and underscores.',
     )
   }
 
   if (RESERVED_WINDOWS_NAMES.test(dirName) || /[. ]$/.test(dirName)) {
     throw new Error(
       `Invalid project name "${dirName}". This name is reserved or unsafe on Windows.\n` +
-      "  Try a name like: my-ruvyxa-app",
+        '  Try a name like: my-ruvyxa-app',
     )
   }
 
   if (dirName.length > MAX_DIR_NAME_LENGTH) {
     throw new Error(
       `Project name "${dirName}" is too long (${dirName.length} chars). ` +
-      `Maximum is ${MAX_DIR_NAME_LENGTH} characters.`,
+        `Maximum is ${MAX_DIR_NAME_LENGTH} characters.`,
     )
   }
 
-  if (dirName.startsWith(".") || dirName.startsWith("-")) {
+  if (dirName.startsWith('.') || dirName.startsWith('-')) {
     throw new Error(
       `Project name "${dirName}" should not start with "." or "-".\n` +
-      "  Try a name like: my-ruvyxa-app",
+        '  Try a name like: my-ruvyxa-app',
     )
   }
 
@@ -100,7 +96,7 @@ export async function createRuvyxaApp(targetDir: string): Promise<void> {
     if (!stats.isDirectory()) {
       throw new Error(
         `"${trimmed}" already exists and is not a directory.\n` +
-        "  Please choose a different name or remove the existing file.",
+          '  Please choose a different name or remove the existing file.',
       )
     }
 
@@ -108,7 +104,7 @@ export async function createRuvyxaApp(targetDir: string): Promise<void> {
     if (entries.length > 0) {
       throw new Error(
         `Directory "${trimmed}" already exists and is not empty.\n` +
-        "  Please choose a different name or remove the existing directory.",
+          '  Please choose a different name or remove the existing directory.',
       )
     }
   }
@@ -120,20 +116,20 @@ export async function createRuvyxaApp(targetDir: string): Promise<void> {
   } catch {
     throw new Error(
       `Cannot write to "${parentDir}". Permission denied.\n` +
-      "  Check that you have write access to the parent directory.",
+        '  Check that you have write access to the parent directory.',
     )
   }
 
   // --- Locate Template ---
   const here = dirname(fileURLToPath(import.meta.url))
-  const packagedTemplateDir = resolve(here, "../template/minimal")
-  const monorepoTemplateDir = resolve(here, "../../../templates/minimal")
+  const packagedTemplateDir = resolve(here, '../template/minimal')
+  const monorepoTemplateDir = resolve(here, '../../../templates/minimal')
   const templateDir = existsSync(packagedTemplateDir) ? packagedTemplateDir : monorepoTemplateDir
 
   if (!existsSync(templateDir)) {
     throw new Error(
-      "Template directory was not found. The create-ruvyxa package may be corrupted.\n" +
-      "  Try reinstalling: npm i -g create-ruvyxa@latest",
+      'Template directory was not found. The create-ruvyxa package may be corrupted.\n' +
+        '  Try reinstalling: npm i -g create-ruvyxa@latest',
     )
   }
 
@@ -148,9 +144,10 @@ export async function createRuvyxaApp(targetDir: string): Promise<void> {
 
   if (missingFiles.length > 0) {
     throw new Error(
-      "Template is incomplete. Missing required files:\n" +
-      missingFiles.map((f) => `  - ${f}`).join("\n") + "\n" +
-      "  The create-ruvyxa package may be corrupted. Try reinstalling.",
+      'Template is incomplete. Missing required files:\n' +
+        missingFiles.map((f) => `  - ${f}`).join('\n') +
+        '\n' +
+        '  The create-ruvyxa package may be corrupted. Try reinstalling.',
     )
   }
 
@@ -161,8 +158,8 @@ export async function createRuvyxaApp(targetDir: string): Promise<void> {
     const message = error instanceof Error ? error.message : String(error)
     throw new Error(
       `Failed to create project at "${trimmed}".\n` +
-      `  ${message}\n` +
-      "  Check disk space and filesystem permissions.",
+        `  ${message}\n` +
+        '  Check disk space and filesystem permissions.',
     )
   }
 }

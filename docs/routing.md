@@ -1,19 +1,20 @@
 # File Routing
 
-Ruvyxa uses file-system routing. Routes are discovered automatically from the `app/` directory — no manual registration, no configuration file.
+Ruvyxa uses file-system routing. Routes are discovered automatically from the `app/` directory — no
+manual registration, no configuration file.
 
 ---
 
 ## Conventions
 
-| File | Purpose |
-|------|---------|
-| `page.tsx` | A renderable page route |
-| `route.ts` | An API route (no UI) |
-| `layout.tsx` | A layout that wraps child pages |
-| `server.ts` | A server-side data loader |
-| `action.ts` | Server action definitions |
-| `client.tsx` | An explicit client hydration module |
+| File         | Purpose                              |
+| ------------ | ------------------------------------ |
+| `page.tsx`   | A renderable page route              |
+| `route.ts`   | An API route (no UI)                 |
+| `layout.tsx` | A layout that wraps child pages      |
+| `server.ts`  | A server-side data loader            |
+| `action.ts`  | Server action definitions            |
+| `client.tsx` | An explicit client hydration module  |
 | `global.css` | Global styles (imported from layout) |
 
 ---
@@ -22,11 +23,11 @@ Ruvyxa uses file-system routing. Routes are discovered automatically from the `a
 
 The folder structure under `app/` maps directly to URL paths:
 
-| File Path | URL |
-|-----------|-----|
-| `app/page.tsx` | `/` |
-| `app/about/page.tsx` | `/about` |
-| `app/blog/page.tsx` | `/blog` |
+| File Path                 | URL           |
+| ------------------------- | ------------- |
+| `app/page.tsx`            | `/`           |
+| `app/about/page.tsx`      | `/about`      |
+| `app/blog/page.tsx`       | `/blog`       |
 | `app/api/health/route.ts` | `/api/health` |
 
 ---
@@ -57,8 +58,7 @@ Use `[...name]` to match one or more segments:
 app/docs/[...path]/page.tsx  →  /docs/*path
 ```
 
-This matches `/docs/intro`, `/docs/guides/routing`, `/docs/a/b/c`, etc.,
-but not `/docs`.
+This matches `/docs/intro`, `/docs/guides/routing`, `/docs/a/b/c`, etc., but not `/docs`.
 
 ---
 
@@ -70,12 +70,10 @@ Use `[[...name]]` when the catch-all may consume zero segments:
 app/shop/[[...category]]/page.tsx  →  /shop/*category?
 ```
 
-This matches `/shop`, `/shop/electronics`, and
-`/shop/electronics/phones`. Ruvyxa currently passes a matched catch-all value
-as a slash-joined string (for example, `"electronics/phones"`).
+This matches `/shop`, `/shop/electronics`, and `/shop/electronics/phones`. Ruvyxa currently passes a
+matched catch-all value as a slash-joined string (for example, `"electronics/phones"`).
 
-`[[name]]` is not a valid App Router convention and fails discovery with
-`RUV1002`.
+`[[name]]` is not a valid App Router convention and fails discovery with `RUV1002`.
 
 ---
 
@@ -101,8 +99,8 @@ Prefix a folder with `@` to create a named slot (excluded from URL):
 app/@sidebar/page.tsx  →  (not routable, used as a slot)
 ```
 
-Slot trees are excluded from standalone route discovery. Full parallel-route
-rendering semantics are not implemented yet.
+Slot trees are excluded from standalone route discovery. Full parallel-route rendering semantics are
+not implemented yet.
 
 ---
 
@@ -114,8 +112,7 @@ Prefix a folder with `_` to keep the entire subtree out of routing:
 app/blog/_components/page.tsx  →  (not routable)
 ```
 
-Use private folders to colocate implementation files without accidentally
-publishing a URL.
+Use private folders to colocate implementation files without accidentally publishing a URL.
 
 ---
 
@@ -133,7 +130,8 @@ app/
     └── [slug]/page.tsx
 ```
 
-Layout nesting is automatic. A page at `/blog/hello` receives the layout chain: root layout → blog layout → page.
+Layout nesting is automatic. A page at `/blog/hello` receives the layout chain: root layout → blog
+layout → page.
 
 ---
 
@@ -161,7 +159,8 @@ API routes do not render HTML and cannot coexist with `page.tsx` in the same fol
 
 ## Route Manifest
 
-During build, Ruvyxa writes a route manifest to `.ruvyxa/manifest.json` containing every discovered route with its:
+During build, Ruvyxa writes a route manifest to `.ruvyxa/manifest.json` containing every discovered
+route with its:
 
 - Route path and ID
 - Route kind (page or API)
@@ -187,16 +186,17 @@ Inspect how the server matches a specific URL:
 curl "http://localhost:3000/__ruvyxa/trace?path=/blog/hello"
 ```
 
-The trace endpoint returns the matched route, parsed params, layout chain, server modules, and runtime mode.
+The trace endpoint returns the matched route, parsed params, layout chain, server modules, and
+runtime mode.
 
 ---
 
 ## Conflict Detection
 
-Ruvyxa detects and reports overlapping route paths at discovery time. This
-includes route groups that resolve to the same URL, dynamic routes that differ
-only by parameter name, and a `page.tsx` plus `route.ts` at the same segment.
-The build fails with `RUV1003` and identifies the conflicting file.
+Ruvyxa detects and reports overlapping route paths at discovery time. This includes route groups
+that resolve to the same URL, dynamic routes that differ only by parameter name, and a `page.tsx`
+plus `route.ts` at the same segment. The build fails with `RUV1003` and identifies the conflicting
+file.
 
 ---
 

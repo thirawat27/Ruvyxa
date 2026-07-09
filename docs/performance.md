@@ -1,6 +1,8 @@
 # Performance
 
-Ruvyxa is built for speed at every layer. The CLI is compiled Rust, route discovery uses `walkdir` without spawning child processes, and production builds emit route-level bundles with tree-shaking and content-addressed hashing.
+Ruvyxa is built for speed at every layer. The CLI is compiled Rust, route discovery uses `walkdir`
+without spawning child processes, and production builds emit route-level bundles with tree-shaking
+and content-addressed hashing.
 
 ---
 
@@ -14,11 +16,11 @@ ruvyxa bench --root .
 
 ### What it measures
 
-| Benchmark | What's timed |
-|-----------|-------------|
-| `route-discovery` | Walking `app/` and building the route manifest |
-| `analyze-validation` | Route discovery + full server/client boundary validation |
-| `production-build` | Complete `.ruvyxa` output: server copy, client bundles, manifests |
+| Benchmark            | What's timed                                                      |
+| -------------------- | ----------------------------------------------------------------- |
+| `route-discovery`    | Walking `app/` and building the route manifest                    |
+| `analyze-validation` | Route discovery + full server/client boundary validation          |
+| `production-build`   | Complete `.ruvyxa` output: server copy, client bundles, manifests |
 
 ### Options
 
@@ -41,7 +43,8 @@ production-build    avg 142ms   min 138ms   max 147ms   (3 samples)
 
 ### Route-Level Code Splitting
 
-Client bundles are split per route, not per app. Each page gets its own hydration bundle containing only the code that page needs.
+Client bundles are split per route, not per app. Each page gets its own hydration bundle containing
+only the code that page needs.
 
 ```
 .ruvyxa/client/
@@ -54,17 +57,19 @@ Client bundles are split per route, not per app. Each page gets its own hydratio
 
 ### Tree Shaking
 
-The Ruvyxa bundler eliminates dead code from each route bundle. Only imports actually used by the page are included in the output.
-This is enabled by default and can be disabled with `build.treeShaking: false`
-when debugging optimizer behavior.
+The Ruvyxa bundler eliminates dead code from each route bundle. Only imports actually used by the
+page are included in the output. This is enabled by default and can be disabled with
+`build.treeShaking: false` when debugging optimizer behavior.
 
 ### Minification
 
-Production bundles are minified by the Ruvyxa minifier with whitespace removal, identifier shortening, and dead-code elimination.
+Production bundles are minified by the Ruvyxa minifier with whitespace removal, identifier
+shortening, and dead-code elimination.
 
 ### Content Hashing
 
 File names are BLAKE3 hashes of their content (first 16 hex characters). This enables:
+
 - Immutable caching (`Cache-Control: public, max-age=31536000, immutable`)
 - Automatic cache-busting on content change
 - Deterministic builds — same input always produces the same hash
@@ -82,9 +87,8 @@ File names are BLAKE3 hashes of their content (first 16 hex characters). This en
 - `cache.compileEntries`
 - `cache.compileBytes`
 
-Set `build.emitChunkManifest: true` to also write
-`.ruvyxa/client/chunk-manifest.json` for deployment adapters and performance
-tooling.
+Set `build.emitChunkManifest: true` to also write `.ruvyxa/client/chunk-manifest.json` for
+deployment adapters and performance tooling.
 
 ---
 
@@ -94,10 +98,14 @@ tooling.
 
 - Route discovery runs in Rust, not JavaScript.
 - File watching uses native OS notifications (`notify` crate).
-- HMR events are classified by type (CSS update, component update, full reload) to minimize browser work.
-- **Render cache**: default capacity 1024 (dev) / 512 (prod), default TTL 5 min (dev) / 30 min (prod). Configurable via `RUVYXA_RENDER_CACHE_SIZE` env var.
-- **Worker pool**: Auto-sizes to `available_parallelism()` (clamped 2–8). Configurable via `RUVYXA_WORKER_POOL_SIZE` env var. Default timeout 10s for dead-worker detection.
-- **Async file I/O**: SSR hot-path file reads use `tokio::task::spawn_blocking` to avoid blocking the async runtime.
+- HMR events are classified by type (CSS update, component update, full reload) to minimize browser
+  work.
+- **Render cache**: default capacity 1024 (dev) / 512 (prod), default TTL 5 min (dev) / 30 min
+  (prod). Configurable via `RUVYXA_RENDER_CACHE_SIZE` env var.
+- **Worker pool**: Auto-sizes to `available_parallelism()` (clamped 2–8). Configurable via
+  `RUVYXA_WORKER_POOL_SIZE` env var. Default timeout 10s for dead-worker detection.
+- **Async file I/O**: SSR hot-path file reads use `tokio::task::spawn_blocking` to avoid blocking
+  the async runtime.
 
 ### Production Server
 
@@ -131,7 +139,8 @@ Integrate with your CI pipeline to detect regressions:
 - Run benchmarks before and after changes to route discovery, build, or HMR logic.
 - Use `ruvyxa clean` before benchmarking to ensure cold-start measurements.
 - The `route-discovery` benchmark is the best indicator of CLI startup latency.
-- For app-level performance (response times, TTFB), use standard HTTP benchmarking tools against `ruvyxa start`.
+- For app-level performance (response times, TTFB), use standard HTTP benchmarking tools against
+  `ruvyxa start`.
 
 ---
 

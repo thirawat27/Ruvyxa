@@ -1,4 +1,4 @@
-import type { RuvyxaConfig } from "./types.js"
+import type { RuvyxaConfig } from './types.js'
 
 export type {
   BuiltinMiddlewareConfig,
@@ -17,7 +17,7 @@ export type {
   RuvyxaPlugin,
   StaticParamsContext,
   TransformResult,
-} from "./types.js"
+} from './types.js'
 
 export function defineConfig<TConfig extends RuvyxaConfig>(config: TConfig): TConfig {
   return config

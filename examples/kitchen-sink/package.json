@@ -1,32 +1,32 @@
 {
-    "name": "kitchen-sink",
-    "version": "1.0.0",
-    "private": true,
-    "type": "module",
-    "scripts": {
-        "dev": "cargo run -p ruvyxa_cli -- dev --root .",
-        "build": "cargo run -p ruvyxa_cli -- build --root .",
-        "start": "cargo run -p ruvyxa_cli -- start --root .",
-        "routes": "cargo run -p ruvyxa_cli -- routes --root .",
-        "analyze": "cargo run -p ruvyxa_cli -- analyze --root .",
-        "check": "cargo run -p ruvyxa_cli -- check --root .",
-        "preview": "cargo run -p ruvyxa_cli -- start --root . --port 3000",
-        "parity": "cargo run -p ruvyxa_cli -- test:parity --root .",
-        "doctor": "cargo run -p ruvyxa_cli -- doctor --root .",
-        "clean": "cargo run -p ruvyxa_cli -- clean --root .",
-        "typecheck": "tsc --noEmit"
-    },
-    "dependencies": {
-        "@ruvyxa/core": "workspace:*",
-        "ruvyxa": "workspace:*",
-        "react": "^19.0.0",
-        "react-dom": "^19.0.0"
-    },
-    "devDependencies": {
-        "@types/react": "^19.0.0",
-        "@types/react-dom": "^19.0.0"
-    },
-    "engines": {
-        "node": ">=22.0.0"
-    }
+  "name": "kitchen-sink",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "cargo run -p ruvyxa_cli -- dev --root .",
+    "build": "cargo run -p ruvyxa_cli -- build --root .",
+    "start": "cargo run -p ruvyxa_cli -- start --root .",
+    "routes": "cargo run -p ruvyxa_cli -- routes --root .",
+    "analyze": "cargo run -p ruvyxa_cli -- analyze --root .",
+    "check": "cargo run -p ruvyxa_cli -- check --root .",
+    "preview": "cargo run -p ruvyxa_cli -- start --root . --port 3000",
+    "parity": "cargo run -p ruvyxa_cli -- test:parity --root .",
+    "doctor": "cargo run -p ruvyxa_cli -- doctor --root .",
+    "clean": "cargo run -p ruvyxa_cli -- clean --root .",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@ruvyxa/core": "workspace:*",
+    "ruvyxa": "workspace:*",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0"
+  },
+  "engines": {
+    "node": ">=22.0.0"
+  }
 }

@@ -1,28 +1,28 @@
-import { createHash } from "node:crypto"
-import { existsSync, statSync } from "node:fs"
-import { mkdir, readFile, writeFile } from "node:fs/promises"
-import path from "node:path"
-import { stripTypeScriptTypes } from "node:module"
+import { createHash } from 'node:crypto'
+import { existsSync, statSync } from 'node:fs'
+import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import path from 'node:path'
+import { stripTypeScriptTypes } from 'node:module'
 
-const JS_EXTENSIONS = ["", ".ts", ".tsx", ".js", ".jsx", ".mts", ".mjs"]
-const ASSET_EXTENSIONS = new Set([".css", ".scss", ".sass", ".less"])
-const compilerCache = globalThis.__RUVYXA_COMPILER_CACHE__ ??= {
+const JS_EXTENSIONS = ['', '.ts', '.tsx', '.js', '.jsx', '.mts', '.mjs']
+const ASSET_EXTENSIONS = new Set(['.css', '.scss', '.sass', '.less'])
+const compilerCache = (globalThis.__RUVYXA_COMPILER_CACHE__ ??= {
   sources: new Map(),
   rewrites: new Map(),
-}
+})
 
 export function collectLayouts(appDir, routeDir) {
   const layouts = []
   let current = appDir
 
-  pushIfExists(layouts, path.join(current, "layout.tsx"))
+  pushIfExists(layouts, path.join(current, 'layout.tsx'))
 
   const relative = path.relative(appDir, routeDir)
-  if (relative && !relative.startsWith("..")) {
+  if (relative && !relative.startsWith('..')) {
     for (const segment of relative.split(path.sep)) {
       if (!segment) continue
       current = path.join(current, segment)
-      pushIfExists(layouts, path.join(current, "layout.tsx"))
+      pushIfExists(layouts, path.join(current, 'layout.tsx'))
     }
   }
 
@@ -32,9 +32,9 @@ export function collectLayouts(appDir, routeDir) {
 export async function compileBundle({
   projectRoot,
   entrySource,
-  sourcefile = "ruvyxa:entry.ts",
+  sourcefile = 'ruvyxa:entry.ts',
   outfile,
-  platform = "node",
+  platform = 'node',
   external = [],
   aliases = {},
   minify = false,
@@ -72,33 +72,50 @@ export async function compileBundle({
 }
 
 export function toImportPath(file) {
-  return path.resolve(file).replaceAll("\\", "/")
+  return path.resolve(file).replaceAll('\\', '/')
 }
 
 export function cacheFileName(parts, extension) {
-  const hash = createHash("sha256")
+  const hash = createHash('sha256')
   for (const part of parts) {
     hash.update(String(part))
-    hash.update("\0")
+    hash.update('\0')
   }
-  return `${hash.digest("hex").slice(0, 16)}.${extension}`
+  return `${hash.digest('hex').slice(0, 16)}.${extension}`
 }
 
 export function runtimeAliases(runtimeDir = path.dirname(new URL(import.meta.url).pathname)) {
-  const normalizedRuntimeDir = process.platform === "win32" && runtimeDir.startsWith("/")
-    ? runtimeDir.slice(1)
-    : runtimeDir
-  const packageRoot = path.resolve(normalizedRuntimeDir, "..")
-  const workspaceRoot = path.resolve(packageRoot, "..")
-  const coreRoot = path.join(workspaceRoot, "@ruvyxa", "core")
+  const normalizedRuntimeDir =
+    process.platform === 'win32' && runtimeDir.startsWith('/') ? runtimeDir.slice(1) : runtimeDir
+  const packageRoot = path.resolve(normalizedRuntimeDir, '..')
+  const workspaceRoot = path.resolve(packageRoot, '..')
+  const coreRoot = path.join(workspaceRoot, '@ruvyxa', 'core')
 
   return {
-    ruvyxa: preferExisting(path.join(packageRoot, "src", "index.ts"), path.join(packageRoot, "dist", "index.js")),
-    "ruvyxa/server": preferExisting(path.join(packageRoot, "src", "server.ts"), path.join(packageRoot, "dist", "server.js")),
-    "ruvyxa/config": preferExisting(path.join(packageRoot, "src", "config.ts"), path.join(packageRoot, "dist", "config.js")),
-    "@ruvyxa/core": preferExisting(path.join(coreRoot, "src", "index.ts"), path.join(coreRoot, "dist", "index.js")),
-    "@ruvyxa/core/server": preferExisting(path.join(coreRoot, "src", "server.ts"), path.join(coreRoot, "dist", "server.js")),
-    "@ruvyxa/core/config": preferExisting(path.join(coreRoot, "src", "config.ts"), path.join(coreRoot, "dist", "config.js")),
+    ruvyxa: preferExisting(
+      path.join(packageRoot, 'src', 'index.ts'),
+      path.join(packageRoot, 'dist', 'index.js'),
+    ),
+    'ruvyxa/server': preferExisting(
+      path.join(packageRoot, 'src', 'server.ts'),
+      path.join(packageRoot, 'dist', 'server.js'),
+    ),
+    'ruvyxa/config': preferExisting(
+      path.join(packageRoot, 'src', 'config.ts'),
+      path.join(packageRoot, 'dist', 'config.js'),
+    ),
+    '@ruvyxa/core': preferExisting(
+      path.join(coreRoot, 'src', 'index.ts'),
+      path.join(coreRoot, 'dist', 'index.js'),
+    ),
+    '@ruvyxa/core/server': preferExisting(
+      path.join(coreRoot, 'src', 'server.ts'),
+      path.join(coreRoot, 'dist', 'server.js'),
+    ),
+    '@ruvyxa/core/config': preferExisting(
+      path.join(coreRoot, 'src', 'config.ts'),
+      path.join(coreRoot, 'dist', 'config.js'),
+    ),
   }
 }
 
@@ -132,7 +149,7 @@ async function visitModule(context) {
   byKey.set(key, module)
   modules.push(module)
 
-  if (platform === "browser") {
+  if (platform === 'browser') {
     checkClientBoundary(root, filePath, source)
   }
 
@@ -174,7 +191,7 @@ async function visitModule(context) {
       alias: externals.get(externalSpecifier),
     })
 
-    if (!externalSet.has(specifier) && specifier.startsWith(".")) {
+    if (!externalSet.has(specifier) && specifier.startsWith('.')) {
       throw new Error(`RUV1801 cannot resolve '${specifier}' from ${filePath || sourcefile}`)
     }
   }
@@ -194,47 +211,49 @@ function linkModules(modules, externals, { minify, outfile, sourceMap }) {
   for (const [specifier, alias] of externals) {
     push(`import * as ${alias} from ${JSON.stringify(specifier)};`)
   }
-  const reactAlias = externals.get("react")
+  const reactAlias = externals.get('react')
   if (reactAlias) push(`const React = ${reactAlias}.default ?? ${reactAlias};`)
-  if (externals.size > 0) push("")
+  if (externals.size > 0) push('')
 
   const rewrittenModules = new Map(modules.map((module) => [module.id, rewriteModule(module)]))
 
   for (const module of modules.slice().reverse()) {
     const rewritten = rewrittenModules.get(module.id)
-    const sourceIndex = sourceMap && module.filePath
-      ? sourceMapIndex(mapSources, module.filePath, module.source)
-      : null
+    const sourceIndex =
+      sourceMap && module.filePath
+        ? sourceMapIndex(mapSources, module.filePath, module.source)
+        : null
 
     push(`const ${module.id} = (() => {`)
     push(`  const __exports = {};`)
-    const codeLines = rewritten.code.split("\n")
+    const codeLines = rewritten.code.split('\n')
     for (let index = 0; index < codeLines.length; index++) {
       const line = codeLines[index]
       const originalLine = rewritten.lineMap[index]
-      push(line ? `  ${line}` : "", sourceIndex !== null && originalLine !== null
-        ? { sourceIndex, originalLine }
-        : null)
+      push(
+        line ? `  ${line}` : '',
+        sourceIndex !== null && originalLine !== null ? { sourceIndex, originalLine } : null,
+      )
     }
     push(`  return __exports;`)
     push(`})();`)
-    push("")
+    push('')
   }
 
   const entry = modules[0]
   const entryRewritten = rewrittenModules.get(entry.id)
-  if (entryRewritten && entryRewritten.exportedNames.includes("default")) {
+  if (entryRewritten && entryRewritten.exportedNames.includes('default')) {
     push(`export default ${entry.id}.default;`)
   }
   push(`Object.assign(globalThis.__RUVYXA_LAST_EXPORTS__ ??= {}, ${entry.id});`)
   for (const name of collectLinkedExportNames(entry.id, rewrittenModules)) {
-    if (name !== "default") push(`export const ${name} = ${entry.id}.${name};`)
+    if (name !== 'default') push(`export const ${name} = ${entry.id}.${name};`)
   }
   if (sourceMap && !minify) push(`//# sourceMappingURL=${path.basename(outfile)}.map`)
 
-  const code = out.join("\n")
+  const code = out.join('\n')
   return {
-    code: minify ? code.replace(/\s+/g, " ") : code,
+    code: minify ? code.replace(/\s+/g, ' ') : code,
     map: sourceMap && !minify ? buildSourceMap(outfile, lineMappings, mapSources) : null,
   }
 }
@@ -283,7 +302,7 @@ function encodeMappings(lineMappings) {
 
   return lineMappings
     .map((mapping) => {
-      if (!mapping) return ""
+      if (!mapping) return ''
       const segment = [
         0,
         mapping.sourceIndex - previousSource,
@@ -293,15 +312,15 @@ function encodeMappings(lineMappings) {
       previousSource = mapping.sourceIndex
       previousOriginalLine = mapping.originalLine
       previousOriginalColumn = 0
-      return segment.map(encodeVlq).join("")
+      return segment.map(encodeVlq).join('')
     })
-    .join(";")
+    .join(';')
 }
 
 function encodeVlq(value) {
-  const base64 = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/"
-  let vlq = value < 0 ? ((-value) << 1) + 1 : value << 1
-  let encoded = ""
+  const base64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/'
+  let vlq = value < 0 ? (-value << 1) + 1 : value << 1
+  let encoded = ''
   do {
     let digit = vlq & 31
     vlq >>>= 5
@@ -314,9 +333,11 @@ function encodeVlq(value) {
 function rewriteModule(module) {
   const rewriteKey = [
     module.key,
-    createHash("sha256").update(module.source).digest("hex"),
-    [...module.deps.entries()].map(([specifier, dep]) => `${specifier}:${dep.external ? dep.alias : dep.id}`).join("|"),
-  ].join("\0")
+    createHash('sha256').update(module.source).digest('hex'),
+    [...module.deps.entries()]
+      .map(([specifier, dep]) => `${specifier}:${dep.external ? dep.alias : dep.id}`)
+      .join('|'),
+  ].join('\0')
   const cached = compilerCache.rewrites.get(rewriteKey)
   if (cached) return cached
 
@@ -329,11 +350,11 @@ function rewriteModule(module) {
   const exported = []
   const reExportAll = []
 
-  const sourceLines = source.split("\n")
-  const codeLines = codeOnly.split("\n")
+  const sourceLines = source.split('\n')
+  const codeLines = codeOnly.split('\n')
   for (let sourceLine = 0; sourceLine < sourceLines.length; sourceLine++) {
     const rawLine = sourceLines[sourceLine]
-    const line = (codeLines[sourceLine] ?? "").trim()
+    const line = (codeLines[sourceLine] ?? '').trim()
     if (!line) {
       lines.push(rawLine)
       lineMap.push(sourceLine)
@@ -349,17 +370,20 @@ function rewriteModule(module) {
       continue
     }
 
-    if (/^export\s+default\b/.test(line) && !line.startsWith("export default function ")) {
+    if (/^export\s+default\b/.test(line) && !line.startsWith('export default function ')) {
       const collectedRaw = [rawLine.trim()]
       const collectedCode = [line]
       let endLine = sourceLine
       while (!isBalancedDefaultExpression(collectedCode) && endLine + 1 < sourceLines.length) {
         endLine += 1
         collectedRaw.push(sourceLines[endLine].trim())
-        collectedCode.push((codeLines[endLine] ?? "").trim())
+        collectedCode.push((codeLines[endLine] ?? '').trim())
       }
 
-      const expression = collectedRaw.join("\n").replace(/^export\s+default\s+/, "").replace(/;$/, "")
+      const expression = collectedRaw
+        .join('\n')
+        .replace(/^export\s+default\s+/, '')
+        .replace(/;$/, '')
       lines.push(`__exports.default = ${rewriteDynamicImports(expression, module)};`)
       lineMap.push(sourceLine)
       sourceLine = endLine
@@ -385,7 +409,7 @@ function rewriteModule(module) {
   }
 
   const result = {
-    code: lines.join("\n"),
+    code: lines.join('\n'),
     lineMap,
     exportedNames: exported
       .map((item) => item.match(/__exports\.([A-Za-z_$][\w$]*)\s=/)?.[1])
@@ -397,30 +421,30 @@ function rewriteModule(module) {
 }
 
 function isBalancedDefaultExpression(lines) {
-  const expression = lines.join("\n").replace(/^export\s+default\s+/, "")
+  const expression = lines.join('\n').replace(/^export\s+default\s+/, '')
   let depth = 0
   for (const char of expression) {
-    if (char === "(" || char === "{" || char === "[") depth += 1
-    else if (char === ")" || char === "}" || char === "]") depth -= 1
+    if (char === '(' || char === '{' || char === '[') depth += 1
+    else if (char === ')' || char === '}' || char === ']') depth -= 1
   }
   return depth <= 0
 }
 
 function shouldTransformJsx(module) {
-  const name = module.filePath || module.key || ""
-  return name.endsWith(".tsx") || name.endsWith(".jsx")
+  const name = module.filePath || module.key || ''
+  return name.endsWith('.tsx') || name.endsWith('.jsx')
 }
 
 function rewriteImport(line, module) {
-  if (/^import\s+type\b/.test(line)) return ""
-  if (/^import\s+["']/.test(line)) return ""
+  if (/^import\s+type\b/.test(line)) return ''
+  if (/^import\s+["']/.test(line)) return ''
 
   const match = line.match(/^import\s+(.+?)\s+from\s+["'](.+?)["'];?$/)
   if (!match) return line
 
   const [, clause, specifier] = match
   const source = module.deps.get(specifier)
-  if (!source) return ""
+  if (!source) return ''
 
   const sourceRef = source.external ? source.alias : source.id
   return rewriteImportClause(clause, sourceRef)
@@ -429,37 +453,39 @@ function rewriteImport(line, module) {
 function rewriteExport(line, module, exported, reExportAll) {
   line = rewriteDynamicImports(line, module)
 
-  if (line.startsWith("export default function ")) {
+  if (line.startsWith('export default function ')) {
     const name = line.match(/^export\s+default\s+function\s+([A-Za-z_$][\w$]*)/)?.[1]
-    const declaration = line.replace(/^export\s+default\s+/, "")
+    const declaration = line.replace(/^export\s+default\s+/, '')
     if (name) exported.push(`__exports.default = ${name};`)
-    return name ? declaration : `__exports.default = ${declaration.replace(/^function\s*/, "function ")}`
+    return name
+      ? declaration
+      : `__exports.default = ${declaration.replace(/^function\s*/, 'function ')}`
   }
 
-  if (line.startsWith("export default ")) {
-    return `__exports.default = ${line.replace(/^export\s+default\s+/, "").replace(/;$/, "")};`
+  if (line.startsWith('export default ')) {
+    return `__exports.default = ${line.replace(/^export\s+default\s+/, '').replace(/;$/, '')};`
   }
 
   if (/^export\s+(const|let|var)\s+/.test(line)) {
     const name = line.match(/^export\s+(?:const|let|var)\s+([A-Za-z_$][\w$]*)/)?.[1]
     if (name) exported.push(`__exports.${name} = ${name};`)
-    return line.replace(/^export\s+/, "")
+    return line.replace(/^export\s+/, '')
   }
 
   if (/^export\s+(async\s+)?function\s+/.test(line)) {
     const name = line.match(/^export\s+(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/)?.[1]
     if (name) exported.push(`__exports.${name} = ${name};`)
-    return line.replace(/^export\s+/, "")
+    return line.replace(/^export\s+/, '')
   }
 
-  if (line.includes(" from ")) {
+  if (line.includes(' from ')) {
     const match = line.match(/^export\s+(.+?)\s+from\s+["'](.+?)["'];?$/)
-    if (!match) return ""
+    if (!match) return ''
     const [, clause, specifier] = match
     const source = module.deps.get(specifier)
-    if (!source) return ""
+    if (!source) return ''
     const sourceRef = source.external ? source.alias : source.id
-    if (clause.trim() === "*") {
+    if (clause.trim() === '*') {
       if (!source.external) reExportAll.push(source.id)
       return `Object.assign(__exports, ${sourceRef});`
     }
@@ -468,17 +494,18 @@ function rewriteExport(line, module, exported, reExportAll) {
       exported.push(assignment)
       return assignment
     })
-    return assignments.join(" ")
+    return assignments.join(' ')
   }
 
-  if (line.startsWith("export {")) {
-    const assignments = parseNamedBindings(line.replace(/^export\s+/, "").replace(/;$/, ""))
-      .map(([original, alias]) => {
+  if (line.startsWith('export {')) {
+    const assignments = parseNamedBindings(line.replace(/^export\s+/, '').replace(/;$/, '')).map(
+      ([original, alias]) => {
         const assignment = `__exports.${alias} = ${original};`
         exported.push(assignment)
         return assignment
-      })
-    return assignments.join(" ")
+      },
+    )
+    return assignments.join(' ')
   }
 
   return line
@@ -486,20 +513,20 @@ function rewriteExport(line, module, exported, reExportAll) {
 
 function rewriteImportClause(clause, sourceRef) {
   const cleaned = clause.trim()
-  if (cleaned.startsWith("* as ")) {
+  if (cleaned.startsWith('* as ')) {
     return `const ${cleaned.slice(5).trim()} = ${sourceRef};`
   }
-  if (cleaned.startsWith("{")) {
+  if (cleaned.startsWith('{')) {
     return parseNamedBindings(cleaned)
       .map(([original, alias]) => `const ${alias} = ${sourceRef}.${original};`)
-      .join(" ")
+      .join(' ')
   }
-  if (cleaned.includes(",")) {
+  if (cleaned.includes(',')) {
     const [defaultName, rest] = cleaned.split(/,(.+)/)
     return [
       `const ${defaultName.trim()} = ${sourceRef}.default ?? ${sourceRef};`,
       rewriteImportClause(rest.trim(), sourceRef),
-    ].join(" ")
+    ].join(' ')
   }
   return `const ${cleaned} = ${sourceRef}.default ?? ${sourceRef};`
 }
@@ -517,14 +544,14 @@ function rewriteDynamicImports(line, module) {
 function parseNamedBindings(clause) {
   return clause
     .trim()
-    .replace(/^\{/, "")
-    .replace(/\}$/, "")
-    .split(",")
+    .replace(/^\{/, '')
+    .replace(/\}$/, '')
+    .split(',')
     .map((part) => part.trim())
     .filter(Boolean)
-    .filter((part) => !part.startsWith("type "))
+    .filter((part) => !part.startsWith('type '))
     .map((part) => {
-      const cleaned = part.replace(/^type\s+/, "")
+      const cleaned = part.replace(/^type\s+/, '')
       const [original, alias] = cleaned.split(/\s+as\s+/)
       return [original.trim(), (alias || original).trim()]
     })
@@ -553,17 +580,17 @@ function extractSpecifiers(source) {
 }
 
 function resolveLocalSpecifier(baseDir, specifier) {
-  if (!specifier.startsWith(".") && !path.isAbsolute(specifier)) return null
+  if (!specifier.startsWith('.') && !path.isAbsolute(specifier)) return null
   const base = path.isAbsolute(specifier) ? specifier : path.resolve(baseDir, specifier)
   return resolveFile(base)
 }
 
 function resolveFile(base) {
   const extensionFallbacks = {
-    ".js": [".ts", ".tsx", ".jsx"],
-    ".mjs": [".mts", ".ts"],
-    ".cjs": [".cts", ".ts"],
-    ".jsx": [".tsx"],
+    '.js': ['.ts', '.tsx', '.jsx'],
+    '.mjs': ['.mts', '.ts'],
+    '.cjs': ['.cts', '.ts'],
+    '.jsx': ['.tsx'],
   }
   const ext = path.extname(base)
   if (extensionFallbacks[ext]) {
@@ -586,8 +613,8 @@ function resolveFile(base) {
 }
 
 function isTypeOnlySpecifier(source, index) {
-  const lineStart = source.lastIndexOf("\n", index) + 1
-  const lineEnd = source.indexOf("\n", index)
+  const lineStart = source.lastIndexOf('\n', index) + 1
+  const lineEnd = source.indexOf('\n', index)
   const line = source.slice(lineStart, lineEnd === -1 ? source.length : lineEnd)
   return /^\s*(import|export)\s+type\b/.test(line)
 }
@@ -602,7 +629,7 @@ function isDirectory(file) {
 
 function isProjectLocal(root, file) {
   const relative = path.relative(root, file)
-  return relative && !relative.startsWith("..") && !path.isAbsolute(relative)
+  return relative && !relative.startsWith('..') && !path.isAbsolute(relative)
 }
 
 function isAssetSpecifier(specifier) {
@@ -616,7 +643,7 @@ async function readSourceFile(file) {
   if (cached && cached.mtimeMs === stats.mtimeMs && cached.size === stats.size) {
     return cached.source
   }
-  const source = await readFile(file, "utf8")
+  const source = await readFile(file, 'utf8')
   compilerCache.sources.set(cacheKey, {
     mtimeMs: stats.mtimeMs,
     size: stats.size,
@@ -627,7 +654,7 @@ async function readSourceFile(file) {
 
 async function writeIfChanged(file, contents) {
   try {
-    if ((await readFile(file, "utf8")) === contents) return
+    if ((await readFile(file, 'utf8')) === contents) return
   } catch {
     // File does not exist yet.
   }
@@ -635,20 +662,26 @@ async function writeIfChanged(file, contents) {
 }
 
 function stripTypes(source) {
-  return stripTypeScriptTypes(source, { mode: "strip" })
+  return stripTypeScriptTypes(source, { mode: 'strip' })
 }
 
 function checkClientBoundary(root, filePath, source) {
   if (!filePath) return
-  const normalized = path.relative(root, filePath).replaceAll("\\", "/")
-  if (normalized === "server.ts" || normalized.startsWith("server/") || normalized.endsWith("/server.ts")) {
+  const normalized = path.relative(root, filePath).replaceAll('\\', '/')
+  if (
+    normalized === 'server.ts' ||
+    normalized.startsWith('server/') ||
+    normalized.endsWith('/server.ts')
+  ) {
     throw new Error(`RUV1007: Server-only file imported into client bundle: ${filePath}`)
   }
-  if (extractSpecifiers(source).includes("server-only")) {
+  if (extractSpecifiers(source).includes('server-only')) {
     throw new Error(`RUV1007: Server-only module imported into client bundle: ${filePath}`)
   }
   for (const envName of privateEnvReads(source)) {
-    throw new Error(`RUV1008: Private environment variable ${envName} used in client bundle: ${filePath}`)
+    throw new Error(
+      `RUV1008: Private environment variable ${envName} used in client bundle: ${filePath}`,
+    )
   }
 }
 
@@ -661,14 +694,17 @@ class JsxTransformer {
   constructor(source) {
     this.source = source
     this.index = 0
-    this.output = ""
+    this.output = ''
   }
 
   run() {
     while (this.index < this.source.length) {
-      if (this.source.startsWith("<>", this.index)) {
+      if (this.source.startsWith('<>', this.index)) {
         this.output += this.parseFragment()
-      } else if (this.source[this.index] === "<" && /[A-Za-z]/.test(this.source[this.index + 1] || "")) {
+      } else if (
+        this.source[this.index] === '<' &&
+        /[A-Za-z]/.test(this.source[this.index + 1] || '')
+      ) {
         this.output += this.parseElement()
       } else {
         this.output += this.source[this.index++]
@@ -680,20 +716,20 @@ class JsxTransformer {
   parseFragment() {
     this.index += 2
     const children = this.readChildren(null)
-    return `React.createElement(React.Fragment, null${children.length ? `, ${children.join(", ")}` : ""})`
+    return `React.createElement(React.Fragment, null${children.length ? `, ${children.join(', ')}` : ''})`
   }
 
   parseElement() {
-    this.expect("<")
+    this.expect('<')
     const tag = this.readName()
     const props = []
     while (this.index < this.source.length) {
       this.skipWhitespace()
-      if (this.source.startsWith("/>", this.index)) {
+      if (this.source.startsWith('/>', this.index)) {
         this.index += 2
         return `React.createElement(${formatTag(tag)}, ${formatProps(props)})`
       }
-      if (this.source[this.index] === ">") {
+      if (this.source[this.index] === '>') {
         this.index++
         break
       }
@@ -701,55 +737,55 @@ class JsxTransformer {
     }
 
     const children = this.readChildren(tag)
-    return `React.createElement(${formatTag(tag)}, ${formatProps(props)}${children.length ? `, ${children.join(", ")}` : ""})`
+    return `React.createElement(${formatTag(tag)}, ${formatProps(props)}${children.length ? `, ${children.join(', ')}` : ''})`
   }
 
   readChildren(tag) {
     const children = []
     while (this.index < this.source.length) {
-      if (tag === null && this.source.startsWith("</>", this.index)) {
+      if (tag === null && this.source.startsWith('</>', this.index)) {
         this.index += 3
         break
       }
       if (tag !== null && this.source.startsWith(`</${tag}`, this.index)) {
         this.index += tag.length + 2
-        while (this.source[this.index] !== ">" && this.index < this.source.length) this.index++
+        while (this.source[this.index] !== '>' && this.index < this.source.length) this.index++
         this.index++
         break
       }
-      if (this.source.startsWith("<>", this.index)) {
+      if (this.source.startsWith('<>', this.index)) {
         children.push(this.parseFragment())
         continue
       }
-      if (this.source[this.index] === "<" && /[A-Za-z]/.test(this.source[this.index + 1] || "")) {
+      if (this.source[this.index] === '<' && /[A-Za-z]/.test(this.source[this.index + 1] || '')) {
         children.push(this.parseElement())
         continue
       }
-      if (this.source[this.index] === "{") {
-        const expr = this.readBalanced("{", "}")
+      if (this.source[this.index] === '{') {
+        const expr = this.readBalanced('{', '}')
         const inner = expr.slice(1, -1).trim()
         if (inner && !isJsxComment(inner)) children.push(transformJsxExpression(inner))
         continue
       }
       const text = this.readText()
-      if (text.trim()) children.push(JSON.stringify(text.replace(/\s+/g, " ").trim()))
+      if (text.trim()) children.push(JSON.stringify(text.replace(/\s+/g, ' ').trim()))
     }
 
     return children
   }
 
   readProp() {
-    if (this.source.startsWith("{...", this.index)) {
-      const expr = this.readBalanced("{", "}")
+    if (this.source.startsWith('{...', this.index)) {
+      const expr = this.readBalanced('{', '}')
       return { spread: transformJsxExpression(expr.slice(4, -1).trim()) }
     }
     const name = this.readName()
     this.skipWhitespace()
-    if (this.source[this.index] !== "=") return [name, "true"]
+    if (this.source[this.index] !== '=') return [name, 'true']
     this.index++
     this.skipWhitespace()
     const quote = this.source[this.index]
-    if (quote === "\"" || quote === "'") {
+    if (quote === '"' || quote === "'") {
       this.index++
       const start = this.index
       while (this.source[this.index] !== quote && this.index < this.source.length) this.index++
@@ -757,19 +793,19 @@ class JsxTransformer {
       this.index++
       return [name, JSON.stringify(value)]
     }
-    if (this.source[this.index] === "{") {
-      const expr = this.readBalanced("{", "}")
+    if (this.source[this.index] === '{') {
+      const expr = this.readBalanced('{', '}')
       return [name, transformJsxExpression(expr.slice(1, -1).trim())]
     }
-    return [name, "true"]
+    return [name, 'true']
   }
 
   readText() {
     const start = this.index
     while (
       this.index < this.source.length &&
-      this.source[this.index] !== "<" &&
-      this.source[this.index] !== "{"
+      this.source[this.index] !== '<' &&
+      this.source[this.index] !== '{'
     ) {
       this.index++
     }
@@ -781,7 +817,7 @@ class JsxTransformer {
     let depth = 0
     while (this.index < this.source.length) {
       const char = this.source[this.index++]
-      if (char === "\"" || char === "'" || char === "`") {
+      if (char === '"' || char === "'" || char === '`') {
         this.skipString(char)
         continue
       }
@@ -794,7 +830,7 @@ class JsxTransformer {
   skipString(quote) {
     while (this.index < this.source.length) {
       const char = this.source[this.index++]
-      if (char === "\\") {
+      if (char === '\\') {
         this.index++
         continue
       }
@@ -804,19 +840,21 @@ class JsxTransformer {
 
   readName() {
     const start = this.index
-    while (/[A-Za-z0-9_$:.-]/.test(this.source[this.index] || "")) this.index++
+    while (/[A-Za-z0-9_$:.-]/.test(this.source[this.index] || '')) this.index++
     return this.source.slice(start, this.index)
   }
 
   skipWhitespace() {
-    while (/\s/.test(this.source[this.index] || "")) this.index++
+    while (/\s/.test(this.source[this.index] || '')) this.index++
   }
 
   expect(char) {
     if (this.source[this.index] !== char) {
-      const line = this.source.slice(0, this.index).split("\n").length
-      const col = this.index - (this.source.lastIndexOf("\n", this.index - 1) + 1)
-      const ctx = this.source.slice(Math.max(0, this.index - 20), this.index + 20).replace(/\n/g, "\\n")
+      const line = this.source.slice(0, this.index).split('\n').length
+      const col = this.index - (this.source.lastIndexOf('\n', this.index - 1) + 1)
+      const ctx = this.source
+        .slice(Math.max(0, this.index - 20), this.index + 20)
+        .replace(/\n/g, '\\n')
       throw new Error(`Expected '${char}' at line ${line}:${col} near "...${ctx}..."`)
     }
     this.index++
@@ -828,14 +866,14 @@ function formatTag(tag) {
 }
 
 function formatProps(props) {
-  if (!props.length) return "null"
+  if (!props.length) return 'null'
   const objects = []
   let current = []
 
   for (const prop of props) {
     if (prop.spread) {
       if (current.length) {
-        objects.push(`{ ${current.join(", ")} }`)
+        objects.push(`{ ${current.join(', ')} }`)
         current = []
       }
       objects.push(prop.spread)
@@ -845,12 +883,12 @@ function formatProps(props) {
     current.push(`${JSON.stringify(name)}: ${value}`)
   }
 
-  if (current.length) objects.push(`{ ${current.join(", ")} }`)
-  return objects.length === 1 ? objects[0] : `Object.assign({}, ${objects.join(", ")})`
+  if (current.length) objects.push(`{ ${current.join(', ')} }`)
+  return objects.length === 1 ? objects[0] : `Object.assign({}, ${objects.join(', ')})`
 }
 
 function isJsxComment(value) {
-  return value.startsWith("/*") && value.endsWith("*/")
+  return value.startsWith('/*') && value.endsWith('*/')
 }
 
 function transformJsxExpression(value) {
@@ -858,7 +896,7 @@ function transformJsxExpression(value) {
 }
 
 function maybeContainsJsx(value) {
-  return /<[A-Za-z][\w:.-]*(\s|>|\/)/.test(value) || value.includes("<>")
+  return /<[A-Za-z][\w:.-]*(\s|>|\/)/.test(value) || value.includes('<>')
 }
 
 function privateEnvReads(source) {
@@ -866,7 +904,7 @@ function privateEnvReads(source) {
   const codeOnly = maskNonCode(source)
   for (const match of codeOnly.matchAll(/\bprocess\.env\.([A-Z_][A-Z0-9_]*)/g)) {
     const name = match[1]
-    if (name !== "NODE_ENV" && !name.startsWith("RUVYXA_PUBLIC_")) names.push(name)
+    if (name !== 'NODE_ENV' && !name.startsWith('RUVYXA_PUBLIC_')) names.push(name)
   }
   return names
 }
@@ -874,30 +912,30 @@ function privateEnvReads(source) {
 function maskNonCode(source, options = {}) {
   const preserveImportExportSpecifiers = options.preserveImportExportSpecifiers === true
   const preserveImportCallSpecifiers = options.preserveImportCallSpecifiers === true
-  let output = ""
+  let output = ''
   let index = 0
 
   while (index < source.length) {
     const char = source[index]
     const next = source[index + 1]
 
-    if (char === "/" && next === "/") {
-      const end = source.indexOf("\n", index + 2)
+    if (char === '/' && next === '/') {
+      const end = source.indexOf('\n', index + 2)
       const stop = end === -1 ? source.length : end
-      output += " ".repeat(stop - index)
+      output += ' '.repeat(stop - index)
       index = stop
       continue
     }
 
-    if (char === "/" && next === "*") {
-      const end = source.indexOf("*/", index + 2)
+    if (char === '/' && next === '*') {
+      const end = source.indexOf('*/', index + 2)
       const stop = end === -1 ? source.length : end + 2
       output += maskRange(source.slice(index, stop))
       index = stop
       continue
     }
 
-    if (char === "\"" || char === "'") {
+    if (char === '"' || char === "'") {
       const end = readStringEnd(source, index, char)
       const literal = source.slice(index, end)
       const previous = source.slice(Math.max(0, index - 32), index)
@@ -909,7 +947,7 @@ function maskNonCode(source, options = {}) {
       continue
     }
 
-    if (char === "`") {
+    if (char === '`') {
       const end = readTemplateEnd(source, index)
       output += maskRange(source.slice(index, end))
       index = end
@@ -927,7 +965,7 @@ function readStringEnd(source, start, quote) {
   let index = start + 1
   while (index < source.length) {
     const char = source[index++]
-    if (char === "\\") {
+    if (char === '\\') {
       index++
       continue
     }
@@ -940,17 +978,17 @@ function readTemplateEnd(source, start) {
   let index = start + 1
   while (index < source.length) {
     const char = source[index++]
-    if (char === "\\") {
+    if (char === '\\') {
       index++
       continue
     }
-    if (char === "`") break
+    if (char === '`') break
   }
   return index
 }
 
 function maskRange(value) {
-  return value.replace(/[^\n]/g, " ")
+  return value.replace(/[^\n]/g, ' ')
 }
 
 function pushIfExists(collection, file) {

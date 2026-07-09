@@ -1,4 +1,4 @@
-import "server-only"
+import 'server-only'
 
 export interface Todo {
   id: string
@@ -7,8 +7,8 @@ export interface Todo {
 }
 
 const todos: Todo[] = [
-  { id: "1", title: "Learn Ruvyxa", completed: true },
-  { id: "2", title: "Build an app", completed: false },
+  { id: '1', title: 'Learn Ruvyxa', completed: true },
+  { id: '2', title: 'Build an app', completed: false },
 ]
 
 export function getTodos(): Todo[] {

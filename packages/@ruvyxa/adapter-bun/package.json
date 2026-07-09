@@ -1,1 +1,29 @@
-{  "name": "@ruvyxa/adapter-bun",  "version": "1.0.5",  "description": "Run Ruvyxa on Bun-flavored hosts with typed adapter metadata for entrypoints and assets.",  "license": "MIT",  "type": "module",  "main": "./dist/index.js",  "types": "./dist/index.d.ts",  "files": [    "dist",    "README.md"  ],  "keywords": [    "ruvyxa",    "adapter",    "bun",    "deployment"  ],  "repository": {    "type": "git",    "url": "git+https://github.com/thirawat27/ruvyxa.git",    "directory": "packages/@ruvyxa/adapter-bun"  },  "bugs": {    "url": "https://github.com/thirawat27/ruvyxa/issues"  },  "homepage": "https://github.com/thirawat27/ruvyxa#readme",  "engines": {    "node": ">=22.0.0"  },  "publishConfig": {    "access": "public"  },  "exports": {    ".": {      "types": "./dist/index.d.ts",      "default": "./dist/index.js"    }  },  "dependencies": {    "@ruvyxa/core": "workspace:^"  },  "scripts": {    "build": "tsc -p tsconfig.json",    "check": "tsc -p tsconfig.json --noEmit",    "test": "node --test \"../../../tests/packages/adapter-bun/**/*.test.ts\"",    "format": "tsc -p tsconfig.json --noEmit",    "prepack": "pnpm run build"  }}
+{
+  "name": "@ruvyxa/adapter-bun",
+  "version": "1.0.5",
+  "description": "Run Ruvyxa on Bun-flavored hosts with typed adapter metadata for entrypoints and assets.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist", "README.md"],
+  "keywords": ["ruvyxa", "adapter", "bun", "deployment"],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thirawat27/ruvyxa.git",
+    "directory": "packages/@ruvyxa/adapter-bun"
+  },
+  "bugs": { "url": "https://github.com/thirawat27/ruvyxa/issues" },
+  "homepage": "https://github.com/thirawat27/ruvyxa#readme",
+  "engines": { "node": ">=22.0.0" },
+  "publishConfig": { "access": "public" },
+  "exports": { ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" } },
+  "dependencies": { "@ruvyxa/core": "workspace:^" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.check.json",
+    "test": "node --test \"../../../tests/packages/adapter-bun/**/*.test.ts\"",
+    "format": "tsc -p tsconfig.check.json",
+    "prepack": "pnpm run build"
+  }
+}

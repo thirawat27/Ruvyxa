@@ -3,6 +3,7 @@
 ## v1.0.5 (2026-07-09)
 
 ### Highlights
+
 - Full native bundler pipeline with AST parsing, plugin system, chunking, and tree-shaking
 - New `kitchen-sink` example app replacing `basic-app`
 - Comprehensive end-to-end test script (`test-full-flow.ps1`)
@@ -10,6 +11,7 @@
 - README logo switched to local asset for reliability
 
 ### Rust Crates
+
 - **ruvyxa_bundler**: Major feature expansion
   - AST module (`ast.rs`) for structured parsing of imports, exports, JSX, decorators, TypeScript
   - Plugin system (`plugin.rs`) for custom transformations in the bundler pipeline
@@ -29,15 +31,18 @@
 - **ruvyxa_diagnostics**: Diagnostic enhancements
 
 ### npm Packages
+
 - All packages bumped to v1.0.5
 - **@ruvyxa/core**: Added `utils.ts`, `PluginContext` and `TransformResult` exports, config updates
 - **@ruvyxa/react**: Package updates
-- **ruvyxa/runtime**: Added `plugin-runner.mjs`, `config-renderer.mjs` enhancements, `compiler.mjs` updates
+- **ruvyxa/runtime**: Added `plugin-runner.mjs`, `config-renderer.mjs` enhancements, `compiler.mjs`
+  updates
 - **adapters**: All 6 adapter packages updated with platform info and README improvements
 - **CLI platform binaries**: All 5 platform packages updated
 - **create-ruvyxa**: Updates
 
 ### Examples
+
 - Replaced `basic-app` with comprehensive `kitchen-sink` example
   - Multiple route patterns (static, dynamic `[slug]`, catchall `[...slug]`)
   - Todos with server actions and in-memory DB
@@ -46,6 +51,7 @@
   - AGENTS.md and CLAUDE.md for AI-assisted development
 
 ### Documentation
+
 - Added `docs/architecture/project-structure.md`
 - Added `docs/roadmap/engineering-backlog.md`
 - Updated debugging, deployment, parity, performance, production-readiness docs
@@ -53,12 +59,14 @@
 - README refreshed with new logo, features, and bundler comparison link
 
 ### Testing
+
 - New `scripts/test-full-flow.ps1` end-to-end test script
 - Expanded compiler test coverage
 - Integration tests for all adapter packages
 - AST parsing tests across import forms
 
 ### Infrastructure
+
 - Removed obsolete `basic-app` example
 - Cleaned up old design spec documents
 - CLAUDE.md and AGENTS.md updated
@@ -68,12 +76,14 @@
 ## v1.0.4 (2026-07-01)
 
 ### Highlights
+
 - `ruvyxa check` command for pre-deploy verification
 - Type checking, build validation, dev/prod parity, and page smoke rendering
 - Plugin contract documentation and type exports
 - Simplified template structure (removed `.env.example`, consolidated CSS)
 
 ### Rust Crates
+
 - **ruvyxa_cli**: Added `CheckArgs` and `ruvyxa check` command
   - Runs type checking, build validation, dev/prod parity, smoke rendering
 - **ruvyxa_dev_server**: Exported `render_request` for programmatic rendering in `check` command
@@ -81,8 +91,9 @@
 - All crates bumped to v1.0.4
 
 ### npm Packages
+
 - All packages bumped to v1.0.4
-- **@ruvyxa/core**: 
+- **@ruvyxa/core**:
   - Exported `PluginContext` and `TransformResult` types
   - Added comprehensive Plugin Contract section to README
   - New `types.ts` for shared type definitions
@@ -92,14 +103,16 @@
 - All adapters and CLI binaries updated
 
 ### Examples & Templates
+
 - **basic-app**: Removed `.env.example`, simplified
-- **minimal template**: 
+- **minimal template**:
   - Removed todos example and about page
   - Consolidated `global.css` → `globals.css`
   - Removed legacy API examples
   - Updated TypeScript configuration
 
 ### Documentation
+
 - Plugin Contract documentation with example implementation
 - `check` positioned as primary verification command before `build`
 - SKILL.md and app-guide.md updated to recommend `pnpm check`
@@ -108,6 +121,7 @@
 - Removed outdated `Plan.md`
 
 ### Testing
+
 - `core/config.test.ts` test suite for configuration validation
 - Expanded compiler test coverage
 - create-ruvyxa test suite enhancements
@@ -118,13 +132,15 @@
 ## v1.0.3 (2026-07-08)
 
 ### Highlights
+
 - Incremental caching and HMR tracking for bundler and dev server
 - Centralized test directory structure (`tests/`)
 - First-class adapter packages with dedicated tests
 - React utilities: error boundary, hydration, `useLoader` hook
 
 ### Rust Crates
-- **ruvyxa_bundler**: 
+
+- **ruvyxa_bundler**:
   - Incremental graph cache with `incremental.rs` (file fingerprinting via blake3)
   - `CachedModuleEntry` and `GraphManifest` for persistent dependency storage
   - Fast-reject optimization (mtime/size check before hashing)
@@ -132,7 +148,7 @@
   - Compiler enhancements: TypeScript annotation stripping fixes, JSX child detection
   - All crates bumped to v1.0.3
 - **ruvyxa_cli**: Path validation in `ProjectConfig`, command additions
-- **ruvyxa_dev_server**: 
+- **ruvyxa_dev_server**:
   - HMR tracker module (`hmr_tracker.rs`)
   - Module invalidation tracking and dependency relationship mapping
   - Render cache expiry and validation improvements
@@ -142,13 +158,14 @@
 - **ruvyxa_diagnostics**: Updates
 
 ### npm Packages
+
 - All packages bumped to v1.0.3
-- **@ruvyxa/react**: 
+- **@ruvyxa/react**:
   - Error boundary component
   - Hydration utilities for React client initialization
   - `useLoader` hook for data loading patterns
 - **@ruvyxa/core**: Server implementation improvements
-- **ruvyxa/runtime**: 
+- **ruvyxa/runtime**:
   - Full runtime compiler (`compiler.mjs`)
   - SSR renderer, action renderer, client renderer, API renderer improvements
   - Worker pool enhancements
@@ -156,6 +173,7 @@
 - All adapters and CLI binaries updated
 
 ### Testing
+
 - Reorganized tests from package-local to centralized `tests/` directory
 - Dedicated test files for each adapter: Bun, Cloudflare, Netlify, Node, Static, Vercel
 - `tests/packages/core/server.test.ts`
@@ -166,12 +184,14 @@
 - Adapter test coverage for all deployment targets
 
 ### Documentation
+
 - `docs/testing.md` with testing layout guidance
 - Updated debugging, performance, production-readiness, publishing docs
 - README logo enlarged
 - CLI platform binary READMEs
 
 ### Infrastructure
+
 - Dashmap, memmap2, parking_lot dependencies for concurrent caching
 - Clap bumped to 4.6
 - Dependency updates
@@ -181,12 +201,14 @@
 ## v1.0.2 (2026-06-18)
 
 ### Highlights
+
 - First release of `ruvyxa_bundler` — native Rust bundler
 - `ruvyxa_middleware` crate with WASM plugin support
 - Compression, caching, and worker pool in dev server
 - Upgraded toolchain: Node.js 22, Rust 1.96, pnpm 10
 
 ### Rust Crates
+
 - **ruvyxa_bundler** (new crate):
   - Native Rust TypeScript/JSX compiler pipeline
   - Boundary checker for server/client module isolation
@@ -201,7 +223,7 @@
   - Builtin middleware implementations
   - Config-driven middleware stack
   - WASM plugin system for custom middleware
-- **ruvyxa_dev_server**: 
+- **ruvyxa_dev_server**:
   - HTTP compression (gzip + brotli) via tower-http
   - Render cache system with blake3 hashing
   - Radix router for efficient route matching
@@ -210,10 +232,11 @@
 - All crates bumped to v1.0.2
 
 ### npm Packages
+
 - All packages bumped to v1.0.2
 - **@ruvyxa/core**: Server refactoring, config improvements, type safety
 - **@ruvyxa/react**: Package initialized with exports
-- **ruvyxa/runtime**: 
+- **ruvyxa/runtime**:
   - `config-renderer.mjs` for runtime configuration
   - `worker-pool.mjs` for Node.js worker management
 - **CLI platform binaries**: All 5 platform packages with native binaries
@@ -221,6 +244,7 @@
 - **@ruvyxa/adapter-***: All 6 adapters with README and teamplate support
 
 ### CI/CD
+
 - GitHub Actions CI and release workflows
 - Cargo caching (Swatinem/rust-cache@v2)
 - Smart publishing via `publish-if-new.mjs`
@@ -231,6 +255,7 @@
 - `--locked` flag for reproducible builds
 
 ### Toolchain
+
 - Node.js upgraded from 20 to 22
 - Rust toolchain upgraded from 1.80+ to 1.96+
 - pnpm upgraded to v10
@@ -238,12 +263,14 @@
 - pnpm action v5
 
 ### Templates
+
 - **minimal template**: Complete Ruvyxa starter with routing, API, todos, Tailwind CSS
 - AGENTS.md and CLAUDE.md for AI-assisted development
 - `config-renderer.mjs` integration
 - TypeScript configuration with path aliases
 
 ### Documentation
+
 - Comprehensive README with hero section, features, CLI commands
 - Full CONTRIBUTING.md with development setup, conventions, workflows
 - Getting started, routing, data, actions, debugging, deployment, performance docs
@@ -257,16 +284,20 @@
 ## v1.0.1 (2026-06-17)
 
 ### Highlights
+
 - Cross-platform npm pack smoke testing
 - HMR WebSocket payload optimization
 - `create-ruvyxa` CLI UX improvements
 - CI/CD reliability and version management
 
 ### Rust Crates
+
 - All crates bumped to v1.0.1 (ruvyxa_cli, ruvyxa_dev_server, ruvyxa_diagnostics, ruvyxa_graph)
-- **ruvyxa_dev_server**: Simplified HMR WebSocket handling using pre-serialized messages from channel
+- **ruvyxa_dev_server**: Simplified HMR WebSocket handling using pre-serialized messages from
+  channel
 
 ### npm Packages
+
 - All packages bumped to v1.0.1
 - **create-ruvyxa**:
   - Try-catch error handling with graceful error display
@@ -278,6 +309,7 @@
 - **CLI platform binaries**: All platform packages updated
 
 ### CI/CD
+
 - `resolve-version` job for version extraction and git tag validation
 - Auto tag creation on `workflow_dispatch`
 - Git tag existence check via `git ls-remote`
@@ -288,12 +320,14 @@
 - HMR error handling simplification
 
 ### Documentation
+
 - `docs/publishing.md` with npm publishing guidelines
 - Updated deployment docs
 - Version reference updates across docs
 - README version badges
 
 ### Infrastructure
+
 - `scripts/validate-package-metadata.mjs`
 - `scripts/pack-smoke.mjs` with dynamic tarball detection
 - Platform-specific native binary preparation scripts
@@ -303,6 +337,7 @@
 ## v1.0.0 (2026-06-17)
 
 ### Highlights
+
 - Initial production release of Ruvyxa
 - Native Rust CLI with full-stack React framework
 - Built-in development server and production server
@@ -310,23 +345,26 @@
 - Diagnostic system with error codes
 
 ### Rust Crates
-- **ruvyxa_cli**: 
-  - CLI entry point with commands: `dev`, `build`, `start`, `preview`, `routes`, `analyze`, `doctor`, `clean`, `trace`, `bench`, `test:parity`
+
+- **ruvyxa_cli**:
+  - CLI entry point with commands: `dev`, `build`, `start`, `preview`, `routes`, `analyze`,
+    `doctor`, `clean`, `trace`, `bench`, `test:parity`
   - Project configuration and build pipeline
   - PID file management
-- **ruvyxa_dev_server**: 
+- **ruvyxa_dev_server**:
   - Development server with HMR and WebSocket support
   - Production server with static file serving
   - Node.js runtime integration
-- **ruvyxa_diagnostics**: 
+- **ruvyxa_diagnostics**:
   - Diagnostic type system: warnings, errors, hints, tips
   - Structured diagnostic output
-- **ruvyxa_graph**: 
+- **ruvyxa_graph**:
   - Route discovery from file system
   - Route manifest generation
   - Layout and page tree construction
 
 ### npm Packages
+
 - **ruvyxa**: Main CLI wrapper package with native binary resolution
 - **@ruvyxa/core**: Core framework with server, config, types, request/response handling
 - **@ruvyxa/react**: React integration with SSR support
@@ -344,6 +382,7 @@
 - **@ruvyxa/cli-win32-x64**: Windows x64 native binary
 
 ### Runtime
+
 - `ssr-renderer.mjs` — Server-side rendering
 - `client-renderer.mjs` — Client hydration and rendering
 - `action-renderer.mjs` — Server action handling
@@ -352,6 +391,7 @@
 - `worker-pool.mjs` — Worker pool management
 
 ### Examples
+
 - **basic-app**: Starter application with:
   - Layout and page routing
   - About page
@@ -361,17 +401,20 @@
   - TypeScript configuration
 
 ### Templates
+
 - **minimal template**: Minimal Ruvyxa starter
   - Single page with layout
   - Basic route structure
   - TypeScript + Tailwind CSS
 
 ### Documentation
+
 - README.md with feature overview, getting started, examples
 - CLI command documentation
 - Architecture overview
 
 ### Infrastructure
+
 - Rust workspace with 5 crates
 - pnpm monorepo with 18 packages
 - GitHub repository setup
@@ -385,25 +428,25 @@
 
 The following commits occurred before the v1.0.0 tag and represent the initial project bootstrap:
 
-| Date | Description |
-|------|-------------|
-| 2026-06-17 | Initial project scaffold (`first commit`) |
-| | Application structure with Tailwind CSS, todos page, navigation |
-| | Security headers, performance benchmarks, deployment docs |
-| | Repository references updated, npm publishing documentation |
-| | Prebuilt native CLI binaries for multiple platforms |
-| | Adapter packages initialized (Bun, Cloudflare, Netlify, Node, Static, Vercel) |
-| | Foundational documentation and contributing guide |
+| Date       | Description                                                                   |
+| ---------- | ----------------------------------------------------------------------------- |
+| 2026-06-17 | Initial project scaffold (`first commit`)                                     |
+|            | Application structure with Tailwind CSS, todos page, navigation               |
+|            | Security headers, performance benchmarks, deployment docs                     |
+|            | Repository references updated, npm publishing documentation                   |
+|            | Prebuilt native CLI binaries for multiple platforms                           |
+|            | Adapter packages initialized (Bun, Cloudflare, Netlify, Node, Static, Vercel) |
+|            | Foundational documentation and contributing guide                             |
 
 ---
 
 ## Release Tags
 
-| Tag | Date | Type |
-|-----|------|------|
+| Tag      | Date       | Type       |
+| -------- | ---------- | ---------- |
 | `v1.0.0` | 2026-06-17 | Production |
-| `v1.0.1` | 2026-06-17 | Patch |
-| `v1.0.2` | 2026-06-18 | Minor |
-| `v1.0.3` | 2026-07-08 | Minor |
-| `v1.0.4` | 2026-07-01 | Minor |
-| `v1.0.5` | 2026-07-09 | Minor |
+| `v1.0.1` | 2026-06-17 | Patch      |
+| `v1.0.2` | 2026-06-18 | Minor      |
+| `v1.0.3` | 2026-07-08 | Minor      |
+| `v1.0.4` | 2026-07-01 | Minor      |
+| `v1.0.5` | 2026-07-09 | Minor      |

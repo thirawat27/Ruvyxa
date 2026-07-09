@@ -1,4 +1,4 @@
-import { Suspense } from "react"
+import { Suspense } from 'react'
 
 export const ppr = true
 
@@ -7,7 +7,9 @@ async function DynamicSection() {
   return (
     <div className="dynamic-slot">
       <h3>Dynamic Content (streamed at request time)</h3>
-      <p>Current time: <code>{timestamp}</code></p>
+      <p>
+        Current time: <code>{timestamp}</code>
+      </p>
       <p>This section was rendered on the server at request time and streamed to the client.</p>
     </div>
   )
@@ -27,9 +29,8 @@ export default function PprPage() {
     <main className="page-wide">
       <h1>PPR: Partial Pre-Rendering</h1>
       <p>
-        The static parts of this page (header, navigation, layout) were
-        pre-rendered at <strong>build time</strong>. Dynamic sections stream in
-        at request time.
+        The static parts of this page (header, navigation, layout) were pre-rendered at{' '}
+        <strong>build time</strong>. Dynamic sections stream in at request time.
       </p>
 
       <section>

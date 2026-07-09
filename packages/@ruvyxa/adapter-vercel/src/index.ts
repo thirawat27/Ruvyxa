@@ -1,5 +1,5 @@
-import type { Adapter, AdapterOutput, BuildContext } from "@ruvyxa/core"
-import { validateBuildContext } from "@ruvyxa/core"
+import type { Adapter, AdapterOutput, BuildContext } from '@ruvyxa/core'
+import { validateBuildContext } from '@ruvyxa/core'
 
 /**
  * Options for the Vercel adapter.
@@ -27,32 +27,30 @@ export interface VercelAdapterOptions {
  * ```
  */
 export function vercelAdapter(options: VercelAdapterOptions = {}): Adapter {
-  if (options.functionsDir !== undefined && typeof options.functionsDir !== "string") {
+  if (options.functionsDir !== undefined && typeof options.functionsDir !== 'string') {
     throw new Error(
       `[RUV2001] vercelAdapter: "functionsDir" must be a string, got ${typeof options.functionsDir}`,
     )
   }
 
-  if (options.functionsDir !== undefined && options.functionsDir.trim() === "") {
-    throw new Error(
-      `[RUV2001] vercelAdapter: "functionsDir" must not be an empty string`,
-    )
+  if (options.functionsDir !== undefined && options.functionsDir.trim() === '') {
+    throw new Error(`[RUV2001] vercelAdapter: "functionsDir" must not be an empty string`)
   }
 
   return {
-    name: "vercel",
-    target: "serverless",
+    name: 'vercel',
+    target: 'serverless',
     build(ctx: BuildContext): AdapterOutput {
-      validateBuildContext(ctx, "vercelAdapter")
+      validateBuildContext(ctx, 'vercelAdapter')
       const functionsDir = options.functionsDir ?? `${ctx.outDir}/functions`
       return {
-        name: "vercel",
-        target: "serverless",
-        platform: "vercel",
+        name: 'vercel',
+        target: 'serverless',
+        platform: 'vercel',
         entry: `${ctx.outDir}/server/app`,
         assetsDir: `${ctx.outDir}/assets`,
         functionsDir,
-        configFiles: ["vercel.json"],
+        configFiles: ['vercel.json'],
       }
     },
   }

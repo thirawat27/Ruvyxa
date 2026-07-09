@@ -1,15 +1,21 @@
 #!/usr/bin/env node
-import { createRequire } from "node:module"
-import path from "node:path"
-import { pathToFileURL } from "node:url"
+import { createRequire } from 'node:module'
+import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 
-import { cacheFileName, collectLayouts, compileBundle, runtimeAliases, toImportPath } from "./compiler.mjs"
+import {
+  cacheFileName,
+  collectLayouts,
+  compileBundle,
+  runtimeAliases,
+  toImportPath,
+} from './compiler.mjs'
 
-const [projectRootArg, appDirArg, pageFileArg, requestPath = "/", paramsJson = "{}"] =
+const [projectRootArg, appDirArg, pageFileArg, requestPath = '/', paramsJson = '{}'] =
   process.argv.slice(2)
 
 if (!projectRootArg || !appDirArg || !pageFileArg) {
-  fail("RUV1101", "SSR renderer requires projectRoot, appDir, and pageFile arguments.")
+  fail('RUV1101', 'SSR renderer requires projectRoot, appDir, and pageFile arguments.')
 }
 
 const projectRoot = path.resolve(projectRootArg)
@@ -17,9 +23,9 @@ const appDir = path.resolve(appDirArg)
 const pageFile = path.resolve(pageFileArg)
 
 try {
-  const requireFromProject = createRequire(path.join(projectRoot, "package.json"))
-  requireFromProject.resolve("react")
-  requireFromProject.resolve("react-dom/server")
+  const requireFromProject = createRequire(path.join(projectRoot, 'package.json'))
+  requireFromProject.resolve('react')
+  requireFromProject.resolve('react-dom/server')
 
   const layouts = collectLayouts(appDir, path.dirname(pageFile))
   const bundleFile = await bundleSsrModule(projectRoot, pageFile, layouts)
@@ -28,11 +34,11 @@ try {
 
   process.stdout.write(JSON.stringify({ ok: true, html }))
 } catch (error) {
-  fail("RUV1100", error instanceof Error ? error.message : String(error), error?.stack)
+  fail('RUV1100', error instanceof Error ? error.message : String(error), error?.stack)
 }
 
 async function bundleSsrModule(projectRoot, pageFile, layouts) {
-  const cacheDir = path.join(projectRoot, ".ruvyxa", "cache", "ssr")
+  const cacheDir = path.join(projectRoot, '.ruvyxa', 'cache', 'ssr')
   const imports = [`import Page from ${JSON.stringify(toImportPath(pageFile))}`]
   const wrappers = []
 
@@ -44,26 +50,26 @@ async function bundleSsrModule(projectRoot, pageFile, layouts) {
   const moduleCode = `
 import React from "react"
 import { renderToString } from "react-dom/server"
-${imports.join("\n")}
+${imports.join('\n')}
 
 export async function render(ctx) {
   let tree = React.createElement(Page, { params: ctx.params ?? {}, requestPath: ctx.path })
-  for (const Layout of [${wrappers.join(", ")}].reverse()) {
+  for (const Layout of [${wrappers.join(', ')}].reverse()) {
     tree = React.createElement(Layout, null, tree)
   }
   return "<!doctype html>" + renderToString(tree)
 }
 `
 
-  const outfile = path.join(cacheDir, cacheFileName([moduleCode, pageFile], "mjs"))
+  const outfile = path.join(cacheDir, cacheFileName([moduleCode, pageFile], 'mjs'))
 
   await compileBundle({
     projectRoot,
     entrySource: moduleCode,
-    sourcefile: "ruvyxa:ssr-entry.tsx",
+    sourcefile: 'ruvyxa:ssr-entry.tsx',
     outfile,
-    platform: "node",
-    external: ["react", "react-dom/server"],
+    platform: 'node',
+    external: ['react', 'react-dom/server'],
     aliases: runtimeAliases(path.dirname(new URL(import.meta.url).pathname)),
   })
 

@@ -11,8 +11,8 @@ npm install @ruvyxa/adapter-vercel
 ## Usage
 
 ```ts
-import { defineConfig } from "ruvyxa/config"
-import { vercelAdapter } from "@ruvyxa/adapter-vercel"
+import { defineConfig } from 'ruvyxa/config'
+import { vercelAdapter } from '@ruvyxa/adapter-vercel'
 
 export default defineConfig({
   adapter: vercelAdapter(),

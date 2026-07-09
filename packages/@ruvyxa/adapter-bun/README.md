@@ -11,8 +11,8 @@ npm install @ruvyxa/adapter-bun
 ## Usage
 
 ```ts
-import { defineConfig } from "ruvyxa/config"
-import { bunAdapter } from "@ruvyxa/adapter-bun"
+import { defineConfig } from 'ruvyxa/config'
+import { bunAdapter } from '@ruvyxa/adapter-bun'
 
 export default defineConfig({
   adapter: bunAdapter(),

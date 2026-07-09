@@ -41,22 +41,22 @@ Create a config file:
 
 ```ts
 // ruvyxa.config.ts
-import { defineConfig } from "ruvyxa/config"
+import { defineConfig } from 'ruvyxa/config'
 
 export default defineConfig({
-  appDir: "app",
-  outDir: ".ruvyxa",
+  appDir: 'app',
+  outDir: '.ruvyxa',
   server: {
     port: 3000,
-    host: "localhost",
+    host: 'localhost',
   },
   build: {
     minify: true,
     sourcemap: false,
     treeShaking: true,
-    splitStrategy: "route",
-    jsxRuntime: "classic",
-    esTarget: "es2022",
+    splitStrategy: 'route',
+    jsxRuntime: 'classic',
+    esTarget: 'es2022',
     parallelism: 4,
     emitChunkManifest: false,
   },
@@ -90,7 +90,8 @@ export default function Home() {
 }
 ```
 
-Every `page.tsx` is server-rendered by default. No client-side JavaScript ships unless you add a hydration bundle.
+Every `page.tsx` is server-rendered by default. No client-side JavaScript ships unless you add a
+hydration bundle.
 
 ---
 
@@ -99,11 +100,11 @@ Every `page.tsx` is server-rendered by default. No client-side JavaScript ships 
 Create `app/layout.tsx` to wrap all pages:
 
 ```tsx
-import "./global.css"
+import './global.css'
 
 export const meta = {
-  title: "My App",
-  description: "Built with Ruvyxa.",
+  title: 'My App',
+  description: 'Built with Ruvyxa.',
 }
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
@@ -153,19 +154,19 @@ API routes support `GET`, `POST`, `PUT`, `PATCH`, and `DELETE` handlers.
 Create `app/todos/action.ts` beside your page:
 
 ```ts
-import { action } from "ruvyxa/server"
+import { action } from 'ruvyxa/server'
 
 export const createTodo = action
   .input({
     parse(value: unknown) {
-      if (!value || typeof value !== "object" || !("title" in value)) {
-        throw new Error("Title is required")
+      if (!value || typeof value !== 'object' || !('title' in value)) {
+        throw new Error('Title is required')
       }
       return { title: String(value.title).trim() }
     },
   })
   .handler(async ({ input, invalidate }) => {
-    invalidate("todos")
+    invalidate('todos')
     return { title: input.title, completed: false }
   })
 ```
@@ -191,16 +192,19 @@ Co-locate server-side data fetching with your pages:
 
 ```ts
 // app/blog/[slug]/server.ts
-import { loader } from "ruvyxa/server"
+import { loader } from 'ruvyxa/server'
 
 export const getPost = loader(async ({ params, cache }) => {
-  return cache(`post:${params.slug}`).ttl("5m").get(async () => {
-    return db.posts.findBySlug(params.slug)
-  })
+  return cache(`post:${params.slug}`)
+    .ttl('5m')
+    .get(async () => {
+      return db.posts.findBySlug(params.slug)
+    })
 })
 ```
 
-Loaders run on the server only. They have access to all environment variables and can call databases directly.
+Loaders run on the server only. They have access to all environment variables and can call databases
+directly.
 
 ---
 
@@ -209,7 +213,7 @@ Loaders run on the server only. They have access to all environment variables an
 Ruvyxa supports Tailwind CSS v4 out of the box. Add it to `app/global.css`:
 
 ```css
-@import "tailwindcss";
+@import 'tailwindcss';
 
 @source "../app";
 @source "../components";
@@ -221,7 +225,8 @@ Install the Tailwind dependencies:
 npm install tailwindcss @tailwindcss/cli
 ```
 
-Ruvyxa detects the `@import "tailwindcss"` directive, runs the Tailwind CLI, and injects compiled CSS into your pages automatically.
+Ruvyxa detects the `@import "tailwindcss"` directive, runs the Tailwind CLI, and injects compiled
+CSS into your pages automatically.
 
 ---
 
@@ -238,6 +243,7 @@ DATABASE_URL=postgres://localhost:5432/mydb
 ```
 
 Rules:
+
 - `RUVYXA_PUBLIC_*` variables are available everywhere.
 - All other variables are server-only (SSR, API routes, actions, loaders).
 - `ruvyxa check` catches private env usage in client-reachable code before deploy.
@@ -251,11 +257,13 @@ npx ruvyxa build
 npx ruvyxa start
 ```
 
-The build step validates your app, bundles client-side code with tree-shaking and minification, and emits everything to `.ruvyxa/`. The production server serves from this directory with the same route semantics as dev.
+The build step validates your app, bundles client-side code with tree-shaking and minification, and
+emits everything to `.ruvyxa/`. The production server serves from this directory with the same route
+semantics as dev.
 
-Build metadata includes per-route module counts, output sizes, estimated gzip
-sizes, optimizer counts, and compile cache size. Set `build.emitChunkManifest`
-to `true` when deployment tooling needs `client/chunk-manifest.json`.
+Build metadata includes per-route module counts, output sizes, estimated gzip sizes, optimizer
+counts, and compile cache size. Set `build.emitChunkManifest` to `true` when deployment tooling
+needs `client/chunk-manifest.json`.
 
 ---
 
@@ -266,6 +274,7 @@ npx ruvyxa check
 ```
 
 This runs the app-level production readiness gate:
+
 - TypeScript type checking when `tsconfig.json` is present
 - Production build validation
 - Dev/prod route parity

@@ -1,1 +1,63 @@
-{  "name": "ruvyxa",  "version": "1.0.5",  "description": "The Ruvyxa CLI and runtime for building, validating, serving, and shipping production-minded web applications.",  "license": "MIT",  "type": "module",  "main": "./dist/index.js",  "types": "./dist/index.d.ts",  "bin": {    "ruvyxa": "./bin/ruvyxa.js"  },  "files": [    "bin",    "dist",    "native-bin",    "runtime/action-renderer.mjs",    "runtime/api-renderer.mjs",    "runtime/client-renderer.mjs",    "runtime/compiler.mjs",    "runtime/config-renderer.mjs",    "runtime/plugin-runner.mjs",    "runtime/ssr-renderer.mjs",    "runtime/worker-pool.mjs",    "README.md"  ],  "keywords": [    "framework",    "typescript",    "react",    "rust",    "ssr",    "fullstack",    "middleware",    "wasm"  ],  "repository": {    "type": "git",    "url": "git+https://github.com/thirawat27/ruvyxa.git",    "directory": "packages/ruvyxa"  },  "bugs": {    "url": "https://github.com/thirawat27/ruvyxa/issues"  },  "homepage": "https://github.com/thirawat27/ruvyxa#readme",  "engines": {    "node": ">=22.0.0"  },  "publishConfig": {    "access": "public"  },  "exports": {    ".": {      "types": "./dist/index.d.ts",      "default": "./dist/index.js"    },    "./server": {      "types": "./dist/server.d.ts",      "default": "./dist/server.js"    },    "./config": {      "types": "./dist/config.d.ts",      "default": "./dist/config.js"    }  },  "dependencies": {    "@ruvyxa/core": "workspace:^"  },  "optionalDependencies": {    "@ruvyxa/cli-darwin-arm64": "workspace:^",    "@ruvyxa/cli-darwin-x64": "workspace:^",    "@ruvyxa/cli-linux-arm64": "workspace:^",    "@ruvyxa/cli-linux-x64": "workspace:^",    "@ruvyxa/cli-win32-x64": "workspace:^"  },  "scripts": {    "build": "tsc -p tsconfig.json",    "check": "tsc -p tsconfig.json --noEmit",    "test": "node --test \"../../tests/packages/ruvyxa/**/*.test.mjs\"",    "format": "tsc -p tsconfig.json --noEmit",    "prepack": "pnpm run build && node scripts/prepare-native-binary.mjs"  }}
+{
+  "name": "ruvyxa",
+  "version": "1.0.5",
+  "description": "The Ruvyxa CLI and runtime for building, validating, serving, and shipping production-minded web applications.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "bin": { "ruvyxa": "./bin/ruvyxa.js" },
+  "files": [
+    "bin",
+    "dist",
+    "native-bin",
+    "runtime/action-renderer.mjs",
+    "runtime/api-renderer.mjs",
+    "runtime/client-renderer.mjs",
+    "runtime/compiler.mjs",
+    "runtime/config-renderer.mjs",
+    "runtime/plugin-runner.mjs",
+    "runtime/ssr-renderer.mjs",
+    "runtime/worker-pool.mjs",
+    "README.md"
+  ],
+  "keywords": [
+    "framework",
+    "typescript",
+    "react",
+    "rust",
+    "ssr",
+    "fullstack",
+    "middleware",
+    "wasm"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thirawat27/ruvyxa.git",
+    "directory": "packages/ruvyxa"
+  },
+  "bugs": { "url": "https://github.com/thirawat27/ruvyxa/issues" },
+  "homepage": "https://github.com/thirawat27/ruvyxa#readme",
+  "engines": { "node": ">=22.0.0" },
+  "publishConfig": { "access": "public" },
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
+    "./server": { "types": "./dist/server.d.ts", "default": "./dist/server.js" },
+    "./config": { "types": "./dist/config.d.ts", "default": "./dist/config.js" }
+  },
+  "dependencies": { "@ruvyxa/core": "workspace:^" },
+  "optionalDependencies": {
+    "@ruvyxa/cli-darwin-arm64": "workspace:^",
+    "@ruvyxa/cli-darwin-x64": "workspace:^",
+    "@ruvyxa/cli-linux-arm64": "workspace:^",
+    "@ruvyxa/cli-linux-x64": "workspace:^",
+    "@ruvyxa/cli-win32-x64": "workspace:^"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.check.json",
+    "test": "node --test \"../../tests/packages/ruvyxa/**/*.test.mjs\"",
+    "format": "tsc -p tsconfig.check.json",
+    "prepack": "pnpm run build && node scripts/prepare-native-binary.mjs"
+  }
+}

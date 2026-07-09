@@ -1,5 +1,5 @@
-import type { Adapter, AdapterOutput, BuildContext } from "@ruvyxa/core"
-import { validateBuildContext } from "@ruvyxa/core"
+import type { Adapter, AdapterOutput, BuildContext } from '@ruvyxa/core'
+import { validateBuildContext } from '@ruvyxa/core'
 
 /**
  * Options for the Netlify adapter.
@@ -26,32 +26,30 @@ export interface NetlifyAdapterOptions {
  * ```
  */
 export function netlifyAdapter(options: NetlifyAdapterOptions = {}): Adapter {
-  if (options.functionsDir !== undefined && typeof options.functionsDir !== "string") {
+  if (options.functionsDir !== undefined && typeof options.functionsDir !== 'string') {
     throw new Error(
       `[RUV2001] netlifyAdapter: "functionsDir" must be a string, got ${typeof options.functionsDir}`,
     )
   }
 
-  if (options.functionsDir !== undefined && options.functionsDir.trim() === "") {
-    throw new Error(
-      `[RUV2001] netlifyAdapter: "functionsDir" must not be an empty string`,
-    )
+  if (options.functionsDir !== undefined && options.functionsDir.trim() === '') {
+    throw new Error(`[RUV2001] netlifyAdapter: "functionsDir" must not be an empty string`)
   }
 
   return {
-    name: "netlify",
-    target: "serverless",
+    name: 'netlify',
+    target: 'serverless',
     build(ctx: BuildContext): AdapterOutput {
-      validateBuildContext(ctx, "netlifyAdapter")
+      validateBuildContext(ctx, 'netlifyAdapter')
       const functionsDir = options.functionsDir ?? `${ctx.outDir}/netlify/functions`
       return {
-        name: "netlify",
-        target: "serverless",
-        platform: "netlify",
+        name: 'netlify',
+        target: 'serverless',
+        platform: 'netlify',
         entry: `${ctx.outDir}/server/app`,
         assetsDir: `${ctx.outDir}/assets`,
         functionsDir,
-        configFiles: ["netlify.toml"],
+        configFiles: ['netlify.toml'],
       }
     },
   }

@@ -1,4 +1,4 @@
 packages:
-  - "packages/*"
-  - "packages/@ruvyxa/*"
-  - "examples/*"
+  - 'packages/*'
+  - 'packages/@ruvyxa/*'
+  - 'examples/*'

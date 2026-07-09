@@ -1,0 +1,39 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+target/
+
+# Build output
+dist/
+.ruvyxa/
+.ruvyxa-*/
+.ruvyxa/cache/
+
+# Rust — handled by cargo fmt
+crates/
+*.rs
+*.toml
+
+# Generated / vendored
+*.wasm
+*.d.ts
+*.js.map
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp
+*.log
+*.tmp

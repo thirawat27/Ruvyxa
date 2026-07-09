@@ -1,5 +1,5 @@
-import type { Adapter, AdapterOutput, BuildContext } from "@ruvyxa/core"
-import { validateBuildContext } from "@ruvyxa/core"
+import type { Adapter, AdapterOutput, BuildContext } from '@ruvyxa/core'
+import { validateBuildContext } from '@ruvyxa/core'
 
 /**
  * Options for the Cloudflare Workers adapter.
@@ -26,30 +26,28 @@ export interface CloudflareAdapterOptions {
  * ```
  */
 export function cloudflareAdapter(options: CloudflareAdapterOptions = {}): Adapter {
-  if (options.workerEntry !== undefined && typeof options.workerEntry !== "string") {
+  if (options.workerEntry !== undefined && typeof options.workerEntry !== 'string') {
     throw new Error(
       `[RUV2001] cloudflareAdapter: "workerEntry" must be a string, got ${typeof options.workerEntry}`,
     )
   }
 
-  if (options.workerEntry !== undefined && options.workerEntry.trim() === "") {
-    throw new Error(
-      `[RUV2001] cloudflareAdapter: "workerEntry" must not be an empty string`,
-    )
+  if (options.workerEntry !== undefined && options.workerEntry.trim() === '') {
+    throw new Error(`[RUV2001] cloudflareAdapter: "workerEntry" must not be an empty string`)
   }
 
   return {
-    name: "cloudflare",
-    target: "edge",
+    name: 'cloudflare',
+    target: 'edge',
     build(ctx: BuildContext): AdapterOutput {
-      validateBuildContext(ctx, "cloudflareAdapter")
+      validateBuildContext(ctx, 'cloudflareAdapter')
       return {
-        name: "cloudflare",
-        target: "edge",
-        platform: "cloudflare",
+        name: 'cloudflare',
+        target: 'edge',
+        platform: 'cloudflare',
         entry: options.workerEntry ?? `${ctx.outDir}/server/app`,
         assetsDir: `${ctx.outDir}/assets`,
-        configFiles: ["wrangler.toml"],
+        configFiles: ['wrangler.toml'],
       }
     },
   }

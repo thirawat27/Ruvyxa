@@ -11,8 +11,8 @@ npm install @ruvyxa/adapter-node
 ## Usage
 
 ```ts
-import { defineConfig } from "ruvyxa/config"
-import { nodeAdapter } from "@ruvyxa/adapter-node"
+import { defineConfig } from 'ruvyxa/config'
+import { nodeAdapter } from '@ruvyxa/adapter-node'
 
 export default defineConfig({
   adapter: nodeAdapter(),

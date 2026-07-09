@@ -23,9 +23,9 @@ cargo run -p ruvyxa_cli -- start --root examples/kitchen-sink --port 3000
 
 ## Project Structure
 
-This is a Rust + TypeScript monorepo. The native CLI is the Rust crate `ruvyxa_cli`. 
-JS/TS packages live in `packages/`. The bundler (`ruvyxa_bundler`) handles all
-TypeScript/JSX compilation, tree-shaking, minification, and source maps natively.
+This is a Rust + TypeScript monorepo. The native CLI is the Rust crate `ruvyxa_cli`. JS/TS packages
+live in `packages/`. The bundler (`ruvyxa_bundler`) handles all TypeScript/JSX compilation,
+tree-shaking, minification, and source maps natively.
 
 - **crates/** — Rust workspace: CLI, bundler, dev server, graph, middleware, diagnostics
 - **packages/** — npm packages: CLI wrapper, runtime, adapters, core primitives

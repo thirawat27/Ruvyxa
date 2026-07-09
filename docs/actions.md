@@ -1,6 +1,7 @@
 # Server Actions
 
-Server actions are typed, validated mutations that run exclusively on the server. They live in `action.ts` files beside pages and are invoked through Ruvyxa's action endpoint.
+Server actions are typed, validated mutations that run exclusively on the server. They live in
+`action.ts` files beside pages and are invoked through Ruvyxa's action endpoint.
 
 ---
 
@@ -8,13 +9,13 @@ Server actions are typed, validated mutations that run exclusively on the server
 
 ```ts
 // app/todos/action.ts
-import { action } from "ruvyxa/server"
+import { action } from 'ruvyxa/server'
 
 export const createTodo = action
   .input({
     parse(value: unknown) {
-      if (!value || typeof value !== "object" || !("title" in value)) {
-        throw new Error("Title is required")
+      if (!value || typeof value !== 'object' || !('title' in value)) {
+        throw new Error('Title is required')
       }
       return { title: String(value.title).trim() }
     },
@@ -24,7 +25,7 @@ export const createTodo = action
     const todo = await db.todos.create({ title: input.title })
 
     // Invalidate cached data
-    invalidate("todos")
+    invalidate('todos')
 
     return todo
   })
@@ -32,13 +33,13 @@ export const createTodo = action
 
 ### Anatomy
 
-| Part | Purpose |
-|------|---------|
-| `action` | Creates a new server action |
-| `.input({ parse })` | Validates and transforms the raw input |
-| `.handler()` | Executes the mutation logic |
-| `input` | The validated, typed input from `.input()` |
-| `invalidate(key)` | Marks cached loader data as stale |
+| Part                | Purpose                                    |
+| ------------------- | ------------------------------------------ |
+| `action`            | Creates a new server action                |
+| `.input({ parse })` | Validates and transforms the raw input     |
+| `.handler()`        | Executes the mutation logic                |
+| `input`             | The validated, typed input from `.input()` |
+| `invalidate(key)`   | Marks cached loader data as stale          |
 
 ---
 
@@ -60,10 +61,10 @@ export default function TodosPage() {
 ### From JavaScript
 
 ```ts
-const response = await fetch("/__ruvyxa/action?path=/todos&name=createTodo", {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({ title: "Ship it" }),
+const response = await fetch('/__ruvyxa/action?path=/todos&name=createTodo', {
+  method: 'POST',
+  headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ title: 'Ship it' }),
 })
 ```
 
@@ -73,7 +74,8 @@ const response = await fetch("/__ruvyxa/action?path=/todos&name=createTodo", {
 POST /__ruvyxa/action?path=<route-path>&name=<action-export-name>
 ```
 
-The endpoint resolves the action from the target route's sibling `action.ts`. Clients cannot specify arbitrary module paths.
+The endpoint resolves the action from the target route's sibling `action.ts`. Clients cannot specify
+arbitrary module paths.
 
 ---
 
@@ -87,11 +89,11 @@ export const updateUser = action
     parse(value: unknown) {
       const obj = value as Record<string, unknown>
 
-      if (!obj.email || typeof obj.email !== "string") {
-        throw new Error("Valid email required")
+      if (!obj.email || typeof obj.email !== 'string') {
+        throw new Error('Valid email required')
       }
-      if (!obj.name || typeof obj.name !== "string") {
-        throw new Error("Name required")
+      if (!obj.name || typeof obj.name !== 'string') {
+        throw new Error('Name required')
       }
 
       return {
@@ -124,15 +126,15 @@ Other content types are rejected with `415 Unsupported Media Type`.
 
 Ruvyxa applies multiple layers of protection to every action call:
 
-| Protection | Behavior |
-|-----------|----------|
-| **Body size limit** | Payloads over 64 KB are rejected with `413` |
-| **Content-Type guard** | Only JSON and form-encoded are accepted |
-| **Origin validation** | `Origin` must match `Host` header, or `403` |
-| **Fetch Metadata** | `Sec-Fetch-Site: cross-site` is rejected with `403` |
-| **Rate limiting** | Per-client/action throttling (60 req/min default) |
-| **Security headers** | Standard headers applied to all responses |
-| **Module isolation** | Actions can only be invoked from their owning route |
+| Protection             | Behavior                                            |
+| ---------------------- | --------------------------------------------------- |
+| **Body size limit**    | Payloads over 64 KB are rejected with `413`         |
+| **Content-Type guard** | Only JSON and form-encoded are accepted             |
+| **Origin validation**  | `Origin` must match `Host` header, or `403`         |
+| **Fetch Metadata**     | `Sec-Fetch-Site: cross-site` is rejected with `403` |
+| **Rate limiting**      | Per-client/action throttling (60 req/min default)   |
+| **Security headers**   | Standard headers applied to all responses           |
+| **Module isolation**   | Actions can only be invoked from their owning route |
 
 These protections work automatically. No configuration needed.
 
@@ -174,11 +176,11 @@ Actions return structured responses:
 
 ## Diagnostic Codes
 
-| Code | Meaning |
-|------|---------|
-| `RUV1500` | Action runtime error — validation failure or handler exception |
-| `RUV1501` | Route has no `action.ts` or `action.js` file |
-| `RUV1502` | Action renderer script not found |
+| Code      | Meaning                                                                                |
+| --------- | -------------------------------------------------------------------------------------- |
+| `RUV1500` | Action runtime error — validation failure or handler exception                         |
+| `RUV1501` | Route has no `action.ts` or `action.js` file                                           |
+| `RUV1502` | Action renderer script not found                                                       |
 | `RUV1503` | Internal renderer invocation missing arguments — renderer called without required args |
 
 ---
@@ -189,7 +191,8 @@ Actions return structured responses:
 - Always validate input. Never trust the client payload.
 - Use `invalidate()` to keep loaders fresh after mutations.
 - Co-locate actions with the page that uses them.
-- For complex validation, consider extracting a schema library — but the `parse` function is the enforcement point.
+- For complex validation, consider extracting a schema library — but the `parse` function is the
+  enforcement point.
 
 ---
 

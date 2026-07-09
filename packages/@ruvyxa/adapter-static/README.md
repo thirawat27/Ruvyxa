@@ -11,8 +11,8 @@ npm install @ruvyxa/adapter-static
 ## Usage
 
 ```ts
-import { defineConfig } from "ruvyxa/config"
-import { staticAdapter } from "@ruvyxa/adapter-static"
+import { defineConfig } from 'ruvyxa/config'
+import { staticAdapter } from '@ruvyxa/adapter-static'
 
 export default defineConfig({
   adapter: staticAdapter(),
@@ -31,4 +31,5 @@ export default defineConfig({
 }
 ```
 
-Use this adapter for static-only sites. Runtime APIs such as API routes and server actions require a server target.
+Use this adapter for static-only sites. Runtime APIs such as API routes and server actions require a
+server target.

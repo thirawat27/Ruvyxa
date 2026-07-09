@@ -39,4 +39,3 @@ Before handing off app-sensitive changes, run:
 ```bash
 pnpm check
 ```
-

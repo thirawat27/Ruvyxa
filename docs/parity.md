@@ -1,12 +1,15 @@
 # Dev/Production Parity
 
-Ruvyxa guarantees that `ruvyxa dev` and `ruvyxa start` share the same route semantics. What works in development works in production — no surprises at deploy time.
+Ruvyxa guarantees that `ruvyxa dev` and `ruvyxa start` share the same route semantics. What works in
+development works in production — no surprises at deploy time.
 
 ---
 
 ## The Problem
 
-Many frameworks have subtle differences between dev and production modes: different routing algorithms, different module resolution, different layout behavior. Bugs that only appear in production are the worst kind.
+Many frameworks have subtle differences between dev and production modes: different routing
+algorithms, different module resolution, different layout behavior. Bugs that only appear in
+production are the worst kind.
 
 Ruvyxa eliminates this class of bug by:
 
@@ -37,16 +40,17 @@ This command:
 
 For each route, the parity check verifies:
 
-| Property | Must match |
-|----------|-----------|
-| Route kind | `page` or `api` |
-| Route path | The resolved URL pattern |
-| Layout chain | All layouts that wrap the route |
+| Property       | Must match                        |
+| -------------- | --------------------------------- |
+| Route kind     | `page` or `api`                   |
+| Route path     | The resolved URL pattern          |
+| Layout chain   | All layouts that wrap the route   |
 | Server modules | `server.ts`, `action.ts` siblings |
-| Client modules | `client.tsx` siblings |
-| Runtime target | `node`, `edge`, or `static` |
+| Client modules | `client.tsx` siblings             |
+| Runtime target | `node`, `edge`, or `static`       |
 
-For page routes, it also renders a representative URL in development and production mode and fails if either render path returns an error.
+For page routes, it also renders a representative URL in development and production mode and fails
+if either render path returns an error.
 
 ---
 
@@ -87,7 +91,8 @@ Run the parity check after changing:
 - Client module detection
 - Action file conventions
 
-The CI workflow runs `ruvyxa check`, which includes parity, as part of the release gate. Run `ruvyxa test:parity` directly when you only need to debug route behavior.
+The CI workflow runs `ruvyxa check`, which includes parity, as part of the release gate. Run
+`ruvyxa test:parity` directly when you only need to debug route behavior.
 
 ---
 
@@ -95,10 +100,15 @@ The CI workflow runs `ruvyxa check`, which includes parity, as part of the relea
 
 The `ServerConfig` struct has two constructors:
 
-- `ServerConfig::dev(root, host, port)` — reads from `app/` with file watching enabled, render cache optimised for hot reload.
-- `ServerConfig::production(root, host, port)` — reads from `.ruvyxa/server/app` with watching disabled, render cache optimised for capacity.
+- `ServerConfig::dev(root, host, port)` — reads from `app/` with file watching enabled, render cache
+  optimised for hot reload.
+- `ServerConfig::production(root, host, port)` — reads from `.ruvyxa/server/app` with watching
+  disabled, render cache optimised for capacity.
 
-Both pass through the same `discover_routes()` function, the same `RadixRouter`, and the same `render_request()` pipeline via the persistent Node worker pool. The parity test verifies that `discover_routes()` output is identical for both source directories and then smoke-renders every page route in both modes.
+Both pass through the same `discover_routes()` function, the same `RadixRouter`, and the same
+`render_request()` pipeline via the persistent Node worker pool. The parity test verifies that
+`discover_routes()` output is identical for both source directories and then smoke-renders every
+page route in both modes.
 
 ---
 

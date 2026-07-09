@@ -445,14 +445,12 @@ fn load_project_config(root: &Path) -> anyhow::Result<ProjectConfig> {
         .arg(root)
         .output()
         .with_context(|| format!("failed to load config for {}", root.display()))?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let result: ConfigRendererOutput = serde_json::from_str(&stdout).with_context(|| {
-        format!(
-            "config renderer returned invalid output for {}\nstdout:\n{}",
-            root.display(),
-            stdout
-        )
-    })?;
+    let result = parse_config_renderer_output(
+        root,
+        &output.stdout,
+        &output.stderr,
+        &output.status.to_string(),
+    )?;
 
     if output.status.success() && result.ok {
         let config = result.config.unwrap_or_default();
@@ -468,6 +466,33 @@ fn load_project_config(root: &Path) -> anyhow::Result<ProjectConfig> {
             .or(result.stack)
             .unwrap_or_else(|| "unknown config error".to_string())
     )
+}
+
+fn parse_config_renderer_output(
+    root: &Path,
+    stdout: &[u8],
+    stderr: &[u8],
+    status: &str,
+) -> anyhow::Result<ConfigRendererOutput> {
+    let stdout = String::from_utf8_lossy(stdout);
+    let stderr = String::from_utf8_lossy(stderr);
+    serde_json::from_str(&stdout).with_context(|| {
+        format!(
+            "config renderer returned invalid output for {}\nstatus: {}\nstdout:\n{}\nstderr:\n{}",
+            root.display(),
+            status,
+            diagnostic_stream(&stdout),
+            diagnostic_stream(&stderr),
+        )
+    })
+}
+
+fn diagnostic_stream(value: &str) -> String {
+    if value.trim().is_empty() {
+        "(empty)".to_string()
+    } else {
+        value.to_string()
+    }
 }
 
 fn build(args: BuildArgs) -> anyhow::Result<()> {
@@ -2654,6 +2679,23 @@ mod tests {
     use serde_json::json;
 
     use super::*;
+
+    #[test]
+    fn config_renderer_invalid_output_reports_empty_stdout_and_stderr() {
+        let error = parse_config_renderer_output(
+            Path::new("."),
+            b"",
+            b"SyntaxError: Unexpected token",
+            "exit status: 1",
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("config renderer returned invalid output for ."));
+        assert!(error.contains("status: exit status: 1"));
+        assert!(error.contains("stdout:\n(empty)"));
+        assert!(error.contains("stderr:\nSyntaxError: Unexpected token"));
+    }
 
     #[test]
     fn parses_dependency_major_versions() {

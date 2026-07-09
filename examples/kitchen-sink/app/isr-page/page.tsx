@@ -20,8 +20,8 @@ export default function IsrPage() {
         This page was rendered at: <code>{now}</code>
       </p>
       <p>
-        It will be served from cache for up to <strong>60 seconds</strong>, then
-        revalidated in the background on the next request.
+        It will be served from cache for up to <strong>60 seconds</strong>, then revalidated in the
+        background on the next request.
       </p>
 
       <section>
