@@ -59,9 +59,11 @@ use tokio::sync::RwLock;
 use tracing::{error, info};
 use wasmtime::*;
 use wasmtime_wasi::p1::WasiP1Ctx;
-use wasmtime_wasi::WasiCtxBuilder;
+use wasmtime_wasi::{DirPerms, FilePerms, WasiCtxBuilder};
 
 use crate::config::{PluginConfig, PluginPermissions, PluginPhase};
+
+const MAX_PLUGIN_RESULT_BYTES: usize = 1024 * 1024;
 
 /// Represents an HTTP request passed to/from a Wasm plugin.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,6 +114,11 @@ struct LoadedPlugin {
     path: PathBuf,
 }
 
+struct PluginStoreState {
+    wasi: WasiP1Ctx,
+    limits: StoreLimits,
+}
+
 /// The Wasm plugin runtime manages all loaded plugins.
 pub struct WasmPluginRuntime {
     engine: Engine,
@@ -132,8 +139,11 @@ impl WasmPluginRuntime {
         let mut plugins = Vec::new();
 
         for plugin_config in configs {
+            let mut plugin_config = plugin_config.clone();
+            plugin_config.permissions =
+                Self::resolve_permissions(project_root, &plugin_config.permissions);
             let wasm_path = project_root.join(&plugin_config.path);
-            match Self::load_plugin(&engine, &wasm_path, plugin_config) {
+            match Self::load_plugin(&engine, &wasm_path, &plugin_config) {
                 Ok(plugin) => {
                     info!(name = %plugin.name, path = %wasm_path.display(), "loaded wasm plugin");
                     plugins.push(plugin);
@@ -331,15 +341,58 @@ impl WasmPluginRuntime {
     fn matches_route(plugin: &LoadedPlugin, path: &str) -> bool {
         match &plugin.routes {
             None => true, // No filter = match all
-            Some(patterns) => patterns.iter().any(|pattern| {
-                if pattern.ends_with('*') {
-                    let prefix = &pattern[..pattern.len() - 1];
-                    path.starts_with(prefix)
-                } else {
-                    path == pattern
-                }
-            }),
+            Some(patterns) => patterns
+                .iter()
+                .any(|pattern| Self::route_pattern_matches(pattern, path)),
         }
+    }
+
+    fn route_pattern_matches(pattern: &str, path: &str) -> bool {
+        if matches!(pattern, "*" | "/*" | "/**") {
+            return true;
+        }
+
+        let pattern_segments = Self::route_segments(pattern);
+        let path_segments = Self::route_segments(path);
+
+        let mut pattern_index = 0;
+        let mut path_index = 0;
+
+        while pattern_index < pattern_segments.len() {
+            let segment = pattern_segments[pattern_index];
+
+            if segment == "*" || segment == "**" || segment.starts_with('*') {
+                return true;
+            }
+
+            let Some(path_segment) = path_segments.get(path_index) else {
+                return false;
+            };
+
+            if segment.starts_with(':') {
+                if path_segment.is_empty() {
+                    return false;
+                }
+            } else if segment != *path_segment {
+                return false;
+            }
+
+            pattern_index += 1;
+            path_index += 1;
+        }
+
+        path_index == path_segments.len()
+    }
+
+    fn route_segments(value: &str) -> Vec<&str> {
+        value
+            .split('?')
+            .next()
+            .unwrap_or(value)
+            .trim_matches('/')
+            .split('/')
+            .filter(|segment| !segment.is_empty())
+            .collect()
     }
 
     fn invoke_on_request_blocking(
@@ -400,7 +453,7 @@ impl WasmPluginRuntime {
     fn create_store(
         engine: &Engine,
         permissions: &PluginPermissions,
-    ) -> std::result::Result<Store<WasiP1Ctx>, String> {
+    ) -> std::result::Result<Store<PluginStoreState>, String> {
         let mut wasi_builder = WasiCtxBuilder::new();
 
         for var in &permissions.env {
@@ -409,8 +462,41 @@ impl WasmPluginRuntime {
             }
         }
 
+        if !permissions.net.is_empty() {
+            return Err(format!(
+                "Network permissions are not supported for Wasm plugins yet: {}",
+                permissions.net.join(", ")
+            ));
+        }
+
+        for host_path in &permissions.fs_read {
+            wasi_builder
+                .preopened_dir(
+                    host_path,
+                    Self::guest_preopen_path(host_path),
+                    DirPerms::READ,
+                    FilePerms::READ,
+                )
+                .map_err(|e| {
+                    format!(
+                        "Failed to grant read access to '{}': {e}",
+                        host_path.display()
+                    )
+                })?;
+        }
+
         let wasi_ctx = wasi_builder.build_p1();
-        let mut store = Store::new(engine, wasi_ctx);
+        let limits = StoreLimitsBuilder::new()
+            .memory_size(Self::memory_limit_usize(permissions.max_memory_bytes)?)
+            .build();
+        let mut store = Store::new(
+            engine,
+            PluginStoreState {
+                wasi: wasi_ctx,
+                limits,
+            },
+        );
+        store.limiter(|state| &mut state.limits);
 
         let fuel = permissions.timeout_ms * 1_000_000;
         store.set_fuel(fuel).ok();
@@ -420,12 +506,14 @@ impl WasmPluginRuntime {
 
     fn instantiate(
         engine: &Engine,
-        store: &mut Store<WasiP1Ctx>,
+        store: &mut Store<PluginStoreState>,
         module: &Module,
     ) -> std::result::Result<Instance, String> {
         let mut linker = Linker::new(engine);
-        wasmtime_wasi::p1::add_to_linker_sync(&mut linker, |ctx| ctx)
-            .map_err(|e| format!("Failed to link WASI: {e}"))?;
+        wasmtime_wasi::p1::add_to_linker_sync(&mut linker, |state: &mut PluginStoreState| {
+            &mut state.wasi
+        })
+        .map_err(|e| format!("Failed to link WASI: {e}"))?;
 
         linker
             .instantiate(&mut *store, module)
@@ -433,7 +521,7 @@ impl WasmPluginRuntime {
     }
 
     fn call_plugin_func(
-        store: &mut Store<WasiP1Ctx>,
+        store: &mut Store<PluginStoreState>,
         instance: &Instance,
         func_name: &str,
         input: &str,
@@ -457,23 +545,160 @@ impl WasmPluginRuntime {
             .call(&mut *store, (input_ptr, input_bytes.len() as i32))
             .map_err(|e| format!("Plugin function '{func_name}' trapped: {e}"))?;
 
-        let mut result_buf = vec![0u8; 4096];
-        memory
-            .read(&*store, result_ptr as usize, &mut result_buf)
-            .map_err(|e| format!("Failed to read plugin result: {e}"))?;
-
-        let result_str = String::from_utf8_lossy(
-            &result_buf[..result_buf
-                .iter()
-                .position(|&b| b == 0)
-                .unwrap_or(result_buf.len())],
-        )
-        .to_string();
+        let data = memory.data(&*store);
+        let result_str = Self::read_plugin_result_bytes(data, result_ptr, MAX_PLUGIN_RESULT_BYTES)?;
 
         if result_str.is_empty() {
             Ok(serde_json::to_string(&PluginResult::default()).unwrap())
         } else {
             Ok(result_str)
         }
+    }
+
+    fn read_plugin_result_bytes(
+        memory: &[u8],
+        result_ptr: i32,
+        max_bytes: usize,
+    ) -> std::result::Result<String, String> {
+        if result_ptr < 0 {
+            return Err(format!(
+                "Plugin returned invalid result pointer: {result_ptr}"
+            ));
+        }
+
+        let start = result_ptr as usize;
+        if start >= memory.len() {
+            return Err(format!(
+                "Plugin result pointer {start} is outside memory ({} bytes)",
+                memory.len()
+            ));
+        }
+
+        let end_limit = memory.len().min(start.saturating_add(max_bytes));
+        let Some(relative_end) = memory[start..end_limit].iter().position(|byte| *byte == 0) else {
+            return Err(format!(
+                "Plugin result is not null-terminated within {max_bytes} bytes"
+            ));
+        };
+        let end = start + relative_end;
+
+        String::from_utf8(memory[start..end].to_vec())
+            .map_err(|e| format!("Plugin result was not valid UTF-8: {e}"))
+    }
+
+    fn resolve_permissions(
+        project_root: &Path,
+        permissions: &PluginPermissions,
+    ) -> PluginPermissions {
+        let mut resolved = permissions.clone();
+        resolved.fs_read = permissions
+            .fs_read
+            .iter()
+            .map(|path| {
+                if path.is_absolute() {
+                    path.clone()
+                } else {
+                    project_root.join(path)
+                }
+            })
+            .collect();
+        resolved
+    }
+
+    fn guest_preopen_path(host_path: &Path) -> String {
+        host_path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .filter(|name| !name.is_empty())
+            .unwrap_or(".")
+            .replace('\\', "/")
+    }
+
+    fn memory_limit_usize(limit: u64) -> std::result::Result<usize, String> {
+        usize::try_from(limit).map_err(|_| format!("maxMemoryBytes is too large: {limit}"))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn route_patterns_match_exact_params_and_wildcards() {
+        assert!(WasmPluginRuntime::route_pattern_matches(
+            "/api/health",
+            "/api/health"
+        ));
+        assert!(!WasmPluginRuntime::route_pattern_matches(
+            "/api/health",
+            "/api/status"
+        ));
+
+        assert!(WasmPluginRuntime::route_pattern_matches(
+            "/blog/:slug",
+            "/blog/plugin-guide"
+        ));
+        assert!(!WasmPluginRuntime::route_pattern_matches(
+            "/blog/:slug",
+            "/blog/a/b"
+        ));
+
+        assert!(WasmPluginRuntime::route_pattern_matches(
+            "/assets/*",
+            "/assets/css/app.css"
+        ));
+        assert!(WasmPluginRuntime::route_pattern_matches(
+            "/assets/*",
+            "/assets"
+        ));
+        assert!(WasmPluginRuntime::route_pattern_matches("*", "/anything"));
+    }
+
+    #[test]
+    fn reads_null_terminated_plugin_result_with_bounds() {
+        let memory = b"xxxx{\"action\":\"continue\"}\0ignored";
+        let result = WasmPluginRuntime::read_plugin_result_bytes(memory, 4, 1024).unwrap();
+        assert_eq!(result, "{\"action\":\"continue\"}");
+
+        let error = WasmPluginRuntime::read_plugin_result_bytes(memory, 4, 8).unwrap_err();
+        assert!(error.contains("not null-terminated"));
+
+        let error = WasmPluginRuntime::read_plugin_result_bytes(memory, -1, 1024).unwrap_err();
+        assert!(error.contains("invalid result pointer"));
+    }
+
+    #[test]
+    fn resolves_relative_fs_permissions_against_project_root() {
+        let permissions = PluginPermissions {
+            fs_read: vec![PathBuf::from("data")],
+            ..PluginPermissions::default()
+        };
+
+        let resolved =
+            WasmPluginRuntime::resolve_permissions(Path::new("/workspace/app"), &permissions);
+
+        assert_eq!(resolved.fs_read, vec![PathBuf::from("/workspace/app/data")]);
+        assert_eq!(
+            WasmPluginRuntime::guest_preopen_path(&resolved.fs_read[0]),
+            "data"
+        );
+    }
+
+    #[test]
+    fn network_permissions_fail_closed() {
+        let mut engine_config = Config::new();
+        engine_config.consume_fuel(true);
+        let engine = Engine::new(&engine_config).unwrap();
+        let permissions = PluginPermissions {
+            net: vec!["api.example.com".to_string()],
+            ..PluginPermissions::default()
+        };
+
+        let error = match WasmPluginRuntime::create_store(&engine, &permissions) {
+            Ok(_) => panic!("expected network permissions to fail closed"),
+            Err(error) => error,
+        };
+
+        assert!(error.contains("Network permissions are not supported"));
     }
 }

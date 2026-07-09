@@ -41,7 +41,7 @@ export interface RuvyxaConfig {
   middleware?: MiddlewareConfig
   adapter?: Adapter
   adapterOptions?: Record<string, unknown>
-  plugins?: RuvyxaPlugin[]
+  plugins?: RuvyxaPluginInput[]
 }
 
 export interface MiddlewareConfig {
@@ -100,20 +100,58 @@ export interface TransformResult {
   map?: unknown
 }
 
+export type PluginTransformResult = string | TransformResult
+
 export interface PluginContext {
   environment: "client" | "server" | "edge" | "worker" | "shared"
+  root?: string
+  id?: string
 }
 
 export interface RuvyxaPlugin {
   name: string
   enforce?: "pre" | "post"
-  resolveId?(id: string): string | null | Promise<string | null>
+  timeoutMs?: number
+  resolveId?(
+    id: string,
+    importer?: string,
+    ctx?: PluginContext,
+  ): string | null | undefined | Promise<string | null | undefined>
   transform?(
     code: string,
     id: string,
     ctx: PluginContext,
-  ): TransformResult | null | Promise<TransformResult | null>
+  ): PluginTransformResult | null | undefined | Promise<PluginTransformResult | null | undefined>
 }
+
+export type RuvyxaPluginTransformHook = NonNullable<RuvyxaPlugin["transform"]>
+
+export type RuvyxaPluginHooks = Omit<RuvyxaPlugin, "name">
+
+export interface PluginSetupContext {
+  root?: string
+  mode?: "development" | "production"
+  command?: "dev" | "build" | "check" | "analyze" | "routes" | "unknown"
+}
+
+export type RuvyxaPluginFactoryResult =
+  | RuvyxaPlugin
+  | RuvyxaPluginInput[]
+  | false
+  | null
+  | undefined
+  | Promise<RuvyxaPlugin | RuvyxaPluginInput[] | false | null | undefined>
+
+export type RuvyxaPluginFactory = (ctx: PluginSetupContext) => RuvyxaPluginFactoryResult
+
+export type RuvyxaPluginInput =
+  | string
+  | RuvyxaPlugin
+  | RuvyxaPluginFactory
+  | RuvyxaPluginInput[]
+  | false
+  | null
+  | undefined
 
 export interface BuildContext {
   root: string

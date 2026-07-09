@@ -30,6 +30,7 @@
 - **Gzip + Brotli compression** — all responses compressed automatically via tower-http middleware.
 - **Tower-based middleware** — composable CORS, timing, logging, and custom headers via `ruvyxa.config.ts`.
 - **Wasm plugin runtime** — sandboxed WebAssembly plugins powered by Wasmtime with hot-reload, configurable permissions, and execution limits.
+- **Build plugin ecosystem** — enable installed plugins by name, write inline TypeScript plugins, or publish reusable `ruvyxa-plugin-*` packages.
 - **Parallel production bundling** — page client bundles are emitted concurrently and written back in deterministic route order.
 - **Honest checks** — `ruvyxa check` runs type checking, build validation, dev/prod parity, and page smoke rendering before deploy.
 - **SSR-first React** — pages render on the server, with route-level client bundles for hydration.
@@ -189,11 +190,11 @@ export default defineConfig({
         path: "plugins/auth-guard.wasm",
         phase: "request",        // "request" or "response"
         hotReload: true,         // reload on file change
-        routes: ["/api/*"],      // route filter
+        routes: ["/api/*", "/users/:id"], // route filter
         permissions: {
           env: ["AUTH_SECRET"],   // allowed env vars
-          fsRead: [],            // no filesystem access
-          net: [],               // no network access
+          fsRead: ["./policies"], // read-only WASI preopen
+          net: [],               // network permissions currently fail closed
           timeoutMs: 5000,       // execution limit
           maxMemoryBytes: 67108864, // 64MB memory limit
         },
@@ -205,9 +206,32 @@ export default defineConfig({
 
 **Security model:**
 - Each plugin runs in its own Wasmtime `Store` with fuel-based execution limits
-- No filesystem, network, or environment access unless explicitly granted
-- Memory-bounded execution prevents resource exhaustion
+- No filesystem or environment access unless explicitly granted
+- Filesystem grants are read-only WASI preopened directories resolved from the project root
+- Network permissions currently fail closed instead of granting host access
+- Memory-bounded execution and bounded result reads prevent resource exhaustion
+- Route filters support exact paths, `:params`, and catch-all wildcards
 - Hot-reload on `.wasm` file change without server restart
+
+---
+
+## Build Plugins
+
+Build plugins run during `ruvyxa build` and can transform source code, resolve
+imports, or add support for custom file formats. Installed plugins can be
+enabled by short name:
+
+```ts
+import { defineConfig } from "ruvyxa/config"
+
+export default defineConfig({
+  plugins: ["mdx"],
+})
+```
+
+Ruvyxa tries `mdx`, `ruvyxa-plugin-mdx`, then `@ruvyxa/plugin-mdx` from the
+project root. See [Plugins](docs/plugins.md) for installation, authoring,
+testing, and publishing guidance.
 
 ---
 
@@ -364,6 +388,7 @@ export default defineConfig({
 - [File Routing](docs/routing.md)
 - [Data Loading](docs/data.md)
 - [Server Actions](docs/actions.md)
+- [Plugins](docs/plugins.md)
 - [Deployment](docs/deployment.md)
 - [Debugging & Diagnostics](docs/debugging.md)
 - [Performance](docs/performance.md)

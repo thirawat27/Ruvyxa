@@ -1,4 +1,4 @@
-export { defineConfig } from "./config.js"
+export { defineConfig, definePlugin, plugin } from "./config.js"
 export type {
   Adapter,
   AdapterOutput,
@@ -10,9 +10,16 @@ export type {
   MiddlewarePluginConfig,
   PluginContext,
   PluginPermissions,
+  PluginSetupContext,
+  PluginTransformResult,
   RateLimitConfig,
   RuvyxaConfig,
   RuvyxaPlugin,
+  RuvyxaPluginFactory,
+  RuvyxaPluginFactoryResult,
+  RuvyxaPluginHooks,
+  RuvyxaPluginInput,
+  RuvyxaPluginTransformHook,
   TransformResult,
 } from "./types.js"
 export { validateBuildContext } from "./utils.js"

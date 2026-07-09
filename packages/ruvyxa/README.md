@@ -34,10 +34,9 @@ Production builds emit route-level client bundles concurrently and keep manifest
 ## Imports
 
 ```ts
-import { defineConfig } from "ruvyxa/config"
+import { defineConfig, definePlugin, plugin } from "ruvyxa/config"
 import { action, cache, invalidateCache, json, loader, notFound, redirect } from "ruvyxa/server"
-import type { Adapter, PluginContext, RuvyxaConfig, RuvyxaPlugin, TransformResult } from "ruvyxa"
-import type { ConfigPlugin } from "ruvyxa/config"
+import type { Adapter, PluginContext, PluginTransformResult, RuvyxaConfig, RuvyxaPlugin } from "ruvyxa"
 ```
 
 ## Configuration with Middleware
@@ -100,6 +99,53 @@ export default defineConfig({
 })
 ```
 
+## Build Plugins
+
+Installed build plugins can be enabled by name:
+
+```ts
+import { defineConfig } from "ruvyxa/config"
+
+export default defineConfig({
+  plugins: ["auto-replace"],
+})
+```
+
+Ruvyxa resolves `"auto-replace"` by trying `auto-replace`,
+`ruvyxa-plugin-auto-replace`, then `@ruvyxa/plugin-auto-replace` from the
+project root. Use `plugin()` when writing an inline plugin in the config:
+
+```ts
+import { defineConfig, plugin } from "ruvyxa/config"
+
+export default defineConfig({
+  plugins: [
+    plugin("replace-text", (code, id) => {
+      if (!id.endsWith("page.tsx")) return null
+      return code.replace("Hello", "สวัสดี")
+    }),
+  ],
+})
+```
+
+Use object form only when you need options:
+
+```ts
+const banner = plugin("banner", {
+  enforce: "pre",
+  timeoutMs: 5000,
+  transform(code) {
+    return `/* client bundle */\n${code}`
+  },
+})
+```
+
+Plugin hook failures include the plugin name and hook name, which keeps build
+errors tied to the integration that caused them.
+
+See [Plugins](../../docs/plugins.md) for the full install, authoring, testing,
+and publishing guide.
+
 ## Runtime Architecture
 
 The `ruvyxa` package includes a persistent Node worker pool (`runtime/worker-pool.mjs`) that keeps Node processes alive between requests. This eliminates the ~100-500ms overhead of spawning Node and loading renderer state per request.
@@ -116,6 +162,7 @@ The runtime files included in this package:
 | `runtime/action-renderer.mjs` | Server action execution |
 | `runtime/config-renderer.mjs` | Config file loading |
 | `runtime/plugin-runner.mjs` | JS build plugin hook runner |
+| `runtime/plugin-utils.mjs` | Shared plugin normalization and hook safety |
 
 ## Native CLI
 

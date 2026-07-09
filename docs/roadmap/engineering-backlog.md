@@ -15,6 +15,7 @@ as deploy blockers unless marked as such.
 | AST-backed module facts | Implemented for resolver/compiler inputs |
 | Native bundler plugin pipeline | `NativeBundlerPlugin` trait with `resolveId`/`transform` hooks |
 | JavaScript config plugin bridge | `resolveId` and `transform` hooks from `ruvyxa.config.ts` |
+| Persistent JS plugin worker | One long-lived JSONL worker per build bridge avoids spawning Node for every hook |
 | Tree-shaking | Dead-code elimination per route bundle, enabled by default |
 | Minification | Whitespace removal, identifier shortening, dead-code elimination |
 | BLAKE3 content hashing | Deterministic cache-busting filenames for client bundles |
@@ -26,7 +27,7 @@ as deploy blockers unless marked as such.
 | Node worker pool | Persistent IPC worker pool eliminates per-request subprocess overhead |
 | Radix-tree router | O(path-depth) route resolution |
 | Security headers + action guards | Default headers, origin checks, rate limiting, body limits |
-| Wasmtime plugin runtime | Sandboxed WebAssembly plugins with fuel, memory, and permissions |
+| Wasmtime plugin runtime | Sandboxed WebAssembly plugins with fuel, memory, read-only WASI preopens, bounded results, and route filters |
 | Configurable CORS, timing, logging middleware | Tower-based composable middleware stack |
 | CLI platform packages | `@ruvyxa/cli-*` for win32, linux x64/arm64, darwin x64/arm64 |
 
@@ -34,7 +35,6 @@ as deploy blockers unless marked as such.
 
 | Priority | Area | Why it matters | Suggested proof |
 | --- | --- | --- | --- |
-| P1 | Persistent JS plugin worker | Current bridge spawns Node per hook; fine for correctness, slower for large apps with many plugin hooks | Benchmark route builds before/after worker pooling |
 | P1 | Runtime preload for shared chunks | Shared chunks emitted as metadata/files, but route scripts remain self-contained; preload tags would improve hydration | Browser integration test verifies preload tags and route hydration timing |
 | P1 | Plugin source map forwarding | `transform` may return maps, but native bridge currently forwards only code | Source map fixture with transformed line mapping verified in browser DevTools |
 | P2 | Full parser compatibility suite | AST facts are lightweight; add cases for advanced TS/JSX grammar (decorators, `satisfies`, `using`, etc.) | Parser fixture suite in native bundler tests |

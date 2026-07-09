@@ -112,6 +112,7 @@ Affected routes:
 | `RUV1700` | Config plugin error | JS build plugin bridge returned an error |
 | `RUV1701` | JS plugin runner not found | `plugin-runner.mjs` missing from node_modules |
 | `RUV1702` | Worker pool script not found | `worker-pool.mjs` missing from node_modules |
+| `RUV1703` | JS plugin hook failed | A build plugin hook threw or exceeded its timeout |
 
 ### Middleware
 

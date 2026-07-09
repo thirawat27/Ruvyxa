@@ -13,7 +13,7 @@ npm install @ruvyxa/core
 ## Exports
 
 ```ts
-import { defineConfig } from "@ruvyxa/core/config"
+import { defineConfig, definePlugin, plugin } from "@ruvyxa/core/config"
 import { action, cache, invalidateCache, json, loader, notFound, redirect } from "@ruvyxa/core/server"
 import type {
   Adapter,
@@ -22,7 +22,7 @@ import type {
   PluginContext,
   RuvyxaConfig,
   RuvyxaPlugin,
-  TransformResult,
+  PluginTransformResult,
 } from "@ruvyxa/core"
 ```
 
@@ -121,27 +121,48 @@ export function customAdapter(): Adapter {
 
 ## Plugin Contract
 
-Custom build plugins use the exported `RuvyxaPlugin`, `PluginContext`, and
-`TransformResult` types. During `ruvyxa build`, `resolveId` and `transform`
-hooks from `ruvyxa.config.ts` are bridged into the native bundler pipeline:
+Custom build plugins can be enabled by package name, the concise `plugin()`
+helper, plain `RuvyxaPlugin` objects, or `definePlugin()` factories. During
+`ruvyxa build`, `resolveId` and `transform` hooks from `ruvyxa.config.ts` are
+bridged into the native bundler pipeline:
 
 ```ts
-import type { RuvyxaPlugin } from "@ruvyxa/core"
+import { defineConfig } from "@ruvyxa/core/config"
 
-export function bannerPlugin(): RuvyxaPlugin {
-  return {
-    name: "banner",
-    transform(code, id, ctx) {
-      if (ctx.environment !== "client" || !id.endsWith(".tsx")) {
-        return null
-      }
-
-      return {
-        code: `/* client bundle */\n${code}`,
-      }
-    },
-  }
-}
+export default defineConfig({
+  plugins: ["auto-replace"],
+})
 ```
+
+Ruvyxa resolves `"auto-replace"` by trying `auto-replace`,
+`ruvyxa-plugin-auto-replace`, then `@ruvyxa/plugin-auto-replace` from the
+project root. Use `plugin()` when writing an inline plugin:
+
+```ts
+import { plugin } from "@ruvyxa/core/config"
+
+export const replaceLabel = plugin("replace-label", (code, id) => {
+  if (!id.endsWith(".tsx")) return null
+  return code.replace("Before", "After")
+})
+```
+
+Use object form only when you need options:
+
+```ts
+export const banner = plugin("banner", {
+  enforce: "pre",
+  timeoutMs: 5000,
+  transform(code) {
+    return `/* client bundle */\n${code}`
+  },
+})
+```
+
+Plugins run in `pre`, normal, then `post` order. Hook failures are reported
+with the plugin name and hook name, and `timeoutMs` guards long-running hooks.
+
+See [Plugins](../../../docs/plugins.md) for the full install, authoring,
+testing, and publishing guide.
 
 This package is published as ESM with generated TypeScript declarations.
