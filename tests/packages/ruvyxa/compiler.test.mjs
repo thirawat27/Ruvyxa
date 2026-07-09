@@ -1,4 +1,5 @@
 import assert from "node:assert/strict"
+import { spawn } from "node:child_process"
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises"
 import path from "node:path"
 import { describe, it } from "node:test"
@@ -8,6 +9,8 @@ import { compileBundle, toImportPath } from "../../../packages/ruvyxa/runtime/co
 
 const workspaceRoot = path.resolve(fileURLToPath(new URL("../../..", import.meta.url)))
 const exampleRoot = path.join(workspaceRoot, "examples/kitchen-sink")
+const configRenderer = path.join(workspaceRoot, "packages/ruvyxa/runtime/config-renderer.mjs")
+const pluginRunner = path.join(workspaceRoot, "packages/ruvyxa/runtime/plugin-runner.mjs")
 
 describe("runtime compiler", () => {
   it("resolves local dynamic imports without an external bundler", async () => {
@@ -206,7 +209,78 @@ describe("runtime compiler", () => {
       assert.doesNotMatch(output, /import "\.\/global\.css"/)
     })
   })
+
+  it("loads config plugin metadata and executes transform hooks", async () => {
+    await withFixture(async ({ root }) => {
+      const pageFile = path.join(root, "page.tsx")
+      await writeFile(pageFile, "export const label = \"Original\"\n")
+      await writeFile(
+        path.join(root, "ruvyxa.config.ts"),
+        `
+          import { defineConfig } from "ruvyxa/config"
+
+          export default defineConfig({
+            plugins: [
+              {
+                name: "replace-label",
+                transform(code, id, ctx) {
+                  if (ctx.environment !== "client" || !id.endsWith("page.tsx")) return null
+                  return { code: code.replace("Original", "Transformed") }
+                },
+              },
+            ],
+          })
+        `,
+      )
+
+      const config = await runJson(configRenderer, [root], {})
+      assert.equal(config.ok, true)
+      assert.equal(config.config.plugins[0].name, "replace-label")
+      assert.equal(config.config.plugins[0].transform, true)
+
+      const transformed = await runJson(pluginRunner, [root, "transform"], {
+        code: await readFile(pageFile, "utf8"),
+        id: pageFile,
+        environment: "client",
+      })
+
+      assert.equal(transformed.ok, true)
+      assert.match(transformed.result.code, /Transformed/)
+    })
+  })
 })
+
+function runJson(script, args, payload) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, [script, ...args], {
+      stdio: ["pipe", "pipe", "pipe"],
+    })
+    let stdout = ""
+    let stderr = ""
+    child.stdout.setEncoding("utf8")
+    child.stderr.setEncoding("utf8")
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk
+    })
+    child.stderr.on("data", (chunk) => {
+      stderr += chunk
+    })
+    child.on("error", reject)
+    child.on("close", (code) => {
+      try {
+        const parsed = JSON.parse(stdout)
+        if (code === 0 && parsed.ok) {
+          resolve(parsed)
+        } else {
+          reject(new Error(`script failed (${code}): ${stdout || stderr}`))
+        }
+      } catch (error) {
+        reject(new Error(`invalid JSON from script: ${error.message}; stdout=${stdout}; stderr=${stderr}`))
+      }
+    })
+    child.stdin.end(JSON.stringify(payload))
+  })
+}
 
 async function withFixture(run) {
   const root = await mkdtemp(path.join(exampleRoot, ".ruvyxa-compiler-test-"))

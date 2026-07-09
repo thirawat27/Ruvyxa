@@ -15,7 +15,7 @@ the wider JavaScript toolchain.
 | Resolution | Relative imports, `tsconfig` paths/baseUrl, package `exports` | Covers common app imports | Advanced conditional exports and loader pipelines are limited |
 | Optimization | Tree-shaking, minification, BLAKE3 content hashing | Deterministic production bundles | Tree-shaking is conservative compared with Rollup/Parcel |
 | Caching | In-process and disk compile cache | Rebuilds avoid repeated transforms | No remote/cache-server story yet |
-| Extensibility | Native Rust plugin pipeline for resolve/transform hooks | Adapters and embedded callers can extend bundling without forking the compiler | JavaScript config plugin execution is not wired to the Rust process yet |
+| Extensibility | Native Rust plugin pipeline plus `ruvyxa.config.ts` JavaScript `resolveId`/`transform` bridge | Users can extend bundling without forking the compiler | JS plugin hooks currently start a Node runner per hook; a persistent worker is future optimization |
 | Safety | Server/client boundary diagnostics | Framework-specific correctness checks | General-purpose plugin ecosystem is smaller |
 
 ## What Ruvyxa Borrows
@@ -62,7 +62,8 @@ bundler upgrades already landed.
 | Candidate | Borrowed from | Why it matters |
 |-----------|---------------|----------------|
 | Runtime loading for extracted shared chunks | Rollup, webpack, Parcel | Let production HTML preload and execute shared chunks before route scripts |
-| Executing JavaScript config plugins inside the Rust CLI | Vite, Rollup | Bridge typed `RuvyxaPlugin` config objects into native `resolve_id` and `transform` hooks |
+| Persistent JavaScript plugin worker | Vite, Rollup | Reduce overhead when many modules run config plugin hooks |
+| Plugin source-map forwarding | Vite, Rollup | Preserve transformed line mappings across plugin output |
 | Full parser compatibility suite | SWC, esbuild, Rollup | Expand the AST-backed facts into broader TypeScript/JSX grammar coverage |
 | Dependency pre-bundling | Vite, esbuild | Faster dev startup for dependency-heavy apps |
 | Persistent cache invalidation by config dependency graph | webpack, Rspack, Parcel, Turbopack | Safer cache reuse when config, package metadata, or tsconfig changes |

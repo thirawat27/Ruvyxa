@@ -2,8 +2,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
 use std::io::IsTerminal;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Command as ProcessCommand;
+use std::process::Stdio;
+use std::sync::Arc;
 use std::time::SystemTime;
 use std::time::{Duration, Instant};
 
@@ -142,6 +145,8 @@ struct ProjectConfig {
     cache: CacheConfigOptions,
     #[serde(default)]
     middleware: ruvyxa_middleware::MiddlewareConfig,
+    #[serde(default)]
+    plugins: Vec<BuildPluginConfig>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -178,6 +183,15 @@ struct SecurityConfigOptions {
 struct CacheConfigOptions {
     route_manifest: Option<bool>,
     css: Option<bool>,
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct BuildPluginConfig {
+    name: String,
+    enforce: Option<String>,
+    resolve_id: bool,
+    transform: bool,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -488,8 +502,14 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
     fs::create_dir_all(&client_dir)?;
     write_manifest(&manifest, &staging_dir.join("manifest.json"))?;
 
-    let client_manifest =
-        emit_client_bundles(&args.root, &app_dir, &manifest, &client_dir, &config.build)?;
+    let client_manifest = emit_client_bundles(
+        &args.root,
+        &app_dir,
+        &manifest,
+        &client_dir,
+        &config.build,
+        &config.plugins,
+    )?;
     fs::write(
         client_dir.join("manifest.json"),
         serde_json::to_string_pretty(&client_manifest)?,
@@ -601,14 +621,189 @@ struct SharedRouteChunk {
     routes: Vec<String>,
 }
 
+#[derive(Clone)]
+struct JsConfigPluginBridge {
+    project_root: PathBuf,
+    runner: PathBuf,
+    has_resolve_id: bool,
+    has_transform: bool,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct PluginRunnerOutput {
+    ok: bool,
+    result: Option<serde_json::Value>,
+    code: Option<String>,
+    message: Option<String>,
+    stack: Option<String>,
+}
+
+impl ruvyxa_bundler::plugin::NativeBundlerPlugin for JsConfigPluginBridge {
+    fn name(&self) -> &str {
+        "ruvyxa-config-js-plugins"
+    }
+
+    fn resolve_id(
+        &self,
+        specifier: &str,
+        importer: Option<&Path>,
+        ctx: &ruvyxa_bundler::plugin::PluginContext,
+    ) -> ruvyxa_bundler::Result<Option<PathBuf>> {
+        if !self.has_resolve_id {
+            return Ok(None);
+        }
+
+        let payload = serde_json::json!({
+            "id": specifier,
+            "importer": importer.map(|path| path.display().to_string()),
+            "environment": plugin_environment(ctx.target)
+        });
+        let Some(value) = self.call_runner("resolveId", payload)? else {
+            return Ok(None);
+        };
+        let Some(path) = value.as_str() else {
+            return Ok(None);
+        };
+
+        let resolved = PathBuf::from(path);
+        let resolved = if resolved.is_absolute() {
+            resolved
+        } else {
+            self.project_root.join(resolved)
+        };
+
+        Ok(Some(resolved.canonicalize().unwrap_or(resolved)))
+    }
+
+    fn transform(
+        &self,
+        code: &str,
+        id: &Path,
+        ctx: &ruvyxa_bundler::plugin::PluginContext,
+    ) -> ruvyxa_bundler::Result<Option<ruvyxa_bundler::plugin::TransformResult>> {
+        if !self.has_transform {
+            return Ok(None);
+        }
+
+        let payload = serde_json::json!({
+            "code": code,
+            "id": id.display().to_string(),
+            "environment": plugin_environment(ctx.target)
+        });
+        let Some(value) = self.call_runner("transform", payload)? else {
+            return Ok(None);
+        };
+        let Some(code) = value.get("code").and_then(|value| value.as_str()) else {
+            return Ok(None);
+        };
+
+        Ok(Some(ruvyxa_bundler::plugin::TransformResult::code(code)))
+    }
+}
+
+impl JsConfigPluginBridge {
+    fn call_runner(
+        &self,
+        hook: &str,
+        payload: serde_json::Value,
+    ) -> ruvyxa_bundler::Result<Option<serde_json::Value>> {
+        let mut child = ProcessCommand::new("node")
+            .arg(&self.runner)
+            .arg(&self.project_root)
+            .arg(hook)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .map_err(|err| {
+                ruvyxa_bundler::BundleError::Compiler(format!(
+                    "failed to start JS plugin runner: {err}"
+                ))
+            })?;
+
+        let stdin = child.stdin.as_mut().ok_or_else(|| {
+            ruvyxa_bundler::BundleError::Compiler("failed to open JS plugin runner stdin".into())
+        })?;
+        stdin
+            .write_all(payload.to_string().as_bytes())
+            .map_err(|err| {
+                ruvyxa_bundler::BundleError::Compiler(format!(
+                    "failed to send JS plugin payload: {err}"
+                ))
+            })?;
+
+        let output = child.wait_with_output().map_err(|err| {
+            ruvyxa_bundler::BundleError::Compiler(format!(
+                "failed to wait for JS plugin runner: {err}"
+            ))
+        })?;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let result: PluginRunnerOutput = serde_json::from_str(&stdout).map_err(|err| {
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            ruvyxa_bundler::BundleError::Compiler(format!(
+                "JS plugin runner returned invalid output: {err}; stdout: {stdout}; stderr: {stderr}"
+            ))
+        })?;
+
+        if output.status.success() && result.ok {
+            return Ok(result.result);
+        }
+
+        Err(ruvyxa_bundler::BundleError::Compiler(format!(
+            "{} {}",
+            result.code.unwrap_or_else(|| "RUV1700".to_string()),
+            result
+                .message
+                .or(result.stack)
+                .unwrap_or_else(|| { String::from_utf8_lossy(&output.stderr).trim().to_string() })
+        )))
+    }
+}
+
+fn plugin_environment(target: ruvyxa_bundler::BundleTarget) -> &'static str {
+    match target {
+        ruvyxa_bundler::BundleTarget::Client => "client",
+        ruvyxa_bundler::BundleTarget::Ssr => "server",
+    }
+}
+
+fn bundle_context_for_build(
+    root: &Path,
+    plugins: &[BuildPluginConfig],
+) -> anyhow::Result<ruvyxa_bundler::BundleContext> {
+    let has_resolve_id = plugins.iter().any(|plugin| plugin.resolve_id);
+    let has_transform = plugins.iter().any(|plugin| plugin.transform);
+    if !has_resolve_id && !has_transform {
+        return Ok(ruvyxa_bundler::BundleContext::new(root));
+    }
+
+    let runner = find_runtime_script(root, "plugin-runner.mjs")
+        .ok_or_else(|| anyhow::anyhow!("RUV1701 JS plugin runner not found"))?;
+    let bridge = JsConfigPluginBridge {
+        project_root: root.canonicalize().unwrap_or_else(|_| root.to_path_buf()),
+        runner,
+        has_resolve_id,
+        has_transform,
+    };
+
+    Ok(ruvyxa_bundler::BundleContext::with_plugins(
+        ruvyxa_bundler::cache::CompileCache::new(root, true),
+        ruvyxa_bundler::resolver::ResolveGraphCache::new(),
+        ruvyxa_bundler::incremental::IncrementalGraphCache::new(root, true),
+        ruvyxa_bundler::plugin::PluginPipeline::new(vec![Arc::new(bridge)]),
+    ))
+}
+
 fn emit_client_bundles(
     root: &Path,
     app_dir: &Path,
     manifest: &RouteManifest,
     client_dir: &Path,
     build: &BuildConfigOptions,
+    plugins: &[BuildPluginConfig],
 ) -> anyhow::Result<serde_json::Value> {
-    let bundle_context = ruvyxa_bundler::BundleContext::new(root);
+    let bundle_context = bundle_context_for_build(root, plugins)?;
     let page_routes = manifest
         .routes
         .iter()
@@ -765,6 +960,7 @@ fn emit_client_bundles(
         "durationMs": total_duration_ms,
         "cacheHits": total_cache_hits,
         "treeShakenModules": total_tree_shaken_modules,
+        "plugins": build_plugin_manifest(plugins),
         "sharedRouteChunks": shared_route_chunks
             .iter()
             .map(shared_route_chunk_manifest)
@@ -775,6 +971,22 @@ fn emit_client_bundles(
         },
         "routes": routes
     }))
+}
+
+fn build_plugin_manifest(plugins: &[BuildPluginConfig]) -> serde_json::Value {
+    serde_json::Value::Array(
+        plugins
+            .iter()
+            .map(|plugin| {
+                serde_json::json!({
+                    "name": plugin.name,
+                    "enforce": plugin.enforce,
+                    "resolveId": plugin.resolve_id,
+                    "transform": plugin.transform
+                })
+            })
+            .collect(),
+    )
 }
 
 /// Bundle a client route using the native Rust bundler (ruvyxa_bundler).
@@ -1174,11 +1386,16 @@ fn remove_path(path: &Path) -> anyhow::Result<()> {
 }
 
 fn find_runtime_script(root: &Path, file_name: &str) -> Option<PathBuf> {
-    let cwd_renderer = std::env::current_dir()
-        .ok()
-        .map(|cwd| cwd.join("packages/ruvyxa/runtime").join(file_name));
-    if let Some(path) = cwd_renderer.filter(|path| path.is_file()) {
-        return Some(path);
+    if let Ok(mut cwd) = std::env::current_dir() {
+        loop {
+            let candidate = cwd.join("packages/ruvyxa/runtime").join(file_name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+            if !cwd.pop() {
+                break;
+            }
+        }
     }
 
     let package_renderer = root.join("node_modules/ruvyxa/runtime").join(file_name);
@@ -2244,6 +2461,31 @@ mod tests {
     }
 
     #[test]
+    fn parses_js_build_plugin_metadata() {
+        let config: ProjectConfig = serde_json::from_value(json!({
+            "plugins": [
+                {
+                    "name": "banner",
+                    "enforce": "pre",
+                    "resolveId": true,
+                    "transform": true
+                }
+            ]
+        }))
+        .unwrap();
+
+        assert_eq!(config.plugins.len(), 1);
+        assert_eq!(config.plugins[0].name, "banner");
+        assert_eq!(config.plugins[0].enforce.as_deref(), Some("pre"));
+        assert!(config.plugins[0].resolve_id);
+        assert!(config.plugins[0].transform);
+
+        let manifest = build_plugin_manifest(&config.plugins);
+        assert_eq!(manifest[0]["name"], "banner");
+        assert_eq!(manifest[0]["resolveId"], true);
+    }
+
+    #[test]
     fn rejects_invalid_native_bundler_build_options() {
         assert!(parse_jsx_runtime(Some("runtime-x")).is_err());
         assert!(parse_es_target(Some("es5")).is_err());
@@ -2277,7 +2519,7 @@ mod tests {
         };
 
         let client_manifest =
-            emit_client_bundles(root, &app, &manifest, &client_dir, &build).unwrap();
+            emit_client_bundles(root, &app, &manifest, &client_dir, &build, &[]).unwrap();
 
         assert!(client_dir.join("chunk-manifest.json").is_file());
         assert_eq!(client_manifest["emitChunkManifest"], true);
@@ -2314,6 +2556,62 @@ mod tests {
             .as_str()
             .unwrap()
             .starts_with("/__ruvyxa/client/shared."));
+    }
+
+    #[test]
+    fn native_client_build_applies_js_config_transform_plugin() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let app = root.join("app");
+        let client_dir = root.join(".ruvyxa").join("client");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(&client_dir).unwrap();
+        std::fs::write(
+            app.join("page.tsx"),
+            "export default function Page() { return <main>Before</main>; }",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("ruvyxa.config.ts"),
+            r#"
+import { defineConfig } from "ruvyxa/config"
+
+export default defineConfig({
+  build: {
+    minify: false,
+    emitChunkManifest: true,
+  },
+  plugins: [
+    {
+      name: "replace-before",
+      transform(code, id, ctx) {
+        if (ctx.environment !== "client" || !id.endsWith("page.tsx")) return null
+        return { code: code.replace("Before", "After") }
+      },
+    },
+  ],
+})
+"#,
+        )
+        .unwrap();
+
+        let config = load_project_config(root).unwrap();
+        let manifest = discover_routes(DiscoverOptions::new(&app)).unwrap();
+        let client_manifest = emit_client_bundles(
+            root,
+            &app,
+            &manifest,
+            &client_dir,
+            &config.build,
+            &config.plugins,
+        )
+        .unwrap();
+        let route_file = client_manifest["routes"][0]["file"].as_str().unwrap();
+        let output = std::fs::read_to_string(client_dir.join(route_file)).unwrap();
+
+        assert!(output.contains("After"), "{output}");
+        assert!(!output.contains("Before"), "{output}");
+        assert_eq!(client_manifest["plugins"][0]["name"], "replace-before");
     }
 
     #[test]

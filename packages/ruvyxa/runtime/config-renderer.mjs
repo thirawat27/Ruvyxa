@@ -91,6 +91,7 @@ function sanitizeConfig(config) {
       target: stringValue(config.adapter?.target),
     }),
     adapterOptions: safeJsonValue(config.adapterOptions),
+    plugins: pluginDescriptors(config.plugins),
   }
 }
 
@@ -120,6 +121,20 @@ function safeJsonValue(value) {
   } catch {
     return undefined
   }
+}
+
+function pluginDescriptors(value) {
+  if (!Array.isArray(value)) return undefined
+  const plugins = value
+    .filter((plugin) => plugin && typeof plugin === "object" && typeof plugin.name === "string")
+    .map((plugin) => ({
+      name: plugin.name,
+      enforce: stringValue(plugin.enforce),
+      resolveId: typeof plugin.resolveId === "function",
+      transform: typeof plugin.transform === "function",
+    }))
+
+  return plugins.length > 0 ? plugins : undefined
 }
 
 function ok(config) {

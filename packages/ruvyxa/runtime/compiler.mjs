@@ -349,6 +349,23 @@ function rewriteModule(module) {
       continue
     }
 
+    if (/^export\s+default\b/.test(line) && !line.startsWith("export default function ")) {
+      const collectedRaw = [rawLine.trim()]
+      const collectedCode = [line]
+      let endLine = sourceLine
+      while (!isBalancedDefaultExpression(collectedCode) && endLine + 1 < sourceLines.length) {
+        endLine += 1
+        collectedRaw.push(sourceLines[endLine].trim())
+        collectedCode.push((codeLines[endLine] ?? "").trim())
+      }
+
+      const expression = collectedRaw.join("\n").replace(/^export\s+default\s+/, "").replace(/;$/, "")
+      lines.push(`__exports.default = ${rewriteDynamicImports(expression, module)};`)
+      lineMap.push(sourceLine)
+      sourceLine = endLine
+      continue
+    }
+
     if (/^export\b/.test(line)) {
       const result = rewriteExport(rawLine.trim(), module, exported, reExportAll)
       if (result) {
@@ -377,6 +394,16 @@ function rewriteModule(module) {
   }
   compilerCache.rewrites.set(rewriteKey, result)
   return result
+}
+
+function isBalancedDefaultExpression(lines) {
+  const expression = lines.join("\n").replace(/^export\s+default\s+/, "")
+  let depth = 0
+  for (const char of expression) {
+    if (char === "(" || char === "{" || char === "[") depth += 1
+    else if (char === ")" || char === "}" || char === "]") depth -= 1
+  }
+  return depth <= 0
 }
 
 function shouldTransformJsx(module) {
