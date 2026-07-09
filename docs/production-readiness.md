@@ -26,8 +26,8 @@ All of the following must pass before a release:
 | TypeScript tests | `pnpm -r test` |
 | Package metadata | `pnpm release:validate` |
 | Pack smoke test | `pnpm pack:smoke` |
-| App deploy gate | `ruvyxa check --root examples/basic-app` |
-| Dev/prod parity drill-down | `ruvyxa test:parity --root examples/basic-app` |
+| App deploy gate | `ruvyxa check --root examples/kitchen-sink` |
+| Dev/prod parity drill-down | `ruvyxa test:parity --root examples/kitchen-sink` |
 
 ---
 
@@ -129,14 +129,14 @@ pnpm -r check
 pnpm -r test
 
 # 4. Integration checks
-cargo run -p ruvyxa_cli -- check --root examples/basic-app
+cargo run -p ruvyxa_cli -- check --root examples/kitchen-sink
 pnpm release:validate
 pnpm pack:smoke
 
 # 5. Smoke test
-cargo run -p ruvyxa_cli -- dev --root examples/basic-app --port 3001
-cargo run -p ruvyxa_cli -- build --root examples/basic-app
-cargo run -p ruvyxa_cli -- start --root examples/basic-app --port 3002
+cargo run -p ruvyxa_cli -- dev --root examples/kitchen-sink --port 3001
+cargo run -p ruvyxa_cli -- build --root examples/kitchen-sink
+cargo run -p ruvyxa_cli -- start --root examples/kitchen-sink --port 3002
 ```
 
 ---

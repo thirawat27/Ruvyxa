@@ -22,12 +22,18 @@ cargo test --workspace
 pnpm -r test
 ```
 
-Package-level test scripts use Node's built-in test runner and point back to `tests/packages/...`, for example:
+Package-level test scripts use Node's built-in test runner (`node --test`) and point back to `tests/packages/...`, for example:
 
 ```bash
-pnpm --filter ruvyxa test
-pnpm --filter @ruvyxa/core test
+pnpm --filter ruvyxa test       # tests/packages/ruvyxa/
+pnpm --filter @ruvyxa/core test # tests/packages/core/
 pnpm --filter create-ruvyxa test
 ```
 
-The test stack intentionally avoids external JavaScript bundlers and runners. Runtime compiler tests exercise Ruvyxa's own compiler, source maps, incremental writes, dynamic imports, and TSX edge cases.
+All listed packages run automatically via `pnpm -r test`. The root-level `test` script also includes `cargo test --workspace`:
+
+```bash
+pnpm test   # runs cargo test + pnpm -r test
+```
+
+The test stack intentionally avoids external JavaScript bundlers and runners. Runtime compiler tests exercise Ruvyxa's own compiler, source maps, incremental writes, dynamic imports, and TSX edge cases. Rust unit tests remain inline in their owning crates because they test private Rust modules directly.

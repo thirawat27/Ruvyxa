@@ -34,7 +34,7 @@ pnpm -r test
 ### Run the Example App
 
 ```bash
-cargo run -p ruvyxa_cli -- dev --root examples/basic-app
+cargo run -p ruvyxa_cli -- dev --root examples/kitchen-sink
 ```
 
 Open [http://localhost:3000](http://localhost:3000).
@@ -46,16 +46,19 @@ Open [http://localhost:3000](http://localhost:3000).
 ```
 ruvyxa/
 ├── crates/                    # Rust crates
+│   ├── ruvyxa_bundler/        # Native TS/JSX bundler, compiler, minifier
 │   ├── ruvyxa_cli/            # CLI binary (commands, build, bench)
 │   ├── ruvyxa_dev_server/     # Dev + production HTTP server
 │   ├── ruvyxa_graph/          # Route discovery, validation, manifests
+│   ├── ruvyxa_middleware/     # Tower middleware + Wasm plugin runtime
 │   └── ruvyxa_diagnostics/    # Structured error types (RUV#### codes)
 ├── packages/                  # TypeScript packages (npm)
 │   ├── ruvyxa/                # Main package (CLI wrapper + runtime)
 │   ├── create-ruvyxa/         # Project scaffolding
 │   └── @ruvyxa/               # Scoped packages (core, react, adapters)
-├── examples/basic-app/        # Integration test app
-├── templates/minimal/         # Template for new user projects
+├── examples/kitchen-sink/     # Integration test app with all features
+├── templates/minimal/         # Template for new user projects (create-ruvyxa)
+├── tests/                     # Node package tests (organized by package)
 └── docs/                      # User-facing documentation
 ```
 
@@ -76,14 +79,14 @@ ruvyxa/
 - Public APIs must be typed. Export types alongside values.
 - Keep package entry points small and focused.
 - Avoid adding runtime dependencies unless they serve user-facing functionality.
-- Use Vitest for tests.
+- Use Node built-in test runner (`node --test`) for tests.
 
 ### General
 
 - Keep dev and production behavior aligned. Shared logic goes in shared paths, not command-specific branches.
 - Build validation must catch boundary leaks before output is emitted.
 - Update `templates/minimal/` when a feature affects new projects.
-- Update `examples/basic-app/` when a feature needs demonstration.
+- Update `examples/kitchen-sink/` when a feature needs demonstration.
 
 ---
 
@@ -117,15 +120,15 @@ pnpm -r test
 For runtime changes:
 
 ```bash
-cargo run -p ruvyxa_cli -- dev --root examples/basic-app --port 3001
-cargo run -p ruvyxa_cli -- build --root examples/basic-app
-cargo run -p ruvyxa_cli -- start --root examples/basic-app --port 3002
+cargo run -p ruvyxa_cli -- dev --root examples/kitchen-sink --port 3001
+cargo run -p ruvyxa_cli -- build --root examples/kitchen-sink
+cargo run -p ruvyxa_cli -- start --root examples/kitchen-sink --port 3002
 ```
 
 ### 5. Run parity check
 
 ```bash
-cargo run -p ruvyxa_cli -- test:parity --root examples/basic-app
+cargo run -p ruvyxa_cli -- test:parity --root examples/kitchen-sink
 ```
 
 ### 6. Submit a PR

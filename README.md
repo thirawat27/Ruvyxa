@@ -24,8 +24,8 @@
 - **Clean starter** — new apps start with the same small surface you expect from Next.js-style app routers.
 - **Fast core** — Rust handles routing, validation, production builds, and the dev server. A persistent Node worker pool eliminates per-request subprocess overhead.
 - **Radix-tree routing** — O(path-depth) route resolution regardless of the number of registered routes.
-- **SSR** — React pages render on the server via `renderToString` with layout nesting and route-level hydration bundles.
-- **FIFO render cache** — pages and client bundles are cached in-memory (up to 1024 entries), invalidated automatically on file change.
+- **SSR** — React pages render on the server via a persistent Node worker pool with layout nesting and route-level hydration bundles.
+- **FIFO render cache** — pages and client bundles are cached in-memory (capacity 1024 dev / 512 prod, TTL 5 min dev / 30 min prod), invalidated automatically on file change.
 - **Native Rust bundler** — TypeScript/JSX compilation, module resolution, tree-shaking, minification, and source map generation — all in a zero-dependency Rust binary.
 - **Gzip + Brotli compression** — all responses compressed automatically via tower-http middleware.
 - **Tower-based middleware** — composable CORS, timing, logging, and custom headers via `ruvyxa.config.ts`.
@@ -190,7 +190,6 @@ export default defineConfig({
         phase: "request",        // "request" or "response"
         hotReload: true,         // reload on file change
         routes: ["/api/*"],      // route filter
-        config: { apiKeyHeader: "X-Api-Key" },
         permissions: {
           env: ["AUTH_SECRET"],   // allowed env vars
           fsRead: [],            // no filesystem access
@@ -220,7 +219,6 @@ import { defineConfig } from "ruvyxa/config"
 export default defineConfig({
   appDir: "app",
   outDir: ".ruvyxa",
-  runtime: "node",              // "node" | "edge" | "static"
   server: {
     host: "localhost",
     port: 3000,
@@ -229,16 +227,15 @@ export default defineConfig({
     minify: true,
     sourcemap: false,
     treeShaking: true,
-    splitStrategy: "route",     // "route" | "manual"
+    splitStrategy: "route",
+    jsxRuntime: "classic",
+    esTarget: "es2022",
     parallelism: 4,
+    emitChunkManifest: false,
   },
   cache: {
     routeManifest: true,
     css: true,
-  },
-  css: {
-    modules: false,
-    nesting: false,
   },
   security: {
     actionBodyLimitBytes: 65536,
@@ -247,8 +244,29 @@ export default defineConfig({
     securityHeaders: true,
   },
   middleware: {
-    builtin: { timing: true, logging: true },
-    plugins: [],
+    builtin: {
+      timing: true,
+      logging: true,
+      cors: {
+        origins: ["http://localhost:5173"],
+        methods: ["GET", "POST", "PUT", "DELETE"],
+        credentials: true,
+      },
+    },
+    plugins: [
+      {
+        name: "auth-guard",
+        path: "plugins/auth.wasm",
+        phase: "request",
+        hotReload: true,
+        routes: ["/api/*"],
+        permissions: {
+          env: ["AUTH_SECRET"],
+          timeoutMs: 5000,
+          maxMemoryBytes: 67108864,
+        },
+      },
+    ],
   },
 })
 ```
@@ -292,7 +310,8 @@ export default defineConfig({
 │ ruvyxa_dev_server   │ axum server, worker pool, radix router │
 │ ruvyxa_middleware   │ tower layers, wasmtime wasm plugins    │
 │ ruvyxa_graph        │ route discovery, import graph, validation │
-│ ruvyxa_diagnostics  │ structured errors with RUV#### codes  │
+│ ruvyxa_middleware    │ tower layers, wasmtime wasm plugins     │
+│ ruvyxa_diagnostics  │ structured errors with RUV#### codes    │
 └─────────────────────────────────────────────────────────────┘
 ```
 
@@ -312,11 +331,12 @@ export default defineConfig({
 
 ```text
 .ruvyxa/
-├── server/        # Production route source
-├── client/        # BLAKE3-hashed client bundles
+├── server/        # Production route source (copied from app/, components/, server/)
+├── client/        # BLAKE3-hashed client bundles + manifest.json
 ├── assets/        # Copied public assets
-├── manifest.json  # Route manifest
-└── build.json     # Build metadata and security defaults
+├── manifest.json  # Route manifest with paths, layouts, module references
+├── build.json     # Build metadata, security defaults, and config snapshot
+└── cache/         # Bundler compile cache (preserved across builds)
 ```
 
 ---
@@ -347,7 +367,6 @@ export default defineConfig({
 - [Deployment](docs/deployment.md)
 - [Debugging & Diagnostics](docs/debugging.md)
 - [Performance](docs/performance.md)
-- [Bundler Comparison](docs/bundler-comparison.md)
 - [Dev/Prod Parity](docs/parity.md)
 - [Production Readiness](docs/production-readiness.md)
 - [Publishing](docs/publishing.md)

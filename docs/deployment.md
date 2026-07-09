@@ -33,7 +33,9 @@ ruvyxa build
 ruvyxa start --port 3000
 ```
 
-`ruvyxa start` serves the production build using the same route matching, SSR, and security headers as the dev server. It reads from `.ruvyxa/server/app` and serves static assets from `.ruvyxa/assets`.
+`ruvyxa start` (or its alias `ruvyxa preview`) serves the production build using the same route matching, SSR, and security headers as the dev server. It reads from `.ruvyxa/server/app` and serves static assets from `.ruvyxa/assets`.
+
+All responses include default security headers (`X-Content-Type-Options`, `Referrer-Policy`, `Permissions-Policy`, `Cross-Origin-Opener-Policy`). Static assets use ETag-based caching (blake3), and client bundles are served with immutable cache headers for optimal performance.
 
 ---
 
@@ -97,12 +99,12 @@ Output metadata:
 ### Docker example
 
 ```dockerfile
-FROM node:20-alpine AS builder
+FROM node:22-alpine AS builder
 WORKDIR /app
 COPY . .
 RUN npm install && npx ruvyxa build
 
-FROM node:20-alpine
+FROM node:22-alpine
 WORKDIR /app
 COPY --from=builder /app/.ruvyxa .ruvyxa
 COPY --from=builder /app/node_modules node_modules
@@ -204,7 +206,7 @@ Remember:
 ```json
 {
   "framework": "Ruvyxa",
-  "version": "1.0.1",
+  "version": "1.0.5",
   "target": "node",
   "profile": "production",
   "routes": 5,
@@ -237,4 +239,3 @@ also writes `.ruvyxa/client/chunk-manifest.json`.
 - [Getting Started](getting-started.md) — initial project setup
 - [Production Readiness](production-readiness.md) — release checklist
 - [Performance](performance.md) — build benchmarks and optimization
-- [Bundler Comparison](bundler-comparison.md) — bundler tradeoffs and roadmap candidates

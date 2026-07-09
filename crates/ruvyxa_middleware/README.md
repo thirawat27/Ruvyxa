@@ -51,6 +51,7 @@ Each plugin runs in an isolated Wasmtime `Store`:
 ## Feature Flags
 
 - `wasm-plugins` (default) — enables `wasmtime` and `wasmtime-wasi` dependencies for the Wasm plugin runtime. Disable to reduce binary size if you only need built-in middleware.
+- `debug-plugin` (disabled) — enables verbose logging for Wasm plugin execution and hot-reload events.
 
 ## License
 

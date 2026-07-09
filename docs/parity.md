@@ -95,10 +95,10 @@ The CI workflow runs `ruvyxa check`, which includes parity, as part of the relea
 
 The `ServerConfig` struct has two constructors:
 
-- `ServerConfig::dev(root)` — reads from `app/` with file watching enabled.
-- `ServerConfig::production(root)` — reads from `.ruvyxa/server/app` with watching disabled.
+- `ServerConfig::dev(root, host, port)` — reads from `app/` with file watching enabled, render cache optimised for hot reload.
+- `ServerConfig::production(root, host, port)` — reads from `.ruvyxa/server/app` with watching disabled, render cache optimised for capacity.
 
-Both pass through the same `discover_routes()` function and the same `render_request()` pipeline. The parity test verifies that the output of `discover_routes()` is identical for both source directories.
+Both pass through the same `discover_routes()` function, the same `RadixRouter`, and the same `render_request()` pipeline via the persistent Node worker pool. The parity test verifies that `discover_routes()` output is identical for both source directories and then smoke-renders every page route in both modes.
 
 ---
 

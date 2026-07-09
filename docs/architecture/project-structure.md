@@ -26,18 +26,22 @@ stable; prefer internal module refactors over moving root folders.
 | `ruvyxa_diagnostics` | Structured diagnostics shared across crates. |
 | `ruvyxa_middleware` | Built-in middleware and Wasm middleware plugin runtime. |
 
-`ruvyxa_bundler` is intentionally split by pipeline stage:
+`ruvyxa_bundler` is organized into focused stage modules:
 
-- `types.rs` - public contracts and serializable manifest types.
-- `context.rs` - shared caches and plugin pipeline state.
-- `ast.rs` - lightweight AST facts shared by resolver/compiler.
-- `resolver.rs` - specifier resolution and graph walking.
-- `compiler.rs` - TypeScript/JSX transform.
-- `boundary.rs` - server/client safety checks.
-- `linker.rs` - module ordering and import/export rewrites.
-- `chunking.rs` - dynamic import and chunk manifest helpers.
-- `plugin.rs` - native resolve/transform hook contracts.
-- `output.rs` - virtual entries and target wrappers.
+- `types.rs` — public contracts and serializable manifest types
+- `context.rs` — shared caches, incremental graph, and plugin pipeline state
+- `ast.rs` — lightweight AST facts shared by resolver and compiler
+- `resolver.rs` — specifier resolution, module graph walking, `tsconfig` paths
+- `compiler.rs` — TypeScript/JSX transform, decorators, es-target lowering
+- `boundary.rs` — server/client safety checks (`server-only`, `client-only`, private env)
+- `linker.rs` — module ordering, import/export rewrites, and bundle assembly
+- `chunking.rs` — dynamic `import()` split points and chunk manifest helpers
+- `minifier.rs` — whitespace removal, identifier shortening, dead-code elimination
+- `plugin.rs` — native resolve/transform hook contracts (`NativeBundlerPlugin`)
+- `output.rs` — virtual entries, code emission, and source map generation
+- `cache.rs` — in-process and disk compile cache with incremental rebuilds
+- `incremental.rs` — persistent incremental module graph cache
+- `resolver/graph_cache.rs` — deduplicated resolve graph across route builds
 
 ## Package Boundaries
 

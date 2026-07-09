@@ -176,10 +176,10 @@ Actions return structured responses:
 
 | Code | Meaning |
 |------|---------|
-| `RUV1500` | Action runtime error (validation or handler failure) |
+| `RUV1500` | Action runtime error — validation failure or handler exception |
 | `RUV1501` | Route has no `action.ts` or `action.js` file |
 | `RUV1502` | Action renderer script not found |
-| `RUV1503` | Internal renderer invocation missing arguments |
+| `RUV1503` | Internal renderer invocation missing arguments — renderer called without required args |
 
 ---
 

@@ -28,5 +28,7 @@ Comprehensive example demonstrating all Ruvyxa framework features:
 ```bash
 cargo run -p ruvyxa_cli -- analyze --root .
 cargo run -p ruvyxa_cli -- build --root .
+cargo run -p ruvyxa_cli -- start --root . --port 3002
+cargo run -p ruvyxa_cli -- test:parity --root .
 cargo run -p ruvyxa_cli -- dev --root . --port 3001
 ```

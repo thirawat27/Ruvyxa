@@ -2,7 +2,7 @@
 .SYNOPSIS
     Full integration test: all CLI commands + error scenarios + error overlay
 .DESCRIPTION
-    Tests every CLI command and error scenario using examples/basic-app.
+    Tests every CLI command and error scenario using examples/kitchen-sink.
     Run from the monorepo root after `cargo build -p ruvyxa_cli`.
 #>
 

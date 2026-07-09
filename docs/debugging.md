@@ -104,7 +104,29 @@ Affected routes:
 |------|-------|-------|
 | `RUV1600` | Config error | Invalid configuration value |
 | `RUV1601` | Empty config field | Required config field is empty or not relative |
+
+### Build Plugins
+
+| Code | Title | Cause |
+|------|-------|-------|
+| `RUV1700` | Config plugin error | JS build plugin bridge returned an error |
+| `RUV1701` | JS plugin runner not found | `plugin-runner.mjs` missing from node_modules |
 | `RUV1702` | Worker pool script not found | `worker-pool.mjs` missing from node_modules |
+
+### Middleware
+
+| Code | Title | Cause |
+|------|-------|-------|
+| `RUV2000` | Middleware configuration error | Invalid or missing middleware config |
+| `RUV2001` | Middleware execution failed | Middleware layer threw at runtime |
+
+### Wasm Plugins
+
+| Code | Title | Cause |
+|------|-------|-------|
+| `RUV2100` | Wasm plugin load error | Plugin `.wasm` file could not be loaded or compiled |
+| `RUV2101` | Wasm plugin execution error | Plugin hook threw or was killed by timeout/memory limit |
+| `RUV2102` | Wasm plugin hot-reload error | Watcher failed to reload `.wasm` file on change |
 
 ---
 

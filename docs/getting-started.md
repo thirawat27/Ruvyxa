@@ -55,11 +55,20 @@ export default defineConfig({
     sourcemap: false,
     treeShaking: true,
     splitStrategy: "route",
+    jsxRuntime: "classic",
+    esTarget: "es2022",
     parallelism: 4,
+    emitChunkManifest: false,
   },
   cache: {
     routeManifest: true,
     css: true,
+  },
+  security: {
+    actionBodyLimitBytes: 65536,
+    sameOriginActions: true,
+    fetchMetadataActions: true,
+    securityHeaders: true,
   },
 })
 ```
@@ -273,4 +282,3 @@ Fix all diagnostics before deploying.
 - [Server Actions](actions.md) — mutations, validation, and security
 - [Deployment](deployment.md) — adapters for Node, Vercel, Cloudflare, and more
 - [Debugging](debugging.md) — diagnostics, tracing, and the doctor command
-- [Bundler Comparison](bundler-comparison.md) — Ruvyxa tradeoffs versus Vite, Rollup, webpack, Turbopack, and related tools
