@@ -1,15 +1,5 @@
 "use client"
 
-/**
- * CSR (Client-Side Rendering) — No server rendering.
- *
- * This page is marked with "use client" at the top, which tells Ruvyxa
- * to skip server-side rendering entirely. The server sends a minimal HTML
- * shell, and the full page renders in the browser.
- *
- * Detection: `"use client"` directive → CSR.
- */
-
 import { useState, useEffect } from "react"
 
 export default function CsrPage() {
@@ -23,16 +13,13 @@ export default function CsrPage() {
   return (
     <main className="page-wide">
       <h1>CSR: Client-Side Rendering</h1>
+      <p>
+        This page rendered entirely in the browser. The server sent only a
+        minimal HTML shell — no React was executed on the server.
+      </p>
 
-      {!mounted ? (
-        <p>Loading...</p>
-      ) : (
-        <>
-          <p>
-            This page rendered entirely in the browser. The server sent only a
-            minimal HTML shell — no React was executed on the server.
-          </p>
-
+      {mounted && (
+        <div className="csr-content">
           <section>
             <h2>Interactive Counter</h2>
             <p>Count: <strong>{count}</strong></p>
@@ -43,7 +30,7 @@ export default function CsrPage() {
           <section>
             <h2>How it works</h2>
             <ul>
-              <li>Server sends a shell: <code>&lt;div id="__ruvyxa"&gt;&lt;/div&gt;</code></li>
+              <li>Server sends a minimal shell with an empty root <code>div</code></li>
               <li>Client bundle loads and renders the full React tree</li>
               <li>No SSR overhead — ideal for highly interactive pages</li>
             </ul>
@@ -60,7 +47,7 @@ export default function CsrPage() {
           </section>
 
           <p className="badge">Strategy: CSR</p>
-        </>
+        </div>
       )}
     </main>
   )

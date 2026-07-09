@@ -1,20 +1,8 @@
-/**
- * PPR (Partial Pre-Rendering) — Static shell + dynamic streaming.
- *
- * The static parts of this page are pre-rendered at build time.
- * Dynamic sections wrapped in <Suspense> are streamed in at request time.
- *
- * Detection: `export const ppr = true` → PPR.
- */
-
 import { Suspense } from "react"
 
-// Opt into Partial Pre-Rendering
 export const ppr = true
 
-// Simulated dynamic data component (would normally fetch fresh data)
 async function DynamicSection() {
-  // In a real app, this would be an async data fetch
   const timestamp = new Date().toISOString()
   return (
     <div className="dynamic-slot">
@@ -37,7 +25,6 @@ function DynamicFallback() {
 export default function PprPage() {
   return (
     <main className="page-wide">
-      {/* Static shell — pre-rendered at build time */}
       <h1>PPR: Partial Pre-Rendering</h1>
       <p>
         The static parts of this page (header, navigation, layout) were
@@ -50,7 +37,6 @@ export default function PprPage() {
         <p>This content is part of the static shell. It never changes between requests.</p>
       </section>
 
-      {/* Dynamic slot — streamed at request time */}
       <Suspense fallback={<DynamicFallback />}>
         <DynamicSection />
       </Suspense>

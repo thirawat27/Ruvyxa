@@ -520,13 +520,8 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
 
     // ─── SSG / ISR / PPR pre-rendering at build time ──────────────────────────
     let prerender_dir = staging_dir.join("prerender");
-    let prerendered = prerender_static_routes(
-        &args.root,
-        &app_dir,
-        &manifest,
-        &prerender_dir,
-        &client_dir,
-    )?;
+    let prerendered =
+        prerender_static_routes(&args.root, &app_dir, &manifest, &prerender_dir, &client_dir)?;
 
     let build_info = serde_json::json!({
         "framework": "Ruvyxa",
@@ -700,8 +695,7 @@ fn prerender_static_routes(
             }
             RenderStrategy::Ssg | RenderStrategy::Isr | RenderStrategy::Ppr => {
                 // For dynamic routes with getStaticParams, resolve static paths first
-                let paths_to_render = if route.render.has_static_params
-                    && route.path.contains(':')
+                let paths_to_render = if route.render.has_static_params && route.path.contains(':')
                     || route.path.contains('*')
                 {
                     resolve_static_params(root, app_dir, route, &renderer_script)?
@@ -747,8 +741,8 @@ fn prerender_static_routes(
                         );
                     }
 
-                    let result: serde_json::Value =
-                        serde_json::from_slice(&output.stdout).with_context(|| {
+                    let result: serde_json::Value = serde_json::from_slice(&output.stdout)
+                        .with_context(|| {
                             format!("SSG renderer returned invalid JSON for {}", render_path)
                         })?;
 
@@ -820,11 +814,7 @@ fn resolve_static_params(
 
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!(
-            "getStaticParams failed for {}: {}",
-            route.path,
-            stderr
-        );
+        anyhow::bail!("getStaticParams failed for {}: {}", route.path, stderr);
     }
 
     let result: serde_json::Value = serde_json::from_slice(&output.stdout)

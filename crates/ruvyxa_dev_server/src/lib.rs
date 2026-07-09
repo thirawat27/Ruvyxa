@@ -18,7 +18,9 @@ use axum::Router;
 use chrono::Local;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use ruvyxa_diagnostics::{Diagnostic, Result, RuvyxaError};
-use ruvyxa_graph::{discover_routes, DiscoverOptions, RenderStrategy, RouteEntry, RouteKind, RouteManifest};
+use ruvyxa_graph::{
+    discover_routes, DiscoverOptions, RenderStrategy, RouteEntry, RouteKind, RouteManifest,
+};
 use ruvyxa_middleware::{MiddlewareConfig, MiddlewareStack};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
@@ -1004,22 +1006,14 @@ async fn render_page_by_strategy(
     styles: &str,
 ) -> Result<String> {
     match route.render.strategy {
-        RenderStrategy::Ssr => {
-            render_page_pooled(state, route, request_path, params, styles).await
-        }
+        RenderStrategy::Ssr => render_page_pooled(state, route, request_path, params, styles).await,
         RenderStrategy::Ssg => {
             // In dev mode, SSG pages are rendered on-demand like SSR but cached indefinitely.
             render_page_ssg(state, route, request_path, params, styles).await
         }
-        RenderStrategy::Isr => {
-            render_page_isr(state, route, request_path, params, styles).await
-        }
-        RenderStrategy::Csr => {
-            render_page_csr(state, route, request_path, params, styles).await
-        }
-        RenderStrategy::Ppr => {
-            render_page_ppr(state, route, request_path, params, styles).await
-        }
+        RenderStrategy::Isr => render_page_isr(state, route, request_path, params, styles).await,
+        RenderStrategy::Csr => render_page_csr(state, route, request_path, params, styles).await,
+        RenderStrategy::Ppr => render_page_ppr(state, route, request_path, params, styles).await,
     }
 }
 
@@ -1073,7 +1067,11 @@ async fn render_page_ssg(
         .ok_or_else(|| RuvyxaError::Message("SSG render produced no HTML".to_string()))?;
 
     let asset_links = public_asset_links(&state.config.public_dir);
-    let hmr = if state.config.watch { hmr_client_script() } else { "" };
+    let hmr = if state.config.watch {
+        hmr_client_script()
+    } else {
+        ""
+    };
     let client_script = client_hydration_script(&state.config, route, request_path, params);
     let head_content = format!(r#"{asset_links}<style data-ruvyxa-css>{styles}</style>"#);
     let html = compose_document(&rendered, &head_content, &format!("{client_script}{hmr}"));
@@ -1105,7 +1103,10 @@ async fn render_page_isr(
     if !state.config.watch {
         if let Some(html) = serve_prerendered_html(&state.config.prerender_dir, request_path) {
             // Store in cache and schedule revalidation
-            state.render_cache.put(cache_key.clone(), html.clone()).await;
+            state
+                .render_cache
+                .put(cache_key.clone(), html.clone())
+                .await;
             spawn_isr_revalidation(state, route, request_path, params, styles, &cache_key);
             return Ok(html);
         }
@@ -1139,7 +1140,9 @@ async fn render_isr_background(
 
     if !response.ok {
         let message = response.message.unwrap_or_default();
-        return Err(RuvyxaError::Message(format!("ISR revalidation failed: {message}")));
+        return Err(RuvyxaError::Message(format!(
+            "ISR revalidation failed: {message}"
+        )));
     }
 
     let rendered = response
@@ -1147,10 +1150,18 @@ async fn render_isr_background(
         .ok_or_else(|| RuvyxaError::Message("ISR render produced no HTML".to_string()))?;
 
     let asset_links = public_asset_links(&state.config.public_dir);
-    let hmr = if state.config.watch { hmr_client_script() } else { "" };
+    let hmr = if state.config.watch {
+        hmr_client_script()
+    } else {
+        ""
+    };
     let client_script = client_hydration_script(&state.config, route, request_path, params);
     let head_content = format!(r#"{asset_links}<style data-ruvyxa-css>{styles}</style>"#);
-    Ok(compose_document(&rendered, &head_content, &format!("{client_script}{hmr}")))
+    Ok(compose_document(
+        &rendered,
+        &head_content,
+        &format!("{client_script}{hmr}"),
+    ))
 }
 
 /// Spawn a background task to revalidate an ISR page.
@@ -1218,7 +1229,11 @@ async fn render_page_csr(
     }
 
     let asset_links = public_asset_links(&state.config.public_dir);
-    let hmr = if state.config.watch { hmr_client_script() } else { "" };
+    let hmr = if state.config.watch {
+        hmr_client_script()
+    } else {
+        ""
+    };
     let client_script = client_hydration_script(&state.config, route, request_path, params);
 
     let params_json = serde_json::to_string(params).unwrap_or_else(|_| "{}".to_string());
@@ -1300,7 +1315,11 @@ async fn render_page_ppr(
         .ok_or_else(|| RuvyxaError::Message("PPR render produced no HTML".to_string()))?;
 
     let asset_links = public_asset_links(&state.config.public_dir);
-    let hmr = if state.config.watch { hmr_client_script() } else { "" };
+    let hmr = if state.config.watch {
+        hmr_client_script()
+    } else {
+        ""
+    };
     let client_script = client_hydration_script(&state.config, route, request_path, params);
     let head_content = format!(r#"{asset_links}<style data-ruvyxa-css>{styles}</style>"#);
     let html = compose_document(&rendered, &head_content, &format!("{client_script}{hmr}"));
