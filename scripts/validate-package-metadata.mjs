@@ -4,6 +4,7 @@ import { join } from 'node:path'
 
 const rootPkg = JSON.parse(readFileSync('package.json', 'utf8'))
 const expectedVersion = rootPkg.version
+const expectedLicense = rootPkg.license
 const repoUrl = 'git+https://github.com/thirawat27/ruvyxa.git'
 const packageDirs = [
   'packages/ruvyxa',
@@ -19,7 +20,7 @@ for (const dir of packageDirs) {
   const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))
   check(pkg.version === expectedVersion, `${pkg.name} version must be ${expectedVersion}`)
   check(pkg.description?.length >= 40, `${pkg.name} needs a useful npm description`)
-  check(pkg.license === 'MIT', `${pkg.name} must use MIT license`)
+  check(pkg.license === expectedLicense, `${pkg.name} license must be ${expectedLicense}`)
   check(pkg.repository?.url === repoUrl, `${pkg.name} repository must point to thirawat27/ruvyxa`)
   check(
     pkg.bugs?.url === 'https://github.com/thirawat27/ruvyxa/issues',

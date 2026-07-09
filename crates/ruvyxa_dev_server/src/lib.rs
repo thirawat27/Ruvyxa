@@ -30,6 +30,7 @@ use walkdir::WalkDir;
 
 mod worker_pool;
 pub use worker_pool::NodeWorkerPool;
+use worker_pool::RenderApiRequest;
 
 mod router;
 pub use router::RadixRouter;
@@ -1469,15 +1470,15 @@ async fn render_api_pooled(
 ) -> Result<Response> {
     let response = state
         .worker_pool
-        .render_api(
-            &state.config.root,
-            &route.file,
+        .render_api(RenderApiRequest {
+            project_root: &state.config.root,
+            route_file: &route.file,
             method,
             request_path,
             headers,
             body,
             params,
-        )
+        })
         .await?;
 
     if !response.ok {

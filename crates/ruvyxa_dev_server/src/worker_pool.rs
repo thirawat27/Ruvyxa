@@ -283,6 +283,16 @@ pub struct NodeWorkerPool {
     env: BTreeMap<String, String>,
 }
 
+pub(crate) struct RenderApiRequest<'a> {
+    pub project_root: &'a Path,
+    pub route_file: &'a Path,
+    pub method: &'a str,
+    pub request_path: &'a str,
+    pub headers: &'a BTreeMap<String, String>,
+    pub body: Option<&'a str>,
+    pub params: &'a BTreeMap<String, String>,
+}
+
 impl NodeWorkerPool {
     pub async fn start(root: &Path, env: BTreeMap<String, String>) -> Result<Self> {
         let worker_script = find_worker_script(root).ok_or_else(|| {
@@ -450,25 +460,16 @@ impl NodeWorkerPool {
         self.send(request).await
     }
 
-    pub async fn render_api(
-        &self,
-        project_root: &Path,
-        route_file: &Path,
-        method: &str,
-        request_path: &str,
-        headers: &BTreeMap<String, String>,
-        body: Option<&str>,
-        params: &BTreeMap<String, String>,
-    ) -> Result<WorkerResponse> {
+    pub(crate) async fn render_api(&self, api: RenderApiRequest<'_>) -> Result<WorkerResponse> {
         let request = WorkerRequest::Api {
             id: next_request_id(),
-            project_root: project_root.display().to_string(),
-            route_file: route_file.display().to_string(),
-            method: method.to_string(),
-            request_path: request_path.to_string(),
-            headers: headers.clone(),
-            body: body.map(str::to_string),
-            params: params.clone(),
+            project_root: api.project_root.display().to_string(),
+            route_file: api.route_file.display().to_string(),
+            method: api.method.to_string(),
+            request_path: api.request_path.to_string(),
+            headers: api.headers.clone(),
+            body: api.body.map(str::to_string),
+            params: api.params.clone(),
         };
         self.send(request).await
     }
