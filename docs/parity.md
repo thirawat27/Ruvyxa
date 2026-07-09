@@ -8,13 +8,11 @@ development works in production — no surprises at deploy time.
 ## The Problem
 
 Many frameworks have subtle differences between dev and production modes: different routing
-algorithms, different module resolution, different layout behavior. Bugs that only appear in
-production are the worst kind.
-
-Ruvyxa eliminates this class of bug by:
+algorithms, different module resolution, different layout behavior. Ruvyxa eliminates this class of
+bug by:
 
 1. Using the same route discovery algorithm in both modes.
-2. Using the same SSR rendering pipeline.
+2. Using the same SSR rendering pipeline via the persistent Node worker pool.
 3. Using the same security headers and action protections.
 4. Providing an automated parity check to verify consistency.
 
@@ -26,7 +24,7 @@ Ruvyxa eliminates this class of bug by:
 ruvyxa test:parity
 ```
 
-This command:
+This command (also aliased as `ruvyxa parity`):
 
 1. Discovers routes from `app/` (the dev source).
 2. Builds production output to `.ruvyxa/`.
@@ -38,19 +36,17 @@ This command:
 
 ## What's Compared
 
-For each route, the parity check verifies:
-
-| Property       | Must match                        |
-| -------------- | --------------------------------- |
-| Route kind     | `page` or `api`                   |
-| Route path     | The resolved URL pattern          |
-| Layout chain   | All layouts that wrap the route   |
+| Property       | Must match                      |
+| -------------- | ------------------------------- |
+| Route kind     | `page` or `api`                 |
+| Route path     | The resolved URL pattern        |
+| Layout chain   | All layouts that wrap the route |
 | Server modules | `server.ts`, `action.ts` siblings |
-| Client modules | `client.tsx` siblings             |
-| Runtime target | `node`, `edge`, or `static`       |
+| Client modules | `client.tsx` siblings           |
+| Runtime target | `node`, `edge`, or `static`   |
 
-For page routes, it also renders a representative URL in development and production mode and fails
-if either render path returns an error.
+For page routes, it also renders a representative URL in both modes and fails if either returns
+an error.
 
 ---
 
@@ -60,13 +56,10 @@ if either render path returns an error.
 PASS  Page  /           dev/prod match
 PASS  Page  /about      dev/prod match
 PASS  Page  /blog/:slug dev/prod match
-PASS  Page  /todos      dev/prod match
 PASS  Api   /api/health dev/prod match
 PASS  Render /          dev/prod smoke render
-PASS  Render /about     dev/prod smoke render
 PASS  Render /blog/test dev/prod smoke render
-PASS  Render /todos     dev/prod smoke render
-Parity passed for 5 routes
+Parity passed for 4 routes
 ```
 
 If a mismatch is found:
@@ -89,26 +82,19 @@ Run the parity check after changing:
 - Layout nesting rules
 - Server module detection
 - Client module detection
-- Action file conventions
 
-The CI workflow runs `ruvyxa check`, which includes parity, as part of the release gate. Run
-`ruvyxa test:parity` directly when you only need to debug route behavior.
+The CI and release workflows run `ruvyxa check` (which includes parity) as part of the quality
+gate.
 
 ---
 
 ## How It Works Internally
 
-The `ServerConfig` struct has two constructors:
-
-- `ServerConfig::dev(root, host, port)` — reads from `app/` with file watching enabled, render cache
-  optimised for hot reload.
-- `ServerConfig::production(root, host, port)` — reads from `.ruvyxa/server/app` with watching
-  disabled, render cache optimised for capacity.
-
-Both pass through the same `discover_routes()` function, the same `RadixRouter`, and the same
-`render_request()` pipeline via the persistent Node worker pool. The parity test verifies that
-`discover_routes()` output is identical for both source directories and then smoke-renders every
-page route in both modes.
+Both `ServerConfig::dev` and `ServerConfig::production` pass through the same
+`discover_routes()` function, the same `RadixRouter`, and the same `render_request()` pipeline
+via the persistent Node worker pool. The parity test verifies that route discovery output is
+identical for both source directories (`app/` vs `.ruvyxa/server/app`) and then smoke-renders
+every page route in both modes.
 
 ---
 

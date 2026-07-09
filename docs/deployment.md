@@ -15,39 +15,33 @@ This produces:
 
 ```
 .ruvyxa/
-├── server/       # Server-side route source
+├── server/       # Server-side route source (app/, components/, server/)
 ├── client/       # BLAKE3-hashed hydration bundles
 │   └── manifest.json
 ├── assets/       # Static files from public/
-├── manifest.json # Route manifest
-└── build.json    # Build metadata
+├── prerender/    # Pre-rendered SSG/ISR/PPR/CSR HTML + manifest.json
+├── manifest.json # Route manifest for production server
+└── build.json    # Build metadata and config snapshot
 ```
 
 ---
 
 ## Self-Hosted (Node)
 
-The simplest deployment: build and run.
-
 ```bash
 ruvyxa build
 ruvyxa start --port 3000
 ```
 
-`ruvyxa start` (or its alias `ruvyxa preview`) serves the production build using the same route
-matching, SSR, and security headers as the dev server. It reads from `.ruvyxa/server/app` and serves
-static assets from `.ruvyxa/assets`.
-
-All responses include default security headers (`X-Content-Type-Options`, `Referrer-Policy`,
-`Permissions-Policy`, `Cross-Origin-Opener-Policy`). Static assets use ETag-based caching (blake3),
-and client bundles are served with immutable cache headers for optimal performance.
+The production server serves from `.ruvyxa/server/app`, with static assets from `.ruvyxa/assets`,
+pre-rendered HTML from `.ruvyxa/prerender`, and client bundles from `.ruvyxa/client`. All responses
+include default security headers and blake3-based ETags.
 
 ---
 
 ## Adapters
 
-Adapters describe the build output in a format each platform expects. They all follow the same
-contract:
+Adapters describe the build output in a format each platform expects:
 
 ```ts
 import { defineConfig } from 'ruvyxa/config'
@@ -64,7 +58,7 @@ export default defineConfig({
 | ---------------------------- | ---------------------------------- |
 | `@ruvyxa/adapter-node`       | Node.js (self-hosted, Docker, PM2) |
 | `@ruvyxa/adapter-vercel`     | Vercel Functions                   |
-| `@ruvyxa/adapter-cloudflare` | Cloudflare Workers / Pages         |
+| `@ruvyxa/adapter-cloudflare` | Cloudflare Workers / Pages        |
 | `@ruvyxa/adapter-netlify`    | Netlify Functions                  |
 | `@ruvyxa/adapter-bun`        | Bun runtime                        |
 | `@ruvyxa/adapter-static`     | Static site export (no server)     |
@@ -79,27 +73,22 @@ npm install @ruvyxa/adapter-vercel
 
 ## Node Adapter
 
-The default adapter. Produces output ready for any Node.js hosting environment.
+The default adapter for any Node.js hosting environment:
 
 ```ts
 import { nodeAdapter } from '@ruvyxa/adapter-node'
 
-const output = await nodeAdapter().build({
-  root: '.',
-  outDir: '.ruvyxa',
+export default defineConfig({
+  adapter: nodeAdapter({
+    entry: '.ruvyxa/server/app',  // optional, defaults to this
+  }),
 })
 ```
 
 Output metadata:
 
 ```json
-{
-  "name": "node",
-  "target": "node",
-  "platform": "node",
-  "entry": ".ruvyxa/server/app",
-  "assetsDir": ".ruvyxa/assets"
-}
+{ "name": "node", "target": "node", "platform": "node", "entry": ".ruvyxa/server/app", "assetsDir": ".ruvyxa/assets" }
 ```
 
 ### Docker example
@@ -127,12 +116,14 @@ CMD ["npx", "ruvyxa", "start", "--port", "3000"]
 import { vercelAdapter } from '@ruvyxa/adapter-vercel'
 
 export default defineConfig({
-  adapter: vercelAdapter(),
+  adapter: vercelAdapter({
+    functionsDir: '.ruvyxa/functions',  // optional
+  }),
 })
 ```
 
-Deploy with the Vercel CLI or Git integration. The adapter outputs Vercel-compatible serverless
-function bundles and static assets.
+Deploys via the Vercel CLI or Git integration. Produces serverless function bundles and static
+assets. Output includes `vercel.json`.
 
 ---
 
@@ -142,11 +133,13 @@ function bundles and static assets.
 import { cloudflareAdapter } from '@ruvyxa/adapter-cloudflare'
 
 export default defineConfig({
-  adapter: cloudflareAdapter(),
+  adapter: cloudflareAdapter({
+    workerEntry: '.ruvyxa/server/app',  // optional
+  }),
 })
 ```
 
-Deploy with `wrangler deploy`. The adapter targets the Workers runtime.
+Deploys with `wrangler deploy`. Targets the Workers runtime. Output includes `wrangler.toml`.
 
 ---
 
@@ -156,11 +149,13 @@ Deploy with `wrangler deploy`. The adapter targets the Workers runtime.
 import { netlifyAdapter } from '@ruvyxa/adapter-netlify'
 
 export default defineConfig({
-  adapter: netlifyAdapter(),
+  adapter: netlifyAdapter({
+    functionsDir: '.ruvyxa/netlify/functions',  // optional
+  }),
 })
 ```
 
-Deploy with the Netlify CLI or Git integration.
+Deploys with the Netlify CLI or Git integration. Output includes `netlify.toml`.
 
 ---
 
@@ -186,12 +181,14 @@ For sites that don't need server-side rendering at request time:
 import { staticAdapter } from '@ruvyxa/adapter-static'
 
 export default defineConfig({
-  adapter: staticAdapter(),
+  adapter: staticAdapter({
+    outputDir: '.ruvyxa/static',  // optional
+  }),
 })
 ```
 
-This pre-renders all pages at build time and outputs plain HTML + JS + CSS. Deploy to any static
-host (GitHub Pages, S3, Cloudflare Pages static, etc.).
+Pre-renders all pages at build time and outputs static HTML + JS + CSS. Deploy to any static host
+(GitHub Pages, S3, Cloudflare Pages static, etc.).
 
 > Note: Dynamic routes with runtime params, API routes, and server actions are not available in
 > static mode.
@@ -200,10 +197,8 @@ host (GitHub Pages, S3, Cloudflare Pages static, etc.).
 
 ## Environment Variables in Production
 
-Set environment variables using your platform's standard method (`.env` file, platform dashboard,
-Docker env, etc.). Ruvyxa loads `.env` and `.env.local` at server startup.
-
-Remember:
+Set environment variables using your platform's standard method. Ruvyxa loads `.env` and `.env.local`
+at server startup.
 
 - `RUVYXA_PUBLIC_*` — available in both server and client code
 - All other variables — server-only (SSR, loaders, actions, API routes)
@@ -212,7 +207,7 @@ Remember:
 
 ## Build Metadata
 
-`build.json` records useful information about the build:
+`build.json` records build information:
 
 ```json
 {
@@ -221,7 +216,17 @@ Remember:
   "target": "node",
   "profile": "production",
   "routes": 5,
+  "serverDir": "server",
+  "clientDir": "client",
+  "assetsDir": "assets",
   "hashAlgorithm": "blake3-128",
+  "createdAtUnix": 1712345678,
+  "security": {
+    "actionBodyLimitBytes": 65536,
+    "sameOriginActions": true,
+    "fetchMetadataActions": true,
+    "securityHeaders": true
+  },
   "build": {
     "minify": true,
     "sourcemap": false,
@@ -229,18 +234,19 @@ Remember:
     "splitStrategy": "route",
     "parallelism": 4
   },
-  "security": {
-    "actionBodyLimitBytes": 65536,
-    "sameOriginActions": true,
-    "fetchMetadataActions": true,
-    "securityHeaders": true
+  "rendering": {
+    "prerendered": 3,
+    "routes": [
+      { "path": "/static-page", "strategy": "ssg", "revalidate": null },
+      { "path": "/isr-page", "strategy": "isr", "revalidate": 60 }
+    ]
   }
 }
 ```
 
-`.ruvyxa/client/manifest.json` contains route-level bundle metrics, including module count, output
-bytes, estimated gzip bytes, cache hits, and tree-shaken export counts. When
-`build.emitChunkManifest` is enabled, Ruvyxa also writes `.ruvyxa/client/chunk-manifest.json`.
+`.ruvyxa/client/manifest.json` contains per-route bundle metrics (module count, output bytes,
+estimated gzip bytes, cache hits, tree-shaken modules). When `build.emitChunkManifest` is enabled,
+Ruvyxa also writes `.ruvyxa/client/chunk-manifest.json` with dynamic import chunk info.
 
 ---
 

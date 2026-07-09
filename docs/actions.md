@@ -1,7 +1,7 @@
 # Server Actions
 
 Server actions are typed, validated mutations that run exclusively on the server. They live in
-`action.ts` files beside pages and are invoked through Ruvyxa's action endpoint.
+`action.ts` files beside pages and are invoked through the `/__ruvyxa/action` endpoint.
 
 ---
 
@@ -21,12 +21,8 @@ export const createTodo = action
     },
   })
   .handler(async ({ input, invalidate }) => {
-    // Persist the todo (database, API, etc.)
     const todo = await db.todos.create({ title: input.title })
-
-    // Invalidate cached data
     invalidate('todos')
-
     return todo
   })
 ```
@@ -35,11 +31,12 @@ export const createTodo = action
 
 | Part                | Purpose                                    |
 | ------------------- | ------------------------------------------ |
-| `action`            | Creates a new server action                |
+| `action`            | Creates a new server action builder        |
 | `.input({ parse })` | Validates and transforms the raw input     |
 | `.handler()`        | Executes the mutation logic                |
 | `input`             | The validated, typed input from `.input()` |
 | `invalidate(key)`   | Marks cached loader data as stale          |
+| `request`           | The incoming HTTP `Request` object         |
 
 ---
 
@@ -88,23 +85,12 @@ export const updateUser = action
   .input({
     parse(value: unknown) {
       const obj = value as Record<string, unknown>
-
-      if (!obj.email || typeof obj.email !== 'string') {
-        throw new Error('Valid email required')
-      }
-      if (!obj.name || typeof obj.name !== 'string') {
-        throw new Error('Name required')
-      }
-
-      return {
-        email: obj.email.toLowerCase().trim(),
-        name: obj.name.trim(),
-      }
+      if (!obj.email || typeof obj.email !== 'string') throw new Error('Valid email required')
+      if (!obj.name || typeof obj.name !== 'string') throw new Error('Name required')
+      return { email: obj.email.toLowerCase().trim(), name: obj.name.trim() }
     },
   })
-  .handler(async ({ input }) => {
-    return db.users.update(input)
-  })
+  .handler(async ({ input }) => db.users.update(input))
 ```
 
 If `parse` throws, the action returns a structured error response without executing the handler.
@@ -147,8 +133,8 @@ Use `invalidate()` inside your handler to mark specific cache keys as stale:
 ```ts
 .handler(async ({ input, invalidate }) => {
   await db.todos.create({ title: input.title })
-  invalidate("todos")        // Single key
-  invalidate("dashboard")    // Another key
+  invalidate('todos')
+  invalidate('dashboard')
   return { ok: true }
 })
 ```
@@ -176,12 +162,12 @@ Actions return structured responses:
 
 ## Diagnostic Codes
 
-| Code      | Meaning                                                                                |
-| --------- | -------------------------------------------------------------------------------------- |
-| `RUV1500` | Action runtime error — validation failure or handler exception                         |
-| `RUV1501` | Route has no `action.ts` or `action.js` file                                           |
-| `RUV1502` | Action renderer script not found                                                       |
-| `RUV1503` | Internal renderer invocation missing arguments — renderer called without required args |
+| Code      | Meaning                                                                  |
+| --------- | ------------------------------------------------------------------------ |
+| `RUV1500` | Action runtime error — validation failure or handler exception           |
+| `RUV1501` | Route has no `action.ts` or `action.js` file                             |
+| `RUV1502` | Action renderer script (`action-renderer.mjs`) not found                 |
+| `RUV1503` | Internal renderer invocation missing arguments                           |
 
 ---
 
@@ -191,8 +177,6 @@ Actions return structured responses:
 - Always validate input. Never trust the client payload.
 - Use `invalidate()` to keep loaders fresh after mutations.
 - Co-locate actions with the page that uses them.
-- For complex validation, consider extracting a schema library — but the `parse` function is the
-  enforcement point.
 
 ---
 

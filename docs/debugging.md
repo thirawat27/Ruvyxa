@@ -49,6 +49,31 @@ Affected routes:
 | `RUV1009` | Client-only module in server graph | Server code imports a `"client-only"` module         |
 | `RUV1010` | Server directory in client graph   | Browser code imports from `server/` folder           |
 
+### SSR & Rendering
+
+| Code      | Title                  | Cause                                     |
+| --------- | ---------------------- | ----------------------------------------- |
+| `RUV1100` | SSR render failed      | ReactDOMServer error during page render   |
+| `RUV1102` | SSR renderer not found | Internal renderer `ssr-renderer.mjs` missing |
+
+### API Routes
+
+| Code      | Title                      | Cause                                |
+| --------- | -------------------------- | ------------------------------------ |
+| `RUV1200` | API route execution failed | Handler threw an unhandled exception |
+| `RUV1201` | No available server port   | All configured ports are in use      |
+| `RUV1202` | API renderer not found     | Internal renderer script missing     |
+
+### Client Bundles
+
+| Code      | Title                     | Cause                                        |
+| --------- | ------------------------- | -------------------------------------------- |
+| `RUV1300` | Client bundle failed      | Ruvyxa compiler error during hydration bundle |
+| `RUV1301` | Module compile error      | Compiler failed on a specific module         |
+| `RUV1302` | Client renderer not found | Internal renderer script missing             |
+| `RUV1303` | Client route not found    | Route has no matching client page            |
+| `RUV1304` | Non-page client bundle    | Client bundle requested for API-only route   |
+
 ### Tailwind CSS
 
 | Code      | Title                       | Cause                                          |
@@ -61,50 +86,16 @@ Affected routes:
 | Code      | Title                     | Cause                                   |
 | --------- | ------------------------- | --------------------------------------- |
 | `RUV1500` | Action runtime error      | Validation failure or handler exception |
-| `RUV1501` | Action module not found   | Route has no `action.ts` file           |
-| `RUV1502` | Action renderer not found | Internal renderer script missing        |
-| `RUV1503` | Renderer args missing     | Internal invocation error               |
-
-### SSR & Rendering
-
-| Code      | Title                  | Cause                                     |
-| --------- | ---------------------- | ----------------------------------------- |
-| `RUV1100` | SSR render failed      | ReactDOMServer error during page render   |
-| `RUV1102` | SSR renderer not found | Internal renderer worker-pool.mjs missing |
-
-### API Routes
-
-| Code      | Title                      | Cause                                |
-| --------- | -------------------------- | ------------------------------------ |
-| `RUV1200` | API route execution failed | Handler threw an unhandled exception |
-| `RUV1201` | No available server port   | All configured ports are in use      |
-| `RUV1202` | API renderer not found     | Internal renderer script missing     |
-
-### Client Bundles
-
-| Code      | Title                     | Cause                                         |
-| --------- | ------------------------- | --------------------------------------------- |
-| `RUV1300` | Client bundle failed      | Ruvyxa compiler error during hydration bundle |
-| `RUV1301` | Module compile error      | Compiler failed on a specific module          |
-| `RUV1302` | Client renderer not found | Internal renderer script missing              |
-| `RUV1303` | Client route not found    | Route has no matching client page             |
-| `RUV1304` | Non-page client bundle    | Client bundle requested for API-only route    |
-
-### Server Actions
-
-| Code      | Title                     | Cause                                   |
-| --------- | ------------------------- | --------------------------------------- |
-| `RUV1500` | Action runtime error      | Validation failure or handler exception |
-| `RUV1501` | Action module not found   | Route has no `action.ts` file           |
-| `RUV1502` | Action renderer not found | Internal renderer script missing        |
+| `RUV1501` | Action module not found   | Route has no `action.ts` or `action.js` |
+| `RUV1502` | Action renderer not found | Internal renderer `action-renderer.mjs` missing |
 | `RUV1503` | Renderer args missing     | Internal invocation error               |
 
 ### Config & CLI
 
-| Code      | Title              | Cause                                          |
-| --------- | ------------------ | ---------------------------------------------- |
-| `RUV1600` | Config error       | Invalid configuration value                    |
-| `RUV1601` | Empty config field | Required config field is empty or not relative |
+| Code      | Title              | Cause            |
+| --------- | ------------------ | ---------------- |
+| `RUV1600` | Config error       | Invalid configuration value |
+| `RUV1601` | Empty config field | Required config field is empty or not relative to project root |
 
 ### Build Plugins
 
@@ -126,7 +117,7 @@ Affected routes:
 | Code      | Title                        | Cause                                                   |
 | --------- | ---------------------------- | ------------------------------------------------------- |
 | `RUV2100` | Wasm plugin load error       | Plugin `.wasm` file could not be loaded or compiled     |
-| `RUV2101` | Wasm plugin execution error  | Plugin hook threw or was killed by timeout/memory limit |
+| `RUV2101` | Wasm plugin execution error   | Plugin hook threw or was killed by timeout/memory limit |
 | `RUV2102` | Wasm plugin hot-reload error | Watcher failed to reload `.wasm` file on change         |
 
 ---
@@ -142,8 +133,8 @@ ruvyxa analyze
 ```
 
 Reports all boundary violations, missing exports, and invalid routes as structured JSON with
-diagnostics. Use `ruvyxa check` as the normal before-deploy command; use `analyze` when you need the
-raw diagnostic payload.
+diagnostics. Use `ruvyxa check` as the normal before-deploy command; use `analyze` when you need
+the raw diagnostic payload.
 
 ### `ruvyxa check`
 
@@ -153,8 +144,8 @@ Runs the recommended app-level production readiness checks:
 ruvyxa check
 ```
 
-Use this before deploys. It combines TypeScript type checking, production build validation, dev/prod
-parity, and runtime page smoke rendering.
+Combines TypeScript type checking (when `tsconfig.json` is present), production build validation,
+dev/prod parity, and runtime page smoke rendering.
 
 ### `ruvyxa doctor`
 
@@ -183,12 +174,6 @@ Inspect route matching for a specific URL:
 ruvyxa trace /blog/hello
 ```
 
-Or via the HTTP endpoint while the server is running:
-
-```bash
-curl "http://localhost:3000/__ruvyxa/trace?path=/blog/hello"
-```
-
 Returns:
 
 - Matched route and params
@@ -206,8 +191,6 @@ Compares dev and production route graphs and smoke-renders every page route in b
 ruvyxa test:parity
 ```
 
-See [Dev/Prod Parity](parity.md) for details.
-
 ---
 
 ## Client Boundary Errors
@@ -218,12 +201,12 @@ The most common build-time errors involve the server/client boundary.
 
 ```ts
 // lib/db.ts
-import 'server-only' // marks this module as server-only
+import 'server-only'
 export const db = createClient(process.env.DATABASE_URL)
 ```
 
-If `page.tsx` (which is hydrated in the browser) imports `lib/db.ts` either directly or
-transitively, Ruvyxa reports `RUV1007`.
+If `page.tsx` (hydrated in the browser) imports `lib/db.ts` either directly or transitively,
+Ruvyxa reports `RUV1007`.
 
 **Fix:** Move the database call into `server.ts` and pass data as props to the page.
 
@@ -231,15 +214,15 @@ transitively, Ruvyxa reports `RUV1007`.
 
 ```tsx
 // page.tsx
-const apiKey = process.env.API_SECRET // RUV1008
+const apiKey = process.env.API_SECRET  // RUV1008
 ```
 
 **Fix:** Read the variable in a loader (`server.ts`) and pass only the result to the page.
 
 ### `RUV1010` — Server directory in client
 
-Files under `server/` are reserved for server-only code. If a page imports from `server/utils.ts`,
-Ruvyxa reports `RUV1010`.
+Files under `server/` are reserved for server-only code. A page importing from `server/utils.ts`
+triggers `RUV1010`.
 
 **Fix:** Move browser-safe utilities outside the `server/` directory.
 
@@ -265,28 +248,23 @@ Check the diagnostic output for the Tailwind stderr message. Common causes:
 
 ## Dev Error Overlay
 
-In development mode (`RUVYXA_DEV=1`), Ruvyxa displays errors in a Next.js-style overlay instead of a
-plain text page:
+In development mode, Ruvyxa displays errors in a Next.js-style overlay:
 
 - **Dark theme** with red error badge and title
-- **Code frame** — source context lines surrounding the error location, with `>` marker and
-  `← error` indicator
+- **Code frame** — source context lines surrounding the error location, with `>` marker
 - **Suggested fix** — green-highlighted hint when a diagnostic includes one
 - **Collapsible stack trace** — hidden by default, expand on click
-- **Footer** — `Ruvyxa Dev Server — fix the error and save to hot-reload`
+- **Footer** — `Ruvyxa Dev Server — fix and save to hot-reload`
 
 The overlay is triggered automatically for any `RuvyxaError::Diagnostic` returned during SSR
-rendering, API execution, or client bundle generation. Non-diagnostic errors fall back to a plain
-overlay with the error message.
-
-Production mode (`ruvyxa start`) always returns the plain text error page. No overlay is injected
-into production responses.
+rendering, API execution, or client bundle generation. Production mode (`ruvyxa start`) always
+returns a plain text error page.
 
 ---
 
 ## Security Headers
 
-All runtime responses include these headers by default:
+All runtime responses include:
 
 | Header                       | Value                                      |
 | ---------------------------- | ------------------------------------------ |
@@ -294,9 +272,6 @@ All runtime responses include these headers by default:
 | `Referrer-Policy`            | `strict-origin-when-cross-origin`          |
 | `Permissions-Policy`         | `camera=(), microphone=(), geolocation=()` |
 | `Cross-Origin-Opener-Policy` | `same-origin`                              |
-
-These provide a secure baseline. For custom CSP or additional headers, configure them at the
-deployment layer until Ruvyxa exposes a typed security config.
 
 ---
 

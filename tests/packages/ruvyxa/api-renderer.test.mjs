@@ -79,7 +79,11 @@ function runJson(script, args) {
           reject(new Error(`script failed (${code}): ${stdout || stderr}`))
         }
       } catch (error) {
-        reject(new Error(`invalid JSON from script: ${error.message}; stdout=${stdout}; stderr=${stderr}`))
+        reject(
+          new Error(
+            `invalid JSON from script: ${error.message}; stdout=${stdout}; stderr=${stderr}`,
+          ),
+        )
       }
     })
   })
@@ -113,7 +117,9 @@ function runWorkerJson(request) {
       try {
         resolve(JSON.parse(stdout.slice(0, lineEnd)))
       } catch (error) {
-        reject(new Error(`invalid worker JSON: ${error.message}; stdout=${stdout}; stderr=${stderr}`))
+        reject(
+          new Error(`invalid worker JSON: ${error.message}; stdout=${stdout}; stderr=${stderr}`),
+        )
       }
     })
     child.stderr.on('data', (chunk) => {
@@ -129,7 +135,9 @@ function runWorkerJson(request) {
       if (settled) return
       settled = true
       clearTimeout(timeout)
-      reject(new Error(`worker exited before response (${code}); stdout=${stdout}; stderr=${stderr}`))
+      reject(
+        new Error(`worker exited before response (${code}); stdout=${stdout}; stderr=${stderr}`),
+      )
     })
     child.stdin.write(`${JSON.stringify(request)}\n`)
   })

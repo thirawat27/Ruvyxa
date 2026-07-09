@@ -11,7 +11,7 @@ to submit changes.
 
 - [Rust](https://rustup.rs/) (1.96+)
 - [Node.js](https://nodejs.org/) (22+)
-- [pnpm](https://pnpm.io/) (10+)
+- [pnpm](https://pnpm.io/) (11+)
 
 ### Clone and Install
 
@@ -24,9 +24,9 @@ pnpm install
 ### Verify Everything Works
 
 ```bash
-cargo fmt --all
-cargo test --workspace
-cargo clippy --workspace -- -D warnings
+cargo fmt --all -- --check
+cargo test --workspace --locked
+cargo clippy --workspace -- -- -D warnings
 pnpm -r build
 pnpm -r check
 pnpm -r test
@@ -47,18 +47,18 @@ Open [http://localhost:3000](http://localhost:3000).
 ```
 ruvyxa/
 ├── crates/                    # Rust crates
-│   ├── ruvyxa_bundler/        # Native TS/JSX bundler, compiler, minifier
-│   ├── ruvyxa_cli/            # CLI binary (commands, build, bench)
-│   ├── ruvyxa_dev_server/     # Dev + production HTTP server
-│   ├── ruvyxa_graph/          # Route discovery, validation, manifests
-│   ├── ruvyxa_middleware/     # Tower middleware + Wasm plugin runtime
+│   ├── ruvyxa_bundler/        # TS/JSX bundler: compiler, resolver, linker, minifier, source maps
+│   ├── ruvyxa_cli/            # CLI binary (dev, build, check, start, routes, analyze, etc.)
+│   ├── ruvyxa_dev_server/     # Dev + production HTTP server, HMR, render cache, worker pool
+│   ├── ruvyxa_graph/          # Route discovery, validation, rendering strategy detection
+│   ├── ruvyxa_middleware/     # Tower middleware (CORS, timing, logging, rate limit) + Wasm plugins
 │   └── ruvyxa_diagnostics/    # Structured error types (RUV#### codes)
 ├── packages/                  # TypeScript packages (npm)
-│   ├── ruvyxa/                # Main package (CLI wrapper + runtime)
+│   ├── ruvyxa/                # Main package (CLI wrapper + runtime Node scripts)
 │   ├── create-ruvyxa/         # Project scaffolding
-│   └── @ruvyxa/               # Scoped packages (core, react, adapters)
-├── examples/kitchen-sink/     # Integration test app with all features
-├── templates/minimal/         # Template for new user projects (create-ruvyxa)
+│   └── @ruvyxa/               # Scoped packages (core, react, adapters, cli-*)
+├── examples/kitchen-sink/     # Full-featured demo app with all features
+├── templates/minimal/         # Template for new user projects
 ├── tests/                     # Node package tests (organized by package)
 └── docs/                      # User-facing documentation
 ```
@@ -72,7 +72,7 @@ ruvyxa/
 - Use `cargo fmt` formatting. No exceptions.
 - All warnings are errors (`-D warnings` in CI).
 - Use structured diagnostics with `RUV####` codes for user-facing errors.
-- Add tests for any behavior change to route discovery or validation.
+- Add tests for behavior changes to route discovery, validation, or bundling.
 - Keep errors explicit — do not silently ignore invalid state.
 
 ### TypeScript
@@ -84,8 +84,7 @@ ruvyxa/
 
 ### General
 
-- Keep dev and production behavior aligned. Shared logic goes in shared paths, not command-specific
-  branches.
+- Keep dev and production behavior aligned. Shared logic goes in shared paths.
 - Build validation must catch boundary leaks before output is emitted.
 - Update `templates/minimal/` when a feature affects new projects.
 - Update `examples/kitchen-sink/` when a feature needs demonstration.
@@ -109,9 +108,9 @@ git checkout -b feature/my-change
 ### 3. Run the checks
 
 ```bash
-cargo fmt --all
-cargo test --workspace
-cargo clippy --workspace -- -D warnings
+cargo fmt --all -- --check
+cargo test --workspace --locked
+cargo clippy --workspace -- -- -D warnings
 pnpm -r build
 pnpm -r check
 pnpm -r test
@@ -175,16 +174,10 @@ Diagnostic::new("RUV1011", "Your error title")
 ## Adding an Adapter
 
 1. Create `packages/@ruvyxa/adapter-<name>/`.
-2. Implement the adapter contract from `@ruvyxa/core`.
+2. Implement the `Adapter` interface from `@ruvyxa/core`.
 3. Add a `package.json` with `@ruvyxa/core` as a dependency.
 4. Document it in `docs/deployment.md`.
-5. Add it to the publish order in `docs/publishing.md`.
-
----
-
-## Code of Conduct
-
-Be respectful. Keep discussions technical and constructive. We're building something together.
+5. Add it to the publish procedure in `docs/publishing.md`.
 
 ---
 

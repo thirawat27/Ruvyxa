@@ -13,7 +13,7 @@ npx ruvyxa dev
 
 Open [http://localhost:3000](http://localhost:3000) to see your app.
 
-> You can also use `pnpm`, `yarn`, or `bun` in place of `npm`.
+> `pnpm`, `yarn`, and `bun` also work.
 
 ---
 
@@ -32,7 +32,9 @@ Add scripts to your `package.json`:
   "scripts": {
     "dev": "ruvyxa dev",
     "build": "ruvyxa build",
-    "start": "ruvyxa start"
+    "start": "ruvyxa start",
+    "check": "ruvyxa check",
+    "typecheck": "tsc --noEmit"
   }
 }
 ```
@@ -46,29 +48,17 @@ import { defineConfig } from 'ruvyxa/config'
 export default defineConfig({
   appDir: 'app',
   outDir: '.ruvyxa',
-  server: {
-    port: 3000,
-    host: 'localhost',
-  },
+  server: { port: 3000, host: 'localhost' },
   build: {
-    minify: true,
-    sourcemap: false,
-    treeShaking: true,
-    splitStrategy: 'route',
-    jsxRuntime: 'classic',
-    esTarget: 'es2022',
-    parallelism: 4,
-    emitChunkManifest: false,
+    minify: true, sourcemap: false, treeShaking: true,
+    splitStrategy: 'route', jsxRuntime: 'classic',
+    esTarget: 'es2022', parallelism: 4, emitChunkManifest: false,
   },
-  cache: {
-    routeManifest: true,
-    css: true,
-  },
+  cache: { routeManifest: true, css: true },
+  debug: { overlay: true, traces: true },
   security: {
-    actionBodyLimitBytes: 65536,
-    sameOriginActions: true,
-    fetchMetadataActions: true,
-    securityHeaders: true,
+    actionBodyLimitBytes: 65536, sameOriginActions: true,
+    fetchMetadataActions: true, securityHeaders: true,
   },
 })
 ```
@@ -100,7 +90,7 @@ hydration bundle.
 Create `app/layout.tsx` to wrap all pages:
 
 ```tsx
-import './global.css'
+import './globals.css'
 
 export const meta = {
   title: 'My App',
@@ -159,9 +149,8 @@ import { action } from 'ruvyxa/server'
 export const createTodo = action
   .input({
     parse(value: unknown) {
-      if (!value || typeof value !== 'object' || !('title' in value)) {
+      if (!value || typeof value !== 'object' || !('title' in value))
         throw new Error('Title is required')
-      }
       return { title: String(value.title).trim() }
     },
   })
@@ -197,24 +186,20 @@ import { loader } from 'ruvyxa/server'
 export const getPost = loader(async ({ params, cache }) => {
   return cache(`post:${params.slug}`)
     .ttl('5m')
-    .get(async () => {
-      return db.posts.findBySlug(params.slug)
-    })
+    .get(async () => db.posts.findBySlug(params.slug))
 })
 ```
 
-Loaders run on the server only. They have access to all environment variables and can call databases
-directly.
+Loaders run on the server only, with access to all environment variables and databases.
 
 ---
 
 ## Styling with Tailwind CSS
 
-Ruvyxa supports Tailwind CSS v4 out of the box. Add it to `app/global.css`:
+Add it to `app/globals.css`:
 
 ```css
 @import 'tailwindcss';
-
 @source "../app";
 @source "../components";
 ```
@@ -232,7 +217,7 @@ CSS into your pages automatically.
 
 ## Environment Variables
 
-Create `.env.example` to document required keys, and `.env` or `.env.local` for local values:
+Create `.env.example` to document required keys:
 
 ```env
 # Public — exposed to browser code
@@ -246,7 +231,7 @@ Rules:
 
 - `RUVYXA_PUBLIC_*` variables are available everywhere.
 - All other variables are server-only (SSR, API routes, actions, loaders).
-- `ruvyxa check` catches private env usage in client-reachable code before deploy.
+- `ruvyxa check` catches private env usage in client-reachable code.
 
 ---
 
@@ -257,13 +242,10 @@ npx ruvyxa build
 npx ruvyxa start
 ```
 
-The build step validates your app, bundles client-side code with tree-shaking and minification, and
-emits everything to `.ruvyxa/`. The production server serves from this directory with the same route
-semantics as dev.
+The build validates your app, bundles client-side code with tree-shaking and minification, and emits
+everything to `.ruvyxa/`. SSG/ISR/PPR/CSR routes are pre-rendered at build time.
 
-Build metadata includes per-route module counts, output sizes, estimated gzip sizes, optimizer
-counts, and compile cache size. Set `build.emitChunkManifest` to `true` when deployment tooling
-needs `client/chunk-manifest.json`.
+Set `build.emitChunkManifest: true` when deployment tooling needs `client/chunk-manifest.json`.
 
 ---
 
@@ -273,9 +255,9 @@ needs `client/chunk-manifest.json`.
 npx ruvyxa check
 ```
 
-This runs the app-level production readiness gate:
+Runs:
 
-- TypeScript type checking when `tsconfig.json` is present
+- TypeScript type checking (when `tsconfig.json` is present)
 - Production build validation
 - Dev/prod route parity
 - Runtime smoke rendering for every page route

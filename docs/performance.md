@@ -17,16 +17,16 @@ ruvyxa bench --root .
 ### What it measures
 
 | Benchmark            | What's timed                                                      |
-| -------------------- | ----------------------------------------------------------------- |
-| `route-discovery`    | Walking `app/` and building the route manifest                    |
-| `analyze-validation` | Route discovery + full server/client boundary validation          |
-| `production-build`   | Complete `.ruvyxa` output: server copy, client bundles, manifests |
+| ------------------ | ----------------------------------------------------------------- |
+| `route-discovery`  | Walking `app/` and building the route manifest                    |
+| `analyze-validation` | Route discovery + full server/client boundary validation              |
+| `production-build` | Complete `.ruvyxa/` output: server copy, client bundles, manifests |
 
 ### Options
 
 ```bash
 ruvyxa bench --samples 5          # Run each benchmark 5 times (default: 3)
-ruvyxa bench --samples 5 --json   # Output JSON for CI integration
+ruvyxa bench --samples 5 --json   # JSON output for CI integration
 ```
 
 ### Example output
@@ -43,8 +43,7 @@ production-build    avg 142ms   min 138ms   max 147ms   (3 samples)
 
 ### Route-Level Code Splitting
 
-Client bundles are split per route, not per app. Each page gets its own hydration bundle containing
-only the code that page needs.
+Client bundles are split per route. Each page gets its own hydration bundle:
 
 ```
 .ruvyxa/client/
@@ -57,18 +56,17 @@ only the code that page needs.
 
 ### Tree Shaking
 
-The Ruvyxa bundler eliminates dead code from each route bundle. Only imports actually used by the
-page are included in the output. This is enabled by default and can be disabled with
-`build.treeShaking: false` when debugging optimizer behavior.
+Dead-code elimination per route bundle, enabled by default. Only imports used by the page are
+included. Disable with `build.treeShaking: false` when debugging.
 
 ### Minification
 
-Production bundles are minified by the Ruvyxa minifier with whitespace removal, identifier
-shortening, and dead-code elimination.
+Production bundles are minified with whitespace removal, identifier shortening, and dead-code
+elimination.
 
 ### Content Hashing
 
-File names are BLAKE3 hashes of their content (first 16 hex characters). This enables:
+File names are BLAKE3 hashes (first 16 hex characters). Enables:
 
 - Immutable caching (`Cache-Control: public, max-age=31536000, immutable`)
 - Automatic cache-busting on content change
@@ -76,19 +74,20 @@ File names are BLAKE3 hashes of their content (first 16 hex characters). This en
 
 ### Build Stats
 
-`client/manifest.json` records per-route and aggregate build metrics:
+`client/manifest.json` records per-route metrics:
 
-- `moduleCount`
-- `outputBytes`
-- `estimatedGzBytes`
-- `durationMs`
-- `cacheHits`
-- `treeShakenModules`
-- `cache.compileEntries`
-- `cache.compileBytes`
+- `moduleCount`, `outputBytes`, `estimatedGzBytes`
+- `durationMs`, `cacheHits`, `treeShakenModules`
+- `cache.compileEntries`, `cache.compileBytes`
 
-Set `build.emitChunkManifest: true` to also write `.ruvyxa/client/chunk-manifest.json` for
-deployment adapters and performance tooling.
+Set `build.emitChunkManifest: true` to also write `.ruvyxa/client/chunk-manifest.json` with
+dynamic import split points for deployment adapters.
+
+### Parallel Production Bundling
+
+Client bundles are emitted concurrently using `std::thread::scope` with scoped threads. The
+parallelism level defaults to `available_parallelism()` and is configurable via
+`build.parallelism`. Bundles are written in deterministic route order.
 
 ---
 
@@ -98,38 +97,33 @@ deployment adapters and performance tooling.
 
 - Route discovery runs in Rust, not JavaScript.
 - File watching uses native OS notifications (`notify` crate).
-- HMR events are classified by type (CSS update, component update, full reload) to minimize browser
-  work.
-- **Render cache**: default capacity 1024 (dev) / 512 (prod), default TTL 5 min (dev) / 30 min
-  (prod). Configurable via `RUVYXA_RENDER_CACHE_SIZE` env var.
-- **Worker pool**: Auto-sizes to `available_parallelism()` (clamped 2–8). Configurable via
-  `RUVYXA_WORKER_POOL_SIZE` env var. Default timeout 10s for dead-worker detection.
-- **Async file I/O**: SSR hot-path file reads use `tokio::task::spawn_blocking` to avoid blocking
-  the async runtime.
+- HMR events classified by type (CSS update, component/file update, full reload).
+- **Render cache**: default capacity 1024 (dev) / 512 (prod), TTL 5 min (dev) / 30 min (prod).
+  Configurable via `RUVYXA_RENDER_CACHE_SIZE` env var.
+- **Worker pool**: auto-sizes to `available_parallelism()` (clamped 2–8). Configurable via
+  `RUVYXA_WORKER_POOL_SIZE` env var. Default 10s timeout for dead-worker detection.
+- **Async file I/O**: hot-path file reads use `tokio::task::spawn_blocking`.
 
 ### Production Server
 
-- Static assets and client bundles are served with immutable cache headers.
+- Static assets and client bundles served with immutable cache headers.
 - Route matching reuses the same algorithm as dev — no production-only code paths.
-- Security headers are applied once per response without middleware chains.
+- Security headers applied once per response.
 
 ---
 
 ## Monitoring in CI
 
-Use JSON output to track performance over time:
-
 ```bash
 ruvyxa bench --samples 5 --json > bench-results.json
 ```
 
-Integrate with your CI pipeline to detect regressions:
+CI integration:
 
 ```yaml
 - name: Performance benchmark
   run: |
     npx ruvyxa bench --samples 5 --json > bench.json
-    # Compare against baseline, fail on regression
 ```
 
 ---
@@ -137,7 +131,7 @@ Integrate with your CI pipeline to detect regressions:
 ## Tips
 
 - Run benchmarks before and after changes to route discovery, build, or HMR logic.
-- Use `ruvyxa clean` before benchmarking to ensure cold-start measurements.
+- Use `ruvyxa clean` before benchmarking for cold-start measurements.
 - The `route-discovery` benchmark is the best indicator of CLI startup latency.
 - For app-level performance (response times, TTFB), use standard HTTP benchmarking tools against
   `ruvyxa start`.

@@ -389,7 +389,15 @@ async function handleSsg(request) {
 
 // --- API Handler ---
 async function handleApi(request) {
-  const { projectRoot, routeFile, method, requestPath, params, headers: requestHeaders = {}, body: requestBody } = request
+  const {
+    projectRoot,
+    routeFile,
+    method,
+    requestPath,
+    params,
+    headers: requestHeaders = {},
+    body: requestBody,
+  } = request
 
   const resolvedRoot = path.resolve(projectRoot || process.cwd())
   const { outfile, freshBuild } = await bundleApiModule(resolvedRoot, routeFile)

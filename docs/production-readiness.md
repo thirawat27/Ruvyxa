@@ -13,31 +13,33 @@ For application projects, use the single app-level gate first:
 ruvyxa check
 ```
 
-It runs TypeScript type checking when `tsconfig.json` is present, builds production output, compares
-dev/prod route behavior, and smoke-renders every page route.
+It runs TypeScript type checking (when `tsconfig.json` is present), builds production output,
+compares dev/prod route behavior, and smoke-renders every page route.
 
 All of the following must pass before a release:
 
 | Gate                       | Command                                           |
 | -------------------------- | ------------------------------------------------- |
 | Rust formatting            | `cargo fmt --all -- --check`                      |
-| Rust tests                 | `cargo test --workspace`                          |
-| Rust lints                 | `cargo clippy --workspace -- -D warnings`         |
+| Rust tests                 | `cargo test --workspace --locked`                 |
+| Rust lints                 | `cargo clippy --workspace -- -- -D warnings`      |
 | TypeScript build           | `pnpm -r build`                                   |
 | TypeScript type check      | `pnpm -r check`                                   |
 | TypeScript tests           | `pnpm -r test`                                    |
 | Package metadata           | `pnpm release:validate`                           |
 | Pack smoke test            | `pnpm pack:smoke`                                 |
-| App deploy gate            | `ruvyxa check --root examples/kitchen-sink`       |
-| Dev/prod parity drill-down | `ruvyxa test:parity --root examples/kitchen-sink` |
+| App deploy gate            | `cargo run -p ruvyxa_cli -- check --root examples/kitchen-sink` |
+| Dev/prod parity drill-down | `cargo run -p ruvyxa_cli -- test:parity --root examples/kitchen-sink` |
 
 ---
 
 ## Test Layout
 
 Standalone JavaScript and TypeScript tests are centralized under `tests/`, grouped by package.
-Package `test` scripts point to their own subset in `tests/packages/...`; Rust unit tests remain
-inline in their crates. See [Testing](testing.md) for details.
+Package `test` scripts point to their own subset in `tests/packages/...`. Integration tests for
+runtime renderers (`action-renderer.mjs`, `api-renderer.mjs`, `client-renderer.mjs`,
+`compiler.mjs`) live under `tests/packages/ruvyxa/`. Rust unit tests remain inline in their
+crates. See [Testing](testing.md) for details.
 
 ---
 
@@ -51,28 +53,22 @@ inline in their crates. See [Testing](testing.md) for details.
 
 ### Build Output
 
-Production builds emit a deterministic structure:
-
-| Directory               | Contents                           |
-| ----------------------- | ---------------------------------- |
-| `.ruvyxa/server/`       | Production route source for SSR    |
+| Directory               | Contents                          |
+| ----------------------- | --------------------------------- |
+| `.ruvyxa/server/`       | Production route source for SSR   |
 | `.ruvyxa/client/`       | Route-level hydration bundles      |
-| `.ruvyxa/assets/`       | Static files from `public/`        |
+| `.ruvyxa/assets/`       | Static files from `public/`      |
+| `.ruvyxa/prerender/`    | Pre-rendered HTML files            |
 | `.ruvyxa/manifest.json` | Full route manifest                |
-| `.ruvyxa/build.json`    | Build metadata and security config |
-
-Builds are staged before they replace the active output. Route validation, server/client boundary
-checks, asset copying, client bundle generation, and metadata writing must all succeed before
-`.ruvyxa/server`, `.ruvyxa/client`, `.ruvyxa/assets`, `.ruvyxa/manifest.json`, or
-`.ruvyxa/build.json` are swapped into place. The `.ruvyxa/cache/` directory is preserved across
-builds.
+| `.ruvyxa/build.json`    | Build metadata and config snapshot |
 
 ### Client Bundles
 
 - Route-level splitting (one bundle per page)
-- Minified and tree-shaken by the Ruvyxa bundler by default
+- Minified and tree-shaken by default
 - BLAKE3 content-addressed file names (immutable caching)
-- Per-route bundle metrics in `.ruvyxa/client/manifest.json`
+- Dynamic `import()` split points emitted as chunk files
+- Per-route bundle metrics in `client/manifest.json`
 
 ### Server Actions
 
@@ -96,7 +92,7 @@ All responses include:
 
 ## Native CLI Distribution
 
-End users install Ruvyxa from npm and receive a prebuilt native binary. No Rust toolchain required.
+End users install from npm and receive a prebuilt native binary. No Rust toolchain required.
 
 Resolution order:
 
@@ -120,15 +116,15 @@ Resolution order:
 
 ```bash
 # 1. Clean state
-git status  # ensure working tree is clean
+git status
 
 # 2. Rust checks
 cargo fmt --all -- --check
-cargo test --workspace
-cargo clippy --workspace -- -D warnings
+cargo test --workspace --locked
+cargo clippy --workspace -- -- -D warnings
 
 # 3. TypeScript checks
-pnpm install
+pnpm install --frozen-lockfile
 pnpm -r build
 pnpm -r check
 pnpm -r test
@@ -138,7 +134,7 @@ cargo run -p ruvyxa_cli -- check --root examples/kitchen-sink
 pnpm release:validate
 pnpm pack:smoke
 
-# 5. Smoke test
+# 5. Full smoke test
 cargo run -p ruvyxa_cli -- dev --root examples/kitchen-sink --port 3001
 cargo run -p ruvyxa_cli -- build --root examples/kitchen-sink
 cargo run -p ruvyxa_cli -- start --root examples/kitchen-sink --port 3002
@@ -148,15 +144,19 @@ cargo run -p ruvyxa_cli -- start --root examples/kitchen-sink --port 3002
 
 ## CI/CD
 
-Use the GitHub Actions workflow (`.github/workflows/release.yml`) for actual releases. It:
+The GitHub Actions workflow (`.github/workflows/ci.yml`) runs on every push and pull request:
 
-1. Runs all quality gates on multiple platforms.
-2. Builds native CLI binaries per platform.
-3. Publishes npm packages with provenance.
-4. Creates a GitHub release with changelog.
+1. Rust formatting, tests, clippy on ubuntu, macOS, and Windows
+2. TypeScript build, check, and test
+3. Package metadata validation and pack smoke test
 
-Never publish manually to npm unless the CI pipeline is unavailable and the full checklist above
-passes locally.
+The release workflow (`.github/workflows/release.yml`) runs on `v*.*.*` tags:
+
+1. All quality gates
+2. Build native CLI binaries per platform
+3. Publish npm packages in dependency order with provenance
+
+Never publish manually unless CI is unavailable and the full checklist passes locally.
 
 ---
 
