@@ -5,6 +5,10 @@
 <h1 align="center">Ruvyxa</h1>
 
 <p align="center">
+  <strong>R</strong>obust <strong>U</strong>niversal <strong>V</strong>alidation & <strong>Y</strong>ielding e<strong>X</strong>perience <strong>A</strong>pplication
+</p>
+
+<p align="center">
   Ruvyxa is a production-minded web framework built around clarity, speed, and control.<br/>
   It keeps routing, server logic, validation, builds, and runtime output in one predictable workflow.
 </p>
