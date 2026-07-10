@@ -60,7 +60,7 @@ pnpm install --frozen-lockfile
 pnpm -r build
 pnpm -r check
 pnpm -r test
-cargo run -p ruvyxa_cli -- check --root examples/kitchen-sink
+cargo run -p ruvyxa_cli -- check --root examples/demo
 pnpm release:validate
 pnpm pack:smoke
 ```

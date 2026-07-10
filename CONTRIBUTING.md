@@ -35,7 +35,7 @@ pnpm -r test
 ### Run the Example App
 
 ```bash
-cargo run -p ruvyxa_cli -- dev --root examples/kitchen-sink
+cargo run -p ruvyxa_cli -- dev --root examples/demo
 ```
 
 Open [http://localhost:3000](http://localhost:3000).
@@ -57,7 +57,7 @@ ruvyxa/
 │   ├── ruvyxa/                # Main package (CLI wrapper + runtime Node scripts)
 │   ├── create-ruvyxa/         # Project scaffolding
 │   └── @ruvyxa/               # Scoped packages (core, react, adapters, cli-*)
-├── examples/kitchen-sink/     # Full-featured demo app with all features
+├── examples/demo/             # Full-featured demo app with all features
 ├── templates/minimal/         # Template for new user projects
 ├── tests/                     # Node package tests (organized by package)
 └── docs/                      # User-facing documentation
@@ -87,7 +87,7 @@ ruvyxa/
 - Keep dev and production behavior aligned. Shared logic goes in shared paths.
 - Build validation must catch boundary leaks before output is emitted.
 - Update `templates/minimal/` when a feature affects new projects.
-- Update `examples/kitchen-sink/` when a feature needs demonstration.
+- Update `examples/demo/` when a feature needs demonstration.
 
 ---
 
@@ -121,15 +121,15 @@ pnpm -r test
 For runtime changes:
 
 ```bash
-cargo run -p ruvyxa_cli -- dev --root examples/kitchen-sink --port 3001
-cargo run -p ruvyxa_cli -- build --root examples/kitchen-sink
-cargo run -p ruvyxa_cli -- start --root examples/kitchen-sink --port 3002
+cargo run -p ruvyxa_cli -- dev --root examples/demo --port 3001
+cargo run -p ruvyxa_cli -- build --root examples/demo
+cargo run -p ruvyxa_cli -- start --root examples/demo --port 3002
 ```
 
 ### 5. Run parity check
 
 ```bash
-cargo run -p ruvyxa_cli -- test:parity --root examples/kitchen-sink
+cargo run -p ruvyxa_cli -- test:parity --root examples/demo
 ```
 
 ### 6. Submit a PR

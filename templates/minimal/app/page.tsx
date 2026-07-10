@@ -15,7 +15,7 @@ export default function Home() {
           </a>
           <a
             className="link"
-            href="https://github.com/thirawat27/ruvyxa/tree/main/examples/kitchen-sink"
+            href="https://github.com/thirawat27/ruvyxa/tree/main/examples/demo"
           >
             Examples
           </a>

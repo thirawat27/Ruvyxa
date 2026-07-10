@@ -1,5 +1,6 @@
 import './globals.css'
 import '../styles/external.css'
+import '../styles/config-entry.css'
 
 export const meta = {
   title: 'Ruvyxa Kitchen Sink',

@@ -6,7 +6,7 @@ import { describe, it } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
 const workspaceRoot = path.resolve(fileURLToPath(new URL('../../..', import.meta.url)))
-const exampleRoot = path.join(workspaceRoot, 'examples/kitchen-sink')
+const exampleRoot = path.join(workspaceRoot, 'examples/demo')
 const apiRenderer = path.join(workspaceRoot, 'packages/ruvyxa/runtime/api-renderer.mjs')
 const workerPool = path.join(workspaceRoot, 'packages/ruvyxa/runtime/worker-pool.mjs')
 

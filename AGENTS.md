@@ -16,7 +16,7 @@ work in the repository.
   and route manifests.
 - `packages/` contains npm packages: `ruvyxa`, `create-ruvyxa`, `@ruvyxa/core`, `@ruvyxa/react`,
   adapters, and platform CLI packages.
-- `examples/kitchen-sink/` is the broad integration fixture.
+- `examples/demo/` is the broad integration fixture.
 - `templates/minimal/` is copied into new projects by `create-ruvyxa`.
 - `docs/` is user-facing documentation.
 
@@ -53,11 +53,11 @@ pnpm release:validate
 pnpm pack:smoke
 ```
 
-For kitchen-sink behavior changes, also run:
+For demo behavior changes, also run:
 
 ```bash
-cargo run -p ruvyxa_cli -- check --root examples/kitchen-sink
-cargo run -p ruvyxa_cli -- test:parity --root examples/kitchen-sink
+cargo run -p ruvyxa_cli -- check --root examples/demo
+cargo run -p ruvyxa_cli -- test:parity --root examples/demo
 ```
 
 ## Change Guidance

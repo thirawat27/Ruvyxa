@@ -51,7 +51,7 @@ cargo test --workspace
 pnpm -r build
 pnpm -r check
 pnpm -r test
-cargo run -p ruvyxa_cli -- check --root examples/kitchen-sink
+cargo run -p ruvyxa_cli -- check --root examples/demo
 ```
 
 Or use the full CI workflow (`.github/workflows/`) which runs all quality gates, builds native CLI

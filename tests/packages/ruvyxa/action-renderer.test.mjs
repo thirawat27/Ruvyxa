@@ -8,7 +8,7 @@ import { promisify } from 'node:util'
 
 const execFileAsync = promisify(execFile)
 const workspaceRoot = path.resolve(fileURLToPath(new URL('../../..', import.meta.url)))
-const exampleRoot = path.join(workspaceRoot, 'examples/kitchen-sink')
+const exampleRoot = path.join(workspaceRoot, 'examples/demo')
 const renderer = path.join(workspaceRoot, 'packages/ruvyxa/runtime/action-renderer.mjs')
 
 describe('action renderer', () => {

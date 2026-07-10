@@ -87,7 +87,7 @@ my-app/
 ```
 
 For a fuller integration app with dynamic routes, API routes, server actions, and all rendering
-strategies, see [examples/kitchen-sink](examples/kitchen-sink).
+strategies, see [examples/demo](examples/demo).
 
 ---
 
@@ -95,7 +95,7 @@ strategies, see [examples/kitchen-sink](examples/kitchen-sink).
 
 ```bash
 pnpm install
-cargo run -p ruvyxa_cli -- dev --root examples/kitchen-sink
+cargo run -p ruvyxa_cli -- dev --root examples/demo
 ```
 
 Build and test all packages:

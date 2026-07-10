@@ -12,15 +12,15 @@ pnpm -r build
 pnpm -r check
 pnpm -r test
 pnpm pack:smoke
-cargo run -p ruvyxa_cli -- check --root examples/kitchen-sink
+cargo run -p ruvyxa_cli -- check --root examples/demo
 ```
 
 Commands for working with the example app:
 
 ```bash
-cargo run -p ruvyxa_cli -- dev --root examples/kitchen-sink
-cargo run -p ruvyxa_cli -- build --root examples/kitchen-sink
-cargo run -p ruvyxa_cli -- start --root examples/kitchen-sink --port 3000
+cargo run -p ruvyxa_cli -- dev --root examples/demo
+cargo run -p ruvyxa_cli -- build --root examples/demo
+cargo run -p ruvyxa_cli -- start --root examples/demo --port 3000
 ```
 
 ## Project Structure
@@ -32,6 +32,6 @@ tree-shaking, minification, and source maps natively.
 - **crates/** — Rust workspace: CLI, bundler, dev server, graph, middleware, diagnostics
 - **packages/** — npm packages: CLI wrapper, runtime, adapters, core primitives
 - **tests/** — Node package tests (organized by package)
-- **examples/kitchen-sink/** — full-featured demo app
+- **examples/demo/** — full-featured demo app
 - **templates/minimal/** — template for `create-ruvyxa`
 - **docs/** — user-facing documentation

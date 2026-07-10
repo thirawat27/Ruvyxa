@@ -8,7 +8,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import { compileBundle, toImportPath } from '../../../packages/ruvyxa/runtime/compiler.mjs'
 
 const workspaceRoot = path.resolve(fileURLToPath(new URL('../../..', import.meta.url)))
-const exampleRoot = path.join(workspaceRoot, 'examples/kitchen-sink')
+const exampleRoot = path.join(workspaceRoot, 'examples/demo')
 const configRenderer = path.join(workspaceRoot, 'packages/ruvyxa/runtime/config-renderer.mjs')
 const pluginRunner = path.join(workspaceRoot, 'packages/ruvyxa/runtime/plugin-runner.mjs')
 

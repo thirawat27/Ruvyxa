@@ -8,7 +8,7 @@
   manifest order
 - Reused the configured build parallelism for prerender work to reduce production build time
 - Kept client bundling parallelism capped to available work to avoid oversubscription
-- Reduced the kitchen-sink production build benchmark from about 2.3s to about 1.1s
+- Reduced the demo production build benchmark from about 2.3s to about 1.1s
 
 ### Styling
 
@@ -46,7 +46,7 @@
 - CSR minimal shell HTML generation for client-side rendered pages
 - Revalidation metadata tracking for ISR routes
 - Dev server and build output updated with prerendered routes manifest
-- Kitchen-sink examples demonstrating SSG, ISR, PPR, and CSR rendering strategies
+- Demo examples demonstrating SSG, ISR, PPR, and CSR rendering strategies
 - Codebase-wide formatting standardization with Prettier configuration
 - `render_api` refactored to use structured request object for improved maintainability
 - Documentation overhaul across all guides (rendering strategies, cache, security, middleware)
@@ -81,7 +81,7 @@
 
 ### Examples
 
-- **kitchen-sink**:
+- **demo**:
   - New SSG blog with `[slug]` dynamic routes (`app/ssg-blog/`)
   - New ISR page with revalidation (`app/isr-page/`)
   - New PPR page with partial pre-rendering (`app/ppr-page/`)
@@ -122,7 +122,7 @@
 ### Highlights
 
 - Full native bundler pipeline with AST parsing, plugin system, chunking, and tree-shaking
-- New `kitchen-sink` example app replacing `basic-app`
+- New `demo` example app replacing `basic-app`
 - Comprehensive end-to-end test script (`test-full-flow.ps1`)
 - Project structure and engineering backlog documentation
 - README logo switched to local asset for reliability
@@ -160,7 +160,7 @@
 
 ### Examples
 
-- Replaced `basic-app` with comprehensive `kitchen-sink` example
+- Replaced `basic-app` with comprehensive `demo` example
   - Multiple route patterns (static, dynamic `[slug]`, catchall `[...slug]`)
   - Todos with server actions and in-memory DB
   - Blog routes, environment variables page

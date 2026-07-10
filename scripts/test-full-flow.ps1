@@ -2,14 +2,14 @@
 .SYNOPSIS
     Full integration test: all CLI commands + error scenarios + error overlay
 .DESCRIPTION
-    Tests every CLI command and error scenario using examples/kitchen-sink.
+    Tests every CLI command and error scenario using examples/demo.
     Run from the monorepo root after `cargo build -p ruvyxa_cli`.
 #>
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path -Parent $PSScriptRoot
 $Ruvyxa = "$RepoRoot\target\debug\ruvyxa.exe"
-$App = "$RepoRoot\examples\kitchen-sink"
+$App = "$RepoRoot\examples\demo"
 
 # Kill leftover ruvyxa processes from previous runs
 Get-Process -Name "ruvyxa" -ErrorAction SilentlyContinue | Stop-Process -Force
@@ -593,7 +593,7 @@ if (-not (Test-Path $OutDirAfterClean)) {
 } else {
     Write-Host "[WARN] E9: .ruvyxa still exists after clean" -ForegroundColor DarkYellow
 }
-# Rebuild to leave kitchen-sink in a working state
+# Rebuild to leave demo in a working state
 Invoke-Native -Arguments @("build", "--root", "$App")
 if ($script:LastNativeExitCode -ne 0) { throw "rebuild after clean FAILED" }
 Write-Host "[OK] E9: rebuild after clean succeeds" -ForegroundColor Green
