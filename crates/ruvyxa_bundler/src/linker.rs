@@ -230,10 +230,15 @@ pub fn link_parallel(modules: &[CompiledModule], input: &BundleInput) -> Result<
             segment.push_str(" = (function() {\n");
             segment.push_str("  \"use strict\";\n");
             segment.push_str("  var __exports = {};\n");
+            segment.push_str("  var module = { exports: __exports };\n");
+            segment.push_str("  var exports = module.exports;\n");
+            segment.push_str(
+                "  var process = globalThis.process || { env: { NODE_ENV: \"production\" } };\n",
+            );
 
             rewrite_module_into(&module.js, &module.deps, modules, &mut segment, true, true);
 
-            segment.push_str("  return __exports;\n");
+            segment.push_str("  return module.exports;\n");
             segment.push_str("})();\n\n");
 
             segment
@@ -449,12 +454,47 @@ fn rewrite_module_into(
         };
 
         let dynamic_rewritten = rewrite_dynamic_imports(content, deps);
-        write_rewritten_line(out, &dynamic_rewritten, indent);
+        let commonjs_rewritten = rewrite_commonjs_requires(&dynamic_rewritten, deps);
+        write_rewritten_line(out, &commonjs_rewritten, indent);
     }
 
     for assignment in pending_exports {
         write_rewritten_line(out, &assignment, indent);
     }
+}
+
+fn rewrite_commonjs_requires(line: &str, deps: &[PathBuf]) -> String {
+    let mut output = String::with_capacity(line.len());
+    let mut search_start = 0;
+
+    while let Some(relative_index) = line[search_start..].find("require(") {
+        let require_start = search_start + relative_index;
+        let value_start = require_start + "require(".len();
+        output.push_str(&line[search_start..require_start]);
+
+        let Some((specifier, consumed)) = quoted_value_with_len(&line[value_start..]) else {
+            output.push_str("require(");
+            search_start = value_start;
+            continue;
+        };
+
+        let after_value = value_start + consumed;
+        if let Some(dep_path) = find_dep_for_specifier(&specifier, deps) {
+            output.push_str(&module_id(dep_path));
+            search_start = if line[after_value..].starts_with(')') {
+                after_value + 1
+            } else {
+                after_value
+            };
+        } else {
+            output.push_str("require(");
+            output.push_str(&line[value_start..after_value]);
+            search_start = after_value;
+        }
+    }
+
+    output.push_str(&line[search_start..]);
+    output
 }
 
 fn rewrite_dynamic_imports(line: &str, deps: &[PathBuf]) -> String {
@@ -873,6 +913,21 @@ pub(crate) fn find_dep_for_specifier<'a>(
             }
         }
 
+        if let Some(node_modules) = dep_str.find("/node_modules/") {
+            let package_path = &dep_str[node_modules + "/node_modules/".len()..];
+            let package_path = package_path
+                .strip_suffix(".tsx")
+                .or_else(|| package_path.strip_suffix(".ts"))
+                .or_else(|| package_path.strip_suffix(".jsx"))
+                .or_else(|| package_path.strip_suffix(".js"))
+                .or_else(|| package_path.strip_suffix(".mjs"))
+                .or_else(|| package_path.strip_suffix(".cjs"))
+                .unwrap_or(package_path);
+            return package_path == normalized
+                || package_path == format!("{normalized}/index")
+                || package_path == format!("{normalized}/client");
+        }
+
         false
     })
 }
@@ -1135,6 +1190,19 @@ mod tests {
 
         assert!(output.starts_with("import React from \"react\";"));
         assert!(!output.contains("  import React from \"react\";"));
+    }
+
+    #[test]
+    fn rewrites_commonjs_requires_for_bundled_packages() {
+        let dependency = PathBuf::from("/app/node_modules/example/index.js");
+        let linked = rewrite_commonjs_requires(
+            "module.exports = require(\"example\");",
+            &[dependency.clone()],
+        );
+        assert_eq!(
+            linked,
+            format!("module.exports = {};", module_id(&dependency))
+        );
     }
 
     #[test]

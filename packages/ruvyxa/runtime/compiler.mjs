@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto'
 import { existsSync, statSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
 import path from 'node:path'
 import { stripTypeScriptTypes } from 'node:module'
 
@@ -211,9 +212,10 @@ async function visitModule(context) {
     const resolvedAlias = aliases[specifier]
     const resolved = resolvedAlias
       ? resolveFile(path.resolve(resolvedAlias))
-      : resolveLocalSpecifier(baseDir, specifier)
+      : (resolveLocalSpecifier(baseDir, specifier) ??
+        (platform === 'browser' ? resolveBrowserPackage(baseDir, specifier) : null))
 
-    if (resolved && (resolvedAlias || isProjectLocal(root, resolved))) {
+    if (resolved && (resolvedAlias || isProjectLocal(root, resolved) || platform === 'browser')) {
       const depSource = await readSourceFile(resolved)
       const dep = await visitModule({
         key: resolved,
@@ -278,6 +280,9 @@ function linkModules(modules, externals, { minify, outfile, sourceMap }) {
 
     push(`const ${module.id} = (() => {`)
     push(`  const __exports = {};`)
+    push(`  const module = { exports: __exports };`)
+    push(`  const exports = module.exports;`)
+    push(`  const process = globalThis.process ?? { env: { NODE_ENV: 'production' } };`)
     const codeLines = rewritten.code.split('\n')
     for (let index = 0; index < codeLines.length; index++) {
       const line = codeLines[index]
@@ -287,7 +292,7 @@ function linkModules(modules, externals, { minify, outfile, sourceMap }) {
         sourceIndex !== null && originalLine !== null ? { sourceIndex, originalLine } : null,
       )
     }
-    push(`  return __exports;`)
+    push(`  return module.exports;`)
     push(`})();`)
     push('')
   }
@@ -304,9 +309,10 @@ function linkModules(modules, externals, { minify, outfile, sourceMap }) {
   if (sourceMap && !minify) push(`//# sourceMappingURL=${path.basename(outfile)}.map`)
 
   const code = out.join('\n')
+  const canMinify = minify && !modules.some((module) => module.filePath?.includes('node_modules'))
   return {
-    code: minify ? code.replace(/\s+/g, ' ') : code,
-    map: sourceMap && !minify ? buildSourceMap(outfile, lineMappings, mapSources) : null,
+    code: canMinify ? code.replace(/\s+/g, ' ') : code,
+    map: sourceMap && !canMinify ? buildSourceMap(outfile, lineMappings, mapSources) : null,
   }
 }
 
@@ -451,7 +457,7 @@ function rewriteModule(module) {
       continue
     }
 
-    lines.push(rewriteDynamicImports(rawLine, module))
+    lines.push(rewriteCommonJsRequires(rewriteDynamicImports(rawLine, module), module))
     lineMap.push(sourceLine)
   }
 
@@ -593,6 +599,13 @@ function rewriteDynamicImports(line, module) {
   })
 }
 
+function rewriteCommonJsRequires(line, module) {
+  return line.replace(/\brequire\s*\(\s*["']([^"']+)["']\s*\)/g, (match, specifier, offset) => {
+    const source = module.deps.get(specifier)
+    return source && !source.external ? source.id : match
+  })
+}
+
 function parseNamedBindings(clause) {
   return clause
     .trim()
@@ -635,6 +648,15 @@ function resolveLocalSpecifier(baseDir, specifier) {
   if (!specifier.startsWith('.') && !path.isAbsolute(specifier)) return null
   const base = path.isAbsolute(specifier) ? specifier : path.resolve(baseDir, specifier)
   return resolveFile(base)
+}
+
+function resolveBrowserPackage(baseDir, specifier) {
+  if (specifier.startsWith('node:')) return null
+  try {
+    return createRequire(path.join(baseDir, '__ruvyxa-resolve__.cjs')).resolve(specifier)
+  } catch {
+    return null
+  }
 }
 
 function resolveFile(base) {

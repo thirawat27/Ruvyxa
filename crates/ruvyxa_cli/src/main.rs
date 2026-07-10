@@ -722,6 +722,8 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
 
 const BUILD_OUTPUT_DIRS: [&str; 4] = ["server", "client", "assets", "prerender"];
 const BUILD_OUTPUT_FILES: [&str; 2] = ["manifest.json", "build.json"];
+const MAX_PRERENDER_PARALLELISM: usize = 2;
+const WINDOWS_RENAME_RETRY_COUNT: usize = 5;
 
 /// A route that was pre-rendered at build time.
 #[derive(Debug)]
@@ -849,7 +851,7 @@ fn prerender_static_routes(
         }
     }
 
-    let parallelism = build_parallelism(configured_parallelism, jobs.len());
+    let parallelism = prerender_parallelism(configured_parallelism, jobs.len());
     let chunk_size = jobs.len().max(1).div_ceil(parallelism);
     let mut prerendered = Vec::with_capacity(jobs.len());
 
@@ -1640,6 +1642,17 @@ fn build_parallelism(configured: Option<usize>, work_items: usize) -> usize {
     configured.unwrap_or(available).clamp(1, work_items.max(1))
 }
 
+fn prerender_parallelism(configured: Option<usize>, work_items: usize) -> usize {
+    let default = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1)
+        .min(MAX_PRERENDER_PARALLELISM);
+    configured
+        .unwrap_or(default)
+        .min(MAX_PRERENDER_PARALLELISM)
+        .clamp(1, work_items.max(1))
+}
+
 fn build_plugin_manifest(plugins: &[BuildPluginConfig]) -> serde_json::Value {
     serde_json::Value::Array(
         plugins
@@ -1985,7 +1998,7 @@ fn move_named_build_outputs(from: &Path, to: &Path) -> anyhow::Result<Vec<String
         if destination.exists() {
             remove_path(&destination)?;
         }
-        if let Err(error) = fs::rename(&source, &destination) {
+        if let Err(error) = rename_with_windows_retry(&source, &destination) {
             let rollback_result = restore_named_build_outputs(to, from, &moved);
             let mut move_error: anyhow::Error = error.into();
             move_error = move_error.context(format!(
@@ -2020,7 +2033,7 @@ fn restore_named_build_outputs(
         if destination.exists() {
             remove_path(&destination)?;
         }
-        fs::rename(&source, &destination).with_context(|| {
+        rename_with_windows_retry(&source, &destination).with_context(|| {
             format!(
                 "failed to restore {} to {}",
                 source.display(),
@@ -2030,6 +2043,27 @@ fn restore_named_build_outputs(
     }
 
     Ok(())
+}
+
+fn rename_with_windows_retry(source: &Path, destination: &Path) -> std::io::Result<()> {
+    let mut delay = Duration::from_millis(25);
+
+    for attempt in 0..WINDOWS_RENAME_RETRY_COUNT {
+        match fs::rename(source, destination) {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if cfg!(windows)
+                    && error.kind() == std::io::ErrorKind::PermissionDenied
+                    && attempt + 1 < WINDOWS_RENAME_RETRY_COUNT =>
+            {
+                std::thread::sleep(delay);
+                delay = delay.saturating_mul(2);
+            }
+            Err(error) => return Err(error),
+        }
+    }
+
+    unreachable!("the retry loop returns on its final attempt")
 }
 
 fn remove_named_build_outputs(out_dir: &Path) -> anyhow::Result<()> {
@@ -3131,6 +3165,14 @@ mod tests {
         assert_eq!(build_parallelism(Some(3), 1), 1);
         assert_eq!(build_parallelism(Some(3), 5), 3);
         assert_eq!(build_parallelism(Some(usize::MAX), 2), 2);
+    }
+
+    #[test]
+    fn caps_default_prerender_parallelism_to_limit_and_available_work() {
+        assert_eq!(prerender_parallelism(None, 1), 1);
+        assert!(prerender_parallelism(None, 10) <= MAX_PRERENDER_PARALLELISM);
+        assert_eq!(prerender_parallelism(Some(3), 2), 2);
+        assert_eq!(prerender_parallelism(Some(3), 10), 2);
     }
 
     #[test]

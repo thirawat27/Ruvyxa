@@ -13,6 +13,7 @@ use std::path::Path;
 
 use ruvyxa_diagnostics::Diagnostic;
 
+use crate::ast;
 use crate::compiler::CompiledModule;
 use crate::{BundleInput, BundleTarget, Result};
 
@@ -53,7 +54,7 @@ fn check_client_module(
     let source = &module.js;
 
     // RUV1007 – "server-only" import
-    if source.contains("\"server-only\"") || source.contains("'server-only'") {
+    if imports_marker(source, "server-only") {
         return Err(Diagnostic::new(
             "RUV1007",
             "Server-only module imported into client bundle",
@@ -112,7 +113,7 @@ fn check_ssr_module(module: &CompiledModule, out: &mut Vec<Diagnostic>) -> Resul
     let source = &module.js;
 
     // client-only import in SSR graph
-    if source.contains("\"client-only\"") || source.contains("'client-only'") {
+    if imports_marker(source, "client-only") {
         out.push(
             Diagnostic::new("RUV1009", "Client-only module imported into SSR graph")
                 .explain(
@@ -124,6 +125,13 @@ fn check_ssr_module(module: &CompiledModule, out: &mut Vec<Diagnostic>) -> Resul
     }
 
     Ok(())
+}
+
+fn imports_marker(source: &str, marker: &str) -> bool {
+    ast::parse_module(source)
+        .imports
+        .iter()
+        .any(|edge| edge.specifier == marker)
 }
 
 fn is_inside_server_dir(path: &Path, project_root: &Path) -> bool {
@@ -171,5 +179,14 @@ mod tests {
     fn allows_public_env_and_node_env() {
         let source = "if (process.env.NODE_ENV === 'production') {}";
         assert!(find_private_env_reads(source).is_empty());
+    }
+
+    #[test]
+    fn only_treats_actual_imports_as_boundary_markers() {
+        assert!(!imports_marker(
+            "export const documentation = 'Use server-only modules for secrets.';",
+            "server-only"
+        ));
+        assert!(imports_marker("import 'server-only';", "server-only"));
     }
 }

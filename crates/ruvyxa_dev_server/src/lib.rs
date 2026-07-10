@@ -584,12 +584,7 @@ fn start_watcher(
                     .iter()
                     .map(|path| path.display().to_string())
                     .collect();
-                let pool = worker_pool.clone();
-                tokio::task::block_in_place(|| {
-                    tokio::runtime::Handle::current().block_on(async {
-                        pool.invalidate(path_strings.clone()).await;
-                    });
-                });
+                worker_pool.invalidate_from_watcher(path_strings.clone());
 
                 // Send targeted HMR payload with affected routes.
                 let payload = serde_json::json!({

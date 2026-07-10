@@ -18,6 +18,7 @@ describe('client renderer boundary diagnostics', () => {
       assert.equal(result.ok, true)
       assert.match(result.script, /hydrateRoot/)
       assert.match(result.script, /__RUVYXA_HYDRATED/)
+      assert.doesNotMatch(result.script, /from ["']react(?:-dom\/client)?["']/)
     })
   })
 

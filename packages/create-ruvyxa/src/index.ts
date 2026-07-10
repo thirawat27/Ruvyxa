@@ -13,6 +13,7 @@ const REQUIRED_TEMPLATE_FILES = [
   'app/page.tsx',
   'app/layout.tsx',
   'app/globals.css',
+  'app/css.d.ts',
   'package.json',
   'ruvyxa.config.ts',
 ] as const

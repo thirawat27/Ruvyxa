@@ -144,11 +144,10 @@ fn import_edge(source: &str, after_keyword: usize) -> Option<ImportEdge> {
             kind: ImportKind::SideEffect,
         });
     }
-    let declaration_start = if word_at(source, index) == Some("type") {
-        index + 4
-    } else {
-        index
-    };
+    if word_at(source, index) == Some("type") {
+        return None;
+    }
+    let declaration_start = index;
     find_from_specifier(source, declaration_start).map(|specifier| ImportEdge {
         specifier,
         kind: ImportKind::Static,
@@ -385,5 +384,17 @@ export default function Page(props: Props) { return <main /> }
         assert!(ast.has_typescript);
         assert!(ast.has_jsx);
         assert!(ast.exports.contains(&"Page".to_string()));
+    }
+
+    #[test]
+    fn ignores_type_only_imports() {
+        let ast = parse_module(
+            r#"
+import type { PageProps } from "ruvyxa/config";
+import { createElement } from "react";
+"#,
+        );
+
+        assert_eq!(ast.import_specifiers(), vec!["react"]);
     }
 }

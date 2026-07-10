@@ -723,7 +723,6 @@ window.__RUVYXA_HYDRATED = true
       outfile,
       platform: 'browser',
       minify: process.env.RUVYXA_CLIENT_MINIFY === '1',
-      external: ['react', 'react-dom/client'],
       aliases: runtimeAliases(runtimeDir),
     })
 

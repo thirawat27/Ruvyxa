@@ -119,7 +119,19 @@ fn bundle_with_parts(
     } else {
         linked.clone()
     };
-    let final_code = if input.options.minify {
+    // The built-in text minifier is safe for Ruvyxa's generated modules but
+    // cannot safely transform arbitrary third-party JavaScript (notably regex
+    // literals in React's CommonJS distribution). Keep client dependencies
+    // executable until the minifier becomes syntax-aware.
+    let contains_third_party_module = compiled.iter().any(|module| {
+        module
+            .path
+            .components()
+            .any(|component| component.as_os_str() == "node_modules")
+    });
+    let minify_output = input.options.minify
+        && !(input.target == BundleTarget::Client && contains_third_party_module);
+    let final_code = if minify_output {
         minifier::minify_parallel_with_options(&optimized_linked, input.target, false)?
     } else {
         optimized_linked.clone()
@@ -214,7 +226,7 @@ fn bundle_with_parts(
         module_count: graph.len(),
         output_bytes,
         estimated_gz_bytes: (output_bytes as f64 * 0.35) as usize,
-        minified: input.options.minify,
+        minified: minify_output,
         tree_shaken: input.options.tree_shaking,
         duration_ms: started.elapsed().as_millis() as u64,
         tree_shaken_modules,
@@ -412,5 +424,56 @@ mod tests {
             "expected automatic JSX runtime in output, got: {}",
             &out.code[..out.code.len().min(500)]
         );
+    }
+
+    #[test]
+    fn client_bundle_includes_commonjs_react_dependencies() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let app = root.join("app");
+        let react = root.join("node_modules/react");
+        let react_dom = root.join("node_modules/react-dom");
+        fs::create_dir_all(&app).unwrap();
+        fs::create_dir_all(&react).unwrap();
+        fs::create_dir_all(&react_dom).unwrap();
+
+        fs::write(
+            react.join("package.json"),
+            r#"{"exports":{".":"./index.js"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            react.join("index.js"),
+            "const stack = /\\n( *(at)?)/; module.exports = { createElement() {}, useState() {}, stack };",
+        )
+        .unwrap();
+        fs::write(
+            react_dom.join("package.json"),
+            r#"{"exports":{"./client":"./client.js"}}"#,
+        )
+        .unwrap();
+        fs::write(
+            react_dom.join("client.js"),
+            "module.exports = { hydrateRoot() {} };",
+        )
+        .unwrap();
+
+        let page = app.join("page.tsx");
+        fs::write(
+            &page,
+            "import { useState } from 'react'; export default function Page() { useState(); return <main>Ready</main>; }",
+        )
+        .unwrap();
+
+        let mut input = client_input(&root, &app, page, vec![], "/");
+        input.options.minify = true;
+        input.options.source_map = false;
+        input.options.emit_chunk_manifest = false;
+        let output = bundle(input).unwrap();
+
+        assert!(!output.code.contains("from \"react\""));
+        assert!(!output.code.contains("from \"react-dom/client\""));
+        assert!(output.code.contains("const stack = /\\n( *(at)?)/;"));
+        assert!(!output.stats.minified);
     }
 }

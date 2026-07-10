@@ -599,9 +599,10 @@ pub fn resolve_graph_with_plugins(
         let resolved_frontier: Vec<Result<(PathBuf, ResolvedModule)>> = frontier
             .par_iter()
             .map(|dep_path| {
-                let is_external = dep_path
-                    .components()
-                    .any(|c| c.as_os_str() == "node_modules");
+                let is_external = target == BundleTarget::Ssr
+                    && dep_path
+                        .components()
+                        .any(|c| c.as_os_str() == "node_modules");
 
                 let source = cache.read_source(dep_path)?;
 
@@ -726,11 +727,9 @@ fn collect_deps_cached(
 
         match resolved {
             Some(abs_path) => {
-                if is_project_local(&abs_path, project_root) {
+                if is_project_local(&abs_path, project_root) || target == BundleTarget::Client {
                     deps.push(abs_path);
                 }
-                // External paths (node_modules) are intentionally not added to deps —
-                // they're not bundled, just left as ESM imports.
             }
             None => {
                 if !specifier.starts_with('.') {
@@ -845,7 +844,7 @@ mod tests {
 
         let specs = extract_specifiers(source);
         assert!(specs.contains(&"./foo".to_string()));
-        assert!(specs.contains(&"./bar".to_string()));
+        assert!(!specs.contains(&"./bar".to_string()));
         assert!(specs.contains(&"./styles.css".to_string()));
         assert!(specs.contains(&"../baz".to_string()));
         assert!(specs.contains(&"react".to_string()));

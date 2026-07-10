@@ -398,6 +398,23 @@ impl NodeWorkerPool {
         while set.join_next().await.is_some() {}
     }
 
+    /// Queue cache invalidation from a synchronous file-watcher callback.
+    ///
+    /// `notify` invokes callbacks on its own OS thread, where no Tokio runtime
+    /// is installed. `try_send` keeps the callback runtime-independent and
+    /// avoids panicking while the async writer tasks flush the messages.
+    pub fn invalidate_from_watcher(&self, paths: Vec<String>) {
+        for worker in &self.workers {
+            let request = WorkerRequest::Invalidate {
+                id: next_request_id(),
+                paths: paths.clone(),
+            };
+            if let Ok(line) = serde_json::to_string(&request) {
+                let _ = worker.stdin_tx.try_send(format!("{line}\n"));
+            }
+        }
+    }
+
     /// Restart a dead worker (for self-healing).
     #[allow(dead_code)]
     pub async fn restart_worker(&mut self, index: usize) -> Result<()> {
