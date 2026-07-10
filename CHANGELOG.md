@@ -2,6 +2,14 @@
 
 ## v1.0.8 (2026-07-10)
 
+### Performance and Build
+
+- Parallelized build-time prerendering for CSR, SSG, ISR, and PPR routes while preserving
+  manifest order
+- Reused the configured build parallelism for prerender work to reduce production build time
+- Kept client bundling parallelism capped to available work to avoid oversubscription
+- Reduced the kitchen-sink production build benchmark from about 2.3s to about 1.1s
+
 ### Styling
 
 - Collected CSS through the application dependency graph, including styles imported from outside
