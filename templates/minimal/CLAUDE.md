@@ -2,11 +2,11 @@
 
 Read `AGENTS.md` first and follow it as the source of truth.
 
-This is a Ruvyxa app with file-based routing under `app/`, React 19, TypeScript, and Node.js 22
-runtime expectations.
+This is a Ruvyxa app with file-based routing under `app/`, React 19, TypeScript, and Node.js 22 or
+newer.
 
-_Note: This project supports multiple package managers. You can use `npm`, `pnpm`, `yarn`, or `bun`
-interchangeably._
+This project supports multiple package managers. The examples below use `npm`; use the equivalent
+command for `pnpm`, `yarn`, or `bun` when appropriate.
 
 Available scripts in `package.json`:
 
@@ -21,4 +21,10 @@ behavior, run:
 
 ```bash
 npm run check
+```
+
+For changes that affect production output, styling, or config, also run:
+
+```bash
+npm run build
 ```

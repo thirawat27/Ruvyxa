@@ -1,16 +1,30 @@
 # Claude Instructions
 
-Read `AGENTS.md` first. This is the Ruvyxa kitchen-sink example app demonstrating all framework
-features.
+Read `AGENTS.md` first and follow it as the source of truth.
 
-Available scripts:
+This is a Ruvyxa app with file-based routing under `app/`, React 19, TypeScript, and Node.js 22 or
+newer.
 
-- `pnpm dev` — `cargo run -p ruvyxa_cli -- dev --root .`
-- `pnpm build` — `cargo run -p ruvyxa_cli -- build --root .`
-- `pnpm start` — `cargo run -p ruvyxa_cli -- start --root .`
-- `pnpm check` — `cargo run -p ruvyxa_cli -- check --root .`
-- `pnpm analyze` — `cargo run -p ruvyxa_cli -- analyze --root .`
+This project supports multiple package managers. The examples below use `npm`; use the equivalent
+command for `pnpm`, `yarn`, or `bun` when appropriate.
 
-The app demonstrates: static pages, dynamic routes (`[slug]`), catch-all (`[...slug]`), route
-groups, API routes (`GET`, `POST`), server actions (`action.ts`), server-only modules (`server.ts`),
-public env vars, layouts, global CSS, and all rendering strategies (SSR, SSG, ISR, PPR, CSR).
+Available scripts in `package.json`:
+
+- `npm run dev` — development server with HMR
+- `npm run build` — production build to `.ruvyxa/`
+- `npm run start` — production server
+- `npm run check` — app-level readiness checks (typecheck + parity + smoke)
+- `npm run typecheck` — TypeScript type check only (`tsc --noEmit`)
+
+Before handing off changes that affect routes, imports, config, environment usage, or production
+behavior, run:
+
+```bash
+npm run check
+```
+
+For changes that affect production output, styling, or config, also run:
+
+```bash
+npm run build
+```

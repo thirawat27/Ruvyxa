@@ -1,5 +1,7 @@
 # Claude Instructions
 
+Read `AGENTS.md` first. It is the source of truth for working in this Ruvyxa monorepo.
+
 Important local checks (run these before submitting changes):
 
 ```bash
