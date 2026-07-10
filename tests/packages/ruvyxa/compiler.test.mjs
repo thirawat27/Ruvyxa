@@ -248,6 +248,40 @@ describe('runtime compiler', () => {
     })
   })
 
+  it('preserves runtime CSS-in-JS style objects and style elements', async () => {
+    await withFixture(async ({ root, outDir }) => {
+      const pageFile = path.join(root, 'page.tsx')
+      const outfile = path.join(outDir, 'css-in-js.mjs')
+      await writeFile(
+        pageFile,
+        `
+          const accent = "rebeccapurple"
+          export default function Page() {
+            return <main style={{ color: accent }}><style>{\`.card { color: \${accent}; }\`}</style>ok</main>
+          }
+        `,
+      )
+
+      await compileBundle({
+        projectRoot: exampleRoot,
+        entrySource: `
+          import React from "react"
+          import Page from ${JSON.stringify(toImportPath(pageFile))}
+          export default Page
+        `,
+        sourcefile: 'ruvyxa:css-in-js-entry.tsx',
+        outfile,
+        platform: 'browser',
+        external: ['react'],
+      })
+
+      const output = await readFile(outfile, 'utf8')
+      assert.match(output, /"style": \{ color: accent \}/)
+      assert.match(output, /React\.createElement\("style"/)
+      assert.match(output, /\.card \{ color:/)
+    })
+  })
+
   it('loads config plugin metadata and executes transform hooks', async () => {
     await withFixture(async ({ root }) => {
       const pageFile = path.join(root, 'page.tsx')
@@ -258,6 +292,7 @@ describe('runtime compiler', () => {
           import { defineConfig } from "ruvyxa/config"
 
           export default defineConfig({
+            css: { entries: ["styles/global.css"] },
             plugins: [
               {
                 name: "replace-label",
@@ -273,6 +308,7 @@ describe('runtime compiler', () => {
 
       const config = await runJson(configRenderer, [root], {})
       assert.equal(config.ok, true)
+      assert.deepEqual(config.config.css.entries, ['styles/global.css'])
       assert.equal(config.config.plugins[0].name, 'replace-label')
       assert.equal(config.config.plugins[0].transform, true)
 

@@ -31,7 +31,7 @@ internal module refactors over moving root folders.
 | `ruvyxa_graph`       | File-system route discovery, rendering strategy detection, route validation,                  |
 |                      | manifest writing.                                                                             |
 | `ruvyxa_dev_server`  | Axum HTTP server, WebSocket HMR, radix-tree router, render cache (FIFO with TTL),             |
-|                      | Node worker pool, CSS collection, action/API/client endpoints.                                |
+|                      | Node worker pool, dependency-driven style collection, action/API/client endpoints.            |
 | `ruvyxa_diagnostics` | Structured `Diagnostic` struct, `RuvyxaError` enum with `Diagnostic`/`Io`/`Message` variants. |
 | `ruvyxa_middleware`  | Built-in Tower middleware (CORS, timing, logging, rate limit, custom headers).                |
 |                      | Wasm plugin runtime (optional, requires `wasm-plugins` feature).                              |

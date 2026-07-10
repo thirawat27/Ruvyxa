@@ -74,12 +74,15 @@ Affected routes:
 | `RUV1303` | Client route not found    | Route has no matching client page             |
 | `RUV1304` | Non-page client bundle    | Client bundle requested for API-only route    |
 
-### Tailwind CSS
+### Styles and Tailwind CSS
 
-| Code      | Title                       | Cause                                          |
-| --------- | --------------------------- | ---------------------------------------------- |
-| `RUV1400` | Tailwind compilation failed | Tailwind CLI returned an error                 |
-| `RUV1401` | Tailwind CLI not found      | `@tailwindcss/cli` missing from `node_modules` |
+| Code      | Title                        | Cause                                               |
+| --------- | ---------------------------- | --------------------------------------------------- |
+| `RUV1400` | Tailwind compilation failed  | Tailwind CLI returned an error                      |
+| `RUV1401` | Tailwind CLI not found       | `@tailwindcss/cli` missing from `node_modules`      |
+| `RUV1402` | CSS preprocessor unavailable | Sass/Less import has no configured transform plugin |
+| `RUV1403` | Stylesheet could not resolve | Imported or configured CSS path does not exist      |
+| `RUV1404` | CSS entry outside project    | `css.entries` escapes the project root              |
 
 ### Server Actions
 

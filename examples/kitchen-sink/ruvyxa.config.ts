@@ -4,6 +4,10 @@ const config: RuvyxaConfig = {
   appDir: 'app',
   outDir: '.ruvyxa',
 
+  css: {
+    entries: ['styles/config-entry.css'],
+  },
+
   server: {
     host: 'localhost',
     port: 3000,

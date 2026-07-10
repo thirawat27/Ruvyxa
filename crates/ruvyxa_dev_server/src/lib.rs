@@ -26,7 +26,6 @@ use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tracing::{info, warn};
-use walkdir::WalkDir;
 
 mod worker_pool;
 pub use worker_pool::NodeWorkerPool;
@@ -40,6 +39,9 @@ pub use render_cache::RenderCache;
 
 mod hmr_tracker;
 pub use hmr_tracker::{HmrEventType, HmrTracker, HmrUpdate};
+
+mod style;
+pub use style::{collect_css, collect_styles, StyleCollection};
 
 const MAX_ACTION_BODY_BYTES: usize = 64 * 1024;
 const MAX_API_BODY_BYTES: usize = 1024 * 1024;
@@ -60,6 +62,8 @@ pub struct ServerConfig {
     pub watch: bool,
     pub cache_route_manifest: bool,
     pub cache_css: bool,
+    /// Additional project-relative global stylesheet files or directories.
+    pub style_entries: Vec<PathBuf>,
     /// Precompile route modules and load their dependencies in dev workers.
     pub prebundle_dependencies: bool,
     pub middleware: MiddlewareConfig,
@@ -79,6 +83,7 @@ impl ServerConfig {
             watch: true,
             cache_route_manifest: true,
             cache_css: true,
+            style_entries: Vec::new(),
             prebundle_dependencies: true,
             middleware: MiddlewareConfig::default(),
         }
@@ -97,6 +102,7 @@ impl ServerConfig {
             watch: false,
             cache_route_manifest: true,
             cache_css: true,
+            style_entries: Vec::new(),
             prebundle_dependencies: false,
             middleware: MiddlewareConfig::default(),
         }
@@ -168,7 +174,7 @@ impl RuntimeCache {
 
     async fn styles(&self, config: &ServerConfig) -> Result<String> {
         if !config.cache_css {
-            return collect_css(&config.root, &config.app_dir);
+            return Ok(collect_styles(&config.root, &config.app_dir, &config.style_entries)?.css);
         }
 
         {
@@ -178,7 +184,7 @@ impl RuntimeCache {
             }
         }
 
-        let styles = collect_css(&config.root, &config.app_dir)?;
+        let styles = collect_styles(&config.root, &config.app_dir, &config.style_entries)?.css;
         {
             let mut cached = self.styles.write().await;
             *cached = Some(styles.clone());
@@ -611,15 +617,31 @@ fn start_watcher(
 }
 
 fn watch_paths(config: &ServerConfig) -> Vec<PathBuf> {
-    [
+    let mut paths = vec![
         config.app_dir.clone(),
         config.root.join("components"),
         config.root.join("server"),
         config.public_dir.clone(),
-    ]
-    .into_iter()
-    .filter(|path| path.exists())
-    .collect()
+    ];
+    paths.extend(config.style_entries.iter().map(|entry| {
+        if entry.is_dir() {
+            entry.clone()
+        } else {
+            entry.parent().unwrap_or(entry).to_path_buf()
+        }
+    }));
+    if let Ok(collection) = collect_styles(&config.root, &config.app_dir, &config.style_entries) {
+        paths.extend(
+            collection
+                .files
+                .iter()
+                .filter_map(|file| file.parent().map(Path::to_path_buf)),
+        );
+    }
+    paths.retain(|path| path.exists());
+    paths.sort();
+    paths.dedup();
+    paths
 }
 
 fn print_field(name: &str, value: String) {
@@ -938,7 +960,7 @@ fn render_request_cached(
 
     match route_match.route.kind {
         RouteKind::Page => {
-            let styles = collect_css(&config.root, &config.app_dir)?;
+            let styles = collect_styles(&config.root, &config.app_dir, &config.style_entries)?.css;
             let html = render_page(
                 config,
                 route_match.route,
@@ -2431,89 +2453,6 @@ fn find_route<'a>(
     RadixRouter::compile(manifest).find(manifest, request_path)
 }
 
-/// Collect application styles for server-rendered and pre-rendered documents.
-pub fn collect_css(root: &Path, app_dir: &Path) -> Result<String> {
-    let mut css = String::new();
-
-    for entry in WalkDir::new(app_dir)
-        .into_iter()
-        .filter_map(std::result::Result::ok)
-    {
-        if !entry.file_type().is_file() {
-            continue;
-        }
-
-        if entry
-            .path()
-            .extension()
-            .is_some_and(|extension| extension == "css")
-        {
-            let source = fs::read_to_string(entry.path())?;
-            if source.contains("@import \"tailwindcss\"")
-                || source.contains("@import 'tailwindcss'")
-            {
-                css.push_str(&compile_tailwind_css(root, entry.path())?);
-            } else {
-                css.push_str(&source);
-            }
-            css.push('\n');
-        }
-    }
-
-    Ok(css)
-}
-
-fn compile_tailwind_css(root: &Path, input: &Path) -> Result<String> {
-    let tailwind = find_tailwind_cli(root).ok_or_else(|| {
-        Diagnostic::new("RUV1401", "Tailwind CSS CLI was not found")
-            .explain("A CSS file imports `tailwindcss`, but Ruvyxa could not find `@tailwindcss/cli` in node_modules.")
-            .at_file(input)
-            .suggest("Install Tailwind support with `pnpm add tailwindcss && pnpm add -D @tailwindcss/cli`.")
-    })?;
-    let input_arg = input.strip_prefix(root).unwrap_or(input);
-
-    let output = Command::new(tailwind)
-        .current_dir(root)
-        .arg("-i")
-        .arg(input_arg)
-        .arg("--minify")
-        .output()
-        .map_err(|source| RuvyxaError::Io {
-            message: "Failed to run Tailwind CSS CLI".to_string(),
-            source,
-        })?;
-
-    if output.status.success() {
-        return String::from_utf8(output.stdout)
-            .map_err(|error| RuvyxaError::Message(error.to_string()));
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    Err(Diagnostic::new("RUV1400", "Tailwind CSS compilation failed")
-        .explain(stderr.trim())
-        .at_file(input)
-        .suggest("Check Tailwind directives, content sources, and installed Tailwind package versions.")
-        .into())
-}
-
-fn find_tailwind_cli(root: &Path) -> Option<PathBuf> {
-    let binary = if cfg!(windows) {
-        "tailwindcss.cmd"
-    } else {
-        "tailwindcss"
-    };
-
-    [
-        root.join("node_modules/.bin").join(binary),
-        std::env::current_dir()
-            .ok()
-            .map(|cwd| cwd.join("node_modules/.bin").join(binary))
-            .unwrap_or_default(),
-    ]
-    .into_iter()
-    .find(|path| path.is_file())
-}
-
 fn compose_document(rendered: &str, head_content: &str, hmr: &str) -> String {
     if contains_ascii_case(rendered, "<html") {
         let with_head = if contains_ascii_case(rendered, "<head") {
@@ -3426,5 +3365,19 @@ mod tests {
             .as_deref()
             .unwrap()
             .contains("3000-3100"));
+    }
+
+    #[test]
+    fn watches_imported_styles_outside_app() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        let styles = temp.path().join("styles");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(&styles).unwrap();
+        std::fs::write(app.join("page.tsx"), "import '../styles/site.css'").unwrap();
+        std::fs::write(styles.join("site.css"), "body { color: green; }").unwrap();
+        let config = ServerConfig::dev(temp.path(), "localhost", 3000);
+
+        assert!(watch_paths(&config).contains(&styles.canonicalize().unwrap()));
     }
 }

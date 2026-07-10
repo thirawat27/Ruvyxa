@@ -1,6 +1,6 @@
 {
   "name": "ruvyxa-monorepo",
-  "version": "1.0.7",
+  "version": "1.0.8",
   "private": true,
   "type": "module",
   "description": "A production-minded web framework built around clarity, speed, control, and predictable application delivery.",

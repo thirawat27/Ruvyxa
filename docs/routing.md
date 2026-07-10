@@ -7,19 +7,19 @@ manual registration, no configuration file.
 
 ## Conventions
 
-| File         | Purpose                              |
-| ------------ | ------------------------------------ |
-| `page.tsx`   | A renderable page route              |
-| `page.jsx`   | A renderable page route (JSX)        |
-| `route.ts`   | An API route (no UI)                 |
-| `route.js`   | An API route (no UI, JS)             |
-| `layout.tsx` | A layout that wraps child pages      |
-| `server.ts`  | A server-side data loader            |
-| `server.js`  | A server-side data loader (JS)       |
-| `action.ts`  | Server action definitions            |
-| `action.js`  | Server action definitions (JS)       |
-| `client.tsx` | An explicit client hydration module  |
-| `global.css` | Global styles (imported from layout) |
+| File         | Purpose                                         |
+| ------------ | ----------------------------------------------- |
+| `page.tsx`   | A renderable page route                         |
+| `page.jsx`   | A renderable page route (JSX)                   |
+| `route.ts`   | An API route (no UI)                            |
+| `route.js`   | An API route (no UI, JS)                        |
+| `layout.tsx` | A layout that wraps child pages                 |
+| `server.ts`  | A server-side data loader                       |
+| `server.js`  | A server-side data loader (JS)                  |
+| `action.ts`  | Server action definitions                       |
+| `action.js`  | Server action definitions (JS)                  |
+| `client.tsx` | An explicit client hydration module             |
+| `*.css`      | Global styles imported from application modules |
 
 ---
 

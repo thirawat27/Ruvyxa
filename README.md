@@ -250,12 +250,19 @@ middleware. The `wasm-plugins` feature is optional (requires `wasmtime` / `wasmt
 
 ## Configuration
 
+CSS imports are dependency-driven, so application modules may import `.css` from anywhere inside the
+project. Use `css.entries` below for global files or directories that are not imported; React style
+objects and `<style>` elements continue to work for runtime CSS-in-JS.
+
 ```ts
 import { defineConfig } from 'ruvyxa/config'
 
 export default defineConfig({
   appDir: 'app',
   outDir: '.ruvyxa',
+  css: {
+    entries: ['styles/theme.css'],
+  },
   server: {
     host: 'localhost',
     port: 3000,

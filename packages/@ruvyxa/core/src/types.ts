@@ -7,8 +7,8 @@ export interface RuvyxaConfig {
     strict?: boolean
   }
   css?: {
-    modules?: boolean
-    nesting?: boolean
+    /** Additional project-relative global stylesheet files or directories. */
+    entries?: string[]
   }
   server?: {
     port?: number

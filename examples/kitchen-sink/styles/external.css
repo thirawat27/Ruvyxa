@@ -1,0 +1,4 @@
+/* Imported outside app/ to exercise the dependency-driven style pipeline. */
+:root {
+  --ruvyxa-external-style-ready: 1;
+}

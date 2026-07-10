@@ -137,6 +137,8 @@ struct ProjectConfig {
     #[serde(default)]
     server: ServerConfigOptions,
     #[serde(default)]
+    css: CssConfigOptions,
+    #[serde(default)]
     build: BuildConfigOptions,
     #[serde(default)]
     security: SecurityConfigOptions,
@@ -155,6 +157,13 @@ struct ProjectConfig {
 struct ServerConfigOptions {
     host: Option<String>,
     port: Option<u16>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct CssConfigOptions {
+    #[serde(default)]
+    entries: Vec<String>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -225,7 +234,19 @@ impl ProjectConfig {
     fn validate_paths(&self) -> anyhow::Result<()> {
         validate_project_relative_path("appDir", self.app_dir())?;
         validate_project_relative_path("outDir", self.out_dir())?;
+        for entry in &self.css.entries {
+            validate_project_relative_path("css.entries", entry)?;
+        }
         Ok(())
+    }
+
+    fn style_entries(&self, root: &Path) -> Vec<PathBuf> {
+        let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        self.css
+            .entries
+            .iter()
+            .map(|entry| root.join(entry))
+            .collect()
     }
 }
 
@@ -417,6 +438,7 @@ fn dev_server_config(args: &ServerArgs, config: &ProjectConfig) -> ServerConfig 
     server.prerender_dir = out_dir.join("prerender");
     server.cache_route_manifest = config.cache.route_manifest.unwrap_or(true);
     server.cache_css = config.cache.css.unwrap_or(true);
+    server.style_entries = config.style_entries(&args.root);
     server.prebundle_dependencies = config.build.prebundle_dependencies.unwrap_or(true);
     server.middleware = config.middleware.clone();
     server
@@ -438,6 +460,7 @@ fn production_server_config(args: &ServerArgs, config: &ProjectConfig) -> Server
     server.prerender_dir = out_dir.join("prerender");
     server.cache_route_manifest = config.cache.route_manifest.unwrap_or(true);
     server.cache_css = config.cache.css.unwrap_or(true);
+    server.style_entries = config.style_entries(&out_dir.join("server"));
     server.middleware = config.middleware.clone();
     server
 }
@@ -552,6 +575,8 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
     let manifest = discover_routes(DiscoverOptions::new(&app_dir))?;
     let validation = validate_app(&args.root, &manifest)?;
     fail_on_diagnostics(&validation.diagnostics)?;
+    let style_collection =
+        ruvyxa_dev_server::collect_styles(&args.root, &app_dir, &config.style_entries(&args.root))?;
 
     let staging_dir = create_build_staging_dir(&out_dir).with_context(|| {
         format!(
@@ -569,6 +594,7 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
         &server_dir.join("components"),
     )?;
     copy_optional_dir(&args.root.join("server"), &server_dir.join("server"))?;
+    copy_style_sources(&args.root, &server_dir, &style_collection.files)?;
     copy_public_assets(&args.root, &assets_dir)?;
     let asset_files = count_files(&assets_dir);
     fs::create_dir_all(&client_dir)?;
@@ -593,8 +619,14 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
 
     // ─── SSG / ISR / PPR pre-rendering at build time ──────────────────────────
     let prerender_dir = staging_dir.join("prerender");
-    let prerendered =
-        prerender_static_routes(&args.root, &app_dir, &manifest, &prerender_dir, &client_dir)?;
+    let prerendered = prerender_static_routes(
+        &args.root,
+        &app_dir,
+        &manifest,
+        &prerender_dir,
+        &client_dir,
+        &style_collection.css,
+    )?;
 
     let build_info = serde_json::json!({
         "framework": "Ruvyxa",
@@ -715,6 +747,7 @@ fn prerender_static_routes(
     manifest: &RouteManifest,
     prerender_dir: &Path,
     client_dir: &Path,
+    styles: &str,
 ) -> anyhow::Result<Vec<PrerenderedRoute>> {
     use ruvyxa_graph::RouteKind;
 
@@ -748,7 +781,6 @@ fn prerender_static_routes(
         return Ok(Vec::new());
     };
 
-    let styles = ruvyxa_dev_server::collect_css(root, app_dir)?;
     let mut prerendered = Vec::new();
 
     for route in routes_to_prerender {
@@ -759,7 +791,7 @@ fn prerender_static_routes(
                 if let Some(parent) = html_path.parent() {
                     fs::create_dir_all(parent)?;
                 }
-                let shell = csr_shell_html(&route.path, client_dir, &styles);
+                let shell = csr_shell_html(&route.path, client_dir, styles);
                 fs::write(&html_path, &shell)?;
                 prerendered.push(PrerenderedRoute {
                     path: route.path.clone(),
@@ -833,7 +865,7 @@ fn prerender_static_routes(
                         .get("html")
                         .and_then(|v| v.as_str())
                         .unwrap_or_default();
-                    let html = inject_prerender_styles(html, &styles);
+                    let html = inject_prerender_styles(html, styles);
                     let html =
                         inject_prerender_client_assets(&html, client_dir, &route.path, render_path);
 
@@ -2494,6 +2526,28 @@ fn copy_public_assets(root: &Path, assets_dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
+fn copy_style_sources(root: &Path, server_dir: &Path, files: &[PathBuf]) -> anyhow::Result<()> {
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    for file in files {
+        let file = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
+        let Ok(relative) = file.strip_prefix(&root) else {
+            continue;
+        };
+        if relative.starts_with("node_modules") {
+            continue;
+        }
+        let target = server_dir.join(relative);
+        if target == file {
+            continue;
+        }
+        if let Some(parent) = target.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(file, target)?;
+    }
+    Ok(())
+}
+
 fn copy_optional_dir(from: &Path, to: &Path) -> anyhow::Result<()> {
     if from.exists() {
         copy_dir_all(from, to)?;
@@ -3507,9 +3561,28 @@ export default {
     fn config_paths_must_stay_project_relative() {
         assert!(validate_project_relative_path("outDir", ".ruvyxa").is_ok());
         assert!(validate_project_relative_path("appDir", "src/app").is_ok());
+        assert!(validate_project_relative_path("css.entries", "styles/theme.css").is_ok());
         assert!(validate_project_relative_path("outDir", "../outside").is_err());
+        assert!(validate_project_relative_path("css.entries", "../outside.css").is_err());
         assert!(validate_project_relative_path("outDir", "/tmp/out").is_err());
         assert!(validate_project_relative_path("appDir", "").is_err());
+    }
+
+    #[test]
+    fn copies_external_style_sources_into_server_output() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let source = root.join("styles/theme.css");
+        let server = root.join("output/server");
+        std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+        std::fs::write(&source, ":root { color-scheme: dark; }").unwrap();
+
+        copy_style_sources(root, &server, std::slice::from_ref(&source)).unwrap();
+
+        assert_eq!(
+            std::fs::read_to_string(server.join("styles/theme.css")).unwrap(),
+            ":root { color-scheme: dark; }"
+        );
     }
 
     #[test]

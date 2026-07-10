@@ -68,6 +68,9 @@ function sanitizeConfig(config) {
     outDir: stringValue(config.outDir),
     runtime: stringValue(config.runtime),
     react: booleanValue(config.react),
+    css: objectValue(config.css, {
+      entries: stringArrayValue(config.css?.entries),
+    }),
     server: objectValue(config.server, {
       host: stringValue(config.server?.host),
       port: numberValue(config.server?.port),
@@ -125,6 +128,11 @@ function numberValue(value) {
 
 function booleanValue(value) {
   return typeof value === 'boolean' ? value : undefined
+}
+
+function stringArrayValue(value) {
+  if (!Array.isArray(value) || !value.every((item) => typeof item === 'string')) return undefined
+  return value
 }
 
 function safeJsonValue(value) {

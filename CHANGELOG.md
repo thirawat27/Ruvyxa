@@ -1,5 +1,17 @@
 # Changelog
 
+## v1.0.8 (2026-07-10)
+
+### Styling
+
+- Collected CSS through the application dependency graph, including styles imported from outside
+  `app/` and nested local CSS `@import` dependencies
+- Added project-relative `css.entries` for unimported global style files and directories
+- Preserved runtime CSS-in-JS style objects and `<style>` elements, with external style HMR and
+  production-copy coverage
+- Added actionable diagnostics for unresolved styles, unsafe entries, and preprocessors without a
+  transform plugin
+
 ## v1.0.7 (2026-07-10)
 
 ### Performance and Bundling

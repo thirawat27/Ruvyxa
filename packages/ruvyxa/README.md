@@ -54,6 +54,9 @@ import { defineConfig } from 'ruvyxa/config'
 export default defineConfig({
   appDir: 'app',
   outDir: '.ruvyxa',
+  css: {
+    entries: ['styles/theme.css'],
+  },
   server: {
     host: 'localhost',
     port: 3000,

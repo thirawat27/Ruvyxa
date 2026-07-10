@@ -18,7 +18,8 @@ You are working in a Ruvyxa application. Keep this starter small and close to th
 
 ## Commands
 
-*Note: This project supports multiple package managers. You can use `npm`, `pnpm`, `yarn`, or `bun` interchangeably.*
+_Note: This project supports multiple package managers. You can use `npm`, `pnpm`, `yarn`, or `bun`
+interchangeably._
 
 ```bash
 npm run dev         # ruvyxa dev

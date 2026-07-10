@@ -1,6 +1,6 @@
 [package]
 name = "ruvyxa_dev_server"
-version = "1.0.7"
+version = "1.0.8"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
@@ -13,6 +13,7 @@ chrono.workspace = true
 notify.workspace = true
 parking_lot.workspace = true
 ruvyxa_diagnostics = { path = "../ruvyxa_diagnostics" }
+ruvyxa_bundler = { path = "../ruvyxa_bundler" }
 ruvyxa_graph = { path = "../ruvyxa_graph" }
 ruvyxa_middleware = { path = "../ruvyxa_middleware" }
 serde.workspace = true

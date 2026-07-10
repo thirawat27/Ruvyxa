@@ -5,7 +5,8 @@ Read `AGENTS.md` first and follow it as the source of truth.
 This is a Ruvyxa app with file-based routing under `app/`, React 19, TypeScript, and Node.js 22
 runtime expectations.
 
-*Note: This project supports multiple package managers. You can use `npm`, `pnpm`, `yarn`, or `bun` interchangeably.*
+_Note: This project supports multiple package managers. You can use `npm`, `pnpm`, `yarn`, or `bun`
+interchangeably._
 
 Available scripts in `package.json`:
 

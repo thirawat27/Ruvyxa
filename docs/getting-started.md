@@ -206,9 +206,31 @@ Loaders run on the server only, with access to all environment variables and dat
 
 ---
 
-## Styling with Tailwind CSS
+## Styling
 
-Add it to `app/globals.css`:
+Stylesheets are dependency-driven: import a `.css` file from a page, layout, or any local module
+reachable from `app/`. The stylesheet itself can live anywhere inside the project:
+
+```tsx
+// app/layout.tsx
+import '../styles/site.css'
+```
+
+Use `css.entries` for global files or directories that are not imported by application code:
+
+```ts
+export default defineConfig({
+  css: { entries: ['styles/theme.css', 'vendor/styles'] },
+})
+```
+
+Runtime CSS-in-JS works through React `style` objects and `<style>` elements. Libraries that require
+a library-specific compiler or SSR extraction step can integrate through Ruvyxa transform plugins.
+
+### Tailwind CSS
+
+Tailwind entry files can also live outside `app/`. Import one from application code or list it in
+`css.entries`:
 
 ```css
 @import 'tailwindcss';
