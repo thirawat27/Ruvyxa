@@ -1,11 +1,37 @@
 # Changelog
 
+## v1.0.9 (2026-07-10)
+
+### Client Bundling and Boundaries
+
+- Bundled browser React and React DOM dependencies, including CommonJS package dependencies, so
+  client hydration no longer leaves unresolved bare `react` module specifiers
+- Preserved valid third-party JavaScript, including regular-expression literals, when the native
+  text minifier cannot safely parse the dependency source
+- Made server/client boundary diagnostics syntax-aware so ordinary content containing `server-only`
+  is not treated as a module marker
+- Ignored type-only imports during runtime dependency resolution
+
+### Build Reliability
+
+- Capped default and configured static pre-render concurrency at two workers to prevent memory
+  exhaustion on content-heavy sites
+- Added Windows rename retries for transient file locks while committing build output
+- Fixed file-watcher cache invalidation on threads without a Tokio runtime
+
+### Starter and Documentation
+
+- Added the CSS module declaration required by the minimal TypeScript starter
+- Synchronized all npm packages, Rust crates, lockfiles, and template dependencies to 1.0.9
+- Added regression coverage for client dependency bundling, boundary markers, Windows-safe build
+  commits, pre-render limits, watcher invalidation, and starter generation
+
 ## v1.0.8 (2026-07-10)
 
 ### Performance and Build
 
-- Parallelized build-time prerendering for CSR, SSG, ISR, and PPR routes while preserving
-  manifest order
+- Parallelized build-time prerendering for CSR, SSG, ISR, and PPR routes while preserving manifest
+  order
 - Reused the configured build parallelism for prerender work to reduce production build time
 - Kept client bundling parallelism capped to available work to avoid oversubscription
 - Reduced the demo production build benchmark from about 2.3s to about 1.1s
@@ -569,3 +595,5 @@ The following commits occurred before the v1.0.0 tag and represent the initial p
 | `v1.0.5` | 2026-07-09 | Minor      |
 | `v1.0.6` | 2026-07-09 | Patch      |
 | `v1.0.7` | 2026-07-10 | Minor      |
+| `v1.0.8` | 2026-07-10 | Minor      |
+| `v1.0.9` | 2026-07-10 | Patch      |
