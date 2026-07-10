@@ -455,4 +455,4 @@ See [CONTRIBUTING.md](CONTRIBUTING.md) for local setup, verification commands, a
 
 ## License
 
-[Apache 2.0](LICENSE) Copyright (c) 2026 Thirawat Sinlapasomsak
+[Apache 2.0](LICENSE) Copyright (c) 2026 Thirawat27
