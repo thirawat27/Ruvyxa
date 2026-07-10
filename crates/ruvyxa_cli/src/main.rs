@@ -626,6 +626,7 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
         &prerender_dir,
         &client_dir,
         &style_collection.css,
+        config.build.parallelism,
     )?;
 
     let build_info = serde_json::json!({
@@ -731,6 +732,24 @@ struct PrerenderedRoute {
     html_file: PathBuf,
 }
 
+#[derive(Debug, Clone)]
+enum PrerenderJobKind {
+    Csr,
+    Render {
+        route_file: PathBuf,
+        mode: &'static str,
+    },
+}
+
+#[derive(Debug, Clone)]
+struct PrerenderJob {
+    route_path: String,
+    render_path: String,
+    strategy: RenderStrategy,
+    revalidate: Option<u64>,
+    kind: PrerenderJobKind,
+}
+
 /// Pre-render all SSG, ISR, and PPR routes at build time.
 ///
 /// For each qualifying route:
@@ -748,6 +767,7 @@ fn prerender_static_routes(
     prerender_dir: &Path,
     client_dir: &Path,
     styles: &str,
+    configured_parallelism: Option<usize>,
 ) -> anyhow::Result<Vec<PrerenderedRoute>> {
     use ruvyxa_graph::RouteKind;
 
@@ -781,23 +801,17 @@ fn prerender_static_routes(
         return Ok(Vec::new());
     };
 
-    let mut prerendered = Vec::new();
+    let mut jobs = Vec::new();
 
     for route in routes_to_prerender {
         match route.render.strategy {
             RenderStrategy::Csr => {
-                // CSR: emit minimal shell HTML (no SSR content)
-                let html_path = prerender_html_path(prerender_dir, &route.path);
-                if let Some(parent) = html_path.parent() {
-                    fs::create_dir_all(parent)?;
-                }
-                let shell = csr_shell_html(&route.path, client_dir, styles);
-                fs::write(&html_path, &shell)?;
-                prerendered.push(PrerenderedRoute {
-                    path: route.path.clone(),
+                jobs.push(PrerenderJob {
+                    route_path: route.path.clone(),
+                    render_path: route.path.clone(),
                     strategy: RenderStrategy::Csr,
                     revalidate: None,
-                    html_file: html_path,
+                    kind: PrerenderJobKind::Csr,
                 });
             }
             RenderStrategy::Ssg | RenderStrategy::Isr | RenderStrategy::Ppr => {
@@ -814,73 +828,74 @@ fn prerender_static_routes(
                     continue;
                 };
 
-                for render_path in &paths_to_render {
-                    let html_path = prerender_html_path(prerender_dir, render_path);
-                    if let Some(parent) = html_path.parent() {
-                        fs::create_dir_all(parent)?;
-                    }
-
-                    let mode = match route.render.strategy {
-                        RenderStrategy::Ppr => "ppr",
-                        _ => "full",
-                    };
-
-                    let output = ProcessCommand::new("node")
-                        .arg(&renderer_script)
-                        .arg(root)
-                        .arg(app_dir)
-                        .arg(&route.file)
-                        .arg(render_path)
-                        .arg(mode)
-                        .output()
-                        .with_context(|| {
-                            format!("SSG renderer failed for route {}", render_path)
-                        })?;
-
-                    if !output.status.success() {
-                        let stderr = String::from_utf8_lossy(&output.stderr);
-                        let stdout = String::from_utf8_lossy(&output.stdout);
-                        anyhow::bail!(
-                            "Pre-rendering failed for {}: {}{}",
-                            render_path,
-                            stderr,
-                            stdout
-                        );
-                    }
-
-                    let result: serde_json::Value = serde_json::from_slice(&output.stdout)
-                        .with_context(|| {
-                            format!("SSG renderer returned invalid JSON for {}", render_path)
-                        })?;
-
-                    if result.get("ok").and_then(|v| v.as_bool()) != Some(true) {
-                        let message = result
-                            .get("message")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("unknown error");
-                        anyhow::bail!("Pre-rendering failed for {}: {}", render_path, message);
-                    }
-
-                    let html = result
-                        .get("html")
-                        .and_then(|v| v.as_str())
-                        .unwrap_or_default();
-                    let html = inject_prerender_styles(html, styles);
-                    let html =
-                        inject_prerender_client_assets(&html, client_dir, &route.path, render_path);
-
-                    fs::write(&html_path, html)?;
-                    prerendered.push(PrerenderedRoute {
-                        path: render_path.clone(),
+                let mode = match route.render.strategy {
+                    RenderStrategy::Ppr => "ppr",
+                    _ => "full",
+                };
+                for render_path in paths_to_render {
+                    jobs.push(PrerenderJob {
+                        route_path: route.path.clone(),
+                        render_path,
                         strategy: route.render.strategy,
                         revalidate: route.render.revalidate,
-                        html_file: html_path,
+                        kind: PrerenderJobKind::Render {
+                            route_file: route.file.clone(),
+                            mode,
+                        },
                     });
                 }
             }
             _ => {}
         }
     }
+
+    let parallelism = build_parallelism(configured_parallelism, jobs.len());
+    let chunk_size = jobs.len().max(1).div_ceil(parallelism);
+    let mut prerendered = Vec::with_capacity(jobs.len());
+
+    std::thread::scope(|scope| -> anyhow::Result<()> {
+        let mut handles = Vec::new();
+
+        for (chunk_index, chunk) in jobs.chunks(chunk_size).enumerate() {
+            let jobs = chunk.to_vec();
+            let offset = chunk_index * chunk_size;
+            let renderer_script = renderer_script.clone();
+
+            handles.push(
+                scope.spawn(move || -> anyhow::Result<Vec<(usize, PrerenderedRoute)>> {
+                    jobs.iter()
+                        .enumerate()
+                        .map(|(index, job)| {
+                            render_prerender_job(
+                                root,
+                                app_dir,
+                                prerender_dir,
+                                client_dir,
+                                styles,
+                                &renderer_script,
+                                job,
+                            )
+                            .map(|route| (offset + index, route))
+                        })
+                        .collect()
+                }),
+            );
+        }
+
+        for handle in handles {
+            let mut next = handle
+                .join()
+                .map_err(|_| anyhow::anyhow!("pre-render worker panicked"))??;
+            prerendered.append(&mut next);
+        }
+
+        Ok(())
+    })?;
+    prerendered.sort_by_key(|(index, _)| *index);
+    let prerendered = prerendered
+        .into_iter()
+        .map(|(_, route)| route)
+        .collect::<Vec<_>>();
 
     // Write pre-render manifest for the production server
     let prerender_manifest = serde_json::json!({
@@ -902,6 +917,75 @@ fn prerender_static_routes(
     );
 
     Ok(prerendered)
+}
+
+fn render_prerender_job(
+    root: &Path,
+    app_dir: &Path,
+    prerender_dir: &Path,
+    client_dir: &Path,
+    styles: &str,
+    renderer_script: &Path,
+    job: &PrerenderJob,
+) -> anyhow::Result<PrerenderedRoute> {
+    let html_path = prerender_html_path(prerender_dir, &job.render_path);
+    if let Some(parent) = html_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+
+    let html = match &job.kind {
+        PrerenderJobKind::Csr => csr_shell_html(&job.route_path, client_dir, styles),
+        PrerenderJobKind::Render { route_file, mode } => {
+            let output = ProcessCommand::new("node")
+                .arg(renderer_script)
+                .arg(root)
+                .arg(app_dir)
+                .arg(route_file)
+                .arg(&job.render_path)
+                .arg(mode)
+                .output()
+                .with_context(|| format!("SSG renderer failed for route {}", job.render_path))?;
+
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                let stdout = String::from_utf8_lossy(&output.stdout);
+                anyhow::bail!(
+                    "Pre-rendering failed for {}: {}{}",
+                    job.render_path,
+                    stderr,
+                    stdout
+                );
+            }
+
+            let result: serde_json::Value =
+                serde_json::from_slice(&output.stdout).with_context(|| {
+                    format!("SSG renderer returned invalid JSON for {}", job.render_path)
+                })?;
+
+            if result.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+                let message = result
+                    .get("message")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("unknown error");
+                anyhow::bail!("Pre-rendering failed for {}: {}", job.render_path, message);
+            }
+
+            let html = result
+                .get("html")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let html = inject_prerender_styles(html, styles);
+            inject_prerender_client_assets(&html, client_dir, &job.route_path, &job.render_path)
+        }
+    };
+
+    fs::write(&html_path, html)?;
+    Ok(PrerenderedRoute {
+        path: job.render_path.clone(),
+        strategy: job.strategy,
+        revalidate: job.revalidate,
+        html_file: html_path,
+    })
 }
 
 /// Resolve static params for a dynamic SSG route by calling getStaticParams
@@ -1375,13 +1459,7 @@ fn emit_client_bundles(
         .filter(|route| route.kind == ruvyxa_graph::RouteKind::Page)
         .cloned()
         .collect::<Vec<_>>();
-    let available_parallelism = std::thread::available_parallelism()
-        .map(usize::from)
-        .unwrap_or(1);
-    let parallelism = build
-        .parallelism
-        .unwrap_or(available_parallelism)
-        .clamp(1, page_routes.len().max(1));
+    let parallelism = build_parallelism(build.parallelism, page_routes.len());
     let chunk_size = page_routes.len().max(1).div_ceil(parallelism);
     let mut bundles = Vec::new();
 
@@ -1553,6 +1631,13 @@ fn emit_client_bundles(
         },
         "routes": routes
     }))
+}
+
+fn build_parallelism(configured: Option<usize>, work_items: usize) -> usize {
+    let available = std::thread::available_parallelism()
+        .map(usize::from)
+        .unwrap_or(1);
+    configured.unwrap_or(available).clamp(1, work_items.max(1))
 }
 
 fn build_plugin_manifest(plugins: &[BuildPluginConfig]) -> serde_json::Value {
@@ -3038,6 +3123,14 @@ mod tests {
         assert_eq!(result.min_ms, 10.0);
         assert_eq!(result.median_ms, 20.0);
         assert_eq!(result.max_ms, 30.0);
+    }
+
+    #[test]
+    fn caps_build_parallelism_to_available_work() {
+        assert_eq!(build_parallelism(Some(0), 4), 1);
+        assert_eq!(build_parallelism(Some(3), 1), 1);
+        assert_eq!(build_parallelism(Some(3), 5), 3);
+        assert_eq!(build_parallelism(Some(usize::MAX), 2), 2);
     }
 
     #[test]
