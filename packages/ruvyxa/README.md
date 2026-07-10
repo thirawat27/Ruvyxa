@@ -67,10 +67,12 @@ export default defineConfig({
     esTarget: 'es2022',
     parallelism: 4,
     emitChunkManifest: false,
+    prebundleDependencies: true,
   },
   cache: {
     routeManifest: true,
     css: true,
+    buildDir: '.ruvyxa/cache/bundler',
   },
   security: {
     actionBodyLimitBytes: 65536,

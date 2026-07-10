@@ -14,6 +14,8 @@ describe('vercelAdapter', () => {
         platform: output.platform,
         entry: output.entry,
         assetsDir: output.assetsDir,
+        clientDir: output.clientDir,
+        chunkManifest: output.chunkManifest,
         functionsDir: output.functionsDir,
       },
       {
@@ -22,6 +24,8 @@ describe('vercelAdapter', () => {
         platform: 'vercel',
         entry: '.ruvyxa/server/app',
         assetsDir: '.ruvyxa/assets',
+        clientDir: '.ruvyxa/client',
+        chunkManifest: '.ruvyxa/client/chunk-manifest.json',
         functionsDir: '.ruvyxa/functions',
       },
     )

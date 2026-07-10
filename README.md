@@ -269,6 +269,7 @@ export default defineConfig({
     esTarget: 'es2022',
     parallelism: 4,
     emitChunkManifest: false,
+    prebundleDependencies: true,
   },
   rendering: {
     defaultStrategy: 'ssr',
@@ -278,6 +279,7 @@ export default defineConfig({
   cache: {
     routeManifest: true,
     css: true,
+    buildDir: '.ruvyxa/cache/bundler',
   },
   debug: {
     overlay: true,

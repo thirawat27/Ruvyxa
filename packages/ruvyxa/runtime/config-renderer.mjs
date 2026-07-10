@@ -2,7 +2,12 @@ import { existsSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-import { cacheFileName, compileBundle, runtimeAliases, toImportPath } from './compiler.mjs'
+import {
+  cacheFileName,
+  compileBundleWithMetadata,
+  runtimeAliases,
+  toImportPath,
+} from './compiler.mjs'
 
 const [projectRootArg] = process.argv.slice(2)
 
@@ -16,7 +21,7 @@ const runtimeDir = path.dirname(fileURLToPath(import.meta.url))
 try {
   const configFile = findConfig(projectRoot)
   if (!configFile) {
-    await ok({})
+    await ok({}, 'no-config')
   }
 
   const moduleCode = `export { default } from ${JSON.stringify(toImportPath(configFile))}`
@@ -28,7 +33,7 @@ try {
     cacheFileName([moduleCode, configFile], 'mjs'),
   )
 
-  await compileBundle({
+  const bundle = await compileBundleWithMetadata({
     projectRoot,
     entrySource: moduleCode,
     sourcefile: 'ruvyxa:config-entry.ts',
@@ -39,7 +44,7 @@ try {
 
   const mod = await import(pathToFileURL(outfile).href + `?t=${Date.now()}`)
   const config = mod.default ?? {}
-  await ok(sanitizeConfig(config))
+  await ok(sanitizeConfig(config), bundle.dependencyHash)
 } catch (error) {
   await fail('RUV1600', error instanceof Error ? error.message : String(error), error?.stack)
 }
@@ -76,6 +81,7 @@ function sanitizeConfig(config) {
       jsxRuntime: stringValue(config.build?.jsxRuntime),
       esTarget: stringValue(config.build?.esTarget),
       emitChunkManifest: booleanValue(config.build?.emitChunkManifest),
+      prebundleDependencies: booleanValue(config.build?.prebundleDependencies),
     }),
     debug: objectValue(config.debug, {
       overlay: booleanValue(config.debug?.overlay),
@@ -90,6 +96,7 @@ function sanitizeConfig(config) {
     cache: objectValue(config.cache, {
       routeManifest: booleanValue(config.cache?.routeManifest),
       css: booleanValue(config.cache?.css),
+      buildDir: stringValue(config.cache?.buildDir),
     }),
     adapter: objectValue(config.adapter, {
       name: stringValue(config.adapter?.name),
@@ -144,8 +151,8 @@ function pluginDescriptors(value) {
   return plugins.length > 0 ? plugins : undefined
 }
 
-async function ok(config) {
-  await writeJson({ ok: true, config })
+async function ok(config, dependencyHash) {
+  await writeJson({ ok: true, config, dependencyHash })
   process.exit(0)
 }
 

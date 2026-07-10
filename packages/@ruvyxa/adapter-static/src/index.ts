@@ -1,5 +1,5 @@
 import type { Adapter, AdapterOutput, BuildContext } from '@ruvyxa/core'
-import { validateBuildContext } from '@ruvyxa/core'
+import { clientBuildOutput, validateBuildContext } from '@ruvyxa/core'
 
 /**
  * Options for the static site adapter.
@@ -48,6 +48,7 @@ export function staticAdapter(options: StaticAdapterOptions = {}): Adapter {
         platform: 'static',
         entry: options.outputDir ?? `${ctx.outDir}/static`,
         assetsDir: `${ctx.outDir}/assets`,
+        ...clientBuildOutput(ctx),
       }
     },
   }

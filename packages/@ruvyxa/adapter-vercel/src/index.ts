@@ -1,5 +1,5 @@
 import type { Adapter, AdapterOutput, BuildContext } from '@ruvyxa/core'
-import { validateBuildContext } from '@ruvyxa/core'
+import { clientBuildOutput, validateBuildContext } from '@ruvyxa/core'
 
 /**
  * Options for the Vercel adapter.
@@ -49,6 +49,7 @@ export function vercelAdapter(options: VercelAdapterOptions = {}): Adapter {
         platform: 'vercel',
         entry: `${ctx.outDir}/server/app`,
         assetsDir: `${ctx.outDir}/assets`,
+        ...clientBuildOutput(ctx),
         functionsDir,
         configFiles: ['vercel.json'],
       }

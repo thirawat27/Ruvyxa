@@ -57,160 +57,286 @@ impl ModuleAst {
 pub fn parse_module(source: &str) -> ModuleAst {
     let mut ast = ModuleAst::default();
 
-    for line in source.lines() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
+    let bytes = source.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if is_comment_start(bytes, index) {
+            index = skip_comment(bytes, index);
+            continue;
+        }
+        if is_quote(bytes[index]) {
+            index = skip_string(bytes, index);
             continue;
         }
 
-        if trimmed.starts_with('@') {
+        if bytes[index] == b'@' && is_line_prefix_whitespace(bytes, index) {
             ast.has_decorators = true;
+            index += 1;
+            continue;
         }
-        if starts_with_keyword(trimmed, "interface")
-            || starts_with_keyword(trimmed, "type")
-            || trimmed.contains(" satisfies ")
-            || trimmed.contains(" as ")
-            || trimmed.contains(": ")
-        {
-            ast.has_typescript = true;
-        }
-        if starts_with_keyword(trimmed, "enum") || trimmed.starts_with("const enum ") {
-            ast.has_enums = true;
-        }
-        if looks_like_jsx(trimmed) {
+        if bytes[index] == b'<' && looks_like_jsx_at(bytes, index) {
             ast.has_jsx = true;
         }
 
-        if let Some(edge) = static_import_edge(trimmed) {
-            ast.imports.push(edge);
-        }
-        if let Some(edge) = re_export_edge(trimmed) {
-            ast.imports.push(edge);
-        }
-        if trimmed.starts_with("export ") {
-            if let Some(name) = export_name(trimmed) {
-                ast.exports.push(name);
-            }
+        if !is_ident_start_byte(bytes[index]) {
+            index += 1;
+            continue;
         }
 
-        for specifier in call_specifiers(trimmed, "require(") {
-            ast.imports.push(ImportEdge {
-                specifier,
-                kind: ImportKind::Require,
-            });
-        }
-        for specifier in call_specifiers(trimmed, "import(") {
-            ast.imports.push(ImportEdge {
-                specifier,
-                kind: ImportKind::Dynamic,
-            });
+        let start = index;
+        index = skip_identifier(bytes, index);
+        let word = &source[start..index];
+        match word {
+            "import" => {
+                if let Some(edge) = import_edge(source, index) {
+                    ast.imports.push(edge);
+                }
+            }
+            "require" if previous_non_whitespace(bytes, start) != Some(b'.') => {
+                if let Some(specifier) = call_specifier(source, index) {
+                    ast.imports.push(ImportEdge {
+                        specifier,
+                        kind: ImportKind::Require,
+                    });
+                }
+            }
+            "export" => {
+                if let Some(edge) = export_edge(source, index) {
+                    ast.imports.push(edge);
+                }
+                if let Some(name) = export_name(source, index) {
+                    ast.exports.push(name);
+                }
+            }
+            "enum" => {
+                ast.has_enums = true;
+                ast.has_typescript = true;
+            }
+            "interface" | "type" | "satisfies" | "implements" | "declare" | "abstract"
+            | "readonly" | "public" | "private" | "protected" | "override" => {
+                ast.has_typescript = true;
+            }
+            "as" if previous_non_whitespace(bytes, start).is_some() => {
+                ast.has_typescript = true;
+            }
+            _ => {}
         }
     }
 
     ast
 }
 
-fn static_import_edge(line: &str) -> Option<ImportEdge> {
-    if !line.starts_with("import ") {
+fn import_edge(source: &str, after_keyword: usize) -> Option<ImportEdge> {
+    let bytes = source.as_bytes();
+    let index = skip_whitespace_and_comments(bytes, after_keyword);
+    if index >= bytes.len() || bytes[index] == b'.' {
         return None;
     }
-
-    if line.starts_with("import \"") || line.starts_with("import '") {
-        return quoted_value(line.strip_prefix("import ")?).map(|specifier| ImportEdge {
+    if bytes[index] == b'(' {
+        return call_specifier(source, index).map(|specifier| ImportEdge {
+            specifier,
+            kind: ImportKind::Dynamic,
+        });
+    }
+    if is_quote(bytes[index]) {
+        return quoted_value_at(source, index).map(|specifier| ImportEdge {
             specifier,
             kind: ImportKind::SideEffect,
         });
     }
-
-    split_from_specifier(line).map(|(_, specifier)| ImportEdge {
+    let declaration_start = if word_at(source, index) == Some("type") {
+        index + 4
+    } else {
+        index
+    };
+    find_from_specifier(source, declaration_start).map(|specifier| ImportEdge {
         specifier,
         kind: ImportKind::Static,
     })
 }
 
-fn re_export_edge(line: &str) -> Option<ImportEdge> {
-    if !line.starts_with("export ") {
+fn export_edge(source: &str, after_keyword: usize) -> Option<ImportEdge> {
+    let bytes = source.as_bytes();
+    let index = skip_whitespace_and_comments(bytes, after_keyword);
+    if word_at(source, index) == Some("type")
+        || !matches!(bytes.get(index), Some(b'{') | Some(b'*'))
+    {
         return None;
     }
-
-    split_from_specifier(line).map(|(_, specifier)| ImportEdge {
+    find_from_specifier(source, index).map(|specifier| ImportEdge {
         specifier,
         kind: ImportKind::ReExport,
     })
 }
 
-fn call_specifiers(line: &str, marker: &str) -> Vec<String> {
-    let mut specifiers = Vec::new();
-    let mut search_start = 0;
-
-    while let Some(relative_index) = line[search_start..].find(marker) {
-        let value_start = search_start + relative_index + marker.len();
-        if let Some(specifier) = quoted_value(&line[value_start..]) {
-            specifiers.push(specifier);
-        }
-        search_start = value_start;
+fn call_specifier(source: &str, after_keyword: usize) -> Option<String> {
+    let bytes = source.as_bytes();
+    let mut index = skip_whitespace_and_comments(bytes, after_keyword);
+    if bytes.get(index) != Some(&b'(') {
+        return None;
     }
-
-    specifiers
+    index = skip_whitespace_and_comments(bytes, index + 1);
+    quoted_value_at(source, index)
 }
 
-fn split_from_specifier(line: &str) -> Option<(String, String)> {
-    let from_idx = line.rfind(" from ")?;
-    let before = line[..from_idx].to_string();
-    let after = line[from_idx + 6..].trim();
-    let specifier = quoted_value(after)?;
-    Some((before, specifier))
+fn find_from_specifier(source: &str, mut index: usize) -> Option<String> {
+    let bytes = source.as_bytes();
+    while index < bytes.len() {
+        index = skip_whitespace_and_comments(bytes, index);
+        if index >= bytes.len() || bytes[index] == b';' {
+            return None;
+        }
+        if is_quote(bytes[index]) {
+            index = skip_string(bytes, index);
+            continue;
+        }
+        if word_at(source, index) == Some("from") {
+            let value = skip_whitespace_and_comments(bytes, index + 4);
+            return quoted_value_at(source, value);
+        }
+        index += 1;
+    }
+    None
 }
 
-fn quoted_value(s: &str) -> Option<String> {
-    let quote = s.chars().find(|c| *c == '"' || *c == '\'')?;
-    let start = s.find(quote)? + 1;
-    let rest = &s[start..];
-    let end = rest.find(quote)?;
-    Some(rest[..end].to_string())
+fn quoted_value_at(source: &str, start: usize) -> Option<String> {
+    let bytes = source.as_bytes();
+    let quote = *bytes.get(start)?;
+    if !is_quote(quote) || quote == b'`' {
+        return None;
+    }
+    let mut index = start + 1;
+    while index < bytes.len() {
+        if bytes[index] == b'\\' {
+            index += 2;
+            continue;
+        }
+        if bytes[index] == quote {
+            return Some(source[start + 1..index].to_string());
+        }
+        index += 1;
+    }
+    None
 }
 
-fn export_name(line: &str) -> Option<String> {
-    let rest = line.strip_prefix("export ")?;
-    let rest = rest.strip_prefix("default ").unwrap_or(rest);
-    let rest = rest.strip_prefix("async ").unwrap_or(rest);
-    let rest = rest
-        .strip_prefix("function* ")
-        .or_else(|| rest.strip_prefix("function "))
-        .or_else(|| rest.strip_prefix("class "))
-        .or_else(|| rest.strip_prefix("const "))
-        .or_else(|| rest.strip_prefix("let "))
-        .or_else(|| rest.strip_prefix("var "))?;
-
-    let name: String = rest
-        .chars()
-        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
-        .collect();
-
-    (!name.is_empty()).then_some(name)
+fn export_name(source: &str, after_keyword: usize) -> Option<String> {
+    let bytes = source.as_bytes();
+    let mut index = skip_whitespace_and_comments(bytes, after_keyword);
+    for optional in ["default", "async"] {
+        if word_at(source, index) == Some(optional) {
+            index = skip_whitespace_and_comments(bytes, index + optional.len());
+        }
+    }
+    let kind = word_at(source, index)?;
+    if !matches!(kind, "function" | "class" | "const" | "let" | "var") {
+        return None;
+    }
+    index = skip_whitespace_and_comments(bytes, index + kind.len());
+    if bytes.get(index) == Some(&b'*') {
+        index = skip_whitespace_and_comments(bytes, index + 1);
+    }
+    let end = skip_identifier(bytes, index);
+    (end > index).then(|| source[index..end].to_string())
 }
 
-fn looks_like_jsx(line: &str) -> bool {
-    let Some(idx) = line.find('<') else {
-        return false;
-    };
-    let mut chars = line[idx + 1..].chars();
+fn word_at(source: &str, start: usize) -> Option<&str> {
+    let bytes = source.as_bytes();
+    if start >= bytes.len() || !is_ident_start_byte(bytes[start]) {
+        return None;
+    }
+    Some(&source[start..skip_identifier(bytes, start)])
+}
+
+fn skip_whitespace_and_comments(bytes: &[u8], mut index: usize) -> usize {
+    loop {
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if is_comment_start(bytes, index) {
+            index = skip_comment(bytes, index);
+        } else {
+            return index;
+        }
+    }
+}
+
+fn is_comment_start(bytes: &[u8], index: usize) -> bool {
+    bytes.get(index) == Some(&b'/') && matches!(bytes.get(index + 1), Some(b'/') | Some(b'*'))
+}
+
+fn skip_comment(bytes: &[u8], start: usize) -> usize {
+    if bytes.get(start + 1) == Some(&b'/') {
+        return bytes[start + 2..]
+            .iter()
+            .position(|byte| *byte == b'\n')
+            .map_or(bytes.len(), |offset| start + 2 + offset + 1);
+    }
+    let mut index = start + 2;
+    while index + 1 < bytes.len() {
+        if bytes[index] == b'*' && bytes[index + 1] == b'/' {
+            return index + 2;
+        }
+        index += 1;
+    }
+    bytes.len()
+}
+
+fn skip_string(bytes: &[u8], start: usize) -> usize {
+    let quote = bytes[start];
+    let mut index = start + 1;
+    while index < bytes.len() {
+        if bytes[index] == b'\\' {
+            index += 2;
+            continue;
+        }
+        if bytes[index] == quote {
+            return index + 1;
+        }
+        index += 1;
+    }
+    bytes.len()
+}
+
+fn is_line_prefix_whitespace(bytes: &[u8], index: usize) -> bool {
+    bytes[..index]
+        .iter()
+        .rev()
+        .take_while(|byte| **byte != b'\n')
+        .all(|byte| byte.is_ascii_whitespace())
+}
+
+fn looks_like_jsx_at(bytes: &[u8], index: usize) -> bool {
     matches!(
-        chars.next(),
-        Some(c) if c.is_ascii_alphabetic() || c == '>' || c == '/'
+        bytes.get(index + 1),
+        Some(b'>') | Some(b'/') | Some(b'A'..=b'Z') | Some(b'a'..=b'z')
     )
 }
 
-fn starts_with_keyword(line: &str, keyword: &str) -> bool {
-    let Some(rest) = line.strip_prefix(keyword) else {
-        return false;
-    };
-    rest.is_empty()
-        || rest
-            .chars()
-            .next()
-            .map(|c| !c.is_alphanumeric() && c != '_')
-            .unwrap_or(true)
+fn previous_non_whitespace(bytes: &[u8], index: usize) -> Option<u8> {
+    bytes[..index]
+        .iter()
+        .rev()
+        .find(|byte| !byte.is_ascii_whitespace())
+        .copied()
+}
+
+fn skip_identifier(bytes: &[u8], mut index: usize) -> usize {
+    while index < bytes.len() && is_ident_continue_byte(bytes[index]) {
+        index += 1;
+    }
+    index
+}
+
+fn is_ident_start_byte(byte: u8) -> bool {
+    byte.is_ascii_alphabetic() || matches!(byte, b'_' | b'$')
+}
+
+fn is_ident_continue_byte(byte: u8) -> bool {
+    is_ident_start_byte(byte) || byte.is_ascii_digit()
+}
+
+fn is_quote(byte: u8) -> bool {
+    matches!(byte, b'"' | b'\'' | b'`')
 }
 
 #[cfg(test)]

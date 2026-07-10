@@ -27,7 +27,9 @@ export default defineConfig({
   "target": "static",
   "platform": "static",
   "entry": ".ruvyxa/static",
-  "assetsDir": ".ruvyxa/assets"
+  "assetsDir": ".ruvyxa/assets",
+  "clientDir": ".ruvyxa/client",
+  "chunkManifest": ".ruvyxa/client/chunk-manifest.json"
 }
 ```
 

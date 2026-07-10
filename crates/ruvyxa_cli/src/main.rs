@@ -146,6 +146,8 @@ struct ProjectConfig {
     middleware: ruvyxa_middleware::MiddlewareConfig,
     #[serde(default)]
     plugins: Vec<BuildPluginConfig>,
+    #[serde(skip)]
+    config_dependency_hash: String,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -166,6 +168,7 @@ struct BuildConfigOptions {
     jsx_runtime: Option<String>,
     es_target: Option<String>,
     emit_chunk_manifest: Option<bool>,
+    prebundle_dependencies: Option<bool>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -182,6 +185,7 @@ struct SecurityConfigOptions {
 struct CacheConfigOptions {
     route_manifest: Option<bool>,
     css: Option<bool>,
+    build_dir: Option<String>,
 }
 
 #[derive(Debug, Clone, Default, serde::Deserialize)]
@@ -193,6 +197,11 @@ struct BuildPluginConfig {
     transform: bool,
 }
 
+struct NativeBuildCache<'a> {
+    dependency_hash: &'a str,
+    directory: &'a Path,
+}
+
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct ConfigRendererOutput {
@@ -201,6 +210,7 @@ struct ConfigRendererOutput {
     code: Option<String>,
     message: Option<String>,
     stack: Option<String>,
+    dependency_hash: Option<String>,
 }
 
 impl ProjectConfig {
@@ -407,6 +417,7 @@ fn dev_server_config(args: &ServerArgs, config: &ProjectConfig) -> ServerConfig 
     server.prerender_dir = out_dir.join("prerender");
     server.cache_route_manifest = config.cache.route_manifest.unwrap_or(true);
     server.cache_css = config.cache.css.unwrap_or(true);
+    server.prebundle_dependencies = config.build.prebundle_dependencies.unwrap_or(true);
     server.middleware = config.middleware.clone();
     server
 }
@@ -433,7 +444,10 @@ fn production_server_config(args: &ServerArgs, config: &ProjectConfig) -> Server
 
 fn load_project_config(root: &Path) -> anyhow::Result<ProjectConfig> {
     let Some(renderer) = find_runtime_script(root, "config-renderer.mjs") else {
-        let config = ProjectConfig::default();
+        let config = ProjectConfig {
+            config_dependency_hash: "no-config".to_string(),
+            ..ProjectConfig::default()
+        };
         config.validate_paths()?;
         return Ok(config);
     };
@@ -451,7 +465,10 @@ fn load_project_config(root: &Path) -> anyhow::Result<ProjectConfig> {
     )?;
 
     if output.status.success() && result.ok {
-        let config = result.config.unwrap_or_default();
+        let mut config = result.config.unwrap_or_default();
+        config.config_dependency_hash = result
+            .dependency_hash
+            .unwrap_or_else(|| "legacy-config-renderer".to_string());
         config.validate_paths()?;
         return Ok(config);
     }
@@ -483,6 +500,35 @@ fn parse_config_renderer_output(
             diagnostic_stream(&stderr),
         )
     })
+}
+
+fn build_cache_dir(root: &Path, cache: &CacheConfigOptions) -> PathBuf {
+    resolve_build_cache_dir(
+        root,
+        cache.build_dir.as_deref(),
+        std::env::var_os("RUVYXA_BUILD_CACHE_DIR"),
+    )
+}
+
+fn resolve_build_cache_dir(
+    root: &Path,
+    configured: Option<&str>,
+    environment: Option<OsString>,
+) -> PathBuf {
+    let selected = environment
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| {
+            configured
+                .filter(|value| !value.trim().is_empty())
+                .map(PathBuf::from)
+        });
+
+    match selected {
+        Some(path) if path.is_absolute() => path,
+        Some(path) => root.join(path),
+        None => root.join(".ruvyxa").join("cache").join("bundler"),
+    }
 }
 
 fn diagnostic_stream(value: &str) -> String {
@@ -535,6 +581,10 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
         &client_dir,
         &config.build,
         &config.plugins,
+        NativeBuildCache {
+            dependency_hash: &config.config_dependency_hash,
+            directory: &build_cache_dir(&args.root, &config.cache),
+        },
     )?;
     fs::write(
         client_dir.join("manifest.json"),
@@ -574,6 +624,7 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
             "jsxRuntime": config.build.jsx_runtime.as_deref().unwrap_or("classic"),
             "esTarget": config.build.es_target.as_deref().unwrap_or("es2022"),
             "emitChunkManifest": config.build.emit_chunk_manifest.unwrap_or(false),
+            "prebundleDependencies": config.build.prebundle_dependencies.unwrap_or(true),
             "parallelism": client_manifest.get("parallelism").cloned().unwrap_or(serde_json::Value::Null)
         },
         "rendering": {
@@ -1221,11 +1272,22 @@ fn plugin_environment(target: ruvyxa_bundler::BundleTarget) -> &'static str {
 fn bundle_context_for_build(
     root: &Path,
     plugins: &[BuildPluginConfig],
+    config_dependency_hash: &str,
+    cache_dir: &Path,
 ) -> anyhow::Result<ruvyxa_bundler::BundleContext> {
+    let compile_cache = ruvyxa_bundler::cache::CompileCache::at_dir_with_namespace(
+        cache_dir,
+        true,
+        config_dependency_hash,
+    );
     let has_resolve_id = plugins.iter().any(|plugin| plugin.resolve_id);
     let has_transform = plugins.iter().any(|plugin| plugin.transform);
     if !has_resolve_id && !has_transform {
-        return Ok(ruvyxa_bundler::BundleContext::new(root));
+        return Ok(ruvyxa_bundler::BundleContext::with_all_caches(
+            compile_cache,
+            ruvyxa_bundler::resolver::ResolveGraphCache::new(),
+            ruvyxa_bundler::incremental::IncrementalGraphCache::new(root, true),
+        ));
     }
 
     let runner = find_runtime_script(root, "plugin-runner.mjs")
@@ -1240,7 +1302,7 @@ fn bundle_context_for_build(
     };
 
     Ok(ruvyxa_bundler::BundleContext::with_plugins(
-        ruvyxa_bundler::cache::CompileCache::new(root, true),
+        compile_cache,
         ruvyxa_bundler::resolver::ResolveGraphCache::new(),
         ruvyxa_bundler::incremental::IncrementalGraphCache::new(root, true),
         ruvyxa_bundler::plugin::PluginPipeline::new(vec![Arc::new(bridge)]),
@@ -1254,8 +1316,10 @@ fn emit_client_bundles(
     client_dir: &Path,
     build: &BuildConfigOptions,
     plugins: &[BuildPluginConfig],
+    cache: NativeBuildCache<'_>,
 ) -> anyhow::Result<serde_json::Value> {
-    let bundle_context = bundle_context_for_build(root, plugins)?;
+    let bundle_context =
+        bundle_context_for_build(root, plugins, cache.dependency_hash, cache.directory)?;
     let page_routes = manifest
         .routes
         .iter()
@@ -1434,6 +1498,7 @@ fn emit_client_bundles(
             .map(shared_route_chunk_manifest)
             .collect::<Vec<_>>(),
         "cache": {
+            "directory": bundle_context.compile_cache().cache_dir(),
             "compileEntries": bundle_context.compile_cache().entry_count(),
             "compileBytes": bundle_context.compile_cache().total_bytes()
         },
@@ -2938,11 +3003,13 @@ mod tests {
 
         let config: BuildConfigOptions = serde_json::from_value(json!({
             "treeShaking": false,
-            "emitChunkManifest": true
+            "emitChunkManifest": true,
+            "prebundleDependencies": false
         }))
         .unwrap();
         assert_eq!(config.tree_shaking, Some(false));
         assert_eq!(config.emit_chunk_manifest, Some(true));
+        assert_eq!(config.prebundle_dependencies, Some(false));
     }
 
     #[test]
@@ -2968,6 +3035,30 @@ mod tests {
         let manifest = build_plugin_manifest(&config.plugins);
         assert_eq!(manifest[0]["name"], "banner");
         assert_eq!(manifest[0]["resolveId"], true);
+    }
+
+    #[test]
+    fn resolves_shared_build_cache_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("project");
+        let shared = temp.path().join("shared-cache");
+
+        assert_eq!(
+            resolve_build_cache_dir(&root, Some(".cache/build"), None),
+            root.join(".cache/build")
+        );
+        assert_eq!(
+            resolve_build_cache_dir(
+                &root,
+                Some("ignored"),
+                Some(shared.clone().into_os_string())
+            ),
+            shared
+        );
+        assert_eq!(
+            resolve_build_cache_dir(&root, None, None),
+            root.join(".ruvyxa/cache/bundler")
+        );
     }
 
     #[test]
@@ -3001,10 +3092,22 @@ mod tests {
             jsx_runtime: Some("classic".to_string()),
             es_target: Some("es2022".to_string()),
             emit_chunk_manifest: Some(true),
+            prebundle_dependencies: Some(true),
         };
 
-        let client_manifest =
-            emit_client_bundles(root, &app, &manifest, &client_dir, &build, &[]).unwrap();
+        let client_manifest = emit_client_bundles(
+            root,
+            &app,
+            &manifest,
+            &client_dir,
+            &build,
+            &[],
+            NativeBuildCache {
+                dependency_hash: "no-config",
+                directory: &root.join(".ruvyxa/cache/bundler"),
+            },
+        )
+        .unwrap();
 
         assert!(client_dir.join("chunk-manifest.json").is_file());
         assert_eq!(client_manifest["emitChunkManifest"], true);
@@ -3070,8 +3173,19 @@ mod tests {
             ..BuildConfigOptions::default()
         };
 
-        let client_manifest =
-            emit_client_bundles(root, &app, &manifest, &client_dir, &build, &[]).unwrap();
+        let client_manifest = emit_client_bundles(
+            root,
+            &app,
+            &manifest,
+            &client_dir,
+            &build,
+            &[],
+            NativeBuildCache {
+                dependency_hash: "no-config",
+                directory: &root.join(".ruvyxa/cache/bundler"),
+            },
+        )
+        .unwrap();
 
         for route in client_manifest["routes"].as_array().unwrap() {
             assert_eq!(route["sharedChunks"].as_array().unwrap().len(), 1);
@@ -3167,6 +3281,10 @@ export default defineConfig({
             &client_dir,
             &config.build,
             &config.plugins,
+            NativeBuildCache {
+                dependency_hash: &config.config_dependency_hash,
+                directory: &build_cache_dir(root, &config.cache),
+            },
         )
         .unwrap();
         let route_file = client_manifest["routes"][0]["file"].as_str().unwrap();
@@ -3185,6 +3303,93 @@ export default defineConfig({
             .unwrap()
             .iter()
             .any(|source| source.as_str() == Some("plugin-original.tsx")));
+    }
+
+    #[test]
+    fn imported_plugin_change_invalidates_compile_cache_without_clean() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let app = root.join("app");
+        let client_dir = root.join(".ruvyxa").join("client");
+        let plugin_file = root.join("build-plugin.ts");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(&client_dir).unwrap();
+        std::fs::write(
+            app.join("page.tsx"),
+            "export default function Page() { return <main>Before</main>; }",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("ruvyxa.config.ts"),
+            r#"
+import { plugin } from "./build-plugin.js"
+export default { build: { minify: false }, plugins: [plugin] }
+"#,
+        )
+        .unwrap();
+
+        let write_plugin = |replacement: &str| {
+            std::fs::write(
+                &plugin_file,
+                format!(
+                    r#"export const plugin = {{
+  name: "replace-label",
+  transform(code, id) {{
+    if (!id.endsWith("page.tsx")) return null
+    return {{ code: code.replace("Before", "{replacement}") }}
+  }}
+}}
+"#
+                ),
+            )
+            .unwrap();
+        };
+
+        write_plugin("FirstBuild");
+        let first_config = load_project_config(root).unwrap();
+        let manifest = discover_routes(DiscoverOptions::new(&app)).unwrap();
+        let cache_dir = build_cache_dir(root, &first_config.cache);
+        let first_manifest = emit_client_bundles(
+            root,
+            &app,
+            &manifest,
+            &client_dir,
+            &first_config.build,
+            &first_config.plugins,
+            NativeBuildCache {
+                dependency_hash: &first_config.config_dependency_hash,
+                directory: &cache_dir,
+            },
+        )
+        .unwrap();
+        let first_file = first_manifest["routes"][0]["file"].as_str().unwrap();
+        let first_output = std::fs::read_to_string(client_dir.join(first_file)).unwrap();
+
+        write_plugin("SecondRun");
+        let second_config = load_project_config(root).unwrap();
+        assert_ne!(
+            first_config.config_dependency_hash,
+            second_config.config_dependency_hash
+        );
+        let second_manifest = emit_client_bundles(
+            root,
+            &app,
+            &manifest,
+            &client_dir,
+            &second_config.build,
+            &second_config.plugins,
+            NativeBuildCache {
+                dependency_hash: &second_config.config_dependency_hash,
+                directory: &cache_dir,
+            },
+        )
+        .unwrap();
+        let second_file = second_manifest["routes"][0]["file"].as_str().unwrap();
+        let second_output = std::fs::read_to_string(client_dir.join(second_file)).unwrap();
+
+        assert!(first_output.contains("FirstBuild"), "{first_output}");
+        assert!(second_output.contains("SecondRun"), "{second_output}");
+        assert!(!second_output.contains("FirstBuild"), "{second_output}");
     }
 
     #[test]

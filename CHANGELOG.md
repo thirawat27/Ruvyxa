@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.0.7 (2026-07-10)
 
 ### Performance and Bundling
 
@@ -10,6 +10,12 @@
   HTML
 - Ensured pre-rendered SSG, ISR, PPR, and CSR output loads hashed hydration assets from the client
   manifest
+- Added fixture-driven advanced TypeScript/JSX parser coverage and fixed multiline enums,
+  `implements`, and namespaced JSX tags
+- Invalidated native compile artifacts when imported config/plugin dependencies change
+- Added shared build-cache directories via `cache.buildDir` or `RUVYXA_BUILD_CACHE_DIR`
+- Pre-bundled dev route dependencies in background across every persistent Node worker
+- Added consistent client directory and chunk-manifest references to every deployment adapter
 
 ## v1.0.6 (2026-07-09)
 

@@ -524,10 +524,10 @@ fn expand_enums(source: &str) -> std::result::Result<String, String> {
             // Skip `const ` if present.
             if is_const_enum {
                 i += 5; // "const"
-                i = skip_spaces(&chars, i);
+                i = skip_all_whitespace(&chars, i);
             }
             i += 4; // "enum"
-            i = skip_spaces(&chars, i);
+            i = skip_all_whitespace(&chars, i);
 
             // Read enum name.
             let name_start = i;
@@ -536,7 +536,7 @@ fn expand_enums(source: &str) -> std::result::Result<String, String> {
             }
             let name: String = chars[name_start..i].iter().collect();
 
-            i = skip_spaces(&chars, i);
+            i = skip_all_whitespace(&chars, i);
             if i >= len || chars[i] != '{' {
                 return Err(format!("expected '{{' after enum name '{name}'"));
             }
@@ -547,7 +547,7 @@ fn expand_enums(source: &str) -> std::result::Result<String, String> {
             let mut next_value: i64 = 0;
 
             loop {
-                i = skip_spaces(&chars, i);
+                i = skip_all_whitespace(&chars, i);
                 if i >= len || chars[i] == '}' {
                     break;
                 }
@@ -570,11 +570,14 @@ fn expand_enums(source: &str) -> std::result::Result<String, String> {
                     i += 1;
                 }
                 let mname: String = chars[mname_start..i].iter().collect();
-                i = skip_spaces(&chars, i);
+                if mname.is_empty() {
+                    return Err(format!("expected enum member near character {i}"));
+                }
+                i = skip_all_whitespace(&chars, i);
 
                 let value = if i < len && chars[i] == '=' {
                     i += 1;
-                    i = skip_spaces(&chars, i);
+                    i = skip_all_whitespace(&chars, i);
                     // Parse a simple integer or negative integer literal.
                     let neg = i < len && chars[i] == '-';
                     if neg {
@@ -597,7 +600,7 @@ fn expand_enums(source: &str) -> std::result::Result<String, String> {
                 next_value = v + 1;
                 members.push((mname, Some(v)));
 
-                i = skip_spaces(&chars, i);
+                i = skip_all_whitespace(&chars, i);
                 if i < len && chars[i] == ',' {
                     i += 1;
                 }
@@ -750,6 +753,22 @@ fn strip_typescript(source: &str) -> std::result::Result<String, String> {
             continue;
         }
 
+        // Class heritage type list: `class Service implements A, B<T> {`.
+        if is_keyword_at(&chars, i, "implements") {
+            i += 10;
+            let mut angle_depth = 0i32;
+            while i < len {
+                match chars[i] {
+                    '<' => angle_depth += 1,
+                    '>' => angle_depth = (angle_depth - 1).max(0),
+                    '{' if angle_depth == 0 => break,
+                    _ => {}
+                }
+                i += 1;
+            }
+            continue;
+        }
+
         // Class member access modifiers.
         if is_keyword_at(&chars, i, "public")
             || is_keyword_at(&chars, i, "private")
@@ -780,7 +799,7 @@ fn strip_typescript(source: &str) -> std::result::Result<String, String> {
         }
 
         // `: TypeAnnotation` — strip colon + type.
-        if chars[i] == ':' && i > 0 {
+        if chars[i] == ':' && i > 0 && !inside_jsx_tag(&chars, i) {
             let prev = prev_non_space(&chars, i);
             if prev
                 .map(|c| is_ident_end(c) || c == ')' || c == ']' || c == '}' || c == '?')
@@ -1160,6 +1179,7 @@ impl JsxTransformer {
             && (self.current().is_alphanumeric()
                 || self.current() == '_'
                 || self.current() == '.'
+                || self.current() == ':'
                 || self.current() == '$'
                 || self.current() == '-')
         {
@@ -1667,6 +1687,13 @@ fn skip_spaces(chars: &[char], mut i: usize) -> usize {
     i
 }
 
+fn skip_all_whitespace(chars: &[char], mut i: usize) -> usize {
+    while i < chars.len() && chars[i].is_whitespace() {
+        i += 1;
+    }
+    i
+}
+
 fn skip_ident(chars: &[char], mut i: usize) -> usize {
     while i < chars.len() && (chars[i].is_alphanumeric() || chars[i] == '_') {
         i += 1;
@@ -1722,6 +1749,23 @@ fn is_value_token(chars: &[char], i: usize) -> bool {
         return false;
     }
     chars[i].is_alphanumeric() || chars[i] == '"' || chars[i] == '\'' || chars[i] == '{'
+}
+
+fn inside_jsx_tag(chars: &[char], index: usize) -> bool {
+    let mut cursor = index;
+    while cursor > 0 {
+        cursor -= 1;
+        match chars[cursor] {
+            '>' => return false,
+            '<' => {
+                return chars
+                    .get(cursor + 1)
+                    .is_some_and(|next| next.is_alphabetic() || matches!(next, '_' | '/'));
+            }
+            _ => {}
+        }
+    }
+    false
 }
 
 fn find_statement_end(chars: &[char], start: usize) -> usize {

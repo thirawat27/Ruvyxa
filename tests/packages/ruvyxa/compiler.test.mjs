@@ -287,11 +287,40 @@ describe('runtime compiler', () => {
     })
   })
 
+  it('changes the config dependency fingerprint when imported plugin code changes', async () => {
+    await withFixture(async ({ root }) => {
+      const pluginFile = path.join(root, 'plugin.ts')
+      await writeFile(
+        path.join(root, 'ruvyxa.config.ts'),
+        `
+          import { plugin } from "./plugin.js"
+          export default { plugins: [plugin] }
+        `,
+      )
+      await writeFile(
+        pluginFile,
+        `export const plugin = { name: "label", transform(code) { return code + "\\n// one" } }\n`,
+      )
+
+      const first = await runJson(configRenderer, [root], {})
+      await writeFile(
+        pluginFile,
+        `export const plugin = { name: "label", transform(code) { return code + "\\n// two" } }\n`,
+      )
+      const second = await runJson(configRenderer, [root], {})
+
+      assert.match(first.dependencyHash, /^[a-f0-9]{64}$/)
+      assert.match(second.dependencyHash, /^[a-f0-9]{64}$/)
+      assert.notEqual(second.dependencyHash, first.dependencyHash)
+    })
+  })
+
   it('returns JSON for missing and failing config files', async () => {
     await withFixture(async ({ root }) => {
       const missing = await runJson(configRenderer, [root], {})
       assert.equal(missing.ok, true)
       assert.deepEqual(missing.config, {})
+      assert.equal(missing.dependencyHash, 'no-config')
 
       await writeFile(
         path.join(root, 'ruvyxa.config.ts'),

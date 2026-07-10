@@ -23,6 +23,8 @@ export interface RuvyxaConfig {
     jsxRuntime?: 'classic' | 'automatic'
     esTarget?: 'es2018' | 'es2019' | 'es2020' | 'es2022' | 'esnext'
     emitChunkManifest?: boolean
+    /** Precompile dev route modules and load their dependencies in background workers. */
+    prebundleDependencies?: boolean
   }
   rendering?: RenderingConfig
   debug?: {
@@ -38,6 +40,8 @@ export interface RuvyxaConfig {
   cache?: {
     routeManifest?: boolean
     css?: boolean
+    /** Shared compile-cache directory. Relative paths are resolved from the project root. */
+    buildDir?: string
   }
   middleware?: MiddlewareConfig
   adapter?: Adapter
@@ -190,6 +194,8 @@ export interface RuvyxaPlugin {
 export interface BuildContext {
   root: string
   outDir: string
+  /** Override the generated chunk manifest path when an adapter relocates client output. */
+  chunkManifest?: string
 }
 
 export interface AdapterOutput {
@@ -197,6 +203,10 @@ export interface AdapterOutput {
   target: Adapter['target']
   entry: string
   assetsDir: string
+  /** Directory that adapters must copy or publish with hashed client chunks. */
+  clientDir?: string
+  /** Chunk graph consumed by deployment tooling when `emitChunkManifest` is enabled. */
+  chunkManifest?: string
   platform?: 'node' | 'vercel' | 'cloudflare' | 'netlify' | 'bun' | 'static'
   configFiles?: string[]
   functionsDir?: string

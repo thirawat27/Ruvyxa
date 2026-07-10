@@ -28,6 +28,8 @@ export default defineConfig({
   "platform": "netlify",
   "entry": ".ruvyxa/server/app",
   "assetsDir": ".ruvyxa/assets",
+  "clientDir": ".ruvyxa/client",
+  "chunkManifest": ".ruvyxa/client/chunk-manifest.json",
   "functionsDir": ".ruvyxa/netlify/functions",
   "configFiles": ["netlify.toml"]
 }

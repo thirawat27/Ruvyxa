@@ -24,6 +24,9 @@ This produces:
 └── build.json    # Build metadata and config snapshot
 ```
 
+When `build.emitChunkManifest` is enabled, `client/chunk-manifest.json` is emitted beside the client
+manifest.
+
 ---
 
 ## Self-Hosted (Node)
@@ -51,6 +54,10 @@ export default defineConfig({
   adapter: nodeAdapter(),
 })
 ```
+
+Every adapter output includes `clientDir` and `chunkManifest`. Deployment tooling should publish the
+entire client directory and consume `chunkManifest` when the optional file exists; builds that do
+not enable `emitChunkManifest` remain valid.
 
 ### Available Adapters
 
@@ -93,7 +100,9 @@ Output metadata:
   "target": "node",
   "platform": "node",
   "entry": ".ruvyxa/server/app",
-  "assetsDir": ".ruvyxa/assets"
+  "assetsDir": ".ruvyxa/assets",
+  "clientDir": ".ruvyxa/client",
+  "chunkManifest": ".ruvyxa/client/chunk-manifest.json"
 }
 ```
 

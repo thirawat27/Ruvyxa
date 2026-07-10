@@ -14,6 +14,8 @@ describe('bunAdapter', () => {
         platform: output.platform,
         entry: output.entry,
         assetsDir: output.assetsDir,
+        clientDir: output.clientDir,
+        chunkManifest: output.chunkManifest,
       },
       {
         name: 'bun',
@@ -21,6 +23,8 @@ describe('bunAdapter', () => {
         platform: 'bun',
         entry: '.ruvyxa/server/app',
         assetsDir: '.ruvyxa/assets',
+        clientDir: '.ruvyxa/client',
+        chunkManifest: '.ruvyxa/client/chunk-manifest.json',
       },
     )
   })

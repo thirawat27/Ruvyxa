@@ -7,7 +7,7 @@
 //! ## Cache key
 //!
 //! ```text
-//! blake3(source_content || "\0" || jsx_flag || "\0" || jsx_runtime || "\0" || compiler_version)
+//! blake3(source_content || "\0" || jsx_flag || "\0" || jsx_runtime || "\0" || compiler_version || "\0" || namespace)
 //! ```
 //!
 //! The compiler version is included so that cache entries are automatically
@@ -60,6 +60,9 @@ pub struct CompileCache {
     cache_dir: PathBuf,
     /// Whether caching is enabled.
     enabled: bool,
+    /// Build-input namespace used to invalidate artifacts when config or plugin
+    /// dependencies change without changing a source module.
+    namespace: String,
     /// Process-local hot cache shared by cloned cache handles.
     memory: Arc<Mutex<HashMap<String, MemEntry>>>,
 }
@@ -77,9 +80,26 @@ impl CompileCache {
     /// Create a cache instance rooted at `project_root/.ruvyxa/cache/bundler/`.
     pub fn new(project_root: &Path, enabled: bool) -> Self {
         let cache_dir = project_root.join(".ruvyxa").join("cache").join("bundler");
+        Self::at_dir(cache_dir, enabled)
+    }
+
+    /// Create a cache rooted at a caller-selected directory.
+    ///
+    /// This supports shared filesystems mounted by CI or developer machines.
+    pub fn at_dir(cache_dir: impl Into<PathBuf>, enabled: bool) -> Self {
+        Self::at_dir_with_namespace(cache_dir, enabled, "")
+    }
+
+    /// Create a cache at a caller-selected directory with an invalidation namespace.
+    pub fn at_dir_with_namespace(
+        cache_dir: impl Into<PathBuf>,
+        enabled: bool,
+        namespace: impl Into<String>,
+    ) -> Self {
         Self {
-            cache_dir,
+            cache_dir: cache_dir.into(),
             enabled,
+            namespace: namespace.into(),
             memory: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -89,6 +109,7 @@ impl CompileCache {
         Self {
             cache_dir: PathBuf::new(),
             enabled: false,
+            namespace: String::new(),
             memory: Arc::new(Mutex::new(HashMap::new())),
         }
     }
@@ -108,7 +129,12 @@ impl CompileCache {
         has_jsx: bool,
         jsx_runtime: JsxRuntime,
     ) -> CacheLookup {
-        let key = Self::cache_key_with_options(source, has_jsx, jsx_runtime);
+        let key = Self::cache_key_with_options_and_namespace(
+            source,
+            has_jsx,
+            jsx_runtime,
+            &self.namespace,
+        );
 
         if !self.enabled {
             return CacheLookup::Miss(key);
@@ -191,7 +217,12 @@ impl CompileCache {
         if !self.enabled {
             return;
         }
-        let key = Self::cache_key(source, has_jsx);
+        let key = Self::cache_key_with_options_and_namespace(
+            source,
+            has_jsx,
+            JsxRuntime::Classic,
+            &self.namespace,
+        );
         if let Ok(mut memory) = self.memory.lock() {
             memory.remove(&key);
         }
@@ -221,6 +252,16 @@ impl CompileCache {
     ///
     /// Key = blake3(source || "\0" || jsx_flag || "\0" || jsx_runtime || "\0" || compiler_version)[..32] as hex.
     pub fn cache_key_with_options(source: &str, has_jsx: bool, jsx_runtime: JsxRuntime) -> String {
+        Self::cache_key_with_options_and_namespace(source, has_jsx, jsx_runtime, "")
+    }
+
+    /// Compute a cache key with an additional build-input namespace.
+    pub fn cache_key_with_options_and_namespace(
+        source: &str,
+        has_jsx: bool,
+        jsx_runtime: JsxRuntime,
+        namespace: &str,
+    ) -> String {
         let mut hasher = blake3::Hasher::new();
         hasher.update(source.as_bytes());
         hasher.update(b"\0");
@@ -232,6 +273,8 @@ impl CompileCache {
         });
         hasher.update(b"\0");
         hasher.update(COMPILER_VERSION.as_bytes());
+        hasher.update(b"\0");
+        hasher.update(namespace.as_bytes());
         let hash = hasher.finalize();
         hash.to_hex()[..32].to_string()
     }
@@ -314,6 +357,40 @@ mod tests {
         let k1 = CompileCache::cache_key_with_options("const x = 1;", true, JsxRuntime::Classic);
         let k2 = CompileCache::cache_key_with_options("const x = 1;", true, JsxRuntime::Automatic);
         assert_ne!(k1, k2);
+    }
+
+    #[test]
+    fn cache_namespace_invalidates_entries() {
+        let tmp = tempfile::tempdir().unwrap();
+        let first = CompileCache::at_dir_with_namespace(tmp.path(), true, "config-a");
+        let second = CompileCache::at_dir_with_namespace(tmp.path(), true, "config-b");
+        let source = "const x: number = 1;";
+
+        let key = match first.lookup(source, false) {
+            CacheLookup::Miss(key) => key,
+            CacheLookup::Hit(_) => panic!("new namespace should initially miss"),
+        };
+        first.store(&key, "const x = 1;");
+
+        assert!(matches!(first.lookup(source, false), CacheLookup::Hit(_)));
+        assert!(matches!(second.lookup(source, false), CacheLookup::Miss(_)));
+    }
+
+    #[test]
+    fn shared_directory_reuses_artifacts_across_project_roots() {
+        let tmp = tempfile::tempdir().unwrap();
+        let shared = tmp.path().join("network-cache");
+        let first = CompileCache::at_dir_with_namespace(&shared, true, "same-config");
+        let second = CompileCache::at_dir_with_namespace(&shared, true, "same-config");
+        let source = "const shared: string = 'cache';";
+
+        let key = match first.lookup(source, false) {
+            CacheLookup::Miss(key) => key,
+            CacheLookup::Hit(_) => panic!("shared cache should initially miss"),
+        };
+        first.store(&key, "const shared = 'cache';");
+
+        assert!(matches!(second.lookup(source, false), CacheLookup::Hit(_)));
     }
 
     #[test]

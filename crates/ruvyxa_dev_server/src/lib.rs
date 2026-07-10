@@ -60,6 +60,8 @@ pub struct ServerConfig {
     pub watch: bool,
     pub cache_route_manifest: bool,
     pub cache_css: bool,
+    /// Precompile route modules and load their dependencies in dev workers.
+    pub prebundle_dependencies: bool,
     pub middleware: MiddlewareConfig,
 }
 
@@ -77,6 +79,7 @@ impl ServerConfig {
             watch: true,
             cache_route_manifest: true,
             cache_css: true,
+            prebundle_dependencies: true,
             middleware: MiddlewareConfig::default(),
         }
     }
@@ -94,6 +97,7 @@ impl ServerConfig {
             watch: false,
             cache_route_manifest: true,
             cache_css: true,
+            prebundle_dependencies: false,
             middleware: MiddlewareConfig::default(),
         }
     }
@@ -208,6 +212,16 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
     let worker_pool = Arc::new(NodeWorkerPool::start(&config.root, env).await?);
     info!("Node worker pool ready");
 
+    let warmup_routes = dependency_warmup_routes(&config, &manifest);
+    if !warmup_routes.is_empty() {
+        let warmup_pool = worker_pool.clone();
+        let warmup_root = config.root.display().to_string();
+        tokio::spawn(async move {
+            let warmed = warmup_pool.warmup(&warmup_root, warmup_routes).await;
+            info!(warmed, "dependency pre-bundling complete");
+        });
+    }
+
     let render_cache = Arc::new(if config.watch {
         RenderCache::default_dev()
     } else {
@@ -267,6 +281,25 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
     print_server_ready(&config, &manifest, bound_address);
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+fn dependency_warmup_routes(
+    config: &ServerConfig,
+    manifest: &RouteManifest,
+) -> Vec<worker_pool::WarmupRoute> {
+    if !config.watch || !config.prebundle_dependencies {
+        return Vec::new();
+    }
+
+    manifest
+        .routes
+        .iter()
+        .filter(|route| route.kind == RouteKind::Page)
+        .map(|route| worker_pool::WarmupRoute {
+            page_file: route.file.display().to_string(),
+            app_dir: config.app_dir.display().to_string(),
+        })
+        .collect()
 }
 
 async fn bind_listener(
@@ -3317,6 +3350,36 @@ mod tests {
         assert_eq!(cache.manifest(&config).await.unwrap().routes.len(), 1);
         cache.invalidate_async().await;
         assert_eq!(cache.manifest(&config).await.unwrap().routes.len(), 2);
+    }
+
+    #[test]
+    fn dependency_prebundle_plan_includes_pages_only_when_enabled_in_dev() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        std::fs::create_dir_all(app.join("api/health")).unwrap();
+        std::fs::write(
+            app.join("page.tsx"),
+            "export default function Home() { return <main /> }",
+        )
+        .unwrap();
+        std::fs::write(
+            app.join("api/health/route.ts"),
+            "export function GET() { return Response.json({ ok: true }) }",
+        )
+        .unwrap();
+        let manifest = discover_routes(DiscoverOptions::new(&app)).unwrap();
+
+        let mut dev = ServerConfig::dev(temp.path(), "localhost", 3000);
+        let routes = dependency_warmup_routes(&dev, &manifest);
+        assert_eq!(routes.len(), 1);
+        assert!(routes[0].page_file.ends_with("page.tsx"));
+        assert_eq!(routes[0].app_dir, app.display().to_string());
+
+        dev.prebundle_dependencies = false;
+        assert!(dependency_warmup_routes(&dev, &manifest).is_empty());
+
+        let production = ServerConfig::production(temp.path(), "localhost", 3000);
+        assert!(dependency_warmup_routes(&production, &manifest).is_empty());
     }
 
     #[test]

@@ -20,7 +20,7 @@ export type {
   StaticParamsContext,
   TransformResult,
 } from './types.js'
-export { validateBuildContext } from './utils.js'
+export { clientBuildOutput, validateBuildContext } from './utils.js'
 export {
   action,
   cache,

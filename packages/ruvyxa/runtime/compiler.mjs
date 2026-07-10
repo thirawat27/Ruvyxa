@@ -29,7 +29,12 @@ export function collectLayouts(appDir, routeDir) {
   return layouts
 }
 
-export async function compileBundle({
+export async function compileBundle(options) {
+  return (await compileBundleWithMetadata(options)).outfile
+}
+
+/** Compile a bundle and return a stable fingerprint of its project-local inputs. */
+export async function compileBundleWithMetadata({
   projectRoot,
   entrySource,
   sourcefile = 'ruvyxa:entry.ts',
@@ -68,7 +73,11 @@ export async function compileBundle({
   if (linked.map) {
     await writeIfChanged(`${outfile}.map`, JSON.stringify(linked.map))
   }
-  return outfile
+  return {
+    outfile,
+    dependencyHash: await fingerprintProjectInputs(root, modules),
+    inputs: projectInputPaths(root, modules),
+  }
 }
 
 export function toImportPath(file) {
@@ -82,6 +91,49 @@ export function cacheFileName(parts, extension) {
     hash.update('\0')
   }
   return `${hash.digest('hex').slice(0, 16)}.${extension}`
+}
+
+function projectInputPaths(root, modules) {
+  return modules
+    .filter((module) => module.filePath && isWithinProject(root, module.filePath))
+    .map((module) => path.relative(root, module.filePath).replaceAll('\\', '/'))
+    .sort()
+}
+
+async function fingerprintProjectInputs(root, modules) {
+  const hash = createHash('sha256')
+  const projectModules = modules
+    .filter((module) => module.filePath && isWithinProject(root, module.filePath))
+    .map((module) => ({
+      path: path.relative(root, module.filePath).replaceAll('\\', '/'),
+      source: module.source,
+    }))
+    .sort((left, right) => left.path.localeCompare(right.path))
+
+  for (const module of projectModules) {
+    hash.update(module.path)
+    hash.update('\0')
+    hash.update(module.source)
+    hash.update('\0')
+  }
+
+  for (const fileName of [
+    'package.json',
+    'pnpm-lock.yaml',
+    'package-lock.json',
+    'yarn.lock',
+    'bun.lock',
+    'bun.lockb',
+  ]) {
+    const file = path.join(root, fileName)
+    if (!existsSync(file)) continue
+    hash.update(fileName)
+    hash.update('\0')
+    hash.update(await readFile(file))
+    hash.update('\0')
+  }
+
+  return hash.digest('hex')
 }
 
 export function runtimeAliases(runtimeDir = path.dirname(new URL(import.meta.url).pathname)) {
@@ -630,6 +682,11 @@ function isDirectory(file) {
 function isProjectLocal(root, file) {
   const relative = path.relative(root, file)
   return relative && !relative.startsWith('..') && !path.isAbsolute(relative)
+}
+
+function isWithinProject(root, file) {
+  const relative = path.relative(root, file)
+  return !relative.startsWith('..') && !path.isAbsolute(relative)
 }
 
 function isAssetSpecifier(specifier) {

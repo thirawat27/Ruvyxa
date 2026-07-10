@@ -16,6 +16,8 @@ describe('nodeAdapter', () => {
       platform: 'node',
       entry: '.ruvyxa/server/app',
       assetsDir: '.ruvyxa/assets',
+      clientDir: '.ruvyxa/client',
+      chunkManifest: '.ruvyxa/client/chunk-manifest.json',
     })
   })
 })

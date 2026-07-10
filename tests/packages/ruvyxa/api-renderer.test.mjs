@@ -52,6 +52,21 @@ describe('API renderer request forwarding', () => {
       })
     })
   })
+
+  it('prebundles a route dependency graph in the persistent worker', async () => {
+    await withFixture(async ({ root, appDir, pageFile }) => {
+      const result = await runWorkerJson({
+        id: 'dependency-prebundle-test',
+        type: 'warmup',
+        projectRoot: root,
+        routes: [{ pageFile, appDir }],
+      })
+
+      assert.equal(result.ok, true)
+      assert.equal(result.warmed, 1)
+      assert.ok(result.moduleCacheSize >= 1)
+    })
+  })
 })
 
 function runJson(script, args) {
@@ -146,7 +161,9 @@ function runWorkerJson(request) {
 async function withFixture(run) {
   const root = await mkdtemp(path.join(exampleRoot, '.ruvyxa-api-test-'))
   const routeDir = path.join(root, 'app/api/echo')
+  const appDir = path.join(root, 'app')
   const routeFile = path.join(routeDir, 'route.ts')
+  const pageFile = path.join(appDir, 'page.tsx')
   await mkdir(routeDir, { recursive: true })
   await writeFile(
     routeFile,
@@ -159,9 +176,10 @@ async function withFixture(run) {
       }
     `,
   )
+  await writeFile(pageFile, 'export default function Page() { return <main>Warm</main> }\n')
 
   try {
-    await run({ root, routeFile })
+    await run({ root, appDir, pageFile, routeFile })
   } finally {
     await rm(root, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
   }

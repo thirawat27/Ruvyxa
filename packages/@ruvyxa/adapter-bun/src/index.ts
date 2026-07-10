@@ -1,5 +1,5 @@
 import type { Adapter, AdapterOutput, BuildContext } from '@ruvyxa/core'
-import { validateBuildContext } from '@ruvyxa/core'
+import { clientBuildOutput, validateBuildContext } from '@ruvyxa/core'
 
 /**
  * Options for the Bun adapter.
@@ -45,6 +45,7 @@ export function bunAdapter(options: BunAdapterOptions = {}): Adapter {
         platform: 'bun',
         entry: options.entry ?? `${ctx.outDir}/server/app`,
         assetsDir: `${ctx.outDir}/assets`,
+        ...clientBuildOutput(ctx),
       }
     },
   }

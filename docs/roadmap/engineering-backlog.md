@@ -31,16 +31,16 @@ plugin bridge upgrades. Items here should not be treated as deploy blockers unle
 | Wasmtime plugin runtime                       | Sandboxed WebAssembly plugins with fuel, memory, and permissions                  |
 | Configurable CORS, timing, logging middleware | Tower-based composable middleware stack                                           |
 | CLI platform packages                         | `@ruvyxa/cli-*` for win32, linux x64/arm64, darwin x64/arm64                      |
+| Full parser compatibility suite               | Fixture coverage for multiline modules, decorators, `satisfies`, `using`, and JSX |
+| Config dependency invalidation                | Imported config/plugin fingerprints namespace compile-cache artifacts             |
+| Adapter chunk-manifest consumption            | Every adapter reports client output and optional chunk-manifest paths             |
+| Dependency pre-bundling                       | Dev route graphs warm every persistent Node worker in the background              |
+| Shared/remote build cache                     | Configurable local, network, or CI-restored compile-cache directory               |
 
 ## Remaining Work
 
-| Priority | Area                                  | Why it matters                                                                                            | Suggested proof                                                             |
-| -------- | ------------------------------------- | --------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
-| P2       | Full parser compatibility suite       | AST facts are lightweight; add cases for advanced TS/JSX grammar (decorators, `satisfies`, `using`, etc.) | Parser fixture suite in native bundler tests                                |
-| P2       | Config dependency invalidation        | Config/plugin changes should invalidate all affected compile caches explicitly                            | Change plugin code and verify rebuilt output changes without `ruvyxa clean` |
-| P2       | Adapter consumption of chunk manifest | Adapters should copy/use `chunk-manifest.json` consistently                                               | Adapter tests inspect produced deployment output for chunk references       |
-| P3       | Dependency pre-bundling               | Can improve cold dev startup for dependency-heavy apps                                                    | Benchmark cold `ruvyxa dev` startup with large dependency graph             |
-| P3       | Remote/build-cache server             | Share compile cache across CI and developer machines                                                      | Integration test with shared network cache directory                        |
+No P2 or P3 engineering items remain in this backlog. New work should be added with an observable
+proof before implementation begins.
 
 ## Release Gate
 

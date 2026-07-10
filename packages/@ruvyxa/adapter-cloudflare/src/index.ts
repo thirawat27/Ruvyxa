@@ -1,5 +1,5 @@
 import type { Adapter, AdapterOutput, BuildContext } from '@ruvyxa/core'
-import { validateBuildContext } from '@ruvyxa/core'
+import { clientBuildOutput, validateBuildContext } from '@ruvyxa/core'
 
 /**
  * Options for the Cloudflare Workers adapter.
@@ -47,6 +47,7 @@ export function cloudflareAdapter(options: CloudflareAdapterOptions = {}): Adapt
         platform: 'cloudflare',
         entry: options.workerEntry ?? `${ctx.outDir}/server/app`,
         assetsDir: `${ctx.outDir}/assets`,
+        ...clientBuildOutput(ctx),
         configFiles: ['wrangler.toml'],
       }
     },

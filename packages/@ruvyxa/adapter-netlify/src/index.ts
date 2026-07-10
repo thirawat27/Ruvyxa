@@ -1,5 +1,5 @@
 import type { Adapter, AdapterOutput, BuildContext } from '@ruvyxa/core'
-import { validateBuildContext } from '@ruvyxa/core'
+import { clientBuildOutput, validateBuildContext } from '@ruvyxa/core'
 
 /**
  * Options for the Netlify adapter.
@@ -48,6 +48,7 @@ export function netlifyAdapter(options: NetlifyAdapterOptions = {}): Adapter {
         platform: 'netlify',
         entry: `${ctx.outDir}/server/app`,
         assetsDir: `${ctx.outDir}/assets`,
+        ...clientBuildOutput(ctx),
         functionsDir,
         configFiles: ['netlify.toml'],
       }

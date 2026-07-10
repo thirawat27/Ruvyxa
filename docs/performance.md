@@ -99,6 +99,25 @@ JavaScript `resolveId` and `transform` config hooks share one persistent Node pr
 context. The newline-delimited JSON protocol keeps plugin module state alive and avoids paying Node
 startup and config compilation cost for every module. A transform result may include a Source Map v3
 object or JSON string in `map`; valid mappings are forwarded into the emitted bundle source map.
+Imported config and plugin files are content-fingerprinted, so changing plugin behavior invalidates
+affected compile artifacts without requiring `ruvyxa clean`.
+
+### Shared Build Cache
+
+Set `cache.buildDir` to a local, network-mounted, or CI-restored directory to reuse
+content-addressed native compile artifacts across workspaces. `RUVYXA_BUILD_CACHE_DIR` overrides the
+config value, which is useful for CI agents that mount the cache at a machine-specific absolute
+path.
+
+```ts
+export default defineConfig({
+  cache: { buildDir: '/mnt/ruvyxa-build-cache' },
+})
+```
+
+Artifacts include the compiler version, JSX mode, source content, and config/plugin dependency
+fingerprint in their keys. Sharing a directory between projects does not make graph manifests or
+project output shared.
 
 ---
 
@@ -113,6 +132,9 @@ object or JSON string in `map`; valid mappings are forwarded into the emitted bu
   Configurable via `RUVYXA_RENDER_CACHE_SIZE` env var.
 - **Worker pool**: auto-sizes to `available_parallelism()` (clamped 2–8). Configurable via
   `RUVYXA_WORKER_POOL_SIZE` env var. Default 10s timeout for dead-worker detection.
+- **Dependency pre-bundling**: page route graphs compile in the background and load into every
+  worker's process-local ESM cache. Disable with `build.prebundleDependencies: false` when measuring
+  an un-warmed development path.
 - **Async file I/O**: hot-path file reads use `tokio::task::spawn_blocking`.
 
 ### Production Server

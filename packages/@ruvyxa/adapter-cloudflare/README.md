@@ -28,6 +28,8 @@ export default defineConfig({
   "platform": "cloudflare",
   "entry": ".ruvyxa/server/app",
   "assetsDir": ".ruvyxa/assets",
+  "clientDir": ".ruvyxa/client",
+  "chunkManifest": ".ruvyxa/client/chunk-manifest.json",
   "configFiles": ["wrangler.toml"]
 }
 ```
