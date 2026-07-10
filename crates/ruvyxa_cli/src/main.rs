@@ -748,6 +748,7 @@ fn prerender_static_routes(
         return Ok(Vec::new());
     };
 
+    let styles = ruvyxa_dev_server::collect_css(root, app_dir)?;
     let mut prerendered = Vec::new();
 
     for route in routes_to_prerender {
@@ -758,7 +759,7 @@ fn prerender_static_routes(
                 if let Some(parent) = html_path.parent() {
                     fs::create_dir_all(parent)?;
                 }
-                let shell = csr_shell_html(&route.path, client_dir);
+                let shell = csr_shell_html(&route.path, client_dir, &styles);
                 fs::write(&html_path, &shell)?;
                 prerendered.push(PrerenderedRoute {
                     path: route.path.clone(),
@@ -832,8 +833,9 @@ fn prerender_static_routes(
                         .get("html")
                         .and_then(|v| v.as_str())
                         .unwrap_or_default();
+                    let html = inject_prerender_styles(html, &styles);
                     let html =
-                        inject_prerender_client_assets(html, client_dir, &route.path, render_path);
+                        inject_prerender_client_assets(&html, client_dir, &route.path, render_path);
 
                     fs::write(&html_path, html)?;
                     prerendered.push(PrerenderedRoute {
@@ -943,7 +945,7 @@ fn prerender_html_path(prerender_dir: &Path, route_path: &str) -> PathBuf {
 }
 
 /// Generate a minimal CSR shell HTML document.
-fn csr_shell_html(route_path: &str, client_dir: &Path) -> String {
+fn csr_shell_html(route_path: &str, client_dir: &Path, styles: &str) -> String {
     let assets = prerender_client_assets(client_dir, route_path);
     let preload_links = assets
         .as_ref()
@@ -962,6 +964,7 @@ fn csr_shell_html(route_path: &str, client_dir: &Path) -> String {
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Loading...</title>
+  <style data-ruvyxa-css>{styles}</style>
   {preload_links}
   <script>window.__RUVYXA_REQUEST_PATH__ = {path_json};</script>
 </head>
@@ -972,6 +975,20 @@ fn csr_shell_html(route_path: &str, client_dir: &Path) -> String {
 </html>"#,
         path_json = serde_json::to_string(route_path).unwrap_or_else(|_| "\"\"".to_string()),
     )
+}
+
+fn inject_prerender_styles(html: &str, styles: &str) -> String {
+    let style_tag = format!(r#"<style data-ruvyxa-css>{styles}</style>"#);
+    let lower = html.to_ascii_lowercase();
+    if let Some(head_end) = lower.find("</head>") {
+        let mut output = String::with_capacity(html.len() + style_tag.len());
+        output.push_str(&html[..head_end]);
+        output.push_str(&style_tag);
+        output.push_str(&html[head_end..]);
+        return output;
+    }
+
+    format!("<!doctype html><html><head>{style_tag}</head><body>{html}</body></html>")
 }
 
 #[derive(Debug)]
@@ -3223,6 +3240,18 @@ mod tests {
         assert!(html.contains(r#"globalThis.__RUVYXA_REQUEST_PATH__ = "/docs/start""#));
         assert!(html.find("modulepreload").unwrap() < html.find("</head>").unwrap());
         assert!(html.find("docs.123.js").unwrap() < html.find("</body>").unwrap());
+    }
+
+    #[test]
+    fn prerender_html_includes_global_styles_in_the_document_head() {
+        let html = inject_prerender_styles(
+            "<!doctype html><html><head><title>Docs</title></head><body><main>Guide</main></body></html>",
+            "body { color: rebeccapurple; }",
+        );
+
+        assert!(html.contains(r#"<style data-ruvyxa-css>body { color: rebeccapurple; }</style>"#));
+        assert!(html.find("data-ruvyxa-css").unwrap() < html.find("</head>").unwrap());
+        assert!(html.contains("<main>Guide</main>"));
     }
 
     #[test]

@@ -2431,7 +2431,8 @@ fn find_route<'a>(
     RadixRouter::compile(manifest).find(manifest, request_path)
 }
 
-fn collect_css(root: &Path, app_dir: &Path) -> Result<String> {
+/// Collect application styles for server-rendered and pre-rendered documents.
+pub fn collect_css(root: &Path, app_dir: &Path) -> Result<String> {
     let mut css = String::new();
 
     for entry in WalkDir::new(app_dir)
