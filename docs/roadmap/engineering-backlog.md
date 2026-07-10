@@ -14,6 +14,9 @@ plugin bridge upgrades. Items here should not be treated as deploy blockers unle
 | AST-backed module facts                       | Implemented for resolver/compiler inputs                                          |
 | Native bundler plugin pipeline                | `NativeBundlerPlugin` trait with `resolveId`/`transform` hooks                    |
 | JavaScript config plugin bridge               | `resolveId` and `transform` hooks from `ruvyxa.config.ts`                         |
+| Persistent JS plugin worker                   | One JSONL Node worker per build context serves all config plugin hooks            |
+| Plugin source map forwarding                  | Plugin transform maps are merged into emitted client bundle source maps           |
+| Runtime preload for shared chunks             | Route manifests drive `modulepreload` hints for runtime and pre-rendered HTML     |
 | Tree-shaking                                  | Dead-code elimination per route bundle, enabled by default                        |
 | Minification                                  | Whitespace removal, identifier shortening, dead-code elimination                  |
 | BLAKE3 content hashing                        | Deterministic cache-busting filenames for client bundles                          |
@@ -31,16 +34,13 @@ plugin bridge upgrades. Items here should not be treated as deploy blockers unle
 
 ## Remaining Work
 
-| Priority | Area                                  | Why it matters                                                                                                         | Suggested proof                                                               |
-| -------- | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------- |
-| P1       | Persistent JS plugin worker           | Current bridge spawns Node per hook; fine for correctness, slower for large apps with many plugin hooks                | Benchmark route builds before/after worker pooling                            |
-| P1       | Runtime preload for shared chunks     | Shared chunks emitted as metadata/files, but route scripts remain self-contained; preload tags would improve hydration | Browser integration test verifies preload tags and route hydration timing     |
-| P1       | Plugin source map forwarding          | `transform` may return maps, but native bridge currently forwards only code                                            | Source map fixture with transformed line mapping verified in browser DevTools |
-| P2       | Full parser compatibility suite       | AST facts are lightweight; add cases for advanced TS/JSX grammar (decorators, `satisfies`, `using`, etc.)              | Parser fixture suite in native bundler tests                                  |
-| P2       | Config dependency invalidation        | Config/plugin changes should invalidate all affected compile caches explicitly                                         | Change plugin code and verify rebuilt output changes without `ruvyxa clean`   |
-| P2       | Adapter consumption of chunk manifest | Adapters should copy/use `chunk-manifest.json` consistently                                                            | Adapter tests inspect produced deployment output for chunk references         |
-| P3       | Dependency pre-bundling               | Can improve cold dev startup for dependency-heavy apps                                                                 | Benchmark cold `ruvyxa dev` startup with large dependency graph               |
-| P3       | Remote/build-cache server             | Share compile cache across CI and developer machines                                                                   | Integration test with shared network cache directory                          |
+| Priority | Area                                  | Why it matters                                                                                            | Suggested proof                                                             |
+| -------- | ------------------------------------- | --------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------- |
+| P2       | Full parser compatibility suite       | AST facts are lightweight; add cases for advanced TS/JSX grammar (decorators, `satisfies`, `using`, etc.) | Parser fixture suite in native bundler tests                                |
+| P2       | Config dependency invalidation        | Config/plugin changes should invalidate all affected compile caches explicitly                            | Change plugin code and verify rebuilt output changes without `ruvyxa clean` |
+| P2       | Adapter consumption of chunk manifest | Adapters should copy/use `chunk-manifest.json` consistently                                               | Adapter tests inspect produced deployment output for chunk references       |
+| P3       | Dependency pre-bundling               | Can improve cold dev startup for dependency-heavy apps                                                    | Benchmark cold `ruvyxa dev` startup with large dependency graph             |
+| P3       | Remote/build-cache server             | Share compile cache across CI and developer machines                                                      | Integration test with shared network cache directory                        |
 
 ## Release Gate
 

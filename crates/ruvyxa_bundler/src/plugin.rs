@@ -113,7 +113,18 @@ impl PluginPipeline {
     }
 
     pub fn transform(&self, code: &str, id: &Path, ctx: &PluginContext) -> Result<String> {
+        Ok(self.transform_with_map(code, id, ctx)?.code)
+    }
+
+    /// Apply all transform hooks while preserving the most recent source map.
+    pub fn transform_with_map(
+        &self,
+        code: &str,
+        id: &Path,
+        ctx: &PluginContext,
+    ) -> Result<TransformResult> {
         let mut current = code.to_string();
+        let mut map = None;
         for plugin in self.plugins.iter() {
             if let Some(result) = plugin.transform(&current, id, ctx).map_err(|err| {
                 BundleError::Compiler(format!(
@@ -122,9 +133,12 @@ impl PluginPipeline {
                 ))
             })? {
                 current = result.code;
+                if result.map.is_some() {
+                    map = result.map;
+                }
             }
         }
-        Ok(current)
+        Ok(TransformResult { code: current, map })
     }
 }
 
@@ -149,6 +163,29 @@ mod tests {
         }
     }
 
+    struct MapPlugin;
+
+    impl NativeBundlerPlugin for MapPlugin {
+        fn name(&self) -> &str {
+            "source-map"
+        }
+
+        fn transform(
+            &self,
+            code: &str,
+            _id: &Path,
+            _ctx: &PluginContext,
+        ) -> Result<Option<TransformResult>> {
+            Ok(Some(TransformResult {
+                code: code.to_string(),
+                map: Some(
+                    r#"{"version":3,"sources":["input.ts"],"names":[],"mappings":"AAAA"}"#
+                        .to_string(),
+                ),
+            }))
+        }
+    }
+
     #[test]
     fn pipeline_applies_transform_hooks_in_order() {
         let pipeline = PluginPipeline::new(vec![Arc::new(BannerPlugin)]);
@@ -164,5 +201,21 @@ mod tests {
 
         assert!(out.starts_with("/* banner */"));
         assert_eq!(pipeline.plugin_names(), vec!["banner"]);
+    }
+
+    #[test]
+    fn pipeline_preserves_transform_source_map() {
+        let pipeline = PluginPipeline::new(vec![Arc::new(MapPlugin)]);
+        let ctx = PluginContext {
+            project_root: PathBuf::from("/app"),
+            importer: None,
+            target: BundleTarget::Client,
+        };
+
+        let out = pipeline
+            .transform_with_map("export const answer = 42;", Path::new("/app/page.ts"), &ctx)
+            .unwrap();
+
+        assert!(out.map.unwrap().contains("input.ts"));
     }
 }

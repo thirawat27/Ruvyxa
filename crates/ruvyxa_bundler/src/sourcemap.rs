@@ -16,7 +16,7 @@
 
 use std::path::{Path, PathBuf};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// A single mapping segment: one generated position → one original position.
 #[derive(Debug, Clone)]
@@ -146,6 +146,94 @@ impl SourceMapBuilder {
         }
     }
 
+    /// Import mappings from a Source Map v3 document at a generated-line offset.
+    ///
+    /// Returns `false` for malformed or empty maps so callers can retain their
+    /// existing identity-mapping fallback without breaking older plugins.
+    pub fn add_source_map(&mut self, json: &str, gen_line_offset: u32) -> bool {
+        let mut candidate = self.clone();
+        if !candidate.add_source_map_inner(json, gen_line_offset) {
+            return false;
+        }
+        *self = candidate;
+        true
+    }
+
+    fn add_source_map_inner(&mut self, json: &str, gen_line_offset: u32) -> bool {
+        let Ok(source_map) = serde_json::from_str::<InputSourceMap>(json) else {
+            return false;
+        };
+        if source_map.version != 3 || source_map.sources.is_empty() {
+            return false;
+        }
+
+        let source_indices = source_map
+            .sources
+            .iter()
+            .enumerate()
+            .map(|(index, source)| {
+                let path = if source_map.source_root.is_empty() {
+                    PathBuf::from(source)
+                } else {
+                    PathBuf::from(&source_map.source_root).join(source)
+                };
+                self.add_source(
+                    &path,
+                    source_map
+                        .sources_content
+                        .get(index)
+                        .and_then(Option::as_deref),
+                )
+            })
+            .collect::<Vec<_>>();
+
+        let mut previous_source = 0i64;
+        let mut previous_original_line = 0i64;
+        let mut previous_original_column = 0i64;
+        let mut imported = Vec::new();
+
+        for (generated_line, line) in source_map.mappings.split(';').enumerate() {
+            let mut generated_column = 0i64;
+            for segment in line.split(',').filter(|segment| !segment.is_empty()) {
+                let Some(fields) = decode_vlq_segment(segment) else {
+                    return false;
+                };
+                if fields.len() < 4 {
+                    continue;
+                }
+
+                generated_column += fields[0];
+                previous_source += fields[1];
+                previous_original_line += fields[2];
+                previous_original_column += fields[3];
+                if generated_column < 0
+                    || previous_source < 0
+                    || previous_original_line < 0
+                    || previous_original_column < 0
+                {
+                    return false;
+                }
+                let Some(&source_idx) = source_indices.get(previous_source as usize) else {
+                    return false;
+                };
+
+                imported.push(Mapping {
+                    gen_line: gen_line_offset + generated_line as u32,
+                    gen_col: generated_column as u32,
+                    source_idx,
+                    orig_line: previous_original_line as u32,
+                    orig_col: previous_original_column as u32,
+                });
+            }
+        }
+
+        if imported.is_empty() {
+            return false;
+        }
+        self.mappings.extend(imported);
+        true
+    }
+
     /// Serialize the source map to a JSON string.
     pub fn to_json(&self) -> String {
         let mappings_str = self.encode_mappings();
@@ -257,6 +345,20 @@ struct SourceMapJson<'a> {
     x_google_ignore_list: Option<&'a [u32]>,
 }
 
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct InputSourceMap {
+    version: u8,
+    #[serde(default)]
+    source_root: String,
+    #[serde(default)]
+    sources: Vec<String>,
+    #[serde(default)]
+    sources_content: Vec<Option<String>>,
+    #[serde(default)]
+    mappings: String,
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // VLQ encoding (Base64-VLQ per source map spec)
 // ─────────────────────────────────────────────────────────────────────────────
@@ -283,6 +385,36 @@ fn vlq_encode(out: &mut String, value: i64) {
             break;
         }
     }
+}
+
+fn decode_vlq_segment(segment: &str) -> Option<Vec<i64>> {
+    let mut values = Vec::new();
+    let mut value = 0u64;
+    let mut shift = 0u32;
+
+    for byte in segment.bytes() {
+        let digit = BASE64_CHARS
+            .iter()
+            .position(|candidate| *candidate == byte)? as u64;
+        value |= (digit & 0x1f) << shift;
+        if digit & 0x20 == 0 {
+            let magnitude = (value >> 1) as i64;
+            values.push(if value & 1 == 1 {
+                -magnitude
+            } else {
+                magnitude
+            });
+            value = 0;
+            shift = 0;
+        } else {
+            shift += 5;
+            if shift > 60 {
+                return None;
+            }
+        }
+    }
+
+    (shift == 0).then_some(values)
 }
 
 /// Decode a single VLQ value from a Base64-VLQ string (for testing).
@@ -496,5 +628,18 @@ mod tests {
             0,
             "names should be empty when none were added"
         );
+    }
+
+    #[test]
+    fn imports_source_map_v3_mappings_with_offset() {
+        let mut builder = SourceMapBuilder::new("bundle.js", PathBuf::from("/project"));
+        let input = r#"{"version":3,"sourceRoot":"src","sources":["input.ts"],"sourcesContent":["const value = 1"],"names":[],"mappings":"AAAA"}"#;
+
+        assert!(builder.add_source_map(input, 4));
+
+        let parsed: serde_json::Value = serde_json::from_str(&builder.to_json()).unwrap();
+        assert_eq!(parsed["sources"][0], "src/input.ts");
+        assert_eq!(parsed["sourcesContent"][0], "const value = 1");
+        assert_eq!(parsed["mappings"].as_str().unwrap().matches(';').count(), 4);
     }
 }

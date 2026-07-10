@@ -101,7 +101,8 @@ fn bundle_with_parts(
     )?;
 
     // 3. Compile each module (strip TS types, transform JSX).
-    let compiled = compiler::compile_graph_with_pipeline(&graph, &input, compile_cache, plugins)?;
+    let (compiled, plugin_source_maps) =
+        compiler::compile_graph_with_pipeline_and_maps(&graph, &input, compile_cache, plugins)?;
 
     // 4. Enforce server/client boundaries.
     let mut diagnostics = Vec::new();
@@ -151,7 +152,13 @@ fn bundle_with_parts(
             }
             let source_idx = builder.add_source(&module.path, Some(&module.js));
             let line_count = module.js.lines().count() as u32;
-            builder.add_identity_mappings(source_idx, &module.js, current_line);
+            let imported_plugin_map = plugin_source_maps
+                .get(&module.path)
+                .map(String::as_str)
+                .is_some_and(|map| builder.add_source_map(map, current_line));
+            if !imported_plugin_map {
+                builder.add_identity_mappings(source_idx, &module.js, current_line);
+            }
             current_line += line_count + 5;
         }
 

@@ -1,12 +1,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
-use std::io::IsTerminal;
-use std::io::Write;
+use std::io::{BufRead, BufReader, IsTerminal, Write};
 use std::path::{Path, PathBuf};
-use std::process::Command as ProcessCommand;
-use std::process::Stdio;
-use std::sync::Arc;
+use std::process::{Child, ChildStdin, ChildStdout, Command as ProcessCommand, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 use std::time::{Duration, Instant};
 
@@ -665,7 +663,7 @@ fn prerender_static_routes(
     app_dir: &Path,
     manifest: &RouteManifest,
     prerender_dir: &Path,
-    _client_dir: &Path,
+    client_dir: &Path,
 ) -> anyhow::Result<Vec<PrerenderedRoute>> {
     use ruvyxa_graph::RouteKind;
 
@@ -709,7 +707,7 @@ fn prerender_static_routes(
                 if let Some(parent) = html_path.parent() {
                     fs::create_dir_all(parent)?;
                 }
-                let shell = csr_shell_html(&route.path);
+                let shell = csr_shell_html(&route.path, client_dir);
                 fs::write(&html_path, &shell)?;
                 prerendered.push(PrerenderedRoute {
                     path: route.path.clone(),
@@ -783,6 +781,8 @@ fn prerender_static_routes(
                         .get("html")
                         .and_then(|v| v.as_str())
                         .unwrap_or_default();
+                    let html =
+                        inject_prerender_client_assets(html, client_dir, &route.path, render_path);
 
                     fs::write(&html_path, html)?;
                     prerendered.push(PrerenderedRoute {
@@ -892,7 +892,18 @@ fn prerender_html_path(prerender_dir: &Path, route_path: &str) -> PathBuf {
 }
 
 /// Generate a minimal CSR shell HTML document.
-fn csr_shell_html(route_path: &str) -> String {
+fn csr_shell_html(route_path: &str, client_dir: &Path) -> String {
+    let assets = prerender_client_assets(client_dir, route_path);
+    let preload_links = assets
+        .as_ref()
+        .map(|assets| module_preload_links(&assets.preloads))
+        .unwrap_or_default();
+    let client_src = assets.map(|assets| assets.src).unwrap_or_else(|| {
+        format!(
+            "/__ruvyxa/client/{}.js",
+            route_path.trim_start_matches('/').replace('/', "__")
+        )
+    });
     format!(
         r#"<!doctype html>
 <html>
@@ -900,16 +911,82 @@ fn csr_shell_html(route_path: &str) -> String {
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Loading...</title>
+  {preload_links}
   <script>window.__RUVYXA_REQUEST_PATH__ = {path_json};</script>
 </head>
 <body>
   <div id="__ruvyxa"></div>
-  <script type="module" src="/__ruvyxa/client/{encoded_path}.js"></script>
+  <script type="module" src="{client_src}"></script>
 </body>
 </html>"#,
         path_json = serde_json::to_string(route_path).unwrap_or_else(|_| "\"\"".to_string()),
-        encoded_path = route_path.trim_start_matches('/').replace('/', "__"),
     )
+}
+
+#[derive(Debug)]
+struct PrerenderClientAssets {
+    src: String,
+    preloads: Vec<String>,
+}
+
+fn prerender_client_assets(client_dir: &Path, route_path: &str) -> Option<PrerenderClientAssets> {
+    let source = fs::read_to_string(client_dir.join("manifest.json")).ok()?;
+    let manifest: serde_json::Value = serde_json::from_str(&source).ok()?;
+    let route = manifest
+        .get("routes")?
+        .as_array()?
+        .iter()
+        .find(|route| route.get("path").and_then(|path| path.as_str()) == Some(route_path))?;
+    let src = route.get("src")?.as_str()?.to_string();
+    let preloads = route
+        .get("sharedChunks")
+        .and_then(|chunks| chunks.as_array())
+        .into_iter()
+        .flatten()
+        .filter_map(|chunk| chunk.get("src").and_then(|src| src.as_str()))
+        .map(str::to_string)
+        .collect();
+    Some(PrerenderClientAssets { src, preloads })
+}
+
+fn module_preload_links(preloads: &[String]) -> String {
+    preloads
+        .iter()
+        .map(|src| format!(r#"<link rel="modulepreload" href="{src}">"#))
+        .collect()
+}
+
+fn inject_prerender_client_assets(
+    html: &str,
+    client_dir: &Path,
+    route_path: &str,
+    request_path: &str,
+) -> String {
+    let Some(assets) = prerender_client_assets(client_dir, route_path) else {
+        return html.to_string();
+    };
+    let preload_links = module_preload_links(&assets.preloads);
+    let request_path_json =
+        serde_json::to_string(request_path).unwrap_or_else(|_| "\"/\"".to_string());
+    let scripts = format!(
+        r#"<script>globalThis.__RUVYXA_ROUTE_PARAMS__ = {{}};globalThis.__RUVYXA_REQUEST_PATH__ = {request_path_json};</script><script type="module" src="{}"></script>"#,
+        assets.src
+    );
+    let lower = html.to_ascii_lowercase();
+    if let (Some(head_end), Some(body_end)) = (lower.find("</head>"), lower.rfind("</body>")) {
+        if head_end <= body_end {
+            let mut output =
+                String::with_capacity(html.len() + preload_links.len() + scripts.len());
+            output.push_str(&html[..head_end]);
+            output.push_str(&preload_links);
+            output.push_str(&html[head_end..body_end]);
+            output.push_str(&scripts);
+            output.push_str(&html[body_end..]);
+            return output;
+        }
+    }
+
+    format!("<!doctype html><html><head>{preload_links}</head><body>{html}{scripts}</body></html>")
 }
 
 struct ClientBundle {
@@ -939,9 +1016,15 @@ struct SharedRouteChunk {
 #[derive(Clone)]
 struct JsConfigPluginBridge {
     project_root: PathBuf,
-    runner: PathBuf,
+    worker: Arc<Mutex<JsPluginWorker>>,
     has_resolve_id: bool,
     has_transform: bool,
+}
+
+struct JsPluginWorker {
+    child: Child,
+    stdin: ChildStdin,
+    stdout: BufReader<ChildStdout>,
 }
 
 #[derive(Debug, serde::Deserialize)]
@@ -1013,7 +1096,15 @@ impl ruvyxa_bundler::plugin::NativeBundlerPlugin for JsConfigPluginBridge {
             return Ok(None);
         };
 
-        Ok(Some(ruvyxa_bundler::plugin::TransformResult::code(code)))
+        let map = value
+            .get("map")
+            .and_then(|value| value.as_str())
+            .map(str::to_string);
+
+        Ok(Some(ruvyxa_bundler::plugin::TransformResult {
+            code: code.to_string(),
+            map,
+        }))
     }
 }
 
@@ -1021,47 +1112,15 @@ impl JsConfigPluginBridge {
     fn call_runner(
         &self,
         hook: &str,
-        payload: serde_json::Value,
+        mut payload: serde_json::Value,
     ) -> ruvyxa_bundler::Result<Option<serde_json::Value>> {
-        let mut child = ProcessCommand::new("node")
-            .arg(&self.runner)
-            .arg(&self.project_root)
-            .arg(hook)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|err| {
-                ruvyxa_bundler::BundleError::Compiler(format!(
-                    "failed to start JS plugin runner: {err}"
-                ))
-            })?;
-
-        let stdin = child.stdin.as_mut().ok_or_else(|| {
-            ruvyxa_bundler::BundleError::Compiler("failed to open JS plugin runner stdin".into())
+        payload["hook"] = serde_json::Value::String(hook.to_string());
+        let mut worker = self.worker.lock().map_err(|_| {
+            ruvyxa_bundler::BundleError::Compiler("JS plugin worker lock was poisoned".into())
         })?;
-        stdin
-            .write_all(payload.to_string().as_bytes())
-            .map_err(|err| {
-                ruvyxa_bundler::BundleError::Compiler(format!(
-                    "failed to send JS plugin payload: {err}"
-                ))
-            })?;
+        let result = worker.call(&payload)?;
 
-        let output = child.wait_with_output().map_err(|err| {
-            ruvyxa_bundler::BundleError::Compiler(format!(
-                "failed to wait for JS plugin runner: {err}"
-            ))
-        })?;
-        let stdout = String::from_utf8_lossy(&output.stdout);
-        let result: PluginRunnerOutput = serde_json::from_str(&stdout).map_err(|err| {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            ruvyxa_bundler::BundleError::Compiler(format!(
-                "JS plugin runner returned invalid output: {err}; stdout: {stdout}; stderr: {stderr}"
-            ))
-        })?;
-
-        if output.status.success() && result.ok {
+        if result.ok {
             return Ok(result.result);
         }
 
@@ -1071,8 +1130,84 @@ impl JsConfigPluginBridge {
             result
                 .message
                 .or(result.stack)
-                .unwrap_or_else(|| { String::from_utf8_lossy(&output.stderr).trim().to_string() })
+                .unwrap_or_else(|| "JS plugin hook failed".to_string())
         )))
+    }
+}
+
+impl JsPluginWorker {
+    fn spawn(runner: &Path, project_root: &Path) -> ruvyxa_bundler::Result<Self> {
+        let mut child = ProcessCommand::new("node")
+            .arg(runner)
+            .arg(project_root)
+            .arg("--persistent")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .map_err(|err| {
+                ruvyxa_bundler::BundleError::Compiler(format!(
+                    "failed to start persistent JS plugin worker: {err}"
+                ))
+            })?;
+        let stdin = child.stdin.take().ok_or_else(|| {
+            ruvyxa_bundler::BundleError::Compiler("failed to open JS plugin worker stdin".into())
+        })?;
+        let stdout = child.stdout.take().ok_or_else(|| {
+            ruvyxa_bundler::BundleError::Compiler("failed to open JS plugin worker stdout".into())
+        })?;
+
+        Ok(Self {
+            child,
+            stdin,
+            stdout: BufReader::new(stdout),
+        })
+    }
+
+    fn call(&mut self, payload: &serde_json::Value) -> ruvyxa_bundler::Result<PluginRunnerOutput> {
+        writeln!(self.stdin, "{payload}").map_err(|err| {
+            ruvyxa_bundler::BundleError::Compiler(format!(
+                "failed to send JS plugin worker payload: {err}"
+            ))
+        })?;
+        self.stdin.flush().map_err(|err| {
+            ruvyxa_bundler::BundleError::Compiler(format!(
+                "failed to flush JS plugin worker payload: {err}"
+            ))
+        })?;
+
+        let mut stdout = String::new();
+        let bytes_read = self.stdout.read_line(&mut stdout).map_err(|err| {
+            ruvyxa_bundler::BundleError::Compiler(format!(
+                "failed to read JS plugin worker response: {err}"
+            ))
+        })?;
+        if bytes_read == 0 {
+            let status = self
+                .child
+                .try_wait()
+                .ok()
+                .flatten()
+                .map(|status| status.to_string())
+                .unwrap_or_else(|| "unknown".to_string());
+            return Err(ruvyxa_bundler::BundleError::Compiler(format!(
+                "JS plugin worker exited before responding (status: {status})"
+            )));
+        }
+
+        serde_json::from_str(stdout.trim()).map_err(|err| {
+            ruvyxa_bundler::BundleError::Compiler(format!(
+                "JS plugin worker returned invalid output: {err}; stdout: {}",
+                stdout.trim()
+            ))
+        })
+    }
+}
+
+impl Drop for JsPluginWorker {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }
 
@@ -1095,9 +1230,11 @@ fn bundle_context_for_build(
 
     let runner = find_runtime_script(root, "plugin-runner.mjs")
         .ok_or_else(|| anyhow::anyhow!("RUV1701 JS plugin runner not found"))?;
+    let project_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let worker = JsPluginWorker::spawn(&runner, &project_root)?;
     let bridge = JsConfigPluginBridge {
-        project_root: root.canonicalize().unwrap_or_else(|_| root.to_path_buf()),
-        runner,
+        project_root,
+        worker: Arc::new(Mutex::new(worker)),
         has_resolve_id,
         has_transform,
     };
@@ -1239,6 +1376,22 @@ fn emit_client_bundles(
     } else {
         Vec::new()
     };
+
+    for route in &mut routes {
+        let route_path = route
+            .get("path")
+            .and_then(|value| value.as_str())
+            .unwrap_or("/");
+        let route_shared_chunks = shared_route_chunks
+            .iter()
+            .filter(|chunk| chunk.routes.iter().any(|path| path == route_path))
+            .map(shared_route_chunk_manifest)
+            .collect::<Vec<_>>();
+        route["sharedChunks"] = serde_json::Value::Array(route_shared_chunks);
+        if let Some(chunk_manifest) = route.get_mut("chunkManifest") {
+            attach_shared_chunks_to_manifest(chunk_manifest, &shared_route_chunks);
+        }
+    }
 
     if build.emit_chunk_manifest.unwrap_or(false) {
         fs::write(
@@ -2891,6 +3044,74 @@ mod tests {
     }
 
     #[test]
+    fn client_manifest_attaches_shared_chunks_to_affected_routes() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let app = root.join("app");
+        let client_dir = root.join("client");
+        std::fs::create_dir_all(app.join("about")).unwrap();
+        std::fs::create_dir_all(&client_dir).unwrap();
+        std::fs::write(app.join("shared.ts"), "export const label = 'shared'").unwrap();
+        std::fs::write(
+            app.join("page.tsx"),
+            "import { label } from './shared'; export default function Page() { return <main>{label}</main> }",
+        )
+        .unwrap();
+        std::fs::write(
+            app.join("about/page.tsx"),
+            "import { label } from '../shared'; export default function About() { return <main>{label}</main> }",
+        )
+        .unwrap();
+        let manifest = discover_routes(DiscoverOptions::new(&app)).unwrap();
+        let build = BuildConfigOptions {
+            minify: Some(false),
+            split_strategy: Some("route".to_string()),
+            emit_chunk_manifest: Some(true),
+            ..BuildConfigOptions::default()
+        };
+
+        let client_manifest =
+            emit_client_bundles(root, &app, &manifest, &client_dir, &build, &[]).unwrap();
+
+        for route in client_manifest["routes"].as_array().unwrap() {
+            assert_eq!(route["sharedChunks"].as_array().unwrap().len(), 1);
+            assert!(route["sharedChunks"][0]["src"]
+                .as_str()
+                .unwrap()
+                .starts_with("/__ruvyxa/client/shared."));
+        }
+    }
+
+    #[test]
+    fn prerender_html_includes_hashed_hydration_and_preload_assets() {
+        let temp = tempfile::tempdir().unwrap();
+        let client_dir = temp.path().join("client");
+        std::fs::create_dir_all(&client_dir).unwrap();
+        std::fs::write(
+            client_dir.join("manifest.json"),
+            r#"{"routes":[{"path":"/docs/:slug","src":"/__ruvyxa/client/docs.123.js","sharedChunks":[{"src":"/__ruvyxa/client/shared.456.js"}]}]}"#,
+        )
+        .unwrap();
+
+        let html = inject_prerender_client_assets(
+            "<!doctype html><html><head><title>Docs</title></head><body><main>Guide</main></body></html>",
+            &client_dir,
+            "/docs/:slug",
+            "/docs/start",
+        );
+
+        assert!(
+            html.contains(r#"<link rel="modulepreload" href="/__ruvyxa/client/shared.456.js">"#)
+        );
+        assert!(
+            html.contains(r#"<script type="module" src="/__ruvyxa/client/docs.123.js"></script>"#)
+        );
+        assert!(html.contains(r#"globalThis.__RUVYXA_REQUEST_PATH__ = "/docs/start""#));
+        assert!(html.find("modulepreload").unwrap() < html.find("</head>").unwrap());
+        assert!(html.find("docs.123.js").unwrap() < html.find("</body>").unwrap());
+    }
+
+    #[test]
     fn native_client_build_applies_js_config_transform_plugin() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
@@ -2911,6 +3132,7 @@ import { defineConfig } from "ruvyxa/config"
 export default defineConfig({
   build: {
     minify: false,
+    sourcemap: true,
     emitChunkManifest: true,
   },
   plugins: [
@@ -2918,7 +3140,16 @@ export default defineConfig({
       name: "replace-before",
       transform(code, id, ctx) {
         if (ctx.environment !== "client" || !id.endsWith("page.tsx")) return null
-        return { code: code.replace("Before", "After") }
+        return {
+          code: code.replace("Before", "After"),
+          map: {
+            version: 3,
+            sources: ["plugin-original.tsx"],
+            sourcesContent: [code],
+            names: [],
+            mappings: "AAAA",
+          },
+        }
       },
     },
   ],
@@ -2944,6 +3175,82 @@ export default defineConfig({
         assert!(output.contains("After"), "{output}");
         assert!(!output.contains("Before"), "{output}");
         assert_eq!(client_manifest["plugins"][0]["name"], "replace-before");
+        let source_map_file = client_manifest["routes"][0]["sourceMap"].as_str().unwrap();
+        let source_map: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(client_dir.join(source_map_file)).unwrap(),
+        )
+        .unwrap();
+        assert!(source_map["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|source| source.as_str() == Some("plugin-original.tsx")));
+    }
+
+    #[test]
+    fn js_config_plugin_bridge_reuses_worker_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        std::fs::write(
+            root.join("ruvyxa.config.mjs"),
+            r#"
+let calls = 0
+export default {
+  plugins: [{
+    name: "counter",
+    transform(code) {
+      calls += 1
+      return {
+        code: `${code}\nexport const pluginCall = ${calls}`,
+        map: {
+          version: 3,
+          sources: ["counter-input.ts"],
+          sourcesContent: [code],
+          names: [],
+          mappings: "AAAA",
+        },
+      }
+    },
+  }],
+}
+"#,
+        )
+        .unwrap();
+
+        let runner = find_runtime_script(root, "plugin-runner.mjs").unwrap();
+        let worker = JsPluginWorker::spawn(&runner, root).unwrap();
+        let bridge = JsConfigPluginBridge {
+            project_root: root.to_path_buf(),
+            worker: Arc::new(Mutex::new(worker)),
+            has_resolve_id: false,
+            has_transform: true,
+        };
+        let context = ruvyxa_bundler::plugin::PluginContext {
+            project_root: root.to_path_buf(),
+            importer: None,
+            target: ruvyxa_bundler::BundleTarget::Client,
+        };
+
+        let first = ruvyxa_bundler::plugin::NativeBundlerPlugin::transform(
+            &bridge,
+            "export const value = 1",
+            &root.join("first.ts"),
+            &context,
+        )
+        .unwrap()
+        .unwrap();
+        let second = ruvyxa_bundler::plugin::NativeBundlerPlugin::transform(
+            &bridge,
+            "export const value = 2",
+            &root.join("second.ts"),
+            &context,
+        )
+        .unwrap()
+        .unwrap();
+
+        assert!(first.code.contains("pluginCall = 1"));
+        assert!(second.code.contains("pluginCall = 2"));
+        assert!(second.map.unwrap().contains("counter-input.ts"));
     }
 
     #[test]

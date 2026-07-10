@@ -31,6 +31,7 @@
 //! - `<Component prop={…}>…</Component>` → `_jsx(Component, { prop: …, children: … })`
 //! - Automatically injects `import { jsx as _jsx, jsxs as _jsxs, Fragment as _Fragment } from "react/jsx-runtime"`
 
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 
 use rayon::prelude::*;
@@ -55,6 +56,11 @@ pub struct CompiledModule {
     pub is_external: bool,
     /// Whether this module's compiled output came from the compile cache.
     pub cache_hit: bool,
+}
+
+struct CompiledModuleOutput {
+    module: CompiledModule,
+    plugin_source_map: Option<String>,
 }
 
 /// Compile every module in the resolved graph.
@@ -83,12 +89,30 @@ pub fn compile_graph_with_pipeline(
     cache: &CompileCache,
     plugins: &PluginPipeline,
 ) -> Result<Vec<CompiledModule>> {
-    let results: Vec<Result<CompiledModule>> = graph
+    Ok(compile_graph_with_pipeline_and_maps(graph, input, cache, plugins)?.0)
+}
+
+pub(crate) fn compile_graph_with_pipeline_and_maps(
+    graph: &[ResolvedModule],
+    input: &BundleInput,
+    cache: &CompileCache,
+    plugins: &PluginPipeline,
+) -> Result<(Vec<CompiledModule>, BTreeMap<PathBuf, String>)> {
+    let results: Vec<Result<CompiledModuleOutput>> = graph
         .par_iter()
         .map(|module| compile_module(module, input, cache, plugins))
         .collect();
 
-    results.into_iter().collect()
+    let mut modules = Vec::with_capacity(results.len());
+    let mut source_maps = BTreeMap::new();
+    for output in results {
+        let output = output?;
+        if let Some(source_map) = output.plugin_source_map {
+            source_maps.insert(output.module.path.clone(), source_map);
+        }
+        modules.push(output.module);
+    }
+    Ok((modules, source_maps))
 }
 
 /// A compiler error with source location information.
@@ -132,7 +156,8 @@ pub fn compile_graph_resilient(
         .map(|(idx, module)| {
             (
                 idx,
-                compile_module(module, input, cache, &PluginPipeline::empty()),
+                compile_module(module, input, cache, &PluginPipeline::empty())
+                    .map(|output| output.module),
             )
         })
         .collect();
@@ -248,7 +273,7 @@ fn compile_module(
     input: &BundleInput,
     cache: &CompileCache,
     plugins: &PluginPipeline,
-) -> Result<CompiledModule> {
+) -> Result<CompiledModuleOutput> {
     let ext = module
         .path
         .extension()
@@ -260,17 +285,22 @@ fn compile_module(
         importer: Some(module.path.clone()),
         target: input.target,
     };
-    let source = plugins.transform(&module.source, &module.path, &plugin_ctx)?;
+    let plugin_output = plugins.transform_with_map(&module.source, &module.path, &plugin_ctx)?;
+    let source = plugin_output.code;
+    let plugin_source_map = plugin_output.map;
 
     // Virtual entry (label starts with "ruvyxa:") or plain JS: pass through
     // after native plugin transforms.
     if matches!(ext, "js" | "mjs" | "cjs") || module.path.to_string_lossy().contains("ruvyxa:") {
-        return Ok(CompiledModule {
-            path: module.path.clone(),
-            js: source,
-            deps: module.deps.clone(),
-            is_external: module.is_external,
-            cache_hit: false,
+        return Ok(CompiledModuleOutput {
+            module: CompiledModule {
+                path: module.path.clone(),
+                js: source,
+                deps: module.deps.clone(),
+                is_external: module.is_external,
+                cache_hit: false,
+            },
+            plugin_source_map,
         });
     }
 
@@ -280,12 +310,15 @@ fn compile_module(
 
     // Cache key includes JSX runtime mode so switching modes invalidates entries.
     match cache.lookup_with_options(&source, has_jsx, jsx_runtime) {
-        CacheLookup::Hit(cached_js) => Ok(CompiledModule {
-            path: module.path.clone(),
-            js: cached_js,
-            deps: module.deps.clone(),
-            is_external: module.is_external,
-            cache_hit: true,
+        CacheLookup::Hit(cached_js) => Ok(CompiledModuleOutput {
+            module: CompiledModule {
+                path: module.path.clone(),
+                js: cached_js,
+                deps: module.deps.clone(),
+                is_external: module.is_external,
+                cache_hit: true,
+            },
+            plugin_source_map,
         }),
         CacheLookup::Miss(key) => {
             let js = transform_with_options(&source, has_jsx, jsx_runtime).map_err(|msg| {
@@ -294,12 +327,15 @@ fn compile_module(
 
             cache.store(&key, &js);
 
-            Ok(CompiledModule {
-                path: module.path.clone(),
-                js,
-                deps: module.deps.clone(),
-                is_external: module.is_external,
-                cache_hit: false,
+            Ok(CompiledModuleOutput {
+                module: CompiledModule {
+                    path: module.path.clone(),
+                    js,
+                    deps: module.deps.clone(),
+                    is_external: module.is_external,
+                    cache_hit: false,
+                },
+                plugin_source_map,
             })
         }
     }

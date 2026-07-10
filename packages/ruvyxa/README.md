@@ -108,9 +108,11 @@ export default defineConfig({
 
 ## Runtime Architecture
 
-The `ruvyxa` package includes a persistent Node worker pool (`runtime/worker-pool.mjs`) that keeps
-Node processes alive between requests. This eliminates the ~100-500ms overhead of spawning Node and
-loading renderer state per request.
+The `ruvyxa` package includes a persistent Node render worker pool (`runtime/worker-pool.mjs`) that
+keeps Node processes alive between requests, plus a persistent build-plugin worker
+(`runtime/plugin-runner.mjs`) that reuses loaded config hooks across modules. This removes repeated
+process startup and config compilation overhead. Plugin transform source maps are forwarded into
+generated client maps.
 
 The runtime files included in this package:
 
@@ -123,7 +125,7 @@ The runtime files included in this package:
 | `runtime/api-renderer.mjs`    | API route execution                                |
 | `runtime/action-renderer.mjs` | Server action execution                            |
 | `runtime/config-renderer.mjs` | Config file loading                                |
-| `runtime/plugin-runner.mjs`   | JS build plugin hook runner                        |
+| `runtime/plugin-runner.mjs`   | Persistent config-plugin hook worker               |
 
 ## Native CLI
 

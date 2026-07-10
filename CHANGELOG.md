@@ -1,5 +1,16 @@
 # Changelog
 
+## Unreleased
+
+### Performance and Bundling
+
+- Reused one persistent Node worker for JavaScript config plugin hooks during each build
+- Forwarded plugin transform Source Map v3 data into generated client bundle maps
+- Added route-scoped shared chunk metadata and `modulepreload` hints to runtime and pre-rendered
+  HTML
+- Ensured pre-rendered SSG, ISR, PPR, and CSR output loads hashed hydration assets from the client
+  manifest
+
 ## v1.0.6 (2026-07-09)
 
 ### Highlights

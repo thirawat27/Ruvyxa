@@ -2554,6 +2554,18 @@ struct ClientAssetManifest {
 struct ClientAssetRoute {
     path: String,
     src: String,
+    #[serde(default, rename = "sharedChunks")]
+    shared_chunks: Vec<ClientSharedChunk>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ClientSharedChunk {
+    src: String,
+}
+
+struct ClientAssets {
+    src: String,
+    preloads: Vec<String>,
 }
 
 fn client_hydration_script(
@@ -2567,33 +2579,53 @@ fn client_hydration_script(
     let request_path_json = safe_json_for_script(
         &serde_json::to_string(request_path).unwrap_or_else(|_| "\"/\"".to_string()),
     );
-    let src = if config.watch {
-        format!(
-            "/__ruvyxa/client?path={}",
-            url_encode_component(request_path)
-        )
-    } else {
-        prebuilt_client_src(config, &route.path).unwrap_or_else(|| {
-            format!(
+    let assets = if config.watch {
+        ClientAssets {
+            src: format!(
                 "/__ruvyxa/client?path={}",
                 url_encode_component(request_path)
-            )
+            ),
+            preloads: Vec::new(),
+        }
+    } else {
+        prebuilt_client_assets(config, &route.path).unwrap_or_else(|| ClientAssets {
+            src: format!(
+                "/__ruvyxa/client?path={}",
+                url_encode_component(request_path)
+            ),
+            preloads: Vec::new(),
         })
     };
+    let preload_links = assets
+        .preloads
+        .iter()
+        .map(|src| {
+            let src = escape_html(src);
+            format!(r#"<link rel="modulepreload" href="{src}">"#)
+        })
+        .collect::<String>();
+    let src = escape_html(&assets.src);
 
     format!(
-        r#"<script>globalThis.__RUVYXA_ROUTE_PARAMS__ = {params_json};globalThis.__RUVYXA_REQUEST_PATH__ = {request_path_json};</script><script type="module" src="{src}"></script>"#
+        r#"{preload_links}<script>globalThis.__RUVYXA_ROUTE_PARAMS__ = {params_json};globalThis.__RUVYXA_REQUEST_PATH__ = {request_path_json};</script><script type="module" src="{src}"></script>"#,
     )
 }
 
-fn prebuilt_client_src(config: &ServerConfig, route_path: &str) -> Option<String> {
+fn prebuilt_client_assets(config: &ServerConfig, route_path: &str) -> Option<ClientAssets> {
     let source = fs::read_to_string(config.client_dir.join("manifest.json")).ok()?;
     let manifest: ClientAssetManifest = serde_json::from_str(&source).ok()?;
     manifest
         .routes
         .into_iter()
         .find(|route| route.path == route_path)
-        .map(|route| route.src)
+        .map(|route| ClientAssets {
+            src: route.src,
+            preloads: route
+                .shared_chunks
+                .into_iter()
+                .map(|chunk| chunk.src)
+                .collect(),
+        })
 }
 
 fn safe_json_for_script(json: &str) -> String {
@@ -3201,22 +3233,61 @@ mod tests {
     }
 
     #[test]
-    fn reads_prebuilt_client_src_from_manifest() {
+    fn reads_prebuilt_client_assets_from_manifest() {
         let temp = tempfile::tempdir().unwrap();
         let client_dir = temp.path().join(".ruvyxa/client");
         std::fs::create_dir_all(&client_dir).unwrap();
         std::fs::write(
             client_dir.join("manifest.json"),
-            r#"{"routes":[{"path":"/","src":"/__ruvyxa/client/home.js"}]}"#,
+            r#"{"routes":[{"path":"/","src":"/__ruvyxa/client/home.js","sharedChunks":[{"src":"/__ruvyxa/client/shared.123.js"}]}]}"#,
         )
         .unwrap();
 
         let config = ServerConfig::production(temp.path(), "localhost", 3000);
 
-        assert_eq!(
-            prebuilt_client_src(&config, "/"),
-            Some("/__ruvyxa/client/home.js".to_string())
+        let assets = prebuilt_client_assets(&config, "/").unwrap();
+        assert_eq!(assets.src, "/__ruvyxa/client/home.js");
+        assert_eq!(assets.preloads, vec!["/__ruvyxa/client/shared.123.js"]);
+
+        std::fs::write(
+            client_dir.join("manifest.json"),
+            r#"{"routes":[{"path":"/","src":"/__ruvyxa/client/legacy.js"}]}"#,
+        )
+        .unwrap();
+        let legacy_assets = prebuilt_client_assets(&config, "/").unwrap();
+        assert_eq!(legacy_assets.src, "/__ruvyxa/client/legacy.js");
+        assert!(legacy_assets.preloads.is_empty());
+    }
+
+    #[test]
+    fn hydration_script_preloads_route_shared_chunks() {
+        let temp = tempfile::tempdir().unwrap();
+        let client_dir = temp.path().join(".ruvyxa/client");
+        std::fs::create_dir_all(&client_dir).unwrap();
+        std::fs::write(
+            client_dir.join("manifest.json"),
+            r#"{"routes":[{"path":"/","src":"/__ruvyxa/client/home.js","sharedChunks":[{"src":"/__ruvyxa/client/shared.123.js"}]}]}"#,
+        )
+        .unwrap();
+        let config = ServerConfig::production(temp.path(), "localhost", 3000);
+        let route = RouteEntry {
+            id: "page:index".to_string(),
+            path: "/".to_string(),
+            file: temp.path().join("app/page.tsx"),
+            kind: ruvyxa_graph::RouteKind::Page,
+            layout_chain: Vec::new(),
+            server_modules: Vec::new(),
+            client_modules: Vec::new(),
+            runtime: ruvyxa_graph::RuntimeTarget::Node,
+            render: Default::default(),
+        };
+
+        let script = client_hydration_script(&config, &route, "/", &BTreeMap::new());
+
+        assert!(
+            script.contains(r#"<link rel="modulepreload" href="/__ruvyxa/client/shared.123.js">"#)
         );
+        assert!(script.contains(r#"<script type="module" src="/__ruvyxa/client/home.js">"#));
     }
 
     #[tokio::test]

@@ -83,11 +83,22 @@ File names are BLAKE3 hashes (first 16 hex characters). Enables:
 Set `build.emitChunkManifest: true` to also write `.ruvyxa/client/chunk-manifest.json` with dynamic
 import split points for deployment adapters.
 
+When route splitting identifies modules shared by multiple pages, each route entry also records a
+`sharedChunks` list. Production responses and pre-rendered HTML emit route-scoped
+`<link rel="modulepreload">` hints before loading the hashed hydration bundle.
+
 ### Parallel Production Bundling
 
 Client bundles are emitted concurrently using `std::thread::scope` with scoped threads. The
 parallelism level defaults to `available_parallelism()` and is configurable via `build.parallelism`.
 Bundles are written in deterministic route order.
+
+### Build Plugin Worker
+
+JavaScript `resolveId` and `transform` config hooks share one persistent Node process per build
+context. The newline-delimited JSON protocol keeps plugin module state alive and avoids paying Node
+startup and config compilation cost for every module. A transform result may include a Source Map v3
+object or JSON string in `map`; valid mappings are forwarded into the emitted bundle source map.
 
 ---
 
