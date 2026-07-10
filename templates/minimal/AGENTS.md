@@ -18,12 +18,14 @@ You are working in a Ruvyxa application. Keep this starter small and close to th
 
 ## Commands
 
+*Note: This project supports multiple package managers. You can use `npm`, `pnpm`, `yarn`, or `bun` interchangeably.*
+
 ```bash
-pnpm dev         # ruvyxa dev
-pnpm build       # ruvyxa build
-pnpm start       # ruvyxa start
-pnpm check       # ruvyxa check (typecheck + parity + smoke render)
-pnpm typecheck   # tsc --noEmit
+npm run dev         # ruvyxa dev
+npm run build       # ruvyxa build
+npm run start       # ruvyxa start
+npm run check       # ruvyxa check (typecheck + parity + smoke render)
+npm run typecheck   # tsc --noEmit
 ```
 
 ## Checks
@@ -31,11 +33,11 @@ pnpm typecheck   # tsc --noEmit
 Run the narrowest useful check while iterating:
 
 ```bash
-pnpm typecheck
+npm run typecheck
 ```
 
 Before handing off app-sensitive changes, run:
 
 ```bash
-pnpm check
+npm run check
 ```
