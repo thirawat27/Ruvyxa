@@ -13,4 +13,4 @@ Available scripts:
 
 The app demonstrates: static pages, dynamic routes (`[slug]`), catch-all (`[...slug]`), route
 groups, API routes (`GET`, `POST`), server actions (`action.ts`), server-only modules (`server.ts`),
-public env vars, layouts, and global CSS.
+public env vars, layouts, global CSS, and all rendering strategies (SSR, SSG, ISR, PPR, CSR).

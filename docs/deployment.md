@@ -227,7 +227,7 @@ Set environment variables using your platform's standard method. Ruvyxa loads `.
 ```json
 {
   "framework": "Ruvyxa",
-  "version": "1.0.5",
+  "version": "1.x.x",
   "target": "node",
   "profile": "production",
   "routes": 5,

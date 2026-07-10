@@ -99,11 +99,16 @@ export default defineConfig({
     sourcemap: false,
     treeShaking: true,
     splitStrategy: 'route',
+    jsxRuntime: 'classic',
+    esTarget: 'es2022',
     parallelism: 4,
+    emitChunkManifest: false,
+    prebundleDependencies: true,
   },
   cache: {
     routeManifest: true,
     css: true,
+    buildDir: '.ruvyxa/cache/bundler',
   },
 })
 ```
@@ -114,6 +119,8 @@ Adapters return metadata describing how a platform should consume `.ruvyxa/` out
 
 ```ts
 import type { Adapter } from '@ruvyxa/core'
+
+import { clientBuildOutput } from '@ruvyxa/core'
 
 export function customAdapter(): Adapter {
   return {
@@ -126,6 +133,7 @@ export function customAdapter(): Adapter {
         platform: 'node',
         entry: `${ctx.outDir}/server/app`,
         assetsDir: `${ctx.outDir}/assets`,
+        ...clientBuildOutput(ctx),
       }
     },
   }

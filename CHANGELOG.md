@@ -548,3 +548,4 @@ The following commits occurred before the v1.0.0 tag and represent the initial p
 | `v1.0.4` | 2026-07-01 | Minor      |
 | `v1.0.5` | 2026-07-09 | Minor      |
 | `v1.0.6` | 2026-07-09 | Patch      |
+| `v1.0.7` | 2026-07-10 | Minor      |
