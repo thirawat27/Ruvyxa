@@ -25,7 +25,7 @@
 
 ## Why Ruvyxa
 
-- **Clean starter** — new apps start with the same small surface you expect from Next.js-style app
+- **Clean starter** — new apps start with the same small surface you expect from file-system app
   routers.
 - **Fast core** — Rust handles routing, validation, production builds, and the dev server. A
   persistent Node worker pool eliminates per-request subprocess overhead.
@@ -345,20 +345,20 @@ Routes with `getStaticParams` export generate static paths at build time.
 
 ## CLI
 
-| Command               | Purpose                                                                     |
-| --------------------- | --------------------------------------------------------------------------- |
-| `ruvyxa dev`          | Start the development server with HMR and file watching                     |
-| `ruvyxa build`        | Build production output to `.ruvyxa/` (supports `--target node              | edge | static`) |
-| `ruvyxa check`        | Run app-level production readiness checks (typecheck, build, parity, smoke) |
-| `ruvyxa start`        | Serve production output with the same runtime semantics as dev              |
-| `ruvyxa preview`      | Alias for `ruvyxa start` (preview production build locally)                 |
-| `ruvyxa routes`       | Print the discovered route table                                            |
-| `ruvyxa analyze`      | Validate routes, imports, and server/client boundaries (structured JSON)    |
-| `ruvyxa doctor`       | Check project health, dependencies, environment, and native CLI status      |
-| `ruvyxa trace <path>` | Print route matching details for a URL                                      |
-| `ruvyxa bench`        | Benchmark route discovery, analysis, validation, and production builds      |
-| `ruvyxa test:parity`  | Compare dev/prod routes and smoke-render page routes                        |
-| `ruvyxa clean`        | Remove `.ruvyxa/` build output                                              |
+| Command               | Purpose                                                                            |
+| --------------------- | ---------------------------------------------------------------------------------- |
+| `ruvyxa dev`          | Start the development server with HMR and file watching                            |
+| `ruvyxa build`        | Build production output to `.ruvyxa/` (supports `--target node`, `edge`, `static`) |
+| `ruvyxa check`        | Run app-level production readiness checks (typecheck, build, parity, smoke)        |
+| `ruvyxa start`        | Serve production output with the same runtime semantics as dev                     |
+| `ruvyxa preview`      | Alias for `ruvyxa start` (preview production build locally)                        |
+| `ruvyxa routes`       | Print the discovered route table                                                   |
+| `ruvyxa analyze`      | Validate routes, imports, and server/client boundaries (structured JSON)           |
+| `ruvyxa doctor`       | Check project health, dependencies, environment, and native CLI status             |
+| `ruvyxa trace <path>` | Print route matching details for a URL                                             |
+| `ruvyxa bench`        | Benchmark route discovery, analysis, validation, and production builds             |
+| `ruvyxa test:parity`  | Compare dev/prod routes and smoke-render page routes                               |
+| `ruvyxa clean`        | Remove `.ruvyxa/` build output                                                     |
 
 ---
 

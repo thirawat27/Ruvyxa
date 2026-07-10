@@ -31,10 +31,11 @@ internal module refactors over moving root folders.
 | `ruvyxa_graph`       | File-system route discovery, rendering strategy detection, route validation,                  |
 |                      | manifest writing.                                                                             |
 | `ruvyxa_dev_server`  | Axum HTTP server, WebSocket HMR, radix-tree router, render cache (FIFO with TTL),             |
-|                      | Node worker pool, dependency-driven style collection, action/API/client endpoints.            |
+|                      | Node worker pool (`worker_pool`), radix router (`router`), render cache (`render_cache`),     |
+|                      | HMR tracker (`hmr_tracker`), style collection (`style`), action/API/client endpoints.         |
 | `ruvyxa_diagnostics` | Structured `Diagnostic` struct, `RuvyxaError` enum with `Diagnostic`/`Io`/`Message` variants. |
-| `ruvyxa_middleware`  | Built-in Tower middleware (CORS, timing, logging, rate limit, custom headers).                |
-|                      | Wasm plugin runtime (optional, requires `wasm-plugins` feature).                              |
+| `ruvyxa_middleware`  | Built-in Tower middleware (`builtin`, `config`, `stack`).                                     |
+|                      | Wasm plugin runtime (`wasm`, optional, requires `wasm-plugins` feature).                      |
 
 `ruvyxa_bundler` is organized into focused stage modules:
 
@@ -52,7 +53,6 @@ internal module refactors over moving root folders.
 - `cache.rs` — in-process and disk compile cache with incremental rebuilds
 - `incremental.rs` — persistent incremental module graph cache
 - `sourcemap.rs` — source map generation
-- `types.rs` — public contracts and serializable manifest types
 
 ## Package Boundaries
 

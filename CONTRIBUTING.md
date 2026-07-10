@@ -26,7 +26,7 @@ pnpm install
 ```bash
 cargo fmt --all -- --check
 cargo test --workspace --locked
-cargo clippy --workspace -- -- -D warnings
+cargo clippy --workspace --locked -- -D warnings
 pnpm -r build
 pnpm -r check
 pnpm -r test
@@ -110,7 +110,7 @@ git checkout -b feature/my-change
 ```bash
 cargo fmt --all -- --check
 cargo test --workspace --locked
-cargo clippy --workspace -- -- -D warnings
+cargo clippy --workspace --locked -- -D warnings
 pnpm -r build
 pnpm -r check
 pnpm -r test

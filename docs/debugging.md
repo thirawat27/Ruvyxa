@@ -251,7 +251,7 @@ Check the diagnostic output for the Tailwind stderr message. Common causes:
 
 ## Dev Error Overlay
 
-In development mode, Ruvyxa displays errors in a Next.js-style overlay:
+In development mode, Ruvyxa displays errors in a dev error overlay:
 
 - **Dark theme** with red error badge and title
 - **Code frame** — source context lines surrounding the error location, with `>` marker

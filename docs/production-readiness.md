@@ -22,7 +22,7 @@ All of the following must pass before a release:
 | -------------------------- | --------------------------------------------------------------------- |
 | Rust formatting            | `cargo fmt --all -- --check`                                          |
 | Rust tests                 | `cargo test --workspace --locked`                                     |
-| Rust lints                 | `cargo clippy --workspace -- -- -D warnings`                          |
+| Rust lints                 | `cargo clippy --workspace --locked -- -D warnings`                    |
 | TypeScript build           | `pnpm -r build`                                                       |
 | TypeScript type check      | `pnpm -r check`                                                       |
 | TypeScript tests           | `pnpm -r test`                                                        |
@@ -121,7 +121,7 @@ git status
 # 2. Rust checks
 cargo fmt --all -- --check
 cargo test --workspace --locked
-cargo clippy --workspace -- -- -D warnings
+cargo clippy --workspace --locked -- -D warnings
 
 # 3. TypeScript checks
 pnpm install --frozen-lockfile

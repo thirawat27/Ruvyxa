@@ -1,15 +1,15 @@
 # Claude Instructions
 
-Read `AGENTS.md` first. It is the source of truth for working in this Ruvyxa monorepo.
-
 Important local checks (run these before submitting changes):
 
 ```bash
-cargo test --workspace
-cargo clippy --workspace -- -D warnings
+cargo fmt --all -- --check
+cargo test --workspace --locked
+cargo clippy --workspace --locked -- -D warnings
 pnpm -r build
 pnpm -r check
 pnpm -r test
+pnpm pack:smoke
 cargo run -p ruvyxa_cli -- check --root examples/kitchen-sink
 ```
 

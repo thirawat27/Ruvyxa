@@ -55,7 +55,7 @@ Run the full validation suite:
 ```bash
 cargo fmt --all -- --check
 cargo test --workspace --locked
-cargo clippy --workspace -- -- -D warnings
+cargo clippy --workspace --locked -- -D warnings
 pnpm install --frozen-lockfile
 pnpm -r build
 pnpm -r check
