@@ -83,7 +83,6 @@ The `packages/ruvyxa/runtime/` directory contains Node scripts that the Rust CLI
 | `plugin-runner.mjs`   | JavaScript build plugin hooks        |
 | `compiler.mjs`        | Runtime module compilation           |
 | `ssg-renderer.mjs`    | SSG/ISR/PPR build-time pre-rendering |
-| `ssg-renderer.mjs`    | SSG/ISR/PPR build-time pre-rendering |
 
 ## Change Rules
 

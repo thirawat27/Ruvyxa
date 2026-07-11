@@ -2,23 +2,13 @@
 
 ## v1.0.10 (2026-07-11)
 
-### Content and Bundling
+### Content, Images, and SEO
 
 - Added first-class `page.md` and `page.mdx` routes with frontmatter, heading metadata, GFM
   Markdown, MDX ESM imports, JSX components, expressions, SSG, and HMR support
 - Shared content compilation across the native Rust bundler and Node runtime compiler, including
   content-aware dependency scanning that ignores imports inside fenced code examples
 - Added `frontmatter`, `meta`, `headings`, and `contentFormat` exports to generated content modules
-
-### Diagnostics and Error Recovery
-
-- Refined the plain error page into a centered 404/500 recovery layout with the persistent Ruvyxa
-  logo, dark outer background, white card, purple status/text treatment, and escaped diagnostics
-- Kept the development diagnostic overlay source-aware with code frames, suggested fixes, import
-  chains, affected routes, and stack details
-
-### Images and SEO
-
 - Added build-time AVIF and WebP sidecars while preserving original PNG/JPEG assets as fallbacks
 - Added image manifest output with dimensions, formats, byte sizes, and generated variant counts
 - Added browser `Accept` negotiation with `Vary: Accept` and development fallback behavior for
@@ -27,14 +17,62 @@
   lazy loading, canonical URLs, robots, Open Graph, Twitter Cards, and escaped JSON-LD
 - Added typed `images.optimize`, `images.formats`, and `images.quality` configuration
 
-### Starters, Documentation, and Verification
+### Hashing and Build
 
-- Centralized the framework logo at `assets/branding/ruvyxa.png` and documented the synchronized
-  runtime copies used by starters and the error page
-- Updated minimal starters and the demo with image configuration and a working MDX content route
-- Added the Markdown, MDX, image, and SEO guide plus expanded diagnostic documentation
-- Added focused coverage for content compilation, fenced-import handling, error-page escaping and
-  layout, image codecs/negotiation, React metadata, route discovery, and dev/prod parity
+- Upgraded asset hashing from BLAKE3-64 to BLAKE3-256: `content_hash()` now returns the full
+  64-character hex output instead of a truncated 16-character value; `ASSET_HASH_ALGORITHM`
+  constant changed from `"blake3-64"` to `"blake3-256"`
+- Updated `build.json` hash algorithm output and documentation to reflect 256-bit hashing
+- Client bundle file names now use full BLAKE3-256 content hashes for stronger cache uniqueness
+
+### CLI and Config
+
+- Added `debug.traces` configuration option for debug trace control in the dev server
+- Added `deny_unknown_fields` to `ProjectConfig` and `DebugConfigOptions` for strict config
+  validation against unknown keys
+- Added placeholder fields for future config options (`runtime`, `react`, `typescript`,
+  `rendering`, `adapter`, `adapterOptions`)
+- Implemented `normalize_source_path()` to gracefully handle non-existent paths in HMR tracking
+- Updated worker pool and config renderer with improved runtime implementations
+- Added tests for asset hash algorithm, dev config overlay/trace flags, unknown field rejection,
+  and HMR tracker path normalization
+
+### Branding and Error Page
+
+- Centralized the framework logo at `assets/branding/ruvyxa.png` as the canonical source
+- Added `assets/branding/README.md` documenting synchronization of runtime copies across starters
+  and the error page
+- Refined the plain error page into a centered 404/500 recovery layout with logo, status code,
+  title, and escaped diagnostics on a dark outer background with white card and purple accent
+
+### Infrastructure
+
+- Added `.githooks/pre-commit` hook validating `Cargo.lock` synchronization before commits
+- Added `scripts/check-cargo-lock.mjs` script and `check:cargo-lock` npm script for manual
+  validation
+- Upgraded Rust workspace from edition 2021 to 2024 and resolver from "2" to "3"
+- Applied `cargo fmt` with Rust 2024 formatting rules across all crates
+- Upgraded Rust dependencies: cranelift 0.132.2→0.133.1, tower-http 0.6.11→0.7.0, pulley 45.0.2→46.0.1,
+  mach2 0.4.3→0.6.0, wasm-compose/encoder/parser to 0.251.0
+- Upgraded bytes 1.11.1→1.12.0, cc 1.2.64→1.2.65, log 0.4.32→0.4.33, quote 1.0.45→1.0.46
+- Upgraded Node.js package versions across all workspace packages and regenerated lockfiles
+
+### Diagnostic Codes
+
+- Added `RUV1101` SSR renderer args missing diagnostic
+- Added `RUV1550` PPR (Partial Prerendering) render failed diagnostic
+- Added `RUV1801` Module resolution error diagnostic
+- Added Partial Prerendering (PPR) error code section to diagnostics guide
+- Refined error code table formatting and alignment for readability
+
+### Testing
+
+- Added `worker-pool.test.mjs` test suite for worker pool behavior
+- Expanded compiler tests with content compilation, fenced-import handling, and image
+  codec/negotiation coverage
+- Added tests for React metadata, route discovery, dev/prod parity, error-page escaping and
+  layout
+- All existing test suites updated and passing
 
 ## v1.0.9 (2026-07-10)
 
@@ -632,4 +670,5 @@ The following commits occurred before the v1.0.0 tag and represent the initial p
 | `v1.0.6` | 2026-07-09 | Patch      |
 | `v1.0.7` | 2026-07-10 | Minor      |
 | `v1.0.8` | 2026-07-10 | Minor      |
-| `v1.0.9` | 2026-07-10 | Patch      |
+| `v1.0.9`  | 2026-07-10 | Patch      |
+| `v1.0.10` | 2026-07-11 | Minor      |

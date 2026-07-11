@@ -8,7 +8,7 @@ This crate provides:
 
 - **Built-in middleware** — composable Tower layers for CORS, rate-limiting, request timing, logging, and custom response headers.
 - **Middleware stack builder** — compiles `MiddlewareConfig` into axum-compatible layer stacks.
-- **Wasm plugin runtime** — sandboxed WebAssembly plugin execution via Wasmtime 45 with hot-reload support.
+- **Wasm plugin runtime** — sandboxed WebAssembly plugin execution via Wasmtime 46 with hot-reload support.
 
 ## Built-in Middleware
 

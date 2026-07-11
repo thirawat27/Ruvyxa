@@ -66,7 +66,7 @@ live under `tests/packages/ruvyxa/`. Rust unit tests remain inline in their crat
 
 - Route-level splitting (one bundle per page)
 - Minified and tree-shaken by default
-- BLAKE3 content-addressed file names (64-bit, immutable caching)
+- BLAKE3-256 content-addressed file names (immutable caching)
 - Dynamic `import()` split points emitted as chunk files
 - Per-route bundle metrics in `client/manifest.json`
 

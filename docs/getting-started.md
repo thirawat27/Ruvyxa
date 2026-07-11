@@ -60,7 +60,7 @@ export default defineConfig({
     routeManifest: true,
     css: true,
   },
-  debug: { overlay: true },
+  debug: { overlay: true, traces: true },
   images: {
     optimize: true,
     formats: ['avif', 'webp'],
