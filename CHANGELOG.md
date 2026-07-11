@@ -9,13 +9,19 @@
 - Shared content compilation across the native Rust bundler and Node runtime compiler, including
   content-aware dependency scanning that ignores imports inside fenced code examples
 - Added `frontmatter`, `meta`, `headings`, and `contentFormat` exports to generated content modules
-- Added build-time AVIF and WebP sidecars while preserving original PNG/JPEG assets as fallbacks
-- Added image manifest output with dimensions, formats, byte sizes, and generated variant counts
-- Added browser `Accept` negotiation with `Vary: Accept` and development fallback behavior for
-  optimized image URLs
-- Added typed `@ruvyxa/react` `Image`, `Picture`, and `Seo` primitives for intrinsic dimensions,
-  lazy loading, canonical URLs, robots, Open Graph, Twitter Cards, and escaped JSON-LD
-- Added typed `images.optimize`, `images.formats`, and `images.quality` configuration
+- Rebuilt image optimization around a single-output `.webp` pipeline that replaces local
+  PNG/JPEG asset extensions instead of generating AVIF/WebP sidecars beside the original files
+- Optimized public assets in one parallel pass with persistent content caching, direct cache reuse,
+  collision detection, and unchanged fallback copies for invalid or non-image files
+- Simplified development and production image serving so `.webp` assets resolve directly, while
+  legacy local PNG/JPEG requests can still map to the optimized `.webp` output where applicable
+- Added compact image manifest output with source/output paths, dimensions, byte sizes, source
+  bytes, output bytes, optimized image counts, and cache hit tracking
+- Updated typed image configuration to `images.optimize`, `images.quality`, `images.lossless`, and
+  `images.parallelism`
+- Updated `@ruvyxa/react` `Image` and `Picture` to emit direct `<img>` output for local assets with
+  automatic `.webp` URL rewriting, while retaining typed SEO primitives for canonical URLs,
+  robots, Open Graph, Twitter Cards, and escaped JSON-LD
 
 ### Hashing and Build
 
@@ -68,10 +74,13 @@
 ### Testing
 
 - Added `worker-pool.test.mjs` test suite for worker pool behavior
-- Expanded compiler tests with content compilation, fenced-import handling, and image
-  codec/negotiation coverage
+- Expanded compiler tests with content compilation, fenced-import handling, and image configuration
+  coverage
 - Added tests for React metadata, route discovery, dev/prod parity, error-page escaping and
   layout
+- Added regression coverage for the new single-output `.webp` optimizer, cache reuse, collision
+  rejection, invalid image fallback, disabled optimization, and dev server `.webp` source
+  resolution
 - All existing test suites updated and passing
 
 ## v1.0.9 (2026-07-10)

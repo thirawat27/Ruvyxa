@@ -1,12 +1,10 @@
 import type { ImgHTMLAttributes, ReactElement } from 'react'
 
-export type OptimizedImageFormat = 'avif' | 'webp'
-
 export interface ImageProps extends Omit<
   ImgHTMLAttributes<HTMLImageElement>,
   'src' | 'alt' | 'width' | 'height' | 'loading' | 'fetchPriority'
 > {
-  /** Public image URL. PNG and JPEG files receive optimized build sidecars. */
+  /** Public image URL. Local PNG/JPEG URLs are rewritten to their build-time WebP output. */
   src: string
   /** Required accessible alternative text. Use an empty string for decorative images. */
   alt: string
@@ -14,61 +12,50 @@ export interface ImageProps extends Omit<
   width: number
   /** Intrinsic height prevents cumulative layout shift. */
   height: number
-  /** Preferred browser formats, in source order. */
-  formats?: OptimizedImageFormat[]
+  /** Keep `src` unchanged for remote URLs or assets managed outside Ruvyxa. */
+  unoptimized?: boolean
   /** Eager-load and prioritize a largest-contentful-paint image. */
   priority?: boolean
 }
 
 /**
- * Render an accessible responsive picture backed by Ruvyxa build sidecars.
- * The original `src` remains the final fallback on every host.
+ * Render an accessible image backed by Ruvyxa's single WebP build output.
  */
 export function Image({
   src,
   alt,
   width,
   height,
-  formats = ['avif', 'webp'],
+  unoptimized = false,
   priority = false,
   decoding = 'async',
   sizes,
   ...attributes
 }: ImageProps): ReactElement {
-  const optimizable = /\.(?:png|jpe?g)(?:[?#].*)?$/i.test(src)
-  const sources = optimizable ? [...new Set(formats)] : []
+  const outputSrc = unoptimized ? src : webpUrl(src)
 
   return (
-    <picture>
-      {sources.map((format) => (
-        <source
-          key={format}
-          srcSet={sidecarUrl(src, format)}
-          type={`image/${format}`}
-          sizes={sizes}
-        />
-      ))}
-      <img
-        {...attributes}
-        src={src}
-        alt={alt}
-        width={width}
-        height={height}
-        sizes={sizes}
-        loading={priority ? 'eager' : 'lazy'}
-        fetchPriority={priority ? 'high' : 'auto'}
-        decoding={decoding}
-      />
-    </picture>
+    <img
+      {...attributes}
+      src={outputSrc}
+      alt={alt}
+      width={width}
+      height={height}
+      sizes={sizes}
+      loading={priority ? 'eager' : 'lazy'}
+      fetchPriority={priority ? 'high' : 'auto'}
+      decoding={decoding}
+    />
   )
 }
 
-/** Alias that emphasizes art-direction/multi-format markup. */
+/** Backward-compatible alias for `Image`. */
 export const Picture = Image
 
-function sidecarUrl(src: string, format: OptimizedImageFormat): string {
+function webpUrl(src: string): string {
   const marker = src.search(/[?#]/)
-  return marker === -1
-    ? `${src}.${format}`
-    : `${src.slice(0, marker)}.${format}${src.slice(marker)}`
+  const path = marker === -1 ? src : src.slice(0, marker)
+  if (!/\.(?:png|jpe?g)$/i.test(path)) return src
+  const converted = path.replace(/\.(?:png|jpe?g)$/i, '.webp')
+  return marker === -1 ? converted : `${converted}${src.slice(marker)}`
 }

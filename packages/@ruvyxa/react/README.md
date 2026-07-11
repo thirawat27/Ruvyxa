@@ -19,8 +19,9 @@ import { Image } from '@ruvyxa/react'
 ;<Image src="/hero.png" alt="Product overview" width={1600} height={900} priority />
 ```
 
-`Image` (also exported as `Picture`) emits AVIF/WebP sources backed by Ruvyxa build sidecars, keeps
-the original as a fallback, requires intrinsic dimensions, and applies sensible loading defaults.
+`Image` (also exported as `Picture`) rewrites local PNG/JPEG URLs to Ruvyxa's single build-time WebP
+output, requires intrinsic dimensions, and applies sensible loading defaults. Pass `unoptimized`
+when the URL is remote or managed outside Ruvyxa.
 
 ## SEO metadata
 

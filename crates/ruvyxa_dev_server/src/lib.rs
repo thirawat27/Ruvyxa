@@ -1985,44 +1985,41 @@ async fn serve_public_file(
 fn resolve_public_asset(
     public_dir: &Path,
     request_path: &str,
-    request_headers: Option<&HeaderMap>,
+    _request_headers: Option<&HeaderMap>,
 ) -> Option<(PathBuf, bool)> {
     let requested = public_dir.join(request_path);
     if requested.is_file() {
-        if is_original_image(&requested) {
-            let avif = image_sidecar_path(&requested, "avif");
-            let webp = image_sidecar_path(&requested, "webp");
-            let accept = request_headers
-                .and_then(|headers| headers.get(header::ACCEPT))
-                .and_then(|value| value.to_str().ok())
-                .unwrap_or_default();
-            if accept.contains("image/avif") && avif.is_file() {
-                return Some((avif, true));
-            }
-            if accept.contains("image/webp") && webp.is_file() {
-                return Some((webp, true));
-            }
-            return Some((requested, avif.is_file() || webp.is_file()));
-        }
         return Some((requested, false));
     }
 
-    // In development, optimized sidecars are not written into the user's
-    // public directory. Serve the original bytes for explicit Picture source
-    // URLs so the same component markup works before and after a build.
-    let file_name = requested.file_name()?.to_string_lossy();
-    for suffix in [".avif", ".webp"] {
-        if let Some(original_name) = file_name.strip_suffix(suffix) {
-            let original = requested.with_file_name(original_name);
-            if original.is_file() && is_original_image(&original) {
-                return Some((original, false));
-            }
+    // Development keeps source images untouched while the React component
+    // points at the production `.webp` URL. Resolve that URL to exactly one
+    // source format; ambiguity matches the build-time collision guard.
+    if requested.extension().and_then(|value| value.to_str()) == Some("webp") {
+        let mut candidates = ["png", "jpg", "jpeg", "PNG", "JPG", "JPEG"]
+            .map(|extension| requested.with_extension(extension))
+            .into_iter()
+            .filter_map(|path| path.is_file().then(|| path.canonicalize().unwrap_or(path)))
+            .collect::<Vec<_>>();
+        candidates.sort();
+        candidates.dedup();
+        if candidates.len() == 1 {
+            return Some((candidates.into_iter().next()?, false));
+        }
+    }
+
+    // Keep server deployments compatible with plain `<img src="hero.png">`
+    // while the build output stores only `hero.webp`.
+    if is_convertible_image_url(&requested) {
+        let webp = requested.with_extension("webp");
+        if webp.is_file() {
+            return Some((webp, false));
         }
     }
     None
 }
 
-fn is_original_image(path: &Path) -> bool {
+fn is_convertible_image_url(path: &Path) -> bool {
     matches!(
         path.extension()
             .and_then(|extension| extension.to_str())
@@ -2030,12 +2027,6 @@ fn is_original_image(path: &Path) -> bool {
             .as_deref(),
         Some("png" | "jpg" | "jpeg")
     )
-}
-
-fn image_sidecar_path(source: &Path, format: &str) -> PathBuf {
-    let mut name = source.file_name().unwrap_or_default().to_os_string();
-    name.push(format!(".{format}"));
-    source.with_file_name(name)
 }
 
 fn is_safe_relative_path(path: &str) -> bool {
@@ -3593,27 +3584,34 @@ mod tests {
     }
 
     #[test]
-    fn negotiates_modern_image_sidecars_and_falls_back_in_development() {
+    fn resolves_single_webp_outputs_and_development_sources() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(temp.path().join("hero.png"), b"png").unwrap();
-        fs::write(temp.path().join("hero.png.avif"), b"avif").unwrap();
-        fs::write(temp.path().join("hero.png.webp"), b"webp").unwrap();
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::ACCEPT,
-            HeaderValue::from_static("image/avif,image/webp,*/*"),
-        );
-
-        let (selected, vary) =
-            resolve_public_asset(temp.path(), "hero.png", Some(&headers)).unwrap();
-        assert!(selected.ends_with("hero.png.avif"));
-        assert!(vary);
-
-        fs::remove_file(temp.path().join("hero.png.avif")).unwrap();
-        let (fallback, vary) =
-            resolve_public_asset(temp.path(), "hero.png.avif", Some(&headers)).unwrap();
+        let (fallback, vary) = resolve_public_asset(temp.path(), "hero.webp", None).unwrap();
         assert!(fallback.ends_with("hero.png"));
         assert!(!vary);
+
+        fs::remove_file(temp.path().join("hero.png")).unwrap();
+        fs::write(temp.path().join("hero.webp"), b"webp").unwrap();
+        let (selected, vary) = resolve_public_asset(temp.path(), "hero.png", None).unwrap();
+        assert!(selected.ends_with("hero.webp"));
+        assert!(!vary);
+    }
+
+    #[test]
+    fn rejects_ambiguous_development_image_sources() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("hero.png"), b"png").unwrap();
+        fs::write(temp.path().join("hero.jpg"), b"jpg").unwrap();
+        assert!(resolve_public_asset(temp.path(), "hero.webp", None).is_none());
+    }
+
+    #[test]
+    fn resolves_uppercase_development_image_extensions() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("hero.PNG"), b"png").unwrap();
+        let (source, _) = resolve_public_asset(temp.path(), "hero.webp", None).unwrap();
+        assert!(source.ends_with("hero.PNG"));
     }
 
     #[test]

@@ -625,8 +625,13 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
     )?;
     copy_optional_dir(&args.root.join("server"), &server_dir.join("server"))?;
     copy_style_sources(&args.root, &server_dir, &style_collection.files)?;
-    copy_public_assets(&args.root, &assets_dir)?;
-    let image_report = optimize_public_images(&assets_dir, &config.images)?;
+    let image_cache_dir = build_cache_dir(&args.root, &config.cache).join("images");
+    let image_report = optimize_public_images(
+        &args.root.join("public"),
+        &assets_dir,
+        &image_cache_dir,
+        &config.images,
+    )?;
     let asset_files = count_files(&assets_dir);
     fs::create_dir_all(&client_dir)?;
     write_manifest(&manifest, &staging_dir.join("manifest.json"))?;
@@ -746,10 +751,11 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
         if image_report.optimized_images > 0 {
             print_field(
                 "optimized images",
-                accent(format!(
-                    "{} ({} variants)",
-                    image_report.optimized_images, image_report.generated_variants
-                )),
+                accent(image_report.optimized_images.to_string()),
+            );
+            print_field(
+                "image cache hits",
+                accent(image_report.cache_hits.to_string()),
             );
         }
         if !prerendered.is_empty() {
@@ -2675,14 +2681,6 @@ fn normalize_route_path(app_dir: &Path, path: &Path) -> String {
         })
         .collect::<Vec<_>>()
         .join("/")
-}
-
-fn copy_public_assets(root: &Path, assets_dir: &Path) -> anyhow::Result<()> {
-    let public = root.join("public");
-    if public.exists() {
-        copy_dir_all(&public, assets_dir)?;
-    }
-    Ok(())
 }
 
 fn copy_style_sources(root: &Path, server_dir: &Path, files: &[PathBuf]) -> anyhow::Result<()> {

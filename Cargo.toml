@@ -22,7 +22,7 @@ blake3 = "1.8"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 clap = { version = "4.6", features = ["derive"] }
 dashmap = "6.1"
-image = { version = "0.25.10", default-features = false, features = ["avif", "jpeg", "png", "webp"] }
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
 memmap2 = "0.9"
 markdown = "1.0"
 notify = "8.2"
@@ -38,5 +38,6 @@ tower-http = { version = "0.7", features = ["fs", "trace", "compression-gzip", "
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 walkdir = "2.5"
+webp = { version = "0.3.1", default-features = false }
 wasmtime = "46.0.1"
 wasmtime-wasi = "46.0.1"

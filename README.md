@@ -40,8 +40,8 @@
   tree-shaking, minification, and source map generation in one self-contained binary.
 - **Built-in content routes** — `page.md` and `page.mdx` support frontmatter, heading exports, GFM,
   JSX components, expressions, SSG, and the same dev/prod pipeline as TSX.
-- **Modern image pipeline** — production builds retain source images and emit AVIF/WebP sidecars,
-  dimensions, manifests, content negotiation, and React image primitives for low CLS.
+- **Fast WebP image pipeline** — production builds replace copied PNG/JPEG assets with one cached,
+  parallel-encoded WebP output plus React image primitives for low CLS.
 - **SEO primitives** — typed canonical, robots, Open Graph, Twitter Card, and safe JSON-LD metadata.
 - **Gzip + Brotli compression** — all responses compressed automatically via tower-http middleware.
 - **Tower-based middleware** — composable CORS, timing, logging, rate limiting, and custom headers
@@ -302,8 +302,9 @@ export default defineConfig({
   },
   images: {
     optimize: true,
-    formats: ['avif', 'webp'],
-    quality: 80,
+    quality: 82,
+    lossless: false,
+    parallelism: 0,
   },
   security: {
     actionBodyLimitBytes: 65536,
@@ -420,7 +421,7 @@ Routes with `getStaticParams` export generate static paths at build time.
 .ruvyxa/
 ├── server/        # Production route source (copied from app/, components/, server/)
 ├── client/        # BLAKE3-hashed client bundles + manifest.json
-├── assets/        # Original public assets + AVIF/WebP sidecars and image manifest
+├── assets/        # Public assets + converted WebP images and image manifest
 ├── prerender/     # Pre-rendered SSG/ISR/PPR/CSR HTML files + manifest.json
 ├── manifest.json  # Route manifest with paths, layouts, module references
 └── build.json     # Build metadata, security defaults, config snapshot, rendering stats

@@ -51,12 +51,14 @@ export interface RuvyxaConfig {
 }
 
 export interface ImageConfig {
-  /** Generate modern-format variants during production builds. @default true */
+  /** Convert local PNG/JPEG public assets to WebP during production builds. @default true */
   optimize?: boolean
-  /** Modern formats emitted next to PNG/JPEG public assets. @default ['avif', 'webp'] */
-  formats?: Array<'avif' | 'webp'>
-  /** AVIF quality from 1 to 100. WebP output is lossless. @default 80 */
+  /** Lossy WebP quality from 1 to 100. @default 82 */
   quality?: number
+  /** Use lossless WebP encoding; `quality` then controls encoder effort. @default false */
+  lossless?: boolean
+  /** Image conversion workers. Zero selects the available CPU count. @default 0 */
+  parallelism?: number
 }
 
 // ─── Rendering Strategy ───────────────────────────────────────────────────────

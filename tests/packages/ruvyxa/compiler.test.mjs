@@ -410,6 +410,23 @@ import Card from './Card.js'
     })
   })
 
+  it('serializes WebP image encoding controls', async () => {
+    await withFixture(async ({ root }) => {
+      await writeFile(
+        path.join(root, 'ruvyxa.config.ts'),
+        `export default { images: { optimize: true, quality: 91, lossless: true, parallelism: 2 } }`,
+      )
+
+      const config = await runJson(configRenderer, [root], {})
+      assert.deepEqual(config.config.images, {
+        optimize: true,
+        quality: 91,
+        lossless: true,
+        parallelism: 2,
+      })
+    })
+  })
+
   it('rejects unknown config fields instead of silently ignoring them', async () => {
     await withFixture(async ({ root }) => {
       await writeFile(
@@ -421,6 +438,14 @@ import Card from './Card.js'
       assert.equal(failed.exitCode, 1)
       assert.equal(failed.parsed.ok, false)
       assert.match(failed.parsed.message, /RUV1602 unknown config\.debug field: tracez/)
+
+      await writeFile(
+        path.join(root, 'ruvyxa.config.ts'),
+        `export default { images: { formats: ["avif", "webp"] } }`,
+      )
+      const obsolete = await runJsonResult(configRenderer, [root], {})
+      assert.equal(obsolete.exitCode, 1)
+      assert.match(obsolete.parsed.message, /RUV1602 unknown config\.images field: formats/)
     })
   })
 })

@@ -43,16 +43,18 @@ Relative `.md` and `.mdx` imports are also resolved by both native and Node comp
 
 ## Image optimization
 
-Production builds keep every original PNG/JPEG and generate AVIF/WebP sidecars next to it. The
-server negotiates the best format from the browser's `Accept` header and sends `Vary: Accept`.
-Static hosts can use the sidecars through the React `Image`/`Picture` component.
+Production builds convert every valid PNG/JPEG in `public/` into one WebP file. For example,
+`public/hero.jpg` becomes `.ruvyxa/assets/hero.webp`; the copied JPEG is removed only after the WebP
+has been written successfully. This keeps static output small and request-time serving free of image
+transforms and content negotiation.
 
 ```ts
 export default defineConfig({
   images: {
     optimize: true,
-    formats: ['avif', 'webp'],
-    quality: 80,
+    quality: 82,
+    lossless: false,
+    parallelism: 0,
   },
 })
 ```
@@ -72,8 +74,21 @@ import { Image } from '@ruvyxa/react'
 
 `width` and `height` are required to prevent cumulative layout shift. Non-priority images use
 `loading="lazy"` and `decoding="async"`; priority images use eager loading and high fetch priority.
-The build writes `.ruvyxa/assets/.ruvyxa-images.json` with source dimensions, variant URLs, byte
-sizes, and counts. Invalid image files remain available as originals instead of failing the build.
+The component rewrites local PNG/JPEG URLs to `.webp`; pass `unoptimized` for a remote URL or an
+asset managed outside Ruvyxa. Development resolves the WebP URL back to the untouched source, so the
+same component works before and after a build.
+
+Plain HTML, CSS, and Markdown image references are not component-transformed. Point them at the
+output name directly (for example, `/hero.webp`); the development server maps that URL to
+`public/hero.jpg` or `public/hero.png` when there is exactly one matching source.
+
+`quality` accepts 1–100 for lossy output. Set `lossless: true` for pixel-exact output and set
+`parallelism` to a positive worker limit, or leave it at `0` to use available CPUs. Encoded bytes
+are cached by source content and settings under the configured build cache, making unchanged
+rebuilds copy/link-only. The build writes `.ruvyxa/assets/.ruvyxa-images.json` with source/output
+URLs, dimensions, byte sizes, and cache-hit status. Invalid image files remain unchanged. Two source
+files with the same stem, such as `hero.png` and `hero.jpg`, fail with a rename hint instead of
+overwriting one another.
 
 ## SEO metadata
 

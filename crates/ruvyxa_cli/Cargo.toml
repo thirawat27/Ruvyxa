@@ -16,6 +16,7 @@ blake3.workspace = true
 chrono.workspace = true
 clap.workspace = true
 image.workspace = true
+rayon.workspace = true
 ruvyxa_bundler = { path = "../ruvyxa_bundler" }
 ruvyxa_dev_server = { path = "../ruvyxa_dev_server" }
 ruvyxa_diagnostics = { path = "../ruvyxa_diagnostics" }
@@ -27,6 +28,7 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 walkdir.workspace = true
+webp.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

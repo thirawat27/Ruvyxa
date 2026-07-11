@@ -96,7 +96,12 @@ function sanitizeConfig(config) {
     'prebundleDependencies',
   ])
   assertKnownKeys(config.debug, 'config.debug', ['overlay', 'traces'])
-  assertKnownKeys(config.images, 'config.images', ['optimize', 'formats', 'quality'])
+  assertKnownKeys(config.images, 'config.images', [
+    'optimize',
+    'quality',
+    'lossless',
+    'parallelism',
+  ])
   assertKnownKeys(config.security, 'config.security', [
     'actionBodyLimitBytes',
     'sameOriginActions',
@@ -134,8 +139,9 @@ function sanitizeConfig(config) {
     }),
     images: objectValue(config.images, {
       optimize: booleanValue(config.images?.optimize),
-      formats: stringArrayValue(config.images?.formats),
       quality: numberValue(config.images?.quality),
+      lossless: booleanValue(config.images?.lossless),
+      parallelism: numberValue(config.images?.parallelism),
     }),
     security: objectValue(config.security, {
       actionBodyLimitBytes: numberValue(config.security?.actionBodyLimitBytes),

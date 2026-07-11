@@ -23,8 +23,9 @@ const config: RuvyxaConfig = {
   },
   images: {
     optimize: true,
-    formats: ['avif', 'webp'],
-    quality: 80,
+    quality: 82,
+    lossless: false,
+    parallelism: 0,
   },
 }
 
