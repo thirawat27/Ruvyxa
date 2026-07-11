@@ -496,7 +496,11 @@ fn print_server_ready(
     address: SocketAddr,
     ready_in: Duration,
 ) {
-    let mode = if config.watch { "dev" } else { "production" };
+    let mode = if config.watch {
+        "Development"
+    } else {
+        "Production"
+    };
     let url = local_display_url(config, address);
     let page_routes = manifest
         .routes
@@ -511,11 +515,11 @@ fn print_server_ready(
 
     println!();
     if config.watch {
-        println!("🦊 {}", heading("Ruvyxa dev server ready"));
-        println!("○ Watching {} paths", watch_paths(config).len());
-        println!("✓ Ready in {}", format_update_elapsed(ready_in));
+        println!("{}", heading("🦊 Ruvyxa Dev Server"));
+        println!();
     } else {
-        println!("{}", heading("Ruvyxa server"));
+        println!("{}", heading("🦊 Ruvyxa Server"));
+        println!();
     }
     print_field("time", accent(current_timestamp()));
     print_field("mode", accent(mode));
@@ -804,7 +808,7 @@ fn project_relative_display(root: &Path, path: &Path) -> String {
 }
 
 fn print_field(name: &str, value: String) {
-    let padding = " ".repeat(12usize.saturating_sub(name.len()));
+    let padding = " ".repeat(20usize.saturating_sub(name.len()));
     println!("  {}{} {}", dim(name), padding, value);
 }
 
@@ -1077,7 +1081,7 @@ async fn handle_request(
             }
         }
     };
-    if state.config.watch && is_document_navigation(&method, &headers) {
+    if state.config.watch && should_log_dev_request(&request_path) {
         println!(
             "{}",
             dev_page_request_log(&method, &request_path, response.status(), started.elapsed())
@@ -1090,18 +1094,14 @@ fn request_method_allows_body(method: &str) -> bool {
     !method.eq_ignore_ascii_case("GET") && !method.eq_ignore_ascii_case("HEAD")
 }
 
-fn is_document_navigation(method: &str, headers: &HeaderMap) -> bool {
-    if !method.eq_ignore_ascii_case("GET") {
+fn should_log_dev_request(request_path: &str) -> bool {
+    if request_path.starts_with("/__ruvyxa/") {
         return false;
     }
-    headers
-        .get("sec-fetch-dest")
-        .and_then(|value| value.to_str().ok())
-        .is_some_and(|value| value.eq_ignore_ascii_case("document"))
-        || headers
-            .get(header::ACCEPT)
-            .and_then(|value| value.to_str().ok())
-            .is_some_and(|value| value.contains("text/html"))
+    if request_path == "/api" || request_path.starts_with("/api/") {
+        return true;
+    }
+    Path::new(request_path).extension().is_none()
 }
 
 fn dev_page_request_log(
@@ -1111,10 +1111,28 @@ fn dev_page_request_log(
     elapsed: Duration,
 ) -> String {
     format!(
-        "◌ {method} {request_path} → {} · {}",
-        status.as_u16(),
-        format_update_elapsed(elapsed)
+        "{} {} {} {} {} {} {}",
+        paint("◌", "1;32"),
+        paint(method, "1;32"),
+        paint(request_path, "1;37"),
+        dim("→"),
+        status_text(status),
+        dim("·"),
+        accent(format_update_elapsed(elapsed))
     )
+}
+
+fn status_text(status: StatusCode) -> String {
+    let color = if status.is_success() {
+        "1;32"
+    } else if status.is_redirection() {
+        "1;36"
+    } else if status.is_client_error() {
+        "1;33"
+    } else {
+        "1;31"
+    };
+    paint(status.as_u16().to_string(), color)
 }
 
 fn worker_request_headers(headers: &HeaderMap) -> BTreeMap<String, String> {
@@ -3919,15 +3937,12 @@ mod tests {
     }
 
     #[test]
-    fn dev_page_request_logs_document_navigations_without_asset_noise() {
-        let mut document_headers = HeaderMap::new();
-        document_headers.insert("sec-fetch-dest", HeaderValue::from_static("document"));
-        assert!(is_document_navigation("GET", &document_headers));
-        assert!(!is_document_navigation("POST", &document_headers));
-
-        let mut asset_headers = HeaderMap::new();
-        asset_headers.insert("sec-fetch-dest", HeaderValue::from_static("script"));
-        assert!(!is_document_navigation("GET", &asset_headers));
+    fn dev_request_logs_include_route_methods_without_asset_noise() {
+        assert!(should_log_dev_request("/"));
+        assert!(should_log_dev_request("/api/echo"));
+        assert!(!should_log_dev_request("/app.js"));
+        assert!(!should_log_dev_request("/images/logo.webp"));
+        assert!(!should_log_dev_request("/__ruvyxa/client"));
 
         assert_eq!(
             dev_page_request_log("GET", "/about", StatusCode::OK, Duration::from_micros(420),),
