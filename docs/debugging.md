@@ -73,6 +73,9 @@ Affected routes:
 | `RUV1302` | Client renderer not found | Internal renderer script missing              |
 | `RUV1303` | Client route not found    | Route has no matching client page             |
 | `RUV1304` | Non-page client bundle    | Client bundle requested for API-only route    |
+| `RUV1310` | Markdown parse error      | A `.md` page contains invalid content syntax  |
+| `RUV1311` | MDX parse error           | A `.mdx` page contains invalid JSX/expression |
+| `RUV1312` | Frontmatter not closed    | Opening `---` has no closing delimiter        |
 
 ### Styles and Tailwind CSS
 
@@ -251,13 +254,14 @@ Check the diagnostic output for the Tailwind stderr message. Common causes:
 
 ## Dev Error Overlay
 
-In development mode, Ruvyxa displays errors in a dev error overlay:
+In development mode, Ruvyxa displays errors in a source-aware modal overlay:
 
-- **Dark theme** with red error badge and title
-- **Code frame** — source context lines surrounding the error location, with `>` marker
-- **Suggested fix** — green-highlighted hint when a diagnostic includes one
-- **Collapsible stack trace** — hidden by default, expand on click
-- **Footer** — `Ruvyxa Dev Server — fix and save to hot-reload`
+- **Error navigation and close control** matching the browser runtime-error workflow
+- **Diagnostic code, title, file, line, and column** at the top of the modal
+- **Dark source frame** with surrounding lines and an exact error marker
+- **Suggested fix, import chain, and affected routes** when available
+- **Collapsible stack trace** for runtime failures
+- **Responsive layout and escaped diagnostic content** for safe display on desktop and mobile
 
 The overlay is triggered automatically for any `RuvyxaError::Diagnostic` returned during SSR
 rendering, API execution, or client bundle generation. Production mode (`ruvyxa start`) always

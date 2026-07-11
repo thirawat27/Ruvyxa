@@ -36,8 +36,13 @@
 - **FIFO render cache** — SSR pages and client bundles are cached in-memory (capacity 1024 dev / 512
   prod, TTL 5 min dev / 30 min prod), invalidated automatically on file change. Configurable via
   `RUVYXA_RENDER_CACHE_SIZE`.
-- **Native Rust bundler** — TypeScript/JSX compilation, module resolution, tree-shaking,
-  minification, and source map generation — all in a zero-dependency Rust binary.
+- **Native Rust bundler** — TypeScript/JSX/Markdown/MDX compilation, module resolution,
+  tree-shaking, minification, and source map generation in one self-contained binary.
+- **Built-in content routes** — `page.md` and `page.mdx` support frontmatter, heading exports, GFM,
+  JSX components, expressions, SSG, and the same dev/prod pipeline as TSX.
+- **Modern image pipeline** — production builds retain source images and emit AVIF/WebP sidecars,
+  dimensions, manifests, content negotiation, and React image primitives for low CLS.
+- **SEO primitives** — typed canonical, robots, Open Graph, Twitter Card, and safe JSON-LD metadata.
 - **Gzip + Brotli compression** — all responses compressed automatically via tower-http middleware.
 - **Tower-based middleware** — composable CORS, timing, logging, rate limiting, and custom headers
   via `ruvyxa.config.ts`.
@@ -120,6 +125,8 @@ Routes are discovered from `app/`. Every `page.tsx` must export a default compon
 | File                               | Route          |
 | ---------------------------------- | -------------- |
 | `app/page.tsx`                     | `/`            |
+| `app/docs/page.md`                 | `/docs`        |
+| `app/guide/page.mdx`               | `/guide`       |
 | `app/about/page.tsx`               | `/about`       |
 | `app/blog/[slug]/page.tsx`         | `/blog/:slug`  |
 | `app/docs/[...path]/page.tsx`      | `/docs/*path`  |
@@ -292,6 +299,11 @@ export default defineConfig({
     overlay: true,
     traces: true,
   },
+  images: {
+    optimize: true,
+    formats: ['avif', 'webp'],
+    quality: 80,
+  },
   security: {
     actionBodyLimitBytes: 65536,
     sameOriginActions: true,
@@ -407,7 +419,7 @@ Routes with `getStaticParams` export generate static paths at build time.
 .ruvyxa/
 ├── server/        # Production route source (copied from app/, components/, server/)
 ├── client/        # BLAKE3-hashed client bundles + manifest.json
-├── assets/        # Copied public assets
+├── assets/        # Original public assets + AVIF/WebP sidecars and image manifest
 ├── prerender/     # Pre-rendered SSG/ISR/PPR/CSR HTML files + manifest.json
 ├── manifest.json  # Route manifest with paths, layouts, module references
 └── build.json     # Build metadata, security defaults, config snapshot, rendering stats
@@ -436,6 +448,7 @@ Routes with `getStaticParams` export generate static paths at build time.
 
 - [Getting Started](docs/getting-started.md)
 - [File Routing](docs/routing.md)
+- [Markdown, MDX, Images & SEO](docs/content-and-images.md)
 - [Data Loading](docs/data.md)
 - [Server Actions](docs/actions.md)
 - [Deployment](docs/deployment.md)

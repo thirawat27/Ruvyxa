@@ -5,11 +5,12 @@ import { createRequire } from 'node:module'
 import path from 'node:path'
 import { stripTypeScriptTypes } from 'node:module'
 
-const JS_EXTENSIONS = ['', '.ts', '.tsx', '.js', '.jsx', '.mts', '.mjs']
+const JS_EXTENSIONS = ['', '.ts', '.tsx', '.js', '.jsx', '.mts', '.mjs', '.md', '.mdx']
 const ASSET_EXTENSIONS = new Set(['.css', '.scss', '.sass', '.less'])
 const compilerCache = (globalThis.__RUVYXA_COMPILER_CACHE__ ??= {
   sources: new Map(),
   rewrites: new Map(),
+  content: new Map(),
 })
 
 export function collectLayouts(appDir, routeDir) {
@@ -190,12 +191,13 @@ async function visitModule(context) {
 
   if (byKey.has(key)) return byKey.get(key)
 
+  const compiledSource = await compileContentSource(source, filePath)
   const id = `__m${modules.length}`
   const module = {
     id,
     key,
     filePath,
-    source,
+    source: compiledSource,
     baseDir,
     deps: new Map(),
   }
@@ -203,10 +205,10 @@ async function visitModule(context) {
   modules.push(module)
 
   if (platform === 'browser') {
-    checkClientBoundary(root, filePath, source)
+    checkClientBoundary(root, filePath, compiledSource)
   }
 
-  for (const specifier of extractSpecifiers(source)) {
+  for (const specifier of extractSpecifiers(compiledSource)) {
     if (isAssetSpecifier(specifier)) continue
 
     const resolvedAlias = aliases[specifier]
@@ -729,6 +731,110 @@ async function readSourceFile(file) {
     source,
   })
   return source
+}
+
+async function compileContentSource(source, filePath) {
+  const extension = filePath ? path.extname(filePath).toLowerCase() : ''
+  if (extension !== '.md' && extension !== '.mdx') return source
+
+  const cacheKey = createHash('sha256').update(extension).update('\0').update(source).digest('hex')
+  const cached = compilerCache.content.get(cacheKey)
+  if (cached) return cached
+
+  const { frontmatter, body } = splitContentFrontmatter(source)
+  const { compile } = await import('@mdx-js/mdx')
+  let compiled
+  try {
+    compiled = String(
+      await compile(body, {
+        format: extension === '.md' ? 'md' : 'mdx',
+        jsx: false,
+        outputFormat: 'program',
+        development: false,
+      }),
+    )
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    throw new Error(`RUV1311 ${filePath}: ${detail}`)
+  }
+
+  const headings = collectContentHeadings(body)
+  const prefix = [
+    contentExport(compiled, 'frontmatter', JSON.stringify(frontmatter)),
+    contentExport(compiled, 'meta', 'frontmatter'),
+    contentExport(compiled, 'headings', JSON.stringify(headings)),
+    contentExport(compiled, 'contentFormat', JSON.stringify(extension.slice(1))),
+  ]
+    .filter(Boolean)
+    .join('\n')
+  const output = `${compiled}\n${prefix}\n`
+  compilerCache.content.set(cacheKey, output)
+  return output
+}
+
+function contentExport(compiled, name, value) {
+  const declaration = new RegExp(`\\bexport\\s+(?:const|let|var)\\s+${name}\\b`)
+  return declaration.test(compiled) ? '' : `export const ${name} = ${value};`
+}
+
+function splitContentFrontmatter(source) {
+  const normalized = source.replace(/^\uFEFF/, '')
+  if (!normalized.startsWith('---\n') && !normalized.startsWith('---\r\n')) {
+    return { frontmatter: {}, body: normalized }
+  }
+
+  const lines = normalized.split(/\r?\n/)
+  const end = lines.findIndex((line, index) => index > 0 && /^(---|\.\.\.)\s*$/.test(line))
+  if (end === -1) {
+    throw new Error("RUV1312 frontmatter starts with '---' but has no closing delimiter")
+  }
+  return {
+    frontmatter: parseContentFrontmatter(lines.slice(1, end)),
+    body: lines.slice(end + 1).join('\n'),
+  }
+}
+
+function parseContentFrontmatter(lines) {
+  const output = {}
+  for (const line of lines) {
+    const match = line.match(/^\s*([^:#][^:]*):\s*(.*?)\s*$/)
+    if (!match) continue
+    output[match[1].trim()] = parseContentFrontmatterValue(match[2])
+  }
+  return output
+}
+
+function parseContentFrontmatterValue(value) {
+  if (
+    (value.startsWith('"') && value.endsWith('"')) ||
+    (value.startsWith("'") && value.endsWith("'"))
+  ) {
+    return value.slice(1, -1)
+  }
+  if (/^(true|false)$/i.test(value)) return value.toLowerCase() === 'true'
+  if (/^(null|~)$/i.test(value)) return null
+  if (/^-?\d+(\.\d+)?$/.test(value)) return Number(value)
+  if (value.startsWith('[') && value.endsWith(']')) {
+    return value
+      .slice(1, -1)
+      .split(',')
+      .map((item) => parseContentFrontmatterValue(item.trim()))
+      .filter((item) => item !== '')
+  }
+  return value
+}
+
+function collectContentHeadings(source) {
+  return source.split(/\r?\n/).flatMap((line) => {
+    const match = line.match(/^(#{1,6})\s+(.+?)\s*#*$/)
+    if (!match) return []
+    const text = match[2].replace(/[*_`~{}<>]/g, '').trim()
+    const slug = text
+      .toLocaleLowerCase()
+      .replace(/[^\p{Letter}\p{Number}]+/gu, '-')
+      .replace(/^-|-$/g, '')
+    return [{ depth: match[1].length, slug, text }]
+  })
 }
 
 async function writeIfChanged(file, contents) {

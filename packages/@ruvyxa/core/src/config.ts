@@ -4,6 +4,7 @@ export type {
   BuiltinMiddlewareConfig,
   CorsConfig,
   GetStaticParams,
+  ImageConfig,
   LayerConfig,
   MiddlewareConfig,
   MiddlewarePluginConfig,

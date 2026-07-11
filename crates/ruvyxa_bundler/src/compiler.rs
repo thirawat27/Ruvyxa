@@ -280,12 +280,19 @@ fn compile_module(
         .and_then(|e| e.to_str())
         .unwrap_or("");
 
+    let content_source = if matches!(ext, "md" | "mdx") {
+        crate::content::compile_content_module(&module.source, &module.path)
+            .map_err(BundleError::Compiler)?
+    } else {
+        module.source.clone()
+    };
+
     let plugin_ctx = PluginContext {
         project_root: input.project_root.clone(),
         importer: Some(module.path.clone()),
         target: input.target,
     };
-    let plugin_output = plugins.transform_with_map(&module.source, &module.path, &plugin_ctx)?;
+    let plugin_output = plugins.transform_with_map(&content_source, &module.path, &plugin_ctx)?;
     let source = plugin_output.code;
     let plugin_source_map = plugin_output.map;
 

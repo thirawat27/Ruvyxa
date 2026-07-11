@@ -104,9 +104,9 @@ pub fn discover_routes(options: DiscoverOptions) -> Result<RouteManifest> {
 
     if !app_dir.exists() {
         return Err(Diagnostic::new("RUV1001", "App directory was not found")
-            .explain("Ruvyxa expects an app directory with page.tsx or route.ts files.")
+            .explain("Ruvyxa expects an app directory with page.tsx, page.md, page.mdx, or route.ts files.")
             .at_file(&app_dir)
-            .suggest("Create app/page.tsx or set appDir in ruvyxa.config.ts.")
+            .suggest("Create app/page.tsx, app/page.md, or app/page.mdx; or set appDir in ruvyxa.config.ts.")
             .into());
     }
 
@@ -130,7 +130,7 @@ pub fn discover_routes(options: DiscoverOptions) -> Result<RouteManifest> {
 
         let file_name = entry.file_name().to_string_lossy();
         let kind = match file_name.as_ref() {
-            "page.tsx" | "page.jsx" => RouteKind::Page,
+            "page.tsx" | "page.jsx" | "page.md" | "page.mdx" => RouteKind::Page,
             "route.ts" | "route.js" => RouteKind::Api,
             _ => continue,
         };
@@ -220,10 +220,19 @@ pub fn validate_app(root: &Path, manifest: &RouteManifest) -> Result<ValidationR
         match route.kind {
             RouteKind::Page => {
                 let source = fs::read_to_string(&route.file)?;
-                if !source.contains("export default") {
+                let is_content_page = matches!(
+                    route
+                        .file
+                        .extension()
+                        .and_then(|extension| extension.to_str()),
+                    Some("md" | "mdx")
+                );
+                if !is_content_page && !source.contains("export default") {
                     diagnostics.push(
                         Diagnostic::new("RUV1004", "Page is missing a default export")
-                            .explain("Every page.tsx file must export a default component.")
+                            .explain(
+                                "Every TypeScript/JavaScript page must export a default component.",
+                            )
                             .at_file(&route.file)
                             .suggest("Add `export default function Page() { return <main /> }`."),
                     );
@@ -435,10 +444,14 @@ fn resolve_relative_import(from: &Path, specifier: &str) -> Option<PathBuf> {
         base.with_extension("tsx"),
         base.with_extension("js"),
         base.with_extension("jsx"),
+        base.with_extension("md"),
+        base.with_extension("mdx"),
         base.join("index.ts"),
         base.join("index.tsx"),
         base.join("index.js"),
         base.join("index.jsx"),
+        base.join("index.md"),
+        base.join("index.mdx"),
     ];
 
     candidates
@@ -1017,6 +1030,28 @@ mod tests {
             .collect::<Vec<_>>();
 
         assert_eq!(paths, vec!["/", "/about", "/blog/:slug"]);
+    }
+
+    #[test]
+    fn discovers_markdown_and_mdx_pages_without_default_export_diagnostics() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        fs::create_dir_all(app.join("docs")).unwrap();
+        fs::write(app.join("page.md"), "# Home").unwrap();
+        fs::write(
+            app.join("docs/page.mdx"),
+            "# Docs\n\n<strong>Built in</strong>",
+        )
+        .unwrap();
+
+        let manifest = discover_routes(DiscoverOptions::new(&app)).unwrap();
+        let report = validate_app(temp.path(), &manifest).unwrap();
+        assert_eq!(manifest.routes.len(), 2);
+        assert!(report.diagnostics.is_empty());
+        assert!(manifest
+            .routes
+            .iter()
+            .all(|route| route.render.strategy == RenderStrategy::Ssg));
     }
 
     #[test]

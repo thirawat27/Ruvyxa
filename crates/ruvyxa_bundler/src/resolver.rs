@@ -610,8 +610,19 @@ pub fn resolve_graph_with_plugins(
                     Vec::new()
                 } else {
                     let resolve_base = dep_path.parent().unwrap_or(&project_root).to_path_buf();
+                    let dependency_source = if matches!(
+                        dep_path
+                            .extension()
+                            .and_then(|extension| extension.to_str()),
+                        Some("md" | "mdx")
+                    ) {
+                        crate::content::compile_content_module(&source, dep_path)
+                            .map_err(BundleError::Compiler)?
+                    } else {
+                        source.clone()
+                    };
                     collect_deps_cached(
-                        &source,
+                        &dependency_source,
                         &resolve_base,
                         &project_root,
                         &app_dir,
@@ -802,6 +813,8 @@ fn resolve_file_candidate(joined: &Path) -> Option<PathBuf> {
         joined.with_extension("cts"),
         joined.with_extension("mjs"),
         joined.with_extension("cjs"),
+        joined.with_extension("md"),
+        joined.with_extension("mdx"),
         joined.join("index.ts"),
         joined.join("index.tsx"),
         joined.join("index.js"),
@@ -810,6 +823,8 @@ fn resolve_file_candidate(joined: &Path) -> Option<PathBuf> {
         joined.join("index.cts"),
         joined.join("index.mjs"),
         joined.join("index.cjs"),
+        joined.join("index.md"),
+        joined.join("index.mdx"),
     ];
 
     candidates
@@ -850,6 +865,17 @@ mod tests {
         assert!(specs.contains(&"react".to_string()));
         assert!(specs.contains(&"./helper".to_string()));
         assert!(specs.contains(&"./lazy".to_string()));
+    }
+
+    #[test]
+    fn content_dependency_scan_ignores_import_examples_in_code_fences() {
+        let source =
+            "import Card from './Card'\n\n```js\nimport Secret from './missing'\n```\n\n<Card />";
+        let compiled =
+            crate::content::compile_content_module(source, Path::new("page.mdx")).unwrap();
+        let specifiers = extract_specifiers(&compiled);
+        assert!(specifiers.iter().any(|specifier| specifier == "./Card"));
+        assert!(!specifiers.iter().any(|specifier| specifier == "./missing"));
     }
 
     #[test]

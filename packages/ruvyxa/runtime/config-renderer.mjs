@@ -90,6 +90,11 @@ function sanitizeConfig(config) {
       overlay: booleanValue(config.debug?.overlay),
       traces: booleanValue(config.debug?.traces),
     }),
+    images: objectValue(config.images, {
+      optimize: booleanValue(config.images?.optimize),
+      formats: stringArrayValue(config.images?.formats),
+      quality: numberValue(config.images?.quality),
+    }),
     security: objectValue(config.security, {
       actionBodyLimitBytes: numberValue(config.security?.actionBodyLimitBytes),
       sameOriginActions: booleanValue(config.security?.sameOriginActions),

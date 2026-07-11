@@ -27,6 +27,7 @@ pub mod boundary;
 pub mod cache;
 pub mod chunking;
 pub mod compiler;
+pub mod content;
 pub mod context;
 pub mod incremental;
 pub mod linker;
@@ -345,6 +346,25 @@ mod tests {
         assert!(!manifest.bundle_id.is_empty());
         assert_eq!(manifest.route, "/");
         assert!(manifest.size_bytes > 0);
+    }
+
+    #[test]
+    fn bundles_markdown_page_through_native_content_pipeline() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let app = root.join("app");
+        fs::create_dir_all(&app).unwrap();
+        let page = app.join("page.md");
+        fs::write(
+            &page,
+            "---\ntitle: Native content\n---\n# Fast docs\n\nBuilt with **Ruvyxa**.",
+        )
+        .unwrap();
+
+        let output = bundle(client_input(&root, &app, page, vec![], "/")).unwrap();
+        assert!(output.code.contains("Native content"));
+        assert!(output.code.contains("ruvyxa-content"));
+        assert!(output.code.contains("Fast docs"));
     }
 
     #[test]

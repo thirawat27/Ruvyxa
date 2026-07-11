@@ -1,5 +1,37 @@
 # Changelog
 
+## v1.0.10 (2026-07-11)
+
+### Content and Bundling
+
+- Added first-class `page.md` and `page.mdx` routes with frontmatter, heading metadata, GFM
+  Markdown, MDX ESM imports, JSX components, expressions, SSG, and HMR support
+- Shared content compilation across the native Rust bundler and Node runtime compiler, including
+  content-aware dependency scanning that ignores imports inside fenced code examples
+- Added `frontmatter`, `meta`, `headings`, and `contentFormat` exports to generated content modules
+
+### Diagnostics and Error Recovery
+
+- Kept the development diagnostic overlay source-aware with code frames, suggested fixes, import
+  chains, affected routes, and stack details
+
+### Images and SEO
+
+- Added build-time AVIF and WebP sidecars while preserving original PNG/JPEG assets as fallbacks
+- Added image manifest output with dimensions, formats, byte sizes, and generated variant counts
+- Added browser `Accept` negotiation with `Vary: Accept` and development fallback behavior for
+  optimized image URLs
+- Added typed `@ruvyxa/react` `Image`, `Picture`, and `Seo` primitives for intrinsic dimensions,
+  lazy loading, canonical URLs, robots, Open Graph, Twitter Cards, and escaped JSON-LD
+- Added typed `images.optimize`, `images.formats`, and `images.quality` configuration
+
+### Starters, Documentation, and Verification
+
+- Updated minimal starters and the demo with image configuration and a working MDX content route
+- Added the Markdown, MDX, image, and SEO guide plus expanded diagnostic documentation
+- Added focused coverage for content compilation, fenced-import handling, error-page escaping and
+  layout, image codecs/negotiation, React metadata, route discovery, and dev/prod parity
+
 ## v1.0.9 (2026-07-10)
 
 ### Client Bundling and Boundaries

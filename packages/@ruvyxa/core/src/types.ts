@@ -31,6 +31,7 @@ export interface RuvyxaConfig {
     overlay?: boolean
     traces?: boolean
   }
+  images?: ImageConfig
   security?: {
     actionBodyLimitBytes?: number
     sameOriginActions?: boolean
@@ -47,6 +48,15 @@ export interface RuvyxaConfig {
   adapter?: Adapter
   adapterOptions?: Record<string, unknown>
   plugins?: RuvyxaPlugin[]
+}
+
+export interface ImageConfig {
+  /** Generate modern-format variants during production builds. @default true */
+  optimize?: boolean
+  /** Modern formats emitted next to PNG/JPEG public assets. @default ['avif', 'webp'] */
+  formats?: Array<'avif' | 'webp'>
+  /** AVIF quality from 1 to 100. WebP output is lossless. @default 80 */
+  quality?: number
 }
 
 // ─── Rendering Strategy ───────────────────────────────────────────────────────

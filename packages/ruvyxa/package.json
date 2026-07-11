@@ -64,6 +64,7 @@
     }
   },
   "dependencies": {
+    "@mdx-js/mdx": "^3.1.1",
     "@ruvyxa/core": "workspace:^"
   },
   "optionalDependencies": {

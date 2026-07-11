@@ -32,6 +32,11 @@ const config: RuvyxaConfig = {
     overlay: true,
     traces: true,
   },
+  images: {
+    optimize: true,
+    formats: ['avif', 'webp'],
+    quality: 80,
+  },
 }
 
 export default defineConfig(config)

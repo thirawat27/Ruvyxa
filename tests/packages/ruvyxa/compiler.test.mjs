@@ -13,6 +13,43 @@ const configRenderer = path.join(workspaceRoot, 'packages/ruvyxa/runtime/config-
 const pluginRunner = path.join(workspaceRoot, 'packages/ruvyxa/runtime/plugin-runner.mjs')
 
 describe('runtime compiler', () => {
+  it('compiles Markdown and MDX modules with frontmatter and components', async () => {
+    await withFixture(async ({ root, outDir }) => {
+      const cardFile = path.join(root, 'Card.js')
+      const pageFile = path.join(root, 'page.mdx')
+      const outfile = path.join(outDir, 'content.mjs')
+      await writeFile(cardFile, 'export default function Card({ children }) { return children }\n')
+      await writeFile(
+        pageFile,
+        `---
+title: Built-in MDX
+draft: false
+---
+import Card from './Card.js'
+
+# Hello MDX
+
+<Card>{2 + 2}</Card>
+`,
+      )
+
+      await compileBundle({
+        projectRoot: root,
+        entrySource: `export { default, frontmatter, headings } from ${JSON.stringify(toImportPath(pageFile))}`,
+        sourcefile: 'ruvyxa:content-entry.ts',
+        outfile,
+        platform: 'node',
+        external: ['react', 'react/jsx-runtime'],
+      })
+
+      const output = await readFile(outfile, 'utf8')
+      assert.match(output, /Built-in MDX/)
+      assert.match(output, /Hello MDX/)
+      assert.match(output, /frontmatter/)
+      assert.match(output, /2 \+ 2/)
+    })
+  })
+
   it('resolves local dynamic imports without an external bundler', async () => {
     await withFixture(async ({ root, outDir }) => {
       await writeFile(path.join(root, 'lazy.ts'), 'export const value = 42\n')

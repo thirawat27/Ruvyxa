@@ -21,6 +21,9 @@ use ruvyxa_graph::{
 use tracing::info;
 use walkdir::WalkDir;
 
+mod image_optimizer;
+use image_optimizer::{optimize_public_images, ImageOptimizationOptions};
+
 #[derive(Debug, Parser)]
 #[command(name = "Ruvyxa")]
 #[command(bin_name = "Ruvyxa")]
@@ -141,6 +144,10 @@ struct ProjectConfig {
     #[serde(default)]
     build: BuildConfigOptions,
     #[serde(default)]
+    debug: DebugConfigOptions,
+    #[serde(default)]
+    images: ImageOptimizationOptions,
+    #[serde(default)]
     security: SecurityConfigOptions,
     #[serde(default)]
     cache: CacheConfigOptions,
@@ -178,6 +185,12 @@ struct BuildConfigOptions {
     es_target: Option<String>,
     emit_chunk_manifest: Option<bool>,
     prebundle_dependencies: Option<bool>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct DebugConfigOptions {
+    overlay: Option<bool>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -440,7 +453,9 @@ fn dev_server_config(args: &ServerArgs, config: &ProjectConfig) -> ServerConfig 
     server.cache_css = config.cache.css.unwrap_or(true);
     server.style_entries = config.style_entries(&args.root);
     server.prebundle_dependencies = config.build.prebundle_dependencies.unwrap_or(true);
+    server.error_overlay = config.debug.overlay.unwrap_or(true);
     server.middleware = config.middleware.clone();
+    server.error_overlay = false;
     server
 }
 
@@ -596,6 +611,7 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
     copy_optional_dir(&args.root.join("server"), &server_dir.join("server"))?;
     copy_style_sources(&args.root, &server_dir, &style_collection.files)?;
     copy_public_assets(&args.root, &assets_dir)?;
+    let image_report = optimize_public_images(&assets_dir, &config.images)?;
     let asset_files = count_files(&assets_dir);
     fs::create_dir_all(&client_dir)?;
     write_manifest(&manifest, &staging_dir.join("manifest.json"))?;
@@ -642,6 +658,7 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
         "serverDir": "server",
         "clientDir": "client",
         "assetsDir": "assets",
+        "images": image_report,
         "hashAlgorithm": "blake3-128",
         "security": {
             "actionBodyLimitBytes": config.security.action_body_limit_bytes.unwrap_or(65536),
@@ -711,6 +728,15 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
         print_field("api", accent(api_routes.to_string()));
         print_field("client bundles", accent(client_bundles.to_string()));
         print_field("asset files", accent(asset_files.to_string()));
+        if image_report.optimized_images > 0 {
+            print_field(
+                "optimized images",
+                accent(format!(
+                    "{} ({} variants)",
+                    image_report.optimized_images, image_report.generated_variants
+                )),
+            );
+        }
         if !prerendered.is_empty() {
             print_field("prerendered", accent(prerendered.len().to_string()));
         }

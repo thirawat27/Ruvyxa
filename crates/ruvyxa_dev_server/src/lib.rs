@@ -66,6 +66,8 @@ pub struct ServerConfig {
     pub style_entries: Vec<PathBuf>,
     /// Precompile route modules and load their dependencies in dev workers.
     pub prebundle_dependencies: bool,
+    /// Render actionable source-aware error overlays in development.
+    pub error_overlay: bool,
     pub middleware: MiddlewareConfig,
 }
 
@@ -85,6 +87,7 @@ impl ServerConfig {
             cache_css: true,
             style_entries: Vec::new(),
             prebundle_dependencies: true,
+            error_overlay: true,
             middleware: MiddlewareConfig::default(),
         }
     }
@@ -104,6 +107,7 @@ impl ServerConfig {
             cache_css: true,
             style_entries: Vec::new(),
             prebundle_dependencies: false,
+            error_overlay: false,
             middleware: MiddlewareConfig::default(),
         }
     }
@@ -893,7 +897,7 @@ async fn handle_request(
     {
         Ok(response) => response,
         Err(error) => {
-            let is_dev = is_dev_mode();
+            let is_dev = state.config.watch && state.config.error_overlay;
             match &error {
                 RuvyxaError::Diagnostic(diag) => {
                     error_response(StatusCode::INTERNAL_SERVER_ERROR, diag, is_dev)
@@ -949,7 +953,7 @@ fn render_request_cached(
     let Some(route_match) = find_route(&manifest, request_path) else {
         return Ok(html_response(
             StatusCode::NOT_FOUND,
-            error_page("Route not found"),
+            error_page("Route not found", config.watch && config.error_overlay),
         ));
     };
 
@@ -982,10 +986,9 @@ fn serve_public_file_sync(public_dir: &Path, request_path: &str) -> Result<Optio
     if !is_safe_relative_path(trimmed) {
         return Ok(None);
     }
-    let file = public_dir.join(trimmed);
-    if !file.is_file() {
+    let Some((file, _)) = resolve_public_asset(public_dir, trimmed, None) else {
         return Ok(None);
-    }
+    };
     let bytes = fs::read(&file)?;
     let content_type = content_type_for(&file);
     let mut response = bytes.into_response();
@@ -1060,7 +1063,10 @@ async fn render_request_pooled(
     let Some(route_match) = router.find(&manifest, request_path) else {
         return Ok(html_response(
             StatusCode::NOT_FOUND,
-            error_page("Route not found"),
+            error_page(
+                "Route not found",
+                state.config.watch && state.config.error_overlay,
+            ),
         ));
     };
 
@@ -1451,10 +1457,10 @@ async fn render_page_pooled(
         .await
         .map_err(|e| RuvyxaError::Message(format!("Page read task panicked: {e}")))??;
 
-    if !source.contains("export default") {
+    if !page_has_default_export(&route.file, &source) {
         return Err(
             Diagnostic::new("RUV1004", "Page is missing a default export")
-                .explain("Every page.tsx file must export a default component.")
+                .explain("Every TypeScript/JavaScript page must export a default component. Markdown and MDX pages receive one from the content compiler.")
                 .at_file(&route.file)
                 .suggest("Add `export default function Page() { return <main /> }`.")
                 .into(),
@@ -1746,7 +1752,10 @@ async fn serve_public_file(
         return Ok(None);
     }
 
-    let file = public_dir.join(trimmed);
+    let Some((file, vary_accept)) = resolve_public_asset(public_dir, trimmed, request_headers)
+    else {
+        return Ok(None);
+    };
     let metadata = match tokio::fs::metadata(&file).await {
         Ok(meta) if meta.is_file() => meta,
         _ => return Ok(None),
@@ -1768,6 +1777,11 @@ async fn serve_public_file(
             if let Ok(client_etag) = if_none_match.to_str() {
                 if client_etag.trim_matches('"') == etag.trim_matches('"') {
                     let mut response = StatusCode::NOT_MODIFIED.into_response();
+                    if vary_accept {
+                        response
+                            .headers_mut()
+                            .insert(header::VARY, HeaderValue::from_static("Accept"));
+                    }
                     apply_security_headers(&mut response);
                     return Ok(Some(response));
                 }
@@ -1787,10 +1801,69 @@ async fn serve_public_file(
         header::CACHE_CONTROL,
         HeaderValue::from_static("public, max-age=3600, must-revalidate"),
     );
+    if vary_accept {
+        headers.insert(header::VARY, HeaderValue::from_static("Accept"));
+    }
 
     let _ = metadata; // used for existence check
     apply_security_headers(&mut response);
     Ok(Some(response))
+}
+
+fn resolve_public_asset(
+    public_dir: &Path,
+    request_path: &str,
+    request_headers: Option<&HeaderMap>,
+) -> Option<(PathBuf, bool)> {
+    let requested = public_dir.join(request_path);
+    if requested.is_file() {
+        if is_original_image(&requested) {
+            let avif = image_sidecar_path(&requested, "avif");
+            let webp = image_sidecar_path(&requested, "webp");
+            let accept = request_headers
+                .and_then(|headers| headers.get(header::ACCEPT))
+                .and_then(|value| value.to_str().ok())
+                .unwrap_or_default();
+            if accept.contains("image/avif") && avif.is_file() {
+                return Some((avif, true));
+            }
+            if accept.contains("image/webp") && webp.is_file() {
+                return Some((webp, true));
+            }
+            return Some((requested, avif.is_file() || webp.is_file()));
+        }
+        return Some((requested, false));
+    }
+
+    // In development, optimized sidecars are not written into the user's
+    // public directory. Serve the original bytes for explicit Picture source
+    // URLs so the same component markup works before and after a build.
+    let file_name = requested.file_name()?.to_string_lossy();
+    for suffix in [".avif", ".webp"] {
+        if let Some(original_name) = file_name.strip_suffix(suffix) {
+            let original = requested.with_file_name(original_name);
+            if original.is_file() && is_original_image(&original) {
+                return Some((original, false));
+            }
+        }
+    }
+    None
+}
+
+fn is_original_image(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|extension| extension.to_str())
+            .map(str::to_ascii_lowercase)
+            .as_deref(),
+        Some("png" | "jpg" | "jpeg")
+    )
+}
+
+fn image_sidecar_path(source: &Path, format: &str) -> PathBuf {
+    let mut name = source.file_name().unwrap_or_default().to_os_string();
+    name.push(format!(".{format}"));
+    source.with_file_name(name)
 }
 
 fn is_safe_relative_path(path: &str) -> bool {
@@ -1943,10 +2016,10 @@ fn render_page(
         source,
     })?;
 
-    if !source.contains("export default") {
+    if !page_has_default_export(&route.file, &source) {
         return Err(
             Diagnostic::new("RUV1004", "Page is missing a default export")
-                .explain("Every page.tsx file must export a default component.")
+                .explain("Every TypeScript/JavaScript page must export a default component. Markdown and MDX pages receive one from the content compiler.")
                 .at_file(&route.file)
                 .suggest("Add `export default function Page() { return <main /> }`.")
                 .into(),
@@ -1968,6 +2041,13 @@ fn render_page(
         &head_content,
         &format!("{client_script}{hmr}"),
     ))
+}
+
+fn page_has_default_export(file: &Path, source: &str) -> bool {
+    matches!(
+        file.extension().and_then(|extension| extension.to_str()),
+        Some("md" | "mdx")
+    ) || source.contains("export default")
 }
 
 #[derive(Debug, Deserialize)]
@@ -2640,7 +2720,7 @@ fn classify_hmr_event(paths: &[PathBuf]) -> &'static str {
     }
 
     let has_component = paths.iter().any(|path| {
-        ["tsx", "jsx", "ts", "js"]
+        ["tsx", "jsx", "ts", "js", "md", "mdx"]
             .into_iter()
             .any(|extension| extension_is(path, extension))
             && path.components().any(|component| {
@@ -2829,22 +2909,12 @@ fn error_response(status: StatusCode, diagnostics: &Diagnostic, is_dev: bool) ->
         .span
         .as_ref()
         .and_then(|span| extract_code_frame(&span.file, span.line));
-    let suggestion = diagnostics.suggested_fix.as_deref();
-    let explanation = &diagnostics.explanation;
-    let title = &diagnostics.title;
-    let message = format!("{title}\n\n{explanation}");
-    let body = dev_error_overlay(&message, code_frame.as_deref(), None, suggestion);
+    let body = dev_diagnostic_overlay(diagnostics, code_frame.as_deref());
     html_response(status, body)
 }
 
-fn is_dev_mode() -> bool {
-    std::env::var("RUVYXA_DEV")
-        .map(|v| v == "1")
-        .unwrap_or(false)
-}
-
-fn error_page(message: &str) -> String {
-    if is_dev_mode() {
+fn error_page(message: &str, show_overlay: bool) -> String {
+    if show_overlay {
         dev_error_overlay(message, None, None, None)
     } else {
         plain_error_page(message)
@@ -2864,12 +2934,77 @@ fn dev_error_overlay(
     stack: Option<&str>,
     suggestion: Option<&str>,
 ) -> String {
-    let title = message.lines().next().unwrap_or("Error");
-    let body = message;
+    let mut lines = message.lines();
+    let title = lines.next().unwrap_or("Unhandled Runtime Error");
+    let detail = lines.collect::<Vec<_>>().join("\n");
+    render_error_overlay(ErrorOverlayView {
+        code: "RUV_RUNTIME",
+        title,
+        detail: if detail.trim().is_empty() {
+            message
+        } else {
+            &detail
+        },
+        location: None,
+        code_frame,
+        stack,
+        suggestion,
+        import_chain: &[],
+        affected_routes: &[],
+    })
+}
+
+fn dev_diagnostic_overlay(diagnostic: &Diagnostic, code_frame: Option<&str>) -> String {
+    let location = diagnostic
+        .span
+        .as_ref()
+        .map(|span| match (span.line, span.column) {
+            (Some(line), Some(column)) => format!("{}:{line}:{column}", span.file.display()),
+            (Some(line), None) => format!("{}:{line}", span.file.display()),
+            _ => span.file.display().to_string(),
+        });
+    render_error_overlay(ErrorOverlayView {
+        code: diagnostic.code,
+        title: &diagnostic.title,
+        detail: &diagnostic.explanation,
+        location: location.as_deref(),
+        code_frame,
+        stack: None,
+        suggestion: diagnostic.suggested_fix.as_deref(),
+        import_chain: &diagnostic.import_chain,
+        affected_routes: &diagnostic.affected_routes,
+    })
+}
+
+struct ErrorOverlayView<'a> {
+    code: &'a str,
+    title: &'a str,
+    detail: &'a str,
+    location: Option<&'a str>,
+    code_frame: Option<&'a str>,
+    stack: Option<&'a str>,
+    suggestion: Option<&'a str>,
+    import_chain: &'a [PathBuf],
+    affected_routes: &'a [String],
+}
+
+fn render_error_overlay(view: ErrorOverlayView<'_>) -> String {
+    let ErrorOverlayView {
+        code,
+        title,
+        detail,
+        location,
+        code_frame,
+        stack,
+        suggestion,
+        import_chain,
+        affected_routes,
+    } = view;
     let frame_html = code_frame
         .map(|f| {
             format!(
-                r#"<div class="code-frame"><pre>{}</pre></div>"#,
+                r#"<section class="source"><div class="source-head"><span>Source</span><code>{}</code></div><pre>{}</pre></section>"#,
+                escape_html(location.unwrap_or("source unavailable")),
                 escape_html(f)
             )
         })
@@ -2877,14 +3012,49 @@ fn dev_error_overlay(
     let stack_html = stack
         .map(|s| {
             format!(
-                r#"<details class="stack"><summary>Stack Trace</summary><pre>{}</pre></details>"#,
+                r#"<details><summary>Stack trace</summary><pre>{}</pre></details>"#,
                 escape_html(s)
             )
         })
         .unwrap_or_default();
     let suggestion_html = suggestion
-        .map(|s| format!(r#"<div class="suggestion">💡 {}</div>"#, escape_html(s)))
+        .map(|s| {
+            format!(
+                r#"<section class="hint"><strong>Suggested fix</strong><p>{}</p></section>"#,
+                escape_html(s)
+            )
+        })
         .unwrap_or_default();
+    let location_html = location
+        .map(|location| format!(r#"<div class="location">{}</div>"#, escape_html(location)))
+        .unwrap_or_default();
+    let import_chain_html = if import_chain.is_empty() {
+        String::new()
+    } else {
+        format!(
+            r#"<details open><summary>Import chain ({})</summary><ol>{}</ol></details>"#,
+            import_chain.len(),
+            import_chain
+                .iter()
+                .map(|path| format!(
+                    "<li><code>{}</code></li>",
+                    escape_html(&path.display().to_string())
+                ))
+                .collect::<String>()
+        )
+    };
+    let routes_html = if affected_routes.is_empty() {
+        String::new()
+    } else {
+        format!(
+            r#"<details open><summary>Affected routes ({})</summary><ul>{}</ul></details>"#,
+            affected_routes.len(),
+            affected_routes
+                .iter()
+                .map(|route| format!("<li><code>{}</code></li>", escape_html(route)))
+                .collect::<String>()
+        )
+    };
 
     format!(
         r#"<!doctype html>
@@ -2894,123 +3064,90 @@ fn dev_error_overlay(
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Ruvyxa Error - {title}</title>
 <style>
-  *, *::before, *::after {{ box-sizing: border-box; margin: 0; padding: 0; }}
+  *, *::before, *::after {{ box-sizing: border-box; }}
+  :root {{ color-scheme: light; font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
   body {{
-    background: #1a1a2e;
-    color: #e0e0e0;
-    font-family: 'SF Mono', 'Fira Code', 'Consolas', monospace;
-    font-size: 14px;
-    line-height: 1.6;
+    margin: 0;
     min-height: 100vh;
-    display: flex;
-    flex-direction: column;
+    color: #171717;
+    background: linear-gradient(135deg, #f1f1f1, #d9d9d9);
   }}
-  .overlay {{
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    padding: 24px;
-    max-width: 960px;
+  .backdrop {{
+    min-height: 100vh;
+    padding: clamp(16px, 5vw, 64px);
+    background: rgba(245, 245, 245, .76);
+    backdrop-filter: blur(9px);
+  }}
+  .dialog {{
+    width: min(920px, 100%);
     margin: 0 auto;
-    width: 100%;
+    background: #fff;
+    border: 1px solid #d7d7d7;
+    border-top: 3px solid #ef5b5b;
+    border-radius: 8px;
+    box-shadow: 0 24px 64px rgba(0, 0, 0, .2);
+    overflow: hidden;
   }}
-  .header {{
+  .toolbar {{
     display: flex;
     align-items: center;
-    gap: 12px;
-    margin-bottom: 20px;
-    padding-bottom: 16px;
-    border-bottom: 1px solid #333;
-  }}
-  .badge {{
-    background: #e53935;
-    color: #fff;
-    padding: 4px 10px;
-    border-radius: 4px;
-    font-size: 11px;
-    font-weight: 700;
-    text-transform: uppercase;
-    letter-spacing: 0.5px;
-  }}
-  .title {{
-    color: #ef5350;
-    font-size: 16px;
-    font-weight: 600;
-  }}
-  .body {{
-    background: #16213e;
-    border: 1px solid #333;
-    border-radius: 8px;
-    padding: 16px;
-    margin-bottom: 16px;
-    white-space: pre-wrap;
-    word-break: break-word;
-    color: #ffcdd2;
-  }}
-  .code-frame {{
-    background: #0d1b2a;
-    border: 1px solid #e53935;
-    border-radius: 6px;
-    padding: 12px;
-    margin-bottom: 16px;
-    overflow-x: auto;
-  }}
-  .code-frame pre {{
-    font-size: 13px;
-    line-height: 1.5;
-    color: #e0e0e0;
-    tab-size: 2;
-  }}
-  .suggestion {{
-    background: #1b2838;
-    border: 1px solid #4caf50;
-    border-radius: 6px;
-    padding: 12px 16px;
-    margin-bottom: 16px;
-    color: #a5d6a7;
-  }}
-  .stack {{
-    background: #16213e;
-    border: 1px solid #333;
-    border-radius: 6px;
-    padding: 12px;
-    margin-bottom: 16px;
-  }}
-  .stack summary {{
-    cursor: pointer;
-    color: #90caf9;
-    font-weight: 500;
-    margin-bottom: 8px;
-  }}
-  .stack pre {{
+    justify-content: space-between;
+    min-height: 46px;
+    padding: 0 14px;
+    border-bottom: 1px solid #ececec;
+    color: #6b6b6b;
     font-size: 12px;
-    color: #b0bec5;
-    white-space: pre-wrap;
   }}
-  .footer {{
-    margin-top: auto;
-    padding-top: 16px;
-    border-top: 1px solid #333;
-    font-size: 12px;
-    color: #666;
-    text-align: center;
+  .toolbar button {{ border: 0; background: transparent; color: #707070; font-size: 22px; cursor: pointer; padding: 4px 8px; }}
+  .content {{ padding: clamp(20px, 4vw, 40px); }}
+  .eyebrow {{ color: #d53535; font: 700 12px/1.4 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: .06em; }}
+  h1 {{ margin: 8px 0 6px; font-size: clamp(20px, 3vw, 28px); line-height: 1.25; }}
+  .location {{ color: #b4232d; font: 500 13px/1.5 ui-monospace, SFMono-Regular, Consolas, monospace; overflow-wrap: anywhere; }}
+  .detail {{ margin: 18px 0 24px; color: #424242; white-space: pre-wrap; overflow-wrap: anywhere; }}
+  .source {{ margin: 20px 0; border: 1px solid #222; border-radius: 6px; overflow: hidden; background: #101010; color: #f5f5f5; }}
+  .source-head {{ display: flex; justify-content: space-between; gap: 16px; padding: 8px 12px; border-bottom: 1px solid #333; color: #d7d7d7; font-size: 12px; }}
+  .source-head code {{ color: #a8a8a8; overflow-wrap: anywhere; text-align: right; }}
+  .source pre {{ margin: 0; padding: 16px; overflow: auto; color: #f3f3f3; font: 13px/1.6 ui-monospace, SFMono-Regular, Consolas, monospace; tab-size: 2; }}
+  .hint {{ margin: 18px 0; padding: 14px 16px; border: 1px solid #9dd5ab; border-left: 4px solid #2f9e44; border-radius: 6px; background: #f3fbf5; }}
+  .hint strong {{ color: #176b2c; }}
+  .hint p {{ margin: 5px 0 0; color: #285b35; white-space: pre-wrap; }}
+  details {{ margin-top: 12px; border: 1px solid #e2e2e2; border-radius: 6px; padding: 10px 12px; }}
+  summary {{ cursor: pointer; font-weight: 650; }}
+  details pre {{ overflow: auto; white-space: pre-wrap; color: #454545; font: 12px/1.55 ui-monospace, SFMono-Regular, Consolas, monospace; }}
+  details ol, details ul {{ margin-bottom: 0; padding-left: 24px; }}
+  details li {{ margin: 5px 0; overflow-wrap: anywhere; }}
+  .footer {{ padding: 12px 20px; border-top: 1px solid #ececec; background: #fafafa; color: #777; font-size: 12px; text-align: center; }}
+  @media (max-width: 600px) {{
+    .backdrop {{ padding: 0; }}
+    .dialog {{ min-height: 100vh; border-radius: 0; border-left: 0; border-right: 0; }}
+    .source-head {{ flex-direction: column; }}
+    .source-head code {{ text-align: left; }}
   }}
 </style>
 </head>
 <body>
-<div class="overlay">
-  <div class="header">
-    <span class="badge">Ruvyxa Error</span>
-    <span class="title">{title}</span>
-  </div>
-  <div class="body">{body}</div>
-  {frame_html}
-  {suggestion_html}
-  {stack_html}
-  <div class="footer">Ruvyxa Dev Server — fix the error and save to hot-reload</div>
-</div>
+<main class="backdrop">
+  <section class="dialog" id="ruvyxa-error-overlay" role="dialog" aria-modal="true" aria-labelledby="ruvyxa-error-title">
+    <div class="toolbar"><span>‹ &nbsp; 1 of 1 unhandled error &nbsp; ›</span><button type="button" aria-label="Close error overlay" onclick="document.getElementById('ruvyxa-error-overlay').hidden=true">×</button></div>
+    <div class="content">
+      <div class="eyebrow">{code}</div>
+      <h1 id="ruvyxa-error-title">{title}</h1>
+      {location_html}
+      <div class="detail">{detail}</div>
+      {frame_html}
+      {suggestion_html}
+      {import_chain_html}
+      {routes_html}
+      {stack_html}
+    </div>
+    <div class="footer">Ruvyxa Dev Server — fix the error and save to hot-reload</div>
+  </section>
+</main>
 </body>
-</html>"#
+</html>"#,
+        code = escape_html(code),
+        title = escape_html(title),
+        detail = escape_html(detail),
     )
 }
 
@@ -3032,6 +3169,7 @@ fn content_type_for(path: &Path) -> &'static str {
         Some("png") => "image/png",
         Some("jpg" | "jpeg") => "image/jpeg",
         Some("webp") => "image/webp",
+        Some("avif") => "image/avif",
         _ => "application/octet-stream",
     }
 }
@@ -3061,6 +3199,56 @@ mod tests {
 
         assert!(html.contains(r#"<head><link rel="icon" href="/ruvyxa.png"></head>"#));
         assert!(html.contains("<script /></body>"));
+    }
+
+    #[test]
+    fn diagnostic_overlay_renders_complete_escaped_context() {
+        let mut diagnostic = Diagnostic::new("RUV1300", "Compile <error>")
+            .explain("Unexpected </script> token")
+            .at_file_with_span("app/page.tsx", 8, 15)
+            .suggest("Close the JSX element");
+        diagnostic.import_chain = vec![PathBuf::from("app/layout.tsx")];
+        diagnostic.affected_routes = vec!["/docs?<unsafe>".to_string()];
+
+        let html = dev_diagnostic_overlay(
+            &diagnostic,
+            Some("   8 │ return <main>\n     │              ^"),
+        );
+
+        assert!(html.contains("RUV1300"));
+        assert!(html.contains("app/page.tsx:8:15"));
+        assert!(html.contains("Suggested fix"));
+        assert!(html.contains("Import chain (1)"));
+        assert!(html.contains("Affected routes (1)"));
+        assert!(html.contains("return &lt;main&gt;"));
+        assert!(!html.contains("<script> token"));
+        assert!(html.contains("&lt;/script&gt; token"));
+        assert!(html.contains("/docs?&lt;unsafe&gt;"));
+    }
+
+    #[test]
+    fn runtime_overlay_matches_modal_error_interaction() {
+        let html = dev_error_overlay(
+            "Unhandled Runtime Error\nFailed to load script",
+            None,
+            Some("at Page (page.tsx:2:1)"),
+            None,
+        );
+        assert!(html.contains("1 of 1 unhandled error"));
+        assert!(html.contains("role=\"dialog\""));
+        assert!(html.contains("RUV_RUNTIME"));
+        assert!(html.contains("Stack trace"));
+        assert!(html.contains("Close error overlay"));
+    }
+
+    #[test]
+    fn plain_error_page_escapes_message() {
+        let html = plain_error_page("<script>alert(1)</script>");
+
+        assert_eq!(
+            html,
+            "<!doctype html><html><body><main><h1>Ruvyxa Error</h1><pre>&lt;script&gt;alert(1)&lt;/script&gt;</pre></main></body></html>"
+        );
     }
 
     #[tokio::test]
@@ -3124,6 +3312,18 @@ mod tests {
             classify_hmr_event(&[PathBuf::from("server/db.ts")]),
             "full-reload"
         );
+        assert_eq!(
+            classify_hmr_event(&[PathBuf::from("app/docs/page.mdx")]),
+            "component-update"
+        );
+        assert!(page_has_default_export(
+            Path::new("app/docs/page.mdx"),
+            "# Content"
+        ));
+        assert!(!page_has_default_export(
+            Path::new("app/docs/page.tsx"),
+            "export const title = 'Missing'"
+        ));
     }
 
     #[test]
@@ -3163,6 +3363,30 @@ mod tests {
         assert!(!is_safe_relative_path(""));
         assert!(!is_safe_relative_path("../secret.txt"));
         assert!(!is_safe_relative_path("images\\logo.png"));
+    }
+
+    #[test]
+    fn negotiates_modern_image_sidecars_and_falls_back_in_development() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("hero.png"), b"png").unwrap();
+        fs::write(temp.path().join("hero.png.avif"), b"avif").unwrap();
+        fs::write(temp.path().join("hero.png.webp"), b"webp").unwrap();
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::ACCEPT,
+            HeaderValue::from_static("image/avif,image/webp,*/*"),
+        );
+
+        let (selected, vary) =
+            resolve_public_asset(temp.path(), "hero.png", Some(&headers)).unwrap();
+        assert!(selected.ends_with("hero.png.avif"));
+        assert!(vary);
+
+        fs::remove_file(temp.path().join("hero.png.avif")).unwrap();
+        let (fallback, vary) =
+            resolve_public_asset(temp.path(), "hero.png.avif", Some(&headers)).unwrap();
+        assert!(fallback.ends_with("hero.png"));
+        assert!(!vary);
     }
 
     #[test]
