@@ -496,11 +496,7 @@ fn print_server_ready(
     address: SocketAddr,
     ready_in: Duration,
 ) {
-    let mode = if config.watch {
-        "development"
-    } else {
-        "production"
-    };
+    let mode = if config.watch { "dev" } else { "production" };
     let url = local_display_url(config, address);
     let page_routes = manifest
         .routes
@@ -515,9 +511,9 @@ fn print_server_ready(
 
     println!();
     if config.watch {
-        println!("🦊 Ruvyxa dev server ready on {url}");
+        println!("🦊 {}", heading("Ruvyxa dev server ready"));
         println!("○ Watching {} paths", watch_paths(config).len());
-        println!("✓ Ready in {}ms", ready_in.as_millis());
+        println!("✓ Ready in {}", format_update_elapsed(ready_in));
     } else {
         println!("{}", heading("Ruvyxa server"));
     }
@@ -548,7 +544,7 @@ fn print_server_ready(
         )),
     );
     print_field("watch paths", accent(watch_paths(config).len().to_string()));
-    print_field("ready in", accent(format!("{}ms", ready_in.as_millis())));
+    print_field("ready in", accent(format_update_elapsed(ready_in)));
     print_field("middleware", accent(middleware_summary(&config.middleware)));
     println!();
 }
@@ -692,12 +688,16 @@ fn watch_paths(config: &ServerConfig) -> Vec<PathBuf> {
 
 fn ignored_watch_path(root: &Path, path: &Path) -> bool {
     let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let relative = path
-        .strip_prefix(&canonical_root)
-        .or_else(|_| path.strip_prefix(root))
-        .unwrap_or(path);
+    let relative = if path.is_absolute() {
+        path.strip_prefix(&canonical_root)
+            .or_else(|_| path.strip_prefix(root))
+            .unwrap_or(path)
+    } else {
+        path.strip_prefix(Path::new(".")).unwrap_or(path)
+    };
     let components = relative
         .components()
+        .filter(|component| !matches!(component, std::path::Component::CurDir))
         .map(|component| component.as_os_str().to_string_lossy())
         .collect::<Vec<_>>();
     let top_level_ignored = components.first().is_some_and(|component| {
@@ -709,7 +709,7 @@ fn ignored_watch_path(root: &Path, path: &Path) -> bool {
     top_level_ignored
         || components
             .iter()
-            .any(|component| component == "node_modules")
+            .any(|component| matches!(component.as_ref(), ".ruvyxa" | "node_modules"))
 }
 
 fn watch_event_kind(kind: &notify::EventKind) -> &'static str {
@@ -733,69 +733,60 @@ fn dev_update_log_lines(
     subscribers: usize,
     elapsed: Duration,
 ) -> Vec<String> {
-    let elapsed_ms = elapsed.as_millis();
-    let mut lines = update
+    let elapsed = format_update_elapsed(elapsed);
+    let changed = update
         .changed_files
         .iter()
-        .map(|path| {
-            format!(
-                "⟳ File {event_kind}: {} (detect {}ms)",
-                project_relative_display(root, path),
-                elapsed_ms
-            )
-        })
+        .map(|path| project_relative_display(root, path))
         .collect::<Vec<_>>();
-
-    if update.full_reload {
-        lines.push(format!(
-            "↻ Affected routes: all {tracked_routes} routes (detect {elapsed_ms}ms)"
-        ));
+    let files = match changed.as_slice() {
+        [] => "project files".to_string(),
+        [file] => file.clone(),
+        [first, second] => format!("{first}, {second}"),
+        [first, second, rest @ ..] => format!("{first}, {second} +{} more", rest.len()),
+    };
+    let action = if update.full_reload {
+        format!("full reload · {tracked_routes} routes")
     } else if update.affected_routes.is_empty() {
-        lines.push(format!(
-            "↻ Affected routes: active stylesheet routes (detect {elapsed_ms}ms)"
-        ));
+        "styles refreshed".to_string()
     } else {
-        lines.push(format!(
-            "↻ Affected routes: {} (detect {elapsed_ms}ms)",
+        format!(
+            "{} · {}",
+            update.event_type.as_str(),
             update.affected_routes.join(", ")
-        ));
-    }
-    lines.push(format!(
-        "↻ Invalidated {invalidated_entries} render cache entries ({elapsed_ms}ms)"
-    ));
+        )
+    };
+    let cache = if invalidated_entries == 0 {
+        String::new()
+    } else {
+        format!(" · cleared {invalidated_entries} cache entries")
+    };
+    let mut lines = vec![format!("⟳ {event_kind}: {files}")];
 
     match worker_result {
         Ok(workers) => {
-            let bundle_type = match update.event_type {
-                HmrEventType::CssUpdate => "CSS",
-                HmrEventType::ComponentUpdate => "client/SSR",
-                HmrEventType::FullReload => "all route",
-            };
             lines.push(format!(
-                "⚙ {bundle_type} bundle rebuild queued on {workers} workers ({elapsed_ms}ms)"
+                "  {} · {workers} workers · {subscribers} browsers{cache} · {elapsed}",
+                ok(action)
             ));
-            if update.full_reload {
-                lines.push(format!(
-                    "✓ Full reload sent ({tracked_routes} routes, {subscribers} browsers, {elapsed_ms}ms)"
-                ));
-            } else {
-                lines.push(format!(
-                    "✓ HMR update sent: {} ({} routes, {subscribers} browsers, {elapsed_ms}ms)",
-                    update.event_type.as_str(),
-                    update.affected_routes.len()
-                ));
-            }
         }
         Err(error) => {
-            lines.push("✖ HMR update failed while invalidating worker bundles".to_string());
-            lines.push(format!("  Reason: {error}"));
             lines.push(format!(
-                "  Browser full reload fallback sent ({subscribers} browsers, {elapsed_ms}ms)."
+                "  {} · full reload fallback · {subscribers} browsers · {elapsed}",
+                warn_text(format!("worker update failed: {error}"))
             ));
         }
     }
 
     lines
+}
+
+fn format_update_elapsed(elapsed: Duration) -> String {
+    if elapsed >= Duration::from_millis(1) {
+        return format!("{}ms", elapsed.as_millis());
+    }
+    let tenths = elapsed.as_micros().div_ceil(100).max(1);
+    format!("{}.{:01}ms", tenths / 10, tenths % 10)
 }
 
 fn project_relative_display(root: &Path, path: &Path) -> String {
@@ -1034,6 +1025,7 @@ async fn handle_request(
     State(state): State<Arc<AppState>>,
     request: Request<Body>,
 ) -> impl IntoResponse {
+    let started = Instant::now();
     let (parts, body) = request.into_parts();
     let headers = parts.headers.clone();
     let method = parts.method.as_str().to_string();
@@ -1066,7 +1058,7 @@ async fn handle_request(
         request_body.as_deref(),
     )
     .await;
-    match render_result {
+    let response = match render_result {
         Ok(response) => response,
         Err(error) => {
             let is_dev = state.config.watch && state.config.error_overlay;
@@ -1084,11 +1076,45 @@ async fn handle_request(
                 }
             }
         }
+    };
+    if state.config.watch && is_document_navigation(&method, &headers) {
+        println!(
+            "{}",
+            dev_page_request_log(&method, &request_path, response.status(), started.elapsed())
+        );
     }
+    response
 }
 
 fn request_method_allows_body(method: &str) -> bool {
     !method.eq_ignore_ascii_case("GET") && !method.eq_ignore_ascii_case("HEAD")
+}
+
+fn is_document_navigation(method: &str, headers: &HeaderMap) -> bool {
+    if !method.eq_ignore_ascii_case("GET") {
+        return false;
+    }
+    headers
+        .get("sec-fetch-dest")
+        .and_then(|value| value.to_str().ok())
+        .is_some_and(|value| value.eq_ignore_ascii_case("document"))
+        || headers
+            .get(header::ACCEPT)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.contains("text/html"))
+}
+
+fn dev_page_request_log(
+    method: &str,
+    request_path: &str,
+    status: StatusCode,
+    elapsed: Duration,
+) -> String {
+    format!(
+        "◌ {method} {request_path} → {} · {}",
+        status.as_u16(),
+        format_update_elapsed(elapsed)
+    )
 }
 
 fn worker_request_headers(headers: &HeaderMap) -> BTreeMap<String, String> {
@@ -3850,10 +3876,14 @@ mod tests {
             temp.path(),
             &temp.path().join(".ruvyxa/cache/client.js")
         ));
+        assert!(ignored_watch_path(
+            temp.path(),
+            Path::new(".\\.ruvyxa\\cache\\ssr\\page.mjs")
+        ));
     }
 
     #[test]
-    fn dev_hmr_logs_are_relative_timed_and_actionable() {
+    fn dev_hmr_logs_are_compact_relative_and_actionable() {
         let root = PathBuf::from("C:/project");
         let update = HmrUpdate {
             affected_routes: vec!["/".to_string()],
@@ -3873,22 +3903,36 @@ mod tests {
         );
         let output = lines.join("\n");
 
-        assert!(output.contains("File modified: app/page.tsx"), "{output}");
-        assert!(output.contains("Affected routes: /"), "{output}");
-        assert!(
-            output.contains("Invalidated 2 render cache entries"),
-            "{output}"
-        );
-        assert!(
-            output.contains("client/SSR bundle rebuild queued"),
-            "{output}"
-        );
-        assert!(
-            output.contains("HMR update sent: component-update"),
-            "{output}"
-        );
+        assert_eq!(lines.len(), 2, "{output}");
+        assert!(output.contains("modified: app/page.tsx"), "{output}");
+        assert!(output.contains("component-update · /"), "{output}");
+        assert!(output.contains("cleared 2 cache entries"), "{output}");
+        assert!(output.contains("2 workers · 1 browsers"), "{output}");
         assert!(output.contains("86ms"), "{output}");
         assert!(!output.contains("C:/project"), "{output}");
+    }
+
+    #[test]
+    fn dev_hmr_logs_keep_submillisecond_timing_visible() {
+        assert_eq!(format_update_elapsed(Duration::from_micros(42)), "0.1ms");
+        assert_eq!(format_update_elapsed(Duration::from_millis(1)), "1ms");
+    }
+
+    #[test]
+    fn dev_page_request_logs_document_navigations_without_asset_noise() {
+        let mut document_headers = HeaderMap::new();
+        document_headers.insert("sec-fetch-dest", HeaderValue::from_static("document"));
+        assert!(is_document_navigation("GET", &document_headers));
+        assert!(!is_document_navigation("POST", &document_headers));
+
+        let mut asset_headers = HeaderMap::new();
+        asset_headers.insert("sec-fetch-dest", HeaderValue::from_static("script"));
+        assert!(!is_document_navigation("GET", &asset_headers));
+
+        assert_eq!(
+            dev_page_request_log("GET", "/about", StatusCode::OK, Duration::from_micros(420),),
+            "◌ GET /about → 200 · 0.5ms"
+        );
     }
 
     #[test]
@@ -3911,12 +3955,12 @@ mod tests {
         );
         let output = lines.join("\n");
 
-        assert!(output.contains("HMR update failed"), "{output}");
+        assert!(output.contains("worker update failed"), "{output}");
         assert!(
             output.contains("worker invalidation queue is full"),
             "{output}"
         );
-        assert!(output.contains("full reload fallback sent"), "{output}");
+        assert!(output.contains("full reload fallback"), "{output}");
         assert!(output.contains("112ms"), "{output}");
     }
 

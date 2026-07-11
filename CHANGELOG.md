@@ -19,9 +19,9 @@
   bytes, output bytes, optimized image counts, and cache hit tracking
 - Updated typed image configuration to `images.optimize`, `images.quality`, `images.lossless`, and
   `images.parallelism`
-- Updated `@ruvyxa/react` `Image` and `Picture` to emit direct `<img>` output for local assets with
-  automatic `.webp` URL rewriting, while retaining typed SEO primitives for canonical URLs,
-  robots, Open Graph, Twitter Cards, and escaped JSON-LD
+- Upgraded `@ruvyxa/react` images with local-only `.webp` rewriting, `fill`, author-managed
+  `srcSet`, browser-native `Picture` art direction, loading controls, and per-image CDN loaders
+  without adding runtime image transformation
 
 ### Hashing and Build
 
@@ -39,6 +39,10 @@
 - Added placeholder fields for future config options (`runtime`, `react`, `typescript`,
   `rendering`, `adapter`, `adapterOptions`)
 - Implemented `normalize_source_path()` to gracefully handle non-existent paths in HMR tracking
+- Fixed Windows watcher paths prefixed with `.` so generated `.ruvyxa` cache writes are ignored
+  instead of triggering repeated reloads; condensed dev startup and HMR logs into readable summaries
+- Added concise dev document-request logs with method, route, response status, and sub-millisecond
+  timing while excluding HMR and static asset traffic
 - Updated worker pool and config renderer with improved runtime implementations
 - Added tests for asset hash algorithm, dev config overlay/trace flags, unknown field rejection,
   and HMR tracker path normalization

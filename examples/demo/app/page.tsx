@@ -1,7 +1,7 @@
 export default function Home() {
   return (
     <main className="page-wide">
-      <h1>Ruvyxa Kitchen Sink</h1>
+      <h1>Ruvyxa Demo</h1>
       <p>Comprehensive example app demonstrating every Ruvyxa framework feature.</p>
 
       <div className="feature-grid">

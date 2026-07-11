@@ -5,6 +5,12 @@ export type { UseLoaderOptions, UseLoaderResult } from './use-loader.js'
 export { hydrate, reportHydrationError } from './hydration.js'
 export type { HydrationOptions, HydrationErrorHandler } from './hydration.js'
 export { Image, Picture } from './image.js'
-export type { ImageProps } from './image.js'
+export type {
+  ImageLoader,
+  ImageLoaderProps,
+  ImageProps,
+  PictureProps,
+  PictureSource,
+} from './image.js'
 export { Seo } from './seo.js'
 export type { SeoProps } from './seo.js'

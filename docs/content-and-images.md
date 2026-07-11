@@ -72,11 +72,50 @@ import { Image } from '@ruvyxa/react'
 />
 ```
 
-`width` and `height` are required to prevent cumulative layout shift. Non-priority images use
-`loading="lazy"` and `decoding="async"`; priority images use eager loading and high fetch priority.
-The component rewrites local PNG/JPEG URLs to `.webp`; pass `unoptimized` for a remote URL or an
-asset managed outside Ruvyxa. Development resolves the WebP URL back to the untouched source, so the
-same component works before and after a build.
+`width` and `height` are required to prevent cumulative layout shift unless `fill` is used. `fill`
+uses an absolutely positioned image that fills its positioned parent, without adding a framework
+wrapper. Non-priority images use `loading="lazy"` and `decoding="async"`; priority images use eager
+loading and high fetch priority. The component rewrites only local PNG/JPEG URLs to `.webp`. Remote
+URLs are left unchanged; use `unoptimized` to also preserve a local source URL. Development resolves
+the WebP URL back to the untouched source, so the same component works before and after a build.
+
+Use browser-native `srcSet` and `sizes` when you publish deliberate image sizes yourself. Local
+PNG/JPEG URLs inside `srcSet` are rewritten to their WebP counterparts; Ruvyxa does not generate
+width variants automatically, keeping builds and static output bounded.
+
+For art direction, `Picture` renders native `<picture>` and `<source>` elements. Each local source
+is rewritten to its one WebP build output:
+
+```tsx
+import { Picture } from '@ruvyxa/react'
+
+;<Picture
+  src="/hero-desktop.jpg"
+  alt="Ruvyxa dashboard"
+  width={1600}
+  height={900}
+  sources={[
+    { media: '(max-width: 768px)', srcSet: '/hero-mobile.png' },
+    { media: '(min-width: 769px)', srcSet: '/hero-desktop.jpg' },
+  ]}
+/>
+```
+
+For an external CDN, pass a `loader`. It produces the final URL at render time but does not make a
+request through the Ruvyxa server or enable runtime image transformation:
+
+```tsx
+;<Image
+  src="https://images.example.com/hero.jpg"
+  alt="Ruvyxa dashboard"
+  width={1600}
+  height={900}
+  quality={75}
+  loader={({ src, width, quality }) =>
+    `https://cdn.example.com/image?src=${encodeURIComponent(src)}&w=${width}&q=${quality}`
+  }
+/>
+```
 
 Plain HTML, CSS, and Markdown image references are not component-transformed. Point them at the
 output name directly (for example, `/hero.webp`); the development server maps that URL to

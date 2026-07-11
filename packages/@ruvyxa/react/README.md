@@ -19,9 +19,10 @@ import { Image } from '@ruvyxa/react'
 ;<Image src="/hero.png" alt="Product overview" width={1600} height={900} priority />
 ```
 
-`Image` (also exported as `Picture`) rewrites local PNG/JPEG URLs to Ruvyxa's single build-time WebP
-output, requires intrinsic dimensions, and applies sensible loading defaults. Pass `unoptimized`
-when the URL is remote or managed outside Ruvyxa.
+`Image` rewrites local PNG/JPEG URLs to Ruvyxa's single build-time WebP output, requires intrinsic
+dimensions unless `fill` is used, and applies sensible loading defaults. Remote URLs are unchanged.
+Use `Picture` with `sources` for browser-native art direction, or a per-image `loader` to send an
+image URL to an external CDN—neither option adds an image transformation endpoint to Ruvyxa.
 
 ## SEO metadata
 
