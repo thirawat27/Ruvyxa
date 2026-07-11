@@ -2922,8 +2922,51 @@ fn error_page(message: &str, show_overlay: bool) -> String {
 }
 
 fn plain_error_page(message: &str) -> String {
+    let not_found = message.contains("Route not found");
+    let code = if not_found { "404" } else { "500" };
+    let title = if not_found {
+        "This page could not be found."
+    } else {
+        "Ruvyxa hit an unexpected error."
+    };
+
     format!(
-        "<!doctype html><html><body><main><h1>Ruvyxa Error</h1><pre>{}</pre></main></body></html>",
+        r##"<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>Ruvyxa Error - {code}</title>
+<style>
+  :root {{ color-scheme: light; --bg: #18181c; --ink: #4c1d95; --muted: #6d4b8f; --accent: #7c3aed; --line: rgba(124,58,237,.28); }}
+  *, *::before, *::after {{ box-sizing: border-box; }}
+  html, body {{ min-height: 100%; }}
+  body {{ display: grid; min-height: 100vh; place-items: center; margin: 0; padding: 28px; color: var(--ink); background: radial-gradient(circle at 50% 38%, rgba(111, 65, 143, .18), transparent 34rem), var(--bg); font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }}
+  .error-card {{ width: min(760px, 100%); padding: clamp(30px, 6vw, 66px); border: 1px solid rgba(124,58,237,.16); border-radius: 24px; background: #fff; box-shadow: 0 28px 90px rgba(0,0,0,.38), 0 0 0 1px rgba(255,255,255,.7) inset; text-align: center; }}
+  .logo {{ display: block; width: clamp(82px, 15vw, 132px); height: clamp(82px, 15vw, 132px); margin: 0 auto 28px; object-fit: contain; filter: drop-shadow(0 12px 22px rgba(123, 62, 226, .3)); }}
+  .status {{ display: inline-flex; align-items: center; justify-content: center; gap: clamp(14px, 3vw, 34px); margin: 0 auto 18px; }}
+  .code {{ color: var(--accent); font: 800 clamp(36px, 7vw, 58px)/1 ui-monospace, SFMono-Regular, Consolas, monospace; letter-spacing: -.06em; }}
+  .divider {{ width: 1px; height: 62px; background: var(--line); }}
+  h1 {{ margin: 0; color: var(--ink); font-size: clamp(22px, 4vw, 34px); font-weight: 520; letter-spacing: -.035em; }}
+  .message {{ max-width: 620px; margin: 18px auto 0; color: var(--muted); font: 15px/1.7 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }}
+  .path-label {{ display: inline-block; margin-top: 20px; padding: 6px 12px; border: 1px solid rgba(124,58,237,.2); border-radius: 999px; color: #6d28d9; background: #f4efff; font-size: clamp(13px, 1.8vw, 16px); font-weight: 700; letter-spacing: .06em; text-transform: uppercase; text-shadow: 0 1px 0 rgba(255,255,255,.8); }}
+  @media (max-width: 560px) {{ body {{ padding: 16px; }} .error-card {{ padding: 34px 22px; border-radius: 18px; }} .status {{ flex-direction: column; gap: 12px; }} .code {{ font-size: clamp(42px, 14vw, 54px); }} .divider {{ width: 64px; height: 1px; }} h1 {{ max-width: 260px; text-align: center; }} }}
+</style>
+</head>
+<body>
+<main class="error-card" aria-labelledby="error-title">
+  <img class="logo" src="/ruvyxa.png" alt="Ruvyxa">
+  <div class="status" aria-label="Error status">
+    <span class="code">{code}</span>
+    <span class="divider" aria-hidden="true"></span>
+    <h1 id="error-title">{title}</h1>
+  </div>
+  <pre class="message">{}</pre>
+  <div class="path-label">Ruvyxa Error</div>
+</main>
+</body>
+</html>"##,
         escape_html(message)
     )
 }
@@ -3245,10 +3288,21 @@ mod tests {
     fn plain_error_page_escapes_message() {
         let html = plain_error_page("<script>alert(1)</script>");
 
-        assert_eq!(
-            html,
-            "<!doctype html><html><body><main><h1>Ruvyxa Error</h1><pre>&lt;script&gt;alert(1)&lt;/script&gt;</pre></main></body></html>"
-        );
+        assert!(html.contains("<main class=\"error-card\""));
+        assert!(html.contains("src=\"/ruvyxa.png\""));
+        assert!(html.contains("500"));
+        assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+        assert!(!html.contains("<script>alert(1)</script>"));
+    }
+
+    #[test]
+    fn plain_error_page_uses_centered_404_state_and_logo() {
+        let html = plain_error_page("Route not found");
+
+        assert!(html.contains("<main class=\"error-card\""));
+        assert!(html.contains("<span class=\"code\">404</span>"));
+        assert!(html.contains("src=\"/ruvyxa.png\""));
+        assert!(html.contains("This page could not be found."));
     }
 
     #[tokio::test]

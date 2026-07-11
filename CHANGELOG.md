@@ -12,6 +12,8 @@
 
 ### Diagnostics and Error Recovery
 
+- Refined the plain error page into a centered 404/500 recovery layout with the persistent Ruvyxa
+  logo, dark outer background, white card, purple status/text treatment, and escaped diagnostics
 - Kept the development diagnostic overlay source-aware with code frames, suggested fixes, import
   chains, affected routes, and stack details
 
@@ -27,6 +29,8 @@
 
 ### Starters, Documentation, and Verification
 
+- Centralized the framework logo at `assets/branding/ruvyxa.png` and documented the synchronized
+  runtime copies used by starters and the error page
 - Updated minimal starters and the demo with image configuration and a working MDX content route
 - Added the Markdown, MDX, image, and SEO guide plus expanded diagnostic documentation
 - Added focused coverage for content compilation, fenced-import handling, error-page escaping and
