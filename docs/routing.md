@@ -9,8 +9,10 @@ manual registration, no configuration file.
 
 | File         | Purpose                                         |
 | ------------ | ----------------------------------------------- |
-| `page.tsx`   | A renderable page route                         |
+| `page.tsx`   | A renderable page route (TSX)                   |
 | `page.jsx`   | A renderable page route (JSX)                   |
+| `page.md`    | A renderable Markdown page route                |
+| `page.mdx`   | A renderable MDX page route                     |
 | `route.ts`   | An API route (no UI)                            |
 | `route.js`   | An API route (no UI, JS)                        |
 | `layout.tsx` | A layout that wraps child pages                 |

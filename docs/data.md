@@ -60,7 +60,7 @@ export const getPost = loader(async ({ params, cache }) => {
 | `"1h"`  | 1 hour     |
 | `"1d"`  | 1 day      |
 
-The cache uses a FIFO eviction policy (1024 max entries) with periodic cleanup every 60 seconds. It
+The cache uses an LRU eviction policy (1024 max entries) with periodic cleanup every 60 seconds. It
 is per-process and invalidated on server restart. For distributed caching, connect your own client
 inside the loader body.
 

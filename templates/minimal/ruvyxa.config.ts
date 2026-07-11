@@ -20,7 +20,6 @@ const config: RuvyxaConfig = {
   },
   debug: {
     overlay: true,
-    traces: true,
   },
   images: {
     optimize: true,

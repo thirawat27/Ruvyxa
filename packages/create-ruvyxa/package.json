@@ -1,14 +1,26 @@
 {
   "name": "create-ruvyxa",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "description": "Create a clean Ruvyxa application with production-minded defaults and a focused project structure.",
   "license": "Apache-2.0",
   "type": "module",
   "bin": {
     "create-ruvyxa": "./bin/create-ruvyxa.js"
   },
-  "files": ["bin", "dist", "template", "README.md"],
-  "keywords": ["create", "starter", "template", "ruvyxa", "typescript", "react"],
+  "files": [
+    "bin",
+    "dist",
+    "template",
+    "README.md"
+  ],
+  "keywords": [
+    "create",
+    "starter",
+    "template",
+    "ruvyxa",
+    "typescript",
+    "react"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/thirawat27/ruvyxa.git",

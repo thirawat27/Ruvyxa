@@ -1,13 +1,21 @@
 {
   "name": "@ruvyxa/adapter-static",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "description": "Prepare Ruvyxa routes and assets for static output targets through the first-party adapter contract.",
   "license": "Apache-2.0",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "files": ["dist", "README.md"],
-  "keywords": ["ruvyxa", "adapter", "static", "deployment"],
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "keywords": [
+    "ruvyxa",
+    "adapter",
+    "static",
+    "deployment"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/thirawat27/ruvyxa.git",

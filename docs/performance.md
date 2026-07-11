@@ -66,7 +66,7 @@ elimination.
 
 ### Content Hashing
 
-File names are BLAKE3 hashes (first 16 hex characters). Enables:
+File names are BLAKE3 hashes (first 16 hex characters, 64-bit). Enables:
 
 - Immutable caching (`Cache-Control: public, max-age=31536000, immutable`)
 - Automatic cache-busting on content change

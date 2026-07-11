@@ -53,8 +53,9 @@ Affected routes:
 
 | Code      | Title                  | Cause                                        |
 | --------- | ---------------------- | -------------------------------------------- |
-| `RUV1100` | SSR render failed      | ReactDOMServer error during page render      |
-| `RUV1102` | SSR renderer not found | Internal renderer `ssr-renderer.mjs` missing |
+| `RUV1100` | SSR render failed         | ReactDOMServer error during page render           |
+| `RUV1101` | SSR renderer args missing | SSR renderer missing required projectRoot/appDir/pageFile arguments |
+| `RUV1102` | SSR renderer not found    | Internal renderer `ssr-renderer.mjs` missing         |
 
 ### API Routes
 
@@ -63,6 +64,12 @@ Affected routes:
 | `RUV1200` | API route execution failed | Handler threw an unhandled exception |
 | `RUV1201` | No available server port   | All configured ports are in use      |
 | `RUV1202` | API renderer not found     | Internal renderer script missing     |
+
+### Partial Prerendering (PPR)
+
+| Code      | Title             | Cause                                   |
+| --------- | ----------------- | --------------------------------------- |
+| `RUV1550` | PPR render failed | PPR (Partial Prerendering) render error |
 
 ### Client Bundles
 
@@ -110,6 +117,7 @@ Affected routes:
 | `RUV1700` | Config plugin error          | JS build plugin bridge returned an error      |
 | `RUV1701` | JS plugin runner not found   | `plugin-runner.mjs` missing from node_modules |
 | `RUV1702` | Worker pool script not found | `worker-pool.mjs` missing from node_modules   |
+| `RUV1801` | Module resolution error      | Bundler could not resolve a module specifier |
 
 ### Middleware
 

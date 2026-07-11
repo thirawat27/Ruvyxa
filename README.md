@@ -59,7 +59,7 @@
   limit, and per-client rate limiting (60 req/min) are built in.
 - **Dev/prod parity** — `dev` and `start` share routing, rendering, static asset, and
   security-header semantics.
-- **ETag / 304 support** — static assets include blake3-based ETags for efficient browser caching.
+- **ETag / 304 support** — static assets include BLAKE3-based ETags (64-bit) for efficient browser caching.
 - **Async I/O** — file serving uses `tokio::fs` to avoid blocking the async runtime under concurrent
   load.
 
@@ -407,7 +407,7 @@ Routes with `getStaticParams` export generate static paths at build time.
 - Async file I/O via tokio::fs (no thread starvation)
 - SSR via `renderToString` with layout nesting
 - Gzip + Brotli compression (tower-http)
-- ETag / 304 Not Modified (blake3 hashing)
+- ETag / 304 Not Modified (BLAKE3 64-bit hashing)
 - RwLock-based runtime cache (concurrent readers)
 - Route-level client bundle splitting with tree-shaking
 

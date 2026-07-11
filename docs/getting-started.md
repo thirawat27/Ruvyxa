@@ -54,23 +54,17 @@ export default defineConfig({
     sourcemap: false,
     treeShaking: true,
     splitStrategy: 'route',
-    jsxRuntime: 'classic',
-    esTarget: 'es2022',
     parallelism: 4,
-    emitChunkManifest: false,
-    prebundleDependencies: true,
   },
   cache: {
     routeManifest: true,
     css: true,
-    buildDir: '.ruvyxa/cache/bundler',
   },
-  debug: { overlay: true, traces: true },
-  security: {
-    actionBodyLimitBytes: 65536,
-    sameOriginActions: true,
-    fetchMetadataActions: true,
-    securityHeaders: true,
+  debug: { overlay: true },
+  images: {
+    optimize: true,
+    formats: ['avif', 'webp'],
+    quality: 80,
   },
 })
 ```

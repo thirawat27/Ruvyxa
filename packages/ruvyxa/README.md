@@ -43,7 +43,6 @@ deterministic.
 import { defineConfig } from 'ruvyxa/config'
 import { action, cache, invalidateCache, json, loader, notFound, redirect } from 'ruvyxa/server'
 import type { Adapter, PluginContext, RuvyxaConfig, RuvyxaPlugin, TransformResult } from 'ruvyxa'
-import type { ConfigPlugin } from 'ruvyxa/config'
 ```
 
 ## Configuration with Middleware
@@ -131,6 +130,7 @@ The runtime files included in this package:
 | `runtime/action-renderer.mjs` | Server action execution                            |
 | `runtime/config-renderer.mjs` | Config file loading                                |
 | `runtime/plugin-runner.mjs`   | Persistent config-plugin hook worker               |
+| `runtime/ssg-renderer.mjs`    | Build-time SSG/ISR/PPR pre-rendering               |
 
 ## Native CLI
 

@@ -1,13 +1,21 @@
 {
   "name": "@ruvyxa/adapter-bun",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "description": "Run Ruvyxa on Bun-flavored hosts with typed adapter metadata for entrypoints and assets.",
   "license": "Apache-2.0",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "files": ["dist", "README.md"],
-  "keywords": ["ruvyxa", "adapter", "bun", "deployment"],
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "keywords": [
+    "ruvyxa",
+    "adapter",
+    "bun",
+    "deployment"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/thirawat27/ruvyxa.git",

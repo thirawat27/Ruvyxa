@@ -1,13 +1,21 @@
 {
   "name": "@ruvyxa/adapter-node",
-  "version": "1.0.9",
+  "version": "1.0.10",
   "description": "Run Ruvyxa on Node with a clean adapter contract for server output, assets, and production runtime metadata.",
   "license": "Apache-2.0",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "files": ["dist", "README.md"],
-  "keywords": ["ruvyxa", "adapter", "node", "deployment"],
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "keywords": [
+    "ruvyxa",
+    "adapter",
+    "node",
+    "deployment"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/thirawat27/ruvyxa.git",
