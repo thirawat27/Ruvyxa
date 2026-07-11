@@ -1,8 +1,22 @@
 export default function Home() {
   return (
     <main className="page-wide">
-      <h1>Ruvyxa Demo</h1>
-      <p>Comprehensive example app demonstrating every Ruvyxa framework feature.</p>
+      <section className="demo-hero">
+        <div>
+          <p className="eyebrow">Framework playground</p>
+          <h1>Ruvyxa Demo</h1>
+          <p>Comprehensive example app demonstrating every Ruvyxa framework feature.</p>
+        </div>
+        <img
+          className="demo-hero-image"
+          src="/ruvyxa.png"
+          alt="Ruvyxa logo"
+          width={1600}
+          height={1600}
+          fetchPriority="high"
+          decoding="async"
+        />
+      </section>
 
       <div className="feature-grid">
         <a className="feature-card" href="/about">
