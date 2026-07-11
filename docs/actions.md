@@ -122,7 +122,20 @@ Ruvyxa applies multiple layers of protection to every action call:
 | **Security headers**   | Standard headers applied to all responses           |
 | **Module isolation**   | Actions can only be invoked from their owning route |
 
-These protections work automatically. No configuration needed.
+These protections are enabled by default. For trusted non-browser integrations, the action request
+policy can be tuned explicitly without changing the defaults for other applications:
+
+```ts
+import { config } from '@ruvyxa/core'
+
+export default config({
+  security: {
+    actionLimit: 128 * 1024,
+    sameOrigin: true,
+    fetchMeta: true,
+  },
+})
+```
 
 ---
 

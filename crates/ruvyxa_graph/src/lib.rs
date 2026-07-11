@@ -327,8 +327,6 @@ fn validate_client_module(
         return Ok(());
     };
 
-    let code = code_without_strings_and_comments(&source);
-
     if import_specifiers(&source)
         .iter()
         .any(|specifier| specifier == "server-only")
@@ -341,7 +339,7 @@ fn validate_client_module(
         );
     }
 
-    for env_name in private_env_reads(&code) {
+    for env_name in private_env_reads(&source) {
         diagnostics.push(
             Diagnostic::new("RUV1008", "Private environment variable used in client graph")
                 .explain(format!(
@@ -483,23 +481,54 @@ fn resolve_relative_import(from: &Path, specifier: &str) -> Option<PathBuf> {
 }
 
 fn private_env_reads(source: &str) -> Vec<String> {
+    let code = code_without_strings_and_comments(source);
     let mut names = Vec::new();
-    let marker = "process.env.";
-    let mut rest = source;
+    let marker = "process.env";
+    let mut offset = 0;
 
-    while let Some(index) = rest.find(marker) {
-        rest = &rest[index + marker.len()..];
-        let name = rest
-            .chars()
-            .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
-            .collect::<String>();
+    while let Some(index) = code[offset..].find(marker) {
+        let start = offset + index + marker.len();
+        let rest = &code[start..];
+        let trimmed = rest.trim_start_matches(char::is_whitespace);
+        let name = if let Some(rest) = trimmed.strip_prefix('.') {
+            rest.chars()
+                .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
+                .collect()
+        } else if let Some(bracket_offset) = rest.find('[') {
+            let before_bracket = &rest[..bracket_offset];
+            if before_bracket.chars().all(char::is_whitespace) {
+                literal_env_name(&source[start + bracket_offset..]).unwrap_or_default()
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
 
         if !name.is_empty() && !name.starts_with("RUVYXA_PUBLIC_") {
             names.push(name);
         }
+        offset = start;
     }
 
     names
+}
+
+fn literal_env_name(source: &str) -> Option<String> {
+    let source = source.strip_prefix('[')?.trim_start();
+    let quote = source.chars().next()?;
+    if quote != '\'' && quote != '"' {
+        return None;
+    }
+    let rest = &source[quote.len_utf8()..];
+    let end = rest.find(quote)?;
+    let name = &rest[..end];
+    rest[end + quote.len_utf8()..]
+        .trim_start()
+        .strip_prefix(']')?;
+    name.chars()
+        .all(|character| character.is_ascii_alphanumeric() || character == '_')
+        .then(|| name.to_string())
 }
 
 fn relative_starts_with_server(relative: &Path) -> bool {
@@ -1343,6 +1372,15 @@ mod tests {
         let report = validate_app(temp.path(), &manifest).unwrap();
 
         assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+    }
+
+    #[test]
+    fn detects_literal_bracket_private_env_reads() {
+        let names = private_env_reads(
+            r#"const secret = process.env["DATABASE_URL"]; const docs = "process.env['EXAMPLE']";"#,
+        );
+
+        assert_eq!(names, vec!["DATABASE_URL"]);
     }
 
     #[test]

@@ -12,7 +12,7 @@ export type {
   PluginPermissions,
   PluginContext,
   RateLimitConfig,
-  RenderingConfig,
+  RenderConfig,
   RenderStrategy,
   RuvyxaConfig,
   RuvyxaPlugin,
@@ -20,6 +20,7 @@ export type {
   TransformResult,
 } from './types.js'
 
-export function defineConfig<TConfig extends RuvyxaConfig>(config: TConfig): TConfig {
+/** Define the typed contents of `ruvyxa.config.ts`. */
+export function config<TConfig extends RuvyxaConfig>(config: TConfig): TConfig {
   return config
 }

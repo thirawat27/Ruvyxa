@@ -40,17 +40,17 @@ deterministic.
 ## Imports
 
 ```ts
-import { defineConfig } from 'ruvyxa/config'
-import { action, cache, invalidateCache, json, loader, notFound, redirect } from 'ruvyxa/server'
-import type { Adapter, PluginContext, RuvyxaConfig, RuvyxaPlugin, TransformResult } from 'ruvyxa'
+import { config } from 'ruvyxa/config'
+import { action, cache, cacheStats, invalidateCache, json, loader, notFound, redirect } from 'ruvyxa/server'
+import type { Adapter, BuildContext, PluginContext, RuvyxaConfig, RuvyxaPlugin, TransformResult } from 'ruvyxa'
 ```
 
 ## Configuration with Middleware
 
 ```ts
-import { defineConfig } from 'ruvyxa/config'
+import { config } from 'ruvyxa/config'
 
-export default defineConfig({
+export default config({
   appDir: 'app',
   outDir: '.ruvyxa',
   css: {
@@ -62,30 +62,30 @@ export default defineConfig({
   },
   build: {
     minify: true,
-    sourcemap: false,
-    treeShaking: true,
-    splitStrategy: 'route',
-    jsxRuntime: 'classic',
-    esTarget: 'es2022',
-    parallelism: 4,
-    emitChunkManifest: false,
-    prebundleDependencies: true,
+    map: false,
+    treeShake: true,
+    split: 'route',
+    jsx: 'classic',
+    target: 'es2022',
+    workers: 4,
+    manifest: false,
+    warm: true,
   },
   cache: {
-    routeManifest: true,
+    routes: true,
     css: true,
-    buildDir: '.ruvyxa/cache/bundler',
+    dir: '.ruvyxa/cache/bundler',
   },
   security: {
-    actionBodyLimitBytes: 65536,
-    sameOriginActions: true,
-    fetchMetadataActions: true,
-    securityHeaders: true,
+    actionLimit: 65536,
+    sameOrigin: true,
+    fetchMeta: true,
+    headers: true,
   },
   middleware: {
     builtin: {
       timing: true,
-      logging: true,
+      log: true,
       cors: {
         origins: ['http://localhost:5173'],
         methods: ['GET', 'POST', 'PUT', 'DELETE'],
@@ -97,12 +97,12 @@ export default defineConfig({
         name: 'auth-guard',
         path: 'plugins/auth.wasm',
         phase: 'request',
-        hotReload: true,
+        hot: true,
         routes: ['/api/*'],
-        permissions: {
+        allow: {
           env: ['AUTH_SECRET'],
-          timeoutMs: 5000,
-          maxMemoryBytes: 67108864,
+          timeout: 5000,
+          memory: 67108864,
         },
       },
     ],

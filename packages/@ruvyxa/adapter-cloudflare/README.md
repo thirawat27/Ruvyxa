@@ -11,10 +11,10 @@ npm install @ruvyxa/adapter-cloudflare
 ## Usage
 
 ```ts
-import { defineConfig } from 'ruvyxa/config'
+import { config } from 'ruvyxa/config'
 import { cloudflareAdapter } from '@ruvyxa/adapter-cloudflare'
 
-export default defineConfig({
+export default config({
   adapter: cloudflareAdapter(),
 })
 ```

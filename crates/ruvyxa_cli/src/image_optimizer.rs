@@ -12,12 +12,13 @@ use walkdir::WalkDir;
 use webp::Encoder;
 
 #[derive(Debug, Clone, Deserialize)]
-#[serde(default, rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub struct ImageOptimizationOptions {
     pub optimize: bool,
     pub quality: u8,
     pub lossless: bool,
     /// Zero uses Rayon's global worker count.
+    #[serde(rename = "workers")]
     pub parallelism: usize,
 }
 

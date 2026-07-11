@@ -16,33 +16,33 @@ export interface RuvyxaConfig {
   }
   build?: {
     minify?: boolean
-    sourcemap?: boolean
-    treeShaking?: boolean
-    splitStrategy?: 'single' | 'route' | 'manual'
-    parallelism?: number
-    jsxRuntime?: 'classic' | 'automatic'
-    esTarget?: 'es2018' | 'es2019' | 'es2020' | 'es2022' | 'esnext'
-    emitChunkManifest?: boolean
+    map?: boolean
+    treeShake?: boolean
+    split?: 'single' | 'route' | 'manual'
+    workers?: number
+    jsx?: 'classic' | 'automatic'
+    target?: 'es2018' | 'es2019' | 'es2020' | 'es2022' | 'esnext'
+    manifest?: boolean
     /** Precompile dev route modules and load their dependencies in background workers. */
-    prebundleDependencies?: boolean
+    warm?: boolean
   }
-  rendering?: RenderingConfig
+  render?: RenderConfig
   debug?: {
     overlay?: boolean
     traces?: boolean
   }
-  images?: ImageConfig
+  image?: ImageConfig
   security?: {
-    actionBodyLimitBytes?: number
-    sameOriginActions?: boolean
-    fetchMetadataActions?: boolean
-    securityHeaders?: boolean
+    actionLimit?: number
+    sameOrigin?: boolean
+    fetchMeta?: boolean
+    headers?: boolean
   }
   cache?: {
-    routeManifest?: boolean
+    routes?: boolean
     css?: boolean
     /** Shared compile-cache directory. Relative paths are resolved from the project root. */
-    buildDir?: string
+    dir?: string
   }
   middleware?: MiddlewareConfig
   adapter?: Adapter
@@ -58,7 +58,7 @@ export interface ImageConfig {
   /** Use lossless WebP encoding; `quality` then controls encoder effort. @default false */
   lossless?: boolean
   /** Image conversion workers. Zero selects the available CPU count. @default 0 */
-  parallelism?: number
+  workers?: number
 }
 
 // ─── Rendering Strategy ───────────────────────────────────────────────────────
@@ -75,20 +75,20 @@ export interface ImageConfig {
 export type RenderStrategy = 'ssr' | 'ssg' | 'isr' | 'csr' | 'ppr'
 
 /**
- * Global rendering configuration in `ruvyxa.config.ts`.
+ * Global render configuration in `ruvyxa.config.ts`.
  */
-export interface RenderingConfig {
+export interface RenderConfig {
   /**
    * Default rendering strategy for pages that don't declare one explicitly.
    * @default "ssr"
    */
-  defaultStrategy?: RenderStrategy
+  strategy?: RenderStrategy
   /**
    * Default ISR revalidation interval in seconds (used when a page exports
    * `revalidate` without a value or inherits ISR from config).
    * @default 60
    */
-  defaultRevalidate?: number
+  revalidate?: number
 }
 
 // ─── Per-Page Exports ─────────────────────────────────────────────────────────
@@ -134,8 +134,8 @@ export interface MiddlewareConfig {
 export interface BuiltinMiddlewareConfig {
   cors?: CorsConfig
   timing?: boolean
-  logging?: boolean
-  rateLimit?: RateLimitConfig
+  log?: boolean
+  rate?: RateLimitConfig
   headers?: Record<string, string>
 }
 
@@ -148,9 +148,9 @@ export interface CorsConfig {
 }
 
 export interface RateLimitConfig {
-  maxRequests: number
-  windowSecs: number
-  keyBy?: string
+  max: number
+  window: number
+  key?: string
 }
 
 export interface LayerConfig {
@@ -161,19 +161,19 @@ export interface LayerConfig {
 export interface MiddlewarePluginConfig {
   name: string
   path: string
-  hotReload?: boolean
+  hot?: boolean
   phase?: 'request' | 'response'
   routes?: string[]
   config?: unknown
-  permissions?: PluginPermissions
+  allow?: PluginPermissions
 }
 
 export interface PluginPermissions {
   env?: string[]
-  fsRead?: string[]
+  read?: string[]
   net?: string[]
-  timeoutMs?: number
-  maxMemoryBytes?: number
+  timeout?: number
+  memory?: number
 }
 
 export interface TransformResult {
@@ -210,7 +210,7 @@ export interface AdapterOutput {
   assetsDir: string
   /** Directory that adapters must copy or publish with hashed client chunks. */
   clientDir?: string
-  /** Chunk graph consumed by deployment tooling when `emitChunkManifest` is enabled. */
+  /** Chunk graph consumed by deployment tooling when `build.manifest` is enabled. */
   chunkManifest?: string
   platform?: 'node' | 'vercel' | 'cloudflare' | 'netlify' | 'bun' | 'static'
   configFiles?: string[]

@@ -43,32 +43,52 @@ Create a config file:
 
 ```ts
 // ruvyxa.config.ts
-import { defineConfig } from 'ruvyxa/config'
+import { config } from 'ruvyxa/config'
 
-export default defineConfig({
+export default config({
   appDir: 'app',
   outDir: '.ruvyxa',
   server: { port: 3000, host: 'localhost' },
   build: {
     minify: true,
-    sourcemap: false,
-    treeShaking: true,
-    splitStrategy: 'route',
-    parallelism: 4,
+    map: false,
+    treeShake: true,
+    split: 'route',
+    workers: 4,
   },
   cache: {
-    routeManifest: true,
+    routes: true,
     css: true,
   },
   debug: { overlay: true, traces: true },
-  images: {
+  image: {
     optimize: true,
     quality: 82,
     lossless: false,
-    parallelism: 0,
+    workers: 0,
   },
 })
 ```
+
+### Concise config keys
+
+`appDir` and `outDir` keep their established names. All other verbose configuration keys use the
+following concise names:
+
+| Area                         | Keys                                                                        |
+| ---------------------------- | --------------------------------------------------------------------------- |
+| `build`                      | `map`, `treeShake`, `split`, `workers`, `jsx`, `target`, `manifest`, `warm` |
+| `render`                     | `strategy`, `revalidate`                                                    |
+| `image`                      | `workers`                                                                   |
+| `security`                   | `actionLimit`, `sameOrigin`, `fetchMeta`, `headers`                         |
+| `cache`                      | `routes`, `dir`                                                             |
+| `middleware.builtin`         | `log`, `rate`                                                               |
+| `middleware.builtin.rate`    | `max`, `window`, `key`                                                      |
+| `middleware.plugins[]`       | `hot`, `allow`                                                              |
+| `middleware.plugins[].allow` | `read`, `timeout`, `memory`                                                 |
+
+The former names are intentionally rejected so configuration mistakes surface immediately during
+`ruvyxa check` or `ruvyxa build`.
 
 ---
 
@@ -214,7 +234,7 @@ import '../styles/site.css'
 Use `css.entries` for global files or directories that are not imported by application code:
 
 ```ts
-export default defineConfig({
+export default config({
   css: { entries: ['styles/theme.css', 'vendor/styles'] },
 })
 ```
@@ -274,7 +294,7 @@ npx ruvyxa start
 The build validates your app, bundles client-side code with tree-shaking and minification, and emits
 everything to `.ruvyxa/`. SSG/ISR/PPR/CSR routes are pre-rendered at build time.
 
-Set `build.emitChunkManifest: true` when deployment tooling needs `client/chunk-manifest.json`.
+Set `build.manifest: true` when deployment tooling needs `client/chunk-manifest.json`.
 
 ---
 

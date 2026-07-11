@@ -25,15 +25,17 @@ internal module refactors over moving root folders.
 | -------------------- | --------------------------------------------------------------------------------------------- |
 | `ruvyxa_cli`         | CLI commands (`dev`, `build`, `check`, `start`, `preview`, `routes`, `analyze`, `doctor`,     |
 |                      | `clean`, `trace`, `bench`, `test:parity`), config loading via Node config renderer, build     |
-|                      | orchestration, production output layout.                                                      |
+|                      | orchestration, production output layout, image optimization.                                  |
 | `ruvyxa_bundler`     | Native module graph, TypeScript/JSX compilation, server/client boundary checks,               |
 |                      | linker, minifier, source maps, chunk manifests, and plugin pipeline.                          |
 | `ruvyxa_graph`       | File-system route discovery, rendering strategy detection, route validation,                  |
-|                      | manifest writing.                                                                             |
+|                      | manifest writing, server/client boundary validation.                                          |
 | `ruvyxa_dev_server`  | Axum HTTP server, WebSocket HMR, radix-tree router, render cache (FIFO with TTL),             |
-|                      | Node worker pool (`worker_pool`), radix router (`router`), render cache (`render_cache`),     |
-|                      | HMR tracker (`hmr_tracker`), style collection (`style`), action/API/client endpoints.         |
-| `ruvyxa_diagnostics` | Structured `Diagnostic` struct, `RuvyxaError` enum with `Diagnostic`/`Io`/`Message` variants. |
+|                      | Node worker pool (`worker_pool`), router (`router`), render cache (`render_cache`),           |
+|                      | HMR tracker (`hmr_tracker`), style collection (`style`), Tailwind compilation,                |
+|                      | action/API/client endpoints, pre-rendered SSG/ISR/PPR/CSR serving.                            |
+| `ruvyxa_diagnostics` | Structured `Diagnostic` struct, `RuvyxaError` enum with `Diagnostic`/`Io`/`Message` variants, |
+|                      | `SourceSpan` for file/line/column references.                                                 |
 | `ruvyxa_middleware`  | Built-in Tower middleware (`builtin`, `config`, `stack`).                                     |
 |                      | Wasm plugin runtime (`wasm`, optional, requires `wasm-plugins` feature).                      |
 
@@ -56,33 +58,33 @@ internal module refactors over moving root folders.
 
 ## Package Boundaries
 
-| Package                      | Responsibility                                                                |
-| ---------------------------- | ----------------------------------------------------------------------------- |
-| `packages/ruvyxa`            | User-facing npm package. Re-exports from `@ruvyxa/core`. Contains `bin/`,     |
-|                              | `runtime/` (Node renderers, worker pool, compiler), and `native-bin/`.        |
-| `packages/@ruvyxa/core`      | Shared typed primitives: `defineConfig`, `loader`, `action`, `cache`, `json`, |
-|                              | `redirect`, `notFound`, adapter and plugin contracts.                         |
-| `packages/@ruvyxa/react`     | React integration: `RuvyxaErrorBoundary`, `useRuvyxaLoader`, `hydrate`.       |
-| `packages/@ruvyxa/adapter-*` | Deployment adapters consuming `.ruvyxa/` output.                              |
-| `packages/create-ruvyxa`     | Project scaffolding. Copies `templates/minimal/` at prepack time.             |
-| `packages/@ruvyxa/cli-*`     | Platform-specific native binary packages (win32-x64, linux-x64/arm64,         |
-|                              | darwin-x64/arm64).                                                            |
+| Package                      | Responsibility                                                            |
+| ---------------------------- | ------------------------------------------------------------------------- |
+| `packages/ruvyxa`            | User-facing npm package. Re-exports from `@ruvyxa/core`. Contains `bin/`, |
+|                              | `runtime/` (Node renderers, worker pool, compiler), and `native-bin/`.    |
+| `packages/@ruvyxa/core`      | Shared typed primitives: `config`, `loader`, `action`, `cache`, `json`,   |
+|                              | `redirect`, `notFound`, adapter and plugin contracts.                     |
+| `packages/@ruvyxa/react`     | React integration: `RuvyxaErrorBoundary`, `useRuvyxaLoader`, `hydrate`.   |
+| `packages/@ruvyxa/adapter-*` | Deployment adapters consuming `.ruvyxa/` output.                          |
+| `packages/create-ruvyxa`     | Project scaffolding. Copies `templates/minimal/` at prepack time.         |
+| `packages/@ruvyxa/cli-*`     | Platform-specific native binary packages (win32-x64, linux-x64/arm64,     |
+|                              | darwin-x64/arm64).                                                        |
 
 ## Runtime Scripts
 
 The `packages/ruvyxa/runtime/` directory contains Node scripts that the Rust CLI spawns:
 
-| Script                | Purpose                              |
-| --------------------- | ------------------------------------ |
-| `worker-pool.mjs`     | Persistent Node worker pool (IPC)    |
-| `ssr-renderer.mjs`    | Server-side React rendering          |
-| `client-renderer.mjs` | Client hydration bundle generation   |
-| `action-renderer.mjs` | Server action execution              |
-| `api-renderer.mjs`    | API route execution                  |
-| `config-renderer.mjs` | Load and validate `ruvyxa.config.ts` |
-| `plugin-runner.mjs`   | JavaScript build plugin hooks        |
-| `compiler.mjs`        | Runtime module compilation           |
-| `ssg-renderer.mjs`    | SSG/ISR/PPR build-time pre-rendering |
+| Script                | Purpose                               |
+| --------------------- | ------------------------------------- |
+| `worker-pool.mjs`     | Persistent Node worker pool (IPC)     |
+| `ssr-renderer.mjs`    | Server-side React rendering           |
+| `client-renderer.mjs` | Client hydration bundle generation    |
+| `action-renderer.mjs` | Server action execution               |
+| `api-renderer.mjs`    | API route execution                   |
+| `config-renderer.mjs` | Load and validate `ruvyxa.config.ts`  |
+| `plugin-runner.mjs`   | JavaScript build plugin hooks         |
+| `compiler.mjs`        | Runtime module compilation            |
+| `ssg-renderer.mjs`    | SSG/ISR/PPR/CSR build-time rendering |
 
 ## Change Rules
 

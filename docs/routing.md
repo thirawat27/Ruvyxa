@@ -7,21 +7,21 @@ manual registration, no configuration file.
 
 ## Conventions
 
-| File         | Purpose                                         |
-| ------------ | ----------------------------------------------- |
-| `page.tsx`   | A renderable page route (TSX)                   |
-| `page.jsx`   | A renderable page route (JSX)                   |
-| `page.md`    | A renderable Markdown page route                |
-| `page.mdx`   | A renderable MDX page route                     |
-| `route.ts`   | An API route (no UI)                            |
-| `route.js`   | An API route (no UI, JS)                        |
-| `layout.tsx` | A layout that wraps child pages                 |
-| `server.ts`  | A server-side data loader                       |
-| `server.js`  | A server-side data loader (JS)                  |
-| `action.ts`  | Server action definitions                       |
-| `action.js`  | Server action definitions (JS)                  |
-| `client.tsx` | An explicit client hydration module             |
-| `*.css`      | Global styles imported from application modules |
+| File          | Purpose                                         |
+| ------------- | ----------------------------------------------- |
+| `page.tsx`    | A renderable page route (TSX)                   |
+| `page.jsx`    | A renderable page route (JSX)                   |
+| `page.md`     | A renderable Markdown page route                |
+| `page.mdx`    | A renderable MDX page route                     |
+| `route.ts`    | An API route (no UI)                            |
+| `route.js`    | An API route (no UI, JS)                        |
+| `layout.tsx`  | A layout that wraps child pages                 |
+| `server.ts`   | A server-side data loader                       |
+| `server.js`   | A server-side data loader (JS)                  |
+| `action.ts`   | Server action definitions                       |
+| `action.js`   | Server action definitions (JS)                  |
+| `client.tsx`  | An explicit client hydration module             |
+| `*.css`       | Stylesheets imported from application modules   |
 
 ---
 

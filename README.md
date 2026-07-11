@@ -18,7 +18,7 @@
   <img src="https://img.shields.io/badge/node-%3E%3D22-blue?style=flat-square" alt="Node 22+" />
   <img src="https://img.shields.io/badge/rust-1.96%2B-orange?style=flat-square" alt="Rust 1.96+" />
   <img src="https://img.shields.io/badge/pnpm-11%2B-yellow?style=flat-square" alt="pnpm 11+" />
-  <img src="https://img.shields.io/badge/TypeScript-6.0-blue?style=flat-square" alt="TypeScript 6.0" />
+  <img src="https://img.shields.io/badge/TypeScript-7.0-blue?style=flat-square" alt="TypeScript 7.0" />
 </p>
 
 ---
@@ -47,7 +47,7 @@
 - **Tower-based middleware** — composable CORS, timing, logging, rate limiting, and custom headers
   via `ruvyxa.config.ts`.
 - **Wasm plugin runtime** — sandboxed WebAssembly plugins powered by Wasmtime with hot-reload,
-  configurable permissions, execution timeouts, and memory limits.
+  configurable `allow` rules, execution timeouts, and memory limits.
 - **Parallel production bundling** — page client bundles are emitted concurrently via scoped threads
   and written back in deterministic route order.
 - **Honest checks** — `ruvyxa check` runs type checking, build validation, dev/prod parity, and page
@@ -201,23 +201,23 @@ rate limiting (60 req/min), module isolation.
 Ruvyxa ships a tower-based middleware system configurable via `ruvyxa.config.ts`:
 
 ```ts
-import { defineConfig } from 'ruvyxa/config'
+import { config } from 'ruvyxa/config'
 
-export default defineConfig({
+export default config({
   middleware: {
     builtin: {
       timing: true,
-      logging: true,
+      log: true,
       cors: {
         origins: ['https://myapp.com'],
         methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
         credentials: true,
         maxAge: 86400,
       },
-      rateLimit: {
-        maxRequests: 100,
-        windowSecs: 60,
-        keyBy: 'ip',
+      rate: {
+        max: 100,
+        window: 60,
+        key: 'ip',
       },
       headers: {
         'X-Powered-By': 'Ruvyxa',
@@ -228,15 +228,15 @@ export default defineConfig({
         name: 'auth-guard',
         path: 'plugins/auth-guard.wasm',
         phase: 'request',
-        hotReload: true,
+        hot: true,
         routes: ['/api/*'],
         config: { apiKeyHeader: 'X-Api-Key' },
-        permissions: {
+        allow: {
           env: ['AUTH_SECRET'],
-          fsRead: ['./content'],
+          read: ['./content'],
           net: ['api.example.com'],
-          timeoutMs: 5000,
-          maxMemoryBytes: 67108864,
+          timeout: 5000,
+          memory: 67108864,
         },
       },
     ],
@@ -250,7 +250,7 @@ middleware. The `wasm-plugins` feature is optional (requires `wasmtime` / `wasmt
 **Security model for Wasm plugins:**
 
 - Each plugin runs in its own Wasmtime `Store` with fuel-based execution limits
-- No filesystem, network, or environment access unless explicitly granted via `permissions`
+- No filesystem, network, or environment access unless explicitly granted via `allow`
 - Memory-bounded execution prevents resource exhaustion
 - Hot-reload on `.wasm` file change without server restart
 
@@ -263,9 +263,9 @@ project. Use `css.entries` below for global files or directories that are not im
 objects and `<style>` elements continue to work for runtime CSS-in-JS.
 
 ```ts
-import { defineConfig } from 'ruvyxa/config'
+import { config } from 'ruvyxa/config'
 
-export default defineConfig({
+export default config({
   appDir: 'app',
   outDir: '.ruvyxa',
   css: {
@@ -277,44 +277,44 @@ export default defineConfig({
   },
   build: {
     minify: true,
-    sourcemap: false,
-    treeShaking: true,
-    splitStrategy: 'route',
-    jsxRuntime: 'classic',
-    esTarget: 'es2022',
-    parallelism: 4,
-    emitChunkManifest: false,
-    prebundleDependencies: true,
+    map: false,
+    treeShake: true,
+    split: 'route',
+    jsx: 'classic',
+    target: 'es2022',
+    workers: 4,
+    manifest: false,
+    warm: true,
   },
-  rendering: {
-    defaultStrategy: 'ssr',
-    defaultRevalidate: 60,
+  render: {
+    strategy: 'ssr',
+    revalidate: 60,
   },
   cache: {
-    routeManifest: true,
+    routes: true,
     css: true,
-    buildDir: '.ruvyxa/cache/bundler',
+    dir: '.ruvyxa/cache/bundler',
   },
   debug: {
     overlay: true,
     traces: true,
   },
-  images: {
+  image: {
     optimize: true,
     quality: 82,
     lossless: false,
-    parallelism: 0,
+    workers: 0,
   },
   security: {
-    actionBodyLimitBytes: 65536,
-    sameOriginActions: true,
-    fetchMetadataActions: true,
-    securityHeaders: true,
+    actionLimit: 65536,
+    sameOrigin: true,
+    fetchMeta: true,
+    headers: true,
   },
   middleware: {
     builtin: {
       timing: true,
-      logging: true,
+      log: true,
       cors: {
         origins: ['http://localhost:5173'],
         methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
@@ -326,13 +326,13 @@ export default defineConfig({
         name: 'auth-guard',
         path: 'plugins/auth.wasm',
         phase: 'request',
-        hotReload: true,
+        hot: true,
         routes: ['/api/*'],
         config: {},
-        permissions: {
+        allow: {
           env: ['AUTH_SECRET'],
-          timeoutMs: 5000,
-          maxMemoryBytes: 67108864,
+          timeout: 5000,
+          memory: 67108864,
         },
       },
     ],
@@ -423,7 +423,7 @@ Routes with `getStaticParams` export generate static paths at build time.
 ├── assets/        # Public assets + converted WebP images and image manifest
 ├── prerender/     # Pre-rendered SSG/ISR/PPR/CSR HTML files + manifest.json
 ├── manifest.json  # Route manifest with paths, layouts, module references
-└── build.json     # Build metadata, security defaults, config snapshot, rendering stats
+└── build.json     # Build metadata, security defaults, build settings, render summary
 ```
 
 ---

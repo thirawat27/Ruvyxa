@@ -1,6 +1,6 @@
-import { defineConfig, type RuvyxaConfig } from 'ruvyxa/config'
+import { config, type RuvyxaConfig } from 'ruvyxa/config'
 
-const config: RuvyxaConfig = {
+const settings: RuvyxaConfig = {
   appDir: 'app',
   outDir: '.ruvyxa',
 
@@ -11,19 +11,19 @@ const config: RuvyxaConfig = {
 
   build: {
     minify: true,
-    sourcemap: false,
-    treeShaking: true,
-    splitStrategy: 'route',
-    parallelism: 4,
+    map: false,
+    treeShake: true,
+    split: 'route',
+    workers: 4,
   },
 
-  rendering: {
-    defaultStrategy: 'ssr',
-    defaultRevalidate: 60,
+  render: {
+    strategy: 'ssr',
+    revalidate: 60,
   },
 
   cache: {
-    routeManifest: true,
+    routes: true,
     css: true,
   },
 
@@ -31,12 +31,12 @@ const config: RuvyxaConfig = {
     overlay: true,
     traces: true,
   },
-  images: {
+  image: {
     optimize: true,
     quality: 82,
     lossless: false,
-    parallelism: 0,
+    workers: 0,
   },
 }
 
-export default defineConfig(config)
+export default config(settings)

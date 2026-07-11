@@ -47,6 +47,19 @@ describe('client renderer boundary diagnostics', () => {
       assert.match(result.message, /RUV1008/)
     })
   })
+
+  it('blocks literal bracket private environment reads from the client bundle', async () => {
+    await withFixture(async ({ appDir, pageFile }) => {
+      await writeFile(
+        pageFile,
+        'export default function Page() { return <main>{process.env["DATABASE_URL"]}</main> }\n',
+      )
+
+      const result = await runRenderer(appDir, pageFile, { reject: false })
+      assert.equal(result.ok, false)
+      assert.match(result.message, /RUV1008/)
+    })
+  })
 })
 
 async function withFixture(run) {

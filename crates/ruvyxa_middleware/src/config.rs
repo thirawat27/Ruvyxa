@@ -8,7 +8,7 @@ use std::path::PathBuf;
 
 /// Top-level middleware configuration block.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct MiddlewareConfig {
     /// Built-in middleware to enable.
     #[serde(default)]
@@ -25,7 +25,7 @@ pub struct MiddlewareConfig {
 
 /// Built-in middleware toggles and config.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BuiltinMiddlewareConfig {
     /// Enable CORS middleware.
     #[serde(default)]
@@ -37,10 +37,12 @@ pub struct BuiltinMiddlewareConfig {
 
     /// Enable request logging.
     #[serde(default = "default_true")]
+    #[serde(rename = "log")]
     pub logging: bool,
 
     /// Rate limiting configuration.
     #[serde(default)]
+    #[serde(rename = "rate")]
     pub rate_limit: Option<RateLimitConfig>,
 
     /// Custom response headers applied to all responses.
@@ -62,7 +64,7 @@ impl Default for BuiltinMiddlewareConfig {
 
 /// CORS configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct CorsConfig {
     /// Allowed origins. Use `["*"]` for permissive.
     #[serde(default)]
@@ -87,22 +89,25 @@ pub struct CorsConfig {
 
 /// Rate limiting configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct RateLimitConfig {
     /// Maximum requests per window.
+    #[serde(rename = "max")]
     pub max_requests: usize,
 
     /// Window duration in seconds.
+    #[serde(rename = "window")]
     pub window_secs: u64,
 
     /// Key extraction: "ip", "header:X-Api-Key", etc.
     #[serde(default = "default_rate_key")]
+    #[serde(rename = "key")]
     pub key_by: String,
 }
 
 /// Custom Tower layer configuration (for advanced users).
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct LayerConfig {
     /// Layer type identifier.
     pub kind: String,
@@ -114,7 +119,7 @@ pub struct LayerConfig {
 
 /// Wasm plugin configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PluginConfig {
     /// Plugin name (used for logging and diagnostics).
     pub name: String,
@@ -124,6 +129,7 @@ pub struct PluginConfig {
 
     /// Whether to enable hot-reload for this plugin.
     #[serde(default = "default_true")]
+    #[serde(rename = "hot")]
     pub hot_reload: bool,
 
     /// Execution phase: "request" (before handler) or "response" (after handler).
@@ -140,6 +146,7 @@ pub struct PluginConfig {
 
     /// WASI permissions granted to the plugin.
     #[serde(default)]
+    #[serde(rename = "allow")]
     pub permissions: PluginPermissions,
 }
 
@@ -156,7 +163,7 @@ pub enum PluginPhase {
 
 /// WASI permissions for sandboxed plugin execution.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct PluginPermissions {
     /// Allow environment variable access (specific vars only).
     #[serde(default)]
@@ -164,6 +171,7 @@ pub struct PluginPermissions {
 
     /// Allow filesystem read access to specific directories.
     #[serde(default)]
+    #[serde(rename = "read")]
     pub fs_read: Vec<PathBuf>,
 
     /// Allow network access to specific hosts.
@@ -172,10 +180,12 @@ pub struct PluginPermissions {
 
     /// Maximum execution time in milliseconds.
     #[serde(default = "default_timeout_ms")]
+    #[serde(rename = "timeout")]
     pub timeout_ms: u64,
 
     /// Maximum memory usage in bytes.
     #[serde(default = "default_max_memory")]
+    #[serde(rename = "memory")]
     pub max_memory_bytes: u64,
 }
 

@@ -53,14 +53,14 @@ live under `tests/packages/ruvyxa/`. Rust unit tests remain inline in their crat
 
 ### Build Output
 
-| Directory               | Contents                           |
-| ----------------------- | ---------------------------------- |
-| `.ruvyxa/server/`       | Production route source for SSR    |
-| `.ruvyxa/client/`       | Route-level hydration bundles      |
-| `.ruvyxa/assets/`       | Static files from `public/`        |
-| `.ruvyxa/prerender/`    | Pre-rendered HTML files            |
-| `.ruvyxa/manifest.json` | Full route manifest                |
-| `.ruvyxa/build.json`    | Build metadata and config snapshot |
+| Directory               | Contents                                                              |
+| ----------------------- | --------------------------------------------------------------------- |
+| `.ruvyxa/server/`       | Production route source for SSR                                       |
+| `.ruvyxa/client/`       | Route-level hydration bundles                                         |
+| `.ruvyxa/assets/`       | Static files from `public/`                                           |
+| `.ruvyxa/prerender/`    | Pre-rendered HTML files                                               |
+| `.ruvyxa/manifest.json` | Full route manifest                                                   |
+| `.ruvyxa/build.json`    | Build metadata, security defaults, build settings, and render summary |
 
 ### Client Bundles
 

@@ -17,10 +17,10 @@ export interface NetlifyAdapterOptions {
  *
  * @example
  * ```ts
- * import { defineConfig } from "ruvyxa/config"
+ * import { config } from "ruvyxa/config"
  * import { netlifyAdapter } from "@ruvyxa/adapter-netlify"
  *
- * export default defineConfig({
+ * export default config({
  *   adapter: netlifyAdapter({ functionsDir: "netlify/functions" })
  * })
  * ```

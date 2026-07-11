@@ -17,10 +17,10 @@ export interface BunAdapterOptions {
  *
  * @example
  * ```ts
- * import { defineConfig } from "ruvyxa/config"
+ * import { config } from "ruvyxa/config"
  * import { bunAdapter } from "@ruvyxa/adapter-bun"
  *
- * export default defineConfig({
+ * export default config({
  *   adapter: bunAdapter({ entry: "./bun-entry.ts" })
  * })
  * ```

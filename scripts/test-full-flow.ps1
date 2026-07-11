@@ -546,8 +546,8 @@ Write-Host ""
 # E6: Invalid config (empty field)
 $OrigConfig = Get-Content "$App\ruvyxa.config.ts" -Raw
 @"
-import { defineConfig } from "ruvyxa/config"
-export default defineConfig({ appDir: "", outDir: ".ruvyxa" })
+import { config } from "ruvyxa/config"
+export default config({ appDir: "", outDir: ".ruvyxa" })
 "@ | Set-Content -Path "$App\ruvyxa.config.ts" -Force 
 $result = Invoke-Native -Arguments @("analyze", "--root", "$App") | Out-String
 if ($result -match "RUV1601|must not be empty") {

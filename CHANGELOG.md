@@ -17,8 +17,8 @@
   legacy local PNG/JPEG requests can still map to the optimized `.webp` output where applicable
 - Added compact image manifest output with source/output paths, dimensions, byte sizes, source
   bytes, output bytes, optimized image counts, and cache hit tracking
-- Updated typed image configuration to `images.optimize`, `images.quality`, `images.lossless`, and
-  `images.parallelism`
+- Updated typed image configuration to `image.optimize`, `image.quality`, `image.lossless`, and
+  `image.workers`
 - Upgraded `@ruvyxa/react` images with local-only `.webp` rewriting, `fill`, author-managed
   `srcSet`, browser-native `Picture` art direction, loading controls, and per-image CDN loaders
   without adding runtime image transformation
@@ -33,11 +33,13 @@
 
 ### CLI and Config
 
+- Replaced `defineConfig()` with `config()` and adopted concise configuration keys across the public
+  contract; `appDir` and `outDir` remain unchanged
 - Added `debug.traces` configuration option for debug trace control in the dev server
 - Added `deny_unknown_fields` to `ProjectConfig` and `DebugConfigOptions` for strict config
   validation against unknown keys
-- Added placeholder fields for future config options (`runtime`, `react`, `typescript`, `rendering`,
-  `adapter`, `adapterOptions`)
+- Added strict top-level config validation for `runtime`, `react`, `typescript`, `render`, `image`,
+  `security`, `cache`, `middleware`, `adapter`, `adapterOptions`, and `plugins`
 - Implemented `normalize_source_path()` to gracefully handle non-existent paths in HMR tracking
 - Fixed Windows watcher paths prefixed with `.` so generated `.ruvyxa` cache writes are ignored
   instead of triggering repeated reloads; condensed dev startup and HMR logs into readable summaries
@@ -144,7 +146,7 @@
 - Added fixture-driven advanced TypeScript/JSX parser coverage and fixed multiline enums,
   `implements`, and namespaced JSX tags
 - Invalidated native compile artifacts when imported config/plugin dependencies change
-- Added shared build-cache directories via `cache.buildDir` or `RUVYXA_BUILD_CACHE_DIR`
+- Added shared build-cache directories via `cache.dir` or `RUVYXA_BUILD_CACHE_DIR`
 - Pre-bundled dev route dependencies in background across every persistent Node worker
 - Added consistent client directory and chunk-manifest references to every deployment adapter
 
@@ -246,7 +248,7 @@
   - Chunking module (`chunking.rs`) for dynamic import split points and output chunk generation
   - Context module (`context.rs`) for shared bundler execution state across parallel workers
   - Types module (`types.rs`) with core bundler type definitions
-  - Tree-shaking as separate step before minification (`treeShaking` build option)
+  - Tree-shaking as separate step before minification (`treeShake` build option)
   - Cache hit tracking via `cache_hit` field on `CompiledModule`
   - Plugin-runner module for runtime plugin execution
   - Resolver enhancements: CommonJS `require()`, dynamic `import()`, improved caching
@@ -301,7 +303,7 @@
 
 ---
 
-## v1.0.4 (2026-07-01)
+## v1.0.4 (2026-07-09)
 
 ### Highlights
 
@@ -676,7 +678,7 @@ The following commits occurred before the v1.0.0 tag and represent the initial p
 | `v1.0.1`  | 2026-06-17 | Patch      |
 | `v1.0.2`  | 2026-06-18 | Minor      |
 | `v1.0.3`  | 2026-07-08 | Minor      |
-| `v1.0.4`  | 2026-07-01 | Minor      |
+| `v1.0.4`  | 2026-07-09 | Minor      |
 | `v1.0.5`  | 2026-07-09 | Minor      |
 | `v1.0.6`  | 2026-07-09 | Patch      |
 | `v1.0.7`  | 2026-07-10 | Minor      |

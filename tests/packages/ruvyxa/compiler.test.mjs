@@ -326,9 +326,9 @@ import Card from './Card.js'
       await writeFile(
         path.join(root, 'ruvyxa.config.ts'),
         `
-          import { defineConfig } from "ruvyxa/config"
+          import { config } from "ruvyxa/config"
 
-          export default defineConfig({
+          export default config({
             css: { entries: ["styles/global.css"] },
             plugins: [
               {
@@ -414,33 +414,33 @@ import Card from './Card.js'
     await withFixture(async ({ root }) => {
       await writeFile(
         path.join(root, 'ruvyxa.config.ts'),
-        `export default { images: { optimize: true, quality: 91, lossless: true, parallelism: 2 } }`,
+        `export default { image: { optimize: true, quality: 91, lossless: true, workers: 2 } }`,
       )
 
       const config = await runJson(configRenderer, [root], {})
-      assert.deepEqual(config.config.images, {
+      assert.deepEqual(config.config.image, {
         optimize: true,
         quality: 91,
         lossless: true,
-        parallelism: 2,
+        workers: 2,
       })
     })
   })
 
-  it('forwards rendering and middleware configuration to the native CLI', async () => {
+  it('forwards render and middleware configuration to the native CLI', async () => {
     await withFixture(async ({ root }) => {
       await writeFile(
         path.join(root, 'ruvyxa.config.ts'),
         `export default {
-          rendering: { defaultStrategy: 'isr', defaultRevalidate: 90 },
+          render: { strategy: 'isr', revalidate: 90 },
           middleware: { builtin: { timing: false, headers: { 'X-Frame-Options': 'DENY' } } }
         }`,
       )
 
       const config = await runJson(configRenderer, [root], {})
-      assert.deepEqual(config.config.rendering, {
-        defaultStrategy: 'isr',
-        defaultRevalidate: 90,
+      assert.deepEqual(config.config.render, {
+        strategy: 'isr',
+        revalidate: 90,
       })
       assert.deepEqual(config.config.middleware, {
         builtin: { timing: false, headers: { 'X-Frame-Options': 'DENY' } },
@@ -462,21 +462,40 @@ import Card from './Card.js'
 
       await writeFile(
         path.join(root, 'ruvyxa.config.ts'),
-        `export default { images: { formats: ["avif", "webp"] } }`,
+        `export default { image: { formats: ["avif", "webp"] } }`,
       )
       const obsolete = await runJsonResult(configRenderer, [root], {})
       assert.equal(obsolete.exitCode, 1)
-      assert.match(obsolete.parsed.message, /RUV1602 unknown config\.images field: formats/)
+      assert.match(obsolete.parsed.message, /RUV1602 unknown config\.image field: formats/)
 
       await writeFile(
         path.join(root, 'ruvyxa.config.ts'),
-        `export default { rendering: { fallback: 'blocking' } }`,
+        `export default { render: { fallback: 'blocking' } }`,
       )
       const removedRenderingOption = await runJsonResult(configRenderer, [root], {})
       assert.equal(removedRenderingOption.exitCode, 1)
       assert.match(
         removedRenderingOption.parsed.message,
-        /RUV1602 unknown config\.rendering field: fallback/,
+        /RUV1602 unknown config\.render field: fallback/,
+      )
+
+      await writeFile(
+        path.join(root, 'ruvyxa.config.ts'),
+        `export default { build: { sourcemap: false } }`,
+      )
+      const legacyBuildKey = await runJsonResult(configRenderer, [root], {})
+      assert.equal(legacyBuildKey.exitCode, 1)
+      assert.match(legacyBuildKey.parsed.message, /RUV1602 unknown config\.build field: sourcemap/)
+
+      await writeFile(
+        path.join(root, 'ruvyxa.config.ts'),
+        `export default { middleware: { builtin: { logging: false } } }`,
+      )
+      const legacyMiddlewareKey = await runJsonResult(configRenderer, [root], {})
+      assert.equal(legacyMiddlewareKey.exitCode, 1)
+      assert.match(
+        legacyMiddlewareKey.parsed.message,
+        /RUV1602 unknown config\.middleware\.builtin field: logging/,
       )
     })
   })

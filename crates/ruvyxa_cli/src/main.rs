@@ -145,7 +145,7 @@ struct ProjectConfig {
     _react: Option<serde_json::Value>,
     #[serde(rename = "typescript")]
     _typescript: Option<serde_json::Value>,
-    #[serde(default)]
+    #[serde(default, rename = "render")]
     rendering: RenderingConfigOptions,
     #[serde(default)]
     server: ServerConfigOptions,
@@ -155,7 +155,7 @@ struct ProjectConfig {
     build: BuildConfigOptions,
     #[serde(default)]
     debug: DebugConfigOptions,
-    #[serde(default)]
+    #[serde(default, rename = "image")]
     images: ImageOptimizationOptions,
     #[serde(default)]
     security: SecurityConfigOptions,
@@ -174,37 +174,47 @@ struct ProjectConfig {
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ServerConfigOptions {
     host: Option<String>,
     port: Option<u16>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CssConfigOptions {
     #[serde(default)]
     entries: Vec<String>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct BuildConfigOptions {
     minify: Option<bool>,
+    #[serde(rename = "map")]
     sourcemap: Option<bool>,
+    #[serde(rename = "treeShake")]
     tree_shaking: Option<bool>,
+    #[serde(rename = "split")]
     split_strategy: Option<String>,
+    #[serde(rename = "workers")]
     parallelism: Option<usize>,
+    #[serde(rename = "jsx")]
     jsx_runtime: Option<String>,
+    #[serde(rename = "target")]
     es_target: Option<String>,
+    #[serde(rename = "manifest")]
     emit_chunk_manifest: Option<bool>,
+    #[serde(rename = "warm")]
     prebundle_dependencies: Option<bool>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct RenderingConfigOptions {
+    #[serde(rename = "strategy")]
     default_strategy: Option<RenderStrategy>,
+    #[serde(rename = "revalidate")]
     default_revalidate: Option<u64>,
 }
 
@@ -216,19 +226,25 @@ struct DebugConfigOptions {
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct SecurityConfigOptions {
+    #[serde(rename = "actionLimit")]
     action_body_limit_bytes: Option<usize>,
+    #[serde(rename = "sameOrigin")]
     same_origin_actions: Option<bool>,
+    #[serde(rename = "fetchMeta")]
     fetch_metadata_actions: Option<bool>,
+    #[serde(rename = "headers")]
     security_headers: Option<bool>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct CacheConfigOptions {
+    #[serde(rename = "routes")]
     route_manifest: Option<bool>,
     css: Option<bool>,
+    #[serde(rename = "dir")]
     build_dir: Option<String>,
 }
 
@@ -488,6 +504,22 @@ fn dev_server_config(args: &ServerArgs, config: &ProjectConfig) -> ServerConfig 
     server.prebundle_dependencies = config.build.prebundle_dependencies.unwrap_or(true);
     server.error_overlay = config.debug.overlay.unwrap_or(true);
     server.debug_traces = config.debug.traces.unwrap_or(false);
+    server.action_body_limit_bytes = config
+        .security
+        .action_body_limit_bytes
+        .unwrap_or(server.action_body_limit_bytes);
+    server.same_origin_actions = config
+        .security
+        .same_origin_actions
+        .unwrap_or(server.same_origin_actions);
+    server.fetch_metadata_actions = config
+        .security
+        .fetch_metadata_actions
+        .unwrap_or(server.fetch_metadata_actions);
+    server.security_headers = config
+        .security
+        .security_headers
+        .unwrap_or(server.security_headers);
     server.middleware = config.middleware.clone();
     server.default_render_strategy = config.rendering.default_strategy;
     server.default_revalidate = config.rendering.default_revalidate;
@@ -511,6 +543,22 @@ fn production_server_config(args: &ServerArgs, config: &ProjectConfig) -> Server
     server.cache_route_manifest = config.cache.route_manifest.unwrap_or(true);
     server.cache_css = config.cache.css.unwrap_or(true);
     server.style_entries = config.style_entries(&out_dir.join("server"));
+    server.action_body_limit_bytes = config
+        .security
+        .action_body_limit_bytes
+        .unwrap_or(server.action_body_limit_bytes);
+    server.same_origin_actions = config
+        .security
+        .same_origin_actions
+        .unwrap_or(server.same_origin_actions);
+    server.fetch_metadata_actions = config
+        .security
+        .fetch_metadata_actions
+        .unwrap_or(server.fetch_metadata_actions);
+    server.security_headers = config
+        .security
+        .security_headers
+        .unwrap_or(server.security_headers);
     server.middleware = config.middleware.clone();
     server.default_render_strategy = config.rendering.default_strategy;
     server.default_revalidate = config.rendering.default_revalidate;
@@ -703,23 +751,23 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
         "images": image_report,
         "hashAlgorithm": ASSET_HASH_ALGORITHM,
         "security": {
-            "actionBodyLimitBytes": config.security.action_body_limit_bytes.unwrap_or(65536),
-            "sameOriginActions": config.security.same_origin_actions.unwrap_or(true),
-            "fetchMetadataActions": config.security.fetch_metadata_actions.unwrap_or(true),
-            "securityHeaders": config.security.security_headers.unwrap_or(true)
+            "actionLimit": config.security.action_body_limit_bytes.unwrap_or(65536),
+            "sameOrigin": config.security.same_origin_actions.unwrap_or(true),
+            "fetchMeta": config.security.fetch_metadata_actions.unwrap_or(true),
+            "headers": config.security.security_headers.unwrap_or(true)
         },
         "build": {
             "minify": config.build.minify.unwrap_or(true),
-            "sourcemap": config.build.sourcemap.unwrap_or(false),
-            "treeShaking": config.build.tree_shaking.unwrap_or(true),
-            "splitStrategy": config.build.split_strategy.as_deref().unwrap_or("route"),
-            "jsxRuntime": config.build.jsx_runtime.as_deref().unwrap_or("classic"),
-            "esTarget": config.build.es_target.as_deref().unwrap_or("es2022"),
-            "emitChunkManifest": config.build.emit_chunk_manifest.unwrap_or(false),
-            "prebundleDependencies": config.build.prebundle_dependencies.unwrap_or(true),
-            "parallelism": client_manifest.get("parallelism").cloned().unwrap_or(serde_json::Value::Null)
+            "map": config.build.sourcemap.unwrap_or(false),
+            "treeShake": config.build.tree_shaking.unwrap_or(true),
+            "split": config.build.split_strategy.as_deref().unwrap_or("route"),
+            "jsx": config.build.jsx_runtime.as_deref().unwrap_or("classic"),
+            "target": config.build.es_target.as_deref().unwrap_or("es2022"),
+            "manifest": config.build.emit_chunk_manifest.unwrap_or(false),
+            "warm": config.build.prebundle_dependencies.unwrap_or(true),
+            "workers": client_manifest.get("parallelism").cloned().unwrap_or(serde_json::Value::Null)
         },
-        "rendering": {
+        "render": {
             "prerendered": prerendered.len(),
             "routes": prerendered.iter().map(|p| serde_json::json!({
                 "path": p.path,
@@ -3282,6 +3330,34 @@ mod tests {
     }
 
     #[test]
+    fn server_configs_apply_action_security_options() {
+        let args = ServerArgs {
+            root: PathBuf::from("."),
+            host: None,
+            port: None,
+        };
+        let config: ProjectConfig = serde_json::from_value(json!({
+            "security": {
+                "actionLimit": 8192,
+                "sameOrigin": false,
+                "fetchMeta": false,
+                "headers": false
+            }
+        }))
+        .unwrap();
+
+        for server in [
+            dev_server_config(&args, &config),
+            production_server_config(&args, &config),
+        ] {
+            assert_eq!(server.action_body_limit_bytes, 8192);
+            assert!(!server.same_origin_actions);
+            assert!(!server.fetch_metadata_actions);
+            assert!(!server.security_headers);
+        }
+    }
+
+    #[test]
     fn rejects_unknown_rust_config_fields() {
         let error = serde_json::from_value::<ProjectConfig>(json!({
             "debug": { "overlay": true, "unsupported": true }
@@ -3320,9 +3396,9 @@ mod tests {
         ));
 
         let config: BuildConfigOptions = serde_json::from_value(json!({
-            "treeShaking": false,
-            "emitChunkManifest": true,
-            "prebundleDependencies": false
+            "treeShake": false,
+            "manifest": true,
+            "warm": false
         }))
         .unwrap();
         assert_eq!(config.tree_shaking, Some(false));
@@ -3358,9 +3434,9 @@ mod tests {
     #[test]
     fn parses_global_rendering_defaults() {
         let config: ProjectConfig = serde_json::from_value(json!({
-            "rendering": {
-                "defaultStrategy": "isr",
-                "defaultRevalidate": 90
+            "render": {
+                "strategy": "isr",
+                "revalidate": 90
             }
         }))
         .unwrap();
@@ -3589,13 +3665,13 @@ mod tests {
         std::fs::write(
             root.join("ruvyxa.config.ts"),
             r#"
-import { defineConfig } from "ruvyxa/config"
+import { config } from "ruvyxa/config"
 
-export default defineConfig({
+export default config({
   build: {
     minify: false,
-    sourcemap: true,
-    emitChunkManifest: true,
+    map: true,
+    manifest: true,
   },
   plugins: [
     {

@@ -17,10 +17,10 @@ export interface NodeAdapterOptions {
  *
  * @example
  * ```ts
- * import { defineConfig } from "ruvyxa/config"
+ * import { config } from "ruvyxa/config"
  * import { nodeAdapter } from "@ruvyxa/adapter-node"
  *
- * export default defineConfig({
+ * export default config({
  *   adapter: nodeAdapter({ entry: "./custom-entry" })
  * })
  * ```

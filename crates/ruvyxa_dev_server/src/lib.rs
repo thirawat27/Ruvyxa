@@ -70,6 +70,14 @@ pub struct ServerConfig {
     pub error_overlay: bool,
     /// Expose runtime route traces from the development diagnostics endpoint.
     pub debug_traces: bool,
+    /// Maximum accepted action request payload size.
+    pub action_body_limit_bytes: usize,
+    /// Reject action requests whose Origin does not match the request Host.
+    pub same_origin_actions: bool,
+    /// Reject action requests initiated from a cross-site browser context.
+    pub fetch_metadata_actions: bool,
+    /// Apply Ruvyxa's default security response headers.
+    pub security_headers: bool,
     pub middleware: MiddlewareConfig,
     pub default_render_strategy: Option<RenderStrategy>,
     pub default_revalidate: Option<u64>,
@@ -93,6 +101,10 @@ impl ServerConfig {
             prebundle_dependencies: true,
             error_overlay: true,
             debug_traces: false,
+            action_body_limit_bytes: MAX_ACTION_BODY_BYTES,
+            same_origin_actions: true,
+            fetch_metadata_actions: true,
+            security_headers: true,
             middleware: MiddlewareConfig::default(),
             default_render_strategy: None,
             default_revalidate: None,
@@ -116,6 +128,10 @@ impl ServerConfig {
             prebundle_dependencies: false,
             error_overlay: false,
             debug_traces: false,
+            action_body_limit_bytes: MAX_ACTION_BODY_BYTES,
+            same_origin_actions: true,
+            fetch_metadata_actions: true,
+            security_headers: true,
             middleware: MiddlewareConfig::default(),
             default_render_strategy: None,
             default_revalidate: None,
@@ -287,7 +303,7 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
         .route("/__ruvyxa/client", get(client_bundle))
         .route(
             "/__ruvyxa/action",
-            post(action_endpoint).layer(DefaultBodyLimit::max(MAX_ACTION_BODY_BYTES)),
+            post(action_endpoint).layer(DefaultBodyLimit::max(config.action_body_limit_bytes)),
         )
         .route("/__ruvyxa/trace", get(trace_endpoint))
         .fallback(handle_request)
@@ -296,6 +312,13 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
     // Apply middleware stack from config (compression, CORS, timing, logging, custom headers)
     let middleware_stack = MiddlewareStack::new(config.middleware.clone());
     let app = middleware_stack.apply(app);
+    let security_headers = config.security_headers;
+    let app =
+        app.layer(axum::middleware::map_response(
+            move |response: Response| async move {
+                finalize_security_headers(response, security_headers)
+            },
+        ));
 
     let address: SocketAddr = format!("{}:{}", config.host, config.port)
         .to_socket_addrs()
@@ -877,7 +900,7 @@ async fn action_endpoint(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if let Some(response) = validate_action_request(&headers, body.len()) {
+    if let Some(response) = validate_action_request(&headers, body.len(), &state.config) {
         return with_security_headers(response);
     }
 
@@ -1939,7 +1962,7 @@ fn resolve_public_asset(
 ) -> Option<(PathBuf, bool)> {
     let requested = public_dir.join(request_path);
     if requested.is_file() {
-        return Some((requested, false));
+        return contained_public_asset(public_dir, &requested).map(|file| (file, false));
     }
 
     // Development keeps source images untouched while the React component
@@ -1949,7 +1972,11 @@ fn resolve_public_asset(
         let mut candidates = ["png", "jpg", "jpeg", "PNG", "JPG", "JPEG"]
             .map(|extension| requested.with_extension(extension))
             .into_iter()
-            .filter_map(|path| path.is_file().then(|| path.canonicalize().unwrap_or(path)))
+            .filter_map(|path| {
+                path.is_file()
+                    .then(|| contained_public_asset(public_dir, &path))
+                    .flatten()
+            })
             .collect::<Vec<_>>();
         candidates.sort();
         candidates.dedup();
@@ -1963,10 +1990,18 @@ fn resolve_public_asset(
     if is_convertible_image_url(&requested) {
         let webp = requested.with_extension("webp");
         if webp.is_file() {
-            return Some((webp, false));
+            return contained_public_asset(public_dir, &webp).map(|file| (file, false));
         }
     }
     None
+}
+
+/// Canonicalize asset paths before serving them so public-directory symlinks
+/// cannot expose files outside the configured root.
+fn contained_public_asset(public_dir: &Path, candidate: &Path) -> Option<PathBuf> {
+    let public_root = public_dir.canonicalize().ok()?;
+    let candidate = candidate.canonicalize().ok()?;
+    candidate.starts_with(&public_root).then_some(candidate)
 }
 
 fn is_convertible_image_url(path: &Path) -> bool {
@@ -2108,6 +2143,19 @@ fn apply_security_headers(response: &mut Response) {
         HeaderName::from_static("keep-alive"),
         HeaderValue::from_static("timeout=30, max=1000"),
     );
+}
+
+fn finalize_security_headers(mut response: Response, enabled: bool) -> Response {
+    if enabled {
+        apply_security_headers(&mut response);
+    } else {
+        let headers = response.headers_mut();
+        headers.remove(header::X_CONTENT_TYPE_OPTIONS);
+        headers.remove("referrer-policy");
+        headers.remove("permissions-policy");
+        headers.remove("cross-origin-opener-policy");
+    }
+    response
 }
 
 fn with_security_headers(mut response: Response) -> Response {
@@ -2676,8 +2724,12 @@ impl ActionRateLimiter {
     }
 }
 
-fn validate_action_request(headers: &HeaderMap, body_len: usize) -> Option<Response> {
-    if body_len > MAX_ACTION_BODY_BYTES {
+fn validate_action_request(
+    headers: &HeaderMap,
+    body_len: usize,
+    config: &ServerConfig,
+) -> Option<Response> {
+    if body_len > config.action_body_limit_bytes {
         return Some(
             (StatusCode::PAYLOAD_TOO_LARGE, "Action payload is too large").into_response(),
         );
@@ -2693,13 +2745,13 @@ fn validate_action_request(headers: &HeaderMap, body_len: usize) -> Option<Respo
         );
     }
 
-    if action_origin_is_cross_site(headers) {
+    if config.same_origin_actions && action_origin_is_cross_site(headers) {
         return Some(
             (StatusCode::FORBIDDEN, "Cross-origin action request blocked").into_response(),
         );
     }
 
-    if action_fetch_site_is_cross_site(headers) {
+    if config.fetch_metadata_actions && action_fetch_site_is_cross_site(headers) {
         return Some((StatusCode::FORBIDDEN, "Cross-site action request blocked").into_response());
     }
 
@@ -3320,7 +3372,30 @@ mod tests {
 
         assert!(!action_origin_is_cross_site(&headers));
         assert!(action_content_type_is_supported(&headers));
-        assert!(validate_action_request(&headers, 128).is_none());
+        assert!(
+            validate_action_request(&headers, 128, &ServerConfig::dev(".", "localhost", 3000))
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn action_security_options_control_request_validation() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("localhost:3000"));
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://example.com"),
+        );
+        headers.insert("sec-fetch-site", HeaderValue::from_static("cross-site"));
+
+        let mut config = ServerConfig::dev(".", "localhost", 3000);
+        config.action_body_limit_bytes = 8;
+        assert!(validate_action_request(&headers, 9, &config).is_some());
+
+        config.action_body_limit_bytes = MAX_ACTION_BODY_BYTES;
+        config.same_origin_actions = false;
+        config.fetch_metadata_actions = false;
+        assert!(validate_action_request(&headers, 8, &config).is_none());
     }
 
     #[test]
@@ -3364,6 +3439,16 @@ mod tests {
     }
 
     #[test]
+    fn rejects_public_assets_outside_the_configured_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let public = temp.path().join("public");
+        fs::create_dir_all(&public).unwrap();
+        fs::write(temp.path().join("secret.txt"), b"secret").unwrap();
+
+        assert!(resolve_public_asset(&public, "../secret.txt", None).is_none());
+    }
+
+    #[test]
     fn applies_default_security_headers() {
         let response = html_response(StatusCode::OK, "<main />".to_string());
 
@@ -3378,12 +3463,28 @@ mod tests {
     }
 
     #[test]
+    fn can_disable_default_security_headers() {
+        let response = finalize_security_headers(StatusCode::OK.into_response(), false);
+
+        assert!(
+            response
+                .headers()
+                .get(header::X_CONTENT_TYPE_OPTIONS)
+                .is_none()
+        );
+        assert!(response.headers().get("referrer-policy").is_none());
+    }
+
+    #[test]
     fn blocks_cross_site_fetch_metadata_for_actions() {
         let mut headers = HeaderMap::new();
         headers.insert("sec-fetch-site", HeaderValue::from_static("cross-site"));
 
         assert!(action_fetch_site_is_cross_site(&headers));
-        assert!(validate_action_request(&headers, 128).is_some());
+        assert!(
+            validate_action_request(&headers, 128, &ServerConfig::dev(".", "localhost", 3000))
+                .is_some()
+        );
     }
 
     #[test]

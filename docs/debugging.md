@@ -54,7 +54,7 @@ Affected routes:
 | Code      | Title                     | Cause                                                               |
 | --------- | ------------------------- | ------------------------------------------------------------------- |
 | `RUV1100` | SSR render failed         | ReactDOMServer error during page render                             |
-| `RUV1101` | SSR renderer args missing | SSR renderer missing required projectRoot/appDir/pageFile arguments |
+| `RUV1101` | SSR renderer args missing | SSR renderer missing required projectRoot/appDir/pageFile arguments (JS runtime) |
 | `RUV1102` | SSR renderer not found    | Internal renderer `ssr-renderer.mjs` missing                        |
 
 ### API Routes
@@ -77,7 +77,7 @@ Affected routes:
 | --------- | ------------------------- | --------------------------------------------- |
 | `RUV1300` | Client bundle failed      | Ruvyxa compiler error during hydration bundle |
 | `RUV1301` | Module compile error      | Compiler failed on a specific module          |
-| `RUV1302` | Client renderer not found | Internal renderer script missing              |
+| `RUV1302` | Module resolution error   | Bundler could not resolve a module specifier  |
 | `RUV1303` | Client route not found    | Route has no matching client page             |
 | `RUV1304` | Non-page client bundle    | Client bundle requested for API-only route    |
 | `RUV1310` | Markdown parse error      | A `.md` page contains invalid content syntax  |
@@ -117,7 +117,6 @@ Affected routes:
 | `RUV1700` | Config plugin error          | JS build plugin bridge returned an error      |
 | `RUV1701` | JS plugin runner not found   | `plugin-runner.mjs` missing from node_modules |
 | `RUV1702` | Worker pool script not found | `worker-pool.mjs` missing from node_modules   |
-| `RUV1801` | Module resolution error      | Bundler could not resolve a module specifier  |
 
 ### Middleware
 

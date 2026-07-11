@@ -141,26 +141,56 @@ fn is_inside_server_dir(path: &Path, project_root: &Path) -> bool {
     rel.components().any(|c| c.as_os_str() == "server")
 }
 
-/// Scan source text for `process.env.VAR_NAME` reads that are not
+/// Scan source text for statically-known `process.env` reads that are not
 /// `RUVYXA_PUBLIC_*` or `NODE_ENV`.
 fn find_private_env_reads(source: &str) -> Vec<String> {
     let mut names = Vec::new();
-    let marker = "process.env.";
-    let mut rest = source;
+    let marker = "process.env";
+    let mut offset = 0;
 
-    while let Some(idx) = rest.find(marker) {
-        rest = &rest[idx + marker.len()..];
-        let name: String = rest
-            .chars()
-            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-            .collect();
+    while let Some(index) = source[offset..].find(marker) {
+        let start = offset + index + marker.len();
+        let rest = &source[start..];
+        let trimmed = rest.trim_start_matches(char::is_whitespace);
+        let name = if let Some(rest) = trimmed.strip_prefix('.') {
+            rest.chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect()
+        } else if let Some(bracket_offset) = rest.find('[') {
+            let before_bracket = &rest[..bracket_offset];
+            if before_bracket.chars().all(char::is_whitespace) {
+                literal_env_name(&source[start + bracket_offset..]).unwrap_or_default()
+            } else {
+                String::new()
+            }
+        } else {
+            String::new()
+        };
 
         if !name.is_empty() && name != "NODE_ENV" && !name.starts_with("RUVYXA_PUBLIC_") {
             names.push(name);
         }
+        offset = start;
     }
 
     names
+}
+
+fn literal_env_name(source: &str) -> Option<String> {
+    let source = source.strip_prefix('[')?.trim_start();
+    let quote = source.chars().next()?;
+    if quote != '\'' && quote != '"' {
+        return None;
+    }
+    let rest = &source[quote.len_utf8()..];
+    let end = rest.find(quote)?;
+    let name = &rest[..end];
+    rest[end + quote.len_utf8()..]
+        .trim_start()
+        .strip_prefix(']')?;
+    name.chars()
+        .all(|character| character.is_ascii_alphanumeric() || character == '_')
+        .then(|| name.to_string())
 }
 
 #[cfg(test)]
@@ -169,10 +199,9 @@ mod tests {
 
     #[test]
     fn detects_private_env_reads() {
-        let source =
-            "const db = process.env.DATABASE_URL; const pub = process.env.RUVYXA_PUBLIC_API;";
+        let source = "const db = process.env.DATABASE_URL; const pub = process.env.RUVYXA_PUBLIC_API; const key = process.env['API_KEY'];";
         let names = find_private_env_reads(source);
-        assert_eq!(names, vec!["DATABASE_URL"]);
+        assert_eq!(names, vec!["DATABASE_URL", "API_KEY"]);
     }
 
     #[test]

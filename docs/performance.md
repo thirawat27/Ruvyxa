@@ -57,7 +57,7 @@ Client bundles are split per route. Each page gets its own hydration bundle:
 ### Tree Shaking
 
 Dead-code elimination per route bundle, enabled by default. Only imports used by the page are
-included. Disable with `build.treeShaking: false` when debugging.
+included. Disable with `build.treeShake: false` when debugging.
 
 ### Minification
 
@@ -80,8 +80,8 @@ File names are BLAKE3-256 hashes (64 hex characters). Enables:
 - `durationMs`, `cacheHits`, `treeShakenModules`
 - `cache.compileEntries`, `cache.compileBytes`
 
-Set `build.emitChunkManifest: true` to also write `.ruvyxa/client/chunk-manifest.json` with dynamic
-import split points for deployment adapters.
+Set `build.manifest: true` to also write `.ruvyxa/client/chunk-manifest.json` with dynamic import
+split points for deployment adapters.
 
 When route splitting identifies modules shared by multiple pages, each route entry also records a
 `sharedChunks` list. Production responses and pre-rendered HTML emit route-scoped
@@ -89,9 +89,9 @@ When route splitting identifies modules shared by multiple pages, each route ent
 
 ### Parallel Production Bundling
 
-Client bundles are emitted concurrently using `std::thread::scope` with scoped threads. The
-parallelism level defaults to `available_parallelism()` and is configurable via `build.parallelism`.
-Bundles are written in deterministic route order.
+Client bundles are emitted concurrently using `std::thread::scope` with scoped threads. The worker
+count defaults to `available_parallelism()` and is configurable via `build.workers`. Bundles are
+written in deterministic route order.
 
 ### Build Plugin Worker
 
@@ -104,14 +104,13 @@ affected compile artifacts without requiring `ruvyxa clean`.
 
 ### Shared Build Cache
 
-Set `cache.buildDir` to a local, network-mounted, or CI-restored directory to reuse
-content-addressed native compile artifacts across workspaces. `RUVYXA_BUILD_CACHE_DIR` overrides the
-config value, which is useful for CI agents that mount the cache at a machine-specific absolute
-path.
+Set `cache.dir` to a local, network-mounted, or CI-restored directory to reuse content-addressed
+native compile artifacts across workspaces. `RUVYXA_BUILD_CACHE_DIR` overrides the config value,
+which is useful for CI agents that mount the cache at a machine-specific absolute path.
 
 ```ts
-export default defineConfig({
-  cache: { buildDir: '/mnt/ruvyxa-build-cache' },
+export default config({
+  cache: { dir: '/mnt/ruvyxa-build-cache' },
 })
 ```
 
@@ -133,8 +132,8 @@ project output shared.
 - **Worker pool**: auto-sizes to `available_parallelism()` (clamped 2–8). Configurable via
   `RUVYXA_WORKER_POOL_SIZE` env var. Default 10s timeout for dead-worker detection.
 - **Dependency pre-bundling**: page route graphs compile in the background and load into every
-  worker's process-local ESM cache. Disable with `build.prebundleDependencies: false` when measuring
-  an un-warmed development path.
+  worker's process-local ESM cache. Disable with `build.warm: false` when measuring an un-warmed
+  development path.
 - **Async file I/O**: hot-path file reads use `tokio::task::spawn_blocking`.
 
 ### Production Server

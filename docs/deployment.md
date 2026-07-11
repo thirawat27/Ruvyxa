@@ -21,10 +21,10 @@ This produces:
 ├── assets/       # Static files from public/
 ├── prerender/    # Pre-rendered SSG/ISR/PPR/CSR HTML + manifest.json
 ├── manifest.json # Route manifest for production server
-└── build.json    # Build metadata and config snapshot
+└── build.json    # Build metadata, security defaults, build settings, and render summary
 ```
 
-When `build.emitChunkManifest` is enabled, `client/chunk-manifest.json` is emitted beside the client
+When `build.manifest` is enabled, `client/chunk-manifest.json` is emitted beside the client
 manifest.
 
 ---
@@ -47,17 +47,17 @@ include default security headers and BLAKE3-based ETags (64-bit).
 Adapters describe the build output in a format each platform expects:
 
 ```ts
-import { defineConfig } from 'ruvyxa/config'
+import { config } from 'ruvyxa/config'
 import { nodeAdapter } from '@ruvyxa/adapter-node'
 
-export default defineConfig({
+export default config({
   adapter: nodeAdapter(),
 })
 ```
 
 Every adapter output includes `clientDir` and `chunkManifest`. Deployment tooling should publish the
 entire client directory and consume `chunkManifest` when the optional file exists; builds that do
-not enable `emitChunkManifest` remain valid.
+not enable `manifest` remain valid.
 
 ### Available Adapters
 
@@ -85,7 +85,7 @@ The default adapter for any Node.js hosting environment:
 ```ts
 import { nodeAdapter } from '@ruvyxa/adapter-node'
 
-export default defineConfig({
+export default config({
   adapter: nodeAdapter({
     entry: '.ruvyxa/server/app', // optional, defaults to this
   }),
@@ -130,7 +130,7 @@ CMD ["npx", "ruvyxa", "start", "--port", "3000"]
 ```ts
 import { vercelAdapter } from '@ruvyxa/adapter-vercel'
 
-export default defineConfig({
+export default config({
   adapter: vercelAdapter({
     functionsDir: '.ruvyxa/functions', // optional
   }),
@@ -147,7 +147,7 @@ assets. Output includes `vercel.json`.
 ```ts
 import { cloudflareAdapter } from '@ruvyxa/adapter-cloudflare'
 
-export default defineConfig({
+export default config({
   adapter: cloudflareAdapter({
     workerEntry: '.ruvyxa/server/app', // optional
   }),
@@ -163,7 +163,7 @@ Deploys with `wrangler deploy`. Targets the Workers runtime. Output includes `wr
 ```ts
 import { netlifyAdapter } from '@ruvyxa/adapter-netlify'
 
-export default defineConfig({
+export default config({
   adapter: netlifyAdapter({
     functionsDir: '.ruvyxa/netlify/functions', // optional
   }),
@@ -179,7 +179,7 @@ Deploys with the Netlify CLI or Git integration. Output includes `netlify.toml`.
 ```ts
 import { bunAdapter } from '@ruvyxa/adapter-bun'
 
-export default defineConfig({
+export default config({
   adapter: bunAdapter(),
 })
 ```
@@ -195,7 +195,7 @@ For sites that don't need server-side rendering at request time:
 ```ts
 import { staticAdapter } from '@ruvyxa/adapter-static'
 
-export default defineConfig({
+export default config({
   adapter: staticAdapter({
     outputDir: '.ruvyxa/static', // optional
   }),
@@ -236,20 +236,33 @@ Set environment variables using your platform's standard method. Ruvyxa loads `.
   "assetsDir": "assets",
   "hashAlgorithm": "blake3-256",
   "createdAtUnix": 1712345678,
+  "images": {
+    "optimizedImages": 5,
+    "cacheHits": 3,
+    "sourceBytes": 2457600,
+    "outputBytes": 819200,
+    "entries": [
+      { "source": "public/hero.jpg", "output": ".ruvyxa/assets/hero.webp", "width": 1600, "height": 900, "sourceBytes": 512000, "outputBytes": 153600, "cacheHit": true }
+    ]
+  },
   "security": {
-    "actionBodyLimitBytes": 65536,
-    "sameOriginActions": true,
-    "fetchMetadataActions": true,
-    "securityHeaders": true
+    "actionLimit": 65536,
+    "sameOrigin": true,
+    "fetchMeta": true,
+    "headers": true
   },
   "build": {
     "minify": true,
-    "sourcemap": false,
-    "treeShaking": true,
-    "splitStrategy": "route",
-    "parallelism": 4
+    "map": false,
+    "treeShake": true,
+    "split": "route",
+    "jsx": "classic",
+    "target": "es2022",
+    "manifest": false,
+    "warm": true,
+    "workers": 4
   },
-  "rendering": {
+  "render": {
     "prerendered": 3,
     "routes": [
       { "path": "/static-page", "strategy": "ssg", "revalidate": null },
@@ -260,8 +273,8 @@ Set environment variables using your platform's standard method. Ruvyxa loads `.
 ```
 
 `.ruvyxa/client/manifest.json` contains per-route bundle metrics (module count, output bytes,
-estimated gzip bytes, cache hits, tree-shaken modules). When `build.emitChunkManifest` is enabled,
-Ruvyxa also writes `.ruvyxa/client/chunk-manifest.json` with dynamic import chunk info.
+estimated gzip bytes, cache hits, tree-shaken modules). When `build.manifest` is enabled, Ruvyxa
+also writes `.ruvyxa/client/chunk-manifest.json` with dynamic import chunk info.
 
 ---
 

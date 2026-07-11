@@ -72,9 +72,9 @@ function sanitizeConfig(config) {
     'css',
     'server',
     'build',
-    'rendering',
+    'render',
     'debug',
-    'images',
+    'image',
     'security',
     'cache',
     'middleware',
@@ -86,31 +86,65 @@ function sanitizeConfig(config) {
   assertKnownKeys(config.server, 'config.server', ['host', 'port'])
   assertKnownKeys(config.build, 'config.build', [
     'minify',
-    'sourcemap',
-    'treeShaking',
-    'splitStrategy',
-    'parallelism',
-    'jsxRuntime',
-    'esTarget',
-    'emitChunkManifest',
-    'prebundleDependencies',
+    'map',
+    'treeShake',
+    'split',
+    'workers',
+    'jsx',
+    'target',
+    'manifest',
+    'warm',
   ])
   assertKnownKeys(config.debug, 'config.debug', ['overlay', 'traces'])
-  assertKnownKeys(config.images, 'config.images', [
-    'optimize',
-    'quality',
-    'lossless',
-    'parallelism',
-  ])
+  assertKnownKeys(config.image, 'config.image', ['optimize', 'quality', 'lossless', 'workers'])
   assertKnownKeys(config.security, 'config.security', [
-    'actionBodyLimitBytes',
-    'sameOriginActions',
-    'fetchMetadataActions',
-    'securityHeaders',
+    'actionLimit',
+    'sameOrigin',
+    'fetchMeta',
+    'headers',
   ])
-  assertKnownKeys(config.cache, 'config.cache', ['routeManifest', 'css', 'buildDir'])
-  assertKnownKeys(config.rendering, 'config.rendering', ['defaultStrategy', 'defaultRevalidate'])
+  assertKnownKeys(config.cache, 'config.cache', ['routes', 'css', 'dir'])
+  assertKnownKeys(config.render, 'config.render', ['strategy', 'revalidate'])
   assertKnownKeys(config.middleware, 'config.middleware', ['builtin', 'layers', 'plugins'])
+  assertKnownKeys(config.middleware?.builtin, 'config.middleware.builtin', [
+    'cors',
+    'timing',
+    'log',
+    'rate',
+    'headers',
+  ])
+  assertKnownKeys(config.middleware?.builtin?.cors, 'config.middleware.builtin.cors', [
+    'origins',
+    'methods',
+    'headers',
+    'credentials',
+    'maxAge',
+  ])
+  assertKnownKeys(config.middleware?.builtin?.rate, 'config.middleware.builtin.rate', [
+    'max',
+    'window',
+    'key',
+  ])
+  if (Array.isArray(config.middleware?.plugins)) {
+    for (const [index, plugin] of config.middleware.plugins.entries()) {
+      assertKnownKeys(plugin, `config.middleware.plugins[${index}]`, [
+        'name',
+        'path',
+        'hot',
+        'phase',
+        'routes',
+        'config',
+        'allow',
+      ])
+      assertKnownKeys(plugin?.allow, `config.middleware.plugins[${index}].allow`, [
+        'env',
+        'read',
+        'net',
+        'timeout',
+        'memory',
+      ])
+    }
+  }
 
   return {
     appDir: stringValue(config.appDir),
@@ -126,39 +160,39 @@ function sanitizeConfig(config) {
     }),
     build: objectValue(config.build, {
       minify: booleanValue(config.build?.minify),
-      sourcemap: booleanValue(config.build?.sourcemap),
-      treeShaking: booleanValue(config.build?.treeShaking),
-      splitStrategy: stringValue(config.build?.splitStrategy),
-      parallelism: numberValue(config.build?.parallelism),
-      jsxRuntime: stringValue(config.build?.jsxRuntime),
-      esTarget: stringValue(config.build?.esTarget),
-      emitChunkManifest: booleanValue(config.build?.emitChunkManifest),
-      prebundleDependencies: booleanValue(config.build?.prebundleDependencies),
+      map: booleanValue(config.build?.map),
+      treeShake: booleanValue(config.build?.treeShake),
+      split: stringValue(config.build?.split),
+      workers: numberValue(config.build?.workers),
+      jsx: stringValue(config.build?.jsx),
+      target: stringValue(config.build?.target),
+      manifest: booleanValue(config.build?.manifest),
+      warm: booleanValue(config.build?.warm),
     }),
-    rendering: objectValue(config.rendering, {
-      defaultStrategy: stringValue(config.rendering?.defaultStrategy),
-      defaultRevalidate: numberValue(config.rendering?.defaultRevalidate),
+    render: objectValue(config.render, {
+      strategy: stringValue(config.render?.strategy),
+      revalidate: numberValue(config.render?.revalidate),
     }),
     debug: objectValue(config.debug, {
       overlay: booleanValue(config.debug?.overlay),
       traces: booleanValue(config.debug?.traces),
     }),
-    images: objectValue(config.images, {
-      optimize: booleanValue(config.images?.optimize),
-      quality: numberValue(config.images?.quality),
-      lossless: booleanValue(config.images?.lossless),
-      parallelism: numberValue(config.images?.parallelism),
+    image: objectValue(config.image, {
+      optimize: booleanValue(config.image?.optimize),
+      quality: numberValue(config.image?.quality),
+      lossless: booleanValue(config.image?.lossless),
+      workers: numberValue(config.image?.workers),
     }),
     security: objectValue(config.security, {
-      actionBodyLimitBytes: numberValue(config.security?.actionBodyLimitBytes),
-      sameOriginActions: booleanValue(config.security?.sameOriginActions),
-      fetchMetadataActions: booleanValue(config.security?.fetchMetadataActions),
-      securityHeaders: booleanValue(config.security?.securityHeaders),
+      actionLimit: numberValue(config.security?.actionLimit),
+      sameOrigin: booleanValue(config.security?.sameOrigin),
+      fetchMeta: booleanValue(config.security?.fetchMeta),
+      headers: booleanValue(config.security?.headers),
     }),
     cache: objectValue(config.cache, {
-      routeManifest: booleanValue(config.cache?.routeManifest),
+      routes: booleanValue(config.cache?.routes),
       css: booleanValue(config.cache?.css),
-      buildDir: stringValue(config.cache?.buildDir),
+      dir: stringValue(config.cache?.dir),
     }),
     middleware: safeJsonValue(config.middleware),
     adapter: objectValue(config.adapter, {

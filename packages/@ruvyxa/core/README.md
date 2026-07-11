@@ -14,10 +14,11 @@ npm install @ruvyxa/core
 ## Exports
 
 ```ts
-import { defineConfig } from '@ruvyxa/core/config'
+import { config } from '@ruvyxa/core/config'
 import {
   action,
   cache,
+  cacheStats,
   invalidateCache,
   json,
   loader,
@@ -66,28 +67,48 @@ export const createPost = action
 
 ### Cache utility
 
-The `cache()` function provides real in-memory TTL caching:
+The `cache()` function provides real in-memory TTL caching with LRU eviction and stale-while-revalidate:
 
 ```ts
-import { cache, invalidateCache } from '@ruvyxa/core/server'
+import { cache, cacheStats, invalidateCache } from '@ruvyxa/core/server'
 
 // Cache with TTL (supports "30s", "5m", "1h", "1d")
 const data = await cache('key')
   .ttl('10m')
+  .swr('1h') // serve stale while revalidating in background
   .get(async () => fetchExpensiveData())
 
 // Invalidate by key or prefix
 invalidateCache('key') // exact match
 invalidateCache('posts') // also clears "posts:123"
 invalidateCache() // clear all
+
+// Monitor cache
+const stats = cacheStats() // { size: number, maxEntries: number }
+```
+
+### Response helpers
+
+```ts
+import { json, notFound, redirect } from '@ruvyxa/core/server'
+
+// JSON response
+return json({ ok: true }, { status: 200 })
+
+// Redirect (status must be 3xx)
+return redirect('/login') // 302 by default
+return redirect('/dashboard', 301)
+
+// Not found
+return notFound('User not found') // 404
 ```
 
 ## Config Shape
 
 ```ts
-import { defineConfig } from '@ruvyxa/core/config'
+import { config } from '@ruvyxa/core/config'
 
-export default defineConfig({
+export default config({
   appDir: 'app',
   outDir: '.ruvyxa',
   css: {
@@ -99,19 +120,19 @@ export default defineConfig({
   },
   build: {
     minify: true,
-    sourcemap: false,
-    treeShaking: true,
-    splitStrategy: 'route',
-    jsxRuntime: 'classic',
-    esTarget: 'es2022',
-    parallelism: 4,
-    emitChunkManifest: false,
-    prebundleDependencies: true,
+    map: false,
+    treeShake: true,
+    split: 'route',
+    jsx: 'classic',
+    target: 'es2022',
+    workers: 4,
+    manifest: false,
+    warm: true,
   },
   cache: {
-    routeManifest: true,
+    routes: true,
     css: true,
-    buildDir: '.ruvyxa/cache/bundler',
+    dir: '.ruvyxa/cache/bundler',
   },
 })
 ```
@@ -121,15 +142,15 @@ export default defineConfig({
 Adapters return metadata describing how a platform should consume `.ruvyxa/` output:
 
 ```ts
-import type { Adapter } from '@ruvyxa/core'
-
-import { clientBuildOutput } from '@ruvyxa/core'
+import type { Adapter, AdapterOutput, BuildContext } from '@ruvyxa/core'
+import { clientBuildOutput, validateBuildContext } from '@ruvyxa/core'
 
 export function customAdapter(): Adapter {
   return {
     name: 'custom',
     target: 'node',
-    build(ctx) {
+    build(ctx: BuildContext): AdapterOutput {
+      validateBuildContext(ctx, 'customAdapter')
       return {
         name: 'custom',
         target: 'node',
@@ -150,12 +171,12 @@ During `ruvyxa build`, `resolveId` and `transform` hooks from `ruvyxa.config.ts`
 the native bundler pipeline:
 
 ```ts
-import type { RuvyxaPlugin } from '@ruvyxa/core'
+import type { PluginContext, RuvyxaPlugin, TransformResult } from '@ruvyxa/core'
 
 export function bannerPlugin(): RuvyxaPlugin {
   return {
     name: 'banner',
-    transform(code, id, ctx) {
+    transform(code: string, id: string, ctx: PluginContext): TransformResult | null {
       if (ctx.environment !== 'client' || !id.endsWith('.tsx')) {
         return null
       }

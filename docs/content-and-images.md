@@ -49,12 +49,12 @@ has been written successfully. This keeps static output small and request-time s
 transforms and content negotiation.
 
 ```ts
-export default defineConfig({
-  images: {
+export default config({
+  image: {
     optimize: true,
     quality: 82,
     lossless: false,
-    parallelism: 0,
+    workers: 0,
   },
 })
 ```
@@ -122,7 +122,7 @@ output name directly (for example, `/hero.webp`); the development server maps th
 `public/hero.jpg` or `public/hero.png` when there is exactly one matching source.
 
 `quality` accepts 1–100 for lossy output. Set `lossless: true` for pixel-exact output and set
-`parallelism` to a positive worker limit, or leave it at `0` to use available CPUs. Encoded bytes
+`image.workers` to a positive worker limit, or leave it at `0` to use available CPUs. Encoded bytes
 are cached by source content and settings under the configured build cache, making unchanged
 rebuilds copy/link-only. The build writes `.ruvyxa/assets/.ruvyxa-images.json` with source/output
 URLs, dimensions, byte sizes, and cache-hit status. Invalid image files remain unchanged. Two source

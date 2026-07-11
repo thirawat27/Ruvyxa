@@ -1091,6 +1091,13 @@ function privateEnvReads(source) {
     const name = match[1]
     if (name !== 'NODE_ENV' && !name.startsWith('RUVYXA_PUBLIC_')) names.push(name)
   }
+  for (const match of codeOnly.matchAll(/\bprocess\.env\s*\[/g)) {
+    const value = source.slice(match.index + match[0].length)
+    const literal = /^(['"])([A-Z_][A-Z0-9_]*)\1\s*\]/.exec(value)
+    if (!literal) continue
+    const name = literal[2]
+    if (name !== 'NODE_ENV' && !name.startsWith('RUVYXA_PUBLIC_')) names.push(name)
+  }
   return names
 }
 

@@ -18,10 +18,10 @@ export interface VercelAdapterOptions {
  *
  * @example
  * ```ts
- * import { defineConfig } from "ruvyxa/config"
+ * import { config } from "ruvyxa/config"
  * import { vercelAdapter } from "@ruvyxa/adapter-vercel"
  *
- * export default defineConfig({
+ * export default config({
  *   adapter: vercelAdapter({ functionsDir: ".vercel/output/functions" })
  * })
  * ```

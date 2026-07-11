@@ -32,7 +32,7 @@ const RESERVED_WINDOWS_NAMES = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i
  *
  * Performs the following safety checks before scaffolding:
  * 1. Validates the target directory name for filesystem safety
- * 2. Checks write permissions on the parent directory
+ * 2. Checks write access on the parent directory
  * 3. Ensures target directory is empty if it exists
  * 4. Validates that the template contains all required files
  * 5. Copies the template with recursive directory creation
@@ -160,7 +160,7 @@ export async function createRuvyxaApp(targetDir: string): Promise<void> {
     throw new Error(
       `Failed to create project at "${trimmed}".\n` +
         `  ${message}\n` +
-        '  Check disk space and filesystem permissions.',
+        '  Check disk space and filesystem access.',
     )
   }
 }

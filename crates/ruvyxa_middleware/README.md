@@ -18,8 +18,8 @@ This crate provides:
 | `RequestLoggingLayer` | Structured logging: method, path, status, duration |
 | `CorsLayer` | Configurable CORS with preflight handling |
 | `CustomHeadersLayer` | Arbitrary response headers from config |
-| `CompressionLayer` | Gzip + Brotli (via tower-http) |
 
+Gzip and Brotli compression is handled by tower-http at the server layer, not by this crate.
 All layers implement `tower::Layer` and can be composed with any axum/tower middleware.
 
 ## Wasm Plugin Security Model
@@ -28,10 +28,10 @@ Each plugin runs in an isolated Wasmtime `Store`:
 
 - **Fuel-based execution limits** — prevents infinite loops
 - **Memory bounds** — configurable max memory (default 64MB)
-- **No filesystem access** unless explicitly granted via `permissions.fsRead`
-- **No network access** unless explicitly granted via `permissions.net`
-- **No environment access** unless explicitly granted via `permissions.env`
-- **Hot-reload** — file watcher detects `.wasm` changes and reloads without server restart
+- **No filesystem access** unless explicitly granted via `allow.read`
+- **No network access** unless explicitly granted via `allow.net`
+- **No environment access** unless explicitly granted via `allow.env`
+- **Hot-reload** — `.wasm` changes reload without server restart (dev mode)
 
 ## Plugin Phases
 
@@ -51,7 +51,6 @@ Each plugin runs in an isolated Wasmtime `Store`:
 ## Feature Flags
 
 - `wasm-plugins` (default) — enables `wasmtime` and `wasmtime-wasi` dependencies for the Wasm plugin runtime. Disable to reduce binary size if you only need built-in middleware.
-- `debug-plugin` (disabled) — enables verbose logging for Wasm plugin execution and hot-reload events.
 
 ## License
 

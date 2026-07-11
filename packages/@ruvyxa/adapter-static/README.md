@@ -11,10 +11,10 @@ npm install @ruvyxa/adapter-static
 ## Usage
 
 ```ts
-import { defineConfig } from 'ruvyxa/config'
+import { config } from 'ruvyxa/config'
 import { staticAdapter } from '@ruvyxa/adapter-static'
 
-export default defineConfig({
+export default config({
   adapter: staticAdapter(),
 })
 ```

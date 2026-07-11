@@ -1,15 +1,15 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { defineConfig, type RuvyxaConfig } from '../../../packages/@ruvyxa/core/src/config.ts'
+import { config, type RuvyxaConfig } from '../../../packages/@ruvyxa/core/src/config.ts'
 
 describe('config API', () => {
   it('accepts documented middleware configuration', () => {
-    const config: RuvyxaConfig = {
+    const settings: RuvyxaConfig = {
       middleware: {
         builtin: {
           timing: true,
-          logging: true,
+          log: true,
           cors: {
             origins: ['http://localhost:5173'],
             methods: ['GET', 'POST'],
@@ -17,10 +17,10 @@ describe('config API', () => {
             credentials: true,
             maxAge: 86400,
           },
-          rateLimit: {
-            maxRequests: 100,
-            windowSecs: 60,
-            keyBy: 'ip',
+          rate: {
+            max: 100,
+            window: 60,
+            key: 'ip',
           },
           headers: {
             'X-Powered-By': 'Ruvyxa',
@@ -31,15 +31,15 @@ describe('config API', () => {
             name: 'auth-guard',
             path: 'plugins/auth-guard.wasm',
             phase: 'request',
-            hotReload: true,
+            hot: true,
             routes: ['/api/*'],
             config: { apiKeyHeader: 'X-Api-Key' },
-            permissions: {
+            allow: {
               env: ['AUTH_SECRET'],
-              fsRead: ['./content'],
+              read: ['./content'],
               net: ['api.example.com'],
-              timeoutMs: 5000,
-              maxMemoryBytes: 67108864,
+              timeout: 5000,
+              memory: 67108864,
             },
           },
         ],
@@ -48,17 +48,17 @@ describe('config API', () => {
         region: 'iad1',
       },
       build: {
-        treeShaking: false,
-        emitChunkManifest: true,
+        treeShake: false,
+        manifest: true,
       },
     }
 
-    const defined = defineConfig(config)
+    const defined = config(settings)
 
     assert.equal(defined.middleware?.builtin?.timing, true)
     assert.equal(defined.middleware?.plugins?.[0]?.phase, 'request')
     assert.equal(defined.adapterOptions?.region, 'iad1')
-    assert.equal(defined.build?.treeShaking, false)
-    assert.equal(defined.build?.emitChunkManifest, true)
+    assert.equal(defined.build?.treeShake, false)
+    assert.equal(defined.build?.manifest, true)
   })
 })

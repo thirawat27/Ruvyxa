@@ -31,6 +31,7 @@ Rust unit tests stay inline in their owning crates because they test private Rus
 | `tests/packages/ruvyxa/client-renderer.test.mjs` | Client bundle boundary diagnostics |
 | `tests/packages/ruvyxa/compiler.test.mjs`        | Runtime compiler, source maps,     |
 |                                                  | incremental writes, JSX edge cases |
+| `tests/packages/ruvyxa/worker-pool.test.mjs`     | Worker pool lifecycle and IPC      |
 | `tests/packages/core/config.test.ts`             | Config API shape                   |
 | `tests/packages/core/server.test.ts`             | Loader/action/cache API            |
 | `tests/packages/create-ruvyxa/index.test.ts`     | Scaffold validation                |

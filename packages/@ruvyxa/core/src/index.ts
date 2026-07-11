@@ -1,4 +1,4 @@
-export { defineConfig } from './config.js'
+export { config } from './config.js'
 export type {
   Adapter,
   AdapterOutput,
@@ -14,7 +14,7 @@ export type {
   PluginContext,
   PluginPermissions,
   RateLimitConfig,
-  RenderingConfig,
+  RenderConfig,
   RenderStrategy,
   RuvyxaConfig,
   RuvyxaPlugin,
