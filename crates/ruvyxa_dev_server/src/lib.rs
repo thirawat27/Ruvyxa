@@ -3896,7 +3896,11 @@ mod tests {
         ));
         assert!(ignored_watch_path(
             temp.path(),
-            &Path::new(".").join(".ruvyxa").join("cache").join("ssr").join("page.mjs")
+            &Path::new(".")
+                .join(".ruvyxa")
+                .join("cache")
+                .join("ssr")
+                .join("page.mjs")
         ));
     }
 
