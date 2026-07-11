@@ -427,6 +427,28 @@ import Card from './Card.js'
     })
   })
 
+  it('forwards rendering and middleware configuration to the native CLI', async () => {
+    await withFixture(async ({ root }) => {
+      await writeFile(
+        path.join(root, 'ruvyxa.config.ts'),
+        `export default {
+          rendering: { defaultStrategy: 'isr', fallback: 'static', defaultRevalidate: 90 },
+          middleware: { builtin: { timing: false, headers: { 'X-Frame-Options': 'DENY' } } }
+        }`,
+      )
+
+      const config = await runJson(configRenderer, [root], {})
+      assert.deepEqual(config.config.rendering, {
+        defaultStrategy: 'isr',
+        fallback: 'static',
+        defaultRevalidate: 90,
+      })
+      assert.deepEqual(config.config.middleware, {
+        builtin: { timing: false, headers: { 'X-Frame-Options': 'DENY' } },
+      })
+    })
+  })
+
   it('rejects unknown config fields instead of silently ignoring them', async () => {
     await withFixture(async ({ root }) => {
       await writeFile(

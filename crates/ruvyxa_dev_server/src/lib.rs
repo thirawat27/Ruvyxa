@@ -71,6 +71,8 @@ pub struct ServerConfig {
     /// Expose runtime route traces from the development diagnostics endpoint.
     pub debug_traces: bool,
     pub middleware: MiddlewareConfig,
+    pub default_render_strategy: Option<RenderStrategy>,
+    pub default_revalidate: Option<u64>,
 }
 
 impl ServerConfig {
@@ -92,6 +94,8 @@ impl ServerConfig {
             error_overlay: true,
             debug_traces: false,
             middleware: MiddlewareConfig::default(),
+            default_render_strategy: None,
+            default_revalidate: None,
         }
     }
 
@@ -113,6 +117,8 @@ impl ServerConfig {
             error_overlay: false,
             debug_traces: false,
             middleware: MiddlewareConfig::default(),
+            default_render_strategy: None,
+            default_revalidate: None,
         }
     }
 }
@@ -147,7 +153,7 @@ impl RuntimeCache {
 
     async fn manifest(&self, config: &ServerConfig) -> Result<RouteManifest> {
         if !config.cache_route_manifest {
-            return discover_routes(DiscoverOptions::new(&config.app_dir));
+            return discover_routes(discover_options(config));
         }
 
         {
@@ -157,7 +163,7 @@ impl RuntimeCache {
             }
         }
 
-        let manifest = discover_routes(DiscoverOptions::new(&config.app_dir))?;
+        let manifest = discover_routes(discover_options(config))?;
         {
             let mut cached = self.manifest.write().await;
             *cached = Some(manifest.clone());
@@ -215,9 +221,14 @@ impl RuntimeCache {
     }
 }
 
+fn discover_options(config: &ServerConfig) -> DiscoverOptions {
+    DiscoverOptions::new(&config.app_dir)
+        .with_rendering_defaults(config.default_render_strategy, config.default_revalidate)
+}
+
 pub async fn serve(config: ServerConfig) -> Result<()> {
     let startup_started = Instant::now();
-    let manifest = discover_routes(DiscoverOptions::new(&config.app_dir))?;
+    let manifest = discover_routes(discover_options(&config))?;
     info!(routes = manifest.routes.len(), "discovered routes");
 
     let (reload_tx, _) = broadcast::channel(64);

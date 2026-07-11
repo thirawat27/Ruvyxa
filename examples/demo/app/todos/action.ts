@@ -14,7 +14,7 @@ export const createTodo = action
   .handler(async ({ input, invalidate }) => {
     invalidate('todos')
     return {
-      id: `todo-${input.title.toLowerCase().replaceAll(/\s+/g, '-')}`,
+      id: crypto.randomUUID(),
       title: input.title,
       completed: false,
     }

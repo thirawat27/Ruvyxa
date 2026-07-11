@@ -4,7 +4,8 @@ export default function TodosPage() {
       <p className="eyebrow">Server action</p>
       <h1>Todos</h1>
       <p>
-        This demonstrates server actions via <code>action.ts</code>.
+        This demonstrates validated server-action input and a unique result via{' '}
+        <code>action.ts</code>.
       </p>
       <p>
         The form POSTs to <code>/__ruvyxa/action?path=/todos&name=createTodo</code>.

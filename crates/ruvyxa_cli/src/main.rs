@@ -145,8 +145,8 @@ struct ProjectConfig {
     _react: Option<serde_json::Value>,
     #[serde(rename = "typescript")]
     _typescript: Option<serde_json::Value>,
-    #[serde(rename = "rendering")]
-    _rendering: Option<serde_json::Value>,
+    #[serde(default)]
+    rendering: RenderingConfigOptions,
     #[serde(default)]
     server: ServerConfigOptions,
     #[serde(default)]
@@ -199,6 +199,15 @@ struct BuildConfigOptions {
     es_target: Option<String>,
     emit_chunk_manifest: Option<bool>,
     prebundle_dependencies: Option<bool>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RenderingConfigOptions {
+    default_strategy: Option<RenderStrategy>,
+    #[serde(rename = "fallback")]
+    _fallback: Option<String>,
+    default_revalidate: Option<u64>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -276,6 +285,17 @@ impl ProjectConfig {
             .map(|entry| root.join(entry))
             .collect()
     }
+
+    fn discover_options(&self, root: &Path) -> DiscoverOptions {
+        DiscoverOptions::new(root.join(self.app_dir())).with_rendering_defaults(
+            self.rendering.default_strategy,
+            self.rendering.default_revalidate,
+        )
+    }
+}
+
+fn discover_project_routes(root: &Path, config: &ProjectConfig) -> anyhow::Result<RouteManifest> {
+    discover_routes(config.discover_options(root)).map_err(Into::into)
 }
 
 fn validate_project_relative_path(field: &str, value: &str) -> anyhow::Result<()> {
@@ -471,6 +491,8 @@ fn dev_server_config(args: &ServerArgs, config: &ProjectConfig) -> ServerConfig 
     server.error_overlay = config.debug.overlay.unwrap_or(true);
     server.debug_traces = config.debug.traces.unwrap_or(false);
     server.middleware = config.middleware.clone();
+    server.default_render_strategy = config.rendering.default_strategy;
+    server.default_revalidate = config.rendering.default_revalidate;
     server
 }
 
@@ -492,6 +514,8 @@ fn production_server_config(args: &ServerArgs, config: &ProjectConfig) -> Server
     server.cache_css = config.cache.css.unwrap_or(true);
     server.style_entries = config.style_entries(&out_dir.join("server"));
     server.middleware = config.middleware.clone();
+    server.default_render_strategy = config.rendering.default_strategy;
+    server.default_revalidate = config.rendering.default_revalidate;
     server
 }
 
@@ -602,7 +626,7 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
     let app_dir = args.root.join(config.app_dir());
     let out_dir = args.root.join(config.out_dir());
 
-    let manifest = discover_routes(DiscoverOptions::new(&app_dir))?;
+    let manifest = discover_project_routes(&args.root, &config)?;
     let validation = validate_app(&args.root, &manifest)?;
     fail_on_diagnostics(&validation.diagnostics)?;
     let style_collection =
@@ -2156,7 +2180,7 @@ fn find_runtime_script(root: &Path, file_name: &str) -> Option<PathBuf> {
 fn print_routes(args: ProjectArgs) -> anyhow::Result<()> {
     let config = load_project_config(&args.root)?;
     let app_dir = args.root.join(config.app_dir());
-    let manifest = discover_routes(DiscoverOptions::new(&app_dir))?;
+    let manifest = discover_project_routes(&args.root, &config)?;
     let page_routes = manifest
         .routes
         .iter()
@@ -2200,7 +2224,7 @@ fn print_routes(args: ProjectArgs) -> anyhow::Result<()> {
 
 fn analyze(args: ProjectArgs) -> anyhow::Result<()> {
     let config = load_project_config(&args.root)?;
-    let manifest = discover_routes(DiscoverOptions::new(args.root.join(config.app_dir())))?;
+    let manifest = discover_project_routes(&args.root, &config)?;
     let validation = validate_app(&args.root, &manifest)?;
 
     println!("{}", serde_json::to_string_pretty(&validation)?);
@@ -2307,7 +2331,7 @@ fn doctor(args: ProjectArgs) -> anyhow::Result<()> {
         }
     }
 
-    let manifest = discover_routes(DiscoverOptions::new(&app_dir))?;
+    let manifest = discover_project_routes(&args.root, &config)?;
     let validation = validate_app(&args.root, &manifest)?;
     print_field("routes", accent(manifest.routes.len().to_string()));
     print_field("page routes", accent(validation.page_routes.to_string()));
@@ -2359,7 +2383,7 @@ fn clean(args: ProjectArgs) -> anyhow::Result<()> {
 
 fn trace(args: TraceArgs) -> anyhow::Result<()> {
     let config = load_project_config(&args.root)?;
-    let manifest = discover_routes(DiscoverOptions::new(args.root.join(config.app_dir())))?;
+    let manifest = discover_project_routes(&args.root, &config)?;
     let route = manifest
         .routes
         .iter()
@@ -2379,11 +2403,11 @@ fn bench(args: BenchArgs) -> anyhow::Result<()> {
     let mut results = Vec::new();
 
     results.push(run_benchmark("route-discovery", samples, || {
-        let _manifest = discover_routes(DiscoverOptions::new(&app_dir))?;
+        let _manifest = discover_project_routes(&root, &config)?;
         Ok(())
     })?);
     results.push(run_benchmark("analyze-validation", samples, || {
-        let manifest = discover_routes(DiscoverOptions::new(&app_dir))?;
+        let manifest = discover_project_routes(&root, &config)?;
         let validation = validate_app(&root, &manifest)?;
         fail_on_diagnostics(&validation.diagnostics)?;
         Ok(())
@@ -2483,13 +2507,19 @@ fn test_parity(args: ProjectArgs) -> anyhow::Result<()> {
         target: BuildTarget::Node,
     })?;
 
-    let dev_manifest = discover_routes(DiscoverOptions::new(args.root.join(config.app_dir())))?;
-    let prod_manifest = discover_routes(DiscoverOptions::new(
-        args.root
-            .join(config.out_dir())
-            .join("server")
-            .join(config.app_dir()),
-    ))?;
+    let dev_manifest = discover_project_routes(&args.root, &config)?;
+    let prod_manifest = discover_routes(
+        DiscoverOptions::new(
+            args.root
+                .join(config.out_dir())
+                .join("server")
+                .join(config.app_dir()),
+        )
+        .with_rendering_defaults(
+            config.rendering.default_strategy,
+            config.rendering.default_revalidate,
+        ),
+    )?;
     let dev_routes = parity_routes(&dev_manifest);
     let prod_routes = parity_routes(&prod_manifest);
     let mut failures = Vec::new();
@@ -3325,6 +3355,21 @@ mod tests {
         let manifest = build_plugin_manifest(&config.plugins);
         assert_eq!(manifest[0]["name"], "banner");
         assert_eq!(manifest[0]["resolveId"], true);
+    }
+
+    #[test]
+    fn parses_global_rendering_defaults() {
+        let config: ProjectConfig = serde_json::from_value(json!({
+            "rendering": {
+                "defaultStrategy": "isr",
+                "fallback": "static",
+                "defaultRevalidate": 90
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(config.rendering.default_strategy, Some(RenderStrategy::Isr));
+        assert_eq!(config.rendering.default_revalidate, Some(90));
     }
 
     #[test]

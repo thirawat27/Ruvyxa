@@ -109,6 +109,12 @@ function sanitizeConfig(config) {
     'securityHeaders',
   ])
   assertKnownKeys(config.cache, 'config.cache', ['routeManifest', 'css', 'buildDir'])
+  assertKnownKeys(config.rendering, 'config.rendering', [
+    'defaultStrategy',
+    'fallback',
+    'defaultRevalidate',
+  ])
+  assertKnownKeys(config.middleware, 'config.middleware', ['builtin', 'layers', 'plugins'])
 
   return {
     appDir: stringValue(config.appDir),
@@ -133,6 +139,11 @@ function sanitizeConfig(config) {
       emitChunkManifest: booleanValue(config.build?.emitChunkManifest),
       prebundleDependencies: booleanValue(config.build?.prebundleDependencies),
     }),
+    rendering: objectValue(config.rendering, {
+      defaultStrategy: stringValue(config.rendering?.defaultStrategy),
+      fallback: stringValue(config.rendering?.fallback),
+      defaultRevalidate: numberValue(config.rendering?.defaultRevalidate),
+    }),
     debug: objectValue(config.debug, {
       overlay: booleanValue(config.debug?.overlay),
       traces: booleanValue(config.debug?.traces),
@@ -154,6 +165,7 @@ function sanitizeConfig(config) {
       css: booleanValue(config.cache?.css),
       buildDir: stringValue(config.cache?.buildDir),
     }),
+    middleware: safeJsonValue(config.middleware),
     adapter: objectValue(config.adapter, {
       name: stringValue(config.adapter?.name),
       target: stringValue(config.adapter?.target),

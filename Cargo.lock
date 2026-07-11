@@ -2042,7 +2042,6 @@ dependencies = [
  "dashmap",
  "markdown",
  "memmap2",
- "parking_lot",
  "rayon",
  "ruvyxa_diagnostics",
  "serde",

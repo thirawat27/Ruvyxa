@@ -19,9 +19,6 @@ importers:
 
   examples/demo:
     dependencies:
-      '@ruvyxa/core':
-        specifier: workspace:*
-        version: link:../../packages/@ruvyxa/core
       '@ruvyxa/react':
         specifier: workspace:*
         version: link:../../packages/@ruvyxa/react

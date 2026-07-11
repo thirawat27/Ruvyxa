@@ -89,18 +89,36 @@ pub struct RenderMeta {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DiscoverOptions {
     pub app_dir: PathBuf,
+    pub default_render_strategy: Option<RenderStrategy>,
+    pub default_revalidate: Option<u64>,
 }
 
 impl DiscoverOptions {
     pub fn new(app_dir: impl Into<PathBuf>) -> Self {
         Self {
             app_dir: app_dir.into(),
+            default_render_strategy: None,
+            default_revalidate: None,
         }
+    }
+
+    pub fn with_rendering_defaults(
+        mut self,
+        default_render_strategy: Option<RenderStrategy>,
+        default_revalidate: Option<u64>,
+    ) -> Self {
+        self.default_render_strategy = default_render_strategy;
+        self.default_revalidate = default_revalidate;
+        self
     }
 }
 
 pub fn discover_routes(options: DiscoverOptions) -> Result<RouteManifest> {
-    let app_dir = options.app_dir;
+    let DiscoverOptions {
+        app_dir,
+        default_render_strategy,
+        default_revalidate,
+    } = options;
 
     if !app_dir.exists() {
         return Err(Diagnostic::new("RUV1001", "App directory was not found")
@@ -154,7 +172,11 @@ pub fn discover_routes(options: DiscoverOptions) -> Result<RouteManifest> {
             client_modules: sibling_module(route_dir, "client.tsx"),
             runtime: RuntimeTarget::Node,
             render: if kind == RouteKind::Page {
-                detect_render_strategy(&file, &path)
+                apply_rendering_defaults(
+                    detect_render_strategy(&file, &path),
+                    default_render_strategy,
+                    default_revalidate,
+                )
             } else {
                 RenderMeta::default()
             },
@@ -884,6 +906,26 @@ fn detect_render_strategy(file: &Path, route_path: &str) -> RenderMeta {
     RenderMeta::default()
 }
 
+fn apply_rendering_defaults(
+    mut render: RenderMeta,
+    default_strategy: Option<RenderStrategy>,
+    default_revalidate: Option<u64>,
+) -> RenderMeta {
+    if render.strategy != RenderStrategy::Ssr {
+        return render;
+    }
+
+    let Some(strategy) = default_strategy else {
+        return render;
+    };
+
+    render.strategy = strategy;
+    if strategy == RenderStrategy::Isr {
+        render.revalidate = Some(default_revalidate.unwrap_or(60));
+    }
+    render
+}
+
 fn route_has_dynamic_segments(route_path: &str) -> bool {
     route_path
         .split('/')
@@ -1319,5 +1361,25 @@ mod tests {
 
         assert_eq!(manifest.routes[0].path, "/server");
         assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+    }
+
+    #[test]
+    fn applies_global_isr_defaults_to_ssr_routes() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(
+            app.join("page.tsx"),
+            "export default async function Page() { return <main>{await fetch('https://example.com')}</main> }",
+        )
+        .unwrap();
+
+        let manifest = discover_routes(
+            DiscoverOptions::new(&app).with_rendering_defaults(Some(RenderStrategy::Isr), Some(90)),
+        )
+        .unwrap();
+
+        assert_eq!(manifest.routes[0].render.strategy, RenderStrategy::Isr);
+        assert_eq!(manifest.routes[0].render.revalidate, Some(90));
     }
 }
