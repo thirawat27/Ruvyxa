@@ -719,7 +719,7 @@ fn ignored_watch_path(root: &Path, path: &Path) -> bool {
         matches!(
             component.as_ref(),
             ".git" | ".ruvyxa" | "target" | "dist" | ".npm-pack" | ".npm-smoke"
-        )
+        ) || component.starts_with(".ruvyxa-")
     });
     top_level_ignored
         || components
@@ -3708,6 +3708,17 @@ mod tests {
                 .join("cache")
                 .join("ssr")
                 .join("page.mjs")
+        ));
+        assert!(ignored_watch_path(
+            temp.path(),
+            &temp
+                .path()
+                .join(".ruvyxa-action-test-BW9IHB")
+                .join("app/todos/action.ts")
+        ));
+        assert!(!ignored_watch_path(
+            temp.path(),
+            &temp.path().join("app/.ruvyxa-action-test-helper.ts")
         ));
     }
 
