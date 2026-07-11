@@ -84,13 +84,6 @@ export interface RenderingConfig {
    */
   defaultStrategy?: RenderStrategy
   /**
-   * Fallback behavior for SSG/ISR pages when a path is not pre-rendered.
-   * - `"blocking"` — server-render on first request, then cache (default).
-   * - `"static"` — return 404 for paths not pre-rendered at build time.
-   * @default "blocking"
-   */
-  fallback?: 'blocking' | 'static'
-  /**
    * Default ISR revalidation interval in seconds (used when a page exports
    * `revalidate` without a value or inherits ISR from config).
    * @default 60

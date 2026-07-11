@@ -160,8 +160,7 @@ pub struct WorkerResponse {
 struct Worker {
     stdin_tx: mpsc::Sender<String>,
     pending: Arc<Mutex<BTreeMap<String, oneshot::Sender<WorkerResponse>>>>,
-    #[allow(dead_code)]
-    child: Child,
+    _child: Child,
 }
 
 impl Worker {
@@ -229,7 +228,7 @@ impl Worker {
         Ok(Self {
             stdin_tx,
             pending,
-            child,
+            _child: child,
         })
     }
 
@@ -284,8 +283,6 @@ impl Worker {
 pub struct NodeWorkerPool {
     workers: Vec<Worker>,
     next_worker: AtomicU64,
-    worker_script: PathBuf,
-    env: BTreeMap<String, String>,
 }
 
 pub(crate) struct RenderApiRequest<'a> {
@@ -350,8 +347,6 @@ impl NodeWorkerPool {
         Ok(Self {
             workers,
             next_worker: AtomicU64::new(0),
-            worker_script,
-            env,
         })
     }
 
@@ -427,19 +422,6 @@ impl NodeWorkerPool {
             queued += 1;
         }
         Ok(queued)
-    }
-
-    /// Restart a dead worker (for self-healing).
-    #[allow(dead_code)]
-    pub async fn restart_worker(&mut self, index: usize) -> Result<()> {
-        if index >= self.workers.len() {
-            return Err(RuvyxaError::Message(format!(
-                "Worker index {index} out of bounds"
-            )));
-        }
-        let new_worker = Worker::spawn(&self.worker_script, &self.env).await?;
-        self.workers[index] = new_worker;
-        Ok(())
     }
 
     /// Pre-warm module caches in a worker by importing route bundles during idle time.

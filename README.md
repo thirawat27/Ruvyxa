@@ -288,7 +288,6 @@ export default defineConfig({
   },
   rendering: {
     defaultStrategy: 'ssr',
-    fallback: 'blocking',
     defaultRevalidate: 60,
   },
   cache: {

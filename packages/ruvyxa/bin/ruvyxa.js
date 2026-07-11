@@ -14,7 +14,13 @@ const binary = findBinary()
 
 if (!binary) {
   console.error(`Ruvyxa native CLI binary was not found for ${platformKey}.`)
-  console.error('Reinstall ruvyxa, or install the matching @ruvyxa/cli-* optional package.')
+  if (optionalBinaryPackageName()) {
+    console.error('Reinstall ruvyxa, or install the matching @ruvyxa/cli-* optional package.')
+  } else {
+    console.error(
+      'Prebuilt binaries support darwin-arm64, darwin-x64, linux-arm64, linux-x64, and win32-x64.',
+    )
+  }
   console.error('When working from source, run `cargo build -p ruvyxa_cli` first.')
   process.exit(1)
 }

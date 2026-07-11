@@ -1162,7 +1162,6 @@ pub fn render_request(config: &ServerConfig, request_path: &str, method: &str) -
     render_request_cached(config, request_path, method)
 }
 
-#[allow(dead_code)]
 fn render_request_cached(
     config: &ServerConfig,
     request_path: &str,
@@ -1207,7 +1206,6 @@ fn render_request_cached(
 }
 
 /// Sync fallback for static file serving (used by render_request test/bench path).
-#[allow(dead_code)]
 fn serve_public_file_sync(public_dir: &Path, request_path: &str) -> Result<Option<Response>> {
     let trimmed = request_path.trim_start_matches('/');
     if !is_safe_relative_path(trimmed) {
@@ -1227,7 +1225,6 @@ fn serve_public_file_sync(public_dir: &Path, request_path: &str) -> Result<Optio
 }
 
 /// Sync fallback for client file serving (used by render_request test/bench path).
-#[allow(dead_code)]
 fn serve_client_file_sync(client_dir: &Path, request_path: &str) -> Result<Option<Response>> {
     let Some(file_name) = request_path.strip_prefix("/__ruvyxa/client/") else {
         return Ok(None);
@@ -2288,30 +2285,6 @@ struct ApiRenderResult {
     stack: Option<String>,
 }
 
-#[allow(dead_code)]
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ClientRenderResult {
-    ok: bool,
-    script: Option<String>,
-    code: Option<String>,
-    message: Option<String>,
-    stack: Option<String>,
-}
-
-#[allow(dead_code)]
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct ActionRenderResult {
-    ok: bool,
-    status: Option<u16>,
-    headers: Option<BTreeMap<String, String>>,
-    body: Option<String>,
-    code: Option<String>,
-    message: Option<String>,
-    stack: Option<String>,
-}
-
 fn render_react_page(
     config: &ServerConfig,
     route: &RouteEntry,
@@ -2380,16 +2353,6 @@ fn find_ssr_renderer(root: &Path) -> Option<PathBuf> {
 
 fn find_api_renderer(root: &Path) -> Option<PathBuf> {
     find_runtime_script(root, "api-renderer.mjs")
-}
-
-#[allow(dead_code)]
-fn find_client_renderer(root: &Path) -> Option<PathBuf> {
-    find_runtime_script(root, "client-renderer.mjs")
-}
-
-#[allow(dead_code)]
-fn find_action_renderer(root: &Path) -> Option<PathBuf> {
-    find_runtime_script(root, "action-renderer.mjs")
 }
 
 fn find_runtime_script(root: &Path, file_name: &str) -> Option<PathBuf> {
@@ -2543,173 +2506,6 @@ fn render_api(
     if let Some(headers) = result.headers {
         for (name, value) in headers {
             let Ok(name) = HeaderName::from_bytes(name.as_bytes()) else {
-                continue;
-            };
-            let Ok(value) = HeaderValue::from_str(&value) else {
-                continue;
-            };
-            response.headers_mut().insert(name, value);
-        }
-    }
-
-    Ok(with_security_headers(response))
-}
-
-#[allow(dead_code)]
-fn render_client_bundle(config: &ServerConfig, request_path: &str) -> Result<String> {
-    let manifest = discover_routes(DiscoverOptions::new(&config.app_dir))?;
-    let Some(route_match) = find_route(&manifest, request_path) else {
-        return Err(Diagnostic::new("RUV1303", "Client route was not found")
-            .explain("The browser requested a hydration bundle for a route that does not exist.")
-            .suggest("Reload the page so the client bundle URL matches the current route.")
-            .into());
-    };
-
-    if route_match.route.kind != RouteKind::Page {
-        return Err(
-            Diagnostic::new("RUV1304", "Client bundle requested for a non-page route")
-                .explain("Only page routes can produce a hydration bundle.")
-                .at_file(&route_match.route.file)
-                .suggest("Request a client bundle for a page route instead.")
-                .into(),
-        );
-    }
-
-    let renderer = find_client_renderer(&config.root).ok_or_else(|| {
-        Diagnostic::new("RUV1302", "Client renderer was not found")
-            .explain("Ruvyxa could not find the Node client renderer used to bundle browser hydration code.")
-            .suggest("Run pnpm install from the monorepo root, or install the ruvyxa package in the app.")
-    })?;
-
-    let output = node_command(&config.root)?
-        .arg(&renderer)
-        .arg(&config.root)
-        .arg(&config.app_dir)
-        .arg(&route_match.route.file)
-        .arg(request_path)
-        .arg(
-            serde_json::to_string(&route_match.params)
-                .map_err(|error| RuvyxaError::Message(error.to_string()))?,
-        )
-        .output()
-        .map_err(|source| RuvyxaError::Io {
-            message: "Failed to start Node for client hydration bundling".to_string(),
-            source,
-        })?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let result: ClientRenderResult = serde_json::from_str(&stdout).map_err(|error| {
-        RuvyxaError::Message(format!(
-            "Client renderer returned invalid output: {error}\nstdout:\n{stdout}\nstderr:\n{stderr}"
-        ))
-    })?;
-
-    if output.status.success() && result.ok {
-        return result.script.ok_or_else(|| {
-            RuvyxaError::Message("Client renderer completed without script output".to_string())
-        });
-    }
-
-    let code = result.code.unwrap_or_else(|| "RUV1300".to_string());
-    let message = result
-        .message
-        .unwrap_or_else(|| "Client bundling failed without an error message".to_string());
-    let explanation = if let Some(stack) = result.stack {
-        format!("{message}\n\n{stack}")
-    } else {
-        message
-    };
-
-    Err(
-        Diagnostic::new("RUV1300", "Client hydration bundling failed")
-            .explain(format!("{code}: {explanation}"))
-            .suggest("Check the page component, its browser-safe imports, and React dependencies.")
-            .into(),
-    )
-}
-
-#[allow(dead_code)]
-fn render_server_action(
-    config: &ServerConfig,
-    request_path: &str,
-    action_name: &str,
-    payload_json: &str,
-) -> Result<Response> {
-    let manifest = discover_routes(DiscoverOptions::new(&config.app_dir))?;
-    let Some(route_match) = find_route(&manifest, request_path) else {
-        return Ok((StatusCode::NOT_FOUND, "Route not found for action").into_response());
-    };
-
-    if route_match.route.kind != RouteKind::Page {
-        return Ok((
-            StatusCode::METHOD_NOT_ALLOWED,
-            "Actions can only target page routes",
-        )
-            .into_response());
-    }
-
-    let action_file = action_file_for(route_match.route).ok_or_else(|| {
-        Diagnostic::new("RUV1501", "Route action file was not found")
-            .explain(
-                "Server actions are resolved from action.ts or action.js next to the page route.",
-            )
-            .at_file(&route_match.route.file)
-            .suggest(
-                "Create action.ts beside the page and export the action handler you want to call.",
-            )
-    })?;
-
-    let renderer = find_action_renderer(&config.root).ok_or_else(|| {
-        Diagnostic::new("RUV1502", "Action renderer was not found")
-            .explain(
-                "Ruvyxa could not find the Node action renderer used to execute server actions.",
-            )
-            .suggest("Run from the monorepo root or install the ruvyxa package into the app.")
-    })?;
-
-    let output = node_command(&config.root)?
-        .arg(renderer)
-        .arg(&config.root)
-        .arg(action_file)
-        .arg(action_name)
-        .arg(payload_json)
-        .arg(request_path)
-        .output()
-        .map_err(|source| RuvyxaError::Io {
-            message: "Failed to start Node for server action execution".to_string(),
-            source,
-        })?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let result: ActionRenderResult =
-        serde_json::from_str(&stdout).map_err(|error| RuvyxaError::Message(error.to_string()))?;
-
-    if !result.ok {
-        let mut diagnostic = Diagnostic::new(
-            action_error_code(result.code.as_deref()),
-            "Server action execution failed",
-        )
-        .explain(
-            result
-                .message
-                .unwrap_or_else(|| "Unknown server action error".to_string()),
-        )
-        .at_file(&route_match.route.file);
-
-        if let Some(stack) = result.stack {
-            diagnostic = diagnostic.suggest(stack);
-        }
-
-        return Err(diagnostic.into());
-    }
-
-    let status = StatusCode::from_u16(result.status.unwrap_or(200)).unwrap_or(StatusCode::OK);
-    let mut response = (status, result.body.unwrap_or_default()).into_response();
-
-    if let Some(headers) = result.headers {
-        for (key, value) in headers {
-            let Ok(name) = HeaderName::from_bytes(key.as_bytes()) else {
                 continue;
             };
             let Ok(value) = HeaderValue::from_str(&value) else {
@@ -2928,7 +2724,7 @@ fn hmr_client_script() -> &'static str {
 </script>"#
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn classify_hmr_event(paths: &[PathBuf]) -> &'static str {
     if paths.is_empty() {
         return "full-reload";
@@ -2955,7 +2751,7 @@ fn classify_hmr_event(paths: &[PathBuf]) -> &'static str {
     }
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 fn extension_is(path: &Path, expected: &str) -> bool {
     path.extension()
         .and_then(|extension| extension.to_str())

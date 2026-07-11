@@ -284,7 +284,6 @@ pub fn link_parallel(modules: &[CompiledModule], input: &BundleInput) -> Result<
 /// Modules within the same layer can be processed concurrently.
 ///
 /// Returns layers in dependency order (layer 0 = leaf modules with no deps).
-#[allow(dead_code)]
 pub fn compute_topo_layers(modules: &[CompiledModule]) -> Vec<Vec<&CompiledModule>> {
     let project_modules: BTreeMap<PathBuf, &CompiledModule> = modules
         .iter()

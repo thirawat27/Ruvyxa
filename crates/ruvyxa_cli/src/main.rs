@@ -205,8 +205,6 @@ struct BuildConfigOptions {
 #[serde(rename_all = "camelCase")]
 struct RenderingConfigOptions {
     default_strategy: Option<RenderStrategy>,
-    #[serde(rename = "fallback")]
-    _fallback: Option<String>,
     default_revalidate: Option<u64>,
 }
 
@@ -3362,7 +3360,6 @@ mod tests {
         let config: ProjectConfig = serde_json::from_value(json!({
             "rendering": {
                 "defaultStrategy": "isr",
-                "fallback": "static",
                 "defaultRevalidate": 90
             }
         }))

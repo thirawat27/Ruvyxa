@@ -206,16 +206,6 @@ impl HmrTracker {
     pub fn tracked_route_count(&self) -> usize {
         self.route_to_files.read().len()
     }
-
-    /// Get the routes affected by a specific file.
-    #[allow(dead_code)]
-    pub fn routes_for_file(&self, path: &Path) -> Vec<String> {
-        self.file_to_routes
-            .read()
-            .get(path)
-            .map(|routes| routes.iter().cloned().collect())
-            .unwrap_or_default()
-    }
 }
 
 fn extension_is(path: &Path, expected: &str) -> bool {

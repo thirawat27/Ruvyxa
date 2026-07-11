@@ -151,37 +151,6 @@ impl ResolveGraphCache {
         Ok(source)
     }
 
-    /// Read source as Arc<str> — avoids extra clone for callers that can use it.
-    #[allow(dead_code)]
-    fn read_source_arc(&self, path: &Path) -> Result<Arc<str>> {
-        let metadata = fs::metadata(path)?;
-        let fingerprint = SourceFingerprint {
-            modified: metadata.modified().ok(),
-            len: metadata.len(),
-        };
-
-        // Fast path: check cache with fingerprint validation.
-        if let Some(entry) = self.sources.get(path)
-            && entry.fingerprint == fingerprint
-        {
-            return Ok(Arc::clone(&entry.source));
-        }
-
-        // Cache miss or stale — read the file.
-        let source = read_source_fast(path, metadata.len())?;
-        let arc_source: Arc<str> = Arc::from(source.as_str());
-
-        self.sources.insert(
-            path.to_path_buf(),
-            CachedSource {
-                fingerprint,
-                source: Arc::clone(&arc_source),
-            },
-        );
-
-        Ok(arc_source)
-    }
-
     /// Number of cached resolution entries. Intended for diagnostics/tests.
     pub fn resolution_count(&self) -> usize {
         self.resolutions.len()

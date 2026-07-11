@@ -19,7 +19,6 @@ const config: RuvyxaConfig = {
 
   rendering: {
     defaultStrategy: 'ssr',
-    fallback: 'blocking',
     defaultRevalidate: 60,
   },
 

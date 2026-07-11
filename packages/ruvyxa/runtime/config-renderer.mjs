@@ -109,11 +109,7 @@ function sanitizeConfig(config) {
     'securityHeaders',
   ])
   assertKnownKeys(config.cache, 'config.cache', ['routeManifest', 'css', 'buildDir'])
-  assertKnownKeys(config.rendering, 'config.rendering', [
-    'defaultStrategy',
-    'fallback',
-    'defaultRevalidate',
-  ])
+  assertKnownKeys(config.rendering, 'config.rendering', ['defaultStrategy', 'defaultRevalidate'])
   assertKnownKeys(config.middleware, 'config.middleware', ['builtin', 'layers', 'plugins'])
 
   return {
@@ -141,7 +137,6 @@ function sanitizeConfig(config) {
     }),
     rendering: objectValue(config.rendering, {
       defaultStrategy: stringValue(config.rendering?.defaultStrategy),
-      fallback: stringValue(config.rendering?.fallback),
       defaultRevalidate: numberValue(config.rendering?.defaultRevalidate),
     }),
     debug: objectValue(config.debug, {

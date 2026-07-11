@@ -9,8 +9,8 @@
 - Shared content compilation across the native Rust bundler and Node runtime compiler, including
   content-aware dependency scanning that ignores imports inside fenced code examples
 - Added `frontmatter`, `meta`, `headings`, and `contentFormat` exports to generated content modules
-- Rebuilt image optimization around a single-output `.webp` pipeline that replaces local
-  PNG/JPEG asset extensions instead of generating AVIF/WebP sidecars beside the original files
+- Rebuilt image optimization around a single-output `.webp` pipeline that replaces local PNG/JPEG
+  asset extensions instead of generating AVIF/WebP sidecars beside the original files
 - Optimized public assets in one parallel pass with persistent content caching, direct cache reuse,
   collision detection, and unchanged fallback copies for invalid or non-image files
 - Simplified development and production image serving so `.webp` assets resolve directly, while
@@ -26,8 +26,8 @@
 ### Hashing and Build
 
 - Upgraded asset hashing from BLAKE3-64 to BLAKE3-256: `content_hash()` now returns the full
-  64-character hex output instead of a truncated 16-character value; `ASSET_HASH_ALGORITHM`
-  constant changed from `"blake3-64"` to `"blake3-256"`
+  64-character hex output instead of a truncated 16-character value; `ASSET_HASH_ALGORITHM` constant
+  changed from `"blake3-64"` to `"blake3-256"`
 - Updated `build.json` hash algorithm output and documentation to reflect 256-bit hashing
 - Client bundle file names now use full BLAKE3-256 content hashes for stronger cache uniqueness
 
@@ -36,16 +36,16 @@
 - Added `debug.traces` configuration option for debug trace control in the dev server
 - Added `deny_unknown_fields` to `ProjectConfig` and `DebugConfigOptions` for strict config
   validation against unknown keys
-- Added placeholder fields for future config options (`runtime`, `react`, `typescript`,
-  `rendering`, `adapter`, `adapterOptions`)
+- Added placeholder fields for future config options (`runtime`, `react`, `typescript`, `rendering`,
+  `adapter`, `adapterOptions`)
 - Implemented `normalize_source_path()` to gracefully handle non-existent paths in HMR tracking
 - Fixed Windows watcher paths prefixed with `.` so generated `.ruvyxa` cache writes are ignored
   instead of triggering repeated reloads; condensed dev startup and HMR logs into readable summaries
 - Added concise dev document-request logs with method, route, response status, and sub-millisecond
   timing while excluding HMR and static asset traffic
 - Updated worker pool and config renderer with improved runtime implementations
-- Added tests for asset hash algorithm, dev config overlay/trace flags, unknown field rejection,
-  and HMR tracker path normalization
+- Added tests for asset hash algorithm, dev config overlay/trace flags, unknown field rejection, and
+  HMR tracker path normalization
 
 ### Branding and Error Page
 
@@ -62,8 +62,8 @@
   validation
 - Upgraded Rust workspace from edition 2021 to 2024 and resolver from "2" to "3"
 - Applied `cargo fmt` with Rust 2024 formatting rules across all crates
-- Upgraded Rust dependencies: cranelift 0.132.2→0.133.1, tower-http 0.6.11→0.7.0, pulley 45.0.2→46.0.1,
-  mach2 0.4.3→0.6.0, wasm-compose/encoder/parser to 0.251.0
+- Upgraded Rust dependencies: cranelift 0.132.2→0.133.1, tower-http 0.6.11→0.7.0, pulley
+  45.0.2→46.0.1, mach2 0.4.3→0.6.0, wasm-compose/encoder/parser to 0.251.0
 - Upgraded bytes 1.11.1→1.12.0, cc 1.2.64→1.2.65, log 0.4.32→0.4.33, quote 1.0.45→1.0.46
 - Upgraded Node.js package versions across all workspace packages and regenerated lockfiles
 
@@ -80,11 +80,9 @@
 - Added `worker-pool.test.mjs` test suite for worker pool behavior
 - Expanded compiler tests with content compilation, fenced-import handling, and image configuration
   coverage
-- Added tests for React metadata, route discovery, dev/prod parity, error-page escaping and
-  layout
+- Added tests for React metadata, route discovery, dev/prod parity, error-page escaping and layout
 - Added regression coverage for the new single-output `.webp` optimizer, cache reuse, collision
-  rejection, invalid image fallback, disabled optimization, and dev server `.webp` source
-  resolution
+  rejection, invalid image fallback, disabled optimization, and dev server `.webp` source resolution
 - All existing test suites updated and passing
 
 ## v1.0.9 (2026-07-10)
@@ -672,16 +670,16 @@ The following commits occurred before the v1.0.0 tag and represent the initial p
 
 ## Release Tags
 
-| Tag      | Date       | Type       |
-| -------- | ---------- | ---------- |
-| `v1.0.0` | 2026-06-17 | Production |
-| `v1.0.1` | 2026-06-17 | Patch      |
-| `v1.0.2` | 2026-06-18 | Minor      |
-| `v1.0.3` | 2026-07-08 | Minor      |
-| `v1.0.4` | 2026-07-01 | Minor      |
-| `v1.0.5` | 2026-07-09 | Minor      |
-| `v1.0.6` | 2026-07-09 | Patch      |
-| `v1.0.7` | 2026-07-10 | Minor      |
-| `v1.0.8` | 2026-07-10 | Minor      |
+| Tag       | Date       | Type       |
+| --------- | ---------- | ---------- |
+| `v1.0.0`  | 2026-06-17 | Production |
+| `v1.0.1`  | 2026-06-17 | Patch      |
+| `v1.0.2`  | 2026-06-18 | Minor      |
+| `v1.0.3`  | 2026-07-08 | Minor      |
+| `v1.0.4`  | 2026-07-01 | Minor      |
+| `v1.0.5`  | 2026-07-09 | Minor      |
+| `v1.0.6`  | 2026-07-09 | Patch      |
+| `v1.0.7`  | 2026-07-10 | Minor      |
+| `v1.0.8`  | 2026-07-10 | Minor      |
 | `v1.0.9`  | 2026-07-10 | Patch      |
 | `v1.0.10` | 2026-07-11 | Minor      |

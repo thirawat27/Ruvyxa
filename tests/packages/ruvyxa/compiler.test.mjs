@@ -432,7 +432,7 @@ import Card from './Card.js'
       await writeFile(
         path.join(root, 'ruvyxa.config.ts'),
         `export default {
-          rendering: { defaultStrategy: 'isr', fallback: 'static', defaultRevalidate: 90 },
+          rendering: { defaultStrategy: 'isr', defaultRevalidate: 90 },
           middleware: { builtin: { timing: false, headers: { 'X-Frame-Options': 'DENY' } } }
         }`,
       )
@@ -440,7 +440,6 @@ import Card from './Card.js'
       const config = await runJson(configRenderer, [root], {})
       assert.deepEqual(config.config.rendering, {
         defaultStrategy: 'isr',
-        fallback: 'static',
         defaultRevalidate: 90,
       })
       assert.deepEqual(config.config.middleware, {
@@ -468,6 +467,17 @@ import Card from './Card.js'
       const obsolete = await runJsonResult(configRenderer, [root], {})
       assert.equal(obsolete.exitCode, 1)
       assert.match(obsolete.parsed.message, /RUV1602 unknown config\.images field: formats/)
+
+      await writeFile(
+        path.join(root, 'ruvyxa.config.ts'),
+        `export default { rendering: { fallback: 'blocking' } }`,
+      )
+      const removedRenderingOption = await runJsonResult(configRenderer, [root], {})
+      assert.equal(removedRenderingOption.exitCode, 1)
+      assert.match(
+        removedRenderingOption.parsed.message,
+        /RUV1602 unknown config\.rendering field: fallback/,
+      )
     })
   })
 })

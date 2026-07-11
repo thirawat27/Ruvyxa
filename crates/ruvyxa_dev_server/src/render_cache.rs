@@ -206,29 +206,6 @@ impl RenderCache {
             .retain(|key| !cache_key_matches_route(key, route_path));
         before - entries.len()
     }
-
-    /// Get cache statistics.
-    #[allow(dead_code)]
-    pub fn stats(&self) -> CacheStats {
-        let hits = self.hits.load(Ordering::Relaxed);
-        let misses = self.misses.load(Ordering::Relaxed);
-        CacheStats {
-            hits,
-            misses,
-            hit_rate: if hits + misses > 0 {
-                hits as f64 / (hits + misses) as f64
-            } else {
-                0.0
-            },
-        }
-    }
-}
-
-#[allow(dead_code)]
-pub struct CacheStats {
-    pub hits: u64,
-    pub misses: u64,
-    pub hit_rate: f64,
 }
 
 /// Generate a cache key for SSR pages.
