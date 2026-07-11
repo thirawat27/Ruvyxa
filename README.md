@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="./assets/branding/ruvyxa2.png" alt="Ruvyxa" width="240" height="240" />
+  <img src="./assets/branding/ruvyxa.png" alt="Ruvyxa" width="240" height="240" />
 </p>
 
 <h1 align="center">Ruvyxa</h1>
