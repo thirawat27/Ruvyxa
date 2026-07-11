@@ -6,16 +6,8 @@
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "files": [
-    "dist",
-    "README.md"
-  ],
-  "keywords": [
-    "ruvyxa",
-    "adapter",
-    "vercel",
-    "serverless"
-  ],
+  "files": ["dist", "README.md"],
+  "keywords": ["ruvyxa", "adapter", "vercel", "serverless"],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/thirawat27/ruvyxa.git",

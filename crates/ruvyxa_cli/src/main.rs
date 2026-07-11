@@ -24,7 +24,7 @@ use walkdir::WalkDir;
 mod image_optimizer;
 use image_optimizer::{optimize_public_images, ImageOptimizationOptions};
 
-const ASSET_HASH_ALGORITHM: &str = "blake3-64";
+const ASSET_HASH_ALGORITHM: &str = "blake3-256";
 
 #[derive(Debug, Parser)]
 #[command(name = "Ruvyxa")]
@@ -1927,7 +1927,7 @@ fn parse_split_strategy(value: Option<&str>) -> anyhow::Result<ruvyxa_bundler::S
 }
 
 fn content_hash(input: &str) -> String {
-    blake3::hash(input.as_bytes()).to_hex()[..16].to_string()
+    blake3::hash(input.as_bytes()).to_hex().to_string()
 }
 
 fn canonical_route_file(root: &Path, file: &Path) -> PathBuf {
@@ -3226,9 +3226,9 @@ mod tests {
             content_hash("console.log('a')"),
             content_hash("console.log('b')")
         );
-        assert_eq!(content_hash("console.log('a')").len(), 16);
-        assert_eq!(ASSET_HASH_ALGORITHM, "blake3-64");
-        assert_eq!(content_hash("metadata-check").len() * 4, 64);
+        assert_eq!(content_hash("console.log('a')").len(), 64);
+        assert_eq!(ASSET_HASH_ALGORITHM, "blake3-256");
+        assert_eq!(content_hash("metadata-check").len() * 4, 256);
     }
 
     #[test]

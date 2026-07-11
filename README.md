@@ -59,7 +59,8 @@
   limit, and per-client rate limiting (60 req/min) are built in.
 - **Dev/prod parity** — `dev` and `start` share routing, rendering, static asset, and
   security-header semantics.
-- **ETag / 304 support** — static assets include BLAKE3-based ETags (64-bit) for efficient browser caching.
+- **ETag / 304 support** — static assets include BLAKE3-based ETags (64-bit) for efficient browser
+  caching.
 - **Async I/O** — file serving uses `tokio::fs` to avoid blocking the async runtime under concurrent
   load.
 

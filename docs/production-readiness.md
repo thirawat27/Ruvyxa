@@ -18,16 +18,16 @@ compares dev/prod route behavior, and smoke-renders every page route.
 
 All of the following must pass before a release:
 
-| Gate                       | Command                                                               |
-| -------------------------- | --------------------------------------------------------------------- |
-| Rust formatting            | `cargo fmt --all -- --check`                                          |
-| Rust tests                 | `cargo test --workspace --locked`                                     |
-| Rust lints                 | `cargo clippy --workspace --locked -- -D warnings`                    |
-| TypeScript build           | `pnpm -r build`                                                       |
-| TypeScript type check      | `pnpm -r check`                                                       |
-| TypeScript tests           | `pnpm -r test`                                                        |
-| Package metadata           | `pnpm release:validate`                                               |
-| Pack smoke test            | `pnpm pack:smoke`                                                     |
+| Gate                       | Command                                                       |
+| -------------------------- | ------------------------------------------------------------- |
+| Rust formatting            | `cargo fmt --all -- --check`                                  |
+| Rust tests                 | `cargo test --workspace --locked`                             |
+| Rust lints                 | `cargo clippy --workspace --locked -- -D warnings`            |
+| TypeScript build           | `pnpm -r build`                                               |
+| TypeScript type check      | `pnpm -r check`                                               |
+| TypeScript tests           | `pnpm -r test`                                                |
+| Package metadata           | `pnpm release:validate`                                       |
+| Pack smoke test            | `pnpm pack:smoke`                                             |
 | App deploy gate            | `cargo run -p ruvyxa_cli -- check --root examples/demo`       |
 | Dev/prod parity drill-down | `cargo run -p ruvyxa_cli -- test:parity --root examples/demo` |
 

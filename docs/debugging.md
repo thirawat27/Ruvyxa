@@ -51,11 +51,11 @@ Affected routes:
 
 ### SSR & Rendering
 
-| Code      | Title                  | Cause                                        |
-| --------- | ---------------------- | -------------------------------------------- |
-| `RUV1100` | SSR render failed         | ReactDOMServer error during page render           |
+| Code      | Title                     | Cause                                                               |
+| --------- | ------------------------- | ------------------------------------------------------------------- |
+| `RUV1100` | SSR render failed         | ReactDOMServer error during page render                             |
 | `RUV1101` | SSR renderer args missing | SSR renderer missing required projectRoot/appDir/pageFile arguments |
-| `RUV1102` | SSR renderer not found    | Internal renderer `ssr-renderer.mjs` missing         |
+| `RUV1102` | SSR renderer not found    | Internal renderer `ssr-renderer.mjs` missing                        |
 
 ### API Routes
 
@@ -117,7 +117,7 @@ Affected routes:
 | `RUV1700` | Config plugin error          | JS build plugin bridge returned an error      |
 | `RUV1701` | JS plugin runner not found   | `plugin-runner.mjs` missing from node_modules |
 | `RUV1702` | Worker pool script not found | `worker-pool.mjs` missing from node_modules   |
-| `RUV1801` | Module resolution error      | Bundler could not resolve a module specifier |
+| `RUV1801` | Module resolution error      | Bundler could not resolve a module specifier  |
 
 ### Middleware
 

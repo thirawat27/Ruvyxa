@@ -13,10 +13,7 @@ export default function Home() {
           <a className="link primary" href="https://github.com/thirawat27/ruvyxa">
             Docs
           </a>
-          <a
-            className="link"
-            href="https://github.com/thirawat27/ruvyxa/tree/main/examples/demo"
-          >
+          <a className="link" href="https://github.com/thirawat27/ruvyxa/tree/main/examples/demo">
             Examples
           </a>
         </div>

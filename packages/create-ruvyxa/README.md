@@ -26,9 +26,9 @@ tsconfig.json
 ```
 
 The starter stays intentionally small: one page, one layout, one global stylesheet, static assets,
-config, TypeScript settings, and agent instructions. Use the repository `examples/demo` when
-you need examples for API routes, dynamic routes, server actions, loaders, middleware, and
-production checks.
+config, TypeScript settings, and agent instructions. Use the repository `examples/demo` when you
+need examples for API routes, dynamic routes, server actions, loaders, middleware, and production
+checks.
 
 ## Project Names
 
