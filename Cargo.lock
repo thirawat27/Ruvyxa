@@ -401,9 +401,9 @@ checksum = "8f1fe948ff07f4bd06c30984e69f5b4899c516a3ef74f34df92a2df2ab535495"
 
 [[package]]
 name = "bytes"
-version = "1.11.1"
+version = "1.12.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1e748733b7cbc798e1434b6ac524f0c1ff2ab456fe201501e6497c8417a4fc33"
+checksum = "8ae3f5d315924270530207e2a68396c3cc547f6dca3fbdca317cfb1a51edb593"
 
 [[package]]
 name = "cap-fs-ext"
@@ -475,9 +475,9 @@ dependencies = [
 
 [[package]]
 name = "cc"
-version = "1.2.64"
+version = "1.2.65"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "dad887fd958be91b5098c0248def011f4523ab786cd411be668777e55063501f"
+checksum = "e228eec9be7c17ccb640b59b36a5cd805ea2a564a4c5e162c2f659fea30d3b96"
 dependencies = [
  "find-msvc-tools",
  "jobserver",
@@ -1659,9 +1659,9 @@ dependencies = [
 
 [[package]]
 name = "log"
-version = "0.4.32"
+version = "0.4.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "953f07c43838f8e6f9758cab68bf5bed85465e7587ebe0b823f1bcd81978ad3a"
+checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
 
 [[package]]
 name = "loop9"
@@ -2103,9 +2103,9 @@ checksum = "a993555f31e5a609f617c12db6250dedcac1b0a85076912c436e6fc9b2c8e6a3"
 
 [[package]]
 name = "quote"
-version = "1.0.45"
+version = "1.0.46"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "41f2619966050689382d2b44f664f4bc593e129785a36d6ee376ddf37259b924"
+checksum = "dfbc457d0c7a0759a614551b11a6409e5951f6c7537be1f1b7682b9ae9230368"
 dependencies = [
  "proc-macro2",
 ]
@@ -2337,7 +2337,7 @@ checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
 name = "ruvyxa_bundler"
-version = "1.0.9"
+version = "1.0.10"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2356,7 +2356,7 @@ dependencies = [
 
 [[package]]
 name = "ruvyxa_cli"
-version = "1.0.9"
+version = "1.0.10"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2379,7 +2379,7 @@ dependencies = [
 
 [[package]]
 name = "ruvyxa_dev_server"
-version = "1.0.9"
+version = "1.0.10"
 dependencies = [
  "axum",
  "blake3",
@@ -2401,7 +2401,7 @@ dependencies = [
 
 [[package]]
 name = "ruvyxa_diagnostics"
-version = "1.0.9"
+version = "1.0.10"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -2409,7 +2409,7 @@ dependencies = [
 
 [[package]]
 name = "ruvyxa_graph"
-version = "1.0.9"
+version = "1.0.10"
 dependencies = [
  "ruvyxa_diagnostics",
  "serde",
@@ -2420,7 +2420,7 @@ dependencies = [
 
 [[package]]
 name = "ruvyxa_middleware"
-version = "1.0.9"
+version = "1.0.10"
 dependencies = [
  "axum",
  "ruvyxa_diagnostics",
