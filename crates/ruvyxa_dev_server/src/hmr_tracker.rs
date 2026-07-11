@@ -87,12 +87,12 @@ impl HmrTracker {
 
         for route in routes {
             let mut files = BTreeSet::new();
-            files.insert(route.file.clone());
+            files.insert(normalize_source_path(&route.file));
             for layout in &route.layout_chain {
-                files.insert(PathBuf::from(layout));
+                files.insert(normalize_source_path(Path::new(layout)));
             }
             for server_module in &route.server_modules {
-                files.insert(PathBuf::from(server_module));
+                files.insert(normalize_source_path(Path::new(server_module)));
             }
             for file in &files {
                 file_to_routes
@@ -126,7 +126,10 @@ impl HmrTracker {
         }
 
         // Insert new mappings.
-        let file_set: BTreeSet<PathBuf> = source_files.iter().cloned().collect();
+        let file_set: BTreeSet<PathBuf> = source_files
+            .iter()
+            .map(|file| normalize_source_path(file))
+            .collect();
         for file in &file_set {
             file_to_routes
                 .entry(file.clone())
@@ -169,16 +172,9 @@ impl HmrTracker {
         // Collect all affected routes.
         let mut affected_routes: BTreeSet<String> = BTreeSet::new();
         for path in changed_paths {
-            // Try exact path lookup.
-            if let Some(routes) = file_to_routes.get(path) {
+            let normalized = normalize_source_path(path);
+            if let Some(routes) = file_to_routes.get(&normalized) {
                 affected_routes.extend(routes.iter().cloned());
-            }
-
-            // Also try with canonical path in case of path normalization differences.
-            if let Ok(canonical) = path.canonicalize() {
-                if let Some(routes) = file_to_routes.get(&canonical) {
-                    affected_routes.extend(routes.iter().cloned());
-                }
             }
         }
 
@@ -226,6 +222,10 @@ fn extension_is(path: &Path, expected: &str) -> bool {
     path.extension()
         .and_then(|ext| ext.to_str())
         .is_some_and(|ext| ext.eq_ignore_ascii_case(expected))
+}
+
+fn normalize_source_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn is_layout_file(path: &Path) -> bool {
@@ -333,5 +333,24 @@ mod tests {
         // No routes tracked, so full_reload is false (no routes to reload),
         // but also no affected routes.
         assert!(update.affected_routes.is_empty());
+    }
+
+    #[test]
+    fn normalizes_relative_and_absolute_existing_paths() {
+        let current_dir = std::env::current_dir().unwrap();
+        let temp = tempfile::Builder::new()
+            .prefix("hmr-path-test-")
+            .tempdir_in(&current_dir)
+            .unwrap();
+        let page = temp.path().join("page.tsx");
+        std::fs::write(&page, "export default function Page() {}").unwrap();
+        let tracker = HmrTracker::new();
+        tracker.register_route("/", std::slice::from_ref(&page));
+
+        let relative = page.strip_prefix(&current_dir).unwrap();
+        let update = tracker.compute_update(&[relative.to_path_buf()]);
+        assert_eq!(update.affected_routes, vec!["/"]);
+        let update = tracker.compute_update(&[page.canonicalize().unwrap()]);
+        assert_eq!(update.affected_routes, vec!["/"]);
     }
 }

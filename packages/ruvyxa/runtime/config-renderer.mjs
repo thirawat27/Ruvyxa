@@ -63,6 +63,48 @@ function findConfig(root) {
 }
 
 function sanitizeConfig(config) {
+  assertKnownKeys(config, 'config', [
+    'appDir',
+    'outDir',
+    'runtime',
+    'react',
+    'typescript',
+    'css',
+    'server',
+    'build',
+    'rendering',
+    'debug',
+    'images',
+    'security',
+    'cache',
+    'middleware',
+    'adapter',
+    'adapterOptions',
+    'plugins',
+  ])
+  assertKnownKeys(config.css, 'config.css', ['entries'])
+  assertKnownKeys(config.server, 'config.server', ['host', 'port'])
+  assertKnownKeys(config.build, 'config.build', [
+    'minify',
+    'sourcemap',
+    'treeShaking',
+    'splitStrategy',
+    'parallelism',
+    'jsxRuntime',
+    'esTarget',
+    'emitChunkManifest',
+    'prebundleDependencies',
+  ])
+  assertKnownKeys(config.debug, 'config.debug', ['overlay', 'traces'])
+  assertKnownKeys(config.images, 'config.images', ['optimize', 'formats', 'quality'])
+  assertKnownKeys(config.security, 'config.security', [
+    'actionBodyLimitBytes',
+    'sameOriginActions',
+    'fetchMetadataActions',
+    'securityHeaders',
+  ])
+  assertKnownKeys(config.cache, 'config.cache', ['routeManifest', 'css', 'buildDir'])
+
   return {
     appDir: stringValue(config.appDir),
     outDir: stringValue(config.outDir),
@@ -112,6 +154,17 @@ function sanitizeConfig(config) {
     }),
     adapterOptions: safeJsonValue(config.adapterOptions),
     plugins: pluginDescriptors(config.plugins),
+  }
+}
+
+function assertKnownKeys(value, field, allowedKeys) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return
+  const allowed = new Set(allowedKeys)
+  const unknown = Object.keys(value).filter((key) => !allowed.has(key))
+  if (unknown.length > 0) {
+    throw new Error(
+      `RUV1602 unknown ${field} field${unknown.length === 1 ? '' : 's'}: ${unknown.join(', ')}`,
+    )
   }
 }
 

@@ -403,16 +403,27 @@ impl NodeWorkerPool {
     /// `notify` invokes callbacks on its own OS thread, where no Tokio runtime
     /// is installed. `try_send` keeps the callback runtime-independent and
     /// avoids panicking while the async writer tasks flush the messages.
-    pub fn invalidate_from_watcher(&self, paths: Vec<String>) {
-        for worker in &self.workers {
+    pub fn invalidate_from_watcher(
+        &self,
+        paths: Vec<String>,
+    ) -> std::result::Result<usize, String> {
+        let mut queued = 0;
+        for (worker_index, worker) in self.workers.iter().enumerate() {
             let request = WorkerRequest::Invalidate {
                 id: next_request_id(),
                 paths: paths.clone(),
             };
-            if let Ok(line) = serde_json::to_string(&request) {
-                let _ = worker.stdin_tx.try_send(format!("{line}\n"));
-            }
+            let line = serde_json::to_string(&request)
+                .map_err(|error| format!("worker invalidation serialization failed: {error}"))?;
+            worker
+                .stdin_tx
+                .try_send(format!("{line}\n"))
+                .map_err(|error| {
+                    format!("worker {worker_index} invalidation queue rejected the update: {error}")
+                })?;
+            queued += 1;
         }
+        Ok(queued)
     }
 
     /// Restart a dead worker (for self-healing).

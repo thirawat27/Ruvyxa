@@ -409,6 +409,20 @@ import Card from './Card.js'
       assert.match(failed.parsed.message, /bad config/)
     })
   })
+
+  it('rejects unknown config fields instead of silently ignoring them', async () => {
+    await withFixture(async ({ root }) => {
+      await writeFile(
+        path.join(root, 'ruvyxa.config.ts'),
+        `export default { debug: { overlay: true, tracez: true } }`,
+      )
+
+      const failed = await runJsonResult(configRenderer, [root], {})
+      assert.equal(failed.exitCode, 1)
+      assert.equal(failed.parsed.ok, false)
+      assert.match(failed.parsed.message, /RUV1602 unknown config\.debug field: tracez/)
+    })
+  })
 })
 
 function runJson(script, args, payload) {

@@ -24,6 +24,8 @@ use walkdir::WalkDir;
 mod image_optimizer;
 use image_optimizer::{optimize_public_images, ImageOptimizationOptions};
 
+const ASSET_HASH_ALGORITHM: &str = "blake3-64";
+
 #[derive(Debug, Parser)]
 #[command(name = "Ruvyxa")]
 #[command(bin_name = "Ruvyxa")]
@@ -133,10 +135,18 @@ struct BenchArgs {
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ProjectConfig {
     app_dir: Option<String>,
     out_dir: Option<String>,
+    #[serde(rename = "runtime")]
+    _runtime: Option<serde_json::Value>,
+    #[serde(rename = "react")]
+    _react: Option<serde_json::Value>,
+    #[serde(rename = "typescript")]
+    _typescript: Option<serde_json::Value>,
+    #[serde(rename = "rendering")]
+    _rendering: Option<serde_json::Value>,
     #[serde(default)]
     server: ServerConfigOptions,
     #[serde(default)]
@@ -155,6 +165,10 @@ struct ProjectConfig {
     middleware: ruvyxa_middleware::MiddlewareConfig,
     #[serde(default)]
     plugins: Vec<BuildPluginConfig>,
+    #[serde(rename = "adapter")]
+    _adapter: Option<serde_json::Value>,
+    #[serde(rename = "adapterOptions")]
+    _adapter_options: Option<serde_json::Value>,
     #[serde(skip)]
     config_dependency_hash: String,
 }
@@ -188,9 +202,10 @@ struct BuildConfigOptions {
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct DebugConfigOptions {
     overlay: Option<bool>,
+    traces: Option<bool>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -454,8 +469,8 @@ fn dev_server_config(args: &ServerArgs, config: &ProjectConfig) -> ServerConfig 
     server.style_entries = config.style_entries(&args.root);
     server.prebundle_dependencies = config.build.prebundle_dependencies.unwrap_or(true);
     server.error_overlay = config.debug.overlay.unwrap_or(true);
+    server.debug_traces = config.debug.traces.unwrap_or(false);
     server.middleware = config.middleware.clone();
-    server.error_overlay = false;
     server
 }
 
@@ -659,7 +674,7 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
         "clientDir": "client",
         "assetsDir": "assets",
         "images": image_report,
-        "hashAlgorithm": "blake3-128",
+        "hashAlgorithm": ASSET_HASH_ALGORITHM,
         "security": {
             "actionBodyLimitBytes": config.security.action_body_limit_bytes.unwrap_or(65536),
             "sameOriginActions": config.security.same_origin_actions.unwrap_or(true),
@@ -3212,6 +3227,49 @@ mod tests {
             content_hash("console.log('b')")
         );
         assert_eq!(content_hash("console.log('a')").len(), 16);
+        assert_eq!(ASSET_HASH_ALGORITHM, "blake3-64");
+        assert_eq!(content_hash("metadata-check").len() * 4, 64);
+    }
+
+    #[test]
+    fn dev_config_respects_overlay_and_trace_flags() {
+        let args = ServerArgs {
+            root: PathBuf::from("."),
+            host: None,
+            port: None,
+        };
+        let enabled: ProjectConfig = serde_json::from_value(json!({
+            "debug": { "overlay": true, "traces": true }
+        }))
+        .unwrap();
+        let disabled: ProjectConfig = serde_json::from_value(json!({
+            "debug": { "overlay": false, "traces": false }
+        }))
+        .unwrap();
+
+        let enabled = dev_server_config(&args, &enabled);
+        let disabled = dev_server_config(&args, &disabled);
+        assert!(enabled.error_overlay);
+        assert!(enabled.debug_traces);
+        assert!(!disabled.error_overlay);
+        assert!(!disabled.debug_traces);
+    }
+
+    #[test]
+    fn rejects_unknown_rust_config_fields() {
+        let error = serde_json::from_value::<ProjectConfig>(json!({
+            "debug": { "overlay": true, "unsupported": true }
+        }))
+        .unwrap_err();
+        assert!(error.to_string().contains("unknown field `unsupported`"));
+
+        let error = serde_json::from_value::<ProjectConfig>(json!({
+            "unsupportedTopLevel": true
+        }))
+        .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("unknown field `unsupportedTopLevel`"));
     }
 
     #[test]

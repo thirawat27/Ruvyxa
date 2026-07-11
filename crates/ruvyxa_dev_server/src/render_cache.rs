@@ -143,36 +143,67 @@ impl RenderCache {
     }
 
     /// Invalidate all entries (called on file change).
-    pub async fn invalidate_all(&self) {
+    pub async fn invalidate_all(&self) -> usize {
         let mut entries = self.entries.write().await;
+        let invalidated = entries.len();
         entries.clear();
         self.order.write().await.clear();
+        invalidated
     }
 
     /// Invalidate entries matching a prefix (e.g., a specific route path).
-    pub async fn invalidate_prefix(&self, prefix: &str) {
+    pub async fn invalidate_prefix(&self, prefix: &str) -> usize {
         let mut entries = self.entries.write().await;
+        let before = entries.len();
         entries.retain(|key, _| !key.starts_with(prefix));
         self.order
             .write()
             .await
             .retain(|key| !key.starts_with(prefix));
+        before - entries.len()
+    }
+
+    /// Invalidate SSR/client entries belonging to a route pattern.
+    pub async fn invalidate_route(&self, route_path: &str) -> usize {
+        let mut entries = self.entries.write().await;
+        let before = entries.len();
+        entries.retain(|key, _| !cache_key_matches_route(key, route_path));
+        self.order
+            .write()
+            .await
+            .retain(|key| !cache_key_matches_route(key, route_path));
+        before - entries.len()
     }
 
     /// Blocking invalidation for use in sync contexts (file watcher).
-    pub fn invalidate_all_blocking(&self) {
+    pub fn invalidate_all_blocking(&self) -> usize {
         let mut entries = self.entries.blocking_write();
+        let invalidated = entries.len();
         entries.clear();
         self.order.blocking_write().clear();
+        invalidated
     }
 
     /// Blocking prefix invalidation for use in sync contexts (file watcher).
-    pub fn invalidate_prefix_blocking(&self, prefix: &str) {
+    pub fn invalidate_prefix_blocking(&self, prefix: &str) -> usize {
         let mut entries = self.entries.blocking_write();
+        let before = entries.len();
         entries.retain(|key, _| !key.starts_with(prefix));
         self.order
             .blocking_write()
             .retain(|key| !key.starts_with(prefix));
+        before - entries.len()
+    }
+
+    /// Invalidate SSR/client entries belonging to a route pattern.
+    pub fn invalidate_route_blocking(&self, route_path: &str) -> usize {
+        let mut entries = self.entries.blocking_write();
+        let before = entries.len();
+        entries.retain(|key, _| !cache_key_matches_route(key, route_path));
+        self.order
+            .blocking_write()
+            .retain(|key| !cache_key_matches_route(key, route_path));
+        before - entries.len()
     }
 
     /// Get cache statistics.
@@ -233,6 +264,23 @@ pub fn client_cache_key(
     }
 }
 
+fn cache_key_matches_route(cache_key: &str, route_path: &str) -> bool {
+    let request_path = ["client:", "ssr:"]
+        .into_iter()
+        .find_map(|marker| cache_key.rsplit_once(marker).map(|(_, path)| path))
+        .and_then(|path| path.split('?').next())
+        .unwrap_or(cache_key);
+    let dynamic_index = route_path
+        .char_indices()
+        .find(|(_, character)| matches!(character, ':' | '*' | '['))
+        .map(|(index, _)| index);
+
+    match dynamic_index {
+        Some(index) => request_path.starts_with(&route_path[..index]),
+        None => request_path == route_path,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -275,7 +323,7 @@ mod tests {
         let cache = RenderCache::new(4, 60);
         cache.put("a".into(), "1".into()).await;
         cache.put("b".into(), "2".into()).await;
-        cache.invalidate_all().await;
+        assert_eq!(cache.invalidate_all().await, 2);
         assert_eq!(cache.get("a").await, None);
         assert_eq!(cache.get("b").await, None);
     }
@@ -286,10 +334,22 @@ mod tests {
         cache.put("ssr:/a".into(), "1".into()).await;
         cache.put("ssr:/b".into(), "2".into()).await;
         cache.put("client:/a".into(), "3".into()).await;
-        cache.invalidate_prefix("ssr:").await;
+        assert_eq!(cache.invalidate_prefix("ssr:").await, 2);
         assert_eq!(cache.get("ssr:/a").await, None);
         assert_eq!(cache.get("ssr:/b").await, None);
         assert_eq!(cache.get("client:/a").await, Some("3".into()));
+    }
+
+    #[tokio::test]
+    async fn test_invalidate_route_across_render_namespaces() {
+        let cache = RenderCache::new(8, 60);
+        cache.put("ssr:/blog/one".into(), "1".into()).await;
+        cache.put("client:/blog/one".into(), "2".into()).await;
+        cache.put("isr:ssr:/blog/two".into(), "3".into()).await;
+        cache.put("ssr:/about".into(), "4".into()).await;
+
+        assert_eq!(cache.invalidate_route("/blog/:slug").await, 3);
+        assert_eq!(cache.get("ssr:/about").await, Some("4".into()));
     }
 
     #[tokio::test]

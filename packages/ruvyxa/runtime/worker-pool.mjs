@@ -27,7 +27,7 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { createInterface } from 'node:readline'
 
-import { compileBundle, runtimeAliases, toImportPath } from './compiler.mjs'
+import { compileBundleWithMetadata, runtimeAliases, toImportPath } from './compiler.mjs'
 
 // --- Configuration ---
 const MAX_BUNDLE_CACHE_ENTRIES = parseInt(process.env.RUVYXA_CACHE_MAX_ENTRIES || '256', 10)
@@ -53,13 +53,16 @@ class LRUCache {
   }
 
   set(key, value) {
+    let evicted
     if (this.#map.has(key)) {
       this.#map.delete(key)
     } else if (this.#map.size >= this.#max) {
-      const oldest = this.#map.keys().next().value
-      this.#map.delete(oldest)
+      const evictedKey = this.#map.keys().next().value
+      evicted = { key: evictedKey, value: this.#map.get(evictedKey) }
+      this.#map.delete(evictedKey)
     }
     this.#map.set(key, value)
+    return evicted
   }
 
   has(key) {
@@ -67,7 +70,9 @@ class LRUCache {
   }
 
   delete(key) {
-    return this.#map.delete(key)
+    const value = this.#map.get(key)
+    this.#map.delete(key)
+    return value
   }
 
   clear() {
@@ -85,6 +90,8 @@ class LRUCache {
 
 // --- State ---
 const bundleCache = new LRUCache(MAX_BUNDLE_CACHE_ENTRIES)
+// Cache key -> normalized absolute project files used to build that bundle.
+const bundleInputs = new Map()
 const buildLocks = new Map()
 
 // Performance: Module import cache — avoids re-parsing JS on every request.
@@ -131,7 +138,7 @@ const memoryCheckInterval = setInterval(() => {
     for (let i = 0; i < evictCount; i++) {
       const { value, done } = keys.next()
       if (done) break
-      bundleCache.delete(value)
+      deleteBundleCacheEntry(value)
     }
     moduleCache.clear()
   }
@@ -208,8 +215,7 @@ async function dispatchRequest(request) {
         coalesceMapSize: renderCoalesceMap.size,
       }
     case 'invalidate':
-      invalidateBundleCache(request.paths)
-      return { ok: true }
+      return { ok: true, ...invalidateBundleCache(request.paths) }
     default:
       return { ok: false, code: 'RUV1700', message: `Unknown request type: ${request.type}` }
   }
@@ -488,22 +494,50 @@ async function handleClient(request) {
 // --- Bundle Cache Invalidation ---
 function invalidateBundleCache(paths) {
   if (!paths || paths.length === 0) {
+    const invalidated = bundleCache.size
     bundleCache.clear()
+    bundleInputs.clear()
     moduleCache.clear()
     buildLocks.clear()
-    return
+    return { invalidated }
   }
+  const normalizedPaths = paths.map(normalizeAbsolutePath)
+  let invalidated = 0
   for (const key of bundleCache.keys()) {
-    for (const changedPath of paths) {
-      const normalized = changedPath.replaceAll('\\', '/')
-      if (key.includes(normalized)) {
-        const outfile = bundleCache.get(key)
-        bundleCache.delete(key)
-        if (outfile) moduleCache.delete(outfile)
-        break
-      }
+    const inputs = bundleInputs.get(key) ?? new Set()
+    const entryMatches = normalizedPaths.some((changedPath) =>
+      key.replaceAll('\\', '/').includes(changedPath),
+    )
+    const dependencyMatches = normalizedPaths.some((changedPath) => inputs.has(changedPath))
+    if (entryMatches || dependencyMatches) {
+      deleteBundleCacheEntry(key)
+      invalidated++
     }
   }
+  return { invalidated }
+}
+
+function normalizeAbsolutePath(file) {
+  return path.resolve(file).replaceAll('\\', '/')
+}
+
+function cacheBundle(cacheKey, outfile, projectRoot, inputs) {
+  const evicted = bundleCache.set(cacheKey, outfile)
+  if (evicted) {
+    bundleInputs.delete(evicted.key)
+    if (evicted.value) moduleCache.delete(evicted.value)
+  }
+  bundleInputs.set(
+    cacheKey,
+    new Set((inputs ?? []).map((input) => normalizeAbsolutePath(path.join(projectRoot, input)))),
+  )
+}
+
+function deleteBundleCacheEntry(cacheKey) {
+  const outfile = bundleCache.delete(cacheKey)
+  bundleInputs.delete(cacheKey)
+  buildLocks.delete(cacheKey)
+  if (outfile) moduleCache.delete(outfile)
 }
 
 // --- Shared Utilities ---
@@ -596,7 +630,7 @@ export async function render(ctx) {
     const rechecked = bundleCache.get(cacheKey)
     if (rechecked) return { outfile: rechecked, freshBuild: false }
 
-    await compileBundle({
+    const bundle = await compileBundleWithMetadata({
       projectRoot,
       entrySource: moduleCode,
       sourcefile: 'ruvyxa:ssr-entry.tsx',
@@ -606,7 +640,7 @@ export async function render(ctx) {
       aliases: runtimeAliases(runtimeDir),
     })
 
-    bundleCache.set(cacheKey, outfile)
+    cacheBundle(cacheKey, outfile, projectRoot, bundle.inputs)
     return { outfile, freshBuild: true }
   })
 
@@ -629,7 +663,7 @@ async function bundleApiModule(projectRoot, routeFile) {
     const rechecked = bundleCache.get(cacheKey)
     if (rechecked) return { outfile: rechecked, freshBuild: false }
 
-    await compileBundle({
+    const bundle = await compileBundleWithMetadata({
       projectRoot,
       entrySource: moduleCode,
       sourcefile: 'ruvyxa:api-entry.ts',
@@ -638,7 +672,7 @@ async function bundleApiModule(projectRoot, routeFile) {
       aliases: runtimeAliases(runtimeDir),
     })
 
-    bundleCache.set(cacheKey, outfile)
+    cacheBundle(cacheKey, outfile, projectRoot, bundle.inputs)
     return { outfile, freshBuild: true }
   })
 }
@@ -659,7 +693,7 @@ async function bundleActionModule(projectRoot, actionFile) {
     const rechecked = bundleCache.get(cacheKey)
     if (rechecked) return { outfile: rechecked, freshBuild: false }
 
-    await compileBundle({
+    const bundle = await compileBundleWithMetadata({
       projectRoot,
       entrySource: moduleCode,
       sourcefile: 'ruvyxa:action-entry.ts',
@@ -668,7 +702,7 @@ async function bundleActionModule(projectRoot, actionFile) {
       aliases: runtimeAliases(runtimeDir),
     })
 
-    bundleCache.set(cacheKey, outfile)
+    cacheBundle(cacheKey, outfile, projectRoot, bundle.inputs)
     return { outfile, freshBuild: true }
   })
 }
@@ -716,7 +750,7 @@ window.__RUVYXA_HYDRATED = true
     const rechecked = bundleCache.get(cacheKey)
     if (rechecked) return { outfile: rechecked, freshBuild: false }
 
-    await compileBundle({
+    const bundle = await compileBundleWithMetadata({
       projectRoot,
       entrySource: moduleCode,
       sourcefile: 'ruvyxa:client-entry.tsx',
@@ -726,7 +760,7 @@ window.__RUVYXA_HYDRATED = true
       aliases: runtimeAliases(runtimeDir),
     })
 
-    bundleCache.set(cacheKey, outfile)
+    cacheBundle(cacheKey, outfile, projectRoot, bundle.inputs)
     return { outfile, freshBuild: true }
   })
 }
@@ -802,7 +836,7 @@ export async function render(ctx) {
     const rechecked = bundleCache.get(cacheKey)
     if (rechecked) return { outfile: rechecked, freshBuild: false }
 
-    await compileBundle({
+    const bundle = await compileBundleWithMetadata({
       projectRoot,
       entrySource: moduleCode,
       sourcefile: 'ruvyxa:ssg-entry.tsx',
@@ -812,7 +846,7 @@ export async function render(ctx) {
       aliases: runtimeAliases(runtimeDir),
     })
 
-    bundleCache.set(cacheKey, outfile)
+    cacheBundle(cacheKey, outfile, projectRoot, bundle.inputs)
     return { outfile, freshBuild: true }
   })
 }

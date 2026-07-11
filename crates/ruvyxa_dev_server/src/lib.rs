@@ -68,6 +68,8 @@ pub struct ServerConfig {
     pub prebundle_dependencies: bool,
     /// Render actionable source-aware error overlays in development.
     pub error_overlay: bool,
+    /// Expose runtime route traces from the development diagnostics endpoint.
+    pub debug_traces: bool,
     pub middleware: MiddlewareConfig,
 }
 
@@ -88,6 +90,7 @@ impl ServerConfig {
             style_entries: Vec::new(),
             prebundle_dependencies: true,
             error_overlay: true,
+            debug_traces: false,
             middleware: MiddlewareConfig::default(),
         }
     }
@@ -108,6 +111,7 @@ impl ServerConfig {
             style_entries: Vec::new(),
             prebundle_dependencies: false,
             error_overlay: false,
+            debug_traces: false,
             middleware: MiddlewareConfig::default(),
         }
     }
@@ -212,6 +216,7 @@ impl RuntimeCache {
 }
 
 pub async fn serve(config: ServerConfig) -> Result<()> {
+    let startup_started = Instant::now();
     let manifest = discover_routes(DiscoverOptions::new(&config.app_dir))?;
     info!(routes = manifest.routes.len(), "discovered routes");
 
@@ -254,6 +259,7 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
 
     let _watcher = if config.watch {
         Some(start_watcher(
+            &config.root,
             &watch_paths(&config),
             state.reload_tx.clone(),
             state.runtime_cache.clone(),
@@ -288,7 +294,7 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
     let (listener, bound_address) = bind_listener(&config, address).await?;
 
     info!("Ruvyxa server listening on http://{bound_address}");
-    print_server_ready(&config, &manifest, bound_address);
+    print_server_ready(&config, &manifest, bound_address, startup_started.elapsed());
     axum::serve(listener, app).await?;
     Ok(())
 }
@@ -481,7 +487,12 @@ fn port_lookup_hint(port: u16) -> String {
     }
 }
 
-fn print_server_ready(config: &ServerConfig, manifest: &RouteManifest, address: SocketAddr) {
+fn print_server_ready(
+    config: &ServerConfig,
+    manifest: &RouteManifest,
+    address: SocketAddr,
+    ready_in: Duration,
+) {
     let mode = if config.watch {
         "development"
     } else {
@@ -500,7 +511,13 @@ fn print_server_ready(config: &ServerConfig, manifest: &RouteManifest, address: 
         .count();
 
     println!();
-    println!("{}", heading("Ruvyxa server"));
+    if config.watch {
+        println!("🦊 Ruvyxa dev server ready on {url}");
+        println!("○ Watching {} paths", watch_paths(config).len());
+        println!("✓ Ready in {}ms", ready_in.as_millis());
+    } else {
+        println!("{}", heading("Ruvyxa server"));
+    }
     print_field("time", accent(current_timestamp()));
     print_field("mode", accent(mode));
     print_field("local", link(&url));
@@ -528,6 +545,7 @@ fn print_server_ready(config: &ServerConfig, manifest: &RouteManifest, address: 
         )),
     );
     print_field("watch paths", accent(watch_paths(config).len().to_string()));
+    print_field("ready in", accent(format!("{}ms", ready_in.as_millis())));
     print_field("middleware", accent(middleware_summary(&config.middleware)));
     println!();
 }
@@ -551,6 +569,7 @@ fn local_display_url(config: &ServerConfig, address: SocketAddr) -> String {
 }
 
 fn start_watcher(
+    root: &Path,
     watch_paths: &[PathBuf],
     reload_tx: broadcast::Sender<String>,
     runtime_cache: Arc<RuntimeCache>,
@@ -558,37 +577,60 @@ fn start_watcher(
     render_cache: Arc<RenderCache>,
     hmr_tracker: Arc<HmrTracker>,
 ) -> Result<RecommendedWatcher> {
+    let root = root.to_path_buf();
     let mut watcher =
         notify::recommended_watcher(move |event: notify::Result<notify::Event>| match event {
             Ok(event) => {
-                let paths = event.paths;
+                let started = Instant::now();
+                if matches!(event.kind, notify::EventKind::Access(_)) {
+                    return;
+                }
+                let paths = event
+                    .paths
+                    .into_iter()
+                    .filter(|path| !ignored_watch_path(&root, path))
+                    .collect::<Vec<_>>();
+                if paths.is_empty() {
+                    return;
+                }
+                let event_kind = watch_event_kind(&event.kind);
 
                 // Use HmrTracker for selective invalidation.
-                let hmr_update = hmr_tracker.compute_update(&paths);
+                let mut hmr_update = hmr_tracker.compute_update(&paths);
+                if hmr_update.full_reload {
+                    hmr_update.event_type = HmrEventType::FullReload;
+                }
+                let tracked_routes = hmr_tracker.tracked_route_count();
 
                 // Selective cache invalidation based on affected routes.
-                if hmr_update.full_reload || hmr_update.affected_routes.is_empty() {
-                    // Full invalidation: manifest may have changed (new/deleted routes).
-                    runtime_cache.invalidate();
-                    render_cache.invalidate_all_blocking();
-                    hmr_tracker.clear();
-                } else {
-                    // Selective invalidation: only evict affected route caches.
-                    // Styles always need refresh if any source file changed.
-                    *runtime_cache.styles.blocking_write() = None;
+                let invalidated_entries =
+                    if hmr_update.full_reload || hmr_update.affected_routes.is_empty() {
+                        // Full invalidation: manifest may have changed (new/deleted routes).
+                        runtime_cache.invalidate();
+                        render_cache.invalidate_all_blocking()
+                    } else {
+                        // Selective invalidation: only evict affected route caches.
+                        // Styles always need refresh if any source file changed.
+                        *runtime_cache.styles.blocking_write() = None;
 
-                    // Selectively invalidate render cache for affected routes only.
-                    for route_path in &hmr_update.affected_routes {
-                        render_cache.invalidate_prefix_blocking(route_path);
-                    }
-                }
+                        // Selectively invalidate render cache for affected routes only.
+                        hmr_update
+                            .affected_routes
+                            .iter()
+                            .map(|route_path| render_cache.invalidate_route_blocking(route_path))
+                            .sum()
+                    };
 
                 // Invalidate worker bundle caches for changed files.
                 let path_strings: Vec<String> = paths
                     .iter()
                     .map(|path| path.display().to_string())
                     .collect();
-                worker_pool.invalidate_from_watcher(path_strings.clone());
+                let worker_result = worker_pool.invalidate_from_watcher(path_strings.clone());
+                if worker_result.is_err() {
+                    hmr_update.full_reload = true;
+                    hmr_update.event_type = HmrEventType::FullReload;
+                }
 
                 // Send targeted HMR payload with affected routes.
                 let payload = serde_json::json!({
@@ -598,9 +640,31 @@ fn start_watcher(
                     "fullReload": hmr_update.full_reload,
                 })
                 .to_string();
-                let _ = reload_tx.send(payload);
+                let subscribers = reload_tx.send(payload).unwrap_or(0);
+                for line in dev_update_log_lines(
+                    &root,
+                    event_kind,
+                    &hmr_update,
+                    invalidated_entries,
+                    tracked_routes,
+                    &worker_result,
+                    subscribers,
+                    started.elapsed(),
+                ) {
+                    println!("{line}");
+                }
+                if let Err(error) = worker_result {
+                    warn!(%error, "worker invalidation failed; browser full reload requested");
+                }
             }
-            Err(error) => warn!(%error, "file watcher error"),
+            Err(error) => {
+                println!("✖ File watcher failed (0ms)");
+                println!("  Reason: {error}");
+                println!(
+                    "  Watcher remains active; refresh the browser after the next detected change."
+                );
+                warn!(%error, "file watcher error");
+            }
         })
         .map_err(|error| RuvyxaError::Message(format!("Failed to start file watcher: {error}")))?;
 
@@ -616,31 +680,133 @@ fn start_watcher(
 }
 
 fn watch_paths(config: &ServerConfig) -> Vec<PathBuf> {
-    let mut paths = vec![
-        config.app_dir.clone(),
-        config.root.join("components"),
-        config.root.join("server"),
-        config.public_dir.clone(),
-    ];
-    paths.extend(config.style_entries.iter().map(|entry| {
-        if entry.is_dir() {
-            entry.clone()
-        } else {
-            entry.parent().unwrap_or(entry).to_path_buf()
-        }
-    }));
-    if let Ok(collection) = collect_styles(&config.root, &config.app_dir, &config.style_entries) {
-        paths.extend(
-            collection
-                .files
-                .iter()
-                .filter_map(|file| file.parent().map(Path::to_path_buf)),
-        );
-    }
+    let mut paths = vec![config.root.clone()];
     paths.retain(|path| path.exists());
     paths.sort();
     paths.dedup();
     paths
+}
+
+fn ignored_watch_path(root: &Path, path: &Path) -> bool {
+    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let relative = path
+        .strip_prefix(&canonical_root)
+        .or_else(|_| path.strip_prefix(root))
+        .unwrap_or(path);
+    let components = relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>();
+    let top_level_ignored = components.first().is_some_and(|component| {
+        matches!(
+            component.as_ref(),
+            ".git" | ".ruvyxa" | "target" | "dist" | ".npm-pack" | ".npm-smoke"
+        )
+    });
+    top_level_ignored
+        || components
+            .iter()
+            .any(|component| component == "node_modules")
+}
+
+fn watch_event_kind(kind: &notify::EventKind) -> &'static str {
+    match kind {
+        notify::EventKind::Create(_) => "created",
+        notify::EventKind::Modify(_) => "modified",
+        notify::EventKind::Remove(_) => "removed",
+        notify::EventKind::Access(_) => "accessed",
+        notify::EventKind::Other | notify::EventKind::Any => "changed",
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn dev_update_log_lines(
+    root: &Path,
+    event_kind: &str,
+    update: &HmrUpdate,
+    invalidated_entries: usize,
+    tracked_routes: usize,
+    worker_result: &std::result::Result<usize, String>,
+    subscribers: usize,
+    elapsed: Duration,
+) -> Vec<String> {
+    let elapsed_ms = elapsed.as_millis();
+    let mut lines = update
+        .changed_files
+        .iter()
+        .map(|path| {
+            format!(
+                "⟳ File {event_kind}: {} (detect {}ms)",
+                project_relative_display(root, path),
+                elapsed_ms
+            )
+        })
+        .collect::<Vec<_>>();
+
+    if update.full_reload {
+        lines.push(format!(
+            "↻ Affected routes: all {tracked_routes} routes (detect {elapsed_ms}ms)"
+        ));
+    } else if update.affected_routes.is_empty() {
+        lines.push(format!(
+            "↻ Affected routes: active stylesheet routes (detect {elapsed_ms}ms)"
+        ));
+    } else {
+        lines.push(format!(
+            "↻ Affected routes: {} (detect {elapsed_ms}ms)",
+            update.affected_routes.join(", ")
+        ));
+    }
+    lines.push(format!(
+        "↻ Invalidated {invalidated_entries} render cache entries ({elapsed_ms}ms)"
+    ));
+
+    match worker_result {
+        Ok(workers) => {
+            let bundle_type = match update.event_type {
+                HmrEventType::CssUpdate => "CSS",
+                HmrEventType::ComponentUpdate => "client/SSR",
+                HmrEventType::FullReload => "all route",
+            };
+            lines.push(format!(
+                "⚙ {bundle_type} bundle rebuild queued on {workers} workers ({elapsed_ms}ms)"
+            ));
+            if update.full_reload {
+                lines.push(format!(
+                    "✓ Full reload sent ({tracked_routes} routes, {subscribers} browsers, {elapsed_ms}ms)"
+                ));
+            } else {
+                lines.push(format!(
+                    "✓ HMR update sent: {} ({} routes, {subscribers} browsers, {elapsed_ms}ms)",
+                    update.event_type.as_str(),
+                    update.affected_routes.len()
+                ));
+            }
+        }
+        Err(error) => {
+            lines.push("✖ HMR update failed while invalidating worker bundles".to_string());
+            lines.push(format!("  Reason: {error}"));
+            lines.push(format!(
+                "  Browser full reload fallback sent ({subscribers} browsers, {elapsed_ms}ms)."
+            ));
+        }
+    }
+
+    lines
+}
+
+fn project_relative_display(root: &Path, path: &Path) -> String {
+    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    canonical_path
+        .strip_prefix(&canonical_root)
+        .or_else(|_| path.strip_prefix(root))
+        .map(|relative| relative.display().to_string().replace('\\', "/"))
+        .unwrap_or_else(|_| {
+            path.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "<project file>".to_string())
+        })
 }
 
 fn print_field(name: &str, value: String) {
@@ -846,6 +1012,9 @@ async fn trace_endpoint(
     State(state): State<Arc<AppState>>,
     Query(query): Query<TraceQuery>,
 ) -> Response {
+    if !debug_traces_enabled(&state.config) {
+        return with_security_headers(StatusCode::NOT_FOUND.into_response());
+    }
     let response =
         match runtime_trace_cached(&state.config, &state.runtime_cache, &query.path).await {
             Ok(trace) => json_response(StatusCode::OK, &trace),
@@ -856,6 +1025,10 @@ async fn trace_endpoint(
                 .into_response(),
         };
     with_security_headers(response)
+}
+
+fn debug_traces_enabled(config: &ServerConfig) -> bool {
+    config.watch && config.debug_traces
 }
 
 async fn handle_request(
@@ -2701,7 +2874,8 @@ fn hmr_client_script() -> &'static str {
   };
   socket.addEventListener("message", (event) => {
     const update = JSON.parse(event.data);
-    if (update.type === "css-update") refreshCss().catch(() => location.reload());
+    if (update.fullReload) location.reload();
+    else if (update.type === "css-update") refreshCss().catch(() => location.reload());
     else if (update.type === "component-update") refreshComponent();
     else location.reload();
   });
@@ -3603,6 +3777,18 @@ mod tests {
         assert_eq!(local_display_url(&config, address), "http://localhost:3001");
     }
 
+    #[test]
+    fn runtime_traces_require_both_dev_mode_and_debug_flag() {
+        let mut dev = ServerConfig::dev(".", "localhost", 3000);
+        assert!(!debug_traces_enabled(&dev));
+        dev.debug_traces = true;
+        assert!(debug_traces_enabled(&dev));
+
+        let mut production = ServerConfig::production(".", "localhost", 3000);
+        production.debug_traces = true;
+        assert!(!debug_traces_enabled(&production));
+    }
+
     #[tokio::test]
     async fn bind_listener_uses_next_available_port_when_requested_port_is_busy() {
         let occupied = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -3641,7 +3827,7 @@ mod tests {
     }
 
     #[test]
-    fn watches_imported_styles_outside_app() {
+    fn watches_the_project_root_for_imported_modules_and_styles() {
         let temp = tempfile::tempdir().unwrap();
         let app = temp.path().join("app");
         let styles = temp.path().join("styles");
@@ -3651,6 +3837,97 @@ mod tests {
         std::fs::write(styles.join("site.css"), "body { color: green; }").unwrap();
         let config = ServerConfig::dev(temp.path(), "localhost", 3000);
 
-        assert!(watch_paths(&config).contains(&styles.canonicalize().unwrap()));
+        assert_eq!(watch_paths(&config), vec![temp.path().to_path_buf()]);
+        assert!(!ignored_watch_path(temp.path(), &styles.join("site.css")));
+        assert!(!ignored_watch_path(
+            temp.path(),
+            &temp.path().join("lib/utils.ts")
+        ));
+        assert!(ignored_watch_path(
+            temp.path(),
+            &temp.path().join("node_modules/react/index.js")
+        ));
+        assert!(ignored_watch_path(
+            temp.path(),
+            &temp.path().join(".ruvyxa/cache/client.js")
+        ));
+    }
+
+    #[test]
+    fn dev_hmr_logs_are_relative_timed_and_actionable() {
+        let root = PathBuf::from("C:/project");
+        let update = HmrUpdate {
+            affected_routes: vec!["/".to_string()],
+            full_reload: false,
+            changed_files: vec![root.join("app/page.tsx")],
+            event_type: HmrEventType::ComponentUpdate,
+        };
+        let lines = dev_update_log_lines(
+            &root,
+            "modified",
+            &update,
+            2,
+            4,
+            &Ok(2),
+            1,
+            Duration::from_millis(86),
+        );
+        let output = lines.join("\n");
+
+        assert!(output.contains("File modified: app/page.tsx"), "{output}");
+        assert!(output.contains("Affected routes: /"), "{output}");
+        assert!(
+            output.contains("Invalidated 2 render cache entries"),
+            "{output}"
+        );
+        assert!(
+            output.contains("client/SSR bundle rebuild queued"),
+            "{output}"
+        );
+        assert!(
+            output.contains("HMR update sent: component-update"),
+            "{output}"
+        );
+        assert!(output.contains("86ms"), "{output}");
+        assert!(!output.contains("C:/project"), "{output}");
+    }
+
+    #[test]
+    fn worker_queue_failure_logs_reason_and_full_reload_fallback() {
+        let update = HmrUpdate {
+            affected_routes: Vec::new(),
+            full_reload: true,
+            changed_files: vec![PathBuf::from("app/layout.tsx")],
+            event_type: HmrEventType::FullReload,
+        };
+        let lines = dev_update_log_lines(
+            Path::new("."),
+            "modified",
+            &update,
+            0,
+            4,
+            &Err("worker invalidation queue is full".to_string()),
+            1,
+            Duration::from_millis(112),
+        );
+        let output = lines.join("\n");
+
+        assert!(output.contains("HMR update failed"), "{output}");
+        assert!(
+            output.contains("worker invalidation queue is full"),
+            "{output}"
+        );
+        assert!(output.contains("full reload fallback sent"), "{output}");
+        assert!(output.contains("112ms"), "{output}");
+    }
+
+    #[test]
+    fn hmr_client_honors_full_reload_before_targeted_updates() {
+        let script = hmr_client_script();
+        let full_reload = script.find("if (update.fullReload)").unwrap();
+        let css_update = script
+            .find("else if (update.type === \"css-update\")")
+            .unwrap();
+        assert!(full_reload < css_update);
     }
 }

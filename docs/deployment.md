@@ -234,7 +234,7 @@ Set environment variables using your platform's standard method. Ruvyxa loads `.
   "serverDir": "server",
   "clientDir": "client",
   "assetsDir": "assets",
-  "hashAlgorithm": "blake3-128",
+  "hashAlgorithm": "blake3-64",
   "createdAtUnix": 1712345678,
   "security": {
     "actionBodyLimitBytes": 65536,
