@@ -11,7 +11,7 @@ export default function Home() {
         height={120}
         priority
       />
-      <h1>Ruvyxa Demo</h1>
+      <h1>Ruvyxa Framework Demo</h1>
       <p>Comprehensive example app demonstrating every Ruvyxa framework feature.</p>
 
       <div className="feature-grid">

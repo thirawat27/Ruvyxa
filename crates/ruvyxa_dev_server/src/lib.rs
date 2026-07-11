@@ -595,7 +595,6 @@ fn start_watcher(
     let mut watcher =
         notify::recommended_watcher(move |event: notify::Result<notify::Event>| match event {
             Ok(event) => {
-                let started = Instant::now();
                 if matches!(event.kind, notify::EventKind::Access(_)) {
                     return;
                 }
@@ -607,33 +606,27 @@ fn start_watcher(
                 if paths.is_empty() {
                     return;
                 }
-                let event_kind = watch_event_kind(&event.kind);
 
                 // Use HmrTracker for selective invalidation.
                 let mut hmr_update = hmr_tracker.compute_update(&paths);
                 if hmr_update.full_reload {
                     hmr_update.event_type = HmrEventType::FullReload;
                 }
-                let tracked_routes = hmr_tracker.tracked_route_count();
-
                 // Selective cache invalidation based on affected routes.
-                let invalidated_entries =
-                    if hmr_update.full_reload || hmr_update.affected_routes.is_empty() {
-                        // Full invalidation: manifest may have changed (new/deleted routes).
-                        runtime_cache.invalidate();
-                        render_cache.invalidate_all_blocking()
-                    } else {
-                        // Selective invalidation: only evict affected route caches.
-                        // Styles always need refresh if any source file changed.
-                        *runtime_cache.styles.blocking_write() = None;
+                if hmr_update.full_reload || hmr_update.affected_routes.is_empty() {
+                    // Full invalidation: manifest may have changed (new/deleted routes).
+                    runtime_cache.invalidate();
+                    render_cache.invalidate_all_blocking();
+                } else {
+                    // Selective invalidation: only evict affected route caches.
+                    // Styles always need refresh if any source file changed.
+                    *runtime_cache.styles.blocking_write() = None;
 
-                        // Selectively invalidate render cache for affected routes only.
-                        hmr_update
-                            .affected_routes
-                            .iter()
-                            .map(|route_path| render_cache.invalidate_route_blocking(route_path))
-                            .sum()
-                    };
+                    // Selectively invalidate render cache for affected routes only.
+                    for route_path in &hmr_update.affected_routes {
+                        render_cache.invalidate_route_blocking(route_path);
+                    }
+                }
 
                 // Invalidate worker bundle caches for changed files.
                 let path_strings: Vec<String> = paths
@@ -654,19 +647,7 @@ fn start_watcher(
                     "fullReload": hmr_update.full_reload,
                 })
                 .to_string();
-                let subscribers = reload_tx.send(payload).unwrap_or(0);
-                for line in dev_update_log_lines(
-                    &root,
-                    event_kind,
-                    &hmr_update,
-                    invalidated_entries,
-                    tracked_routes,
-                    &worker_result,
-                    subscribers,
-                    started.elapsed(),
-                ) {
-                    println!("{line}");
-                }
+                let _ = reload_tx.send(payload);
                 if let Err(error) = worker_result {
                     warn!(%error, "worker invalidation failed; browser full reload requested");
                 }
@@ -727,95 +708,12 @@ fn ignored_watch_path(root: &Path, path: &Path) -> bool {
             .any(|component| matches!(component.as_ref(), ".ruvyxa" | "node_modules"))
 }
 
-fn watch_event_kind(kind: &notify::EventKind) -> &'static str {
-    match kind {
-        notify::EventKind::Create(_) => "created",
-        notify::EventKind::Modify(_) => "modified",
-        notify::EventKind::Remove(_) => "removed",
-        notify::EventKind::Access(_) => "accessed",
-        notify::EventKind::Other | notify::EventKind::Any => "changed",
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn dev_update_log_lines(
-    root: &Path,
-    event_kind: &str,
-    update: &HmrUpdate,
-    invalidated_entries: usize,
-    tracked_routes: usize,
-    worker_result: &std::result::Result<usize, String>,
-    subscribers: usize,
-    elapsed: Duration,
-) -> Vec<String> {
-    let elapsed = format_update_elapsed(elapsed);
-    let changed = update
-        .changed_files
-        .iter()
-        .map(|path| project_relative_display(root, path))
-        .collect::<Vec<_>>();
-    let files = match changed.as_slice() {
-        [] => "project files".to_string(),
-        [file] => file.clone(),
-        [first, second] => format!("{first}, {second}"),
-        [first, second, rest @ ..] => format!("{first}, {second} +{} more", rest.len()),
-    };
-    let action = if update.full_reload {
-        format!("full reload · {tracked_routes} routes")
-    } else if update.affected_routes.is_empty() {
-        "styles refreshed".to_string()
-    } else {
-        format!(
-            "{} · {}",
-            update.event_type.as_str(),
-            update.affected_routes.join(", ")
-        )
-    };
-    let cache = if invalidated_entries == 0 {
-        String::new()
-    } else {
-        format!(" · cleared {invalidated_entries} cache entries")
-    };
-    let mut lines = vec![format!("⟳ {event_kind}: {files}")];
-
-    match worker_result {
-        Ok(workers) => {
-            lines.push(format!(
-                "  {} · {workers} workers · {subscribers} browsers{cache} · {elapsed}",
-                ok(action)
-            ));
-        }
-        Err(error) => {
-            lines.push(format!(
-                "  {} · full reload fallback · {subscribers} browsers · {elapsed}",
-                warn_text(format!("worker update failed: {error}"))
-            ));
-        }
-    }
-
-    lines
-}
-
 fn format_update_elapsed(elapsed: Duration) -> String {
     if elapsed >= Duration::from_millis(1) {
         return format!("{}ms", elapsed.as_millis());
     }
     let tenths = elapsed.as_micros().div_ceil(100).max(1);
     format!("{}.{:01}ms", tenths / 10, tenths % 10)
-}
-
-fn project_relative_display(root: &Path, path: &Path) -> String {
-    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let canonical_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    canonical_path
-        .strip_prefix(&canonical_root)
-        .or_else(|_| path.strip_prefix(root))
-        .map(|relative| relative.display().to_string().replace('\\', "/"))
-        .unwrap_or_else(|_| {
-            path.file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "<project file>".to_string())
-        })
 }
 
 fn print_field(name: &str, value: String) {
@@ -3723,36 +3621,6 @@ mod tests {
     }
 
     #[test]
-    fn dev_hmr_logs_are_compact_relative_and_actionable() {
-        let root = PathBuf::from("C:/project");
-        let update = HmrUpdate {
-            affected_routes: vec!["/".to_string()],
-            full_reload: false,
-            changed_files: vec![root.join("app/page.tsx")],
-            event_type: HmrEventType::ComponentUpdate,
-        };
-        let lines = dev_update_log_lines(
-            &root,
-            "modified",
-            &update,
-            2,
-            4,
-            &Ok(2),
-            1,
-            Duration::from_millis(86),
-        );
-        let output = lines.join("\n");
-
-        assert_eq!(lines.len(), 2, "{output}");
-        assert!(output.contains("modified: app/page.tsx"), "{output}");
-        assert!(output.contains("component-update · /"), "{output}");
-        assert!(output.contains("cleared 2 cache entries"), "{output}");
-        assert!(output.contains("2 workers · 1 browsers"), "{output}");
-        assert!(output.contains("86ms"), "{output}");
-        assert!(!output.contains("C:/project"), "{output}");
-    }
-
-    #[test]
     fn dev_hmr_logs_keep_submillisecond_timing_visible() {
         assert_eq!(format_update_elapsed(Duration::from_micros(42)), "0.1ms");
         assert_eq!(format_update_elapsed(Duration::from_millis(1)), "1ms");
@@ -3777,35 +3645,6 @@ mod tests {
         );
 
         unsafe { std::env::remove_var("NO_COLOR") };
-    }
-
-    #[test]
-    fn worker_queue_failure_logs_reason_and_full_reload_fallback() {
-        let update = HmrUpdate {
-            affected_routes: Vec::new(),
-            full_reload: true,
-            changed_files: vec![PathBuf::from("app/layout.tsx")],
-            event_type: HmrEventType::FullReload,
-        };
-        let lines = dev_update_log_lines(
-            Path::new("."),
-            "modified",
-            &update,
-            0,
-            4,
-            &Err("worker invalidation queue is full".to_string()),
-            1,
-            Duration::from_millis(112),
-        );
-        let output = lines.join("\n");
-
-        assert!(output.contains("worker update failed"), "{output}");
-        assert!(
-            output.contains("worker invalidation queue is full"),
-            "{output}"
-        );
-        assert!(output.contains("full reload fallback"), "{output}");
-        assert!(output.contains("112ms"), "{output}");
     }
 
     #[test]
