@@ -140,21 +140,6 @@ code {
   text-transform: uppercase;
 }
 
-.demo-hero {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(180px, 280px);
-  align-items: center;
-  gap: 32px;
-  margin-bottom: 32px;
-}
-
-.demo-hero-image {
-  width: min(100%, 280px);
-  height: auto;
-  justify-self: end;
-  filter: drop-shadow(0 18px 24px rgba(105, 23, 234, 0.2));
-}
-
 h1 {
   max-width: 760px;
   margin: 0 0 18px;
@@ -416,16 +401,6 @@ td {
   .page-wide {
     width: min(100% - 32px, var(--page-width));
     padding: 44px 0 64px;
-  }
-
-  .demo-hero {
-    grid-template-columns: 1fr;
-    gap: 20px;
-  }
-
-  .demo-hero-image {
-    justify-self: start;
-    width: min(100%, 220px);
   }
 
   h1 {

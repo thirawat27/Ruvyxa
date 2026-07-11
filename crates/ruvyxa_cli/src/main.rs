@@ -733,7 +733,7 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
             .map(Vec::len)
             .unwrap_or_default();
 
-        print_tui_header("Ruvyxa build");
+        print_tui_header("🦊 Ruvyxa Build");
         print_field("status", ok_text("built"));
         print_field(
             "target",
@@ -2859,6 +2859,7 @@ fn print_benchmark_table(
 
 fn print_tui_header(title: impl AsRef<str>) {
     println!("\n{}", heading(title));
+    println!();
     print_field("time", accent(current_timestamp()));
 }
 
