@@ -10,6 +10,7 @@
     "build": "pnpm -r build",
     "check": "pnpm -r check",
     "test": "cargo test --workspace && pnpm -r test",
+    "check:cargo-lock": "node scripts/check-cargo-lock.mjs",
     "format": "cargo fmt --all && prettier --write .",
     "format:check": "cargo fmt --all --check && prettier --check .",
     "release:validate": "node scripts/validate-package-metadata.mjs",
