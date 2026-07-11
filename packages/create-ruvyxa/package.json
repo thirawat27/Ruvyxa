@@ -32,6 +32,6 @@
     "prepack": "pnpm run build && node scripts/prepare-template.mjs"
   },
   "devDependencies": {
-    "@types/node": "^24.10.1"
+    "@types/node": "^26.1.1"
   }
 }

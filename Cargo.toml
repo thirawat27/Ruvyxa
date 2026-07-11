@@ -34,9 +34,9 @@ tempfile = "3.23"
 thiserror = "2.0"
 tokio = { version = "1.52", features = ["full"] }
 tower = { version = "0.5" }
-tower-http = { version = "0.6", features = ["fs", "trace", "compression-gzip", "compression-br"] }
+tower-http = { version = "0.7", features = ["fs", "trace", "compression-gzip", "compression-br"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 walkdir = "2.5"
-wasmtime = "45.0"
-wasmtime-wasi = "45.0"
+wasmtime = "46.0.1"
+wasmtime-wasi = "46.0.1"

@@ -5,7 +5,7 @@
   "type": "module",
   "description": "A production-minded web framework built around clarity, speed, control, and predictable application delivery.",
   "license": "Apache-2.0",
-  "packageManager": "pnpm@11.7.0",
+  "packageManager": "pnpm@11.11.0",
   "scripts": {
     "build": "pnpm -r build",
     "check": "pnpm -r check",
@@ -19,9 +19,9 @@
     "publish:dry-run": "pnpm -r --filter './packages/**' publish --access public --dry-run"
   },
   "devDependencies": {
-    "@types/node": "^25.9.3",
-    "prettier": "3.9.4",
-    "typescript": "^6.0.3"
+    "@types/node": "^26.1.1",
+    "prettier": "3.9.5",
+    "typescript": "^7.0.2"
   },
   "engines": {
     "node": ">=22.0.0"
