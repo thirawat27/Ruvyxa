@@ -141,6 +141,6 @@ Resolution order:
    monorepo
 2. **Bundled binary** — `native-bin/<platform>-<arch>/ruvyxa(.exe)` shipped with the npm package
 3. **Optional platform package** — `@ruvyxa/cli-<platform>-<arch>` as a fallback (e.g.,
-   `@ruvyxa/cli-win32-x64`)
+   `@ruvyxa/cli-win32-arm64`)
 
 Application users only need to install `ruvyxa`. No Rust toolchain required.

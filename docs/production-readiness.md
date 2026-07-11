@@ -104,6 +104,7 @@ Resolution order:
 
 | Package                    | OS      | Architecture          |
 | -------------------------- | ------- | --------------------- |
+| `@ruvyxa/cli-win32-arm64`  | Windows | arm64                 |
 | `@ruvyxa/cli-win32-x64`    | Windows | x64                   |
 | `@ruvyxa/cli-linux-x64`    | Linux   | x64                   |
 | `@ruvyxa/cli-linux-arm64`  | Linux   | arm64                 |
@@ -146,14 +147,14 @@ cargo run -p ruvyxa_cli -- start --root examples/demo --port 3002
 
 The GitHub Actions workflow (`.github/workflows/ci.yml`) runs on every push and pull request:
 
-1. Rust formatting, tests, clippy on ubuntu, macOS, and Windows
+1. Rust formatting, tests, clippy on Ubuntu, macOS, Windows x64, and Windows arm64
 2. TypeScript build, check, and test
 3. Package metadata validation and pack smoke test
 
 The release workflow (`.github/workflows/release.yml`) runs on `v*.*.*` tags:
 
 1. All quality gates
-2. Build native CLI binaries per platform
+2. Build native CLI binaries per platform, including Windows arm64
 3. Publish npm packages in dependency order with provenance
 
 Never publish manually unless CI is unavailable and the full checklist passes locally.

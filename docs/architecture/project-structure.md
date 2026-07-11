@@ -67,7 +67,7 @@ internal module refactors over moving root folders.
 | `packages/@ruvyxa/react`     | React integration: `RuvyxaErrorBoundary`, `useRuvyxaLoader`, `hydrate`.   |
 | `packages/@ruvyxa/adapter-*` | Deployment adapters consuming `.ruvyxa/` output.                          |
 | `packages/create-ruvyxa`     | Project scaffolding. Copies `templates/minimal/` at prepack time.         |
-| `packages/@ruvyxa/cli-*`     | Platform-specific native binary packages (win32-x64, linux-x64/arm64,     |
+| `packages/@ruvyxa/cli-*`     | Platform-specific native binary packages (win32-x64/arm64, linux-x64/arm64, |
 |                              | darwin-x64/arm64).                                                        |
 
 ## Runtime Scripts

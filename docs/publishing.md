@@ -31,7 +31,8 @@ Actions release workflow rather than publishing manually.
 
 | Package                    | Platform    |
 | -------------------------- | ----------- |
-| `@ruvyxa/cli-win32-x64`    | Windows x64 |
+| `@ruvyxa/cli-win32-arm64`  | Windows arm64 |
+| `@ruvyxa/cli-win32-x64`    | Windows x64   |
 | `@ruvyxa/cli-linux-x64`    | Linux x64   |
 | `@ruvyxa/cli-linux-arm64`  | Linux arm64 |
 | `@ruvyxa/cli-darwin-x64`   | macOS x64   |
@@ -103,6 +104,7 @@ Publish in dependency order. The CI workflow does this automatically.
 ```bash
 # 1. Native binaries (one-per-platform — build on each OS)
 # CI handles this; for local testing:
+pnpm --filter @ruvyxa/cli-win32-arm64 publish --access public
 pnpm --filter @ruvyxa/cli-win32-x64 publish --access public
 pnpm --filter @ruvyxa/cli-linux-x64 publish --access public
 pnpm --filter @ruvyxa/cli-linux-arm64 publish --access public

@@ -22,6 +22,7 @@
     "runtime/ssg-renderer.mjs",
     "runtime/ssr-renderer.mjs",
     "runtime/worker-pool.mjs",
+    "scripts/native-platform.mjs",
     "README.md"
   ],
   "keywords": [
@@ -72,6 +73,7 @@
     "@ruvyxa/cli-darwin-x64": "workspace:^",
     "@ruvyxa/cli-linux-arm64": "workspace:^",
     "@ruvyxa/cli-linux-x64": "workspace:^",
+    "@ruvyxa/cli-win32-arm64": "workspace:^",
     "@ruvyxa/cli-win32-x64": "workspace:^"
   },
   "scripts": {

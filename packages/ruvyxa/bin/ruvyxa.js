@@ -4,11 +4,13 @@ import { chmodSync, existsSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
+import { currentPlatformKey, nativeBinaryPackageName } from '../scripts/native-platform.mjs'
+
 const here = dirname(fileURLToPath(import.meta.url))
 const packageRoot = resolve(here, '..')
 const monorepoRoot = resolve(here, '../../..')
 const executable = process.platform === 'win32' ? 'ruvyxa.exe' : 'ruvyxa'
-const platformKey = `${process.platform}-${process.arch}`
+const platformKey = currentPlatformKey()
 
 const binary = findBinary()
 
@@ -18,7 +20,7 @@ if (!binary) {
     console.error('Reinstall ruvyxa, or install the matching @ruvyxa/cli-* optional package.')
   } else {
     console.error(
-      'Prebuilt binaries support darwin-arm64, darwin-x64, linux-arm64, linux-x64, and win32-x64.',
+      'Prebuilt binaries support darwin-arm64, darwin-x64, linux-arm64, linux-x64, win32-arm64, and win32-x64.',
     )
   }
   console.error('When working from source, run `cargo build -p ruvyxa_cli` first.')
@@ -81,18 +83,5 @@ function prepareExecutable(binary) {
 }
 
 function optionalBinaryPackageName() {
-  switch (platformKey) {
-    case 'darwin-arm64':
-      return '@ruvyxa/cli-darwin-arm64'
-    case 'darwin-x64':
-      return '@ruvyxa/cli-darwin-x64'
-    case 'linux-arm64':
-      return '@ruvyxa/cli-linux-arm64'
-    case 'linux-x64':
-      return '@ruvyxa/cli-linux-x64'
-    case 'win32-x64':
-      return '@ruvyxa/cli-win32-x64'
-    default:
-      return null
-  }
+  return nativeBinaryPackageName(platformKey)
 }

@@ -83,6 +83,8 @@ importers:
 
   packages/@ruvyxa/cli-linux-x64: {}
 
+  packages/@ruvyxa/cli-win32-arm64: {}
+
   packages/@ruvyxa/cli-win32-x64: {}
 
   packages/@ruvyxa/core: {}
@@ -127,6 +129,9 @@ importers:
       '@ruvyxa/cli-linux-x64':
         specifier: workspace:^
         version: link:../@ruvyxa/cli-linux-x64
+      '@ruvyxa/cli-win32-arm64':
+        specifier: workspace:^
+        version: link:../@ruvyxa/cli-win32-arm64
       '@ruvyxa/cli-win32-x64':
         specifier: workspace:^
         version: link:../@ruvyxa/cli-win32-x64
