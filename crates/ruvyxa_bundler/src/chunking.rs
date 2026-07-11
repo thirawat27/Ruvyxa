@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use crate::compiler::CompiledModule;
 use crate::{
-    ast, linker, minifier, BundleInput, DynamicImportChunk, OutputChunk, OutputChunkKind, Result,
+    BundleInput, DynamicImportChunk, OutputChunk, OutputChunkKind, Result, ast, linker, minifier,
 };
 
 /// Build output chunks for project-local dynamic import split points.

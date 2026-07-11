@@ -1,4 +1,4 @@
-use ruvyxa_bundler::ast::{parse_module, ImportKind};
+use ruvyxa_bundler::ast::{ImportKind, parse_module};
 use ruvyxa_bundler::compiler::transform;
 
 const MODULE_EDGES: &str = include_str!("fixtures/parser/module-edges.ts");
@@ -8,7 +8,10 @@ const ADVANCED_JSX: &str = include_str!("fixtures/parser/advanced-jsx.tsx");
 #[test]
 fn advanced_typescript_constructs_compile_individually() {
     for (name, source) in [
-        ("interface", "interface Config { port: number }\nconst port = 1"),
+        (
+            "interface",
+            "interface Config { port: number }\nconst port = 1",
+        ),
         ("type", "type Resource = { close(): void }\nconst value = 1"),
         ("enum", "const enum Mode { Development, Production = 5 }"),
         (
@@ -28,11 +31,11 @@ fn advanced_typescript_constructs_compile_individually() {
             "typed-class-field",
             "class Service { readonly config: Config = { port: 3000 } satisfies Config }",
         ),
+        ("computed-method", "class Service { [Symbol.dispose]() {} }"),
         (
-            "computed-method",
-            "class Service { [Symbol.dispose]() {} }",
+            "declare",
+            "declare function openResource(): Resource\nconst value = 1",
         ),
-        ("declare", "declare function openResource(): Resource\nconst value = 1"),
         (
             "using",
             "async function load() { await using resource = openResource(); return resource as Resource }",

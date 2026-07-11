@@ -130,10 +130,10 @@ impl ResolveGraphCache {
         };
 
         // Fast path: check cache with fingerprint validation.
-        if let Some(entry) = self.sources.get(path) {
-            if entry.fingerprint == fingerprint {
-                return Ok(entry.source.to_string());
-            }
+        if let Some(entry) = self.sources.get(path)
+            && entry.fingerprint == fingerprint
+        {
+            return Ok(entry.source.to_string());
         }
 
         // Cache miss or stale — read the file.
@@ -161,10 +161,10 @@ impl ResolveGraphCache {
         };
 
         // Fast path: check cache with fingerprint validation.
-        if let Some(entry) = self.sources.get(path) {
-            if entry.fingerprint == fingerprint {
-                return Ok(Arc::clone(&entry.source));
-            }
+        if let Some(entry) = self.sources.get(path)
+            && entry.fingerprint == fingerprint
+        {
+            return Ok(Arc::clone(&entry.source));
         }
 
         // Cache miss or stale — read the file.
@@ -233,10 +233,10 @@ impl TsConfigPaths {
         ];
 
         for path in &candidates {
-            if let Ok(content) = fs::read_to_string(path) {
-                if let Some(config) = parse_tsconfig_paths(&content, project_root) {
-                    return config;
-                }
+            if let Ok(content) = fs::read_to_string(path)
+                && let Some(config) = parse_tsconfig_paths(&content, project_root)
+            {
+                return config;
             }
         }
 
@@ -280,12 +280,13 @@ impl TsConfigPaths {
         }
 
         // 2. Try baseUrl-relative resolution (for non-relative, non-bare specifiers).
-        if !specifier.starts_with('.') && !specifier.starts_with('/') {
-            if let Some(base) = &self.base_url {
-                let candidate = base.join(specifier);
-                if let Some(resolved) = resolve_file_candidate(&candidate) {
-                    return Some(resolved);
-                }
+        if !specifier.starts_with('.')
+            && !specifier.starts_with('/')
+            && let Some(base) = &self.base_url
+        {
+            let candidate = base.join(specifier);
+            if let Some(resolved) = resolve_file_candidate(&candidate) {
+                return Some(resolved);
             }
         }
 
@@ -467,10 +468,10 @@ fn resolve_exports_condition(val: &serde_json::Value) -> Option<String> {
         serde_json::Value::Object(map) => {
             // Prefer "import" > "module" > "default" for ESM builds.
             for key in &["import", "module", "default", "require"] {
-                if let Some(v) = map.get(*key) {
-                    if let Some(s) = resolve_exports_condition(v) {
-                        return Some(s);
-                    }
+                if let Some(v) = map.get(*key)
+                    && let Some(s) = resolve_exports_condition(v)
+                {
+                    return Some(s);
                 }
             }
             None
@@ -484,7 +485,9 @@ fn read_source_fast(path: &Path, len: u64) -> Result<String> {
     if len >= MMAP_THRESHOLD_BYTES {
         // Memory-map for large files: exploits OS page cache, zero-copy into
         // address space, and avoids a full heap allocation + copy.
-        match unsafe { memmap2::Mmap::map(&fs::File::open(path)?) } {
+        let file = fs::File::open(path)?;
+        let mapped = unsafe { memmap2::Mmap::map(&file) };
+        match mapped {
             Ok(mmap) => {
                 return String::from_utf8(mmap.to_vec()).map_err(|_| {
                     std::io::Error::new(std::io::ErrorKind::InvalidData, "non-UTF-8 source").into()

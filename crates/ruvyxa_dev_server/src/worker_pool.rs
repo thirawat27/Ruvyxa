@@ -10,13 +10,13 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::{mpsc, oneshot, Mutex};
+use tokio::sync::{Mutex, mpsc, oneshot};
 use tracing::{debug, error, warn};
 
 use ruvyxa_diagnostics::{Diagnostic, Result, RuvyxaError};
@@ -215,8 +215,11 @@ impl Worker {
                     }
                 };
                 let id = response.id.clone();
-                let mut map = reader_pending.lock().await;
-                if let Some(sender) = map.remove(&id) {
+                let sender = {
+                    let mut map = reader_pending.lock().await;
+                    map.remove(&id)
+                };
+                if let Some(sender) = sender {
                     let _ = sender.send(response);
                 }
             }

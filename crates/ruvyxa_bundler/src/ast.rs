@@ -354,17 +354,19 @@ const data = require("./data")
 "#,
         );
 
-        assert!(ast
-            .imports
-            .iter()
-            .any(|edge| { edge.specifier == "react" && edge.kind == ImportKind::Static }));
+        assert!(
+            ast.imports
+                .iter()
+                .any(|edge| { edge.specifier == "react" && edge.kind == ImportKind::Static })
+        );
         assert!(ast.imports.iter().any(|edge| {
             edge.specifier == "./global.css" && edge.kind == ImportKind::SideEffect
         }));
-        assert!(ast
-            .imports
-            .iter()
-            .any(|edge| { edge.specifier == "./helper" && edge.kind == ImportKind::ReExport }));
+        assert!(
+            ast.imports
+                .iter()
+                .any(|edge| { edge.specifier == "./helper" && edge.kind == ImportKind::ReExport })
+        );
         assert_eq!(ast.dynamic_import_specifiers(), vec!["./lazy"]);
         assert!(ast.import_specifiers().contains(&"./data".to_string()));
     }

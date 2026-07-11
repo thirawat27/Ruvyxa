@@ -298,10 +298,12 @@ mod tests {
         let page = PathBuf::from("/app/page.tsx");
 
         tracker.register_route("/", &[page.clone(), old_dep.clone()]);
-        assert!(tracker
-            .compute_update(std::slice::from_ref(&old_dep))
-            .affected_routes
-            .contains(&"/".to_string()));
+        assert!(
+            tracker
+                .compute_update(std::slice::from_ref(&old_dep))
+                .affected_routes
+                .contains(&"/".to_string())
+        );
 
         // Re-register with different deps.
         tracker.register_route("/", &[page.clone(), new_dep.clone()]);

@@ -141,11 +141,11 @@ impl CompileCache {
         }
 
         // Fast path: memory cache (LRU-updated on hit).
-        if let Ok(mut memory) = self.memory.lock() {
-            if let Some(entry) = memory.get_mut(&key) {
-                entry.last_used = GENERATION.fetch_add(1, Ordering::Relaxed);
-                return CacheLookup::Hit(entry.value.clone());
-            }
+        if let Ok(mut memory) = self.memory.lock()
+            && let Some(entry) = memory.get_mut(&key)
+        {
+            entry.last_used = GENERATION.fetch_add(1, Ordering::Relaxed);
+            return CacheLookup::Hit(entry.value.clone());
         }
 
         // Disk cache.

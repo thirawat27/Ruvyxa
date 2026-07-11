@@ -187,20 +187,19 @@ pub fn compile_graph_resilient(
                         });
                         diag
                     }
-                    BundleError::Unresolved { specifier, importer } => {
-                        Diagnostic::new(
-                            "RUV1302",
-                            format!("Cannot resolve '{specifier}' from {}", importer.display()),
-                        )
-                        .at_file(&source_module.path)
-                        .suggest(format!(
-                            "Check that the module '{specifier}' exists and the import path is correct."
-                        ))
-                    }
-                    other => {
-                        Diagnostic::new("RUV1301", format!("Module error: {other}"))
-                            .at_file(&source_module.path)
-                    }
+                    BundleError::Unresolved {
+                        specifier,
+                        importer,
+                    } => Diagnostic::new(
+                        "RUV1302",
+                        format!("Cannot resolve '{specifier}' from {}", importer.display()),
+                    )
+                    .at_file(&source_module.path)
+                    .suggest(format!(
+                        "Check that the module '{specifier}' exists and the import path is correct."
+                    )),
+                    other => Diagnostic::new("RUV1301", format!("Module error: {other}"))
+                        .at_file(&source_module.path),
                 };
 
                 diagnostics.push(diagnostic);
@@ -235,15 +234,15 @@ pub fn compile_graph_resilient(
 /// Parse line:col from an error message like "file.tsx:5:12: unexpected token"
 fn parse_error_location(msg: &str) -> (u32, u32) {
     let parts: Vec<&str> = msg.splitn(4, ':').collect();
-    if parts.len() >= 3 {
-        if let (Ok(line), Ok(col)) = (
+    if parts.len() >= 3
+        && let (Ok(line), Ok(col)) = (
             parts[1].trim().parse::<u32>(),
             parts[2].trim().parse::<u32>(),
-        ) {
-            if line > 0 && col > 0 {
-                return (line, col);
-            }
-        }
+        )
+        && line > 0
+        && col > 0
+    {
+        return (line, col);
     }
     if let Some(line_idx) = msg.find("line ") {
         let after_line = &msg[line_idx + 5..];
@@ -440,7 +439,7 @@ fn strip_decorators(source: &str) -> String {
             if is_decorator {
                 // Consume `@identifier(.…)` including optional call arguments.
                 i += 1; // skip @
-                        // Skip identifier (may be dotted).
+                // Skip identifier (may be dotted).
                 while i < len && (chars[i].is_alphanumeric() || chars[i] == '_' || chars[i] == '.')
                 {
                     i += 1;
@@ -868,11 +867,11 @@ fn strip_typescript(source: &str) -> std::result::Result<String, String> {
         // Generic type parameters on calls/new: `foo<T>(` → `foo(`
         if chars[i] == '<' {
             let prev = prev_non_space(&chars, i);
-            if prev.map(is_ident_end).unwrap_or(false) {
-                if let Some(end) = try_skip_type_args(&chars, i) {
-                    i = end;
-                    continue;
-                }
+            if prev.map(is_ident_end).unwrap_or(false)
+                && let Some(end) = try_skip_type_args(&chars, i)
+            {
+                i = end;
+                continue;
             }
         }
 
@@ -1354,13 +1353,12 @@ impl JsxTransformer {
             text.push(self.current());
             self.pos += 1;
         }
-        let trimmed = text
-            .lines()
+
+        text.lines()
             .map(|l| l.trim())
             .filter(|l| !l.is_empty())
             .collect::<Vec<_>>()
-            .join(" ");
-        trimmed
+            .join(" ")
     }
 
     fn at_jsx_child_open(&self) -> bool {

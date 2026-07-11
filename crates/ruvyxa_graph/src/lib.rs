@@ -416,10 +416,10 @@ fn import_specifiers(source: &str) -> Vec<String> {
             if let Some(specifier) = quoted_value(&line[index + " from ".len()..]) {
                 imports.push(specifier);
             }
-        } else if line.starts_with("import ") {
-            if let Some(specifier) = quoted_value(line.trim_start_matches("import").trim()) {
-                imports.push(specifier);
-            }
+        } else if line.starts_with("import ")
+            && let Some(specifier) = quoted_value(line.trim_start_matches("import").trim())
+        {
+            imports.push(specifier);
         }
     }
 
@@ -1048,10 +1048,12 @@ mod tests {
         let report = validate_app(temp.path(), &manifest).unwrap();
         assert_eq!(manifest.routes.len(), 2);
         assert!(report.diagnostics.is_empty());
-        assert!(manifest
-            .routes
-            .iter()
-            .all(|route| route.render.strategy == RenderStrategy::Ssg));
+        assert!(
+            manifest
+                .routes
+                .iter()
+                .all(|route| route.render.strategy == RenderStrategy::Ssg)
+        );
     }
 
     #[test]

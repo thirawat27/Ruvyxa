@@ -16,8 +16,8 @@
 //!   rather than cloning large HTML/JS strings.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::sync::RwLock;
@@ -98,10 +98,10 @@ impl RenderCache {
 
         // Entry expired — remove it under write lock.
         let mut entries = self.entries.write().await;
-        if let Some(entry) = entries.get(key) {
-            if entry.created_at.elapsed() > self.ttl {
-                entries.remove(key);
-            }
+        if let Some(entry) = entries.get(key)
+            && entry.created_at.elapsed() > self.ttl
+        {
+            entries.remove(key);
         }
         self.misses.fetch_add(1, Ordering::Relaxed);
         None
@@ -110,11 +110,11 @@ impl RenderCache {
     /// Get a cached value as an `Arc<str>` (zero-copy for callers that can use it).
     pub async fn get_arc(&self, key: &str) -> Option<Arc<str>> {
         let entries = self.entries.read().await;
-        if let Some(entry) = entries.get(key) {
-            if entry.created_at.elapsed() <= self.ttl {
-                self.hits.fetch_add(1, Ordering::Relaxed);
-                return Some(Arc::clone(&entry.value));
-            }
+        if let Some(entry) = entries.get(key)
+            && entry.created_at.elapsed() <= self.ttl
+        {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+            return Some(Arc::clone(&entry.value));
         }
         self.misses.fetch_add(1, Ordering::Relaxed);
         None
@@ -126,10 +126,11 @@ impl RenderCache {
         let mut order = self.order.write().await;
 
         // O(1) FIFO eviction: pop one oldest entry if at capacity.
-        if entries.len() >= self.capacity && !entries.contains_key(&key) {
-            if let Some(oldest) = order.pop_front() {
-                entries.remove(&oldest);
-            }
+        if entries.len() >= self.capacity
+            && !entries.contains_key(&key)
+            && let Some(oldest) = order.pop_front()
+        {
+            entries.remove(&oldest);
         }
 
         entries.insert(

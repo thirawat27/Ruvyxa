@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use ruvyxa_bundler::ast::parse_module;
-use ruvyxa_bundler::resolver::{resolve_specifier, TsConfigPaths};
+use ruvyxa_bundler::resolver::{TsConfigPaths, resolve_specifier};
 use ruvyxa_diagnostics::{Diagnostic, Result, RuvyxaError};
 use walkdir::WalkDir;
 
@@ -66,10 +66,9 @@ pub fn collect_styles(root: &Path, app_dir: &Path, entries: &[PathBuf]) -> Resul
                 return Err(unsupported_preprocessor(&script, specifier));
             } else if let Some(resolved) =
                 resolve_script_import(&root, base_dir, specifier, &tsconfig)
+                && is_within_project(&root, &resolved)
             {
-                if is_within_project(&root, &resolved) {
-                    scripts.push_back(resolved);
-                }
+                scripts.push_back(resolved);
             }
         }
     }
@@ -222,10 +221,10 @@ fn resolve_style_import(root: &Path, base_dir: &Path, specifier: &str) -> Option
     } else if specifier.starts_with('/') {
         root.join(specifier.trim_start_matches('/'))
     } else {
-        if let Some(mapped) = TsConfigPaths::load(root).resolve(specifier) {
-            if mapped.is_file() {
-                return Some(canonical_or_original(mapped));
-            }
+        if let Some(mapped) = TsConfigPaths::load(root).resolve(specifier)
+            && mapped.is_file()
+        {
+            return Some(canonical_or_original(mapped));
         }
         let project_file = root.join(specifier);
         if project_file.is_file() {

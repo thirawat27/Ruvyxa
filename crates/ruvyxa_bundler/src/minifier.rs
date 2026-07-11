@@ -170,10 +170,11 @@ fn tree_shake(source: &str) -> String {
 
         // Track which module scope we're inside.
         // Module IIFEs start with: `var __ruv_xxx__ = (function() {`
-        if trimmed.starts_with("var __ruv_") && trimmed.contains("= (function()") {
-            if let Some(id) = extract_module_id_from_line(trimmed) {
-                current_module_id = Some(id);
-            }
+        if trimmed.starts_with("var __ruv_")
+            && trimmed.contains("= (function()")
+            && let Some(id) = extract_module_id_from_line(trimmed)
+        {
+            current_module_id = Some(id);
         }
 
         // End of module IIFE: `})();`
@@ -188,16 +189,16 @@ fn tree_shake(source: &str) -> String {
         }
 
         // Check if this is an export assignment we can remove.
-        if let Some(ref mod_id) = current_module_id {
-            if let Some(export_name) = extract_export_assignment(trimmed) {
-                let member_key = format!("{mod_id}.{export_name}");
-                if !used_members.contains(&member_key) && export_name != "default" {
-                    // This export is unused — remove the assignment line.
-                    out.push_str("  // [tree-shaken] ");
-                    out.push_str(trimmed);
-                    out.push('\n');
-                    continue;
-                }
+        if let Some(ref mod_id) = current_module_id
+            && let Some(export_name) = extract_export_assignment(trimmed)
+        {
+            let member_key = format!("{mod_id}.{export_name}");
+            if !used_members.contains(&member_key) && export_name != "default" {
+                // This export is unused — remove the assignment line.
+                out.push_str("  // [tree-shaken] ");
+                out.push_str(trimmed);
+                out.push('\n');
+                continue;
             }
         }
 

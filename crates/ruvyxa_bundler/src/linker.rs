@@ -315,7 +315,7 @@ pub fn compute_topo_layers(modules: &[CompiledModule]) -> Vec<Vec<&CompiledModul
         // Find all modules with in-degree 0 (no unresolved deps).
         let layer_paths: Vec<PathBuf> = remaining
             .iter()
-            .filter(|(_, &deg)| deg == 0)
+            .filter(|&(_, &deg)| deg == 0)
             .map(|(path, _)| path.clone())
             .collect();
 
@@ -949,11 +949,7 @@ fn extract_declaration_name(decl: &str) -> Option<String> {
         .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
         .collect();
 
-    if name.is_empty() {
-        None
-    } else {
-        Some(name)
-    }
+    if name.is_empty() { None } else { Some(name) }
 }
 
 /// Extract the variable name from `const name = …` / `let name = …` / `var name = …`.
@@ -969,11 +965,7 @@ fn extract_var_declaration_name(decl: &str) -> Option<String> {
         .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
         .collect();
 
-    if name.is_empty() {
-        None
-    } else {
-        Some(name)
-    }
+    if name.is_empty() { None } else { Some(name) }
 }
 
 #[cfg(test)]
@@ -1053,10 +1045,12 @@ mod tests {
     fn export_default_function() {
         let result = try_rewrite_export("export default function Page() {}", &[], &[]);
         assert!(result.as_ref().unwrap().contains("function Page() {}"));
-        assert!(result
-            .as_ref()
-            .unwrap()
-            .contains("__exports.default = Page;"));
+        assert!(
+            result
+                .as_ref()
+                .unwrap()
+                .contains("__exports.default = Page;")
+        );
     }
 
     #[test]

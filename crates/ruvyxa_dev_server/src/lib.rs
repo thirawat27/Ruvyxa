@@ -8,18 +8,18 @@ use std::process::Command;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use axum::body::{to_bytes, Body, Bytes};
+use axum::Router;
+use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::ws::{Message, WebSocketUpgrade};
 use axum::extract::{DefaultBodyLimit, Query, State};
-use axum::http::{header, HeaderMap, HeaderName, HeaderValue, Request, StatusCode};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Request, StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
-use axum::Router;
 use chrono::Local;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use ruvyxa_diagnostics::{Diagnostic, Result, RuvyxaError};
 use ruvyxa_graph::{
-    discover_routes, DiscoverOptions, RenderStrategy, RouteEntry, RouteKind, RouteManifest,
+    DiscoverOptions, RenderStrategy, RouteEntry, RouteKind, RouteManifest, discover_routes,
 };
 use ruvyxa_middleware::{MiddlewareConfig, MiddlewareStack};
 use serde::{Deserialize, Serialize};
@@ -41,7 +41,7 @@ mod hmr_tracker;
 pub use hmr_tracker::{HmrEventType, HmrTracker, HmrUpdate};
 
 mod style;
-pub use style::{collect_css, collect_styles, StyleCollection};
+pub use style::{StyleCollection, collect_css, collect_styles};
 
 const MAX_ACTION_BODY_BYTES: usize = 64 * 1024;
 const MAX_API_BODY_BYTES: usize = 1024 * 1024;
@@ -331,7 +331,8 @@ async fn bind_listener(
         let mut candidate = address;
         candidate.set_port(port);
 
-        match TcpListener::bind(candidate).await {
+        let bind_result = TcpListener::bind(candidate).await;
+        match bind_result {
             Ok(listener) => {
                 let bound_address = listener.local_addr().unwrap_or(candidate);
                 if offset > 0 {
@@ -481,7 +482,9 @@ fn unix_port_owner(port: u16) -> Option<String> {
 
 fn port_lookup_hint(port: u16) -> String {
     if cfg!(windows) {
-        format!("On Windows, inspect it with `Get-NetTCPConnection -LocalPort {port} | Select-Object OwningProcess`.")
+        format!(
+            "On Windows, inspect it with `Get-NetTCPConnection -LocalPort {port} | Select-Object OwningProcess`."
+        )
     } else {
         format!("On macOS/Linux, inspect it with `lsof -nP -iTCP:{port} -sTCP:LISTEN`.")
     }
@@ -819,11 +822,7 @@ fn current_timestamp() -> String {
 }
 
 fn enabled_text(enabled: bool) -> &'static str {
-    if enabled {
-        "on"
-    } else {
-        "off"
-    }
+    if enabled { "on" } else { "off" }
 }
 
 fn middleware_summary(config: &MiddlewareConfig) -> String {
@@ -1059,15 +1058,15 @@ async fn handle_request(
         None
     };
 
-    match render_request_pooled(
+    let render_result = render_request_pooled(
         &state,
         &request_path,
         &method,
         &headers,
         request_body.as_deref(),
     )
-    .await
-    {
+    .await;
+    match render_result {
         Ok(response) => response,
         Err(error) => {
             let is_dev = state.config.watch && state.config.error_overlay;
@@ -1302,10 +1301,10 @@ async fn render_page_ssg(
     styles: &str,
 ) -> Result<String> {
     // In production, try to serve the pre-rendered HTML file directly
-    if !state.config.watch {
-        if let Some(html) = serve_prerendered_html(&state.config.prerender_dir, request_path) {
-            return Ok(html);
-        }
+    if !state.config.watch
+        && let Some(html) = serve_prerendered_html(&state.config.prerender_dir, request_path)
+    {
+        return Ok(html);
     }
 
     let cache_key = format!("ssg:{}", render_cache::ssr_cache_key(request_path, params));
@@ -1375,16 +1374,16 @@ async fn render_page_isr(
     }
 
     // In production, try the pre-rendered HTML file
-    if !state.config.watch {
-        if let Some(html) = serve_prerendered_html(&state.config.prerender_dir, request_path) {
-            // Store in cache and schedule revalidation
-            state
-                .render_cache
-                .put(cache_key.clone(), html.clone())
-                .await;
-            spawn_isr_revalidation(state, route, request_path, params, styles, &cache_key);
-            return Ok(html);
-        }
+    if !state.config.watch
+        && let Some(html) = serve_prerendered_html(&state.config.prerender_dir, request_path)
+    {
+        // Store in cache and schedule revalidation
+        state
+            .render_cache
+            .put(cache_key.clone(), html.clone())
+            .await;
+        spawn_isr_revalidation(state, route, request_path, params, styles, &cache_key);
+        return Ok(html);
     }
 
     // No cached version — render synchronously (blocking fallback)
@@ -1497,10 +1496,10 @@ async fn render_page_csr(
     styles: &str,
 ) -> Result<String> {
     // In production, serve the pre-rendered CSR shell
-    if !state.config.watch {
-        if let Some(html) = serve_prerendered_html(&state.config.prerender_dir, request_path) {
-            return Ok(html);
-        }
+    if !state.config.watch
+        && let Some(html) = serve_prerendered_html(&state.config.prerender_dir, request_path)
+    {
+        return Ok(html);
     }
 
     let asset_links = public_asset_links(&state.config.public_dir);
@@ -1550,10 +1549,10 @@ async fn render_page_ppr(
     styles: &str,
 ) -> Result<String> {
     // In production, serve the pre-rendered PPR shell
-    if !state.config.watch {
-        if let Some(html) = serve_prerendered_html(&state.config.prerender_dir, request_path) {
-            return Ok(html);
-        }
+    if !state.config.watch
+        && let Some(html) = serve_prerendered_html(&state.config.prerender_dir, request_path)
+    {
+        return Ok(html);
     }
 
     let cache_key = format!("ppr:{}", render_cache::ssr_cache_key(request_path, params));
@@ -1735,12 +1734,13 @@ async fn render_api_pooled(
 
     if let Some(headers) = response.headers {
         for (name, value) in headers {
-            if let (Ok(name), Ok(value)) = (
-                HeaderName::from_bytes(name.as_bytes()),
-                HeaderValue::from_str(&value),
-            ) {
-                http_response.headers_mut().insert(name, value);
-            }
+            let Ok(name) = HeaderName::from_bytes(name.as_bytes()) else {
+                continue;
+            };
+            let Ok(value) = HeaderValue::from_str(&value) else {
+                continue;
+            };
+            http_response.headers_mut().insert(name, value);
         }
     }
 
@@ -1878,12 +1878,13 @@ async fn render_server_action_pooled(
 
     if let Some(headers) = response.headers {
         for (key, value) in headers {
-            if let (Ok(name), Ok(value)) = (
-                HeaderName::from_bytes(key.as_bytes()),
-                HeaderValue::from_str(&value),
-            ) {
-                http_response.headers_mut().insert(name, value);
-            }
+            let Ok(name) = HeaderName::from_bytes(key.as_bytes()) else {
+                continue;
+            };
+            let Ok(value) = HeaderValue::from_str(&value) else {
+                continue;
+            };
+            http_response.headers_mut().insert(name, value);
         }
     }
 
@@ -1945,21 +1946,19 @@ async fn serve_public_file(
     let etag = compute_etag(&bytes);
 
     // Check If-None-Match for conditional response
-    if let Some(headers) = request_headers {
-        if let Some(if_none_match) = headers.get(header::IF_NONE_MATCH) {
-            if let Ok(client_etag) = if_none_match.to_str() {
-                if client_etag.trim_matches('"') == etag.trim_matches('"') {
-                    let mut response = StatusCode::NOT_MODIFIED.into_response();
-                    if vary_accept {
-                        response
-                            .headers_mut()
-                            .insert(header::VARY, HeaderValue::from_static("Accept"));
-                    }
-                    apply_security_headers(&mut response);
-                    return Ok(Some(response));
-                }
-            }
+    if let Some(headers) = request_headers
+        && let Some(if_none_match) = headers.get(header::IF_NONE_MATCH)
+        && let Ok(client_etag) = if_none_match.to_str()
+        && client_etag.trim_matches('"') == etag.trim_matches('"')
+    {
+        let mut response = StatusCode::NOT_MODIFIED.into_response();
+        if vary_accept {
+            response
+                .headers_mut()
+                .insert(header::VARY, HeaderValue::from_static("Accept"));
         }
+        apply_security_headers(&mut response);
+        return Ok(Some(response));
     }
 
     let content_type = content_type_for(&file);
@@ -2091,16 +2090,14 @@ async fn serve_client_file(
     // Client bundles are content-hashed, so use immutable caching with ETag
     let etag = compute_etag(&bytes);
 
-    if let Some(headers) = request_headers {
-        if let Some(if_none_match) = headers.get(header::IF_NONE_MATCH) {
-            if let Ok(client_etag) = if_none_match.to_str() {
-                if client_etag.trim_matches('"') == etag.trim_matches('"') {
-                    let mut response = StatusCode::NOT_MODIFIED.into_response();
-                    apply_security_headers(&mut response);
-                    return Ok(Some(response));
-                }
-            }
-        }
+    if let Some(headers) = request_headers
+        && let Some(if_none_match) = headers.get(header::IF_NONE_MATCH)
+        && let Ok(client_etag) = if_none_match.to_str()
+        && client_etag.trim_matches('"') == etag.trim_matches('"')
+    {
+        let mut response = StatusCode::NOT_MODIFIED.into_response();
+        apply_security_headers(&mut response);
+        return Ok(Some(response));
     }
 
     let mut response = bytes.into_response();
@@ -2499,12 +2496,13 @@ fn render_api(
 
     if let Some(headers) = result.headers {
         for (name, value) in headers {
-            if let (Ok(name), Ok(value)) = (
-                HeaderName::from_bytes(name.as_bytes()),
-                HeaderValue::from_str(&value),
-            ) {
-                response.headers_mut().insert(name, value);
-            }
+            let Ok(name) = HeaderName::from_bytes(name.as_bytes()) else {
+                continue;
+            };
+            let Ok(value) = HeaderValue::from_str(&value) else {
+                continue;
+            };
+            response.headers_mut().insert(name, value);
         }
     }
 
@@ -2665,12 +2663,13 @@ fn render_server_action(
 
     if let Some(headers) = result.headers {
         for (key, value) in headers {
-            if let (Ok(name), Ok(value)) = (
-                HeaderName::from_bytes(key.as_bytes()),
-                HeaderValue::from_str(&value),
-            ) {
-                response.headers_mut().insert(name, value);
-            }
+            let Ok(name) = HeaderName::from_bytes(key.as_bytes()) else {
+                continue;
+            };
+            let Ok(value) = HeaderValue::from_str(&value) else {
+                continue;
+            };
+            response.headers_mut().insert(name, value);
         }
     }
 
@@ -3819,11 +3818,13 @@ mod tests {
         assert_eq!(diagnostic.code, "RUV1201");
         assert!(diagnostic.explanation.contains("localhost:3000"));
         assert!(diagnostic.explanation.contains("3100"));
-        assert!(diagnostic
-            .suggested_fix
-            .as_deref()
-            .unwrap()
-            .contains("3000-3100"));
+        assert!(
+            diagnostic
+                .suggested_fix
+                .as_deref()
+                .unwrap()
+                .contains("3000-3100")
+        );
     }
 
     #[test]

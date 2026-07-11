@@ -9,7 +9,7 @@ use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Instant;
 
-use axum::http::{header, HeaderName, HeaderValue, Request, Response, StatusCode};
+use axum::http::{HeaderName, HeaderValue, Request, Response, StatusCode, header};
 use tower::{Layer, Service};
 use tracing::info;
 
@@ -315,20 +315,20 @@ fn apply_cors_headers<B>(
     max_age: &str,
 ) {
     let h = response.headers_mut();
-    if let Some(origin) = origin {
-        if let Ok(value) = HeaderValue::from_str(origin) {
-            h.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, value);
-        }
+    if let Some(origin) = origin
+        && let Ok(value) = HeaderValue::from_str(origin)
+    {
+        h.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, value);
     }
-    if !methods.is_empty() {
-        if let Ok(value) = HeaderValue::from_str(methods) {
-            h.insert(header::ACCESS_CONTROL_ALLOW_METHODS, value);
-        }
+    if !methods.is_empty()
+        && let Ok(value) = HeaderValue::from_str(methods)
+    {
+        h.insert(header::ACCESS_CONTROL_ALLOW_METHODS, value);
     }
-    if !headers_str.is_empty() {
-        if let Ok(value) = HeaderValue::from_str(headers_str) {
-            h.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, value);
-        }
+    if !headers_str.is_empty()
+        && let Ok(value) = HeaderValue::from_str(headers_str)
+    {
+        h.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, value);
     }
     if credentials {
         h.insert(

@@ -58,8 +58,8 @@ use serde::{Deserialize, Serialize};
 use tokio::sync::RwLock;
 use tracing::{error, info};
 use wasmtime::*;
-use wasmtime_wasi::p1::WasiP1Ctx;
 use wasmtime_wasi::WasiCtxBuilder;
+use wasmtime_wasi::p1::WasiP1Ctx;
 
 use crate::config::{PluginConfig, PluginPermissions, PluginPhase};
 

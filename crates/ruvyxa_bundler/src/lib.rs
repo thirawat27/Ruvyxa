@@ -66,7 +66,8 @@ pub fn bundle(input: BundleInput) -> Result<BundleOutput> {
 /// Bundle a single route using a caller-provided compile cache.
 pub fn bundle_with_cache(input: BundleInput, cache: &CompileCache) -> Result<BundleOutput> {
     let graph_cache = ResolveGraphCache::new();
-    bundle_with_parts(input, cache, &graph_cache, &PluginPipeline::empty())
+    let plugins = PluginPipeline::empty();
+    bundle_with_parts(input, cache, &graph_cache, &plugins)
 }
 
 /// Bundle a single route using shared batch context.

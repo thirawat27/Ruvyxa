@@ -12,17 +12,17 @@ use anyhow::Context;
 use chrono::Local;
 use clap::builder::styling::{AnsiColor, Effects, Styles};
 use clap::{Parser, Subcommand, ValueEnum};
-use ruvyxa_dev_server::{render_request, serve, ServerConfig};
+use ruvyxa_dev_server::{ServerConfig, render_request, serve};
 use ruvyxa_diagnostics::Diagnostic;
 use ruvyxa_graph::{
-    discover_routes, validate_app, write_manifest, DiscoverOptions, RenderStrategy, RouteEntry,
-    RouteManifest,
+    DiscoverOptions, RenderStrategy, RouteEntry, RouteManifest, discover_routes, validate_app,
+    write_manifest,
 };
 use tracing::info;
 use walkdir::WalkDir;
 
 mod image_optimizer;
-use image_optimizer::{optimize_public_images, ImageOptimizationOptions};
+use image_optimizer::{ImageOptimizationOptions, optimize_public_images};
 
 const ASSET_HASH_ALGORITHM: &str = "blake3-256";
 
@@ -349,10 +349,10 @@ fn normalized_cli_args(args: impl IntoIterator<Item = OsString>) -> Vec<OsString
     if let Some(command_index) = first_command_arg_index(&args) {
         normalize_command_arg(&mut args, command_index);
 
-        if args[command_index] == "help" {
-            if let Some(help_target_index) = first_command_arg_index(&args[command_index..]) {
-                normalize_command_arg(&mut args, command_index + help_target_index);
-            }
+        if args[command_index] == "help"
+            && let Some(help_target_index) = first_command_arg_index(&args[command_index..])
+        {
+            normalize_command_arg(&mut args, command_index + help_target_index);
         }
     }
 
@@ -1200,17 +1200,16 @@ fn inject_prerender_client_assets(
         assets.src
     );
     let lower = html.to_ascii_lowercase();
-    if let (Some(head_end), Some(body_end)) = (lower.find("</head>"), lower.rfind("</body>")) {
-        if head_end <= body_end {
-            let mut output =
-                String::with_capacity(html.len() + preload_links.len() + scripts.len());
-            output.push_str(&html[..head_end]);
-            output.push_str(&preload_links);
-            output.push_str(&html[head_end..body_end]);
-            output.push_str(&scripts);
-            output.push_str(&html[body_end..]);
-            return output;
-        }
+    if let (Some(head_end), Some(body_end)) = (lower.find("</head>"), lower.rfind("</body>"))
+        && head_end <= body_end
+    {
+        let mut output = String::with_capacity(html.len() + preload_links.len() + scripts.len());
+        output.push_str(&html[..head_end]);
+        output.push_str(&preload_links);
+        output.push_str(&html[head_end..body_end]);
+        output.push_str(&scripts);
+        output.push_str(&html[body_end..]);
+        return output;
     }
 
     format!("<!doctype html><html><head>{preload_links}</head><body>{html}{scripts}</body></html>")
@@ -3110,10 +3109,10 @@ fn duplicate_dependencies(package: &serde_json::Value) -> Vec<String> {
 
         for (name, version) in deps {
             let version = version.as_str().unwrap_or("unknown").to_string();
-            if let Some(previous) = seen.insert(name.clone(), version.clone()) {
-                if previous != version {
-                    duplicates.push(format!("{name} ({previous}, {version})"));
-                }
+            if let Some(previous) = seen.insert(name.clone(), version.clone())
+                && previous != version
+            {
+                duplicates.push(format!("{name} ({previous}, {version})"));
             }
         }
     }
@@ -3267,9 +3266,11 @@ mod tests {
             "unsupportedTopLevel": true
         }))
         .unwrap_err();
-        assert!(error
-            .to_string()
-            .contains("unknown field `unsupportedTopLevel`"));
+        assert!(
+            error
+                .to_string()
+                .contains("unknown field `unsupportedTopLevel`")
+        );
     }
 
     #[test]
@@ -3430,10 +3431,12 @@ mod tests {
 
         let manifest = shared_route_chunk_manifest(&chunks[0]);
         assert_eq!(manifest["routes"].as_array().unwrap().len(), 2);
-        assert!(manifest["src"]
-            .as_str()
-            .unwrap()
-            .starts_with("/__ruvyxa/client/shared."));
+        assert!(
+            manifest["src"]
+                .as_str()
+                .unwrap()
+                .starts_with("/__ruvyxa/client/shared.")
+        );
     }
 
     #[test]
@@ -3479,10 +3482,12 @@ mod tests {
 
         for route in client_manifest["routes"].as_array().unwrap() {
             assert_eq!(route["sharedChunks"].as_array().unwrap().len(), 1);
-            assert!(route["sharedChunks"][0]["src"]
-                .as_str()
-                .unwrap()
-                .starts_with("/__ruvyxa/client/shared."));
+            assert!(
+                route["sharedChunks"][0]["src"]
+                    .as_str()
+                    .unwrap()
+                    .starts_with("/__ruvyxa/client/shared.")
+            );
         }
     }
 
@@ -3600,11 +3605,13 @@ export default defineConfig({
             &std::fs::read_to_string(client_dir.join(source_map_file)).unwrap(),
         )
         .unwrap();
-        assert!(source_map["sources"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|source| source.as_str() == Some("plugin-original.tsx")));
+        assert!(
+            source_map["sources"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|source| source.as_str() == Some("plugin-original.tsx"))
+        );
     }
 
     #[test]

@@ -6,9 +6,9 @@
 
 use std::path::Path;
 
-use markdown::mdast::{AttributeContent, AttributeValue, Node};
 use markdown::ParseOptions;
-use serde_json::{json, Map, Value};
+use markdown::mdast::{AttributeContent, AttributeValue, Node};
+use serde_json::{Map, Value, json};
 
 /// Compile a `.md` or `.mdx` document into a React ESM page module.
 pub fn compile_content_module(source: &str, path: &Path) -> Result<String, String> {
@@ -165,10 +165,10 @@ fn parse_frontmatter_value(value: &str) -> Value {
     if let Ok(number) = value.parse::<i64>() {
         return Value::Number(number.into());
     }
-    if let Ok(number) = value.parse::<f64>() {
-        if let Some(number) = serde_json::Number::from_f64(number) {
-            return Value::Number(number);
-        }
+    if let Ok(number) = value.parse::<f64>()
+        && let Some(number) = serde_json::Number::from_f64(number)
+    {
+        return Value::Number(number);
     }
     if let Some(items) = value
         .strip_prefix('[')
