@@ -1,6 +1,16 @@
+import { Image } from '@ruvyxa/react'
+
 export default function Home() {
   return (
     <main className="page-wide">
+      <Image
+        className="logo"
+        src="/ruvyxa.png"
+        alt="Ruvyxa fox logo"
+        width={120}
+        height={120}
+        priority
+      />
       <h1>Ruvyxa Demo</h1>
       <p>Comprehensive example app demonstrating every Ruvyxa framework feature.</p>
 

@@ -22,6 +22,9 @@ importers:
       '@ruvyxa/core':
         specifier: workspace:*
         version: link:../../packages/@ruvyxa/core
+      '@ruvyxa/react':
+        specifier: workspace:*
+        version: link:../../packages/@ruvyxa/react
       react:
         specifier: ^19.2.7
         version: 19.2.7
