@@ -899,7 +899,7 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
     Ok(())
 }
 
-#[allow(dead_code)]
+#[allow(dead_code, clippy::too_many_arguments)]
 fn print_build_report(
     manifest: &RouteManifest,
     client_manifest: &serde_json::Value,
