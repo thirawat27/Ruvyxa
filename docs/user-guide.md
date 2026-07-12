@@ -253,7 +253,8 @@ A progressively enhanced HTML form can submit to the built-in action endpoint:
 The endpoint accepts JSON and URL-encoded form data. Its defaults are a 1 MiB body limit,
 same-origin protection, Fetch Metadata protection, and a limit of 600 requests per client/action per
 60 seconds. Configure these values under `security` only after understanding the impact on abuse
-protection.
+protection. Behind an HTTPS reverse proxy, forward the original scheme with `X-Forwarded-Proto` so
+the origin check can distinguish `https` from `http` correctly.
 
 ## 8. Rendering strategies
 
@@ -286,6 +287,10 @@ export default function Article({ params }: PageProps<{ slug: string }>) {
   return <article>{params.slug}</article>
 }
 ```
+
+Each entry must be an object with string values for every dynamic segment. Values cannot contain
+path traversal, query, or fragment characters; this keeps generated output inside
+`.ruvyxa/prerender`.
 
 ### Incremental regeneration
 

@@ -8,7 +8,7 @@ This crate provides:
 
 - **Built-in middleware** — composable Tower layers for CORS, rate-limiting, request timing, logging, and custom response headers.
 - **Middleware stack builder** — compiles `MiddlewareConfig` into axum-compatible layer stacks.
-- **Wasm plugin runtime** — sandboxed WebAssembly plugin execution via Wasmtime 46 with hot-reload support.
+- **Wasm plugin runtime** — sandboxed WebAssembly request/response plugin execution via Wasmtime 46.
 
 ## Built-in Middleware
 
@@ -28,10 +28,9 @@ Each plugin runs in an isolated Wasmtime `Store`:
 
 - **Fuel-based execution limits** — prevents infinite loops
 - **Memory bounds** — configurable max memory (default 64MB)
-- **No filesystem access** unless explicitly granted via `allow.read`
-- **No network access** unless explicitly granted via `allow.net`
+- **No filesystem or network access** — non-empty `allow.read` and `allow.net` values are rejected
+  until the runtime supports those capabilities
 - **No environment access** unless explicitly granted via `allow.env`
-- **Hot-reload** — `.wasm` changes reload without server restart (dev mode)
 
 ## Plugin Phases
 
@@ -46,7 +45,6 @@ Each plugin runs in an isolated Wasmtime `Store`:
 | `RUV2001` | Middleware execution failed |
 | `RUV2100` | Wasm plugin load error |
 | `RUV2101` | Wasm plugin execution error |
-| `RUV2102` | Wasm plugin hot-reload error |
 
 ## Feature Flags
 

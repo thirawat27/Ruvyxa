@@ -46,8 +46,8 @@
 - **Gzip + Brotli compression** — all responses compressed automatically via tower-http middleware.
 - **Tower-based middleware** — composable CORS, timing, logging, rate limiting, and custom headers
   via `ruvyxa.config.ts`.
-- **Wasm plugin runtime** — sandboxed WebAssembly plugins powered by Wasmtime with hot-reload,
-  configurable `allow` rules, execution timeouts, and memory limits.
+- **Wasm plugin runtime** — sandboxed WebAssembly request/response plugins powered by Wasmtime with
+  explicit environment access, execution timeouts, and memory limits.
 - **Parallel production bundling** — page client bundles are emitted concurrently via scoped threads
   and written back in deterministic route order.
 - **Honest checks** — `ruvyxa check` runs type checking, build validation, dev/prod parity, and page
@@ -229,13 +229,10 @@ export default config({
         name: 'auth-guard',
         path: 'plugins/auth-guard.wasm',
         phase: 'request',
-        hot: true,
         routes: ['/api/*'],
         config: { apiKeyHeader: 'X-Api-Key' },
         allow: {
           env: ['AUTH_SECRET'],
-          read: ['./content'],
-          net: ['api.example.com'],
           timeout: 5000,
           memory: 67108864,
         },
@@ -251,9 +248,11 @@ middleware. The `wasm-plugins` feature is optional (requires `wasmtime` / `wasmt
 **Security model for Wasm plugins:**
 
 - Each plugin runs in its own Wasmtime `Store` with fuel-based execution limits
-- No filesystem, network, or environment access unless explicitly granted via `allow`
+- Environment access is limited to the explicit `allow.env` list
+- Filesystem and network permissions are not available yet; non-empty `allow.read` or `allow.net`
+  are rejected at startup rather than silently ignored
 - Memory-bounded execution prevents resource exhaustion
-- Hot-reload on `.wasm` file change without server restart
+- Request and response phase plugins run in the server request lifecycle
 
 ---
 
@@ -329,7 +328,6 @@ export default config({
         name: 'auth-guard',
         path: 'plugins/auth.wasm',
         phase: 'request',
-        hot: true,
         routes: ['/api/*'],
         config: {},
         allow: {

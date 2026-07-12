@@ -67,7 +67,8 @@ export const createPost = action
 
 ### Cache utility
 
-The `cache()` function provides real in-memory TTL caching with LRU eviction and stale-while-revalidate:
+The `cache()` function provides real in-memory TTL caching with LRU eviction and
+stale-while-revalidate:
 
 ```ts
 import { cache, cacheStats, invalidateCache } from '@ruvyxa/core/server'

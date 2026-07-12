@@ -131,6 +131,14 @@ impl MiddlewareStack {
             ));
         }
 
+        for (name, value) in &self.config.builtin.headers {
+            if axum::http::HeaderName::from_bytes(name.as_bytes()).is_err()
+                || axum::http::HeaderValue::from_str(value).is_err()
+            {
+                return Err(format!("Invalid custom response header '{name}'"));
+            }
+        }
+
         // Reject plugins when wasm feature is disabled
         #[cfg(not(feature = "wasm-plugins"))]
         if !self.config.plugins.is_empty() {
@@ -155,6 +163,12 @@ impl MiddlewareStack {
                 return Err(format!(
                     "Plugin '{}' has max memory set to 0. Set a positive memory limit.",
                     plugin.name,
+                ));
+            }
+            if !plugin.permissions.fs_read.is_empty() || !plugin.permissions.net.is_empty() {
+                return Err(format!(
+                    "Plugin '{}' requests filesystem or network permissions, which this runtime does not expose yet.",
+                    plugin.name
                 ));
             }
         }
@@ -185,5 +199,22 @@ impl MiddlewareStack {
             count += 1;
         }
         count
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::LayerConfig;
+
+    #[test]
+    fn rejects_unsupported_custom_layers_before_server_startup() {
+        let mut config = MiddlewareConfig::default();
+        config.layers.push(LayerConfig {
+            kind: "auth".to_string(),
+            options: serde_json::Value::Null,
+        });
+
+        assert!(MiddlewareStack::new(config).validate().is_err());
     }
 }

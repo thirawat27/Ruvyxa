@@ -171,7 +171,6 @@ export interface LayerConfig {
 export interface MiddlewarePluginConfig {
   name: string
   path: string
-  hot?: boolean
   phase?: 'request' | 'response'
   routes?: string[]
   config?: unknown
@@ -180,7 +179,9 @@ export interface MiddlewarePluginConfig {
 
 export interface PluginPermissions {
   env?: string[]
+  /** Reserved: non-empty values are rejected until filesystem permissions are implemented. */
   read?: string[]
+  /** Reserved: non-empty values are rejected until network permissions are implemented. */
   net?: string[]
   timeout?: number
   memory?: number

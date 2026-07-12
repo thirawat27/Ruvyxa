@@ -136,7 +136,6 @@ async function sanitizeConfig(config) {
       assertKnownKeys(plugin, `config.middleware.plugins[${index}]`, [
         'name',
         'path',
-        'hot',
         'phase',
         'routes',
         'config',

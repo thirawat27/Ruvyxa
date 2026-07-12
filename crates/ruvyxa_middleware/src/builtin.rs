@@ -17,6 +17,8 @@ use tracing::info;
 
 use crate::config::RateLimitConfig;
 
+const MAX_TRACKED_RATE_LIMIT_KEYS: usize = 10_000;
+
 // ─── Timing Layer ──────────────────────────────────────────────────────────────
 
 /// Adds `X-Response-Time` header to all responses.
@@ -323,6 +325,7 @@ fn apply_cors_headers<B>(
         && let Ok(value) = HeaderValue::from_str(origin)
     {
         h.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, value);
+        append_vary_origin(h);
     }
     if !methods.is_empty()
         && let Ok(value) = HeaderValue::from_str(methods)
@@ -342,6 +345,23 @@ fn apply_cors_headers<B>(
     }
     if let Ok(value) = HeaderValue::from_str(max_age) {
         h.insert(header::ACCESS_CONTROL_MAX_AGE, value);
+    }
+}
+
+fn append_vary_origin(headers: &mut axum::http::HeaderMap) {
+    let mut values = headers
+        .get(header::VARY)
+        .and_then(|value| value.to_str().ok())
+        .map(|value| value.split(',').map(str::trim).collect::<Vec<_>>())
+        .unwrap_or_default();
+    if !values
+        .iter()
+        .any(|value| value.eq_ignore_ascii_case("origin"))
+    {
+        values.push("Origin");
+    }
+    if let Ok(value) = HeaderValue::from_str(&values.join(", ")) {
+        headers.insert(header::VARY, value);
     }
 }
 
@@ -399,6 +419,10 @@ impl RateLimitLayer {
     fn allow(&self, key: &str) -> bool {
         let mut state = self.state.lock().expect("rate limiter mutex poisoned");
         let now = Instant::now();
+        state.retain(|_, bucket| now.duration_since(bucket.last_refill) < self.window);
+        if !state.contains_key(key) && state.len() >= MAX_TRACKED_RATE_LIMIT_KEYS {
+            return false;
+        }
         let bucket = state.entry(key.to_string()).or_insert(RateBucket {
             tokens: self.max_requests,
             last_refill: now,
@@ -417,6 +441,19 @@ impl RateLimitLayer {
         } else {
             false
         }
+    }
+
+    fn retry_after_seconds(&self, key: &str) -> u64 {
+        let state = self.state.lock().expect("rate limiter mutex poisoned");
+        state
+            .get(key)
+            .map(|bucket| {
+                self.window
+                    .saturating_sub(bucket.last_refill.elapsed())
+                    .as_secs()
+                    .max(1)
+            })
+            .unwrap_or(1)
     }
 }
 
@@ -483,6 +520,7 @@ where
     fn call(&mut self, request: Request<Body>) -> Self::Future {
         let key = RateLimitLayer::extract_key(&request, &self.key_by);
         let allowed = self.limiter.allow(&key);
+        let retry_after = (!allowed).then(|| self.limiter.retry_after_seconds(&key));
         let mut inner = self.inner.clone();
 
         Box::pin(async move {
@@ -490,7 +528,7 @@ where
                 let response = Response::builder()
                     .status(StatusCode::TOO_MANY_REQUESTS)
                     .header("content-type", "text/plain; charset=utf-8")
-                    .header("retry-after", "60")
+                    .header("retry-after", retry_after.unwrap_or(1).to_string())
                     .body(Body::from("Rate limit exceeded"))
                     .unwrap();
                 return Ok(response);

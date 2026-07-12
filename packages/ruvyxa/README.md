@@ -115,7 +115,6 @@ export default config({
         name: 'auth-guard',
         path: 'plugins/auth.wasm',
         phase: 'request',
-        hot: true,
         routes: ['/api/*'],
         allow: {
           env: ['AUTH_SECRET'],

@@ -10,9 +10,9 @@
 //! - **Tower Layer stack**: Middleware is applied as standard Tower layers, composable
 //!   with any axum/tower ecosystem middleware.
 //! - **Wasm Plugin Runtime** (feature `wasm-plugins`): Load `.wasm` modules as
-//!   sandboxed plugins that can intercept requests/responses. Hot-reloadable via
-//!   file watcher. Provides maximum security isolation (no filesystem, no network
-//!   unless explicitly granted).
+//!   sandboxed plugins that can intercept requests/responses. Provides maximum
+//!   security isolation: filesystem and network permissions are rejected until
+//!   the runtime supports them, while environment access is explicit.
 //!
 //! ## Diagnostic Codes
 //!
@@ -20,7 +20,6 @@
 //! - `RUV2001`: Middleware execution failed
 //! - `RUV2100`: Wasm plugin load error
 //! - `RUV2101`: Wasm plugin execution error
-//! - `RUV2102`: Wasm plugin hot-reload error
 
 pub mod builtin;
 pub mod config;
@@ -33,4 +32,4 @@ pub use config::MiddlewareConfig;
 pub use stack::MiddlewareStack;
 
 #[cfg(feature = "wasm-plugins")]
-pub use wasm::WasmPluginRuntime;
+pub use wasm::{PluginRequest, PluginResponse, PluginResult, WasmPluginRuntime};

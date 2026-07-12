@@ -868,7 +868,6 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
             .and_then(|routes| routes.as_array())
             .map(Vec::len)
             .unwrap_or_default();
-
         print_tui_header("Build");
         print_field("status", ok_text("built"));
         print_field("target", accent(format!("{:?}", target).to_lowercase()));
@@ -900,6 +899,189 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
     Ok(())
 }
 
+#[allow(dead_code)]
+fn print_build_report(
+    manifest: &RouteManifest,
+    client_manifest: &serde_json::Value,
+    prerendered: &[PrerenderedRoute],
+    image_report: &image_optimizer::ImageOptimizationReport,
+    asset_files: usize,
+    target: BuildTarget,
+    out_dir: &Path,
+    duration: Duration,
+) {
+    let page_routes = manifest
+        .routes
+        .iter()
+        .filter(|route| route.kind == ruvyxa_graph::RouteKind::Page)
+        .collect::<Vec<_>>();
+    let client_routes = client_manifest
+        .get("routes")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+    let shared_chunks = client_manifest
+        .get("sharedRouteChunks")
+        .and_then(serde_json::Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or_default();
+
+    println!("\n   {} Ruvyxa {}", accent("▲"), env!("CARGO_PKG_VERSION"));
+    println!("\n   Creating an optimized production build ...");
+    println!(
+        " {} Compiled and validated {} routes",
+        success(),
+        manifest.routes.len()
+    );
+    println!(
+        " {} Generated {} pre-rendered page{}",
+        success(),
+        prerendered.len(),
+        if prerendered.len() == 1 { "" } else { "s" }
+    );
+    println!(
+        " {} Emitted {} client bundle{} and {} asset file{}",
+        success(),
+        client_routes.len(),
+        if client_routes.len() == 1 { "" } else { "s" },
+        asset_files,
+        if asset_files == 1 { "" } else { "s" }
+    );
+    if image_report.optimized_images > 0 {
+        println!(
+            " {} Optimized {} image{} ({} cache hit{})",
+            success(),
+            image_report.optimized_images,
+            if image_report.optimized_images == 1 {
+                ""
+            } else {
+                "s"
+            },
+            image_report.cache_hits,
+            if image_report.cache_hits == 1 {
+                ""
+            } else {
+                "s"
+            }
+        );
+    }
+
+    println!();
+    println!(
+        "Route (app){}Size{}First Load JS",
+        spaces(39, "Route (app)".len()),
+        spaces(16, "Size".len())
+    );
+    for (index, route) in page_routes.iter().enumerate() {
+        let client_route = client_routes.iter().find(|entry| {
+            entry.get("path").and_then(serde_json::Value::as_str) == Some(route.path.as_str())
+        });
+        let route_bytes = client_route.map(manifest_entry_bytes).unwrap_or_default();
+        let first_load_bytes = client_route.map(first_load_bytes).unwrap_or_default();
+        let branch = if index + 1 == page_routes.len() {
+            "└"
+        } else {
+            "├"
+        };
+        let symbol = route_render_symbol(route.render.strategy);
+        println!(
+            "{branch} {symbol} {}{}{}{}{}",
+            route.path,
+            spaces(39, route.path.len()),
+            format_bytes(route_bytes),
+            spaces(16, format_bytes(route_bytes).len()),
+            format_bytes(first_load_bytes),
+        );
+    }
+
+    let shared_bytes = shared_chunks
+        .iter()
+        .map(manifest_entry_bytes)
+        .sum::<usize>();
+    println!(
+        "+ First Load JS shared by all{}{}",
+        spaces(39, "First Load JS shared by all".len()),
+        format_bytes(shared_bytes)
+    );
+    for (index, chunk) in shared_chunks.iter().enumerate() {
+        let file = chunk
+            .get("file")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("shared chunk");
+        let branch = if index + 1 == shared_chunks.len() {
+            "└"
+        } else {
+            "├"
+        };
+        println!(
+            "  {branch} {file}{}{}",
+            spaces(47, file.len()),
+            format_bytes(manifest_entry_bytes(chunk))
+        );
+    }
+
+    println!("\n○  (CSR)      client-rendered");
+    println!("●  (Static)   pre-rendered at build time");
+    println!("◐  (ISR/PPR)  pre-rendered with revalidation or streamed slots");
+    println!("ƒ  (Dynamic)  server-rendered on demand");
+    println!(
+        "\n {} Built {} output for {} in {}\n",
+        success(),
+        path_text(out_dir),
+        accent(format!("{:?}", target).to_lowercase()),
+        accent(format_duration(duration))
+    );
+}
+
+fn manifest_entry_bytes(entry: &serde_json::Value) -> usize {
+    entry
+        .get("bytes")
+        .and_then(serde_json::Value::as_u64)
+        .and_then(|bytes| usize::try_from(bytes).ok())
+        .unwrap_or_default()
+}
+
+fn first_load_bytes(entry: &serde_json::Value) -> usize {
+    let mut files = BTreeSet::new();
+    let mut total = 0;
+    add_manifest_entry_bytes(entry, &mut files, &mut total);
+    for section in ["chunks", "sharedChunks"] {
+        for chunk in entry
+            .get(section)
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            add_manifest_entry_bytes(chunk, &mut files, &mut total);
+        }
+    }
+    total
+}
+
+fn add_manifest_entry_bytes(
+    entry: &serde_json::Value,
+    files: &mut BTreeSet<String>,
+    total: &mut usize,
+) {
+    let should_count = entry
+        .get("file")
+        .and_then(serde_json::Value::as_str)
+        .map(|file| files.insert(file.to_string()))
+        .unwrap_or(true);
+    if should_count {
+        *total += manifest_entry_bytes(entry);
+    }
+}
+
+fn route_render_symbol(strategy: RenderStrategy) -> &'static str {
+    match strategy {
+        RenderStrategy::Csr => "○",
+        RenderStrategy::Ssg => "●",
+        RenderStrategy::Isr | RenderStrategy::Ppr => "◐",
+        RenderStrategy::Ssr => "ƒ",
+    }
+}
+
 const BUILD_OUTPUT_DIRS: [&str; 4] = ["server", "client", "assets", "prerender"];
 const BUILD_OUTPUT_FILES: [&str; 2] = ["manifest.json", "build.json"];
 const MAX_PRERENDER_PARALLELISM: usize = 2;
@@ -927,6 +1109,7 @@ enum PrerenderJobKind {
 struct PrerenderJob {
     route_path: String,
     render_path: String,
+    params: BTreeMap<String, String>,
     strategy: RenderStrategy,
     revalidate: Option<u64>,
     kind: PrerenderJobKind,
@@ -991,6 +1174,7 @@ fn prerender_static_routes(
                 jobs.push(PrerenderJob {
                     route_path: route.path.clone(),
                     render_path: route.path.clone(),
+                    params: BTreeMap::new(),
                     strategy: RenderStrategy::Csr,
                     revalidate: None,
                     kind: PrerenderJobKind::Csr,
@@ -998,13 +1182,16 @@ fn prerender_static_routes(
             }
             RenderStrategy::Ssg | RenderStrategy::Isr | RenderStrategy::Ppr => {
                 // For dynamic routes with getStaticParams, resolve static paths first
-                let paths_to_render = if route.render.has_static_params && route.path.contains(':')
-                    || route.path.contains('*')
+                let paths_to_render = if route.render.has_static_params
+                    && (route.path.contains(':') || route.path.contains('*'))
                 {
                     resolve_static_params(root, app_dir, route, &renderer_script)?
                 } else if !route.path.contains(':') && !route.path.contains('*') {
                     // Pure static route — render the single path
-                    vec![route.path.clone()]
+                    vec![StaticRouteParams {
+                        path: route.path.clone(),
+                        params: BTreeMap::new(),
+                    }]
                 } else {
                     // Dynamic route without getStaticParams — skip (will be rendered at request time)
                     continue;
@@ -1014,10 +1201,11 @@ fn prerender_static_routes(
                     RenderStrategy::Ppr => "ppr",
                     _ => "full",
                 };
-                for render_path in paths_to_render {
+                for static_route in paths_to_render {
                     jobs.push(PrerenderJob {
                         route_path: route.path.clone(),
-                        render_path,
+                        render_path: static_route.path,
+                        params: static_route.params,
                         strategy: route.render.strategy,
                         revalidate: route.render.revalidate,
                         kind: PrerenderJobKind::Render {
@@ -1125,6 +1313,7 @@ fn render_prerender_job(
                 .arg(route_file)
                 .arg(&job.render_path)
                 .arg(mode)
+                .arg(serde_json::to_string(&job.params)?)
                 .output()
                 .with_context(|| format!("SSG renderer failed for route {}", job.render_path))?;
 
@@ -1157,7 +1346,13 @@ fn render_prerender_job(
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
             let html = inject_prerender_styles(html, styles);
-            inject_prerender_client_assets(&html, client_dir, &job.route_path, &job.render_path)
+            inject_prerender_client_assets(
+                &html,
+                client_dir,
+                &job.route_path,
+                &job.render_path,
+                &job.params,
+            )
         }
     };
 
@@ -1172,12 +1367,18 @@ fn render_prerender_job(
 
 /// Resolve static params for a dynamic SSG route by calling getStaticParams
 /// via the SSG renderer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct StaticRouteParams {
+    path: String,
+    params: BTreeMap<String, String>,
+}
+
 fn resolve_static_params(
     root: &Path,
     app_dir: &Path,
     route: &RouteEntry,
     renderer_script: &Path,
-) -> anyhow::Result<Vec<String>> {
+) -> anyhow::Result<Vec<StaticRouteParams>> {
     let output = ProcessCommand::new("node")
         .arg(renderer_script)
         .arg(root)
@@ -1210,31 +1411,88 @@ fn resolve_static_params(
         .cloned()
         .unwrap_or_default();
 
-    // Convert param objects to actual URL paths using the route pattern
-    let paths = params_list
+    params_list
         .iter()
-        .filter_map(|params| {
-            let params = params.as_object()?;
-            let mut path = route.path.clone();
-            for (key, value) in params {
-                let value_str = value.as_str().unwrap_or_default();
-                // Replace :param with value
-                path = path.replace(&format!(":{key}"), value_str);
-                // Replace *param (catch-all) with value
-                path = path.replace(&format!("*{key}"), value_str);
-            }
-            // Remove any optional catch-all markers
-            path = path.replace('?', "");
-            Some(path)
+        .enumerate()
+        .map(|(index, value)| {
+            let params = value.as_object().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "getStaticParams for {} returned item {index}, which is not an object",
+                    route.path
+                )
+            })?;
+            let params = params
+                .iter()
+                .map(|(key, value)| {
+                    let value = value.as_str().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "getStaticParams for {} returned a non-string value for '{key}'",
+                            route.path
+                        )
+                    })?;
+                    Ok((key.clone(), value.to_string()))
+                })
+                .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
+            Ok(StaticRouteParams {
+                path: static_route_path(&route.path, &params)?,
+                params,
+            })
         })
-        .collect();
+        .collect()
+}
 
-    Ok(paths)
+fn static_route_path(
+    route_path: &str,
+    params: &BTreeMap<String, String>,
+) -> anyhow::Result<String> {
+    let mut segments = Vec::new();
+    for segment in route_path
+        .trim_matches('/')
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+    {
+        if let Some(name) = segment.strip_prefix(':') {
+            let value = params.get(name).ok_or_else(|| {
+                anyhow::anyhow!("getStaticParams is missing '{name}' for route {route_path}")
+            })?;
+            validate_static_path_segment(value, name, route_path)?;
+            segments.push(value.clone());
+        } else if let Some(name) = segment.strip_prefix('*') {
+            let optional = name.ends_with('?');
+            let name = name.trim_end_matches('?');
+            let Some(value) = params.get(name) else {
+                if optional {
+                    continue;
+                }
+                anyhow::bail!("getStaticParams is missing '{name}' for route {route_path}");
+            };
+            for value_segment in value.split('/') {
+                validate_static_path_segment(value_segment, name, route_path)?;
+                segments.push(value_segment.to_string());
+            }
+        } else {
+            segments.push(segment.to_string());
+        }
+    }
+    Ok(if segments.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", segments.join("/"))
+    })
+}
+
+fn validate_static_path_segment(value: &str, name: &str, route_path: &str) -> anyhow::Result<()> {
+    if value.is_empty() || matches!(value, "." | "..") || value.contains(['/', '\\', '?', '#']) {
+        anyhow::bail!(
+            "getStaticParams returned unsafe value '{value}' for '{name}' in route {route_path}"
+        );
+    }
+    Ok(())
 }
 
 /// Generate the output HTML file path for a pre-rendered route.
 fn prerender_html_path(prerender_dir: &Path, route_path: &str) -> PathBuf {
-    let sanitized = route_path.trim_start_matches('/');
+    let sanitized = route_path.trim_matches('/');
     if sanitized.is_empty() {
         prerender_dir.join("index.html")
     } else {
@@ -1327,15 +1585,16 @@ fn inject_prerender_client_assets(
     client_dir: &Path,
     route_path: &str,
     request_path: &str,
+    params: &BTreeMap<String, String>,
 ) -> String {
     let Some(assets) = prerender_client_assets(client_dir, route_path) else {
         return html.to_string();
     };
     let preload_links = module_preload_links(&assets.preloads);
-    let request_path_json =
-        serde_json::to_string(request_path).unwrap_or_else(|_| "\"/\"".to_string());
+    let request_path_json = inline_script_json(request_path, "\"/\"");
+    let params_json = inline_script_json(params, "{}");
     let scripts = format!(
-        r#"<script>globalThis.__RUVYXA_ROUTE_PARAMS__ = {{}};globalThis.__RUVYXA_REQUEST_PATH__ = {request_path_json};</script><script type="module" src="{}"></script>"#,
+        r#"<script>globalThis.__RUVYXA_ROUTE_PARAMS__ = {params_json};globalThis.__RUVYXA_REQUEST_PATH__ = {request_path_json};</script><script type="module" src="{}"></script>"#,
         assets.src
     );
     let lower = html.to_ascii_lowercase();
@@ -1352,6 +1611,16 @@ fn inject_prerender_client_assets(
     }
 
     format!("<!doctype html><html><head>{preload_links}</head><body>{html}{scripts}</body></html>")
+}
+
+fn inline_script_json<T: serde::Serialize + ?Sized>(value: &T, fallback: &str) -> String {
+    serde_json::to_string(value)
+        .unwrap_or_else(|_| fallback.to_string())
+        .replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('&', "\\u0026")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
 }
 
 struct ClientBundle {
@@ -3053,6 +3322,31 @@ fn format_duration(duration: Duration) -> String {
     }
 }
 
+fn format_bytes(bytes: usize) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+
+    if bytes < KIB as usize {
+        return format!("{bytes} B");
+    }
+
+    let kibibytes = bytes as f64 / KIB;
+    if bytes < MIB as usize {
+        return if kibibytes < 10.0 {
+            format!("{kibibytes:.1} kB")
+        } else {
+            format!("{kibibytes:.0} kB")
+        };
+    }
+
+    let mebibytes = bytes as f64 / MIB;
+    if mebibytes < 10.0 {
+        format!("{mebibytes:.1} MB")
+    } else {
+        format!("{mebibytes:.0} MB")
+    }
+}
+
 fn heading(value: impl AsRef<str>) -> String {
     paint(value, "1;35")
 }
@@ -3710,6 +4004,7 @@ mod tests {
             &client_dir,
             "/docs/:slug",
             "/docs/start",
+            &BTreeMap::from([("slug".to_string(), "start".to_string())]),
         );
 
         assert!(
@@ -3719,6 +4014,7 @@ mod tests {
             html.contains(r#"<script type="module" src="/__ruvyxa/client/docs.123.js"></script>"#)
         );
         assert!(html.contains(r#"globalThis.__RUVYXA_REQUEST_PATH__ = "/docs/start""#));
+        assert!(html.contains(r#"globalThis.__RUVYXA_ROUTE_PARAMS__ = {"slug":"start"}"#));
         assert!(html.find("modulepreload").unwrap() < html.find("</head>").unwrap());
         assert!(html.find("docs.123.js").unwrap() < html.find("</body>").unwrap());
     }
@@ -4194,6 +4490,27 @@ export default {
 
         assert!(!out_dir.join("assets").exists());
         assert!(out_dir.join("manifest.json").exists());
+    }
+
+    #[test]
+    fn static_route_path_preserves_page_params_and_rejects_traversal() {
+        let params = BTreeMap::from([("slug".to_string(), "hello-world".to_string())]);
+        assert_eq!(
+            static_route_path("/blog/:slug", &params).unwrap(),
+            "/blog/hello-world"
+        );
+
+        let unsafe_params = BTreeMap::from([("slug".to_string(), "../manifest.json".to_string())]);
+        assert!(static_route_path("/blog/:slug", &unsafe_params).is_err());
+    }
+
+    #[test]
+    fn static_route_path_allows_valid_catch_all_segments() {
+        let params = BTreeMap::from([("path".to_string(), "guides/routing".to_string())]);
+        assert_eq!(
+            static_route_path("/docs/*path", &params).unwrap(),
+            "/docs/guides/routing"
+        );
     }
 
     fn os_args<const N: usize>(args: [&str; N]) -> Vec<OsString> {

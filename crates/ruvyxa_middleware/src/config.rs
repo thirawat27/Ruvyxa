@@ -127,11 +127,6 @@ pub struct PluginConfig {
     /// Path to the `.wasm` module (relative to project root).
     pub path: PathBuf,
 
-    /// Whether to enable hot-reload for this plugin.
-    #[serde(default = "default_true")]
-    #[serde(rename = "hot")]
-    pub hot_reload: bool,
-
     /// Execution phase: "request" (before handler) or "response" (after handler).
     #[serde(default = "default_phase")]
     pub phase: PluginPhase,
@@ -169,12 +164,12 @@ pub struct PluginPermissions {
     #[serde(default)]
     pub env: Vec<String>,
 
-    /// Allow filesystem read access to specific directories.
+    /// Reserved for filesystem read access. Unsupported values are rejected at startup.
     #[serde(default)]
     #[serde(rename = "read")]
     pub fs_read: Vec<PathBuf>,
 
-    /// Allow network access to specific hosts.
+    /// Reserved for network access. Unsupported values are rejected at startup.
     #[serde(default)]
     pub net: Vec<String>,
 

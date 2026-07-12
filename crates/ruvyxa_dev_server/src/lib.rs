@@ -22,7 +22,9 @@ use ruvyxa_diagnostics::{Diagnostic, Result, RuvyxaError};
 use ruvyxa_graph::{
     DiscoverOptions, RenderStrategy, RouteEntry, RouteKind, RouteManifest, discover_routes,
 };
-use ruvyxa_middleware::{MiddlewareConfig, MiddlewareStack};
+use ruvyxa_middleware::{
+    MiddlewareConfig, MiddlewareStack, PluginRequest, PluginResponse, WasmPluginRuntime,
+};
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
@@ -48,6 +50,7 @@ const MAX_ACTION_BODY_BYTES: usize = 1024 * 1024;
 const MAX_API_BODY_BYTES: usize = 10 * 1024 * 1024;
 const ACTION_RATE_LIMIT_MAX: usize = 600;
 const ACTION_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
+const MAX_TRACKED_ACTION_RATE_LIMIT_KEYS: usize = 10_000;
 const PORT_FALLBACK_SCAN_LIMIT: u16 = 100;
 const SERVER_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
@@ -162,6 +165,7 @@ struct AppState {
     worker_pool: Arc<NodeWorkerPool>,
     render_cache: Arc<RenderCache>,
     hmr_tracker: Arc<HmrTracker>,
+    plugin_runtime: Option<Arc<WasmPluginRuntime>>,
 }
 
 #[derive(Default)]
@@ -288,6 +292,15 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
     let watcher_render_cache = render_cache.clone();
     let hmr_tracker = Arc::new(HmrTracker::new());
     hmr_tracker.populate_from_manifest(&manifest.routes);
+    let middleware_stack = MiddlewareStack::new(config.middleware.clone());
+    middleware_stack.validate().map_err(RuvyxaError::Message)?;
+    let plugin_runtime = if config.middleware.plugins.is_empty() {
+        None
+    } else {
+        Some(Arc::new(
+            WasmPluginRuntime::new(&config.root, &config.middleware.plugins).await?,
+        ))
+    };
     let state = AppState {
         config: config.clone(),
         reload_tx,
@@ -299,6 +312,7 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
         worker_pool: worker_pool.clone(),
         render_cache,
         hmr_tracker,
+        plugin_runtime,
     };
 
     let _watcher = if config.watch {
@@ -327,7 +341,6 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
         .with_state(Arc::new(state));
 
     // Apply middleware stack from config (compression, CORS, timing, logging, custom headers)
-    let middleware_stack = MiddlewareStack::new(config.middleware.clone());
     let app = middleware_stack.apply(app);
     let security_headers = config.security_headers;
     let app =
@@ -968,14 +981,21 @@ async fn action_endpoint(
     }
 
     let rate_key = action_rate_limit_key(peer, &headers, &query);
-    if !state
-        .action_limiter
-        .lock()
-        .expect("action limiter mutex poisoned")
-        .allow(&rate_key)
-    {
+    let retry_after = {
+        let mut limiter = state
+            .action_limiter
+            .lock()
+            .expect("action limiter mutex poisoned");
+        (!limiter.allow(&rate_key)).then(|| limiter.retry_after_seconds(&rate_key))
+    };
+    if let Some(retry_after) = retry_after {
         return with_security_headers(
-            (StatusCode::TOO_MANY_REQUESTS, "Action rate limit exceeded").into_response(),
+            (
+                StatusCode::TOO_MANY_REQUESTS,
+                [(header::RETRY_AFTER, retry_after.to_string())],
+                "Action rate limit exceeded",
+            )
+                .into_response(),
         );
     }
 
@@ -1026,10 +1046,10 @@ async fn handle_request(
 ) -> impl IntoResponse {
     let started = Instant::now();
     let (parts, body) = request.into_parts();
-    let headers = parts.headers.clone();
-    let method = parts.method.as_str().to_string();
-    let request_path = parts.uri.path().to_string();
-    let request_body = if request_method_allows_body(&method) {
+    let mut headers = parts.headers;
+    let mut method = parts.method.as_str().to_string();
+    let mut request_path = parts.uri.path().to_string();
+    let mut request_body = if request_method_allows_body(&method) {
         match to_bytes(body, state.config.api_body_limit_bytes).await {
             Ok(bytes) if bytes.is_empty() => None,
             Ok(bytes) => Some(String::from_utf8_lossy(&bytes).into_owned()),
@@ -1048,6 +1068,34 @@ async fn handle_request(
     } else {
         None
     };
+
+    let mut plugin_request = PluginRequest {
+        method: method.clone(),
+        path: request_path.clone(),
+        headers: headers_to_plugin_pairs(&headers),
+        body: request_body.as_ref().map(|body| body.as_bytes().to_vec()),
+    };
+    match apply_request_plugins(&state, &mut plugin_request).await {
+        Ok(Some(response)) => return response,
+        Ok(None) => {
+            method = plugin_request.method.clone();
+            request_path = plugin_request.path.clone();
+            headers = plugin_headers(&plugin_request.headers);
+            request_body = plugin_request
+                .body
+                .as_deref()
+                .map(|body| String::from_utf8_lossy(body).into_owned());
+        }
+        Err(error) => {
+            return with_security_headers(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("Middleware plugin request phase failed: {error}"),
+                )
+                    .into_response(),
+            );
+        }
+    }
 
     let render_result = render_request_pooled(
         &state,
@@ -1076,6 +1124,16 @@ async fn handle_request(
             }
         }
     };
+    let response = match apply_response_plugins(&state, &plugin_request, response).await {
+        Ok(response) => response,
+        Err(error) => with_security_headers(
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("Middleware plugin response phase failed: {error}"),
+            )
+                .into_response(),
+        ),
+    };
     if state.config.watch && should_log_dev_request(&request_path) {
         println!(
             "{}",
@@ -1083,6 +1141,114 @@ async fn handle_request(
         );
     }
     response
+}
+
+async fn apply_request_plugins(
+    state: &AppState,
+    request: &mut PluginRequest,
+) -> Result<Option<Response>> {
+    let Some(runtime) = &state.plugin_runtime else {
+        return Ok(None);
+    };
+    let Some(result) = runtime.execute_request_plugins(request).await? else {
+        return Ok(None);
+    };
+    match result.action.as_str() {
+        "respond" => Ok(Some(plugin_response_into_response(
+            result.response.ok_or_else(|| {
+                RuvyxaError::Message("Plugin returned respond without a response".to_string())
+            })?,
+        )?)),
+        "modify-request" => {
+            let replacement = result.request.ok_or_else(|| {
+                RuvyxaError::Message("Plugin returned modify-request without a request".to_string())
+            })?;
+            *request = replacement;
+            Ok(None)
+        }
+        action => Err(RuvyxaError::Message(format!(
+            "Plugin returned unsupported request-phase action '{action}'"
+        ))),
+    }
+}
+
+async fn apply_response_plugins(
+    state: &AppState,
+    request: &PluginRequest,
+    response: Response,
+) -> Result<Response> {
+    let Some(runtime) = &state.plugin_runtime else {
+        return Ok(response);
+    };
+    let (parts, body) = response.into_parts();
+    let body = to_bytes(body, usize::MAX).await.map_err(|error| {
+        RuvyxaError::Message(format!("Failed to read response for plugin: {error}"))
+    })?;
+    let plugin_response = PluginResponse {
+        status: parts.status.as_u16(),
+        headers: headers_to_plugin_pairs(&parts.headers),
+        body: Some(body.to_vec()),
+    };
+    let original = plugin_response.clone();
+    let Some(result) = runtime
+        .execute_response_plugins(request, &plugin_response)
+        .await?
+    else {
+        return plugin_response_into_response(original);
+    };
+    match result.action.as_str() {
+        "respond" | "modify-response" => {
+            plugin_response_into_response(result.response.ok_or_else(|| {
+                RuvyxaError::Message(
+                    "Plugin returned a response action without a response".to_string(),
+                )
+            })?)
+        }
+        action => Err(RuvyxaError::Message(format!(
+            "Plugin returned unsupported response-phase action '{action}'"
+        ))),
+    }
+}
+
+fn plugin_response_into_response(response: PluginResponse) -> Result<Response> {
+    let status = StatusCode::from_u16(response.status).map_err(|error| {
+        RuvyxaError::Message(format!("Plugin returned invalid status: {error}"))
+    })?;
+    let mut output = (status, response.body.unwrap_or_default()).into_response();
+    for (name, value) in response.headers {
+        let name = HeaderName::from_bytes(name.as_bytes()).map_err(|error| {
+            RuvyxaError::Message(format!("Plugin returned invalid header name: {error}"))
+        })?;
+        let value = HeaderValue::from_str(&value).map_err(|error| {
+            RuvyxaError::Message(format!("Plugin returned invalid header value: {error}"))
+        })?;
+        output.headers_mut().insert(name, value);
+    }
+    Ok(output)
+}
+
+fn headers_to_plugin_pairs(headers: &HeaderMap) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|value| (name.to_string(), value.to_string()))
+        })
+        .collect()
+}
+
+fn plugin_headers(headers: &[(String, String)]) -> HeaderMap {
+    headers
+        .iter()
+        .filter_map(|(name, value)| {
+            Some((
+                HeaderName::from_bytes(name.as_bytes()).ok()?,
+                HeaderValue::from_str(value).ok()?,
+            ))
+        })
+        .collect()
 }
 
 fn request_method_allows_body(method: &str) -> bool {
@@ -2750,6 +2916,7 @@ struct ActionRateLimiter {
     hits: HashMap<String, Vec<Instant>>,
     max_hits: usize,
     window: Duration,
+    max_keys: usize,
 }
 
 impl ActionRateLimiter {
@@ -2758,13 +2925,20 @@ impl ActionRateLimiter {
             hits: HashMap::new(),
             max_hits,
             window,
+            max_keys: MAX_TRACKED_ACTION_RATE_LIMIT_KEYS,
         }
     }
 
     fn allow(&mut self, key: &str) -> bool {
         let now = Instant::now();
+        self.hits.retain(|_, hits| {
+            hits.retain(|hit| now.duration_since(*hit) <= self.window);
+            !hits.is_empty()
+        });
+        if !self.hits.contains_key(key) && self.hits.len() >= self.max_keys {
+            return false;
+        }
         let hits = self.hits.entry(key.to_string()).or_default();
-        hits.retain(|hit| now.duration_since(*hit) <= self.window);
 
         if hits.len() >= self.max_hits {
             return false;
@@ -2772,6 +2946,14 @@ impl ActionRateLimiter {
 
         hits.push(now);
         true
+    }
+
+    fn retry_after_seconds(&self, key: &str) -> u64 {
+        self.hits
+            .get(key)
+            .and_then(|hits| hits.first())
+            .map(|first| self.window.saturating_sub(first.elapsed()).as_secs().max(1))
+            .unwrap_or(1)
     }
 }
 
@@ -2842,15 +3024,22 @@ fn action_origin_is_cross_site(headers: &HeaderMap) -> bool {
     else {
         return true;
     };
-    let Some(origin_host) = origin
-        .strip_prefix("http://")
-        .or_else(|| origin.strip_prefix("https://"))
-        .and_then(|value| value.split('/').next())
+    let Some((origin_scheme, origin_host)) = origin
+        .split_once("://")
+        .filter(|(_, value)| !value.contains('/') && !value.is_empty())
     else {
         return true;
     };
 
-    !origin_host.eq_ignore_ascii_case(host)
+    let expected_scheme = headers
+        .get("x-forwarded-proto")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .filter(|value| matches!(*value, "http" | "https"))
+        .unwrap_or("http");
+
+    !origin_host.eq_ignore_ascii_case(host) || !origin_scheme.eq_ignore_ascii_case(expected_scheme)
 }
 
 fn action_fetch_site_is_cross_site(headers: &HeaderMap) -> bool {
@@ -3445,6 +3634,40 @@ mod tests {
             validate_action_request(&headers, 128, &ServerConfig::dev(".", "localhost", 3000))
                 .is_none()
         );
+    }
+
+    #[test]
+    fn blocks_cross_scheme_action_requests_without_trusted_proxy_protocol() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("localhost:3000"));
+        headers.insert(
+            header::ORIGIN,
+            HeaderValue::from_static("https://localhost:3000"),
+        );
+
+        assert!(action_origin_is_cross_site(&headers));
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
+        assert!(!action_origin_is_cross_site(&headers));
+    }
+
+    #[test]
+    fn action_rate_limiter_bounds_tracked_keys() {
+        let mut limiter = ActionRateLimiter::new(1, Duration::from_secs(60));
+        limiter.max_keys = 2;
+        assert!(limiter.allow("first"));
+        assert!(limiter.allow("second"));
+        assert!(!limiter.allow("third"));
+        assert!(limiter.retry_after_seconds("first") >= 59);
+    }
+
+    #[test]
+    fn plugin_responses_reject_invalid_headers() {
+        let response = PluginResponse {
+            status: 200,
+            headers: vec![("bad header".to_string(), "value".to_string())],
+            body: Some(b"body".to_vec()),
+        };
+        assert!(plugin_response_into_response(response).is_err());
     }
 
     #[test]

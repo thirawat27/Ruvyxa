@@ -1,7 +1,6 @@
 //! WebAssembly plugin runtime powered by Wasmtime.
 //!
 //! Provides sandboxed execution of `.wasm` plugins with:
-//! - Hot-reload on file change (dev mode)
 //! - Configurable WASI permissions (fs, net, env)
 //! - Execution timeouts and memory limits
 //! - Request/response interception phases
@@ -46,11 +45,10 @@
 //! Each plugin runs in its own Wasmtime `Store` with:
 //! - Fuel-based execution limits (prevents infinite loops)
 //! - Memory bounds (configurable, default 64MB)
-//! - No filesystem access unless explicitly granted
-//! - No network access unless explicitly granted
+//! - No filesystem or network access (those requested permissions are rejected)
 //! - No environment variable access unless explicitly granted
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use ruvyxa_diagnostics::{Diagnostic, Result, RuvyxaError};
@@ -109,7 +107,11 @@ struct LoadedPlugin {
     phase: PluginPhase,
     routes: Option<Vec<String>>,
     permissions: PluginPermissions,
-    path: PathBuf,
+}
+
+struct PluginStore {
+    wasi: WasiP1Ctx,
+    limits: StoreLimits,
 }
 
 /// The Wasm plugin runtime manages all loaded plugins.
@@ -161,44 +163,6 @@ impl WasmPluginRuntime {
             engine,
             plugins: Arc::new(RwLock::new(plugins)),
         })
-    }
-
-    /// Hot-reload a specific plugin by path.
-    pub async fn reload_plugin(&self, wasm_path: &Path) -> Result<()> {
-        let mut plugins = self.plugins.write().await;
-        let index = plugins
-            .iter()
-            .position(|p| p.path == wasm_path)
-            .ok_or_else(|| {
-                RuvyxaError::Message(format!(
-                    "Plugin not found for reload: {}",
-                    wasm_path.display()
-                ))
-            })?;
-
-        let old = &plugins[index];
-        let config = PluginConfig {
-            name: old.name.clone(),
-            path: old.path.clone(),
-            hot_reload: true,
-            phase: old.phase.clone(),
-            routes: old.routes.clone(),
-            config: serde_json::from_str(&old.config_json).unwrap_or_default(),
-            permissions: old.permissions.clone(),
-        };
-
-        let new_plugin = Self::load_plugin(&self.engine, wasm_path, &config).map_err(|error| {
-            Diagnostic::new("RUV2102", "Wasm plugin hot-reload error")
-                .explain(format!(
-                    "Failed to reload plugin '{}': {error}",
-                    config.name
-                ))
-                .suggest("The .wasm file may be corrupted or incompatible.")
-        })?;
-
-        plugins[index] = new_plugin;
-        info!(path = %wasm_path.display(), "hot-reloaded wasm plugin");
-        Ok(())
     }
 
     /// Execute request-phase plugins.
@@ -324,7 +288,6 @@ impl WasmPluginRuntime {
             phase: config.phase.clone(),
             routes: config.routes.clone(),
             permissions: config.permissions.clone(),
-            path: wasm_path.to_path_buf(),
         })
     }
 
@@ -400,7 +363,7 @@ impl WasmPluginRuntime {
     fn create_store(
         engine: &Engine,
         permissions: &PluginPermissions,
-    ) -> std::result::Result<Store<WasiP1Ctx>, String> {
+    ) -> std::result::Result<Store<PluginStore>, String> {
         let mut wasi_builder = WasiCtxBuilder::new();
 
         for var in &permissions.env {
@@ -409,8 +372,17 @@ impl WasmPluginRuntime {
             }
         }
 
-        let wasi_ctx = wasi_builder.build_p1();
-        let mut store = Store::new(engine, wasi_ctx);
+        let memory_limit = usize::try_from(permissions.max_memory_bytes)
+            .map_err(|_| "Plugin memory limit exceeds this platform's address space".to_string())?;
+        let limits = StoreLimitsBuilder::new().memory_size(memory_limit).build();
+        let mut store = Store::new(
+            engine,
+            PluginStore {
+                wasi: wasi_builder.build_p1(),
+                limits,
+            },
+        );
+        store.limiter(|store| &mut store.limits);
 
         let fuel = permissions.timeout_ms * 1_000_000;
         store.set_fuel(fuel).ok();
@@ -420,11 +392,11 @@ impl WasmPluginRuntime {
 
     fn instantiate(
         engine: &Engine,
-        store: &mut Store<WasiP1Ctx>,
+        store: &mut Store<PluginStore>,
         module: &Module,
     ) -> std::result::Result<Instance, String> {
         let mut linker = Linker::new(engine);
-        wasmtime_wasi::p1::add_to_linker_sync(&mut linker, |ctx| ctx)
+        wasmtime_wasi::p1::add_to_linker_sync(&mut linker, |ctx: &mut PluginStore| &mut ctx.wasi)
             .map_err(|e| format!("Failed to link WASI: {e}"))?;
 
         linker
@@ -433,7 +405,7 @@ impl WasmPluginRuntime {
     }
 
     fn call_plugin_func(
-        store: &mut Store<WasiP1Ctx>,
+        store: &mut Store<PluginStore>,
         instance: &Instance,
         func_name: &str,
         input: &str,

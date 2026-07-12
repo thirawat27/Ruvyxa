@@ -8,7 +8,8 @@
 - Extended supported platform mapping in `scripts/native-platform.mjs` to include `win32-arm64`
 - Updated `nativeBinaryPackageName()` — all supported platforms are now resolved through a shared
   data module instead of a hardcoded switch
-- Added Windows arm64 to the CI build matrix (`.github/workflows/ci.yml`, `.github/workflows/release.yml`)
+- Added Windows arm64 to the CI build matrix (`.github/workflows/ci.yml`,
+  `.github/workflows/release.yml`)
 - Updated binary resolution in `bin/ruvyxa.js` to display `win32-arm64` in the supported-platforms
   message and route to the new optional package
 - Added `@ruvyxa/cli-win32-arm64` as a dependency in `ruvyxa/package.json`
@@ -17,8 +18,8 @@
 
 ### Security Configuration
 
-- Added `security.apiLimit` configuration for maximum API route request payload size
-  (default: 10 MB / 10,485,760 bytes)
+- Added `security.apiLimit` configuration for maximum API route request payload size (default: 10 MB
+  / 10,485,760 bytes)
 - Added `security.actionRateLimit` with `max` (default: 600) and `window` (default: 60s) for
   configurable per-client/action rate limiting
 - Raised default `actionLimit` from 64 KB to 1 MB (1,048,576 bytes)
@@ -50,7 +51,8 @@
 - Added `validate_positive_limit()` helper raising `RUV1601` for zero-valued numeric limits
 - Added Rust tests for zero-limit rejection on `apiLimit` and `actionRateLimit`
 - Updated existing security config tests to verify new `apiLimit` / `actionRateLimit` fields
-- `config()` shorthand key table in getting-started docs updated with `apiLimit` and `actionRateLimit`
+- `config()` shorthand key table in getting-started docs updated with `apiLimit` and
+  `actionRateLimit`
 
 ### Compiler and Runtime
 
@@ -73,8 +75,8 @@
 ### Documentation
 
 - Documented `security.apiLimit` and `security.actionRateLimit` config keys across all guides
-- Updated security defaults (1 MB action limit, 10 MB API limit, 600 req/min rate limit) in
-  actions, deployment, production-readiness, and publishing docs
+- Updated security defaults (1 MB action limit, 10 MB API limit, 600 req/min rate limit) in actions,
+  deployment, production-readiness, and publishing docs
 - Added `@ruvyxa/cli-win32-arm64` to native binary platform tables in production-readiness,
   publishing, deployment, and project-structure documentation
 - Updated CI/CD documentation to reflect Windows arm64 and Ubuntu ARM64 build runners

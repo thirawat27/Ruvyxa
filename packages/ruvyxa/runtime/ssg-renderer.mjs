@@ -29,8 +29,14 @@ import {
   toImportPath,
 } from './compiler.mjs'
 
-const [projectRootArg, appDirArg, pageFileArg, requestPath = '/', mode = 'full'] =
-  process.argv.slice(2)
+const [
+  projectRootArg,
+  appDirArg,
+  pageFileArg,
+  requestPath = '/',
+  mode = 'full',
+  paramsJson = '{}',
+] = process.argv.slice(2)
 
 if (!projectRootArg || !appDirArg || !pageFileArg) {
   fail('RUV1501', 'SSG renderer requires projectRoot, appDir, and pageFile arguments.')
@@ -52,7 +58,7 @@ try {
     process.stdout.write(JSON.stringify({ ok: true, params }))
   } else {
     // Render mode
-    const html = await renderPage(requestPath, mode)
+    const html = await renderPage(requestPath, mode, parseParams(paramsJson))
     process.stdout.write(JSON.stringify({ ok: true, html }))
   }
 } catch (error) {
@@ -94,7 +100,7 @@ async function resolveStaticParams() {
  * @param {string} renderPath - The URL path to render
  * @param {string} renderMode - "full" | "ppr"
  */
-async function renderPage(renderPath, renderMode) {
+async function renderPage(renderPath, renderMode, params) {
   const layouts = collectLayouts(appDir, path.dirname(pageFile))
   const cacheDir = path.join(projectRoot, '.ruvyxa', 'cache', 'ssg')
 
@@ -105,10 +111,6 @@ async function renderPage(renderPath, renderMode) {
     imports.push(`import Layout${index} from ${JSON.stringify(toImportPath(layoutFile))}`)
     wrappers.push(`Layout${index}`)
   })
-
-  // Extract params from the renderPath by comparing with the route pattern.
-  // TODO: implement actual param extraction from the URL pattern.
-  const params = {}
 
   let moduleCode
   if (renderMode === 'ppr') {
@@ -153,6 +155,7 @@ export async function render(ctx) {
     })
   })
 }
+
 `
   } else {
     // Full SSG mode: wait for all content to render
@@ -212,6 +215,14 @@ export async function render(ctx) {
   const mod = await import(pathToFileURL(outfile).href + `?t=${Date.now()}`)
   const html = await mod.render({ path: renderPath, params })
   return html
+}
+
+function parseParams(paramsJson) {
+  const params = JSON.parse(paramsJson)
+  if (!params || Array.isArray(params) || typeof params !== 'object') {
+    throw new Error('SSG renderer params must be a JSON object.')
+  }
+  return params
 }
 
 function fail(code, message, stack) {

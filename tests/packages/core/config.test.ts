@@ -31,7 +31,6 @@ describe('config API', () => {
             name: 'auth-guard',
             path: 'plugins/auth-guard.wasm',
             phase: 'request',
-            hot: true,
             routes: ['/api/*'],
             config: { apiKeyHeader: 'X-Api-Key' },
             allow: {
