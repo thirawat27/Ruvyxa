@@ -1,9 +1,8 @@
 #!/usr/bin/env node
 import { execFileSync, execSync } from 'node:child_process'
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
 import { arch, platform } from 'node:process'
-import { resolve } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
 const destination = '.npm-pack'
@@ -113,52 +112,6 @@ assert(existsSync(`${extracted}/scaffolded-app/.gitignore`), 'scaffolded app mis
 
 // Verify the scaffolded template can install and type-check.
 // This catches version mismatches (e.g. @ruvyxa/react version drift) early.
-// Write an empty pnpm-workspace.yaml so pnpm treats the scaffolded app as its own
-// workspace root, preventing it from inheriting the monorepo workspace context.
-writeFileSync(`${extracted}/scaffolded-app/pnpm-workspace.yaml`, '')
-
-// Override dependencies to install from local tarballs instead of the registry.
-// The version being tested may not be published yet.
-const scaffoldedPkgPath = `${extracted}/scaffolded-app/package.json`
-const scaffoldedPkg = JSON.parse(readFileSync(scaffoldedPkgPath, 'utf8'))
-const tarballs = readdirSync(destination)
-const packDir = resolve(destination)
-
-function findTarball(pkgName) {
-  // Tarball names use the flat npm convention: scoped "@ruvyxa/core" → "ruvyxa-core-1.0.11.tgz"
-  const prefix = pkgName.replace(/^@/, '').replace(/\//, '-')
-  // Match "prefix-<version>.tgz" precisely to avoid e.g. "ruvyxa-" matching "ruvyxa-core-"
-  return tarballs.find((f) => {
-    if (!f.startsWith(prefix + '-') || !f.endsWith('.tgz')) return false
-    // The character after the prefix + '-' must be a digit (start of version)
-    const rest = f.slice(prefix.length + 1)
-    return /^\d/.test(rest)
-  })
-}
-
-for (const depGroup of ['dependencies', 'devDependencies']) {
-  if (!scaffoldedPkg[depGroup]) continue
-  for (const dep of Object.keys(scaffoldedPkg[depGroup])) {
-    const tgz = findTarball(dep)
-    if (tgz) {
-      scaffoldedPkg[depGroup][dep] = `file:${resolve(packDir, tgz)}`
-    }
-  }
-}
-
-// Also set pnpm.overrides to catch transitive dependencies (e.g. ruvyxa → @ruvyxa/core)
-// that reference the unpublished version.
-const overrides = {}
-for (const pkg of packages) {
-  const tgz = findTarball(pkg)
-  if (tgz) {
-    overrides[pkg] = `file:${resolve(packDir, tgz)}`
-  }
-}
-scaffoldedPkg.pnpm = { ...scaffoldedPkg.pnpm, overrides }
-
-writeFileSync(scaffoldedPkgPath, JSON.stringify(scaffoldedPkg, null, 2) + '\n')
-
 execFileSync('pnpm', ['install', '--no-lockfile'], {
   cwd: `${extracted}/scaffolded-app`,
   stdio: 'inherit',
