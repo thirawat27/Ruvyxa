@@ -491,6 +491,45 @@ import Card from './Card.js'
     })
   })
 
+  it('executes adapters and serializes their deployment metadata', async () => {
+    await withFixture(async ({ root }) => {
+      await writeFile(
+        path.join(root, 'ruvyxa.config.ts'),
+        `export default {
+          outDir: '.output',
+          adapterOptions: { region: 'iad1' },
+          adapter: {
+            name: 'fixture',
+            target: 'static',
+            build({ root, outDir }) {
+              return {
+                name: 'fixture',
+                target: 'static',
+                platform: 'static',
+                entry: outDir + '/static',
+                assetsDir: outDir + '/assets',
+                clientDir: outDir + '/client',
+                root,
+              }
+            },
+          },
+        }`,
+      )
+
+      const config = await runJson(configRenderer, [root], {})
+      assert.deepEqual(config.config.adapter, {
+        name: 'fixture',
+        target: 'static',
+        platform: 'static',
+        entry: '.output/static',
+        assetsDir: '.output/assets',
+        clientDir: '.output/client',
+        root,
+      })
+      assert.deepEqual(config.config.adapterOptions, { region: 'iad1' })
+    })
+  })
+
   it('rejects unknown config fields instead of silently ignoring them', async () => {
     await withFixture(async ({ root }) => {
       await writeFile(

@@ -44,7 +44,7 @@ try {
 
   const mod = await import(pathToFileURL(outfile).href + `?t=${Date.now()}`)
   const config = mod.default ?? {}
-  await ok(sanitizeConfig(config), bundle.dependencyHash)
+  await ok(await sanitizeConfig(config), bundle.dependencyHash)
 } catch (error) {
   await fail('RUV1600', error instanceof Error ? error.message : String(error), error?.stack)
 }
@@ -62,7 +62,7 @@ function findConfig(root) {
   return null
 }
 
-function sanitizeConfig(config) {
+async function sanitizeConfig(config) {
   assertKnownKeys(config, 'config', [
     'appDir',
     'outDir',
@@ -206,13 +206,32 @@ function sanitizeConfig(config) {
       dir: stringValue(config.cache?.dir),
     }),
     middleware: safeJsonValue(config.middleware),
-    adapter: objectValue(config.adapter, {
-      name: stringValue(config.adapter?.name),
-      target: stringValue(config.adapter?.target),
-    }),
+    adapter: await adapterOutput(config.adapter, projectRoot, config.outDir),
     adapterOptions: safeJsonValue(config.adapterOptions),
     plugins: pluginDescriptors(config.plugins),
   }
+}
+
+async function adapterOutput(adapter, root, outDir) {
+  if (adapter === undefined) return undefined
+  if (!adapter || typeof adapter !== 'object' || typeof adapter.build !== 'function') {
+    throw new Error('RUV1603 config.adapter must provide a build(context) function.')
+  }
+
+  const output = await adapter.build({ root, outDir: stringValue(outDir) ?? '.ruvyxa' })
+  if (!output || typeof output !== 'object') {
+    throw new Error('RUV1603 config.adapter.build(context) must return an adapter output object.')
+  }
+  if (typeof output.name !== 'string' || typeof output.target !== 'string') {
+    throw new Error('RUV1603 adapter output must include string name and target fields.')
+  }
+
+  const serialized = safeJsonValue(output)
+  if (serialized === undefined) {
+    throw new Error('RUV1603 adapter output must be JSON-serializable.')
+  }
+
+  return serialized
 }
 
 function assertKnownKeys(value, field, allowedKeys) {

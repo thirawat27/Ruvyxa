@@ -103,11 +103,12 @@ struct BuildArgs {
     #[arg(long, default_value = ".")]
     root: PathBuf,
 
-    #[arg(long, value_enum, ignore_case = true, default_value_t = BuildTarget::Node)]
-    target: BuildTarget,
+    #[arg(long, value_enum, ignore_case = true)]
+    target: Option<BuildTarget>,
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 enum BuildTarget {
     Node,
     Edge,
@@ -139,8 +140,7 @@ struct BenchArgs {
 struct ProjectConfig {
     app_dir: Option<String>,
     out_dir: Option<String>,
-    #[serde(rename = "runtime")]
-    _runtime: Option<serde_json::Value>,
+    runtime: Option<BuildTarget>,
     #[serde(rename = "react")]
     _react: Option<serde_json::Value>,
     #[serde(rename = "typescript")]
@@ -166,9 +166,9 @@ struct ProjectConfig {
     #[serde(default)]
     plugins: Vec<BuildPluginConfig>,
     #[serde(rename = "adapter")]
-    _adapter: Option<serde_json::Value>,
+    adapter: Option<serde_json::Value>,
     #[serde(rename = "adapterOptions")]
-    _adapter_options: Option<serde_json::Value>,
+    adapter_options: Option<serde_json::Value>,
     #[serde(skip)]
     config_dependency_hash: String,
 }
@@ -285,6 +285,10 @@ struct ConfigRendererOutput {
 }
 
 impl ProjectConfig {
+    fn build_target(&self, cli_target: Option<BuildTarget>) -> BuildTarget {
+        cli_target.or(self.runtime).unwrap_or(BuildTarget::Node)
+    }
+
     fn app_dir(&self) -> &str {
         self.app_dir.as_deref().unwrap_or("app")
     }
@@ -723,6 +727,7 @@ fn build(args: BuildArgs) -> anyhow::Result<()> {
 fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> {
     let started = Instant::now();
     let config = load_project_config(&args.root)?;
+    let target = config.build_target(args.target);
     let app_dir = args.root.join(config.app_dir());
     let out_dir = args.root.join(config.out_dir());
 
@@ -792,7 +797,7 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
     let build_info = serde_json::json!({
         "framework": "Ruvyxa",
         "version": env!("CARGO_PKG_VERSION"),
-        "target": format!("{:?}", args.target).to_lowercase(),
+        "target": format!("{:?}", target).to_lowercase(),
         "profile": "production",
         "createdAtUnix": SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
@@ -802,6 +807,8 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
         "serverDir": "server",
         "clientDir": "client",
         "assetsDir": "assets",
+        "adapter": config.adapter.clone(),
+        "adapterOptions": config.adapter_options.clone(),
         "images": image_report,
         "hashAlgorithm": ASSET_HASH_ALGORITHM,
         "security": {
@@ -844,7 +851,7 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
         .with_context(|| format!("failed to commit build output into {}", out_dir.display()))?;
 
     info!(
-        target = ?args.target,
+        target = ?target,
         routes = manifest.routes.len(),
         output = %out_dir.display(),
         "build complete"
@@ -862,12 +869,9 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
             .map(Vec::len)
             .unwrap_or_default();
 
-        print_tui_header("🦊 Ruvyxa Build");
+        print_tui_header("Build");
         print_field("status", ok_text("built"));
-        print_field(
-            "target",
-            accent(format!("{:?}", args.target).to_lowercase()),
-        );
+        print_field("target", accent(format!("{:?}", target).to_lowercase()));
         print_field("profile", accent("production"));
         print_field("root", path_text(&args.root));
         print_field("app dir", path_text(&app_dir));
@@ -2293,7 +2297,7 @@ fn print_routes(args: ProjectArgs) -> anyhow::Result<()> {
         .count();
     let api_routes = manifest.routes.len().saturating_sub(page_routes);
 
-    print_tui_header("Ruvyxa routes");
+    print_tui_header("Routes");
     print_field("root", path_text(&args.root));
     print_field("app dir", path_text(&app_dir));
     print_field("routes", accent(manifest.routes.len().to_string()));
@@ -2346,7 +2350,7 @@ fn analyze(args: ProjectArgs) -> anyhow::Result<()> {
 
 fn check(args: ProjectArgs) -> anyhow::Result<()> {
     let started = Instant::now();
-    print_tui_header("Ruvyxa check");
+    print_tui_header("Check");
     print_field("root", path_text(&args.root));
     println!();
 
@@ -2390,7 +2394,7 @@ fn doctor(args: ProjectArgs) -> anyhow::Result<()> {
     let package_json = args.root.join("package.json");
     let tsconfig = args.root.join("tsconfig.json");
 
-    print_tui_header("Ruvyxa doctor");
+    print_tui_header("Doctor");
     print_field("ruvyxa", accent(env!("CARGO_PKG_VERSION")));
     print_field("root", path_text(&args.root));
     print_field("config", exists_status(&args.root.join("ruvyxa.config.ts")));
@@ -2471,7 +2475,7 @@ fn clean(args: ProjectArgs) -> anyhow::Result<()> {
     if removed {
         fs::remove_dir_all(&out_dir)?;
     }
-    print_tui_header("Ruvyxa clean");
+    print_tui_header("Clean");
     print_field(
         "status",
         if removed {
@@ -2521,7 +2525,7 @@ fn bench(args: BenchArgs) -> anyhow::Result<()> {
         build_with_output(
             BuildArgs {
                 root: root.clone(),
-                target: BuildTarget::Node,
+                target: Some(BuildTarget::Node),
             },
             false,
         )
@@ -2593,7 +2597,7 @@ fn duration_ms(duration: Duration) -> f64 {
 fn test_parity(args: ProjectArgs) -> anyhow::Result<()> {
     let started = Instant::now();
     let config = load_project_config(&args.root)?;
-    print_tui_header("Ruvyxa parity");
+    print_tui_header("Parity");
     print_field("root", path_text(&args.root));
     print_field("dev app", path_text(&args.root.join(config.app_dir())));
     print_field(
@@ -2609,7 +2613,7 @@ fn test_parity(args: ProjectArgs) -> anyhow::Result<()> {
     println!();
     build(BuildArgs {
         root: args.root.clone(),
-        target: BuildTarget::Node,
+        target: Some(BuildTarget::Node),
     })?;
 
     let dev_manifest = discover_project_routes(&args.root, &config)?;
@@ -2930,7 +2934,7 @@ fn print_benchmark_table(
     app_dir: &Path,
     elapsed: Duration,
 ) {
-    print_tui_header(format!("Ruvyxa benchmark ({samples} sample(s))"));
+    print_tui_header(format!("Benchmark ({samples} sample(s))"));
     print_field("root", path_text(root));
     print_field("app dir", path_text(app_dir));
     print_field("scenarios", accent(results.len().to_string()));
@@ -2993,9 +2997,13 @@ fn print_benchmark_table(
 }
 
 fn print_tui_header(title: impl AsRef<str>) {
-    println!("\n{}", heading(title));
+    println!("\n{}", heading(tui_header_title(title)));
     println!();
     print_field("time", accent(current_timestamp()));
+}
+
+fn tui_header_title(title: impl AsRef<str>) -> String {
+    format!("🦊 Ruvyxa {}", title.as_ref())
 }
 
 fn print_table_separator(widths: &[usize]) {
@@ -3979,6 +3987,16 @@ export default {
     }
 
     #[test]
+    fn tui_headers_use_the_shared_fox_branding() {
+        assert_eq!(tui_header_title("Build"), "🦊 Ruvyxa Build");
+        assert_eq!(tui_header_title("Check"), "🦊 Ruvyxa Check");
+        assert_eq!(
+            tui_header_title("Benchmark (3 sample(s))"),
+            "🦊 Ruvyxa Benchmark (3 sample(s))"
+        );
+    }
+
+    #[test]
     fn config_paths_must_stay_project_relative() {
         assert!(validate_project_relative_path("outDir", ".ruvyxa").is_ok());
         assert!(validate_project_relative_path("appDir", "src/app").is_ok());
@@ -4047,7 +4065,7 @@ export default {
         let Command::Build(args) = cli.command else {
             panic!("expected build command");
         };
-        assert!(matches!(args.target, BuildTarget::Edge));
+        assert!(matches!(args.target, Some(BuildTarget::Edge)));
     }
 
     #[test]
@@ -4064,7 +4082,7 @@ export default {
         let Command::Build(args) = cli.command else {
             panic!("expected build command");
         };
-        assert!(matches!(args.target, BuildTarget::Edge));
+        assert!(matches!(args.target, Some(BuildTarget::Edge)));
         assert_eq!(args.root, PathBuf::from("examples/basic-app"));
     }
 
@@ -4079,6 +4097,24 @@ export default {
         .unwrap();
 
         assert!(matches!(cli.command, Command::TestParity(_)));
+    }
+
+    #[test]
+    fn uses_config_runtime_when_the_cli_target_is_omitted() {
+        let config = ProjectConfig {
+            runtime: Some(BuildTarget::Static),
+            ..ProjectConfig::default()
+        };
+
+        assert_eq!(config.build_target(None), BuildTarget::Static);
+        assert_eq!(
+            config.build_target(Some(BuildTarget::Edge)),
+            BuildTarget::Edge
+        );
+        assert_eq!(
+            ProjectConfig::default().build_target(None),
+            BuildTarget::Node
+        );
     }
 
     #[test]

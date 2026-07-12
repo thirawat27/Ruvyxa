@@ -16,6 +16,7 @@ The generated project starts with:
 ```text
 AGENTS.md
 CLAUDE.md
+.gitignore
 app/globals.css
 app/layout.tsx
 app/page.tsx
@@ -28,7 +29,8 @@ tsconfig.json
 The starter stays intentionally small: one page, one layout, one global stylesheet, static assets,
 config, TypeScript settings, and agent instructions. Use the repository `examples/demo` when you
 need examples for API routes, dynamic routes, server actions, loaders, middleware, and production
-checks.
+checks. Read the repository [User Guide](../../docs/user-guide.md) for the end-to-end app workflow
+and [Developer Guide](../../docs/developer-guide.md) for framework-contributor checks.
 
 ## Project Names
 

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
-import { cp, mkdir, rm } from 'node:fs/promises'
-import { dirname, resolve } from 'node:path'
+import { cp, mkdir, rename, rm } from 'node:fs/promises'
+import { basename, dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -15,3 +15,8 @@ await cp(resolve(repoRoot, 'templates', 'minimal'), target, {
   force: true,
   filter: (source) => !source.includes('node_modules'),
 })
+
+// npm excludes nested `.gitignore` files from package tarballs. Store the template
+// under a normal name and restore the dotfile while scaffolding a new application.
+const templateIgnore = resolve(target, '.gitignore')
+await rename(templateIgnore, resolve(target, basename(templateIgnore).slice(1)))

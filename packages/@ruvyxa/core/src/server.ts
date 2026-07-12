@@ -206,7 +206,11 @@ if (typeof setInterval !== 'undefined') {
 
 function parseTtl(value: string): number {
   const match = value.match(/^(\d+)\s*(ms|s|m|h|d)$/)
-  if (!match) return 60_000 // default 60s
+  if (!match) {
+    throw new Error(
+      `Invalid cache duration "${value}". Use a positive value such as "30s", "5m", "1h", or "1d".`,
+    )
+  }
   const amount = parseInt(match[1], 10)
   switch (match[2]) {
     case 'ms':
@@ -219,8 +223,9 @@ function parseTtl(value: string): number {
       return amount * 3_600_000
     case 'd':
       return amount * 86_400_000
-    default:
-      return 60_000
+    default: {
+      throw new Error(`Unsupported cache duration unit: ${match[2]}`)
+    }
   }
 }
 

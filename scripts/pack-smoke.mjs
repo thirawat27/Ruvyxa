@@ -33,6 +33,7 @@ for (const pkg of packages) {
 
 for (const file of readdirSync(destination).filter((name) => name.endsWith('.tgz'))) {
   const listing = execSync(`tar -tf ${destination}/${file}`).toString()
+  const verboseListing = execSync(`tar -tvf ${destination}/${file}`).toString()
   const packageJson = JSON.parse(
     execSync(`tar -xOf ${destination}/${file} package/package.json`).toString(),
   )
@@ -42,6 +43,10 @@ for (const file of readdirSync(destination).filter((name) => name.endsWith('.tgz
   assert(!listing.includes('.test.'), `${file} includes test files`)
 
   if (packageJson.name === 'ruvyxa') {
+    assert(
+      /-rwxr-xr-x\s+.*package\/bin\/ruvyxa\.js/.test(verboseListing),
+      'ruvyxa package launcher must be executable',
+    )
     const executable = platform === 'win32' ? 'ruvyxa.exe' : 'ruvyxa'
     assert(
       listing.includes(`package/native-bin/${platform}-${arch}/${executable}`),
@@ -59,6 +64,10 @@ for (const file of readdirSync(destination).filter((name) => name.endsWith('.tgz
     assert(
       listing.includes('package/template/minimal/package.json'),
       'create-ruvyxa package missing template',
+    )
+    assert(
+      listing.includes('package/template/minimal/gitignore'),
+      'create-ruvyxa package missing scaffold ignore template',
     )
   }
 }
@@ -79,11 +88,27 @@ const ruvyxaTgz = readdirSync(destination).find(
 )
 if (!ruvyxaTgz) throw new Error('ruvyxa tarball not found in ' + destination)
 
+const createRuvyxaTgz = readdirSync(destination).find(
+  (name) => name.startsWith('create-ruvyxa-') && name.endsWith('.tgz'),
+)
+if (!createRuvyxaTgz) throw new Error('create-ruvyxa tarball not found in ' + destination)
+
 execSync(`tar -xzf ${destination}/${ruvyxaTgz} -C ${extracted}`)
 execFileSync('node', [`${extracted}/package/bin/ruvyxa.js`, '--help'], {
   stdio: 'inherit',
   shell: process.platform === 'win32',
 })
+mkdirSync(`${extracted}/create-ruvyxa`)
+execSync(`tar -xzf ${destination}/${createRuvyxaTgz} -C ${extracted}/create-ruvyxa`)
+execFileSync(
+  'node',
+  [`${extracted}/create-ruvyxa/package/bin/create-ruvyxa.js`, `${extracted}/scaffolded-app`],
+  {
+    stdio: 'inherit',
+    shell: process.platform === 'win32',
+  },
+)
+assert(existsSync(`${extracted}/scaffolded-app/.gitignore`), 'scaffolded app missing .gitignore')
 await rmWithRetry(extracted)
 
 console.log('npm pack smoke passed.')

@@ -146,4 +146,9 @@ describe('cache', () => {
       /fail/,
     )
   })
+
+  it('rejects invalid cache duration strings instead of silently using the default TTL', () => {
+    assert.throws(() => cache('invalid-duration').ttl('soon'), /Invalid cache duration "soon"/)
+    assert.throws(() => cache('invalid-swr').swr('1 week'), /Invalid cache duration "1 week"/)
+  })
 })

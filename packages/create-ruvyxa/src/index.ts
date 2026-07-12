@@ -1,4 +1,4 @@
-import { access, constants, cp, readFile, readdir, stat, writeFile } from 'node:fs/promises'
+import { access, constants, cp, readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { dirname, resolve, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -155,6 +155,7 @@ export async function createRuvyxaApp(targetDir: string): Promise<void> {
   // --- Copy Template ---
   try {
     await cp(templateDir, resolvedTarget, { recursive: true })
+    await restorePackagedGitignore(resolvedTarget)
     await writeProjectPackageName(resolvedTarget, toPackageName(dirName))
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
@@ -164,6 +165,16 @@ export async function createRuvyxaApp(targetDir: string): Promise<void> {
         '  Check disk space and filesystem access.',
     )
   }
+}
+
+/** Restore the dot-prefixed ignore file that npm excludes from packaged templates. */
+async function restorePackagedGitignore(targetDir: string): Promise<void> {
+  const packagedIgnore = resolve(targetDir, 'gitignore')
+  if (!existsSync(packagedIgnore)) return
+
+  const projectIgnore = resolve(targetDir, '.gitignore')
+  await writeFile(projectIgnore, await readFile(packagedIgnore))
+  await rm(packagedIgnore)
 }
 
 /** Convert a filesystem project name into a portable, unscoped npm package name. */

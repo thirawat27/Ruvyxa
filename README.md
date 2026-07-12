@@ -56,7 +56,8 @@
   via `ruvyxa.config.ts` or inline exports.
 - **SSR-first React** — pages render on the server, with route-level client bundles for hydration.
 - **Secure server actions** — validation hooks, origin checks, Fetch Metadata guards, a 1 MB body
-  limit, a 10 MB API body limit, and per-client/action rate limiting (600 req/min default) are built in.
+  limit, a 10 MB API body limit, and per-client/action rate limiting (600 req/min default) are built
+  in.
 - **Dev/prod parity** — `dev` and `start` share routing, rendering, static asset, and
   security-header semantics.
 - **ETag / 304 support** — static assets include BLAKE3-256-based ETags for efficient browser
@@ -114,7 +115,7 @@ pnpm -r test
 ```
 
 Standalone JavaScript and TypeScript tests live under `tests/` and are routed by each package's
-`test` script. See [Testing](docs/testing.md) for the layout.
+`test` script. See the [Developer Guide](docs/developer-guide.md) for the verification layout.
 
 ---
 
@@ -191,8 +192,8 @@ export const createTodo = action
 
 **Supported content types:** `application/json`, `application/x-www-form-urlencoded`.
 
-**Security defaults:** body size limit (1 MB), API body limit (10 MB), same-origin check, Fetch Metadata
-guards, per-client/action rate limiting (600 req/min), module isolation.
+**Security defaults:** body size limit (1 MB), API body limit (10 MB), same-origin check, Fetch
+Metadata guards, per-client/action rate limiting (600 req/min), module isolation.
 
 ---
 
@@ -449,17 +450,8 @@ Routes with `getStaticParams` export generate static paths at build time.
 
 ## Documentation
 
-- [Getting Started](docs/getting-started.md)
-- [File Routing](docs/routing.md)
-- [Markdown, MDX, Images & SEO](docs/content-and-images.md)
-- [Data Loading](docs/data.md)
-- [Server Actions](docs/actions.md)
-- [Deployment](docs/deployment.md)
-- [Debugging & Diagnostics](docs/debugging.md)
-- [Performance](docs/performance.md)
-- [Dev/Prod Parity](docs/parity.md)
-- [Production Readiness](docs/production-readiness.md)
-- [Publishing](docs/publishing.md)
+- [User Guide: build and deploy a Ruvyxa app](docs/user-guide.md)
+- [Developer Guide: develop, test and package the framework](docs/developer-guide.md)
 
 ---
 

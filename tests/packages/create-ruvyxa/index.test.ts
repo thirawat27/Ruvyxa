@@ -27,7 +27,9 @@ describe('createRuvyxaApp', () => {
         'ruvyxa.config.ts',
         'tsconfig.json',
       ])
-      assert.equal((await readPackageJson(target)).name, 'my-app')
+      const packageJson = await readPackageJson(target)
+      assert.equal(packageJson.name, 'my-app')
+      assert.equal(packageJson.scripts.build, 'ruvyxa build')
     } finally {
       await rm(tempRoot, { recursive: true, force: true })
     }
@@ -74,6 +76,9 @@ async function listFiles(root: string): Promise<string[]> {
   }
 }
 
-async function readPackageJson(root: string): Promise<{ name: string }> {
+async function readPackageJson(root: string): Promise<{
+  name: string
+  scripts: Record<string, string>
+}> {
   return JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
 }
