@@ -2,6 +2,8 @@
 import { execFileSync, execSync } from 'node:child_process'
 import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { arch, platform } from 'node:process'
 import { setTimeout as sleep } from 'node:timers/promises'
 
@@ -72,7 +74,8 @@ for (const file of readdirSync(destination).filter((name) => name.endsWith('.tgz
   }
 }
 
-const extracted = '.npm-smoke'
+const smokeDir = join(tmpdir(), 'ruvyxa-smoke')
+const extracted = smokeDir
 rmSync(extracted, { recursive: true, force: true })
 mkdirSync(extracted, { recursive: true })
 
