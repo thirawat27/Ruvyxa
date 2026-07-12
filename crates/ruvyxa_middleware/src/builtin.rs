@@ -6,16 +6,12 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-use axum::body::Body;
 use axum::http::{HeaderName, HeaderValue, Request, Response, StatusCode, header};
 use tower::{Layer, Service};
 use tracing::info;
-
-use crate::config::RateLimitConfig;
 
 // ─── Timing Layer ──────────────────────────────────────────────────────────────
 
@@ -342,160 +338,5 @@ fn apply_cors_headers<B>(
     }
     if let Ok(value) = HeaderValue::from_str(max_age) {
         h.insert(header::ACCESS_CONTROL_MAX_AGE, value);
-    }
-}
-
-// ─── Rate Limiting Layer ───────────────────────────────────────────────────────
-
-/// Token-bucket rate limiter state shared across clones.
-#[derive(Debug)]
-struct RateBucket {
-    tokens: usize,
-    last_refill: Instant,
-}
-
-/// In-memory sliding-window rate limiter keyed by client IP.
-#[derive(Debug, Clone)]
-pub struct RateLimitLayer {
-    max_requests: usize,
-    window: Duration,
-    state: Arc<Mutex<BTreeMap<String, RateBucket>>>,
-}
-
-impl RateLimitLayer {
-    pub fn from_config(config: &RateLimitConfig) -> Self {
-        Self {
-            max_requests: config.max_requests,
-            window: Duration::from_secs(config.window_secs),
-            state: Arc::new(Mutex::new(BTreeMap::new())),
-        }
-    }
-
-    fn extract_key(request: &Request<Body>, key_by: &str) -> String {
-        if let Some(header_name) = key_by.strip_prefix("header:") {
-            return request
-                .headers()
-                .get(header_name)
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("unknown")
-                .to_string();
-        }
-        // Default: use peer IP from extensions or fallback
-        request
-            .extensions()
-            .get::<std::net::SocketAddr>()
-            .map(|addr| addr.ip().to_string())
-            .or_else(|| {
-                request
-                    .headers()
-                    .get("x-forwarded-for")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.split(',').next())
-                    .map(|s| s.trim().to_string())
-            })
-            .unwrap_or_else(|| "unknown".to_string())
-    }
-
-    fn allow(&self, key: &str) -> bool {
-        let mut state = self.state.lock().expect("rate limiter mutex poisoned");
-        let now = Instant::now();
-        let bucket = state.entry(key.to_string()).or_insert(RateBucket {
-            tokens: self.max_requests,
-            last_refill: now,
-        });
-
-        // Refill tokens if window has elapsed
-        let elapsed = now.duration_since(bucket.last_refill);
-        if elapsed >= self.window {
-            bucket.tokens = self.max_requests;
-            bucket.last_refill = now;
-        }
-
-        if bucket.tokens > 0 {
-            bucket.tokens -= 1;
-            true
-        } else {
-            false
-        }
-    }
-}
-
-impl<S> Layer<S> for RateLimitLayer {
-    type Service = RateLimitService<S>;
-
-    fn layer(&self, inner: S) -> Self::Service {
-        RateLimitService {
-            inner,
-            limiter: self.clone(),
-            key_by: "ip".to_string(),
-        }
-    }
-}
-
-/// Wraps the `RateLimitLayer` with a specific key extraction strategy.
-#[derive(Clone)]
-pub struct RateLimitLayerWithKey {
-    pub limiter: RateLimitLayer,
-    pub key_by: String,
-}
-
-impl RateLimitLayerWithKey {
-    pub fn from_config(config: &RateLimitConfig) -> Self {
-        Self {
-            limiter: RateLimitLayer::from_config(config),
-            key_by: config.key_by.clone(),
-        }
-    }
-}
-
-impl<S> Layer<S> for RateLimitLayerWithKey {
-    type Service = RateLimitService<S>;
-
-    fn layer(&self, inner: S) -> Self::Service {
-        RateLimitService {
-            inner,
-            limiter: self.limiter.clone(),
-            key_by: self.key_by.clone(),
-        }
-    }
-}
-
-#[derive(Debug, Clone)]
-pub struct RateLimitService<S> {
-    inner: S,
-    limiter: RateLimitLayer,
-    key_by: String,
-}
-
-impl<S> Service<Request<Body>> for RateLimitService<S>
-where
-    S: Service<Request<Body>, Response = Response<Body>> + Clone + Send + 'static,
-    S::Future: Send + 'static,
-{
-    type Response = S::Response;
-    type Error = S::Error;
-    type Future = Pin<Box<dyn Future<Output = Result<Self::Response, Self::Error>> + Send>>;
-
-    fn poll_ready(&mut self, cx: &mut Context<'_>) -> Poll<Result<(), Self::Error>> {
-        self.inner.poll_ready(cx)
-    }
-
-    fn call(&mut self, request: Request<Body>) -> Self::Future {
-        let key = RateLimitLayer::extract_key(&request, &self.key_by);
-        let allowed = self.limiter.allow(&key);
-        let mut inner = self.inner.clone();
-
-        Box::pin(async move {
-            if !allowed {
-                let response = Response::builder()
-                    .status(StatusCode::TOO_MANY_REQUESTS)
-                    .header("content-type", "text/plain; charset=utf-8")
-                    .header("retry-after", "60")
-                    .body(Body::from("Rate limit exceeded"))
-                    .unwrap();
-                return Ok(response);
-            }
-            inner.call(request).await
-        })
     }
 }

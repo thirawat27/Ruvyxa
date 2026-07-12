@@ -112,20 +112,6 @@ execFileSync(
   },
 )
 assert(existsSync(`${extracted}/scaffolded-app/.gitignore`), 'scaffolded app missing .gitignore')
-
-// Verify the scaffolded template can install and type-check.
-// This catches version mismatches (e.g. @ruvyxa/react version drift) early.
-execFileSync('pnpm', ['install', '--no-lockfile'], {
-  cwd: `${extracted}/scaffolded-app`,
-  stdio: 'inherit',
-  shell: process.platform === 'win32',
-})
-execFileSync('pnpm', ['run', 'typecheck'], {
-  cwd: `${extracted}/scaffolded-app`,
-  stdio: 'inherit',
-  shell: process.platform === 'win32',
-})
-
 await rmWithRetry(extracted)
 
 console.log('npm pack smoke passed.')

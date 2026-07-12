@@ -132,22 +132,6 @@ pub enum WorkerRequest {
     },
 }
 
-impl WorkerRequest {
-    /// Returns `true` if this request type is safe to retry without risk of
-    /// duplicate side effects. Actions and API calls are NOT idempotent.
-    pub fn is_idempotent(&self) -> bool {
-        matches!(
-            self,
-            Self::Ssr { .. }
-                | Self::Ssg { .. }
-                | Self::Client { .. }
-                | Self::Ping { .. }
-                | Self::Warmup { .. }
-                | Self::Invalidate { .. }
-        )
-    }
-}
-
 /// A route to pre-warm in the worker's module cache.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -202,7 +186,6 @@ impl Worker {
 
         let stdin = child.stdin.take().expect("stdin was piped");
         let stdout = child.stdout.take().expect("stdout was piped");
-        let stderr = child.stderr.take().expect("stderr was piped");
 
         let pending: Arc<Mutex<BTreeMap<String, oneshot::Sender<WorkerResponse>>>> =
             Arc::new(Mutex::new(BTreeMap::new()));
@@ -218,15 +201,6 @@ impl Worker {
                 if stdin.flush().await.is_err() {
                     break;
                 }
-            }
-        });
-
-        // Spawn stderr drain task — prevents the pipe buffer from filling up and
-        // blocking the Node process. Logs lines at warn level for visibility.
-        tokio::spawn(async move {
-            let mut reader = BufReader::new(stderr).lines();
-            while let Ok(Some(line)) = reader.next_line().await {
-                warn!(target: "ruvyxa::worker_stderr", "{}", line);
             }
         });
 
@@ -427,19 +401,14 @@ impl NodeWorkerPool {
         let index = self.next_worker.fetch_add(1, Ordering::Relaxed) as usize % self.workers.len();
         let response = self.workers[index].send(&request).await;
 
-        // If the worker failed, only retry for idempotent request types.
-        // Action and API requests may have side effects — retrying them could
-        // cause duplicate mutations, duplicate emails, double charges, etc.
-        if response.is_err() && self.workers.len() > 1 && request.is_idempotent() {
+        // If the worker failed, try the next one
+        if response.is_err() && self.workers.len() > 1 {
             let fallback_index = (index + 1) % self.workers.len();
             warn!(
                 failed_worker = index,
                 fallback_worker = fallback_index,
-                "retrying idempotent request on fallback worker"
+                "retrying request on fallback worker"
             );
-            // Quarantine the failed worker — terminate it so it cannot process
-            // further requests that might conflict with the retry.
-            self.workers[index].shutdown().await;
             return self.workers[fallback_index].send(&request).await;
         }
 

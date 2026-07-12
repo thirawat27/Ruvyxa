@@ -46,8 +46,7 @@ export function hydrate(options: HydrationOptions = {}): void {
   }
 
   if (typeof window !== 'undefined') {
-    const target = options.root ?? window
-    target.dispatchEvent(new CustomEvent('ruvyxa:hydrate'))
+    window.dispatchEvent(new CustomEvent('ruvyxa:hydrate'))
   }
 }
 

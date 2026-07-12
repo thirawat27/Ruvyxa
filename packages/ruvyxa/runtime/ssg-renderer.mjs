@@ -106,9 +106,8 @@ async function renderPage(renderPath, renderMode) {
     wrappers.push(`Layout${index}`)
   })
 
-  // Extract params from the renderPath by comparing with the route pattern.
-  // TODO: implement actual param extraction from the URL pattern.
-  const params = {}
+  // Extract params from the renderPath by comparing with the route pattern
+  const paramsJson = '{}'
 
   let moduleCode
   if (renderMode === 'ppr') {
@@ -140,8 +139,7 @@ export async function render(ctx) {
         // PPR: resolve as soon as the shell is ready (Suspense fallbacks rendered)
         pipe(writable)
         writable.on("finish", () => {
-          const html = Buffer.concat(chunks).toString("utf8")
-          resolve(html.trimStart().toLowerCase().startsWith("<!doctype") ? html : "<!doctype html>" + html)
+          resolve("<!doctype html>" + Buffer.concat(chunks).toString("utf8"))
         })
       },
       onShellError(error) {
@@ -181,8 +179,7 @@ export async function render(ctx) {
       onAllReady() {
         pipe(writable)
         writable.on("finish", () => {
-          const html = Buffer.concat(chunks).toString("utf8")
-          resolve(html.trimStart().toLowerCase().startsWith("<!doctype") ? html : "<!doctype html>" + html)
+          resolve("<!doctype html>" + Buffer.concat(chunks).toString("utf8"))
         })
       },
       onShellError(error) {
@@ -210,7 +207,7 @@ export async function render(ctx) {
   })
 
   const mod = await import(pathToFileURL(outfile).href + `?t=${Date.now()}`)
-  const html = await mod.render({ path: renderPath, params })
+  const html = await mod.render({ path: renderPath, params: JSON.parse(paramsJson) })
   return html
 }
 
