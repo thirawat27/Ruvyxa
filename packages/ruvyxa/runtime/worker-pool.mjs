@@ -119,7 +119,7 @@ let activeRequests = 0
 let isShuttingDown = false
 
 // --- Graceful Shutdown ---
-function shutdown(signal) {
+function shutdown() {
   if (isShuttingDown) return
   isShuttingDown = true
   if (activeRequests === 0) process.exit(0)
@@ -605,7 +605,8 @@ export async function render(ctx) {
       onAllReady() {
         pipe(writable)
         writable.on("finish", () => {
-          resolve("<!doctype html>" + Buffer.concat(chunks).toString("utf8"))
+          const html = Buffer.concat(chunks).toString("utf8")
+          resolve(html.trimStart().toLowerCase().startsWith("<!doctype") ? html : "<!doctype html>" + html)
         })
       },
       onShellError(error) {
@@ -806,7 +807,8 @@ export async function render(ctx) {
       ${readyEvent}() {
         pipe(writable)
         writable.on("finish", () => {
-          resolve("<!doctype html>" + Buffer.concat(chunks).toString("utf8"))
+          const html = Buffer.concat(chunks).toString("utf8")
+          resolve(html.trimStart().toLowerCase().startsWith("<!doctype") ? html : "<!doctype html>" + html)
         })
       },
       onShellError(error) {

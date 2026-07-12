@@ -958,6 +958,7 @@ async fn client_bundle(
 
 async fn action_endpoint(
     State(state): State<Arc<AppState>>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<SocketAddr>,
     Query(query): Query<ActionQuery>,
     headers: HeaderMap,
     body: Bytes,
@@ -966,7 +967,7 @@ async fn action_endpoint(
         return with_security_headers(response);
     }
 
-    let rate_key = action_rate_limit_key(&headers, &query);
+    let rate_key = action_rate_limit_key(peer, &headers, &query);
     if !state
         .action_limiter
         .lock()
@@ -2859,17 +2860,35 @@ fn action_fetch_site_is_cross_site(headers: &HeaderMap) -> bool {
         .is_some_and(|value| value.eq_ignore_ascii_case("cross-site"))
 }
 
-fn action_rate_limit_key(headers: &HeaderMap, query: &ActionQuery) -> String {
-    let client = headers
-        .get("x-forwarded-for")
-        .or_else(|| headers.get("x-real-ip"))
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-        .unwrap_or("local");
+fn action_rate_limit_key(peer: SocketAddr, headers: &HeaderMap, query: &ActionQuery) -> String {
+    let peer_ip = peer.ip();
+
+    // Only trust forwarded headers when the direct peer is a loopback or
+    // private address (i.e., a trusted reverse proxy). This prevents clients
+    // from spoofing X-Forwarded-For to bypass rate limiting.
+    let client: String = if is_trusted_proxy_ip(peer_ip) {
+        headers
+            .get("x-forwarded-for")
+            .or_else(|| headers.get("x-real-ip"))
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(',').next())
+            .map(|s| s.trim().to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| peer_ip.to_string())
+    } else {
+        peer_ip.to_string()
+    };
 
     format!("{client}:{}:{}", query.path, query.name)
+}
+
+/// Returns true if the IP is a loopback or private network address,
+/// indicating the connection comes from a local reverse proxy.
+fn is_trusted_proxy_ip(ip: std::net::IpAddr) -> bool {
+    match ip {
+        std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_private(),
+        std::net::IpAddr::V6(v6) => v6.is_loopback(),
+    }
 }
 
 fn url_encode_component(input: &str) -> String {
