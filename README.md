@@ -18,7 +18,7 @@
   <img src="https://img.shields.io/badge/node-%3E%3D22-blue?style=flat-square" alt="Node 22+" />
   <img src="https://img.shields.io/badge/rust-1.96%2B-orange?style=flat-square" alt="Rust 1.96+" />
   <img src="https://img.shields.io/badge/pnpm-11%2B-yellow?style=flat-square" alt="pnpm 11+" />
-  <img src="https://img.shields.io/badge/TypeScript-7.0-blue?style=flat-square" alt="TypeScript 7.0" />
+  <img src="https://img.shields.io/badge/TypeScript-7.0.2-blue?style=flat-square" alt="TypeScript 7.0.2" />
 </p>
 
 ---
@@ -56,8 +56,8 @@
   via `ruvyxa.config.ts` or inline exports.
 - **SSR-first React** — pages render on the server, with route-level client bundles for hydration.
 - **Secure server actions** — validation hooks, origin checks, Fetch Metadata guards, a 1 MB body
-  limit, a 10 MB API body limit, and per-client/action rate limiting (600 req/min default) are built
-  in.
+  limit, a 10 MB API body limit (`security.apiLimit`), and per-client/action rate limiting (600
+  req/min default via `security.actionRateLimit`) are built in.
 - **Dev/prod parity** — `dev` and `start` share routing, rendering, static asset, and
   security-header semantics.
 - **ETag / 304 support** — static assets include BLAKE3-256-based ETags for efficient browser

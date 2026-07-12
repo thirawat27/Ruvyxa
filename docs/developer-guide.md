@@ -26,8 +26,8 @@ npm package: ruvyxa
   └─ bin/ruvyxa.js -> platform-specific native CLI
        ├─ crates/ruvyxa_cli          commands, config loading, build orchestration
        ├─ crates/ruvyxa_graph        route discovery, render detection, validation
-       ├─ crates/ruvyxa_bundler      TS/JSX/MDX compilation, resolution, linking, maps
-       ├─ crates/ruvyxa_dev_server   Axum server, HMR, router, cache, Node worker pool
+       ├─ crates/ruvyxa_bundler      TS/JSX/MDX compilation, resolution, linking, maps, selective minification
+       ├─ crates/ruvyxa_dev_server   Axum server, HMR, router, cache, Node worker pool, CSS minification
        ├─ crates/ruvyxa_middleware   Tower middleware and Wasm plugin support
        └─ crates/ruvyxa_diagnostics  structured RUV#### diagnostics
 
@@ -84,16 +84,17 @@ to hide a file-lock problem.
 
 ## 4. Change map
 
-| Change                                           | Primary surface                               | Minimum proof                         |
-| ------------------------------------------------ | --------------------------------------------- | ------------------------------------- |
-| CLI command, config parsing, build orchestration | `crates/ruvyxa_cli/src/main.rs`               | relevant Rust test plus demo `check`  |
-| route matching, validation, rendering detection  | `crates/ruvyxa_graph/src/lib.rs`              | graph test plus `routes`/`analyze`    |
-| compilation, linking, source maps                | `crates/ruvyxa_bundler`                       | bundler tests plus demo build         |
-| API/action/HMR/server behaviour                  | `crates/ruvyxa_dev_server`                    | crate tests plus parity               |
-| core config or server API                        | `packages/@ruvyxa/core/src`                   | package test/check                    |
-| npm launcher or runtime script                   | `packages/ruvyxa`                             | package test and `pnpm pack:smoke`    |
-| generated starter                                | `templates/minimal`, `packages/create-ruvyxa` | create-package test and pack smoke    |
-| cross-cutting application behaviour              | `examples/demo`                               | `analyze`, `check`, and `test:parity` |
+| Change                                                    | Primary surface                               | Minimum proof                         |
+| --------------------------------------------------------- | --------------------------------------------- | ------------------------------------- |
+| CLI command, config parsing, build orchestration          | `crates/ruvyxa_cli/src/main.rs`               | relevant Rust test plus demo `check`  |
+| route matching, validation, rendering detection           | `crates/ruvyxa_graph/src/lib.rs`              | graph test plus `routes`/`analyze`    |
+| compilation, linking, source maps, selective minification | `crates/ruvyxa_bundler`                       | bundler tests plus demo build         |
+| CSS collection, minification, style HMR                   | `crates/ruvyxa_dev_server/src/style.rs`       | crate tests plus demo build           |
+| API/action/HMR/server behaviour                           | `crates/ruvyxa_dev_server`                    | crate tests plus parity               |
+| core config or server API                                 | `packages/@ruvyxa/core/src`                   | package test/check                    |
+| npm launcher or runtime script                            | `packages/ruvyxa`                             | package test and `pnpm pack:smoke`    |
+| generated starter                                         | `templates/minimal`, `packages/create-ruvyxa` | create-package test and pack smoke    |
+| cross-cutting application behaviour                       | `examples/demo`                               | `analyze`, `check`, and `test:parity` |
 
 Add a Rust test beside shared Rust behaviour. Add a Node test under `tests/packages/**` when
 changing a public config, runtime, package, or template contract. Never weaken an existing test just

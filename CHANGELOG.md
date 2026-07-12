@@ -2,6 +2,62 @@
 
 ## v1.0.11 (2026-07-12)
 
+### macOS x64 Native Binary Removal
+
+- Removed `@ruvyxa/cli-darwin-x64` package directory and configuration
+- Removed `darwin-x64` from `supportedPlatforms` mapping in `scripts/native-platform.mjs`
+- Removed `@ruvyxa/cli-darwin-x64` optional dependency from main package
+- Updated error message in `bin/ruvyxa.js` to reflect remaining 5 supported platforms
+- Added test case verifying `darwin-x64` is not published or resolved
+- Intel macOS support discontinued in favor of ARM64 architecture
+
+### Selective Minification and CSS Optimization
+
+- Added `minify_selective()` to skip minification for third-party modules (`node_modules`) while
+  compressing project code
+- Implemented selective minification in bundle pipeline when client bundles contain node_modules
+- Updated module labeling in linker to use full paths consistently
+- Added CSS minification support with `minify_css()` in dev server for production builds while
+  preserving readable CSS in watch mode
+- CSS minifier strips comments and collapses whitespace, preserving string/`url()` content
+
+### Rate Limit Bypass Prevention and Worker Reliability
+
+- Extracted peer socket address in action endpoint to capture direct client IP
+- Implemented trusted proxy detection to prevent `X-Forwarded-For` spoofing attacks
+- Only trust forwarded headers when direct peer is loopback or private address
+- Added idempotent request detection to safely retry only SSR, SSG, and client requests
+- Quarantined failed workers to prevent processing conflicting retry requests
+- Added stderr drain task to prevent Node worker process pipe buffer overflow
+- Implemented sliding-window rate limiter middleware with per-client IP tracking
+- Improved worker pool fallback messaging to clarify idempotent request retry logic
+
+### Documentation Consolidation
+
+- Reorganized docs structure into two main guides: `docs/user-guide.md` for app developers and
+  `docs/developer-guide.md` for framework contributors
+- Deleted specialized docs (getting-started, routing, content-and-images, data, actions, deployment,
+  debugging, performance, parity, production-readiness, publishing, architecture/project-structure)
+- Updated README.md documentation links to point to the two new consolidated guides
+- Added demo app README with health check example
+- Updated CONTRIBUTING.md to reference new documentation structure
+- Simplified documentation maintenance by centralizing content into purpose-specific guides
+
+### Smoke Test and Script Improvements
+
+- Isolated scaffolded app workspace context in smoke tests by creating empty `pnpm-workspace.yaml`
+- Overrode smoke test dependencies with local tarballs for comprehensive validation
+- Added pnpm overrides for transitive dependency resolution during smoke tests
+- Added tarball resolution for `@ruvyxa/core`, `@ruvyxa/react`, and platform-specific CLI packages
+- Improved smoke test isolation by using system temp directory instead of hardcoded path
+- Removed redundant `ruvyxa` type declaration from minimal template `tsconfig.json`
+- Simplified type resolution by relying on `ruvyxa` package's included types
+
+### Infrastructure
+
+- Removed `.githooks/pre-commit` hook for Cargo.lock validation (now handled through CI/CD)
+ - Suppressed clippy `too_many_arguments` warning on `print_build_report` function
+
 ### Windows arm64 Support
 
 - Added `@ruvyxa/cli-win32-arm64` platform package with native CLI binary for Windows arm64
@@ -731,7 +787,7 @@
 - Rust workspace with 5 crates
 - pnpm monorepo with 18 packages
 - GitHub repository setup
-- Prebuilt native CLI binaries for 5 platforms (Windows x64, macOS x64/ARM64, Linux x64/ARM64)
+- Prebuilt native CLI binaries for 5 platforms (Windows x64/ARM64, macOS ARM64, Linux x64/ARM64)
 - npm publishing configuration
 - TypeScript base configuration
 

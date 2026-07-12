@@ -66,6 +66,10 @@ jobs:
           pnpm install --frozen-lockfile --prefer-offline
       - name: Check Rust formatting
         run: cargo fmt --all -- --check
+      - name: Check workspace formatting
+        run: pnpm format:check
+      - name: Check Cargo lockfile
+        run: pnpm check:cargo-lock
       - name: Test Rust workspace
         run: cargo test --workspace --locked
       - name: Lint Rust workspace

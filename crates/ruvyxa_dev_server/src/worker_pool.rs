@@ -10,8 +10,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex as StdMutex};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -180,6 +180,7 @@ struct Worker {
     stdin_tx: StdMutex<Option<mpsc::Sender<String>>>,
     pending: Arc<Mutex<BTreeMap<String, oneshot::Sender<WorkerResponse>>>>,
     child: Mutex<Option<Child>>,
+    alive: Arc<AtomicBool>,
 }
 
 impl Worker {
@@ -206,6 +207,7 @@ impl Worker {
 
         let pending: Arc<Mutex<BTreeMap<String, oneshot::Sender<WorkerResponse>>>> =
             Arc::new(Mutex::new(BTreeMap::new()));
+        let alive = Arc::new(AtomicBool::new(true));
 
         // Spawn stdin writer task
         let (stdin_tx, mut stdin_rx) = mpsc::channel::<String>(256);
@@ -232,6 +234,7 @@ impl Worker {
 
         // Spawn stdout reader task
         let reader_pending = pending.clone();
+        let reader_alive = alive.clone();
         tokio::spawn(async move {
             let mut reader = BufReader::new(stdout).lines();
             while let Ok(Some(line)) = reader.next_line().await {
@@ -251,6 +254,10 @@ impl Worker {
                     let _ = sender.send(response);
                 }
             }
+            // Dropping every sender wakes requests immediately when the worker
+            // exits, instead of leaving them to wait for the request timeout.
+            reader_alive.store(false, Ordering::Release);
+            reader_pending.lock().await.clear();
             debug!("worker stdout reader exited");
         });
 
@@ -258,11 +265,13 @@ impl Worker {
             stdin_tx: StdMutex::new(Some(stdin_tx)),
             pending,
             child: Mutex::new(Some(child)),
+            alive,
         })
     }
 
     /// Close the worker input, then force-stop it if graceful shutdown takes too long.
     async fn shutdown(&self) {
+        self.alive.store(false, Ordering::Release);
         let sender = self
             .stdin_tx
             .lock()
@@ -291,6 +300,11 @@ impl Worker {
     }
 
     async fn send(&self, request: &WorkerRequest) -> Result<WorkerResponse> {
+        if !self.alive.load(Ordering::Acquire) {
+            return Err(RuvyxaError::Message(
+                "Worker process has exited".to_string(),
+            ));
+        }
         let id = match request {
             WorkerRequest::Ssr { id, .. }
             | WorkerRequest::Api { id, .. }
@@ -306,6 +320,12 @@ impl Worker {
         {
             let mut pending = self.pending.lock().await;
             pending.insert(id.clone(), tx);
+        }
+        if !self.alive.load(Ordering::Acquire) {
+            self.pending.lock().await.remove(&id);
+            return Err(RuvyxaError::Message(
+                "Worker process has exited".to_string(),
+            ));
         }
 
         let line = serde_json::to_string(request)
@@ -335,9 +355,9 @@ impl Worker {
             Err(_) => {
                 let mut pending = self.pending.lock().await;
                 pending.remove(&id);
-                Err(RuvyxaError::Message(
-                    "Worker request timed out after 30s".to_string(),
-                ))
+                Err(RuvyxaError::Message(format!(
+                    "Worker request timed out after {WORKER_TIMEOUT_MS}ms"
+                )))
             }
         }
     }
@@ -346,7 +366,9 @@ impl Worker {
 // --- Worker Pool ---
 
 pub struct NodeWorkerPool {
-    workers: Vec<Worker>,
+    workers: StdRwLock<Vec<Arc<Worker>>>,
+    worker_script: PathBuf,
+    env: BTreeMap<String, String>,
     next_worker: AtomicU64,
 }
 
@@ -385,7 +407,7 @@ impl NodeWorkerPool {
 
         let mut workers = Vec::with_capacity(pool_size);
         for _ in 0..pool_size {
-            workers.push(Worker::spawn(&worker_script, &env).await?);
+            workers.push(Arc::new(Worker::spawn(&worker_script, &env).await?));
         }
 
         // Health check: ping first worker to verify it's alive
@@ -410,40 +432,88 @@ impl NodeWorkerPool {
         }
 
         Ok(Self {
-            workers,
+            workers: StdRwLock::new(workers),
+            worker_script,
+            env,
             next_worker: AtomicU64::new(0),
         })
     }
 
     /// Stop every owned Node worker before the server releases its process resources.
     pub async fn shutdown(&self) {
-        for worker in &self.workers {
+        let workers = self
+            .workers
+            .read()
+            .expect("worker pool lock poisoned")
+            .clone();
+        for worker in workers {
             worker.shutdown().await;
         }
     }
 
     /// Send a request to the next available worker (round-robin).
     pub async fn send(&self, request: WorkerRequest) -> Result<WorkerResponse> {
-        let index = self.next_worker.fetch_add(1, Ordering::Relaxed) as usize % self.workers.len();
-        let response = self.workers[index].send(&request).await;
+        let (index, worker) = {
+            let workers = self.workers.read().expect("worker pool lock poisoned");
+            if workers.is_empty() {
+                return Err(RuvyxaError::Message(
+                    "Worker pool has no workers".to_string(),
+                ));
+            }
+            let index = self.next_worker.fetch_add(1, Ordering::Relaxed) as usize % workers.len();
+            (index, workers[index].clone())
+        };
+        let response = worker.send(&request).await;
 
-        // If the worker failed, only retry for idempotent request types.
-        // Action and API requests may have side effects — retrying them could
-        // cause duplicate mutations, duplicate emails, double charges, etc.
-        if response.is_err() && self.workers.len() > 1 && request.is_idempotent() {
-            let fallback_index = (index + 1) % self.workers.len();
+        if response.is_err()
+            && let Some(replacement) = self.replace_failed_worker(index, &worker).await
+            && request.is_idempotent()
+        {
             warn!(
                 failed_worker = index,
-                fallback_worker = fallback_index,
-                "retrying idempotent request on fallback worker"
+                "retrying idempotent request on replacement worker"
             );
-            // Quarantine the failed worker — terminate it so it cannot process
-            // further requests that might conflict with the retry.
-            self.workers[index].shutdown().await;
-            return self.workers[fallback_index].send(&request).await;
+            return replacement.send(&request).await;
         }
 
         response
+    }
+
+    /// Replaces a failed worker before the next request can select its slot.
+    /// The caller decides whether the failed request is safe to retry.
+    async fn replace_failed_worker(
+        &self,
+        index: usize,
+        failed: &Arc<Worker>,
+    ) -> Option<Arc<Worker>> {
+        let replacement = match Worker::spawn(&self.worker_script, &self.env).await {
+            Ok(worker) => Arc::new(worker),
+            Err(error) => {
+                warn!(%error, failed_worker = index, "failed to replace Node worker");
+                return None;
+            }
+        };
+
+        let active = {
+            let mut workers = self.workers.write().expect("worker pool lock poisoned");
+            if workers
+                .get(index)
+                .is_some_and(|worker| Arc::ptr_eq(worker, failed))
+            {
+                workers[index] = replacement.clone();
+                replacement.clone()
+            } else {
+                workers.get(index)?.clone()
+            }
+        };
+
+        if Arc::ptr_eq(&active, &replacement) {
+            failed.shutdown().await;
+        } else {
+            replacement.shutdown().await;
+        }
+
+        Some(active)
     }
 
     /// Invalidate bundle caches in all workers concurrently (called on file change).
@@ -451,8 +521,13 @@ impl NodeWorkerPool {
     /// Sends the invalidation request to all workers in parallel rather than
     /// sequentially, reducing latency from `n * RTT` to `max(RTT)`.
     pub async fn invalidate(&self, paths: Vec<String>) {
+        let workers = self
+            .workers
+            .read()
+            .expect("worker pool lock poisoned")
+            .clone();
         // Build one request per worker (each needs its own unique id).
-        let requests: Vec<WorkerRequest> = (0..self.workers.len())
+        let requests: Vec<WorkerRequest> = (0..workers.len())
             .map(|_| WorkerRequest::Invalidate {
                 id: next_request_id(),
                 paths: paths.clone(),
@@ -463,7 +538,7 @@ impl NodeWorkerPool {
         // so we collect futures and poll them all.
         let mut set = tokio::task::JoinSet::new();
         for (i, request) in requests.into_iter().enumerate() {
-            let stdin_tx = self.workers[i]
+            let stdin_tx = workers[i]
                 .stdin_tx
                 .lock()
                 .expect("worker stdin mutex poisoned")
@@ -488,8 +563,9 @@ impl NodeWorkerPool {
         &self,
         paths: Vec<String>,
     ) -> std::result::Result<usize, String> {
+        let workers = self.workers.read().expect("worker pool lock poisoned");
         let mut queued = 0;
-        for (worker_index, worker) in self.workers.iter().enumerate() {
+        for (worker_index, worker) in workers.iter().enumerate() {
             let request = WorkerRequest::Invalidate {
                 id: next_request_id(),
                 paths: paths.clone(),
@@ -516,12 +592,17 @@ impl NodeWorkerPool {
     /// This eliminates the cold-start penalty for the first request to each route.
     /// Warm every worker because Node's ESM cache is process-local.
     pub async fn warmup(&self, project_root: &str, routes: Vec<WarmupRoute>) -> usize {
-        if routes.is_empty() || self.workers.is_empty() {
+        let workers = self
+            .workers
+            .read()
+            .expect("worker pool lock poisoned")
+            .clone();
+        if routes.is_empty() || workers.is_empty() {
             return 0;
         }
 
         let mut warmed = 0;
-        for worker in &self.workers {
+        for worker in &workers {
             let request = WorkerRequest::Warmup {
                 id: next_request_id(),
                 project_root: project_root.to_string(),
@@ -539,11 +620,7 @@ impl NodeWorkerPool {
                 }
             }
         }
-        debug!(
-            warmed,
-            workers = self.workers.len(),
-            "worker warmup completed"
-        );
+        debug!(warmed, workers = workers.len(), "worker warmup completed");
         warmed
     }
 
@@ -677,19 +754,99 @@ mod tests {
             .await
             .unwrap();
         let pool = NodeWorkerPool {
-            workers: vec![worker],
+            workers: StdRwLock::new(vec![Arc::new(worker)]),
+            worker_script,
+            env: BTreeMap::new(),
             next_worker: AtomicU64::new(0),
         };
 
         pool.shutdown().await;
 
-        assert!(pool.workers[0].child.lock().await.is_none());
+        let worker = pool.workers.read().expect("worker pool lock poisoned")[0].clone();
+        assert!(worker.child.lock().await.is_none());
         assert!(
-            pool.workers[0]
+            worker
                 .stdin_tx
                 .lock()
                 .expect("worker stdin mutex poisoned")
                 .is_none()
         );
+    }
+
+    #[tokio::test]
+    async fn worker_exit_closes_pending_requests_promptly() {
+        let temp = tempfile::tempdir().unwrap();
+        let worker_script = temp.path().join("worker.mjs");
+        std::fs::write(
+            &worker_script,
+            "process.stdin.once('data', () => process.exit(0)); process.stdin.resume();",
+        )
+        .unwrap();
+
+        let worker = Worker::spawn(&worker_script, &BTreeMap::new())
+            .await
+            .unwrap();
+        let request = WorkerRequest::Ping {
+            id: next_request_id(),
+        };
+        let result =
+            tokio::time::timeout(std::time::Duration::from_secs(2), worker.send(&request)).await;
+
+        assert!(result.is_ok(), "worker exit left the request pending");
+        let error = result.unwrap().unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("response channel closed unexpectedly")
+        );
+
+        worker.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn replaces_a_failed_worker_before_retrying_an_idempotent_request() {
+        let temp = tempfile::tempdir().unwrap();
+        let worker_script = temp.path().join("worker.mjs");
+        std::fs::write(
+            &worker_script,
+            "import { createInterface } from 'node:readline'; createInterface({ input: process.stdin }).on('line', (line) => { const { id } = JSON.parse(line); process.stdout.write(JSON.stringify({ id, ok: true, pong: true }) + '\\n'); });",
+        )
+        .unwrap();
+
+        let failed_worker = Arc::new(
+            Worker::spawn(&worker_script, &BTreeMap::new())
+                .await
+                .unwrap(),
+        );
+        let pool = NodeWorkerPool {
+            workers: StdRwLock::new(vec![failed_worker.clone()]),
+            worker_script,
+            env: BTreeMap::new(),
+            next_worker: AtomicU64::new(0),
+        };
+
+        let mut child = failed_worker.child.lock().await;
+        child.as_mut().unwrap().start_kill().unwrap();
+        child.as_mut().unwrap().wait().await.unwrap();
+        drop(child);
+
+        let response = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            pool.send(WorkerRequest::Ping {
+                id: next_request_id(),
+            }),
+        )
+        .await
+        .expect("worker replacement timed out")
+        .expect("worker replacement failed");
+
+        assert!(response.ok);
+        assert_eq!(response.pong, Some(true));
+        assert!(!Arc::ptr_eq(
+            &failed_worker,
+            &pool.workers.read().expect("worker pool lock poisoned")[0]
+        ));
+
+        pool.shutdown().await;
     }
 }
