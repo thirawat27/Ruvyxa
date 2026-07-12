@@ -242,11 +242,21 @@ Set environment variables using your platform's standard method. Ruvyxa loads `.
     "sourceBytes": 2457600,
     "outputBytes": 819200,
     "entries": [
-      { "source": "public/hero.jpg", "output": ".ruvyxa/assets/hero.webp", "width": 1600, "height": 900, "sourceBytes": 512000, "outputBytes": 153600, "cacheHit": true }
+      {
+        "source": "public/hero.jpg",
+        "output": ".ruvyxa/assets/hero.webp",
+        "width": 1600,
+        "height": 900,
+        "sourceBytes": 512000,
+        "outputBytes": 153600,
+        "cacheHit": true
+      }
     ]
   },
   "security": {
-    "actionLimit": 65536,
+    "actionLimit": 1048576,
+    "apiLimit": 10485760,
+    "actionRateLimit": { "max": 600, "window": 60 },
     "sameOrigin": true,
     "fetchMeta": true,
     "headers": true

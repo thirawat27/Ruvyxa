@@ -114,11 +114,11 @@ Ruvyxa applies multiple layers of protection to every action call:
 
 | Protection             | Behavior                                            |
 | ---------------------- | --------------------------------------------------- |
-| **Body size limit**    | Payloads over 64 KB are rejected with `413`         |
+| **Body size limit**    | Payloads over 1 MB are rejected with `413`          |
 | **Content-Type guard** | Only JSON and form-encoded are accepted             |
 | **Origin validation**  | `Origin` must match `Host` header, or `403`         |
 | **Fetch Metadata**     | `Sec-Fetch-Site: cross-site` is rejected with `403` |
-| **Rate limiting**      | Per-client/action throttling (60 req/min default)   |
+| **Rate limiting**      | Per-client/action throttling (600 req/min default)  |
 | **Security headers**   | Standard headers applied to all responses           |
 | **Module isolation**   | Actions can only be invoked from their owning route |
 
@@ -131,6 +131,8 @@ import { config } from '@ruvyxa/core'
 export default config({
   security: {
     actionLimit: 128 * 1024,
+    apiLimit: 10 * 1024 * 1024,
+    actionRateLimit: { max: 1_200, window: 60 },
     sameOrigin: true,
     fetchMeta: true,
   },

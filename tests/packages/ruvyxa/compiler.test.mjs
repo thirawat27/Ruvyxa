@@ -135,6 +135,27 @@ import Card from './Card.js'
     })
   })
 
+  it('rewrites named class exports before wrapping modules', async () => {
+    await withFixture(async ({ root, outDir }) => {
+      const classFile = path.join(root, 'boundary.js')
+      const outfile = path.join(outDir, 'class-export.mjs')
+      await writeFile(classFile, `export class Boundary {\n  message() { return 'ready' }\n}\n`)
+
+      await compileBundle({
+        projectRoot: root,
+        entrySource: `export { Boundary } from ${JSON.stringify(toImportPath(classFile))}`,
+        sourcefile: 'ruvyxa:class-export-entry.js',
+        outfile,
+        platform: 'browser',
+      })
+
+      const output = await readFile(outfile, 'utf8')
+      assert.doesNotMatch(output, /export class Boundary/)
+      const mod = await import(pathToFileURL(outfile).href + `?t=${Date.now()}`)
+      assert.equal(new mod.Boundary().message(), 'ready')
+    })
+  })
+
   it('handles JSX returned from ternaries and map callbacks', async () => {
     await withFixture(async ({ root, outDir }) => {
       const pageFile = path.join(root, 'page.tsx')
@@ -427,6 +448,28 @@ import Card from './Card.js'
     })
   })
 
+  it('serializes scalable action and API security limits', async () => {
+    await withFixture(async ({ root }) => {
+      await writeFile(
+        path.join(root, 'ruvyxa.config.ts'),
+        `export default {
+          security: {
+            actionLimit: 2 * 1024 * 1024,
+            apiLimit: 20 * 1024 * 1024,
+            actionRateLimit: { max: 1200, window: 30 }
+          }
+        }`,
+      )
+
+      const config = await runJson(configRenderer, [root], {})
+      assert.deepEqual(config.config.security, {
+        actionLimit: 2 * 1024 * 1024,
+        apiLimit: 20 * 1024 * 1024,
+        actionRateLimit: { max: 1200, window: 30 },
+      })
+    })
+  })
+
   it('forwards render and middleware configuration to the native CLI', async () => {
     await withFixture(async ({ root }) => {
       await writeFile(
@@ -486,6 +529,17 @@ import Card from './Card.js'
       const legacyBuildKey = await runJsonResult(configRenderer, [root], {})
       assert.equal(legacyBuildKey.exitCode, 1)
       assert.match(legacyBuildKey.parsed.message, /RUV1602 unknown config\.build field: sourcemap/)
+
+      await writeFile(
+        path.join(root, 'ruvyxa.config.ts'),
+        `export default { security: { actionRateLimit: { burst: 10 } } }`,
+      )
+      const invalidRateLimit = await runJsonResult(configRenderer, [root], {})
+      assert.equal(invalidRateLimit.exitCode, 1)
+      assert.match(
+        invalidRateLimit.parsed.message,
+        /RUV1602 unknown config\.security\.actionRateLimit field: burst/,
+      )
 
       await writeFile(
         path.join(root, 'ruvyxa.config.ts'),

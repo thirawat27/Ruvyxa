@@ -1,5 +1,6 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fs;
+use std::future::IntoFuture;
 use std::io::{ErrorKind, IsTerminal};
 use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
@@ -43,11 +44,12 @@ pub use hmr_tracker::{HmrEventType, HmrTracker, HmrUpdate};
 mod style;
 pub use style::{StyleCollection, collect_css, collect_styles};
 
-const MAX_ACTION_BODY_BYTES: usize = 64 * 1024;
-const MAX_API_BODY_BYTES: usize = 1024 * 1024;
-const ACTION_RATE_LIMIT_MAX: usize = 60;
+const MAX_ACTION_BODY_BYTES: usize = 1024 * 1024;
+const MAX_API_BODY_BYTES: usize = 10 * 1024 * 1024;
+const ACTION_RATE_LIMIT_MAX: usize = 600;
 const ACTION_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
 const PORT_FALLBACK_SCAN_LIMIT: u16 = 100;
+const SERVER_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
@@ -72,6 +74,12 @@ pub struct ServerConfig {
     pub debug_traces: bool,
     /// Maximum accepted action request payload size.
     pub action_body_limit_bytes: usize,
+    /// Maximum accepted API route request payload size.
+    pub api_body_limit_bytes: usize,
+    /// Maximum action requests per client/action in the configured window.
+    pub action_rate_limit_max: usize,
+    /// Window used by the action rate limiter.
+    pub action_rate_limit_window: Duration,
     /// Reject action requests whose Origin does not match the request Host.
     pub same_origin_actions: bool,
     /// Reject action requests initiated from a cross-site browser context.
@@ -102,6 +110,9 @@ impl ServerConfig {
             error_overlay: true,
             debug_traces: false,
             action_body_limit_bytes: MAX_ACTION_BODY_BYTES,
+            api_body_limit_bytes: MAX_API_BODY_BYTES,
+            action_rate_limit_max: ACTION_RATE_LIMIT_MAX,
+            action_rate_limit_window: ACTION_RATE_LIMIT_WINDOW,
             same_origin_actions: true,
             fetch_metadata_actions: true,
             security_headers: true,
@@ -129,6 +140,9 @@ impl ServerConfig {
             error_overlay: false,
             debug_traces: false,
             action_body_limit_bytes: MAX_ACTION_BODY_BYTES,
+            api_body_limit_bytes: MAX_API_BODY_BYTES,
+            action_rate_limit_max: ACTION_RATE_LIMIT_MAX,
+            action_rate_limit_window: ACTION_RATE_LIMIT_WINDOW,
             same_origin_actions: true,
             fetch_metadata_actions: true,
             security_headers: true,
@@ -278,8 +292,11 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
         config: config.clone(),
         reload_tx,
         runtime_cache,
-        action_limiter: Arc::new(Mutex::new(ActionRateLimiter::default())),
-        worker_pool,
+        action_limiter: Arc::new(Mutex::new(ActionRateLimiter::new(
+            config.action_rate_limit_max,
+            config.action_rate_limit_window,
+        ))),
+        worker_pool: worker_pool.clone(),
         render_cache,
         hmr_tracker,
     };
@@ -329,8 +346,53 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
 
     info!("Ruvyxa server listening on http://{bound_address}");
     print_server_ready(&config, &manifest, bound_address, startup_started.elapsed());
-    axum::serve(listener, app).await?;
+    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
+    let server = axum::serve(listener, app)
+        .with_graceful_shutdown(async move {
+            let _ = shutdown_rx.changed().await;
+        })
+        .into_future();
+    tokio::pin!(server);
+
+    let server_result = tokio::select! {
+        result = &mut server => result,
+        signal = shutdown_signal() => {
+            info!(signal, "shutting down Ruvyxa server");
+            let _ = shutdown_tx.send(true);
+            match tokio::time::timeout(SERVER_SHUTDOWN_GRACE, &mut server).await {
+                Ok(result) => result,
+                Err(_) => {
+                    warn!("server shutdown timed out; closing remaining connections");
+                    Ok(())
+                }
+            }
+        }
+    };
+
+    worker_pool.shutdown().await;
+    server_result?;
     Ok(())
+}
+
+/// Wait for an interactive interrupt or the Unix termination signal.
+async fn shutdown_signal() -> &'static str {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+
+        let mut terminate = signal(SignalKind::terminate())
+            .expect("failed to register SIGTERM handler for Ruvyxa server");
+        tokio::select! {
+            _ = tokio::signal::ctrl_c() => "SIGINT",
+            _ = terminate.recv() => "SIGTERM",
+        }
+    }
+
+    #[cfg(not(unix))]
+    {
+        let _ = tokio::signal::ctrl_c().await;
+        "CTRL_C"
+    }
 }
 
 fn dependency_warmup_routes(
@@ -967,7 +1029,7 @@ async fn handle_request(
     let method = parts.method.as_str().to_string();
     let request_path = parts.uri.path().to_string();
     let request_body = if request_method_allows_body(&method) {
-        match to_bytes(body, MAX_API_BODY_BYTES).await {
+        match to_bytes(body, state.config.api_body_limit_bytes).await {
             Ok(bytes) if bytes.is_empty() => None,
             Ok(bytes) => Some(String::from_utf8_lossy(&bytes).into_owned()),
             Err(error) => {
@@ -2137,12 +2199,6 @@ fn apply_security_headers(response: &mut Response) {
         HeaderName::from_static("cross-origin-opener-policy"),
         HeaderValue::from_static("same-origin"),
     );
-    // Keep-alive for HTTP/1.1 connection reuse
-    headers.insert(header::CONNECTION, HeaderValue::from_static("keep-alive"));
-    headers.insert(
-        HeaderName::from_static("keep-alive"),
-        HeaderValue::from_static("timeout=30, max=1000"),
-    );
 }
 
 fn finalize_security_headers(mut response: Response, enabled: bool) -> Response {
@@ -2645,26 +2701,11 @@ fn hmr_client_script() -> &'static str {
 (() => {
   const protocol = location.protocol === "https:" ? "wss" : "ws";
   const socket = new WebSocket(`${protocol}://${location.host}/__ruvyxa/hmr`);
-  const refreshCss = async () => {
-    const html = await fetch(location.href, { headers: { accept: "text/html" } }).then((res) => res.text());
-    const next = new DOMParser().parseFromString(html, "text/html").querySelector("style[data-ruvyxa-css]");
-    const current = document.querySelector("style[data-ruvyxa-css]");
-    if (next && current) current.replaceWith(next);
-    else location.reload();
-  };
-  const refreshComponent = () => {
-    const script = document.createElement("script");
-    script.type = "module";
-    script.src = `/__ruvyxa/client?path=${encodeURIComponent(location.pathname)}&t=${Date.now()}`;
-    script.onerror = () => location.reload();
-    document.body.appendChild(script);
-  };
   socket.addEventListener("message", (event) => {
-    const update = JSON.parse(event.data);
-    if (update.fullReload) location.reload();
-    else if (update.type === "css-update") refreshCss().catch(() => location.reload());
-    else if (update.type === "component-update") refreshComponent();
-    else location.reload();
+    // A clean page load keeps the browser's ESM module graph and React root in sync.
+    // This also covers route, CSS, and imported-module changes consistently.
+    JSON.parse(event.data);
+    location.reload();
   });
 })();
 </script>"#
@@ -2704,18 +2745,27 @@ fn extension_is(path: &Path, expected: &str) -> bool {
         .is_some_and(|extension| extension.eq_ignore_ascii_case(expected))
 }
 
-#[derive(Default)]
 struct ActionRateLimiter {
     hits: HashMap<String, Vec<Instant>>,
+    max_hits: usize,
+    window: Duration,
 }
 
 impl ActionRateLimiter {
+    fn new(max_hits: usize, window: Duration) -> Self {
+        Self {
+            hits: HashMap::new(),
+            max_hits,
+            window,
+        }
+    }
+
     fn allow(&mut self, key: &str) -> bool {
         let now = Instant::now();
         let hits = self.hits.entry(key.to_string()).or_default();
-        hits.retain(|hit| now.duration_since(*hit) <= ACTION_RATE_LIMIT_WINDOW);
+        hits.retain(|hit| now.duration_since(*hit) <= self.window);
 
-        if hits.len() >= ACTION_RATE_LIMIT_MAX {
+        if hits.len() >= self.max_hits {
             return false;
         }
 
@@ -3476,6 +3526,28 @@ mod tests {
     }
 
     #[test]
+    fn default_security_headers_preserve_websocket_upgrade_headers() {
+        let mut response = StatusCode::SWITCHING_PROTOCOLS.into_response();
+        response
+            .headers_mut()
+            .insert(header::CONNECTION, HeaderValue::from_static("Upgrade"));
+        response
+            .headers_mut()
+            .insert(header::UPGRADE, HeaderValue::from_static("websocket"));
+
+        let response = finalize_security_headers(response, true);
+
+        assert_eq!(
+            response.headers().get(header::CONNECTION),
+            Some(&HeaderValue::from_static("Upgrade"))
+        );
+        assert_eq!(
+            response.headers().get(header::UPGRADE),
+            Some(&HeaderValue::from_static("websocket"))
+        );
+    }
+
+    #[test]
     fn blocks_cross_site_fetch_metadata_for_actions() {
         let mut headers = HeaderMap::new();
         headers.insert("sec-fetch-site", HeaderValue::from_static("cross-site"));
@@ -3489,7 +3561,7 @@ mod tests {
 
     #[test]
     fn rate_limits_action_keys() {
-        let mut limiter = ActionRateLimiter::default();
+        let mut limiter = ActionRateLimiter::new(ACTION_RATE_LIMIT_MAX, ACTION_RATE_LIMIT_WINDOW);
 
         for _ in 0..ACTION_RATE_LIMIT_MAX {
             assert!(limiter.allow("local:/todos:createTodo"));
@@ -3749,12 +3821,10 @@ mod tests {
     }
 
     #[test]
-    fn hmr_client_honors_full_reload_before_targeted_updates() {
+    fn hmr_client_reloads_for_every_update() {
         let script = hmr_client_script();
-        let full_reload = script.find("if (update.fullReload)").unwrap();
-        let css_update = script
-            .find("else if (update.type === \"css-update\")")
-            .unwrap();
-        assert!(full_reload < css_update);
+        assert!(script.contains("JSON.parse(event.data);"));
+        assert!(script.contains("location.reload();"));
+        assert!(!script.contains("document.createElement(\"script\")"));
     }
 }

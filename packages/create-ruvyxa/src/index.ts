@@ -1,4 +1,4 @@
-import { access, constants, cp, readdir, stat } from 'node:fs/promises'
+import { access, constants, cp, readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { dirname, resolve, basename } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -155,6 +155,7 @@ export async function createRuvyxaApp(targetDir: string): Promise<void> {
   // --- Copy Template ---
   try {
     await cp(templateDir, resolvedTarget, { recursive: true })
+    await writeProjectPackageName(resolvedTarget, toPackageName(dirName))
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error)
     throw new Error(
@@ -163,4 +164,23 @@ export async function createRuvyxaApp(targetDir: string): Promise<void> {
         '  Check disk space and filesystem access.',
     )
   }
+}
+
+/** Convert a filesystem project name into a portable, unscoped npm package name. */
+function toPackageName(projectName: string): string {
+  const packageName = projectName
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '-')
+    .replace(/^[._-]+|[._-]+$/g, '')
+
+  return packageName || 'ruvyxa-app'
+}
+
+/** Update only the copied template manifest so every scaffold owns its package identity. */
+async function writeProjectPackageName(targetDir: string, packageName: string): Promise<void> {
+  const packagePath = resolve(targetDir, 'package.json')
+  const packageJson = JSON.parse(await readFile(packagePath, 'utf8'))
+  packageJson.name = packageName
+  await writeFile(packagePath, `${JSON.stringify(packageJson, null, 2)}\n`)
 }

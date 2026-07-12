@@ -76,8 +76,9 @@ live under `tests/packages/ruvyxa/`. Rust unit tests remain inline in their crat
 - Origin validation (same-origin only)
 - Fetch Metadata checks (`Sec-Fetch-Site`)
 - Content-Type enforcement (JSON or form-encoded)
-- Body size limit (64 KB)
-- Per-client rate limiting (60 req/min)
+- Configurable action body limit (1 MB default)
+- Configurable API body limit (10 MB default)
+- Configurable per-client/action rate limiting (600 req/min default)
 
 ### Security Headers
 

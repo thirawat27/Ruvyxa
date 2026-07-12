@@ -538,6 +538,12 @@ function rewriteExport(line, module, exported, reExportAll) {
     return line.replace(/^export\s+/, '')
   }
 
+  if (/^export\s+class\s+/.test(line)) {
+    const name = line.match(/^export\s+class\s+([A-Za-z_$][\w$]*)/)?.[1]
+    if (name) exported.push(`__exports.${name} = ${name};`)
+    return line.replace(/^export\s+/, '')
+  }
+
   if (line.includes(' from ')) {
     const match = line.match(/^export\s+(.+?)\s+from\s+["'](.+?)["'];?$/)
     if (!match) return ''

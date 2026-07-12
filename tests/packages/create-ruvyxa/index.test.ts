@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, readdir, rm } from 'node:fs/promises'
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 
@@ -27,6 +27,19 @@ describe('createRuvyxaApp', () => {
         'ruvyxa.config.ts',
         'tsconfig.json',
       ])
+      assert.equal((await readPackageJson(target)).name, 'my-app')
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('derives a portable package name from the selected project directory', async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), 'ruvyxa-create-'))
+    const target = join(tempRoot, 'Big App_v2')
+
+    try {
+      await createRuvyxaApp(target)
+      assert.equal((await readPackageJson(target)).name, 'big-app_v2')
     } finally {
       await rm(tempRoot, { recursive: true, force: true })
     }
@@ -59,4 +72,8 @@ async function listFiles(root: string): Promise<string[]> {
       }
     }
   }
+}
+
+async function readPackageJson(root: string): Promise<{ name: string }> {
+  return JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
 }

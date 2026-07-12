@@ -10,8 +10,8 @@
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex as StdMutex};
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -34,6 +34,9 @@ const MAX_POOL_SIZE: usize = 8;
 
 /// Maximum time to wait for a worker response before considering it dead.
 const WORKER_TIMEOUT_MS: u64 = 10_000;
+
+/// Maximum time a worker receives to exit after its stdin closes before it is killed.
+const WORKER_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -158,9 +161,9 @@ pub struct WorkerResponse {
 // --- Worker Process ---
 
 struct Worker {
-    stdin_tx: mpsc::Sender<String>,
+    stdin_tx: StdMutex<Option<mpsc::Sender<String>>>,
     pending: Arc<Mutex<BTreeMap<String, oneshot::Sender<WorkerResponse>>>>,
-    _child: Child,
+    child: Mutex<Option<Child>>,
 }
 
 impl Worker {
@@ -226,10 +229,39 @@ impl Worker {
         });
 
         Ok(Self {
-            stdin_tx,
+            stdin_tx: StdMutex::new(Some(stdin_tx)),
             pending,
-            _child: child,
+            child: Mutex::new(Some(child)),
         })
+    }
+
+    /// Close the worker input, then force-stop it if graceful shutdown takes too long.
+    async fn shutdown(&self) {
+        let sender = self
+            .stdin_tx
+            .lock()
+            .expect("worker stdin mutex poisoned")
+            .take();
+        drop(sender);
+        self.pending.lock().await.clear();
+
+        let Some(mut child) = self.child.lock().await.take() else {
+            return;
+        };
+
+        match tokio::time::timeout(WORKER_SHUTDOWN_TIMEOUT, child.wait()).await {
+            Ok(Ok(status)) => debug!(?status, "Node worker stopped gracefully"),
+            Ok(Err(error)) => warn!(%error, "failed while waiting for Node worker shutdown"),
+            Err(_) => {
+                warn!("Node worker did not stop in time; terminating it");
+                if let Err(error) = child.start_kill() {
+                    warn!(%error, "failed to terminate Node worker");
+                }
+                if let Err(error) = child.wait().await {
+                    warn!(%error, "failed while waiting for terminated Node worker");
+                }
+            }
+        }
     }
 
     async fn send(&self, request: &WorkerRequest) -> Result<WorkerResponse> {
@@ -254,7 +286,14 @@ impl Worker {
             .map_err(|error| RuvyxaError::Message(error.to_string()))?
             + "\n";
 
-        if self.stdin_tx.send(line).await.is_err() {
+        let stdin_tx = self
+            .stdin_tx
+            .lock()
+            .expect("worker stdin mutex poisoned")
+            .clone()
+            .ok_or_else(|| RuvyxaError::Message("Worker process is shutting down".to_string()))?;
+
+        if stdin_tx.send(line).await.is_err() {
             let mut pending = self.pending.lock().await;
             pending.remove(&id);
             return Err(RuvyxaError::Message(
@@ -350,6 +389,13 @@ impl NodeWorkerPool {
         })
     }
 
+    /// Stop every owned Node worker before the server releases its process resources.
+    pub async fn shutdown(&self) {
+        for worker in &self.workers {
+            worker.shutdown().await;
+        }
+    }
+
     /// Send a request to the next available worker (round-robin).
     pub async fn send(&self, request: WorkerRequest) -> Result<WorkerResponse> {
         let index = self.next_worker.fetch_add(1, Ordering::Relaxed) as usize % self.workers.len();
@@ -386,10 +432,16 @@ impl NodeWorkerPool {
         // so we collect futures and poll them all.
         let mut set = tokio::task::JoinSet::new();
         for (i, request) in requests.into_iter().enumerate() {
-            let stdin_tx = self.workers[i].stdin_tx.clone();
+            let stdin_tx = self.workers[i]
+                .stdin_tx
+                .lock()
+                .expect("worker stdin mutex poisoned")
+                .clone();
             set.spawn(async move {
                 let line = serde_json::to_string(&request).unwrap_or_default() + "\n";
-                let _ = stdin_tx.send(line).await;
+                if let Some(stdin_tx) = stdin_tx {
+                    let _ = stdin_tx.send(line).await;
+                }
             });
         }
         // Wait for all to complete.
@@ -415,6 +467,10 @@ impl NodeWorkerPool {
                 .map_err(|error| format!("worker invalidation serialization failed: {error}"))?;
             worker
                 .stdin_tx
+                .lock()
+                .expect("worker stdin mutex poisoned")
+                .as_ref()
+                .ok_or_else(|| format!("worker {worker_index} is shutting down"))?
                 .try_send(format!("{line}\n"))
                 .map_err(|error| {
                     format!("worker {worker_index} invalidation queue rejected the update: {error}")
@@ -570,4 +626,39 @@ fn find_worker_script(root: &Path) -> Option<PathBuf> {
     }
 
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn pool_shutdown_closes_owned_node_workers() {
+        let temp = tempfile::tempdir().unwrap();
+        let worker_script = temp.path().join("worker.mjs");
+        std::fs::write(
+            &worker_script,
+            "process.stdin.on('end', () => process.exit(0)); process.stdin.resume();",
+        )
+        .unwrap();
+
+        let worker = Worker::spawn(&worker_script, &BTreeMap::new())
+            .await
+            .unwrap();
+        let pool = NodeWorkerPool {
+            workers: vec![worker],
+            next_worker: AtomicU64::new(0),
+        };
+
+        pool.shutdown().await;
+
+        assert!(pool.workers[0].child.lock().await.is_none());
+        assert!(
+            pool.workers[0]
+                .stdin_tx
+                .lock()
+                .expect("worker stdin mutex poisoned")
+                .is_none()
+        );
+    }
 }

@@ -41,8 +41,24 @@ deterministic.
 
 ```ts
 import { config } from 'ruvyxa/config'
-import { action, cache, cacheStats, invalidateCache, json, loader, notFound, redirect } from 'ruvyxa/server'
-import type { Adapter, BuildContext, PluginContext, RuvyxaConfig, RuvyxaPlugin, TransformResult } from 'ruvyxa'
+import {
+  action,
+  cache,
+  cacheStats,
+  invalidateCache,
+  json,
+  loader,
+  notFound,
+  redirect,
+} from 'ruvyxa/server'
+import type {
+  Adapter,
+  BuildContext,
+  PluginContext,
+  RuvyxaConfig,
+  RuvyxaPlugin,
+  TransformResult,
+} from 'ruvyxa'
 ```
 
 ## Configuration with Middleware
@@ -77,7 +93,9 @@ export default config({
     dir: '.ruvyxa/cache/bundler',
   },
   security: {
-    actionLimit: 65536,
+    actionLimit: 1024 * 1024,
+    apiLimit: 10 * 1024 * 1024,
+    actionRateLimit: { max: 600, window: 60 },
     sameOrigin: true,
     fetchMeta: true,
     headers: true,

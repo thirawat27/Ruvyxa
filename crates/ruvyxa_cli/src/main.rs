@@ -230,12 +230,23 @@ struct DebugConfigOptions {
 struct SecurityConfigOptions {
     #[serde(rename = "actionLimit")]
     action_body_limit_bytes: Option<usize>,
+    #[serde(rename = "apiLimit")]
+    api_body_limit_bytes: Option<usize>,
+    #[serde(rename = "actionRateLimit")]
+    action_rate_limit: Option<ActionRateLimitOptions>,
     #[serde(rename = "sameOrigin")]
     same_origin_actions: Option<bool>,
     #[serde(rename = "fetchMeta")]
     fetch_metadata_actions: Option<bool>,
     #[serde(rename = "headers")]
     security_headers: Option<bool>,
+}
+
+#[derive(Debug, Default, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct ActionRateLimitOptions {
+    max: Option<usize>,
+    window: Option<u64>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -288,6 +299,15 @@ impl ProjectConfig {
         for entry in &self.css.entries {
             validate_project_relative_path("css.entries", entry)?;
         }
+        validate_positive_limit(
+            "security.actionLimit",
+            self.security.action_body_limit_bytes,
+        )?;
+        validate_positive_limit("security.apiLimit", self.security.api_body_limit_bytes)?;
+        if let Some(rate_limit) = &self.security.action_rate_limit {
+            validate_positive_limit("security.actionRateLimit.max", rate_limit.max)?;
+            validate_positive_limit("security.actionRateLimit.window", rate_limit.window)?;
+        }
         Ok(())
     }
 
@@ -306,6 +326,16 @@ impl ProjectConfig {
             self.rendering.default_revalidate,
         )
     }
+}
+
+fn validate_positive_limit<T>(field: &str, value: Option<T>) -> anyhow::Result<()>
+where
+    T: PartialEq + From<u8>,
+{
+    if value.is_some_and(|value| value == T::from(0)) {
+        anyhow::bail!("RUV1601 config field `{field}` must be greater than zero");
+    }
+    Ok(())
 }
 
 fn discover_project_routes(root: &Path, config: &ProjectConfig) -> anyhow::Result<RouteManifest> {
@@ -508,6 +538,18 @@ fn dev_server_config(args: &ServerArgs, config: &ProjectConfig) -> ServerConfig 
         .security
         .action_body_limit_bytes
         .unwrap_or(server.action_body_limit_bytes);
+    server.api_body_limit_bytes = config
+        .security
+        .api_body_limit_bytes
+        .unwrap_or(server.api_body_limit_bytes);
+    if let Some(rate_limit) = &config.security.action_rate_limit {
+        server.action_rate_limit_max = rate_limit.max.unwrap_or(server.action_rate_limit_max);
+        server.action_rate_limit_window = Duration::from_secs(
+            rate_limit
+                .window
+                .unwrap_or(server.action_rate_limit_window.as_secs()),
+        );
+    }
     server.same_origin_actions = config
         .security
         .same_origin_actions
@@ -547,6 +589,18 @@ fn production_server_config(args: &ServerArgs, config: &ProjectConfig) -> Server
         .security
         .action_body_limit_bytes
         .unwrap_or(server.action_body_limit_bytes);
+    server.api_body_limit_bytes = config
+        .security
+        .api_body_limit_bytes
+        .unwrap_or(server.api_body_limit_bytes);
+    if let Some(rate_limit) = &config.security.action_rate_limit {
+        server.action_rate_limit_max = rate_limit.max.unwrap_or(server.action_rate_limit_max);
+        server.action_rate_limit_window = Duration::from_secs(
+            rate_limit
+                .window
+                .unwrap_or(server.action_rate_limit_window.as_secs()),
+        );
+    }
     server.same_origin_actions = config
         .security
         .same_origin_actions
@@ -751,7 +805,12 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
         "images": image_report,
         "hashAlgorithm": ASSET_HASH_ALGORITHM,
         "security": {
-            "actionLimit": config.security.action_body_limit_bytes.unwrap_or(65536),
+            "actionLimit": config.security.action_body_limit_bytes.unwrap_or(1024 * 1024),
+            "apiLimit": config.security.api_body_limit_bytes.unwrap_or(10 * 1024 * 1024),
+            "actionRateLimit": {
+                "max": config.security.action_rate_limit.as_ref().and_then(|value| value.max).unwrap_or(600),
+                "window": config.security.action_rate_limit.as_ref().and_then(|value| value.window).unwrap_or(60)
+            },
             "sameOrigin": config.security.same_origin_actions.unwrap_or(true),
             "fetchMeta": config.security.fetch_metadata_actions.unwrap_or(true),
             "headers": config.security.security_headers.unwrap_or(true)
@@ -3339,6 +3398,8 @@ mod tests {
         let config: ProjectConfig = serde_json::from_value(json!({
             "security": {
                 "actionLimit": 8192,
+                "apiLimit": 16384,
+                "actionRateLimit": { "max": 240, "window": 30 },
                 "sameOrigin": false,
                 "fetchMeta": false,
                 "headers": false
@@ -3351,6 +3412,9 @@ mod tests {
             production_server_config(&args, &config),
         ] {
             assert_eq!(server.action_body_limit_bytes, 8192);
+            assert_eq!(server.api_body_limit_bytes, 16384);
+            assert_eq!(server.action_rate_limit_max, 240);
+            assert_eq!(server.action_rate_limit_window, Duration::from_secs(30));
             assert!(!server.same_origin_actions);
             assert!(!server.fetch_metadata_actions);
             assert!(!server.security_headers);
@@ -3374,6 +3438,20 @@ mod tests {
                 .to_string()
                 .contains("unknown field `unsupportedTopLevel`")
         );
+    }
+
+    #[test]
+    fn rejects_zero_security_limits() {
+        let config: ProjectConfig = serde_json::from_value(json!({
+            "security": {
+                "apiLimit": 0,
+                "actionRateLimit": { "max": 0, "window": 0 }
+            }
+        }))
+        .unwrap();
+
+        let error = config.validate_paths().unwrap_err();
+        assert!(error.to_string().contains("security.apiLimit"));
     }
 
     #[test]

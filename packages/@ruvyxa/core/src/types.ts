@@ -33,7 +33,17 @@ export interface RuvyxaConfig {
   }
   image?: ImageConfig
   security?: {
+    /** Maximum server-action payload size in bytes. @default 1048576 */
     actionLimit?: number
+    /** Maximum API route request payload size in bytes. @default 10485760 */
+    apiLimit?: number
+    /** Per-client/action request ceiling; values are bounded but configurable. */
+    actionRateLimit?: {
+      /** Maximum requests during `window` seconds. @default 600 */
+      max?: number
+      /** Rolling rate-limit window in seconds. @default 60 */
+      window?: number
+    }
     sameOrigin?: boolean
     fetchMeta?: boolean
     headers?: boolean

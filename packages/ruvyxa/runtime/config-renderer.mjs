@@ -99,9 +99,15 @@ function sanitizeConfig(config) {
   assertKnownKeys(config.image, 'config.image', ['optimize', 'quality', 'lossless', 'workers'])
   assertKnownKeys(config.security, 'config.security', [
     'actionLimit',
+    'apiLimit',
+    'actionRateLimit',
     'sameOrigin',
     'fetchMeta',
     'headers',
+  ])
+  assertKnownKeys(config.security?.actionRateLimit, 'config.security.actionRateLimit', [
+    'max',
+    'window',
   ])
   assertKnownKeys(config.cache, 'config.cache', ['routes', 'css', 'dir'])
   assertKnownKeys(config.render, 'config.render', ['strategy', 'revalidate'])
@@ -185,6 +191,11 @@ function sanitizeConfig(config) {
     }),
     security: objectValue(config.security, {
       actionLimit: numberValue(config.security?.actionLimit),
+      apiLimit: numberValue(config.security?.apiLimit),
+      actionRateLimit: objectValue(config.security?.actionRateLimit, {
+        max: numberValue(config.security?.actionRateLimit?.max),
+        window: numberValue(config.security?.actionRateLimit?.window),
+      }),
       sameOrigin: booleanValue(config.security?.sameOrigin),
       fetchMeta: booleanValue(config.security?.fetchMeta),
       headers: booleanValue(config.security?.headers),
