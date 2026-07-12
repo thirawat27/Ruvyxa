@@ -29,14 +29,15 @@ Ruvyxa 1.x includes:
 - Server/client boundary validation (`server-only`, `client-only`, private env detection)
 - Private environment variable blocking in client bundles (`RUV1008`)
 - Same-origin and Fetch Metadata (`Sec-Fetch-Site`) checks for server actions
-- Action body size limits (64 KB default, configurable)
+- Action body size limits (1 MB default, configurable)
+- API route body size limits (10 MB default, configurable via `security.apiLimit`)
+- Configurable per-client/action rate limiting (600 req/min default via `security.actionRateLimit`)
 - Content-Type enforcement (JSON or form-encoded only)
-- In-process action rate limiting (60 req/min per client)
 - Default security headers on all responses (`X-Content-Type-Options`, `Referrer-Policy`,
-  `Permissions-Policy`, `Cross-Origin-Opener-Policy`)
+  `Permissions-Policy`, `Cross-Origin-Opener-Policy`, WebSocket upgrade preservation)
 - Optional CORS middleware with origin allowlist
 - Wasm plugin sandboxing (fuel-based execution limits, memory bounds, no implicit FS/net/env access)
-- Deterministic BLAKE3 client asset hashes (immutable caching with ETag/304 support)
+- Deterministic BLAKE3-256 client asset hashes (immutable caching with ETag/304 support)
 - Native CLI packages for supported OS/CPU targets (no Rust toolchain required)
 
 Apps should still add deployment-layer controls such as TLS termination, CDN/WAF rules, secret

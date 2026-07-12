@@ -1,13 +1,21 @@
 {
   "name": "@ruvyxa/adapter-cloudflare",
-  "version": "1.0.10",
+  "version": "1.0.11",
   "description": "Shape Ruvyxa builds for Cloudflare edge targets with typed worker and asset output metadata.",
   "license": "Apache-2.0",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "files": ["dist", "README.md"],
-  "keywords": ["ruvyxa", "adapter", "cloudflare", "edge"],
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "keywords": [
+    "ruvyxa",
+    "adapter",
+    "cloudflare",
+    "edge"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/thirawat27/ruvyxa.git",

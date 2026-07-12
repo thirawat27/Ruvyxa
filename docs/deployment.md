@@ -38,7 +38,7 @@ ruvyxa start --port 3000
 
 The production server serves from `.ruvyxa/server/app`, with static assets from `.ruvyxa/assets`,
 pre-rendered HTML from `.ruvyxa/prerender`, and client bundles from `.ruvyxa/client`. All responses
-include default security headers and BLAKE3-based ETags (64-bit).
+include default security headers and BLAKE3-256-based ETags.
 
 ---
 

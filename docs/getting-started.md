@@ -80,7 +80,7 @@ following concise names:
 | `build`                      | `map`, `treeShake`, `split`, `workers`, `jsx`, `target`, `manifest`, `warm` |
 | `render`                     | `strategy`, `revalidate`                                                    |
 | `image`                      | `workers`                                                                   |
-| `security`                   | `actionLimit`, `sameOrigin`, `fetchMeta`, `headers`                         |
+| `security`                   | `actionLimit`, `apiLimit`, `actionRateLimit`, `sameOrigin`, `fetchMeta`, `headers` |
 | `cache`                      | `routes`, `dir`                                                             |
 | `middleware.builtin`         | `log`, `rate`                                                               |
 | `middleware.builtin.rate`    | `max`, `window`, `key`                                                      |

@@ -1,13 +1,22 @@
 {
   "name": "@ruvyxa/core",
-  "version": "1.0.10",
+  "version": "1.0.11",
   "description": "Tiny typed primitives behind Ruvyxa: config, loaders, actions, cache helpers, responses, and adapter contracts.",
   "license": "Apache-2.0",
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "files": ["dist", "README.md"],
-  "keywords": ["ruvyxa", "framework", "typescript", "server-actions", "adapter"],
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "keywords": [
+    "ruvyxa",
+    "framework",
+    "typescript",
+    "server-actions",
+    "adapter"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/thirawat27/ruvyxa.git",

@@ -55,11 +55,11 @@
 - **Multiple rendering strategies** — SSR (default), SSG, ISR, CSR, and PPR — configurable per-route
   via `ruvyxa.config.ts` or inline exports.
 - **SSR-first React** — pages render on the server, with route-level client bundles for hydration.
-- **Secure server actions** — validation hooks, origin checks, Fetch Metadata guards, a 64 KB body
-  limit, and per-client rate limiting (60 req/min) are built in.
+- **Secure server actions** — validation hooks, origin checks, Fetch Metadata guards, a 1 MB body
+  limit, a 10 MB API body limit, and per-client/action rate limiting (600 req/min default) are built in.
 - **Dev/prod parity** — `dev` and `start` share routing, rendering, static asset, and
   security-header semantics.
-- **ETag / 304 support** — static assets include BLAKE3-based ETags (64-bit) for efficient browser
+- **ETag / 304 support** — static assets include BLAKE3-256-based ETags for efficient browser
   caching.
 - **Async I/O** — file serving uses `tokio::fs` to avoid blocking the async runtime under concurrent
   load.
@@ -191,8 +191,8 @@ export const createTodo = action
 
 **Supported content types:** `application/json`, `application/x-www-form-urlencoded`.
 
-**Security defaults:** body size limit (64 KB), same-origin check, Fetch Metadata guards, per-client
-rate limiting (60 req/min), module isolation.
+**Security defaults:** body size limit (1 MB), API body limit (10 MB), same-origin check, Fetch Metadata
+guards, per-client/action rate limiting (600 req/min), module isolation.
 
 ---
 
@@ -306,7 +306,9 @@ export default config({
     workers: 0,
   },
   security: {
-    actionLimit: 65536,
+    actionLimit: 1024 * 1024,
+    apiLimit: 10 * 1024 * 1024,
+    actionRateLimit: { max: 600, window: 60 },
     sameOrigin: true,
     fetchMeta: true,
     headers: true,
@@ -408,7 +410,7 @@ Routes with `getStaticParams` export generate static paths at build time.
 - Async file I/O via tokio::fs (no thread starvation)
 - SSR via `renderToString` with layout nesting
 - Gzip + Brotli compression (tower-http)
-- ETag / 304 Not Modified (BLAKE3 64-bit hashing)
+- ETag / 304 Not Modified (BLAKE3-256 hashing)
 - RwLock-based runtime cache (concurrent readers)
 - Route-level client bundle splitting with tree-shaking
 

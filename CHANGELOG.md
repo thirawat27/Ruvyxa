@@ -1,5 +1,87 @@
 # Changelog
 
+## v1.0.11 (2026-07-12)
+
+### Windows arm64 Support
+
+- Added `@ruvyxa/cli-win32-arm64` platform package with native CLI binary for Windows arm64
+- Extended supported platform mapping in `scripts/native-platform.mjs` to include `win32-arm64`
+- Updated `nativeBinaryPackageName()` — all supported platforms are now resolved through a shared
+  data module instead of a hardcoded switch
+- Added Windows arm64 to the CI build matrix (`.github/workflows/ci.yml`, `.github/workflows/release.yml`)
+- Updated binary resolution in `bin/ruvyxa.js` to display `win32-arm64` in the supported-platforms
+  message and route to the new optional package
+- Added `@ruvyxa/cli-win32-arm64` as a dependency in `ruvyxa/package.json`
+- Added native platform test suite (`native-platform.test.mjs`) verifying the mapping, package
+  metadata, and unsupported-platform fallback
+
+### Security Configuration
+
+- Added `security.apiLimit` configuration for maximum API route request payload size
+  (default: 10 MB / 10,485,760 bytes)
+- Added `security.actionRateLimit` with `max` (default: 600) and `window` (default: 60s) for
+  configurable per-client/action rate limiting
+- Raised default `actionLimit` from 64 KB to 1 MB (1,048,576 bytes)
+- Raised default action rate limiter from 60 req/min to 600 req/min
+- Added `RUV1601` config validation for zero-valued security limits (`actionLimit`, `apiLimit`,
+  `actionRateLimit.max`, `actionRateLimit.window`)
+- Added strict unknown-field rejection for `config.security.actionRateLimit`
+- Extended TypeScript types in `@ruvyxa/core` with `apiLimit` and `actionRateLimit` fields
+- Forwarded new security config fields through runtime config renderer (`config-renderer.mjs`) and
+  into production `build.json` output
+- Updated security section in all documentation to reflect new keys and defaults
+
+### Server and Worker Pool Lifecycle
+
+- **Graceful server shutdown** — intercepts SIGTERM / Ctrl+C, notifies workers, and terminates with
+  a 5-second grace period before force-closing remaining connections
+- **Worker pool shutdown** — added `NodeWorkerPool::shutdown()` that closes stdin on every worker,
+  clears pending requests, and force-terminates workers that do not exit within 2 seconds
+- Worker stdin access now uses a `Mutex<Option<mpsc::Sender>>` so senders are safely drained during
+  shutdown; operations after shutdown return a clear `"Worker process is shutting down"` error
+- Worker `_child` made accessible via `Mutex<Option<Child>>` to support `kill` + `wait` on shutdown
+- HMR client script simplified — now always issues `location.reload()` for every update, eliminating
+  the fragile targeted CSS/component refresh code path
+- Security headers no longer inject `Connection: keep-alive` / `Keep-Alive: timeout=30, max=1000`
+  into every response; WebSocket `Connection: Upgrade` headers are preserved
+
+### Config Validation and CLI
+
+- Added `validate_positive_limit()` helper raising `RUV1601` for zero-valued numeric limits
+- Added Rust tests for zero-limit rejection on `apiLimit` and `actionRateLimit`
+- Updated existing security config tests to verify new `apiLimit` / `actionRateLimit` fields
+- `config()` shorthand key table in getting-started docs updated with `apiLimit` and `actionRateLimit`
+
+### Compiler and Runtime
+
+- Runtime compiler (`compiler.mjs`) now rewrites named `export class` declarations before wrapping
+  modules, making class exports available after module wrapping
+- Added compiler test for named class export rewriting with runtime verification
+
+### create-ruvyxa
+
+- Scaffolded projects now receive their own `package.json#name` derived from the target directory
+  name (sanitized to a portable npm package name)
+- Added `toPackageName()` and `writeProjectPackageName()` helpers in `create-ruvyxa/src/index.ts`
+- Added test coverage for package-name derivation and output verification
+
+### CI and Infrastructure
+
+- Added Ubuntu 24.04 ARM64 to the CI and release build matrix
+- All npm packages, Rust crates, lockfiles, and template dependencies synchronized
+
+### Documentation
+
+- Documented `security.apiLimit` and `security.actionRateLimit` config keys across all guides
+- Updated security defaults (1 MB action limit, 10 MB API limit, 600 req/min rate limit) in
+  actions, deployment, production-readiness, and publishing docs
+- Added `@ruvyxa/cli-win32-arm64` to native binary platform tables in production-readiness,
+  publishing, deployment, and project-structure documentation
+- Updated CI/CD documentation to reflect Windows arm64 and Ubuntu ARM64 build runners
+- Updated build metadata example in deployment docs with new security fields
+- All concise config key tables reflect the current configuration contract
+- Version and dependency references updated across the documentation set
+
 ## v1.0.10 (2026-07-11)
 
 ### Content, Images, and SEO
@@ -685,3 +767,4 @@ The following commits occurred before the v1.0.0 tag and represent the initial p
 | `v1.0.8`  | 2026-07-10 | Minor      |
 | `v1.0.9`  | 2026-07-10 | Patch      |
 | `v1.0.10` | 2026-07-11 | Minor      |
+| `v1.0.11` | 2026-07-12 | Minor      |
