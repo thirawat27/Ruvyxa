@@ -77,8 +77,6 @@ importers:
 
   packages/@ruvyxa/cli-darwin-arm64: {}
 
-  packages/@ruvyxa/cli-darwin-x64: {}
-
   packages/@ruvyxa/cli-linux-arm64: {}
 
   packages/@ruvyxa/cli-linux-x64: {}
@@ -120,9 +118,6 @@ importers:
       '@ruvyxa/cli-darwin-arm64':
         specifier: workspace:^
         version: link:../@ruvyxa/cli-darwin-arm64
-      '@ruvyxa/cli-darwin-x64':
-        specifier: workspace:^
-        version: link:../@ruvyxa/cli-darwin-x64
       '@ruvyxa/cli-linux-arm64':
         specifier: workspace:^
         version: link:../@ruvyxa/cli-linux-arm64

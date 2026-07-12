@@ -690,7 +690,6 @@
 - **@ruvyxa/adapter-static**: Static site generation adapter
 - **@ruvyxa/adapter-vercel**: Vercel deployment adapter
 - **@ruvyxa/cli-darwin-arm64**: macOS ARM64 native binary
-- **@ruvyxa/cli-darwin-x64**: macOS x64 native binary
 - **@ruvyxa/cli-linux-arm64**: Linux ARM64 native binary
 - **@ruvyxa/cli-linux-x64**: Linux x64 native binary
 - **@ruvyxa/cli-win32-x64**: Windows x64 native binary

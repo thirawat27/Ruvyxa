@@ -20,7 +20,7 @@ if (!binary) {
     console.error('Reinstall ruvyxa, or install the matching @ruvyxa/cli-* optional package.')
   } else {
     console.error(
-      'Prebuilt binaries support darwin-arm64, darwin-x64, linux-arm64, linux-x64, win32-arm64, and win32-x64.',
+      'Prebuilt binaries support darwin-arm64, linux-arm64, linux-x64, win32-arm64, and win32-x64.',
     )
   }
   console.error('When working from source, run `cargo build -p ruvyxa_cli` first.')

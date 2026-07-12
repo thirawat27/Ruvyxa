@@ -32,6 +32,14 @@ describe('native CLI platforms', () => {
   it('does not resolve an optional package for unsupported platforms', () => {
     assert.equal(nativeBinaryPackageName('freebsd-x64'), null)
   })
+
+  it('does not publish an Intel macOS binary package', () => {
+    const removedPlatformKey = ['darwin', 'x64'].join('-')
+    const removedPackageName = `@ruvyxa/cli-${removedPlatformKey}`
+    assert.equal(supportedPlatforms[removedPlatformKey], undefined)
+    assert.equal(nativeBinaryPackageName(removedPlatformKey), null)
+    assert.equal(ruvyxaPackage.optionalDependencies[removedPackageName], undefined)
+  })
 })
 
 function readJson(relativePath) {

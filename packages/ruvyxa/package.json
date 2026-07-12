@@ -70,7 +70,6 @@
   },
   "optionalDependencies": {
     "@ruvyxa/cli-darwin-arm64": "workspace:^",
-    "@ruvyxa/cli-darwin-x64": "workspace:^",
     "@ruvyxa/cli-linux-arm64": "workspace:^",
     "@ruvyxa/cli-linux-x64": "workspace:^",
     "@ruvyxa/cli-win32-arm64": "workspace:^",
