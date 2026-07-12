@@ -1,12 +1,14 @@
 #!/usr/bin/env node
 /**
- * Bump all workspace package.json and Cargo.toml versions to match root package.json.
+ * Bump all workspace package.json and Cargo.toml versions to match root package.json,
+ * then regenerate Cargo.lock so CI passes with --locked.
  *
  * Usage:
  *   node scripts/bump-version.mjs          # sync all to root version
  *   node scripts/bump-version.mjs 1.2.0    # set all to 1.2.0
  */
 import { readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
+import { execSync } from 'node:child_process'
 import { join } from 'node:path'
 
 const rootPkg = JSON.parse(readFileSync('package.json', 'utf8'))
@@ -64,6 +66,15 @@ try {
   }
 } catch {
   // template may not exist in all contexts
+}
+
+// Regenerate Cargo.lock so --locked CI checks pass
+try {
+  execSync('cargo update --workspace', { stdio: 'inherit' })
+  console.log('Cargo.lock regenerated')
+} catch (err) {
+  console.error('Warning: failed to update Cargo.lock — run `cargo update --workspace` manually')
+  console.error(err.message)
 }
 
 console.log(`\nAll versions synced to ${newVersion}`)
