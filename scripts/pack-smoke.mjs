@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync, execSync } from 'node:child_process'
-import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
 import { arch, platform } from 'node:process'
 import { setTimeout as sleep } from 'node:timers/promises'
@@ -93,6 +93,22 @@ const createRuvyxaTgz = readdirSync(destination).find(
 )
 if (!createRuvyxaTgz) throw new Error('create-ruvyxa tarball not found in ' + destination)
 
+const coreTgz = readdirSync(destination).find(
+  (name) => name.startsWith('ruvyxa-core-') && name.endsWith('.tgz'),
+)
+if (!coreTgz) throw new Error('@ruvyxa/core tarball not found in ' + destination)
+
+const reactTgz = readdirSync(destination).find(
+  (name) => name.startsWith('ruvyxa-react-') && name.endsWith('.tgz'),
+)
+if (!reactTgz) throw new Error('@ruvyxa/react tarball not found in ' + destination)
+
+const currentPlatformTgz = readdirSync(destination).find(
+  (name) => name.startsWith(`ruvyxa-cli-${platform}-${arch}-`) && name.endsWith('.tgz'),
+)
+if (!currentPlatformTgz)
+  throw new Error(`${currentPlatformPackage} tarball not found in ` + destination)
+
 execSync(`tar -xzf ${destination}/${ruvyxaTgz} -C ${extracted}`)
 execFileSync('node', [`${extracted}/package/bin/ruvyxa.js`, '--help'], {
   stdio: 'inherit',
@@ -111,7 +127,26 @@ execFileSync(
 assert(existsSync(`${extracted}/scaffolded-app/.gitignore`), 'scaffolded app missing .gitignore')
 
 // Verify the scaffolded template can install and type-check.
-// This catches version mismatches (e.g. @ruvyxa/react version drift) early.
+// Install freshly packed packages, not registry releases, so unpublished versions are covered.
+const scaffoldPackageJsonPath = `${extracted}/scaffolded-app/package.json`
+const scaffoldPackageJson = JSON.parse(readFileSync(scaffoldPackageJsonPath, 'utf8'))
+const scaffoldTarball = (file) => `file:../../${destination}/${file}`
+const workspaceTarball = (file) => `file:../${destination}/${file}`
+scaffoldPackageJson.dependencies.ruvyxa = scaffoldTarball(ruvyxaTgz)
+scaffoldPackageJson.dependencies['@ruvyxa/react'] = scaffoldTarball(reactTgz)
+writeFileSync(scaffoldPackageJsonPath, JSON.stringify(scaffoldPackageJson, null, 2) + '\n')
+writeFileSync(
+  `${extracted}/pnpm-workspace.yaml`,
+  [
+    'packages:',
+    "  - 'scaffolded-app'",
+    'overrides:',
+    `  '@ruvyxa/core': ${JSON.stringify(workspaceTarball(coreTgz))}`,
+    `  '${currentPlatformPackage}': ${JSON.stringify(workspaceTarball(currentPlatformTgz))}`,
+    '',
+  ].join('\n'),
+)
+
 execFileSync('pnpm', ['install', '--no-lockfile'], {
   cwd: `${extracted}/scaffolded-app`,
   stdio: 'inherit',
