@@ -56,7 +56,7 @@
 ### Infrastructure
 
 - Removed `.githooks/pre-commit` hook for Cargo.lock validation (now handled through CI/CD)
- - Suppressed clippy `too_many_arguments` warning on `print_build_report` function
+- Suppressed clippy `too_many_arguments` warning on `print_build_report` function
 
 ### Windows arm64 Support
 
