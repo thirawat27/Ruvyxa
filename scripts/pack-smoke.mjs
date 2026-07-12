@@ -145,6 +145,18 @@ for (const depGroup of ['dependencies', 'devDependencies']) {
     }
   }
 }
+
+// Also set pnpm.overrides to catch transitive dependencies (e.g. ruvyxa → @ruvyxa/core)
+// that reference the unpublished version.
+const overrides = {}
+for (const pkg of packages) {
+  const tgz = findTarball(pkg)
+  if (tgz) {
+    overrides[pkg] = `file:${resolve(packDir, tgz)}`
+  }
+}
+scaffoldedPkg.pnpm = { ...scaffoldedPkg.pnpm, overrides }
+
 writeFileSync(scaffoldedPkgPath, JSON.stringify(scaffoldedPkg, null, 2) + '\n')
 
 execFileSync('pnpm', ['install', '--no-lockfile'], {
