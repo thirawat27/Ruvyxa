@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { execFileSync, execSync } from 'node:child_process'
-import { existsSync, mkdirSync, readdirSync, rmSync } from 'node:fs'
+import { existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
 import { rm } from 'node:fs/promises'
 import { arch, platform } from 'node:process'
 import { setTimeout as sleep } from 'node:timers/promises'
@@ -112,6 +112,9 @@ assert(existsSync(`${extracted}/scaffolded-app/.gitignore`), 'scaffolded app mis
 
 // Verify the scaffolded template can install and type-check.
 // This catches version mismatches (e.g. @ruvyxa/react version drift) early.
+// Write an empty pnpm-workspace.yaml so pnpm treats the scaffolded app as its own
+// workspace root, preventing it from inheriting the monorepo workspace context.
+writeFileSync(`${extracted}/scaffolded-app/pnpm-workspace.yaml`, '')
 execFileSync('pnpm', ['install', '--no-lockfile'], {
   cwd: `${extracted}/scaffolded-app`,
   stdio: 'inherit',
