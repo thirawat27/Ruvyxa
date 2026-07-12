@@ -151,11 +151,7 @@ fn link_inner(modules: &[CompiledModule], input: &BundleInput) -> Result<String>
 
     for module in &project_modules {
         let id = module_id(&module.path);
-        let label = module
-            .path
-            .file_name()
-            .map(|n| n.to_string_lossy().into_owned())
-            .unwrap_or_else(|| module.path.to_string_lossy().into_owned());
+        let label = module.path.to_string_lossy().into_owned();
 
         out.push_str("// \u{2500}\u{2500} ");
         out.push_str(&label);
@@ -212,11 +208,7 @@ pub fn link_parallel(modules: &[CompiledModule], input: &BundleInput) -> Result<
         .par_iter()
         .map(|module| {
             let id = module_id(&module.path);
-            let label = module
-                .path
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_else(|| module.path.to_string_lossy().into_owned());
+            let label = module.path.to_string_lossy().into_owned();
 
             // Pre-size the segment buffer.
             let mut segment = String::with_capacity(module.js.len() + 200);

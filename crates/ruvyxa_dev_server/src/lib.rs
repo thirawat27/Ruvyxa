@@ -44,7 +44,7 @@ mod hmr_tracker;
 pub use hmr_tracker::{HmrEventType, HmrTracker, HmrUpdate};
 
 mod style;
-pub use style::{StyleCollection, collect_css, collect_styles};
+pub use style::{StyleCollection, collect_css, collect_styles, minify_css};
 
 const MAX_ACTION_BODY_BYTES: usize = 1024 * 1024;
 const MAX_API_BODY_BYTES: usize = 10 * 1024 * 1024;
@@ -222,7 +222,12 @@ impl RuntimeCache {
 
     async fn styles(&self, config: &ServerConfig) -> Result<String> {
         if !config.cache_css {
-            return Ok(collect_styles(&config.root, &config.app_dir, &config.style_entries)?.css);
+            let css = collect_styles(&config.root, &config.app_dir, &config.style_entries)?.css;
+            return Ok(if config.watch {
+                css
+            } else {
+                style::minify_css(&css)
+            });
         }
 
         {
@@ -232,7 +237,11 @@ impl RuntimeCache {
             }
         }
 
-        let styles = collect_styles(&config.root, &config.app_dir, &config.style_entries)?.css;
+        let mut styles = collect_styles(&config.root, &config.app_dir, &config.style_entries)?.css;
+        // Minify CSS in production mode to reduce inline style payload.
+        if !config.watch {
+            styles = style::minify_css(&styles);
+        }
         {
             let mut cached = self.styles.write().await;
             *cached = Some(styles.clone());

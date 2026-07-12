@@ -108,6 +108,65 @@ pub fn minify_parallel_with_options(
     Ok(final_output)
 }
 
+/// Selectively minify a linked bundle, skipping segments whose header comment
+/// contains a path matching any of the given `skip_markers` (e.g. `node_modules`).
+///
+/// This allows project modules to be fully minified while leaving third-party
+/// code (which may contain regex literals or other constructs the text minifier
+/// cannot safely transform) intact.
+pub fn minify_selective(
+    source: &str,
+    _target: BundleTarget,
+    tree_shaking: bool,
+    skip_markers: &[&str],
+) -> Result<String> {
+    // Phase 1: Tree-shake globally (needs cross-module member usage data).
+    let tree_shaken = if tree_shaking {
+        tree_shake(source)
+    } else {
+        source.to_string()
+    };
+
+    // Phase 2: Split into module segments at IIFE boundaries.
+    let segments = split_into_segments(&tree_shaken);
+
+    // Phase 3: Process each segment — minify project segments, keep third-party as-is.
+    // Each segment has a comment header line like `// ── /path/to/module.js ──`
+    // that identifies the module. Check this header for skip markers.
+    let processed: Vec<String> = segments
+        .iter()
+        .map(|segment| {
+            let should_skip = skip_markers.iter().any(|marker| {
+                // Check any comment line in the segment for the marker.
+                // The linker emits `// ── full/path ──` headers.
+                segment
+                    .lines()
+                    .any(|line| line.starts_with("//") && line.contains(marker))
+            });
+            if should_skip {
+                segment.to_string()
+            } else {
+                let stripped = strip_line_comments(segment);
+                collapse_whitespace(&stripped)
+            }
+        })
+        .collect();
+
+    // Phase 4: Rejoin segments.
+    let joined_size: usize = processed.iter().map(|s| s.len() + 1).sum();
+    let mut joined = String::with_capacity(joined_size);
+    for (i, segment) in processed.iter().enumerate() {
+        joined.push_str(segment);
+        if i < processed.len() - 1 && !segment.ends_with('\n') {
+            joined.push(' ');
+        }
+    }
+
+    // Phase 5: Shorten module IDs (global text replacement — safe for all segments).
+    let final_output = shorten_module_ids(&joined);
+    Ok(final_output)
+}
+
 /// Apply only the tree-shaking pass.
 pub fn tree_shake_exports(source: &str) -> String {
     tree_shake(source)

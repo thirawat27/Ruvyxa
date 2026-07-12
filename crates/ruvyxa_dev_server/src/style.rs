@@ -414,6 +414,146 @@ fn is_within_project(root: &Path, path: &Path) -> bool {
     })
 }
 
+// ─────────────────────────────────────────────
+// CSS Minification
+// ─────────────────────────────────────────────
+
+/// Minify CSS by stripping comments, collapsing whitespace, and removing
+/// unnecessary spaces around selectors and punctuation.
+///
+/// This is intentionally conservative — it preserves content inside strings
+/// and `url()` values, and does not attempt shorthand merging or selector
+/// optimisation.
+pub fn minify_css(source: &str) -> String {
+    let no_comments = strip_css_comments(source);
+    collapse_css_whitespace(&no_comments)
+}
+
+/// Remove `/* ... */` block comments from CSS, respecting string literals.
+fn strip_css_comments(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let bytes = source.as_bytes();
+    let len = bytes.len();
+    let mut i = 0;
+
+    while i < len {
+        // String literal: preserve contents verbatim.
+        if bytes[i] == b'"' || bytes[i] == b'\'' {
+            let quote = bytes[i];
+            out.push(quote as char);
+            i += 1;
+            while i < len && bytes[i] != quote {
+                if bytes[i] == b'\\' && i + 1 < len {
+                    out.push(bytes[i] as char);
+                    i += 1;
+                }
+                out.push(bytes[i] as char);
+                i += 1;
+            }
+            if i < len {
+                out.push(bytes[i] as char);
+                i += 1;
+            }
+            continue;
+        }
+
+        // Block comment start.
+        if i + 1 < len && bytes[i] == b'/' && bytes[i + 1] == b'*' {
+            // Skip until closing `*/`.
+            i += 2;
+            while i + 1 < len && !(bytes[i] == b'*' && bytes[i + 1] == b'/') {
+                i += 1;
+            }
+            if i + 1 < len {
+                i += 2; // skip `*/`
+            }
+            continue;
+        }
+
+        out.push(bytes[i] as char);
+        i += 1;
+    }
+
+    out
+}
+
+/// Collapse runs of whitespace and remove spaces around CSS punctuation.
+fn collapse_css_whitespace(source: &str) -> String {
+    let mut out = String::with_capacity(source.len());
+    let mut prev_space = false;
+    let chars: Vec<char> = source.chars().collect();
+    let len = chars.len();
+    let mut i = 0;
+
+    while i < len {
+        let ch = chars[i];
+
+        // Preserve string literals verbatim.
+        if ch == '"' || ch == '\'' {
+            // Flush pending space only if output doesn't already end with punctuation.
+            if prev_space && !out.is_empty() && !ends_with_css_punct(&out) {
+                out.push(' ');
+            }
+            prev_space = false;
+            out.push(ch);
+            i += 1;
+            while i < len && chars[i] != ch {
+                if chars[i] == '\\' && i + 1 < len {
+                    out.push(chars[i]);
+                    i += 1;
+                }
+                out.push(chars[i]);
+                i += 1;
+            }
+            if i < len {
+                out.push(chars[i]);
+                i += 1;
+            }
+            continue;
+        }
+
+        if ch == ' ' || ch == '\n' || ch == '\r' || ch == '\t' {
+            prev_space = true;
+            i += 1;
+            continue;
+        }
+
+        // CSS punctuation: remove surrounding spaces.
+        if is_css_punct(ch) {
+            if prev_space && !out.is_empty() && !ends_with_css_punct(&out) {
+                // Only keep the space if removing it would merge identifiers/values
+                // incorrectly — but for CSS punctuation it's always safe to drop.
+            }
+            prev_space = false;
+            // Trim trailing space before punctuation.
+            if out.ends_with(' ') {
+                out.pop();
+            }
+            out.push(ch);
+            i += 1;
+            continue;
+        }
+
+        // Normal character.
+        if prev_space && !out.is_empty() && !ends_with_css_punct(&out) {
+            out.push(' ');
+        }
+        prev_space = false;
+        out.push(ch);
+        i += 1;
+    }
+
+    out
+}
+
+fn is_css_punct(ch: char) -> bool {
+    matches!(ch, '{' | '}' | ':' | ';' | ',' | '(' | ')')
+}
+
+fn ends_with_css_punct(s: &str) -> bool {
+    s.chars().last().is_some_and(is_css_punct)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

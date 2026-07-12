@@ -123,18 +123,22 @@ fn bundle_with_parts(
     };
     // The built-in text minifier is safe for Ruvyxa's generated modules but
     // cannot safely transform arbitrary third-party JavaScript (notably regex
-    // literals in React's CommonJS distribution). Keep client dependencies
-    // executable until the minifier becomes syntax-aware.
+    // literals in React's CommonJS distribution). When the client bundle contains
+    // third-party modules, use selective minification that only compresses
+    // project segments while leaving node_modules code intact.
     let contains_third_party_module = compiled.iter().any(|module| {
         module
             .path
             .components()
             .any(|component| component.as_os_str() == "node_modules")
     });
-    let minify_output = input.options.minify
-        && !(input.target == BundleTarget::Client && contains_third_party_module);
+    let minify_output = input.options.minify;
     let final_code = if minify_output {
-        minifier::minify_parallel_with_options(&optimized_linked, input.target, false)?
+        if input.target == BundleTarget::Client && contains_third_party_module {
+            minifier::minify_selective(&optimized_linked, input.target, false, &["node_modules"])?
+        } else {
+            minifier::minify_parallel_with_options(&optimized_linked, input.target, false)?
+        }
     } else {
         optimized_linked.clone()
     };
@@ -495,6 +499,6 @@ mod tests {
         assert!(!output.code.contains("from \"react\""));
         assert!(!output.code.contains("from \"react-dom/client\""));
         assert!(output.code.contains("const stack = /\\n( *(at)?)/;"));
-        assert!(!output.stats.minified);
+        assert!(output.stats.minified);
     }
 }
