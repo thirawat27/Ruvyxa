@@ -85,35 +85,9 @@ jobs:
           pnpm release:validate
           pnpm pack:smoke
 
-  create-tag:
-    name: Create release tag
-    needs: [resolve-version, verify-release]
-    if: >-
-      always() && needs.resolve-version.result == 'success' && needs.verify-release.result == 'success'
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    steps:
-      - uses: actions/checkout@v4
-      - name: Create tag for manual releases
-        if: github.event_name == 'workflow_dispatch'
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          TAG="${{ needs.resolve-version.outputs.tag }}"
-          if git ls-remote --exit-code --tags origin "refs/tags/$TAG" >/dev/null 2>&1; then
-            echo "Tag $TAG already exists on origin, skipping creation"
-          else
-            git tag "$TAG"
-            git push origin "$TAG"
-            echo "Created and pushed tag $TAG"
-          fi
-      - name: Confirm pushed release tag
-        if: github.event_name == 'push'
-        run: echo "Release was triggered by ${GITHUB_REF_NAME}"
-
   publish-native:
     name: Publish native CLI (${{ matrix.os }})
-    needs: [resolve-version, verify-release, create-tag]
+    needs: [resolve-version, verify-release]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -173,7 +147,7 @@ jobs:
 
   publish-packages:
     name: Publish JavaScript packages
-    needs: [resolve-version, verify-release, create-tag, publish-native]
+    needs: [resolve-version, verify-release, publish-native]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
