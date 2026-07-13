@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { copyFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { describe, it } from 'node:test'
@@ -39,7 +39,7 @@ describe('runtime compiler', () => {
       )
       const aliases = copiedCompiler.runtimeAliases()
 
-      assert.equal(aliases.ruvyxa, path.join(sourceDir, 'index.ts'))
+      assert.equal(await realpath(aliases.ruvyxa), await realpath(path.join(sourceDir, 'index.ts')))
     } finally {
       await rm(root, { recursive: true, force: true })
     }

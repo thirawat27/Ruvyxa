@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.0.13 (2026-07-13)
+## v1.0.13 (2026-07-14)
 
 ### Runtime Path Compatibility
 
