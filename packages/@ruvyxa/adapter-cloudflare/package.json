@@ -6,16 +6,8 @@
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
-  "files": [
-    "dist",
-    "README.md"
-  ],
-  "keywords": [
-    "ruvyxa",
-    "adapter",
-    "cloudflare",
-    "edge"
-  ],
+  "files": ["dist", "README.md"],
+  "keywords": ["ruvyxa", "adapter", "cloudflare", "edge"],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/thirawat27/ruvyxa.git",

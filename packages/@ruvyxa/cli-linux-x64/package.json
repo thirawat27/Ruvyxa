@@ -4,23 +4,10 @@
   "description": "Prebuilt Ruvyxa native CLI binary for Linux x64.",
   "license": "Apache-2.0",
   "type": "module",
-  "os": [
-    "linux"
-  ],
-  "cpu": [
-    "x64"
-  ],
-  "files": [
-    "bin",
-    "README.md"
-  ],
-  "keywords": [
-    "ruvyxa",
-    "cli",
-    "native",
-    "linux",
-    "x64"
-  ],
+  "os": ["linux"],
+  "cpu": ["x64"],
+  "files": ["bin", "README.md"],
+  "keywords": ["ruvyxa", "cli", "native", "linux", "x64"],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/thirawat27/ruvyxa.git",
