@@ -39,6 +39,48 @@
 - Applied consistent compact array syntax to `files`, `keywords`, `os`, and `cpu` fields across all
   platform CLI packages, adapter packages, core, react, and create-ruvyxa package manifests
 
+### Security: Wasm Plugin Response Buffering Limits
+
+- Added `security.pluginLimit` configuration option defaulting to 32 MiB (max 256 MiB) to control
+  response-phase Wasm plugin body buffering, preventing unbounded memory growth
+- Introduced `MAX_PLUGIN_RESPONSE_BODY_LIMIT_BYTES` constant and RUV1602 diagnostic for invalid
+  limits; zero and beyond-maximum values are rejected at config load
+- Propagated `plugin_response_body_limit_bytes` through `ServerConfig` into both dev and production
+  server paths, applying the limit at the Axum body extraction layer
+- Updated user guide with plugin buffering limits, memory considerations, and configuration examples
+- Added validation tests for zero, within-range, at-maximum, and over-maximum limit values
+
+### Developer Experience: Pre-commit Hook
+
+- Added `.githooks/pre-commit` hook that runs `format-staged.mjs` before every commit, verifying
+  Prettier formatting for staged JS/TS/JSON/MD files and `cargo fmt --check` for staged Rust files
+- Created `scripts/format-staged.mjs` to detect changed files, run the appropriate formatter, and
+  block commits that would fail CI formatting checks
+- Added `scripts/setup-git-hooks.mjs` and a `prepare` lifecycle script so hooks activate
+  automatically on `pnpm install`
+- Added `format:staged` package script for manual on-demand staged-file formatting
+- Updated `CONTRIBUTING.md` to document the pre-commit hook behaviour
+
+### Documentation: User Guide Restructuring
+
+- Replaced the single `docs/user-guide.md` (517 lines) with an organized `docs/guides/` directory
+  containing 12 focused chapters per language
+- Added complete **English** guides: getting started, routing, server/client components, API routes,
+  data loading and cache, server actions, rendering strategies, markdown/MDX/images, environment
+  variables, configuration reference, CLI commands, and deployment
+- Added complete **Thai** (ภาษาไทย) translations alongside every English chapter under
+  `docs/guides/th/`
+- Created `docs/guides/index.md` with a bilingual table of contents, language selector, and quick
+  navigation section for application authors
+- Updated `README.md` Documentation section with a linked table pointing to all four doc resources
+  (User Guide, Developer Guide, Bundler Modernization, Production Readiness) and moved it higher for
+  visibility
+- Updated `developer-guide.md` links to point to the new guide index
+- Updated documentation to reflect current system defaults: added `preview` and `bench` CLI
+  commands, `parity` alias, `pluginLimit` security option, `plugins` and `middleware` config fields,
+  explicit Rust 1.96+ requirement, and correct `middleware.builtin.log` / `middleware.builtin.rate`
+  field names
+
 ## v1.0.11 (2026-07-12)
 
 ### macOS x64 Native Binary Removal
