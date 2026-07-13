@@ -11,11 +11,14 @@
 - Added test case verifying `darwin-x64` is not published or resolved
 - Intel macOS support discontinued in favor of ARM64 architecture
 
-### Selective Minification and CSS Optimization
+### Production Minification and CSS Optimization
 
-- Added `minify_selective()` to skip minification for third-party modules (`node_modules`) while
-  compressing project code
-- Implemented selective minification in bundle pipeline when client bundles contain node_modules
+- Replaced the third-party minification bypass with token-aware compression for the complete client
+  bundle, including `node_modules`
+- Preserved regular expressions, strings, template literals, legal comments, and JavaScript
+  automatic-semicolon-insertion boundaries during compression
+- Folded CommonJS `process.env.NODE_ENV` guards while resolving production client dependencies so
+  React and similar packages include production implementations without development branches
 - Updated module labeling in linker to use full paths consistently
 - Added CSS minification support with `minify_css()` in dev server for production builds while
   preserving readable CSS in watch mode

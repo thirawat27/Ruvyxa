@@ -1,14 +1,14 @@
-//! Minifier: applies identifier shortening, whitespace compression, and
-//! tree-shaking (dead-code elimination).
+//! Minifier: applies module identifier shortening, token-aware JavaScript
+//! compression, and tree-shaking (dead-code elimination).
 //!
-//! The Ruvyxa minifier is intentionally simple and safe.  It does NOT parse
-//! the JS AST — instead it applies a sequence of well-understood text
-//! transformations that are correct for the output produced by the linker:
+//! The Ruvyxa minifier is intentionally conservative. It does not rewrite an
+//! arbitrary JavaScript AST; instead it tokenizes the linked output closely
+//! enough to preserve literals and automatic-semicolon-insertion boundaries:
 //!
 //! 1. **Tree-shaking**: identify unused exports and remove their assignments.
-//! 2. Strip single-line `//` comments (excluding `//!` directives).
-//! 3. Collapse runs of whitespace (spaces, newlines, tabs) into a single space.
-//! 4. Remove spaces around operators and punctuation where safe.
+//! 2. Remove non-license line and block comments outside literals.
+//! 3. Preserve strings, templates, regular expressions, and legal comments.
+//! 4. Remove whitespace only where adjacent JavaScript tokens remain distinct.
 //! 5. Shorten the long `__ruv_<hex16>__` module namespace identifiers to
 //!    short two-character names (`_ra`, `_rb`, …).
 //!
@@ -16,7 +16,7 @@
 //!
 //! The `minify_parallel` function splits the linked bundle into independent
 //! segments (one per module IIFE) after the tree-shaking pass, then runs
-//! comment-stripping and whitespace-collapse on each segment concurrently
+//! token-aware compression on each segment concurrently
 //! via rayon. For bundles with 8+ modules, this reduces minification time
 //! by approximately 3× on a 4-core machine.
 //!
@@ -45,10 +45,8 @@ pub fn minify_with_options(
     } else {
         source.to_string()
     };
-    let stage1 = strip_line_comments(&stage0);
-    let stage2 = collapse_whitespace(&stage1);
-    let stage3 = shorten_module_ids(&stage2);
-    Ok(stage3)
+    let compressed = compress_javascript(&stage0);
+    Ok(shorten_module_ids(&compressed))
 }
 
 /// Parallel minification: splits the bundle into module segments after
@@ -78,19 +76,14 @@ pub fn minify_parallel_with_options(
 
     // For small bundles, sequential is faster (avoids rayon overhead).
     if segments.len() < 8 {
-        let stage1 = strip_line_comments(&tree_shaken);
-        let stage2 = collapse_whitespace(&stage1);
-        let stage3 = shorten_module_ids(&stage2);
-        return Ok(stage3);
+        let compressed = compress_javascript(&tree_shaken);
+        return Ok(shorten_module_ids(&compressed));
     }
 
-    // Phase 3: Parallel comment-strip + whitespace-collapse per segment.
+    // Phase 3: Compress independent module segments in parallel.
     let minified_segments: Vec<String> = segments
         .par_iter()
-        .map(|segment| {
-            let stripped = strip_line_comments(segment);
-            collapse_whitespace(&stripped)
-        })
+        .map(|segment| compress_javascript(segment))
         .collect();
 
     // Phase 4: Rejoin segments.
@@ -108,68 +101,248 @@ pub fn minify_parallel_with_options(
     Ok(final_output)
 }
 
-/// Selectively minify a linked bundle, skipping segments whose header comment
-/// contains a path matching any of the given `skip_markers` (e.g. `node_modules`).
-///
-/// This allows project modules to be fully minified while leaving third-party
-/// code (which may contain regex literals or other constructs the text minifier
-/// cannot safely transform) intact.
-pub fn minify_selective(
-    source: &str,
-    _target: BundleTarget,
-    tree_shaking: bool,
-    skip_markers: &[&str],
-) -> Result<String> {
-    // Phase 1: Tree-shake globally (needs cross-module member usage data).
-    let tree_shaken = if tree_shaking {
-        tree_shake(source)
-    } else {
-        source.to_string()
-    };
-
-    // Phase 2: Split into module segments at IIFE boundaries.
-    let segments = split_into_segments(&tree_shaken);
-
-    // Phase 3: Process each segment — minify project segments, keep third-party as-is.
-    // Each segment has a comment header line like `// ── /path/to/module.js ──`
-    // that identifies the module. Check this header for skip markers.
-    let processed: Vec<String> = segments
-        .iter()
-        .map(|segment| {
-            let should_skip = skip_markers.iter().any(|marker| {
-                // Check any comment line in the segment for the marker.
-                // The linker emits `// ── full/path ──` headers.
-                segment
-                    .lines()
-                    .any(|line| line.starts_with("//") && line.contains(marker))
-            });
-            if should_skip {
-                segment.to_string()
-            } else {
-                let stripped = strip_line_comments(segment);
-                collapse_whitespace(&stripped)
-            }
-        })
-        .collect();
-
-    // Phase 4: Rejoin segments.
-    let joined_size: usize = processed.iter().map(|s| s.len() + 1).sum();
-    let mut joined = String::with_capacity(joined_size);
-    for (i, segment) in processed.iter().enumerate() {
-        joined.push_str(segment);
-        if i < processed.len() - 1 && !segment.ends_with('\n') {
-            joined.push(' ');
-        }
-    }
-
-    // Phase 5: Shorten module IDs (global text replacement — safe for all segments).
-    let final_output = shorten_module_ids(&joined);
-    Ok(final_output)
-}
-
 /// Apply only the tree-shaking pass.
 pub fn tree_shake_exports(source: &str) -> String {
     tree_shake(source)
+}
+
+/// Fold CommonJS `NODE_ENV` branches while resolving a production client
+/// graph. This prevents packages such as React from pulling both development
+/// and production implementations into the same browser bundle.
+pub(crate) fn fold_production_node_env(source: &str) -> String {
+    let mut folded = source.to_string();
+
+    // A bounded loop handles nested guards without allowing malformed input to
+    // turn source preprocessing into an unbounded build step.
+    for _ in 0..64 {
+        let Some((start, end, replacement)) = find_node_env_conditional(&folded) else {
+            break;
+        };
+        folded.replace_range(start..end, &replacement);
+    }
+
+    folded
+}
+
+fn find_node_env_conditional(source: &str) -> Option<(usize, usize, String)> {
+    let bytes = source.as_bytes();
+    let mut search = 0;
+
+    while search + 1 < bytes.len() {
+        match bytes[search] {
+            b'"' | b'\'' | b'`' => {
+                search = skip_quoted_bytes(bytes, search);
+                continue;
+            }
+            b'/' if bytes.get(search + 1) == Some(&b'/') => {
+                search += 2;
+                while search < bytes.len() && !matches!(bytes[search], b'\n' | b'\r') {
+                    search += 1;
+                }
+                continue;
+            }
+            b'/' if bytes.get(search + 1) == Some(&b'*') => {
+                search = skip_block_comment_bytes(bytes, search);
+                continue;
+            }
+            b'/' => {
+                if let Some(end) = skip_slash_delimited_bytes(bytes, search) {
+                    search = end;
+                    continue;
+                }
+            }
+            b'i' if bytes.get(search + 1) == Some(&b'f') => {}
+            _ => {
+                search += 1;
+                continue;
+            }
+        }
+
+        let start = search;
+        if start > 0 && is_ascii_identifier_byte(bytes[start - 1])
+            || bytes
+                .get(start + 2)
+                .is_some_and(|byte| is_ascii_identifier_byte(*byte))
+        {
+            search = start + 2;
+            continue;
+        }
+
+        let condition_open = skip_ascii_whitespace(bytes, start + 2);
+        if bytes.get(condition_open) != Some(&b'(') {
+            search = start + 2;
+            continue;
+        }
+        let condition_close = matching_delimiter(source, condition_open, b'(', b')')?;
+        let condition = &source[condition_open + 1..condition_close];
+        let Some(condition_result) = production_condition_result(condition) else {
+            search = condition_close + 1;
+            continue;
+        };
+
+        let consequent_open = skip_ascii_whitespace(bytes, condition_close + 1);
+        if bytes.get(consequent_open) != Some(&b'{') {
+            search = condition_close + 1;
+            continue;
+        }
+        let consequent_close = matching_delimiter(source, consequent_open, b'{', b'}')?;
+
+        let after_consequent = skip_ascii_whitespace(bytes, consequent_close + 1);
+        let else_start = source[after_consequent..]
+            .starts_with("else")
+            .then_some(after_consequent);
+        let alternative = else_start.and_then(|else_index| {
+            let open = skip_ascii_whitespace(bytes, else_index + 4);
+            (bytes.get(open) == Some(&b'{'))
+                .then(|| matching_delimiter(source, open, b'{', b'}').map(|close| (open, close)))?
+        });
+
+        let end = alternative
+            .map(|(_, close)| close + 1)
+            .unwrap_or(consequent_close + 1);
+        let replacement = if condition_result {
+            source[consequent_open + 1..consequent_close].to_string()
+        } else if let Some((open, close)) = alternative {
+            source[open + 1..close].to_string()
+        } else {
+            String::new()
+        };
+
+        return Some((start, end, replacement));
+    }
+
+    None
+}
+
+fn production_condition_result(condition: &str) -> Option<bool> {
+    let normalized = condition
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .map(|ch| if ch == '\'' { '"' } else { ch })
+        .collect::<String>();
+    match normalized.as_str() {
+        "process.env.NODE_ENV===\"production\""
+        | "process.env.NODE_ENV==\"production\""
+        | "\"production\"===process.env.NODE_ENV"
+        | "\"production\"==process.env.NODE_ENV" => Some(true),
+        "process.env.NODE_ENV!==\"production\""
+        | "process.env.NODE_ENV!=\"production\""
+        | "\"production\"!==process.env.NODE_ENV"
+        | "\"production\"!=process.env.NODE_ENV" => Some(false),
+        _ => None,
+    }
+}
+
+fn matching_delimiter(source: &str, start: usize, open: u8, close: u8) -> Option<usize> {
+    let bytes = source.as_bytes();
+    let mut depth = 0usize;
+    let mut index = start;
+
+    while index < bytes.len() {
+        match bytes[index] {
+            b'"' | b'\'' | b'`' => index = skip_quoted_bytes(bytes, index),
+            b'/' if bytes.get(index + 1) == Some(&b'/') => {
+                index += 2;
+                while index < bytes.len() && !matches!(bytes[index], b'\n' | b'\r') {
+                    index += 1;
+                }
+            }
+            b'/' if bytes.get(index + 1) == Some(&b'*') => {
+                index = skip_block_comment_bytes(bytes, index);
+            }
+            b'/' => {
+                if let Some(end) = skip_slash_delimited_bytes(bytes, index) {
+                    index = end;
+                } else {
+                    index += 1;
+                }
+            }
+            byte if byte == open => {
+                depth += 1;
+                index += 1;
+            }
+            byte if byte == close => {
+                depth = depth.checked_sub(1)?;
+                if depth == 0 {
+                    return Some(index);
+                }
+                index += 1;
+            }
+            _ => index += 1,
+        }
+    }
+
+    None
+}
+
+fn skip_quoted_bytes(bytes: &[u8], start: usize) -> usize {
+    let quote = bytes[start];
+    let mut index = start + 1;
+    while index < bytes.len() {
+        if bytes[index] == b'\\' {
+            index = (index + 2).min(bytes.len());
+        } else if bytes[index] == quote {
+            return index + 1;
+        } else {
+            index += 1;
+        }
+    }
+    bytes.len()
+}
+
+fn skip_block_comment_bytes(bytes: &[u8], start: usize) -> usize {
+    let mut index = start + 2;
+    while index + 1 < bytes.len() && !(bytes[index] == b'*' && bytes[index + 1] == b'/') {
+        index += 1;
+    }
+    (index + 2).min(bytes.len())
+}
+
+fn skip_slash_delimited_bytes(bytes: &[u8], start: usize) -> Option<usize> {
+    let mut index = start + 1;
+    let mut escaped = false;
+    let mut in_character_class = false;
+
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if matches!(byte, b'\n' | b'\r') {
+            return None;
+        }
+        if escaped {
+            escaped = false;
+        } else {
+            match byte {
+                b'\\' => escaped = true,
+                b'[' => in_character_class = true,
+                b']' => in_character_class = false,
+                b'/' if !in_character_class => {
+                    index += 1;
+                    while bytes
+                        .get(index)
+                        .is_some_and(|byte| is_ascii_identifier_byte(*byte))
+                    {
+                        index += 1;
+                    }
+                    return Some(index);
+                }
+                _ => {}
+            }
+        }
+        index += 1;
+    }
+
+    None
+}
+
+fn skip_ascii_whitespace(bytes: &[u8], mut index: usize) -> usize {
+    while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+        index += 1;
+    }
+    index
+}
+
+fn is_ascii_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$')
 }
 
 /// Split a linked bundle into independent segments at module IIFE boundaries.
@@ -343,73 +516,212 @@ fn extract_export_assignment(line: &str) -> Option<String> {
 }
 
 // ─────────────────────────────────────────────
-// Pass 1 – Strip single-line comments
+// Pass 1 – Token-aware compression
 // ─────────────────────────────────────────────
 
-fn strip_line_comments(source: &str) -> String {
+fn compress_javascript(source: &str) -> String {
+    let chars = source.chars().collect::<Vec<_>>();
     let mut out = String::with_capacity(source.len());
-    let mut in_string: Option<char> = None;
-    let mut chars = source.chars().peekable();
+    let mut index = 0;
+    let mut pending_whitespace = false;
+    let mut pending_newline = false;
+    let mut previous_word = String::new();
 
-    while let Some(ch) = chars.next() {
-        match (in_string, ch) {
-            // Toggle string context.
-            (None, '"' | '\'' | '`') => {
-                in_string = Some(ch);
-                out.push(ch);
-            }
-            (Some(q), c) if c == q => {
-                in_string = None;
-                out.push(ch);
-            }
-            // Start of a line comment outside strings.
-            (None, '/') if chars.peek() == Some(&'/') => {
-                // Consume until end of line.
-                for c in chars.by_ref() {
-                    if c == '\n' {
-                        out.push('\n');
-                        break;
-                    }
-                }
-            }
-            _ => out.push(ch),
+    while index < chars.len() {
+        let ch = chars[index];
+
+        if ch.is_whitespace() {
+            pending_whitespace = true;
+            pending_newline |= matches!(ch, '\n' | '\r');
+            index += 1;
+            continue;
         }
-    }
 
-    out
-}
-
-// ─────────────────────────────────────────────
-// Pass 2 – Collapse whitespace
-// ─────────────────────────────────────────────
-
-fn collapse_whitespace(source: &str) -> String {
-    let mut out = String::with_capacity(source.len());
-    let mut prev_space = false;
-
-    for ch in source.chars() {
-        if ch == '\n' || ch == '\r' || ch == '\t' || ch == ' ' {
-            if !prev_space {
-                out.push(' ');
+        if ch == '/' && chars.get(index + 1) == Some(&'/') {
+            let comment_start = index;
+            index += 2;
+            while index < chars.len() && !matches!(chars[index], '\n' | '\r') {
+                index += 1;
             }
-            prev_space = true;
-        } else {
-            // Remove spaces around specific punctuation to further shrink output.
-            if ch == '{' || ch == '}' || ch == '(' || ch == ')' || ch == ';' || ch == ',' {
-                // Trim trailing space before the punctuation.
-                if out.ends_with(' ') {
-                    out.pop();
-                }
-                out.push(ch);
-                prev_space = true; // Treat as whitespace consumer (skip leading space after).
-            } else {
-                prev_space = false;
-                out.push(ch);
+            if chars.get(comment_start + 2) == Some(&'!') {
+                emit_pending_separator(
+                    &mut out,
+                    &chars,
+                    comment_start,
+                    pending_whitespace,
+                    pending_newline,
+                    &previous_word,
+                );
+                out.extend(chars[comment_start..index].iter());
+                out.push('\n');
             }
+            pending_whitespace = true;
+            pending_newline = true;
+            continue;
         }
+
+        if ch == '/' && chars.get(index + 1) == Some(&'*') {
+            let comment_start = index;
+            let legal_comment = chars.get(index + 2) == Some(&'!');
+            index += 2;
+            while index + 1 < chars.len() && !(chars[index] == '*' && chars[index + 1] == '/') {
+                pending_newline |= matches!(chars[index], '\n' | '\r');
+                index += 1;
+            }
+            index = (index + 2).min(chars.len());
+            if legal_comment {
+                emit_pending_separator(
+                    &mut out,
+                    &chars,
+                    comment_start,
+                    pending_whitespace,
+                    pending_newline,
+                    &previous_word,
+                );
+                out.extend(chars[comment_start..index].iter());
+            }
+            pending_whitespace = true;
+            continue;
+        }
+
+        emit_pending_separator(
+            &mut out,
+            &chars,
+            index,
+            pending_whitespace,
+            pending_newline,
+            &previous_word,
+        );
+        pending_whitespace = false;
+        pending_newline = false;
+
+        if matches!(ch, '"' | '\'' | '`') {
+            let end = quoted_literal_end(&chars, index, ch);
+            out.extend(chars[index..end].iter());
+            previous_word.clear();
+            index = end;
+            continue;
+        }
+
+        if ch == '/'
+            && let Some(end) = slash_delimited_end(&chars, index)
+        {
+            out.extend(chars[index..end].iter());
+            previous_word.clear();
+            index = end;
+            continue;
+        }
+
+        if is_identifier_part(ch) {
+            let start = index;
+            index += 1;
+            while index < chars.len() && is_identifier_part(chars[index]) {
+                index += 1;
+            }
+            previous_word = chars[start..index].iter().collect();
+            out.push_str(&previous_word);
+            continue;
+        }
+
+        previous_word.clear();
+        out.push(ch);
+        index += 1;
     }
 
     out.trim().to_string()
+}
+
+fn emit_pending_separator(
+    out: &mut String,
+    chars: &[char],
+    next_index: usize,
+    pending_whitespace: bool,
+    pending_newline: bool,
+    previous_word: &str,
+) {
+    if !pending_whitespace || out.is_empty() || next_index >= chars.len() {
+        return;
+    }
+
+    let previous = out.chars().next_back().unwrap_or_default();
+    let next = chars[next_index];
+    let restricted_newline = pending_newline
+        && matches!(
+            previous_word,
+            "async" | "await" | "break" | "continue" | "return" | "throw" | "yield"
+        );
+    let postfix_newline =
+        pending_newline && matches!(next, '+' | '-') && chars.get(next_index + 1) == Some(&next);
+
+    if restricted_newline || postfix_newline {
+        out.push('\n');
+    } else if tokens_need_separator(previous, next) {
+        out.push(' ');
+    }
+}
+
+fn tokens_need_separator(previous: char, next: char) -> bool {
+    (is_identifier_part(previous) && is_identifier_part(next))
+        || (previous == '+' && next == '+')
+        || (previous == '-' && next == '-')
+        || (previous == '/' && matches!(next, '/' | '*'))
+}
+
+fn is_identifier_part(ch: char) -> bool {
+    ch.is_alphanumeric() || matches!(ch, '_' | '$') || (!ch.is_ascii() && ch.is_alphabetic())
+}
+
+fn quoted_literal_end(chars: &[char], start: usize, quote: char) -> usize {
+    let mut index = start + 1;
+    let mut escaped = false;
+    while index < chars.len() {
+        let ch = chars[index];
+        index += 1;
+        if escaped {
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == quote {
+            break;
+        }
+    }
+    index
+}
+
+/// Preserve a slash-delimited span verbatim. For a regular expression this
+/// protects its body and flags. For a division chain such as `a / b / c`, the
+/// conservative span is still valid JavaScript and merely retains a few bytes.
+fn slash_delimited_end(chars: &[char], start: usize) -> Option<usize> {
+    let mut index = start + 1;
+    let mut escaped = false;
+    let mut in_character_class = false;
+
+    while index < chars.len() {
+        let ch = chars[index];
+        if matches!(ch, '\n' | '\r') {
+            return None;
+        }
+        if escaped {
+            escaped = false;
+        } else {
+            match ch {
+                '\\' => escaped = true,
+                '[' => in_character_class = true,
+                ']' => in_character_class = false,
+                '/' if !in_character_class => {
+                    index += 1;
+                    while index < chars.len() && is_identifier_part(chars[index]) {
+                        index += 1;
+                    }
+                    return Some(index);
+                }
+                _ => {}
+            }
+        }
+        index += 1;
+    }
+
+    None
 }
 
 // ─────────────────────────────────────────────
@@ -475,20 +787,81 @@ mod tests {
     use super::*;
 
     #[test]
-    fn strips_line_comments() {
-        let src = "const x = 1; // this is a comment\nconst y = 2;";
-        let out = strip_line_comments(src);
+    fn compresses_comments_and_whitespace() {
+        let src = "const   x = 1; // this is a comment\nconst y = 2;";
+        let out = compress_javascript(src);
         assert!(!out.contains("this is a comment"));
-        assert!(out.contains("const x = 1;"));
-        assert!(out.contains("const y = 2;"));
+        assert_eq!(out, "const x=1;const y=2;");
     }
 
     #[test]
-    fn collapses_whitespace() {
-        let src = "const   x   =   1;\n\nconst y = 2;";
-        let out = collapse_whitespace(src);
-        assert!(!out.contains("   "));
-        assert!(!out.contains("\n\n"));
+    fn preserves_literals_and_removes_only_real_comments() {
+        let src = r#"const url = "https://example.test/a//b";
+const template = `keep // text and  spaces`;
+const pattern = /\n( *(at)?)[a-z/]+/gi; /* remove me */"#;
+        let out = compress_javascript(src);
+        assert!(out.contains(r#""https://example.test/a//b""#));
+        assert!(out.contains("`keep // text and  spaces`"));
+        assert!(out.contains(r#"/\n( *(at)?)[a-z/]+/gi"#));
+        assert!(!out.contains("remove me"));
+    }
+
+    #[test]
+    fn preserves_automatic_semicolon_insertion_boundaries() {
+        let src = "function value() { return\n{ ok: true }; }\nlet count = 1\n++count;";
+        let out = compress_javascript(src);
+        assert!(out.contains("return\n{"));
+        assert!(out.contains("1\n++count"));
+    }
+
+    #[test]
+    fn preserves_legal_comments() {
+        let src = "/*! library license */ const value = 1; //! directive\nvalue;";
+        let out = compress_javascript(src);
+        assert!(out.contains("/*! library license */"));
+        assert!(out.contains("//! directive"));
+    }
+
+    #[test]
+    fn folds_commonjs_production_dependency_branch() {
+        let src = r#"
+'use strict';
+if (process.env.NODE_ENV === 'production') {
+  module.exports = require('./production.js');
+} else {
+  module.exports = require('./development.js');
+}
+"#;
+        let out = fold_production_node_env(src);
+        assert!(out.contains("require('./production.js')"));
+        assert!(!out.contains("development.js"));
+        assert!(!out.contains("process.env.NODE_ENV"));
+    }
+
+    #[test]
+    fn folds_nested_development_only_guard() {
+        let src = r#"
+function checkDCE() {
+  if (process.env.NODE_ENV !== "production") {
+    throw new Error("development only");
+  }
+  return true;
+}
+"#;
+        let out = fold_production_node_env(src);
+        assert!(!out.contains("development only"));
+        assert!(out.contains("return true"));
+    }
+
+    #[test]
+    fn node_env_folder_ignores_literals_comments_and_regexes() {
+        let src = r#"
+const message = "if (process.env.NODE_ENV === 'production') { altered }";
+// if (process.env.NODE_ENV === 'production') { altered }
+const pattern = /if \(process\.env\.NODE_ENV === 'production'\) \{ altered \}/;
+module.exports = message;
+"#;
+        assert_eq!(fold_production_node_env(src), src);
     }
 
     #[test]

@@ -17,7 +17,7 @@
 //!   └─ boundary   → enforce server/client rules (RUV1007, RUV1008, RUV1010)
 //!   └─ linker     → topological sort + concatenate modules
 //!                   (circular dependency detection)
-//!   └─ minifier   → scope-aware identifier mangling + dead-code elimination
+//!   └─ minifier   → token-aware compression + dead-code elimination
 //!   └─ output     → wrap in IIFE (client) or ESM (SSR)
 //!                   (chunk manifest + HTML preload hints)
 //! ```
@@ -121,24 +121,9 @@ fn bundle_with_parts(
     } else {
         linked.clone()
     };
-    // The built-in text minifier is safe for Ruvyxa's generated modules but
-    // cannot safely transform arbitrary third-party JavaScript (notably regex
-    // literals in React's CommonJS distribution). When the client bundle contains
-    // third-party modules, use selective minification that only compresses
-    // project segments while leaving node_modules code intact.
-    let contains_third_party_module = compiled.iter().any(|module| {
-        module
-            .path
-            .components()
-            .any(|component| component.as_os_str() == "node_modules")
-    });
     let minify_output = input.options.minify;
     let final_code = if minify_output {
-        if input.target == BundleTarget::Client && contains_third_party_module {
-            minifier::minify_selective(&optimized_linked, input.target, false, &["node_modules"])?
-        } else {
-            minifier::minify_parallel_with_options(&optimized_linked, input.target, false)?
-        }
+        minifier::minify_parallel_with_options(&optimized_linked, input.target, false)?
     } else {
         optimized_linked.clone()
     };
@@ -459,8 +444,8 @@ mod tests {
         let react = root.join("node_modules/react");
         let react_dom = root.join("node_modules/react-dom");
         fs::create_dir_all(&app).unwrap();
-        fs::create_dir_all(&react).unwrap();
-        fs::create_dir_all(&react_dom).unwrap();
+        fs::create_dir_all(react.join("cjs")).unwrap();
+        fs::create_dir_all(react_dom.join("cjs")).unwrap();
 
         fs::write(
             react.join("package.json"),
@@ -469,7 +454,17 @@ mod tests {
         .unwrap();
         fs::write(
             react.join("index.js"),
+            "if (process.env.NODE_ENV === 'production') { module.exports = require('./cjs/react.production.js'); } else { module.exports = require('./cjs/react.development.js'); }",
+        )
+        .unwrap();
+        fs::write(
+            react.join("cjs/react.production.js"),
             "const stack = /\\n( *(at)?)/; module.exports = { createElement() {}, useState() {}, stack };",
+        )
+        .unwrap();
+        fs::write(
+            react.join("cjs/react.development.js"),
+            "module.exports = { developmentOnlyReactRuntime: true };",
         )
         .unwrap();
         fs::write(
@@ -479,7 +474,17 @@ mod tests {
         .unwrap();
         fs::write(
             react_dom.join("client.js"),
+            "if (process.env.NODE_ENV === 'production') { module.exports = require('./cjs/react-dom-client.production.js'); } else { module.exports = require('./cjs/react-dom-client.development.js'); }",
+        )
+        .unwrap();
+        fs::write(
+            react_dom.join("cjs/react-dom-client.production.js"),
             "module.exports = { hydrateRoot() {} };",
+        )
+        .unwrap();
+        fs::write(
+            react_dom.join("cjs/react-dom-client.development.js"),
+            "module.exports = { developmentOnlyReactDomRuntime: true };",
         )
         .unwrap();
 
@@ -490,15 +495,24 @@ mod tests {
         )
         .unwrap();
 
-        let mut input = client_input(&root, &app, page, vec![], "/");
-        input.options.minify = true;
-        input.options.source_map = false;
-        input.options.emit_chunk_manifest = false;
-        let output = bundle(input).unwrap();
+        let mut readable_input = client_input(&root, &app, page.clone(), vec![], "/");
+        readable_input.options.source_map = false;
+        readable_input.options.emit_chunk_manifest = false;
+        let readable_output = bundle(readable_input).unwrap();
+
+        let mut minified_input = client_input(&root, &app, page, vec![], "/");
+        minified_input.options.minify = true;
+        minified_input.options.source_map = false;
+        minified_input.options.emit_chunk_manifest = false;
+        let output = bundle(minified_input).unwrap();
 
         assert!(!output.code.contains("from \"react\""));
         assert!(!output.code.contains("from \"react-dom/client\""));
-        assert!(output.code.contains("const stack = /\\n( *(at)?)/;"));
+        assert!(output.code.contains("/\\n( *(at)?)/"));
+        assert!(!output.code.contains("developmentOnlyReactRuntime"));
+        assert!(!output.code.contains("developmentOnlyReactDomRuntime"));
+        assert!(!output.code.contains("node_modules/react/index.js"));
+        assert!(output.code.len() < readable_output.code.len());
         assert!(output.stats.minified);
     }
 }

@@ -43,9 +43,9 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use rayon::prelude::*;
 
-use crate::ast;
 use crate::plugin::{PluginContext, PluginPipeline};
 use crate::{BundleError, BundleTarget, Result};
+use crate::{ast, minifier};
 
 /// A resolved module: its canonical path and raw source text.
 #[derive(Debug, Clone)]
@@ -577,6 +577,15 @@ pub fn resolve_graph_with_plugins(
                         .any(|c| c.as_os_str() == "node_modules");
 
                 let source = cache.read_source(dep_path)?;
+                let source = if target == BundleTarget::Client
+                    && dep_path
+                        .components()
+                        .any(|component| component.as_os_str() == "node_modules")
+                {
+                    minifier::fold_production_node_env(&source)
+                } else {
+                    source
+                };
 
                 let deps = if is_external {
                     Vec::new()
