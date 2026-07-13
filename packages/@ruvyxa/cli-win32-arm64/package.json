@@ -1,13 +1,26 @@
 {
   "name": "@ruvyxa/cli-win32-arm64",
-  "version": "1.0.11",
+  "version": "1.0.12",
   "description": "Prebuilt Ruvyxa native CLI binary for Windows arm64.",
   "license": "Apache-2.0",
   "type": "module",
-  "os": ["win32"],
-  "cpu": ["arm64"],
-  "files": ["bin", "README.md"],
-  "keywords": ["ruvyxa", "cli", "native", "windows", "arm64"],
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "files": [
+    "bin",
+    "README.md"
+  ],
+  "keywords": [
+    "ruvyxa",
+    "cli",
+    "native",
+    "windows",
+    "arm64"
+  ],
   "repository": {
     "type": "git",
     "url": "git+https://github.com/thirawat27/ruvyxa.git",
