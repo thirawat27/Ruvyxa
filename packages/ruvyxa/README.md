@@ -95,6 +95,7 @@ export default config({
   security: {
     actionLimit: 1024 * 1024,
     apiLimit: 10 * 1024 * 1024,
+    pluginLimit: 32 * 1024 * 1024,
     actionRateLimit: { max: 600, window: 60 },
     sameOrigin: true,
     fetchMeta: true,

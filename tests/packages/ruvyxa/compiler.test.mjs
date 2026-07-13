@@ -448,7 +448,7 @@ import Card from './Card.js'
     })
   })
 
-  it('serializes scalable action and API security limits', async () => {
+  it('serializes scalable action, API, and plugin security limits', async () => {
     await withFixture(async ({ root }) => {
       await writeFile(
         path.join(root, 'ruvyxa.config.ts'),
@@ -456,6 +456,7 @@ import Card from './Card.js'
           security: {
             actionLimit: 2 * 1024 * 1024,
             apiLimit: 20 * 1024 * 1024,
+            pluginLimit: 64 * 1024 * 1024,
             actionRateLimit: { max: 1200, window: 30 }
           }
         }`,
@@ -465,6 +466,7 @@ import Card from './Card.js'
       assert.deepEqual(config.config.security, {
         actionLimit: 2 * 1024 * 1024,
         apiLimit: 20 * 1024 * 1024,
+        pluginLimit: 64 * 1024 * 1024,
         actionRateLimit: { max: 1200, window: 30 },
       })
     })

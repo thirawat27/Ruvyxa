@@ -31,6 +31,8 @@ Ruvyxa 1.x includes:
 - Same-origin and Fetch Metadata (`Sec-Fetch-Site`) checks for server actions
 - Action body size limits (1 MB default, configurable)
 - API route body size limits (10 MB default, configurable via `security.apiLimit`)
+- Response-phase Wasm plugin buffering limited to 32 MB by default, configurable through
+  `security.pluginLimit` up to 256 MB, to prevent unbounded server memory use
 - Configurable per-client/action rate limiting (600 req/min default via `security.actionRateLimit`)
 - Content-Type enforcement (JSON or form-encoded only)
 - Default security headers on all responses (`X-Content-Type-Options`, `Referrer-Policy`,

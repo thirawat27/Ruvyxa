@@ -12,7 +12,9 @@ use anyhow::Context;
 use chrono::Local;
 use clap::builder::styling::{AnsiColor, Effects, Styles};
 use clap::{Parser, Subcommand, ValueEnum};
-use ruvyxa_dev_server::{ServerConfig, render_request, serve};
+use ruvyxa_dev_server::{
+    MAX_PLUGIN_RESPONSE_BODY_LIMIT_BYTES, ServerConfig, render_request, serve,
+};
 use ruvyxa_diagnostics::Diagnostic;
 use ruvyxa_graph::{
     DiscoverOptions, RenderStrategy, RouteEntry, RouteManifest, discover_routes, validate_app,
@@ -232,6 +234,8 @@ struct SecurityConfigOptions {
     action_body_limit_bytes: Option<usize>,
     #[serde(rename = "apiLimit")]
     api_body_limit_bytes: Option<usize>,
+    #[serde(rename = "pluginLimit")]
+    plugin_response_body_limit_bytes: Option<usize>,
     #[serde(rename = "actionRateLimit")]
     action_rate_limit: Option<ActionRateLimitOptions>,
     #[serde(rename = "sameOrigin")]
@@ -308,6 +312,7 @@ impl ProjectConfig {
             self.security.action_body_limit_bytes,
         )?;
         validate_positive_limit("security.apiLimit", self.security.api_body_limit_bytes)?;
+        validate_plugin_response_limit(self.security.plugin_response_body_limit_bytes)?;
         if let Some(rate_limit) = &self.security.action_rate_limit {
             validate_positive_limit("security.actionRateLimit.max", rate_limit.max)?;
             validate_positive_limit("security.actionRateLimit.window", rate_limit.window)?;
@@ -338,6 +343,16 @@ where
 {
     if value.is_some_and(|value| value == T::from(0)) {
         anyhow::bail!("RUV1601 config field `{field}` must be greater than zero");
+    }
+    Ok(())
+}
+
+fn validate_plugin_response_limit(value: Option<usize>) -> anyhow::Result<()> {
+    validate_positive_limit("security.pluginLimit", value)?;
+    if value.is_some_and(|value| value > MAX_PLUGIN_RESPONSE_BODY_LIMIT_BYTES) {
+        anyhow::bail!(
+            "RUV1602 config field `security.pluginLimit` must not exceed {MAX_PLUGIN_RESPONSE_BODY_LIMIT_BYTES} bytes"
+        );
     }
     Ok(())
 }
@@ -546,6 +561,10 @@ fn dev_server_config(args: &ServerArgs, config: &ProjectConfig) -> ServerConfig 
         .security
         .api_body_limit_bytes
         .unwrap_or(server.api_body_limit_bytes);
+    server.plugin_response_body_limit_bytes = config
+        .security
+        .plugin_response_body_limit_bytes
+        .unwrap_or(server.plugin_response_body_limit_bytes);
     if let Some(rate_limit) = &config.security.action_rate_limit {
         server.action_rate_limit_max = rate_limit.max.unwrap_or(server.action_rate_limit_max);
         server.action_rate_limit_window = Duration::from_secs(
@@ -597,6 +616,10 @@ fn production_server_config(args: &ServerArgs, config: &ProjectConfig) -> Server
         .security
         .api_body_limit_bytes
         .unwrap_or(server.api_body_limit_bytes);
+    server.plugin_response_body_limit_bytes = config
+        .security
+        .plugin_response_body_limit_bytes
+        .unwrap_or(server.plugin_response_body_limit_bytes);
     if let Some(rate_limit) = &config.security.action_rate_limit {
         server.action_rate_limit_max = rate_limit.max.unwrap_or(server.action_rate_limit_max);
         server.action_rate_limit_window = Duration::from_secs(
@@ -822,6 +845,7 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
         "security": {
             "actionLimit": config.security.action_body_limit_bytes.unwrap_or(1024 * 1024),
             "apiLimit": config.security.api_body_limit_bytes.unwrap_or(10 * 1024 * 1024),
+            "pluginLimit": config.security.plugin_response_body_limit_bytes.unwrap_or(32 * 1024 * 1024),
             "actionRateLimit": {
                 "max": config.security.action_rate_limit.as_ref().and_then(|value| value.max).unwrap_or(600),
                 "window": config.security.action_rate_limit.as_ref().and_then(|value| value.window).unwrap_or(60)
@@ -3719,6 +3743,7 @@ mod tests {
             "security": {
                 "actionLimit": 8192,
                 "apiLimit": 16384,
+                "pluginLimit": 32768,
                 "actionRateLimit": { "max": 240, "window": 30 },
                 "sameOrigin": false,
                 "fetchMeta": false,
@@ -3733,6 +3758,7 @@ mod tests {
         ] {
             assert_eq!(server.action_body_limit_bytes, 8192);
             assert_eq!(server.api_body_limit_bytes, 16384);
+            assert_eq!(server.plugin_response_body_limit_bytes, 32768);
             assert_eq!(server.action_rate_limit_max, 240);
             assert_eq!(server.action_rate_limit_window, Duration::from_secs(30));
             assert!(!server.same_origin_actions);
@@ -3764,14 +3790,34 @@ mod tests {
     fn rejects_zero_security_limits() {
         let config: ProjectConfig = serde_json::from_value(json!({
             "security": {
-                "apiLimit": 0,
-                "actionRateLimit": { "max": 0, "window": 0 }
+                "pluginLimit": 0
             }
         }))
         .unwrap();
 
         let error = config.validate_paths().unwrap_err();
-        assert!(error.to_string().contains("security.apiLimit"));
+        assert!(error.to_string().contains("security.pluginLimit"));
+    }
+
+    #[test]
+    fn rejects_excessive_plugin_response_limit() {
+        let accepted: ProjectConfig = serde_json::from_value(json!({
+            "security": {
+                "pluginLimit": MAX_PLUGIN_RESPONSE_BODY_LIMIT_BYTES
+            }
+        }))
+        .unwrap();
+        assert!(accepted.validate_paths().is_ok());
+
+        let config: ProjectConfig = serde_json::from_value(json!({
+            "security": {
+                "pluginLimit": MAX_PLUGIN_RESPONSE_BODY_LIMIT_BYTES + 1
+            }
+        }))
+        .unwrap();
+
+        let error = config.validate_paths().unwrap_err();
+        assert!(error.to_string().contains("must not exceed"));
     }
 
     #[test]

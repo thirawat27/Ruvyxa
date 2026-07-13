@@ -256,6 +256,24 @@ same-origin protection, Fetch Metadata protection, and a limit of 600 requests p
 protection. Behind an HTTPS reverse proxy, forward the original scheme with `X-Forwarded-Proto` so
 the origin check can distinguish `https` from `http` correctly.
 
+### Response-phase plugin capacity
+
+Response-phase Wasm plugins buffer a complete response before they can inspect or modify it.
+`security.pluginLimit` defaults to 32 MiB and may be increased to at most 256 MiB for large JSON or
+HTML responses:
+
+```ts
+export default {
+  security: {
+    pluginLimit: 64 * 1024 * 1024,
+  },
+}
+```
+
+Choose the smallest limit that covers the response types handled by the plugin: each concurrent
+plugin response consumes memory while buffered. Use a streaming route or bypass response-phase
+plugins for file downloads and other payloads above 256 MiB.
+
 ## 8. Rendering strategies
 
 Ruvyxa chooses a rendering strategy per page. Its source detection order is significant: the first

@@ -100,6 +100,7 @@ async function sanitizeConfig(config) {
   assertKnownKeys(config.security, 'config.security', [
     'actionLimit',
     'apiLimit',
+    'pluginLimit',
     'actionRateLimit',
     'sameOrigin',
     'fetchMeta',
@@ -191,6 +192,7 @@ async function sanitizeConfig(config) {
     security: objectValue(config.security, {
       actionLimit: numberValue(config.security?.actionLimit),
       apiLimit: numberValue(config.security?.apiLimit),
+      pluginLimit: numberValue(config.security?.pluginLimit),
       actionRateLimit: objectValue(config.security?.actionRateLimit, {
         max: numberValue(config.security?.actionRateLimit?.max),
         window: numberValue(config.security?.actionRateLimit?.window),

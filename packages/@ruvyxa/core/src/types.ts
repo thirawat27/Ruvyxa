@@ -37,6 +37,12 @@ export interface RuvyxaConfig {
     actionLimit?: number
     /** Maximum API route request payload size in bytes. @default 10485760 */
     apiLimit?: number
+    /**
+     * Maximum response size buffered by a response-phase Wasm plugin in bytes.
+     * @default 33554432
+     * @maximum 268435456
+     */
+    pluginLimit?: number
     /** Per-client/action request ceiling; values are bounded but configurable. */
     actionRateLimit?: {
       /** Maximum requests during `window` seconds. @default 600 */

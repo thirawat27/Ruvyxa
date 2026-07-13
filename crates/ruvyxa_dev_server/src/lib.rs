@@ -48,6 +48,10 @@ pub use style::{StyleCollection, collect_styles, minify_css};
 
 const MAX_ACTION_BODY_BYTES: usize = 1024 * 1024;
 const MAX_API_BODY_BYTES: usize = 10 * 1024 * 1024;
+/// Default maximum response size buffered for a response-phase Wasm plugin.
+pub const DEFAULT_PLUGIN_RESPONSE_BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
+/// Largest response size a project may configure for response-phase Wasm plugins.
+pub const MAX_PLUGIN_RESPONSE_BODY_LIMIT_BYTES: usize = 256 * 1024 * 1024;
 const ACTION_RATE_LIMIT_MAX: usize = 600;
 const ACTION_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
 const MAX_TRACKED_ACTION_RATE_LIMIT_KEYS: usize = 10_000;
@@ -79,6 +83,8 @@ pub struct ServerConfig {
     pub action_body_limit_bytes: usize,
     /// Maximum accepted API route request payload size.
     pub api_body_limit_bytes: usize,
+    /// Maximum response size buffered for response-phase Wasm plugins.
+    pub plugin_response_body_limit_bytes: usize,
     /// Maximum action requests per client/action in the configured window.
     pub action_rate_limit_max: usize,
     /// Window used by the action rate limiter.
@@ -114,6 +120,7 @@ impl ServerConfig {
             debug_traces: false,
             action_body_limit_bytes: MAX_ACTION_BODY_BYTES,
             api_body_limit_bytes: MAX_API_BODY_BYTES,
+            plugin_response_body_limit_bytes: DEFAULT_PLUGIN_RESPONSE_BODY_LIMIT_BYTES,
             action_rate_limit_max: ACTION_RATE_LIMIT_MAX,
             action_rate_limit_window: ACTION_RATE_LIMIT_WINDOW,
             same_origin_actions: true,
@@ -144,6 +151,7 @@ impl ServerConfig {
             debug_traces: false,
             action_body_limit_bytes: MAX_ACTION_BODY_BYTES,
             api_body_limit_bytes: MAX_API_BODY_BYTES,
+            plugin_response_body_limit_bytes: DEFAULT_PLUGIN_RESPONSE_BODY_LIMIT_BYTES,
             action_rate_limit_max: ACTION_RATE_LIMIT_MAX,
             action_rate_limit_window: ACTION_RATE_LIMIT_WINDOW,
             same_origin_actions: true,
@@ -1190,9 +1198,8 @@ async fn apply_response_plugins(
         return Ok(response);
     };
     let (parts, body) = response.into_parts();
-    let body = to_bytes(body, usize::MAX).await.map_err(|error| {
-        RuvyxaError::Message(format!("Failed to read response for plugin: {error}"))
-    })?;
+    let body =
+        read_plugin_response_body(body, state.config.plugin_response_body_limit_bytes).await?;
     let plugin_response = PluginResponse {
         status: parts.status.as_u16(),
         headers: headers_to_plugin_pairs(&parts.headers),
@@ -1217,6 +1224,14 @@ async fn apply_response_plugins(
             "Plugin returned unsupported response-phase action '{action}'"
         ))),
     }
+}
+
+async fn read_plugin_response_body(body: Body, limit_bytes: usize) -> Result<Bytes> {
+    to_bytes(body, limit_bytes).await.map_err(|error| {
+        RuvyxaError::Message(format!(
+            "Response exceeds the {limit_bytes}-byte limit for response plugins: {error}"
+        ))
+    })
 }
 
 fn plugin_response_into_response(response: PluginResponse) -> Result<Response> {
@@ -2940,21 +2955,39 @@ impl ActionRateLimiter {
 
     fn allow(&mut self, key: &str) -> bool {
         let now = Instant::now();
+        if let Some(hits) = self.hits.get_mut(key) {
+            hits.retain(|hit| now.duration_since(*hit) <= self.window);
+            if !hits.is_empty() {
+                if hits.len() >= self.max_hits {
+                    return false;
+                }
+                hits.push(now);
+                return true;
+            }
+        }
+        // The current key has no active requests. Remove its empty bucket
+        // before considering the bounded set of client keys.
+        self.hits.remove(key);
+
+        if self.hits.len() >= self.max_keys {
+            // A full sweep is only necessary when admitting a new key at
+            // capacity. Keeping it off the normal request path avoids an
+            // O(tracked keys) scan for every action request.
+            self.remove_expired_keys(now);
+        }
+        if self.hits.len() >= self.max_keys {
+            return false;
+        }
+
+        self.hits.insert(key.to_string(), vec![now]);
+        true
+    }
+
+    fn remove_expired_keys(&mut self, now: Instant) {
         self.hits.retain(|_, hits| {
             hits.retain(|hit| now.duration_since(*hit) <= self.window);
             !hits.is_empty()
         });
-        if !self.hits.contains_key(key) && self.hits.len() >= self.max_keys {
-            return false;
-        }
-        let hits = self.hits.entry(key.to_string()).or_default();
-
-        if hits.len() >= self.max_hits {
-            return false;
-        }
-
-        hits.push(now);
-        true
     }
 
     fn retry_after_seconds(&self, key: &str) -> u64 {
@@ -3670,6 +3703,18 @@ mod tests {
     }
 
     #[test]
+    fn action_rate_limiter_reclaims_expired_keys_when_capacity_is_full() {
+        let mut limiter = ActionRateLimiter::new(1, Duration::from_millis(1));
+        limiter.max_keys = 1;
+
+        assert!(limiter.allow("first"));
+        std::thread::sleep(Duration::from_millis(10));
+        assert!(limiter.allow("second"));
+        assert_eq!(limiter.hits.len(), 1);
+        assert!(limiter.hits.contains_key("second"));
+    }
+
+    #[test]
     fn plugin_responses_reject_invalid_headers() {
         let response = PluginResponse {
             status: 200,
@@ -3677,6 +3722,41 @@ mod tests {
             body: Some(b"body".to_vec()),
         };
         assert!(plugin_response_into_response(response).is_err());
+    }
+
+    #[tokio::test]
+    async fn plugin_response_body_rejects_oversized_responses() {
+        let limit_bytes = 8;
+        let body = Body::from(vec![0_u8; limit_bytes + 1]);
+        let error = read_plugin_response_body(body, limit_bytes)
+            .await
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("Response exceeds the 8-byte limit")
+        );
+    }
+
+    #[tokio::test]
+    async fn plugin_response_body_accepts_the_configured_limit() {
+        let body = Body::from(vec![0_u8; 8]);
+
+        assert_eq!(read_plugin_response_body(body, 8).await.unwrap().len(), 8);
+    }
+
+    #[test]
+    fn server_configs_default_to_the_plugin_response_limit() {
+        for config in [
+            ServerConfig::dev(".", "localhost", 3000),
+            ServerConfig::production(".", "localhost", 3000),
+        ] {
+            assert_eq!(
+                config.plugin_response_body_limit_bytes,
+                DEFAULT_PLUGIN_RESPONSE_BODY_LIMIT_BYTES
+            );
+        }
     }
 
     #[test]
