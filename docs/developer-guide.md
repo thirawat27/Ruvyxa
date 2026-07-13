@@ -2,12 +2,12 @@
 
 This guide is for framework contributors: people changing the Rust workspace, native CLI, npm
 packages, adapters, templates, runtime, or integration fixtures. Application authors should begin
-with the [User Guide](user-guide.md).
+with the [User Guide](guides/index.md).
 
 ## 1. Local requirements and setup
 
-Install Node.js 22 or later, pnpm 11 or later, and the Rust toolchain required by the committed
-`Cargo.lock`. Then install dependencies and inspect the integration fixture:
+Install Node.js 22 or later, pnpm 11 or later, and Rust 1.96 or later (Rust edition 2024). Then
+install dependencies and inspect the integration fixture:
 
 ```bash
 pnpm install
@@ -36,6 +36,7 @@ packages/
   ├─ @ruvyxa/core              config and server APIs, types, adapter contracts
   ├─ @ruvyxa/react             Image, Seo, hydration, loaders, error boundaries
   ├─ @ruvyxa/adapter-*         deployment metadata packages
+  ├─ @ruvyxa/cli-*             platform-specific native binaries (darwin-arm64, linux-arm64, linux-x64, win32-arm64, win32-x64)
   └─ create-ruvyxa             scaffold command and minimal template packaging
 ```
 

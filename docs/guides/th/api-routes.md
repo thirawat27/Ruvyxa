@@ -1,0 +1,48 @@
+# API Routes
+
+สร้าง `route.ts` และ export HTTP method handlers:
+
+```ts
+// app/api/health/route.ts
+export function GET() {
+  return Response.json({ ok: true })
+}
+
+export async function POST({ request }: { request: Request }) {
+  const body = await request.json()
+  return Response.json({ received: body }, { status: 201 })
+}
+```
+
+Handler ได้รับ `{ request, params }`:
+
+- `request` — Web API `Request` object
+- `params` — route parameters
+
+## Response Types
+
+```ts
+export function GET() {
+  return new Response('Hello', { headers: { 'Content-Type': 'text/plain' } })
+}
+
+export function GET() {
+  return Response.json({ data: [1, 2, 3] })
+}
+
+export function GET() {
+  return Response.redirect('/dashboard', 302)
+}
+```
+
+## Body Size Limits
+
+| Limit    | Default | Config              |
+| -------- | ------- | ------------------- |
+| API body | 10 MiB  | `security.apiLimit` |
+
+## Unsupported Methods → 405
+
+Handler ที่ไม่รองรับ method จะตอบ 405 โดยอัตโนมัติ
+
+ดูเพิ่มเติม: [Configuration](configuration.md)

@@ -98,6 +98,17 @@ strategies, see [examples/demo](examples/demo).
 
 ---
 
+## Documentation
+
+| Guide                                                               | Description                                       |
+| ------------------------------------------------------------------- | ------------------------------------------------- |
+| [User Guide](docs/guides/index.md)                                  | Build and deploy a Ruvyxa app — EN & TH           |
+| [Developer Guide](docs/developer-guide.md)                          | Develop, test, and package the framework          |
+| [Bundler Modernization](docs/architecture/bundler-modernization.md) | Oxc integration boundary and pipeline design      |
+| [Production Readiness](docs/architecture/production-readiness.md)   | Framework assessment, caching, and security audit |
+
+---
+
 ## From Source
 
 ```bash
@@ -443,13 +454,6 @@ Routes with `getStaticParams` export generate static paths at build time.
 | [`@ruvyxa/adapter-netlify`](packages/@ruvyxa/adapter-netlify)       | Netlify functions adapter                                                  |
 | [`@ruvyxa/adapter-bun`](packages/@ruvyxa/adapter-bun)               | Bun runtime adapter                                                        |
 | [`@ruvyxa/adapter-static`](packages/@ruvyxa/adapter-static)         | Static output adapter                                                      |
-
----
-
-## Documentation
-
-- [User Guide: build and deploy a Ruvyxa app](docs/user-guide.md)
-- [Developer Guide: develop, test and package the framework](docs/developer-guide.md)
 
 ---
 
