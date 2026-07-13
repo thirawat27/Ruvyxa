@@ -74,6 +74,20 @@ struct CachedSource {
     source: Arc<str>,
 }
 
+/// Fingerprints for the two resolver configuration files we support.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct TsConfigFingerprint {
+    tsconfig: Option<SourceFingerprint>,
+    jsconfig: Option<SourceFingerprint>,
+}
+
+/// Parsed resolver configuration and the file state it was derived from.
+#[derive(Debug, Clone)]
+struct CachedTsConfig {
+    fingerprint: TsConfigFingerprint,
+    paths: TsConfigPaths,
+}
+
 /// Resolution cache key: (base_dir, specifier).
 type ResolutionKey = (Arc<str>, Arc<str>);
 
@@ -91,6 +105,8 @@ pub struct ResolveGraphCache {
     resolutions: Arc<DashMap<ResolutionKey, Option<PathBuf>>>,
     /// Source file cache: path → (fingerprint, source_text).
     sources: Arc<DashMap<PathBuf, CachedSource>>,
+    /// Parsed tsconfig/jsconfig cache, keyed by canonical project root.
+    tsconfigs: Arc<DashMap<PathBuf, CachedTsConfig>>,
 }
 
 impl ResolveGraphCache {
@@ -104,6 +120,7 @@ impl ResolveGraphCache {
         Self {
             resolutions: Arc::new(DashMap::with_capacity(resolution_hint)),
             sources: Arc::new(DashMap::with_capacity(source_hint)),
+            tsconfigs: Arc::new(DashMap::with_capacity(1)),
         }
     }
 
@@ -151,6 +168,26 @@ impl ResolveGraphCache {
         Ok(source)
     }
 
+    /// Load resolver aliases once per configuration version across route builds.
+    fn tsconfig_paths(&self, project_root: &Path) -> TsConfigPaths {
+        let fingerprint = tsconfig_fingerprint(project_root);
+        if let Some(entry) = self.tsconfigs.get(project_root)
+            && entry.fingerprint == fingerprint
+        {
+            return entry.paths.clone();
+        }
+
+        let paths = TsConfigPaths::load(project_root);
+        self.tsconfigs.insert(
+            project_root.to_path_buf(),
+            CachedTsConfig {
+                fingerprint,
+                paths: paths.clone(),
+            },
+        );
+        paths
+    }
+
     /// Number of cached resolution entries. Intended for diagnostics/tests.
     pub fn resolution_count(&self) -> usize {
         self.resolutions.len()
@@ -167,6 +204,9 @@ impl ResolveGraphCache {
             self.sources.remove(path);
             // Remove any resolution entries that resolved to this path.
             self.resolutions.retain(|_, v| v.as_ref() != Some(path));
+            self.tsconfigs.retain(|root, _| {
+                path != &root.join("tsconfig.json") && path != &root.join("jsconfig.json")
+            });
         }
     }
 
@@ -174,6 +214,23 @@ impl ResolveGraphCache {
     pub fn clear(&self) {
         self.resolutions.clear();
         self.sources.clear();
+        self.tsconfigs.clear();
+    }
+}
+
+fn tsconfig_fingerprint(project_root: &Path) -> TsConfigFingerprint {
+    let fingerprint = |name: &str| {
+        fs::metadata(project_root.join(name))
+            .ok()
+            .map(|metadata| SourceFingerprint {
+                modified: metadata.modified().ok(),
+                len: metadata.len(),
+            })
+    };
+
+    TsConfigFingerprint {
+        tsconfig: fingerprint("tsconfig.json"),
+        jsconfig: fingerprint("jsconfig.json"),
     }
 }
 
@@ -499,7 +556,7 @@ pub fn resolve_graph_with_plugins(
     entry_source: &str,
     entry_label: &str,
     project_root: &Path,
-    app_dir: &Path,
+    _app_dir: &Path,
     cache: &ResolveGraphCache,
     plugins: &PluginPipeline,
     target: BundleTarget,
@@ -507,9 +564,9 @@ pub fn resolve_graph_with_plugins(
     let project_root = project_root
         .canonicalize()
         .unwrap_or_else(|_| project_root.to_path_buf());
-    let app_dir = app_dir
-        .canonicalize()
-        .unwrap_or_else(|_| app_dir.to_path_buf());
+    // A graph is resolved against a single configuration snapshot. Keeping it
+    // local to this run avoids repeated I/O and parsing for every module.
+    let tsconfig = cache.tsconfig_paths(&project_root);
 
     let mut visited: BTreeMap<PathBuf, ResolvedModule> = BTreeMap::new();
     let mut order: Vec<PathBuf> = Vec::new();
@@ -523,7 +580,7 @@ pub fn resolve_graph_with_plugins(
         entry_source,
         &project_root,
         &project_root,
-        &app_dir,
+        &tsconfig,
         cache,
         plugins,
         target,
@@ -587,7 +644,7 @@ pub fn resolve_graph_with_plugins(
                         &dependency_source,
                         &resolve_base,
                         &project_root,
-                        &app_dir,
+                        &tsconfig,
                         cache,
                         plugins,
                         target,
@@ -639,15 +696,11 @@ fn collect_deps_cached(
     source: &str,
     base_dir: &Path,
     project_root: &Path,
-    _app_dir: &Path,
+    tsconfig: &TsConfigPaths,
     cache: &ResolveGraphCache,
     plugins: &PluginPipeline,
     target: BundleTarget,
 ) -> Result<Vec<PathBuf>> {
-    // Load tsconfig paths once per resolve call (cheap — cached on disk).
-    // In practice the tsconfig rarely changes between module resolves in a single build.
-    let tsconfig = TsConfigPaths::load(project_root);
-
     let specifiers = extract_specifiers(source);
     let mut deps = Vec::with_capacity(specifiers.len());
     let base_dir_str = base_dir.to_string_lossy();
@@ -884,6 +937,30 @@ mod tests {
     }
 
     #[test]
+    fn tsconfig_cache_reloads_when_config_fingerprint_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let cache = ResolveGraphCache::new();
+
+        fs::write(
+            root.join("tsconfig.json"),
+            r#"{"compilerOptions":{"baseUrl":"src"}}"#,
+        )
+        .unwrap();
+        assert_eq!(cache.tsconfig_paths(root).base_url, Some(root.join("src")));
+
+        fs::write(
+            root.join("tsconfig.json"),
+            r#"{"compilerOptions":{"baseUrl":"source"}}"#,
+        )
+        .unwrap();
+        assert_eq!(
+            cache.tsconfig_paths(root).base_url,
+            Some(root.join("source"))
+        );
+    }
+
+    #[test]
     fn resolves_absolute_project_imports() {
         let temp = tempfile::tempdir().unwrap();
         let app = temp.path().join("app");
@@ -897,11 +974,12 @@ mod tests {
             serde_json::to_string(&import_path).unwrap()
         );
         let root = temp.path().canonicalize().unwrap();
+        let tsconfig = TsConfigPaths::load(&root);
         let deps = collect_deps_cached(
             &source,
             &root,
             &root,
-            &app,
+            &tsconfig,
             &ResolveGraphCache::new(),
             &PluginPipeline::empty(),
             BundleTarget::Client,
@@ -918,12 +996,13 @@ mod tests {
         let app = temp.path().join("app");
         fs::create_dir_all(&app).unwrap();
         fs::write(app.join("global.css"), "body { margin: 0; }").unwrap();
+        let tsconfig = TsConfigPaths::load(temp.path());
 
         let deps = collect_deps_cached(
             "import \"./global.css\";",
             &app,
             temp.path(),
-            &app,
+            &tsconfig,
             &ResolveGraphCache::new(),
             &PluginPipeline::empty(),
             BundleTarget::Client,

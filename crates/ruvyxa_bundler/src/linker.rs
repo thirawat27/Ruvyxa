@@ -13,7 +13,7 @@
 //!   // … compiled JS with imports rewritten …
 //!   __exports.default = MyComponent;
 //!   __exports.helper = helper;
-//!   return __exports;
+//!   return module.exports;
 //! })();
 //! ```
 //!
@@ -162,10 +162,15 @@ fn link_inner(modules: &[CompiledModule], input: &BundleInput) -> Result<String>
         out.push_str(" = (function() {\n");
         out.push_str("  \"use strict\";\n");
         out.push_str("  var __exports = {};\n");
+        out.push_str("  var module = { exports: __exports };\n");
+        out.push_str("  var exports = module.exports;\n");
+        out.push_str(
+            "  var process = globalThis.process || { env: { NODE_ENV: \"production\" } };\n",
+        );
 
         rewrite_module_into(&module.js, &module.deps, modules, &mut out, true, true)?;
 
-        out.push_str("  return __exports;\n");
+        out.push_str("  return module.exports;\n");
         out.push_str("})();\n\n");
     }
 
@@ -1167,6 +1172,34 @@ mod tests {
             linked,
             format!("module.exports = {};", module_id(&dependency))
         );
+    }
+
+    #[test]
+    fn small_graph_commonjs_modules_return_reassigned_module_exports() {
+        let path = PathBuf::from("/app/node_modules/example/index.js");
+        let input = BundleInput {
+            entry: path.clone(),
+            project_root: PathBuf::from("/app"),
+            app_dir: PathBuf::from("/app/app"),
+            layouts: Vec::new(),
+            request_path: "/".to_string(),
+            target: BundleTarget::Client,
+            options: crate::BundleOptions::default(),
+        };
+        let module = CompiledModule {
+            path,
+            js: "module.exports = { answer: 42 };".to_string(),
+            deps: Vec::new(),
+            is_external: false,
+            cache_hit: false,
+        };
+
+        let output = link_parallel(&[module], &input).unwrap();
+
+        assert!(output.contains("var module = { exports: __exports };"));
+        assert!(output.contains("var exports = module.exports;"));
+        assert!(output.contains("return module.exports;"));
+        assert!(!output.contains("return __exports;"));
     }
 
     #[test]
