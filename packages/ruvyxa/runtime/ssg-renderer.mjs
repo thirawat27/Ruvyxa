@@ -18,7 +18,7 @@
  */
 import { createRequire } from 'node:module'
 import path from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { Writable } from 'node:stream'
 
 import {
@@ -45,7 +45,7 @@ if (!projectRootArg || !appDirArg || !pageFileArg) {
 const projectRoot = path.resolve(projectRootArg)
 const appDir = path.resolve(appDirArg)
 const pageFile = path.resolve(pageFileArg)
-const runtimeDir = path.dirname(new URL(import.meta.url).pathname)
+const runtimeDir = path.dirname(fileURLToPath(import.meta.url))
 
 try {
   const requireFromProject = createRequire(path.join(projectRoot, 'package.json'))

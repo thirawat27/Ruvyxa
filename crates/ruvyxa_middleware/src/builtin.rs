@@ -400,19 +400,13 @@ impl RateLimitLayer {
                 .unwrap_or("unknown")
                 .to_string();
         }
-        // Default: use peer IP from extensions or fallback
+        // Default: use the transport peer only. Forwarded headers are client
+        // supplied unless a deployment explicitly selects them with
+        // `key: "header:x-forwarded-for"`.
         request
             .extensions()
             .get::<std::net::SocketAddr>()
             .map(|addr| addr.ip().to_string())
-            .or_else(|| {
-                request
-                    .headers()
-                    .get("x-forwarded-for")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|v| v.split(',').next())
-                    .map(|s| s.trim().to_string())
-            })
             .unwrap_or_else(|| "unknown".to_string())
     }
 
@@ -535,5 +529,24 @@ where
             }
             inner.call(request).await
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_rate_limit_key_does_not_trust_forwarded_headers() {
+        let request = Request::builder()
+            .header("x-forwarded-for", "203.0.113.8")
+            .body(Body::empty())
+            .unwrap();
+
+        assert_eq!(RateLimitLayer::extract_key(&request, "ip"), "unknown");
+        assert_eq!(
+            RateLimitLayer::extract_key(&request, "header:x-forwarded-for"),
+            "203.0.113.8"
+        );
     }
 }

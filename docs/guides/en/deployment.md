@@ -168,7 +168,8 @@ Before deploying:
 - [ ] Security headers — `security.headers: true`
 - [ ] CORS origins — explicit, not wildcard
 - [ ] Body limits — `security.apiLimit` and `security.actionLimit` are appropriate
-- [ ] Reverse proxy — forward `X-Forwarded-Proto` when behind an HTTPS proxy
+- [ ] Reverse proxy — forward `X-Forwarded-Proto` and add its exact non-loopback IP to
+      `security.trustedProxyIps` when behind an HTTPS proxy
 
 ## Learn from the Demo
 

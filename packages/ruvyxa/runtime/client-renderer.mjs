@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
+import { fileURLToPath } from 'node:url'
 
 import {
   cacheFileName,
@@ -75,7 +76,7 @@ window.__RUVYXA_HYDRATED = true
     outfile,
     platform: 'browser',
     minify: process.env.RUVYXA_CLIENT_MINIFY === '1',
-    aliases: runtimeAliases(path.dirname(new URL(import.meta.url).pathname)),
+    aliases: runtimeAliases(path.dirname(fileURLToPath(import.meta.url))),
   })
 
   return outfile

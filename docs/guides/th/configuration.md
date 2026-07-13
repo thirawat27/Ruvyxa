@@ -22,6 +22,7 @@ export default config({
     actionLimit: 1024 * 1024,
     apiLimit: 10 * 1024 * 1024,
     pluginLimit: 32 * 1024 * 1024,
+    trustedProxyIps: ['10.0.0.2'],
   },
   middleware: {
     builtin: { log: true, rate: true },
@@ -53,10 +54,11 @@ export default config({
 
 ### security
 
-| Field         | Default |
-| ------------- | ------- |
-| `actionLimit` | 1 MiB   |
-| `apiLimit`    | 10 MiB  |
-| `pluginLimit` | 32 MiB  |
+| Field             | Default |
+| ----------------- | ------- |
+| `actionLimit`     | 1 MiB   |
+| `apiLimit`        | 10 MiB  |
+| `pluginLimit`     | 32 MiB  |
+| `trustedProxyIps` | `[]`    | IP ของ reverse proxy ที่อนุญาตให้ส่ง forwarded headers |
 
 ดูฉบับเต็ม (อังกฤษ): [Configuration (EN)](../en/configuration.md)

@@ -38,4 +38,19 @@ export const createTodo = action
 | Fetch Metadata | Enabled                       |
 | Rate limiting  | 600 req / client-action / 60s |
 
+### Reverse Proxy
+
+Ruvyxa เชื่อถือ proxy ที่เป็น loopback โดยปริยายเท่านั้น หาก proxy อยู่คนละโฮสต์ ต้องระบุ IP
+แบบเจาะจงก่อนจึงจะเชื่อถือ `X-Forwarded-For`, `X-Real-IP` และ `X-Forwarded-Proto` ได้:
+
+```ts
+export default config({
+  security: {
+    trustedProxyIps: ['10.0.0.2'],
+  },
+})
+```
+
+Proxy ต้องเขียนทับ forwarded headers ที่ผู้ใช้ส่งมา ไม่ใช่ส่งผ่านต่อโดยตรง
+
 ดูเพิ่มเติม: [Configuration](configuration.md), [Data Loading](data-loading-and-cache.md)

@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import { copyFile, mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
+import os from 'node:os'
 import path from 'node:path'
 import { describe, it } from 'node:test'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -13,6 +14,31 @@ const configRenderer = path.join(workspaceRoot, 'packages/ruvyxa/runtime/config-
 const pluginRunner = path.join(workspaceRoot, 'packages/ruvyxa/runtime/plugin-runner.mjs')
 
 describe('runtime compiler', () => {
+  it('resolves runtime aliases when the runtime path contains spaces', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa runtime path '))
+    try {
+      const packageRoot = path.join(root, 'package')
+      const runtimeDir = path.join(packageRoot, 'runtime')
+      const sourceDir = path.join(packageRoot, 'src')
+      await mkdir(runtimeDir, { recursive: true })
+      await mkdir(sourceDir, { recursive: true })
+      await copyFile(
+        path.join(workspaceRoot, 'packages/ruvyxa/runtime/compiler.mjs'),
+        path.join(runtimeDir, 'compiler.mjs'),
+      )
+      await writeFile(path.join(sourceDir, 'index.ts'), 'export {}\n')
+
+      const copiedCompiler = await import(
+        `${pathToFileURL(path.join(runtimeDir, 'compiler.mjs')).href}?t=${Date.now()}`
+      )
+      const aliases = copiedCompiler.runtimeAliases()
+
+      assert.equal(aliases.ruvyxa, path.join(sourceDir, 'index.ts'))
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('compiles Markdown and MDX modules with frontmatter and components', async () => {
     await withFixture(async ({ root, outDir }) => {
       const cardFile = path.join(root, 'Card.js')
@@ -457,7 +483,8 @@ import Card from './Card.js'
             actionLimit: 2 * 1024 * 1024,
             apiLimit: 20 * 1024 * 1024,
             pluginLimit: 64 * 1024 * 1024,
-            actionRateLimit: { max: 1200, window: 30 }
+            actionRateLimit: { max: 1200, window: 30 },
+            trustedProxyIps: ['10.0.0.2', '2001:db8::1']
           }
         }`,
       )
@@ -468,6 +495,7 @@ import Card from './Card.js'
         apiLimit: 20 * 1024 * 1024,
         pluginLimit: 64 * 1024 * 1024,
         actionRateLimit: { max: 1200, window: 30 },
+        trustedProxyIps: ['10.0.0.2', '2001:db8::1'],
       })
     })
   })

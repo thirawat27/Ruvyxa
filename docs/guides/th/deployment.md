@@ -56,6 +56,7 @@ node_modules/.bin/ruvyxa: Permission denied
 - [ ] `.env.example` — มีชื่อตัวแปรที่จำเป็น
 - [ ] Security headers เปิดใช้งาน
 - [ ] CORS origins — explicit
-- [ ] Reverse proxy forward `X-Forwarded-Proto`
+- [ ] Reverse proxy forward `X-Forwarded-Proto` และระบุ IP ของ proxy ที่ไม่ใช่ loopback ใน
+      `security.trustedProxyIps`
 
 ดู [Demo App](../../examples/demo/README.md) สำหรับตัวอย่างเต็มรูปแบบ

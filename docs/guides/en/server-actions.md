@@ -107,11 +107,20 @@ export default config({
 
 ### Behind a Reverse Proxy
 
-Forward `X-Forwarded-Proto` so the origin check can distinguish `https` from `http`:
+Loopback proxies are trusted by default. For a proxy on another host, explicitly allowlist its exact
+IP before Ruvyxa accepts `X-Forwarded-For`, `X-Real-IP`, or `X-Forwarded-Proto`. This keeps a client
+on a private network from forging those headers to bypass rate limits or origin checks.
 
-```text
-X-Forwarded-Proto: https
+```ts
+export default config({
+  security: {
+    trustedProxyIps: ['10.0.0.2'],
+  },
+})
 ```
+
+The proxy must overwrite forwarded headers from the incoming request rather than pass client-sent
+values through.
 
 ## Response-Phase Wasm Plugin Limits
 

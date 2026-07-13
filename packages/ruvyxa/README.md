@@ -99,6 +99,7 @@ export default config({
     actionRateLimit: { max: 600, window: 60 },
     sameOrigin: true,
     fetchMeta: true,
+    trustedProxyIps: [],
     headers: true,
   },
   middleware: {

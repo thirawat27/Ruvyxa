@@ -24,7 +24,7 @@ import { existsSync } from 'node:fs'
 import { mkdir, readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import path from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createInterface } from 'node:readline'
 
 import { compileBundleWithMetadata, runtimeAliases, toImportPath } from './compiler.mjs'
@@ -33,7 +33,7 @@ import { compileBundleWithMetadata, runtimeAliases, toImportPath } from './compi
 const MAX_BUNDLE_CACHE_ENTRIES = parseInt(process.env.RUVYXA_CACHE_MAX_ENTRIES || '256', 10)
 const WORKER_REQUEST_TIMEOUT_MS = parseInt(process.env.RUVYXA_WORKER_TIMEOUT_MS || '30000', 10)
 const MEMORY_PRESSURE_THRESHOLD_MB = parseInt(process.env.RUVYXA_MEMORY_LIMIT_MB || '512', 10)
-const runtimeDir = path.dirname(new URL(import.meta.url).pathname)
+const runtimeDir = path.dirname(fileURLToPath(import.meta.url))
 
 // --- LRU Cache ---
 class LRUCache {

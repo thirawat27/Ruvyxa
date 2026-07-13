@@ -4,6 +4,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import path from 'node:path'
 import { stripTypeScriptTypes } from 'node:module'
+import { fileURLToPath } from 'node:url'
 
 const JS_EXTENSIONS = ['', '.ts', '.tsx', '.js', '.jsx', '.mts', '.mjs', '.md', '.mdx']
 const ASSET_EXTENSIONS = new Set(['.css', '.scss', '.sass', '.less'])
@@ -138,10 +139,8 @@ async function fingerprintProjectInputs(root, modules) {
   return hash.digest('hex')
 }
 
-export function runtimeAliases(runtimeDir = path.dirname(new URL(import.meta.url).pathname)) {
-  const normalizedRuntimeDir =
-    process.platform === 'win32' && runtimeDir.startsWith('/') ? runtimeDir.slice(1) : runtimeDir
-  const packageRoot = path.resolve(normalizedRuntimeDir, '..')
+export function runtimeAliases(runtimeDir = path.dirname(fileURLToPath(import.meta.url))) {
+  const packageRoot = path.resolve(runtimeDir, '..')
   const workspaceRoot = path.resolve(packageRoot, '..')
   const coreRoot = path.join(workspaceRoot, '@ruvyxa', 'core')
 

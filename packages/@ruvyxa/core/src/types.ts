@@ -52,6 +52,11 @@ export interface RuvyxaConfig {
     }
     sameOrigin?: boolean
     fetchMeta?: boolean
+    /**
+     * Exact non-loopback reverse-proxy IPs allowed to supply X-Forwarded-For,
+     * X-Real-IP, and X-Forwarded-Proto. Loopback proxies are trusted by default.
+     */
+    trustedProxyIps?: string[]
     headers?: boolean
   }
   cache?: {

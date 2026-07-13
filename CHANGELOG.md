@@ -1,5 +1,26 @@
 # Changelog
 
+## v1.0.13 (2026-07-13)
+
+### Runtime Path Compatibility
+
+- Fixed runtime alias resolution when Ruvyxa is installed in a path containing spaces or other
+  URL-encoded characters by using `fileURLToPath()` across standalone renderers, the worker pool,
+  and the runtime compiler
+- Added regression coverage that loads the runtime compiler from a temporary path containing spaces
+
+### Server Reliability and Forwarded-Header Security
+
+- Fixed server startup so action endpoints receive Axum TCP connection metadata instead of failing
+  `ConnectInfo` extraction at runtime
+- Restricted forwarded client and protocol headers to loopback or explicitly configured
+  `security.trustedProxyIps`, preventing private-network clients from bypassing action rate limits
+
+### Release Metadata and Templates
+
+- Bumped all npm packages and Rust crates to `1.0.13`
+- Updated both minimal starter template copies to require `ruvyxa` and `@ruvyxa/react` `^1.0.13`
+
 ## v1.0.12 (2026-07-13)
 
 ### Oxc Integration and Modernized Minification
@@ -910,3 +931,4 @@ The following commits occurred before the v1.0.0 tag and represent the initial p
 | `v1.0.10` | 2026-07-11 | Minor      |
 | `v1.0.11` | 2026-07-12 | Minor      |
 | `v1.0.12` | 2026-07-13 | Minor      |
+| `v1.0.13` | 2026-07-13 | Patch      |

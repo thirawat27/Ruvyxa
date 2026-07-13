@@ -2,6 +2,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
 use std::io::{BufRead, BufReader, IsTerminal, Write};
+use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command as ProcessCommand, Stdio};
 use std::sync::{Arc, Mutex};
@@ -242,6 +243,8 @@ struct SecurityConfigOptions {
     same_origin_actions: Option<bool>,
     #[serde(rename = "fetchMeta")]
     fetch_metadata_actions: Option<bool>,
+    #[serde(default, rename = "trustedProxyIps")]
+    trusted_proxy_ips: Vec<String>,
     #[serde(rename = "headers")]
     security_headers: Option<bool>,
 }
@@ -317,6 +320,7 @@ impl ProjectConfig {
             validate_positive_limit("security.actionRateLimit.max", rate_limit.max)?;
             validate_positive_limit("security.actionRateLimit.window", rate_limit.window)?;
         }
+        validate_trusted_proxy_ips(&self.security.trusted_proxy_ips)?;
         Ok(())
     }
 
@@ -353,6 +357,17 @@ fn validate_plugin_response_limit(value: Option<usize>) -> anyhow::Result<()> {
         anyhow::bail!(
             "RUV1602 config field `security.pluginLimit` must not exceed {MAX_PLUGIN_RESPONSE_BODY_LIMIT_BYTES} bytes"
         );
+    }
+    Ok(())
+}
+
+fn validate_trusted_proxy_ips(values: &[String]) -> anyhow::Result<()> {
+    for value in values {
+        value.parse::<IpAddr>().map_err(|_| {
+            anyhow::anyhow!(
+                "RUV1602 config field `security.trustedProxyIps` contains invalid IP address `{value}`"
+            )
+        })?;
     }
     Ok(())
 }
@@ -581,6 +596,12 @@ fn dev_server_config(args: &ServerArgs, config: &ProjectConfig) -> ServerConfig 
         .security
         .fetch_metadata_actions
         .unwrap_or(server.fetch_metadata_actions);
+    server.trusted_proxy_ips = config
+        .security
+        .trusted_proxy_ips
+        .iter()
+        .filter_map(|value| value.parse().ok())
+        .collect();
     server.security_headers = config
         .security
         .security_headers
@@ -636,6 +657,12 @@ fn production_server_config(args: &ServerArgs, config: &ProjectConfig) -> Server
         .security
         .fetch_metadata_actions
         .unwrap_or(server.fetch_metadata_actions);
+    server.trusted_proxy_ips = config
+        .security
+        .trusted_proxy_ips
+        .iter()
+        .filter_map(|value| value.parse().ok())
+        .collect();
     server.security_headers = config
         .security
         .security_headers
@@ -852,6 +879,7 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
             },
             "sameOrigin": config.security.same_origin_actions.unwrap_or(true),
             "fetchMeta": config.security.fetch_metadata_actions.unwrap_or(true),
+            "trustedProxyIps": config.security.trusted_proxy_ips,
             "headers": config.security.security_headers.unwrap_or(true)
         },
         "build": {
@@ -3747,6 +3775,7 @@ mod tests {
                 "actionRateLimit": { "max": 240, "window": 30 },
                 "sameOrigin": false,
                 "fetchMeta": false,
+                "trustedProxyIps": ["10.0.0.2", "2001:db8::2"],
                 "headers": false
             }
         }))
@@ -3763,6 +3792,13 @@ mod tests {
             assert_eq!(server.action_rate_limit_window, Duration::from_secs(30));
             assert!(!server.same_origin_actions);
             assert!(!server.fetch_metadata_actions);
+            assert_eq!(
+                server.trusted_proxy_ips,
+                vec![
+                    "10.0.0.2".parse::<IpAddr>().unwrap(),
+                    "2001:db8::2".parse::<IpAddr>().unwrap()
+                ]
+            );
             assert!(!server.security_headers);
         }
     }
@@ -3797,6 +3833,17 @@ mod tests {
 
         let error = config.validate_paths().unwrap_err();
         assert!(error.to_string().contains("security.pluginLimit"));
+    }
+
+    #[test]
+    fn rejects_invalid_trusted_proxy_ips() {
+        let config: ProjectConfig = serde_json::from_value(json!({
+            "security": { "trustedProxyIps": ["not-an-ip"] }
+        }))
+        .unwrap();
+
+        let error = config.validate_paths().unwrap_err();
+        assert!(error.to_string().contains("security.trustedProxyIps"));
     }
 
     #[test]

@@ -2,8 +2,8 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs;
 use std::future::IntoFuture;
 use std::io::{ErrorKind, IsTerminal};
-use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
+use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex};
@@ -93,6 +93,8 @@ pub struct ServerConfig {
     pub same_origin_actions: bool,
     /// Reject action requests initiated from a cross-site browser context.
     pub fetch_metadata_actions: bool,
+    /// Non-loopback reverse-proxy IPs allowed to supply forwarded client and protocol headers.
+    pub trusted_proxy_ips: Vec<IpAddr>,
     /// Apply Ruvyxa's default security response headers.
     pub security_headers: bool,
     pub middleware: MiddlewareConfig,
@@ -125,6 +127,7 @@ impl ServerConfig {
             action_rate_limit_window: ACTION_RATE_LIMIT_WINDOW,
             same_origin_actions: true,
             fetch_metadata_actions: true,
+            trusted_proxy_ips: Vec::new(),
             security_headers: true,
             middleware: MiddlewareConfig::default(),
             default_render_strategy: None,
@@ -156,6 +159,7 @@ impl ServerConfig {
             action_rate_limit_window: ACTION_RATE_LIMIT_WINDOW,
             same_origin_actions: true,
             fetch_metadata_actions: true,
+            trusted_proxy_ips: Vec::new(),
             security_headers: true,
             middleware: MiddlewareConfig::default(),
             default_render_strategy: None,
@@ -377,7 +381,7 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
     info!("Ruvyxa server listening on http://{bound_address}");
     print_server_ready(&config, &manifest, bound_address, startup_started.elapsed());
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
-    let server = axum::serve(listener, app)
+    let server = axum::serve(listener, server_make_service(app))
         .with_graceful_shutdown(async move {
             let _ = shutdown_rx.changed().await;
         })
@@ -402,6 +406,12 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
     worker_pool.shutdown().await;
     server_result?;
     Ok(())
+}
+
+fn server_make_service(
+    app: Router,
+) -> axum::extract::connect_info::IntoMakeServiceWithConnectInfo<Router, SocketAddr> {
+    app.into_make_service_with_connect_info::<SocketAddr>()
 }
 
 /// Wait for an interactive interrupt or the Unix termination signal.
@@ -993,11 +1003,11 @@ async fn action_endpoint(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response {
-    if let Some(response) = validate_action_request(&headers, body.len(), &state.config) {
+    if let Some(response) = validate_action_request(&headers, body.len(), &state.config, peer) {
         return with_security_headers(response);
     }
 
-    let rate_key = action_rate_limit_key(peer, &headers, &query);
+    let rate_key = action_rate_limit_key(peer, &headers, &query, &state.config);
     let retry_after = {
         let mut limiter = state
             .action_limiter
@@ -3003,6 +3013,7 @@ fn validate_action_request(
     headers: &HeaderMap,
     body_len: usize,
     config: &ServerConfig,
+    peer: SocketAddr,
 ) -> Option<Response> {
     if body_len > config.action_body_limit_bytes {
         return Some(
@@ -3020,7 +3031,7 @@ fn validate_action_request(
         );
     }
 
-    if config.same_origin_actions && action_origin_is_cross_site(headers) {
+    if config.same_origin_actions && action_origin_is_cross_site(headers, config, peer.ip()) {
         return Some(
             (StatusCode::FORBIDDEN, "Cross-origin action request blocked").into_response(),
         );
@@ -3053,7 +3064,7 @@ fn action_content_type_is_supported(headers: &HeaderMap) -> bool {
     )
 }
 
-fn action_origin_is_cross_site(headers: &HeaderMap) -> bool {
+fn action_origin_is_cross_site(headers: &HeaderMap, config: &ServerConfig, peer: IpAddr) -> bool {
     let Some(origin) = headers
         .get(header::ORIGIN)
         .and_then(|value| value.to_str().ok())
@@ -3073,13 +3084,17 @@ fn action_origin_is_cross_site(headers: &HeaderMap) -> bool {
         return true;
     };
 
-    let expected_scheme = headers
-        .get("x-forwarded-proto")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
-        .map(str::trim)
-        .filter(|value| matches!(*value, "http" | "https"))
-        .unwrap_or("http");
+    let expected_scheme = if is_trusted_proxy_ip(config, peer) {
+        headers
+            .get("x-forwarded-proto")
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.split(',').next())
+            .map(str::trim)
+            .filter(|value| matches!(*value, "http" | "https"))
+            .unwrap_or("http")
+    } else {
+        "http"
+    };
 
     !origin_host.eq_ignore_ascii_case(host) || !origin_scheme.eq_ignore_ascii_case(expected_scheme)
 }
@@ -3091,35 +3106,38 @@ fn action_fetch_site_is_cross_site(headers: &HeaderMap) -> bool {
         .is_some_and(|value| value.eq_ignore_ascii_case("cross-site"))
 }
 
-fn action_rate_limit_key(peer: SocketAddr, headers: &HeaderMap, query: &ActionQuery) -> String {
+fn action_rate_limit_key(
+    peer: SocketAddr,
+    headers: &HeaderMap,
+    query: &ActionQuery,
+    config: &ServerConfig,
+) -> String {
     let peer_ip = peer.ip();
 
-    // Only trust forwarded headers when the direct peer is a loopback or
-    // private address (i.e., a trusted reverse proxy). This prevents clients
-    // from spoofing X-Forwarded-For to bypass rate limiting.
-    let client: String = if is_trusted_proxy_ip(peer_ip) {
-        headers
-            .get("x-forwarded-for")
-            .or_else(|| headers.get("x-real-ip"))
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.split(',').next())
-            .map(|s| s.trim().to_string())
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| peer_ip.to_string())
+    // Forwarded identity is untrusted unless the direct peer is loopback or
+    // explicitly allowlisted. Private ranges alone are not a trust boundary:
+    // a LAN client can otherwise forge X-Forwarded-For and bypass the limiter.
+    let client = if is_trusted_proxy_ip(config, peer_ip) {
+        forwarded_client_ip(headers).unwrap_or(peer_ip)
     } else {
-        peer_ip.to_string()
+        peer_ip
     };
 
     format!("{client}:{}:{}", query.path, query.name)
 }
 
-/// Returns true if the IP is a loopback or private network address,
-/// indicating the connection comes from a local reverse proxy.
-fn is_trusted_proxy_ip(ip: std::net::IpAddr) -> bool {
-    match ip {
-        std::net::IpAddr::V4(v4) => v4.is_loopback() || v4.is_private(),
-        std::net::IpAddr::V6(v6) => v6.is_loopback(),
-    }
+fn forwarded_client_ip(headers: &HeaderMap) -> Option<IpAddr> {
+    headers
+        .get("x-forwarded-for")
+        .or_else(|| headers.get("x-real-ip"))
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .and_then(|value| value.parse().ok())
+}
+
+fn is_trusted_proxy_ip(config: &ServerConfig, ip: IpAddr) -> bool {
+    ip.is_loopback() || config.trusted_proxy_ips.contains(&ip)
 }
 
 fn url_encode_component(input: &str) -> String {
@@ -3654,7 +3672,11 @@ mod tests {
             HeaderValue::from_static("https://example.com"),
         );
 
-        assert!(action_origin_is_cross_site(&headers));
+        assert!(action_origin_is_cross_site(
+            &headers,
+            &ServerConfig::dev(".", "localhost", 3000),
+            "127.0.0.1".parse().unwrap(),
+        ));
     }
 
     #[test]
@@ -3670,11 +3692,20 @@ mod tests {
             HeaderValue::from_static("application/x-www-form-urlencoded"),
         );
 
-        assert!(!action_origin_is_cross_site(&headers));
+        assert!(!action_origin_is_cross_site(
+            &headers,
+            &ServerConfig::dev(".", "localhost", 3000),
+            "127.0.0.1".parse().unwrap(),
+        ));
         assert!(action_content_type_is_supported(&headers));
         assert!(
-            validate_action_request(&headers, 128, &ServerConfig::dev(".", "localhost", 3000))
-                .is_none()
+            validate_action_request(
+                &headers,
+                128,
+                &ServerConfig::dev(".", "localhost", 3000),
+                "127.0.0.1:3000".parse().unwrap(),
+            )
+            .is_none()
         );
     }
 
@@ -3687,9 +3718,79 @@ mod tests {
             HeaderValue::from_static("https://localhost:3000"),
         );
 
-        assert!(action_origin_is_cross_site(&headers));
+        let config = ServerConfig::dev(".", "localhost", 3000);
+        assert!(action_origin_is_cross_site(
+            &headers,
+            &config,
+            "127.0.0.1".parse().unwrap(),
+        ));
         headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
-        assert!(!action_origin_is_cross_site(&headers));
+        assert!(!action_origin_is_cross_site(
+            &headers,
+            &config,
+            "127.0.0.1".parse().unwrap(),
+        ));
+        assert!(action_origin_is_cross_site(
+            &headers,
+            &config,
+            "10.0.0.9".parse().unwrap(),
+        ));
+    }
+
+    #[test]
+    fn accepts_forwarded_headers_only_from_trusted_proxies() {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", HeaderValue::from_static("203.0.113.8"));
+        let query = ActionQuery {
+            path: "/todos".to_string(),
+            name: "create".to_string(),
+        };
+        let peer: SocketAddr = "10.0.0.9:5000".parse().unwrap();
+        let mut config = ServerConfig::dev(".", "localhost", 3000);
+
+        assert_eq!(
+            action_rate_limit_key(peer, &headers, &query, &config),
+            "10.0.0.9:/todos:create"
+        );
+
+        config.trusted_proxy_ips.push("10.0.0.9".parse().unwrap());
+        assert_eq!(
+            action_rate_limit_key(peer, &headers, &query, &config),
+            "203.0.113.8:/todos:create"
+        );
+    }
+
+    #[tokio::test]
+    async fn server_make_service_attaches_tcp_peer_metadata() {
+        async fn peer_handler(
+            axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<SocketAddr>,
+        ) -> String {
+            peer.ip().to_string()
+        }
+
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let app = Router::new().route("/", get(peer_handler));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, server_make_service(app))
+                .await
+                .unwrap();
+        });
+
+        let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+        client
+            .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n")
+            .await
+            .unwrap();
+        let mut response = String::new();
+        client.read_to_string(&mut response).await.unwrap();
+        server.abort();
+        let _ = server.await;
+
+        assert!(response.starts_with("HTTP/1.1 200"));
+        assert!(response.ends_with("127.0.0.1"));
     }
 
     #[test]
@@ -3771,12 +3872,18 @@ mod tests {
 
         let mut config = ServerConfig::dev(".", "localhost", 3000);
         config.action_body_limit_bytes = 8;
-        assert!(validate_action_request(&headers, 9, &config).is_some());
+        assert!(
+            validate_action_request(&headers, 9, &config, "127.0.0.1:3000".parse().unwrap())
+                .is_some()
+        );
 
         config.action_body_limit_bytes = MAX_ACTION_BODY_BYTES;
         config.same_origin_actions = false;
         config.fetch_metadata_actions = false;
-        assert!(validate_action_request(&headers, 8, &config).is_none());
+        assert!(
+            validate_action_request(&headers, 8, &config, "127.0.0.1:3000".parse().unwrap())
+                .is_none()
+        );
     }
 
     #[test]
@@ -3885,8 +3992,13 @@ mod tests {
 
         assert!(action_fetch_site_is_cross_site(&headers));
         assert!(
-            validate_action_request(&headers, 128, &ServerConfig::dev(".", "localhost", 3000))
-                .is_some()
+            validate_action_request(
+                &headers,
+                128,
+                &ServerConfig::dev(".", "localhost", 3000),
+                "127.0.0.1:3000".parse().unwrap(),
+            )
+            .is_some()
         );
     }
 

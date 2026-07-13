@@ -36,6 +36,7 @@ export default config({
     actionRateLimit: { max: 600, window: 60 },
     sameOrigin: true,
     fetchMeta: true,
+    trustedProxyIps: ['10.0.0.2'],
     headers: true,
   },
 })
@@ -187,17 +188,21 @@ middleware: {
 
 ### `security`
 
-| Field             | Type              | Default                    | Description                             |
-| ----------------- | ----------------- | -------------------------- | --------------------------------------- |
-| `actionLimit`     | `number`          | `1048576` (1 MiB)          | Body size limit for actions             |
-| `apiLimit`        | `number`          | `10485760` (10 MiB)        | Body size limit for API routes          |
-| `pluginLimit`     | `number`          | `33554432` (32 MiB)        | Max buffered response for Wasm plugins  |
-| `actionRateLimit` | `{ max, window }` | `{ max: 600, window: 60 }` | Rate limit per client-action per window |
-| `sameOrigin`      | `boolean`         | `true`                     | Same-origin validation for actions      |
-| `fetchMeta`       | `boolean`         | `true`                     | Fetch Metadata protection               |
-| `headers`         | `boolean`         | `true`                     | Security response headers (CSP, etc.)   |
+| Field             | Type              | Default                    | Description                                                                |
+| ----------------- | ----------------- | -------------------------- | -------------------------------------------------------------------------- |
+| `actionLimit`     | `number`          | `1048576` (1 MiB)          | Body size limit for actions                                                |
+| `apiLimit`        | `number`          | `10485760` (10 MiB)        | Body size limit for API routes                                             |
+| `pluginLimit`     | `number`          | `33554432` (32 MiB)        | Max buffered response for Wasm plugins                                     |
+| `actionRateLimit` | `{ max, window }` | `{ max: 600, window: 60 }` | Rate limit per client-action per window                                    |
+| `sameOrigin`      | `boolean`         | `true`                     | Same-origin validation for actions                                         |
+| `fetchMeta`       | `boolean`         | `true`                     | Fetch Metadata protection                                                  |
+| `trustedProxyIps` | `string[]`        | `[]`                       | Exact non-loopback proxies trusted for forwarded identity/protocol headers |
+| `headers`         | `boolean`         | `true`                     | Security response headers (CSP, etc.)                                      |
 
 Security limits must be positive when set.
+
+Loopback proxies are trusted without configuration. When a reverse proxy runs elsewhere, list its
+exact IP in `trustedProxyIps`; private network ranges are not trusted implicitly.
 
 ### `adapter`
 

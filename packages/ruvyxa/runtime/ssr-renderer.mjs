@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { createRequire } from 'node:module'
 import path from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import {
   cacheFileName,
@@ -70,7 +70,7 @@ export async function render(ctx) {
     outfile,
     platform: 'node',
     external: ['react', 'react-dom/server'],
-    aliases: runtimeAliases(path.dirname(new URL(import.meta.url).pathname)),
+    aliases: runtimeAliases(path.dirname(fileURLToPath(import.meta.url))),
   })
 
   return outfile

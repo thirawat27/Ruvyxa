@@ -104,6 +104,7 @@ async function sanitizeConfig(config) {
     'actionRateLimit',
     'sameOrigin',
     'fetchMeta',
+    'trustedProxyIps',
     'headers',
   ])
   assertKnownKeys(config.security?.actionRateLimit, 'config.security.actionRateLimit', [
@@ -199,6 +200,7 @@ async function sanitizeConfig(config) {
       }),
       sameOrigin: booleanValue(config.security?.sameOrigin),
       fetchMeta: booleanValue(config.security?.fetchMeta),
+      trustedProxyIps: stringArrayValue(config.security?.trustedProxyIps),
       headers: booleanValue(config.security?.headers),
     }),
     cache: objectValue(config.cache, {

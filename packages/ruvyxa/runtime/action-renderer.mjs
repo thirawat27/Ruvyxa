@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import path from 'node:path'
-import { pathToFileURL } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { cacheFileName, compileBundle, runtimeAliases, toImportPath } from './compiler.mjs'
 
@@ -73,7 +73,7 @@ async function bundleActionModule(projectRoot, actionFile) {
     sourcefile: 'ruvyxa:action-entry.ts',
     outfile,
     platform: 'node',
-    aliases: runtimeAliases(path.dirname(new URL(import.meta.url).pathname)),
+    aliases: runtimeAliases(path.dirname(fileURLToPath(import.meta.url))),
   })
 
   return outfile
