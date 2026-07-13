@@ -17,7 +17,7 @@
 //!   └─ boundary   → enforce server/client rules (RUV1007, RUV1008, RUV1010)
 //!   └─ linker     → topological sort + concatenate modules
 //!                   (circular dependency detection)
-//!   └─ minifier   → token-aware compression + dead-code elimination
+//!   └─ minifier   → linker-aware export pruning + Oxc AST compression/mangling
 //!   └─ output     → wrap in IIFE (client) or ESM (SSR)
 //!                   (chunk manifest + HTML preload hints)
 //! ```

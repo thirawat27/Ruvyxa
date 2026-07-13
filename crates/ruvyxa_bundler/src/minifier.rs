@@ -1,33 +1,25 @@
-//! Minifier: applies module identifier shortening, token-aware JavaScript
-//! compression, and tree-shaking (dead-code elimination).
+//! JavaScript minification and Ruvyxa's linker-aware export pruning.
 //!
-//! The Ruvyxa minifier is intentionally conservative. It does not rewrite an
-//! arbitrary JavaScript AST; instead it tokenizes the linked output closely
-//! enough to preserve literals and automatic-semicolon-insertion boundaries:
-//!
-//! 1. **Tree-shaking**: identify unused exports and remove their assignments.
-//! 2. Remove non-license line and block comments outside literals.
-//! 3. Preserve strings, templates, regular expressions, and legal comments.
-//! 4. Remove whitespace only where adjacent JavaScript tokens remain distinct.
-//! 5. Shorten the long `__ruv_<hex16>__` module namespace identifiers to
-//!    short two-character names (`_ra`, `_rb`, …).
-//!
-//! ## Parallel Minification
-//!
-//! The `minify_parallel` function splits the linked bundle into independent
-//! segments (one per module IIFE) after the tree-shaking pass, then runs
-//! token-aware compression on each segment concurrently
-//! via rayon. For bundles with 8+ modules, this reduces minification time
-//! by approximately 3× on a 4-core machine.
-//!
-//! The minifier is part of Ruvyxa's own Rust bundling pipeline and does not
-//! require an external JavaScript bundler.
+//! Ruvyxa keeps its framework-specific graph, linker, and explicit export
+//! pruning pass. The final JavaScript transformation is delegated to Oxc:
+//! parse → semantic compression/mangling → code generation. This makes
+//! production output safe for syntax that cannot be handled reliably by a
+//! text-only compressor (notably regular expressions, templates, ASI, and
+//! nested modern JavaScript expressions).
 
-use std::collections::{BTreeMap, BTreeSet};
+#[cfg(test)]
+use std::collections::BTreeMap;
+use std::collections::BTreeSet;
 
-use rayon::prelude::*;
+use oxc::{
+    allocator::Allocator,
+    codegen::{Codegen, CodegenOptions},
+    minifier::{CompressOptions, Minifier, MinifierOptions},
+    parser::Parser,
+    span::SourceType,
+};
 
-use crate::{BundleTarget, Result};
+use crate::{BundleError, BundleTarget, Result};
 
 /// Apply all minification passes to `source` and return the result.
 pub fn minify(source: &str, _target: BundleTarget) -> Result<String> {
@@ -45,15 +37,12 @@ pub fn minify_with_options(
     } else {
         source.to_string()
     };
-    let compressed = compress_javascript(&stage0);
-    Ok(shorten_module_ids(&compressed))
+    minify_javascript(&stage0, tree_shaking)
 }
 
-/// Parallel minification: splits the bundle into module segments after
-/// tree-shaking, processes comment-stripping and whitespace-collapse
-/// concurrently on each segment, then applies global ID shortening.
-///
-/// Falls back to sequential `minify()` for small bundles (<8 modules).
+/// Compatibility entry point for callers that previously requested parallel
+/// text minification. Oxc needs the complete linked program to build semantic
+/// scope information safely, so it performs one whole-program AST pass.
 pub fn minify_parallel(source: &str, _target: BundleTarget) -> Result<String> {
     minify_parallel_with_options(source, _target, true)
 }
@@ -64,41 +53,40 @@ pub fn minify_parallel_with_options(
     _target: BundleTarget,
     tree_shaking: bool,
 ) -> Result<String> {
-    // Phase 1: Tree-shake (global pass — needs cross-module member usage data).
-    let tree_shaken = if tree_shaking {
-        tree_shake(source)
+    minify_with_options(source, _target, tree_shaking)
+}
+
+fn minify_javascript(source: &str, tree_shaking: bool) -> Result<String> {
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, source, SourceType::unambiguous()).parse();
+
+    if !parsed.diagnostics.is_empty() {
+        return Err(BundleError::Compiler(format!(
+            "Oxc could not parse linked JavaScript: {} syntax diagnostic(s)",
+            parsed.diagnostics.len()
+        )));
+    }
+
+    let mut program = parsed.program;
+    let options = if tree_shaking {
+        MinifierOptions::default()
     } else {
-        source.to_string()
-    };
-
-    // Phase 2: Split into segments for parallel processing.
-    let segments = split_into_segments(&tree_shaken);
-
-    // For small bundles, sequential is faster (avoids rayon overhead).
-    if segments.len() < 8 {
-        let compressed = compress_javascript(&tree_shaken);
-        return Ok(shorten_module_ids(&compressed));
-    }
-
-    // Phase 3: Compress independent module segments in parallel.
-    let minified_segments: Vec<String> = segments
-        .par_iter()
-        .map(|segment| compress_javascript(segment))
-        .collect();
-
-    // Phase 4: Rejoin segments.
-    let joined_size: usize = minified_segments.iter().map(|s| s.len() + 1).sum();
-    let mut joined = String::with_capacity(joined_size);
-    for (i, segment) in minified_segments.iter().enumerate() {
-        joined.push_str(segment);
-        if i < minified_segments.len() - 1 {
-            joined.push(' ');
+        // `treeShaking: false` must still preserve otherwise-unused bindings.
+        // Oxc's safest compression profile keeps those bindings while allowing
+        // semantics-preserving whitespace reduction and identifier mangling.
+        MinifierOptions {
+            mangle: MinifierOptions::default().mangle,
+            compress: Some(CompressOptions::safest()),
         }
-    }
+    };
+    let result = Minifier::new(options).minify(&allocator, &mut program);
 
-    // Phase 5: Shorten module IDs (global text replacement).
-    let final_output = shorten_module_ids(&joined);
-    Ok(final_output)
+    Ok(Codegen::new()
+        .with_options(CodegenOptions::minify())
+        .with_scoping(result.scoping)
+        .with_private_member_mappings(result.class_private_mappings)
+        .build(&program)
+        .code)
 }
 
 /// Apply only the tree-shaking pass.
@@ -345,31 +333,6 @@ fn is_ascii_identifier_byte(byte: u8) -> bool {
     byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$')
 }
 
-/// Split a linked bundle into independent segments at module IIFE boundaries.
-///
-/// Segments are split at `})();` lines followed by blank lines, which is the
-/// consistent boundary pattern produced by the linker.
-fn split_into_segments(source: &str) -> Vec<&str> {
-    let mut segments = Vec::new();
-    let mut start = 0;
-    let boundary = "})();\n\n";
-
-    let mut search_from = 0;
-    while let Some(pos) = source[search_from..].find(boundary) {
-        let abs_pos = search_from + pos + boundary.len();
-        segments.push(&source[start..abs_pos]);
-        start = abs_pos;
-        search_from = abs_pos;
-    }
-
-    // Remaining content (the SSR export line, or trailing content).
-    if start < source.len() {
-        segments.push(&source[start..]);
-    }
-
-    segments
-}
-
 // ─────────────────────────────────────────────
 // Pass 0 – Tree-shaking (dead-code elimination)
 // ─────────────────────────────────────────────
@@ -519,6 +482,7 @@ fn extract_export_assignment(line: &str) -> Option<String> {
 // Pass 1 – Token-aware compression
 // ─────────────────────────────────────────────
 
+#[cfg(test)]
 fn compress_javascript(source: &str) -> String {
     let chars = source.chars().collect::<Vec<_>>();
     let mut out = String::with_capacity(source.len());
@@ -631,6 +595,7 @@ fn compress_javascript(source: &str) -> String {
     out.trim().to_string()
 }
 
+#[cfg(test)]
 fn emit_pending_separator(
     out: &mut String,
     chars: &[char],
@@ -660,6 +625,7 @@ fn emit_pending_separator(
     }
 }
 
+#[cfg(test)]
 fn tokens_need_separator(previous: char, next: char) -> bool {
     (is_identifier_part(previous) && is_identifier_part(next))
         || (previous == '+' && next == '+')
@@ -667,10 +633,12 @@ fn tokens_need_separator(previous: char, next: char) -> bool {
         || (previous == '/' && matches!(next, '/' | '*'))
 }
 
+#[cfg(test)]
 fn is_identifier_part(ch: char) -> bool {
     ch.is_alphanumeric() || matches!(ch, '_' | '$') || (!ch.is_ascii() && ch.is_alphabetic())
 }
 
+#[cfg(test)]
 fn quoted_literal_end(chars: &[char], start: usize, quote: char) -> usize {
     let mut index = start + 1;
     let mut escaped = false;
@@ -691,6 +659,7 @@ fn quoted_literal_end(chars: &[char], start: usize, quote: char) -> usize {
 /// Preserve a slash-delimited span verbatim. For a regular expression this
 /// protects its body and flags. For a division chain such as `a / b / c`, the
 /// conservative span is still valid JavaScript and merely retains a few bytes.
+#[cfg(test)]
 fn slash_delimited_end(chars: &[char], start: usize) -> Option<usize> {
     let mut index = start + 1;
     let mut escaped = false;
@@ -729,6 +698,7 @@ fn slash_delimited_end(chars: &[char], start: usize) -> Option<usize> {
 // ─────────────────────────────────────────────
 
 /// Replace `__ruv_<hex16>__` identifiers with short names (`_ra`, `_rb`, …).
+#[cfg(test)]
 fn shorten_module_ids(source: &str) -> String {
     // Collect all unique `__ruv_…__` identifiers.
     let mut ids: Vec<String> = Vec::new();
@@ -770,6 +740,7 @@ fn shorten_module_ids(source: &str) -> String {
 }
 
 /// Encode a number into a short alphabetic string (`a`, `b`, …, `z`, `aa`, …).
+#[cfg(test)]
 fn encode_base26(mut n: usize) -> String {
     let mut s = String::new();
     loop {
@@ -785,6 +756,41 @@ fn encode_base26(mut n: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn oxc_minifies_modern_literals_without_corrupting_them() {
+        let src = r#"// remove this comment
+const url = "https://example.test/a//b";
+const template = `keep // text and ${url.length}`;
+const pattern = /\\n( *(at)?)[a-z/]+/gi;
+export { url, template, pattern };"#;
+        let out = minify(src, BundleTarget::Ssr).unwrap();
+
+        assert!(out.len() < src.len());
+        assert!(out.contains("https://example.test/a//b"));
+        assert!(out.contains("keep // text and"), "unexpected output: {out}");
+        assert!(out.contains(r#"/\\n( *(at)?)[a-z/]+/gi"#));
+        assert!(!out.contains("remove this comment"));
+    }
+
+    #[test]
+    fn oxc_minifies_esm_without_erasing_module_syntax() {
+        let src = r#"import { createElement } from "react";
+export const view = createElement("main", null, "Ruvyxa");"#;
+        let out = minify(src, BundleTarget::Ssr).unwrap();
+
+        assert!(out.contains("import"));
+        assert!(out.contains("from\"react\""));
+        assert!(out.contains("export"));
+    }
+
+    #[test]
+    fn oxc_parse_failures_abort_the_bundle() {
+        let error = minify("const = ;", BundleTarget::Client).unwrap_err();
+        assert!(
+            matches!(error, BundleError::Compiler(message) if message.contains("Oxc could not parse"))
+        );
+    }
 
     #[test]
     fn compresses_comments_and_whitespace() {

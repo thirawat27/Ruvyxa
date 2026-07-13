@@ -1,6 +1,6 @@
 //! Ruvyxa Native TypeScript/JSX Compiler
 //!
-//! A pure-Rust, zero-external-dependency TypeScript and JSX transformer
+//! A native Rust TypeScript and JSX transformer
 //! designed specifically for the Ruvyxa framework.
 //!
 //! ## Strategy
