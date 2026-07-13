@@ -20,11 +20,6 @@ pub struct StyleCollection {
     pub files: Vec<PathBuf>,
 }
 
-/// Collect styles reachable from application imports while preserving legacy `app/**/*.css` loading.
-pub fn collect_css(root: &Path, app_dir: &Path) -> Result<String> {
-    Ok(collect_styles(root, app_dir, &[])?.css)
-}
-
 /// Collect imported and explicitly configured global stylesheet entries.
 pub fn collect_styles(root: &Path, app_dir: &Path, entries: &[PathBuf]) -> Result<StyleCollection> {
     let root = absolute_path(root)?;
@@ -33,7 +28,7 @@ pub fn collect_styles(root: &Path, app_dir: &Path, entries: &[PathBuf]) -> Resul
     let mut scripts = VecDeque::new();
     let mut style_seeds = Vec::new();
 
-    collect_application_seeds(&app_dir, &mut scripts, &mut style_seeds);
+    collect_application_seeds(&app_dir, &mut scripts);
     for entry in entries {
         collect_explicit_entry(&root, entry, &mut style_seeds)?;
     }
@@ -86,11 +81,7 @@ pub fn collect_styles(root: &Path, app_dir: &Path, entries: &[PathBuf]) -> Resul
     })
 }
 
-fn collect_application_seeds(
-    app_dir: &Path,
-    scripts: &mut VecDeque<PathBuf>,
-    styles: &mut Vec<PathBuf>,
-) {
+fn collect_application_seeds(app_dir: &Path, scripts: &mut VecDeque<PathBuf>) {
     let mut files = WalkDir::new(app_dir)
         .into_iter()
         .filter_map(std::result::Result::ok)
@@ -102,9 +93,6 @@ fn collect_application_seeds(
     for file in files {
         if has_extension(&file, SCRIPT_EXTENSIONS) {
             scripts.push_back(file);
-        } else if has_extension(&file, &["css"]) {
-            // Compatibility: old Ruvyxa versions loaded every CSS file under app/.
-            styles.push(file);
         }
     }
 }
@@ -590,17 +578,19 @@ mod tests {
     }
 
     #[test]
-    fn preserves_legacy_app_css_and_deduplicates_imports() {
+    fn collects_only_imported_app_css() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         let app = root.join("app");
         fs::create_dir_all(&app).unwrap();
         fs::write(app.join("page.tsx"), "import './global.css'").unwrap();
         fs::write(app.join("global.css"), "body { margin: 0; }").unwrap();
+        fs::write(app.join("unused.css"), ".unused { display: none; }").unwrap();
 
         let collection = collect_styles(root, &app, &[]).unwrap();
 
         assert_eq!(collection.css.matches("body { margin: 0; }").count(), 1);
+        assert!(!collection.css.contains(".unused"));
         assert_eq!(collection.files.len(), 1);
     }
 
@@ -627,7 +617,11 @@ mod tests {
         let root = temp.path();
         let app = root.join("app");
         fs::create_dir_all(&app).unwrap();
-        fs::write(app.join("page.tsx"), "export default 1").unwrap();
+        fs::write(
+            app.join("page.tsx"),
+            "import './global.css'\nexport default 1",
+        )
+        .unwrap();
         fs::write(
             app.join("global.css"),
             "@import \"https://example.com/theme.css\";\n.bad::after { content: \"</STYLE>\"; }",

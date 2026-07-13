@@ -163,7 +163,11 @@ fn bundle_with_parts(
         None
     };
 
-    let chunks = build_dynamic_output_chunks(&compiled, &input)?;
+    let chunks = if input.options.emit_chunk_manifest {
+        build_dynamic_output_chunks(&compiled, &input)?
+    } else {
+        Vec::new()
+    };
 
     // 9. Optionally emit a chunk manifest.
     let chunk_manifest = if input.options.emit_chunk_manifest {
@@ -376,6 +380,29 @@ mod tests {
         assert_eq!(out.chunks.len(), 1);
         assert_eq!(manifest.dynamic_imports[0].file, out.chunks[0].file_name);
         assert!(out.chunks[0].code.contains("export default"));
+    }
+
+    #[test]
+    fn bundle_skips_dynamic_chunks_without_manifest_output() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let app = root.join("app");
+        fs::create_dir_all(&app).unwrap();
+
+        let page = app.join("page.tsx");
+        fs::write(
+            &page,
+            "export default async function Page() { return (await import(\"./lazy\")).label; }",
+        )
+        .unwrap();
+        fs::write(app.join("lazy.ts"), "export const label = \"Lazy\";").unwrap();
+
+        let mut input = client_input(&root, &app, page, vec![], "/");
+        input.options.emit_chunk_manifest = false;
+        let output = bundle(input).unwrap();
+
+        assert!(output.chunk_manifest.is_none());
+        assert!(output.chunks.is_empty());
     }
 
     #[test]

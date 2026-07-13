@@ -44,7 +44,7 @@ mod hmr_tracker;
 pub use hmr_tracker::{HmrEventType, HmrTracker, HmrUpdate};
 
 mod style;
-pub use style::{StyleCollection, collect_css, collect_styles, minify_css};
+pub use style::{StyleCollection, collect_styles, minify_css};
 
 const MAX_ACTION_BODY_BYTES: usize = 1024 * 1024;
 const MAX_API_BODY_BYTES: usize = 10 * 1024 * 1024;
@@ -2794,7 +2794,7 @@ struct ClientAssetManifest {
 struct ClientAssetRoute {
     path: String,
     src: String,
-    #[serde(default, rename = "sharedChunks")]
+    #[serde(rename = "sharedChunks")]
     shared_chunks: Vec<ClientSharedChunk>,
 }
 
@@ -3841,12 +3841,10 @@ mod tests {
 
         std::fs::write(
             client_dir.join("manifest.json"),
-            r#"{"routes":[{"path":"/","src":"/__ruvyxa/client/legacy.js"}]}"#,
+            r#"{"routes":[{"path":"/","src":"/__ruvyxa/client/incomplete.js"}]}"#,
         )
         .unwrap();
-        let legacy_assets = prebuilt_client_assets(&config, "/").unwrap();
-        assert_eq!(legacy_assets.src, "/__ruvyxa/client/legacy.js");
-        assert!(legacy_assets.preloads.is_empty());
+        assert!(prebuilt_client_assets(&config, "/").is_none());
     }
 
     #[test]

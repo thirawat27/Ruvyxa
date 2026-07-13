@@ -1,6 +1,15 @@
 #!/usr/bin/env node
 import { execFileSync, execSync } from 'node:child_process'
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  readdirSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
+import { resolve } from 'node:path'
 import { rm } from 'node:fs/promises'
 import { arch, platform } from 'node:process'
 import { setTimeout as sleep } from 'node:timers/promises'
@@ -25,10 +34,19 @@ rmSync(destination, { recursive: true, force: true })
 mkdirSync(destination, { recursive: true })
 
 for (const pkg of packages) {
-  execFileSync('pnpm', ['--filter', pkg, 'pack', '--pack-destination', destination], {
+  const packageDestination = resolve(
+    destination,
+    'packages',
+    pkg.replaceAll('@', '').replaceAll('/', '-'),
+  )
+  mkdirSync(packageDestination, { recursive: true })
+  execFileSync('pnpm', ['--filter', pkg, 'pack', '--pack-destination', packageDestination], {
     stdio: 'inherit',
     shell: process.platform === 'win32',
   })
+  const tarballs = readdirSync(packageDestination).filter((file) => file.endsWith('.tgz'))
+  assert(tarballs.length === 1, `${pkg} should produce exactly one tarball`)
+  copyFileSync(`${packageDestination}/${tarballs[0]}`, `${destination}/${tarballs[0]}`)
 }
 
 for (const file of readdirSync(destination).filter((name) => name.endsWith('.tgz'))) {

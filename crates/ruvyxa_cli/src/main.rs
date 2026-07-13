@@ -646,10 +646,9 @@ fn load_project_config(root: &Path) -> anyhow::Result<ProjectConfig> {
     )?;
 
     if output.status.success() && result.ok {
+        let dependency_hash = required_config_dependency_hash(&result)?;
         let mut config = result.config.unwrap_or_default();
-        config.config_dependency_hash = result
-            .dependency_hash
-            .unwrap_or_else(|| "legacy-config-renderer".to_string());
+        config.config_dependency_hash = dependency_hash;
         config.validate_paths()?;
         return Ok(config);
     }
@@ -662,6 +661,15 @@ fn load_project_config(root: &Path) -> anyhow::Result<ProjectConfig> {
             .or(result.stack)
             .unwrap_or_else(|| "unknown config error".to_string())
     )
+}
+
+fn required_config_dependency_hash(result: &ConfigRendererOutput) -> anyhow::Result<String> {
+    result
+        .dependency_hash
+        .as_ref()
+        .filter(|hash| !hash.is_empty())
+        .cloned()
+        .ok_or_else(|| anyhow::anyhow!("config renderer returned success without dependencyHash"))
 }
 
 fn parse_config_renderer_output(
@@ -3579,6 +3587,16 @@ mod tests {
         assert!(error.contains("status: exit status: 1"));
         assert!(error.contains("stdout:\n(empty)"));
         assert!(error.contains("stderr:\nSyntaxError: Unexpected token"));
+    }
+
+    #[test]
+    fn rejects_successful_config_renderer_output_without_dependency_hash() {
+        let result: ConfigRendererOutput = serde_json::from_value(json!({ "ok": true })).unwrap();
+        let error = required_config_dependency_hash(&result)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("without dependencyHash"));
     }
 
     #[test]

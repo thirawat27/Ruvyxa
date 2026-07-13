@@ -163,7 +163,7 @@ fn link_inner(modules: &[CompiledModule], input: &BundleInput) -> Result<String>
         out.push_str("  \"use strict\";\n");
         out.push_str("  var __exports = {};\n");
 
-        rewrite_module_into(&module.js, &module.deps, modules, &mut out, true, true);
+        rewrite_module_into(&module.js, &module.deps, modules, &mut out, true, true)?;
 
         out.push_str("  return __exports;\n");
         out.push_str("})();\n\n");
@@ -228,14 +228,14 @@ pub fn link_parallel(modules: &[CompiledModule], input: &BundleInput) -> Result<
                 "  var process = globalThis.process || { env: { NODE_ENV: \"production\" } };\n",
             );
 
-            rewrite_module_into(&module.js, &module.deps, modules, &mut segment, true, true);
+            rewrite_module_into(&module.js, &module.deps, modules, &mut segment, true, true)?;
 
             segment.push_str("  return module.exports;\n");
             segment.push_str("})();\n\n");
 
-            segment
+            Ok(segment)
         })
-        .collect();
+        .collect::<Result<_>>()?;
 
     // Phase 3: Assemble the final output from segments (sequential concat).
     let total_size: usize = external_imports.iter().map(|s| s.len() + 1).sum::<usize>()
@@ -355,13 +355,13 @@ fn rewrite_module_into(
     out: &mut String,
     indent: bool,
     drop_external_imports: bool,
-) {
+) -> Result<()> {
     let mut pending_exports = Vec::new();
 
     for line in source.lines() {
         let trimmed = line.trim();
 
-        let rewritten = try_rewrite_import(trimmed, deps, all_modules, drop_external_imports)
+        let rewritten = try_rewrite_import(trimmed, deps, all_modules, drop_external_imports)?
             .map(Rewrite::Inline)
             .or_else(|| try_rewrite_export_statement(trimmed, deps, all_modules));
 
@@ -385,6 +385,8 @@ fn rewrite_module_into(
     for assignment in pending_exports {
         write_rewritten_line(out, &assignment, indent);
     }
+
+    Ok(())
 }
 
 fn rewrite_commonjs_requires(line: &str, deps: &[PathBuf]) -> String {
@@ -484,33 +486,38 @@ fn try_rewrite_import(
     deps: &[PathBuf],
     _all_modules: &[CompiledModule],
     drop_external_imports: bool,
-) -> Option<String> {
+) -> Result<Option<String>> {
     if !line.starts_with("import ") {
-        return None;
+        return Ok(None);
     }
 
     // Side-effect import: `import "./styles.css"` → remove (CSS handled separately)
     if line.starts_with("import \"") || line.starts_with("import '") {
-        return Some(format!("// [bundled] {line}"));
+        return Ok(Some(format!("// [bundled] {line}")));
     }
 
     // Extract the `from "specifier"` part.
-    let (before_from, specifier) = split_from_specifier(line)?;
+    let Some((before_from, specifier)) = split_from_specifier(line) else {
+        return Ok(None);
+    };
 
     // Find the matching dep by specifier.
     let Some(dep_path) = find_dep_for_specifier(&specifier, deps) else {
-        return if drop_external_imports {
+        return Ok(if drop_external_imports {
             Some(String::new())
         } else {
             None
-        };
+        });
     };
     let dep_id = module_id(dep_path);
 
     // Parse the import clause (the part between `import` and `from`).
-    let clause = before_from.strip_prefix("import ")?.trim();
+    let Some(clause) = before_from.strip_prefix("import ") else {
+        return Ok(None);
+    };
+    let clause = clause.trim();
 
-    Some(rewrite_import_clause(clause, &dep_id))
+    Ok(Some(rewrite_import_clause(clause, &dep_id)?))
 }
 
 fn collect_external_imports(modules: &[&CompiledModule]) -> Vec<String> {
@@ -684,13 +691,13 @@ fn try_rewrite_export_statement(
 /// - `{ a, b as c }`               → `const {a, c: b} = dep` (actually `const a = dep.a; const c = dep.b;`)
 /// - `* as ns`                      → `const ns = dep`
 /// - `Default, { a, b }`           → combined default + named
-fn rewrite_import_clause(clause: &str, dep_id: &str) -> String {
+fn rewrite_import_clause(clause: &str, dep_id: &str) -> Result<String> {
     let clause = clause.trim();
 
     // `* as ns`
     if clause.starts_with("* as ") {
         let ns = clause.strip_prefix("* as ").unwrap().trim();
-        return format!("const {ns} = {dep_id};");
+        return Ok(format!("const {ns} = {dep_id};"));
     }
 
     // `{ a, b as c }` — named imports only
@@ -700,7 +707,7 @@ fn rewrite_import_clause(clause: &str, dep_id: &str) -> String {
             .iter()
             .map(|(original, alias)| format!("const {alias} = {dep_id}.{original};"))
             .collect();
-        return bindings.join(" ");
+        return Ok(bindings.join(" "));
     }
 
     // `Default, { a, b }` — default + named
@@ -716,19 +723,39 @@ fn rewrite_import_clause(clause: &str, dep_id: &str) -> String {
                 result.push_str(&format!(" const {alias} = {dep_id}.{original};"));
             }
         }
-        return result;
+        return Ok(result);
+    }
+
+    // `Default, * as ns` — default + namespace import.
+    if let Some((default_name, namespace_clause)) = clause.split_once(',') {
+        let default_name = default_name.trim();
+        let namespace_clause = namespace_clause.trim();
+        if let Some(namespace) = namespace_clause.strip_prefix("* as ")
+            && is_identifier(default_name)
+            && is_identifier(namespace.trim())
+        {
+            return Ok(format!(
+                "const {default_name} = {dep_id}.default; const {} = {dep_id};",
+                namespace.trim()
+            ));
+        }
     }
 
     // `Default` — plain default import
-    if clause
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
-    {
-        return format!("const {clause} = {dep_id}.default;");
+    if is_identifier(clause) {
+        return Ok(format!("const {clause} = {dep_id}.default;"));
     }
 
-    // Fallback: comment out
-    format!("// [unresolved import] {clause} from {dep_id}")
+    Err(BundleError::Compiler(format!(
+        "unsupported static import clause `{clause}`"
+    )))
+}
+
+fn is_identifier(value: &str) -> bool {
+    !value.is_empty()
+        && value
+            .chars()
+            .all(|character| character.is_alphanumeric() || matches!(character, '_' | '$'))
 }
 
 /// Parse `{ a, b as c, d }` into a vec of (original, alias) pairs.
@@ -909,14 +936,14 @@ mod tests {
     #[test]
     fn rewrite_default_import() {
         let dep_id = "__ruv_test1234567890__";
-        let result = rewrite_import_clause("React", dep_id);
+        let result = rewrite_import_clause("React", dep_id).unwrap();
         assert_eq!(result, "const React = __ruv_test1234567890__.default;");
     }
 
     #[test]
     fn rewrite_named_imports() {
         let dep_id = "__ruv_abc__";
-        let result = rewrite_import_clause("{ useState, useEffect }", dep_id);
+        let result = rewrite_import_clause("{ useState, useEffect }", dep_id).unwrap();
         assert!(result.contains("const useState = __ruv_abc__.useState;"));
         assert!(result.contains("const useEffect = __ruv_abc__.useEffect;"));
     }
@@ -924,23 +951,42 @@ mod tests {
     #[test]
     fn rewrite_named_import_with_alias() {
         let dep_id = "__ruv_abc__";
-        let result = rewrite_import_clause("{ foo as bar }", dep_id);
+        let result = rewrite_import_clause("{ foo as bar }", dep_id).unwrap();
         assert_eq!(result, "const bar = __ruv_abc__.foo;");
     }
 
     #[test]
     fn rewrite_namespace_import() {
         let dep_id = "__ruv_abc__";
-        let result = rewrite_import_clause("* as utils", dep_id);
+        let result = rewrite_import_clause("* as utils", dep_id).unwrap();
         assert_eq!(result, "const utils = __ruv_abc__;");
     }
 
     #[test]
     fn rewrite_default_plus_named() {
         let dep_id = "__ruv_abc__";
-        let result = rewrite_import_clause("React, { useState }", dep_id);
+        let result = rewrite_import_clause("React, { useState }", dep_id).unwrap();
         assert!(result.contains("const React = __ruv_abc__.default;"));
         assert!(result.contains("const useState = __ruv_abc__.useState;"));
+    }
+
+    #[test]
+    fn rewrite_default_plus_namespace() {
+        let result = rewrite_import_clause("React, * as ReactNamespace", "__ruv_abc__").unwrap();
+        assert_eq!(
+            result,
+            "const React = __ruv_abc__.default; const ReactNamespace = __ruv_abc__;"
+        );
+    }
+
+    #[test]
+    fn rejects_unsupported_import_clauses() {
+        let error = rewrite_import_clause("React, invalid", "__ruv_abc__").unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported static import clause")
+        );
     }
 
     #[test]
@@ -1055,7 +1101,7 @@ mod tests {
     #[test]
     fn side_effect_import_commented() {
         let result = try_rewrite_import("import \"./styles.css\"", &[], &[], false);
-        assert!(result.unwrap().starts_with("// [bundled]"));
+        assert!(result.unwrap().unwrap().starts_with("// [bundled]"));
     }
 
     #[test]
