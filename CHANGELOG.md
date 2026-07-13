@@ -1,5 +1,44 @@
 # Changelog
 
+## v1.0.12 (2026-07-13)
+
+### Oxc Integration and Modernized Minification
+
+- Integrated the Oxc 0.139.0 ecosystem (parser, semantic minifier, mangler, code generator) for
+  production JavaScript minification, replacing the selective token compressor
+- Oxc owns final parsing, semantic compression, name mangling, and minified code generation while
+  Ruvyxa retains framework-specific resolution, linking, boundary checks, and output composition
+- `build.treeShaking` keeps its public meaning: enabled uses Oxc full compression; disabled uses
+  `CompressOptions::safest()` to preserve unused bindings
+- Removed the old selective token compressor from production code paths; `minify_parallel` now
+  delegates to a single whole-program Oxc pass since semantic mangling cannot be performed per linker
+  segment
+- Removed unused `compile_graph`, `CompilerError`, `compile_graph_resilient`, and
+  `parse_error_location` utilities, simplifying the compiler public API
+- Added `base64-simd`, `compact_str`, and `num-bigint` for performance-critical operations in the
+  bundler pipeline
+- Published `docs/architecture/bundler-modernization.md` documenting the oxc integration boundary,
+  adoption map, and next safe stages
+
+### Linker and Resolver Improvements
+
+- Added CommonJS `module.exports` / `__exports` / `process.env` shims for compatibility with CommonJS
+  bundles expecting Node.js globals; `process.env` stubs default to production
+- Implemented tsconfig/jsconfig content fingerprinting and cached path resolution to avoid repeated
+  I/O and parsing across multi-file builds; invalidates cached configuration on file modification
+- Added support for `import Default, * as ns` import clause combinations
+- Introduced `is_identifier()` utility for robust identifier validation in import clause parsing
+- Converted the linker's `rewrite_module_into`, `try_rewrite_import`, and `rewrite_import_clause` to
+  return `Result` types for consistent error propagation through `link_inner` and `link_parallel`
+- Skipped dynamic chunk generation when `emit_chunk_manifest` is disabled to avoid unnecessary
+  processing
+
+### Packaging
+
+- Bumped all npm packages and Rust crates from 1.0.11 to 1.0.12
+- Applied consistent compact array syntax to `files`, `keywords`, `os`, and `cpu` fields across
+  all platform CLI packages, adapter packages, core, react, and create-ruvyxa package manifests
+
 ## v1.0.11 (2026-07-12)
 
 ### macOS x64 Native Binary Removal
@@ -828,3 +867,4 @@ The following commits occurred before the v1.0.0 tag and represent the initial p
 | `v1.0.9`  | 2026-07-10 | Patch      |
 | `v1.0.10` | 2026-07-11 | Minor      |
 | `v1.0.11` | 2026-07-12 | Minor      |
+| `v1.0.12` | 2026-07-13 | Minor      |

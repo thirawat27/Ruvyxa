@@ -38,10 +38,14 @@ pub mod resolver;
 pub mod sourcemap;
 pub mod types;
 
+use std::path::PathBuf;
 use std::time::Instant;
 
 use crate::cache::CompileCache;
-use crate::chunking::{build_dynamic_output_chunks, dynamic_import_chunks};
+use crate::chunking::{
+    build_dynamic_output_chunks, dynamic_import_chunks, plan_dynamic_chunk_files,
+    static_entry_modules,
+};
 use crate::plugin::PluginPipeline;
 use crate::resolver::ResolveGraphCache;
 pub use context::BundleContext;
@@ -103,11 +107,32 @@ fn bundle_with_parts(
     let mut diagnostics = Vec::new();
     boundary::check(&compiled, &input, &mut diagnostics)?;
 
-    // 5. Link modules into a single concatenated script.
-    //    This also detects circular dependencies and returns an error.
-    let linked = linker::link_parallel(&compiled, &input)?;
+    // 5. Plan client dynamic chunks before linking. The entry bundle follows only static edges so
+    // dynamic modules are evaluated only when their generated ESM import runs.
+    let split_dynamic_imports =
+        input.target == BundleTarget::Client && input.options.emit_chunk_manifest;
+    let dynamic_import_files = if split_dynamic_imports {
+        plan_dynamic_chunk_files(&compiled)
+    } else {
+        Default::default()
+    };
+    let linked_modules = if split_dynamic_imports {
+        static_entry_modules(&compiled, &PathBuf::from(&entry_label))
+    } else {
+        compiled.clone()
+    };
+    let chunks = if split_dynamic_imports {
+        build_dynamic_output_chunks(&compiled, &input, &dynamic_import_files)?
+    } else {
+        Vec::new()
+    };
 
-    // 6. Optionally tree-shake, then minify. Tree-shaking is controlled
+    // 6. Link modules into a single concatenated script. This also detects circular dependencies
+    // and returns an error.
+    let linked =
+        linker::link_parallel_with_dynamic_imports(&linked_modules, &input, &dynamic_import_files)?;
+
+    // 7. Optionally tree-shake, then minify. Tree-shaking is controlled
     // independently from whitespace/identifier minification.
     let optimized_linked = if input.options.tree_shaking {
         minifier::tree_shake_exports(&linked)
@@ -121,13 +146,13 @@ fn bundle_with_parts(
         optimized_linked.clone()
     };
 
-    // 7. Wrap in the appropriate output format.
+    // 8. Wrap in the appropriate output format.
     let code = output::wrap(final_code, &input);
 
     // Count modules whose JS came from the compile cache, not freshly compiled.
     let cache_hits = compiled.iter().filter(|m| m.cache_hit).count();
 
-    // 8. Generate source map if requested.
+    // 9. Generate source map if requested.
     let source_map = if input.options.source_map {
         let hash = blake3::hash(code.as_bytes()).to_hex();
         let map_file = format!("{}.js.map", &hash[..16]);
@@ -142,7 +167,7 @@ fn bundle_with_parts(
         let total_offset = wrapper_lines + linker_header_lines;
 
         let mut current_line = total_offset;
-        for module in linker::ordered_project_modules(&compiled) {
+        for module in linker::ordered_project_modules(&linked_modules) {
             if module.is_external {
                 continue;
             }
@@ -163,26 +188,20 @@ fn bundle_with_parts(
         None
     };
 
-    let chunks = if input.options.emit_chunk_manifest {
-        build_dynamic_output_chunks(&compiled, &input)?
-    } else {
-        Vec::new()
-    };
-
-    // 9. Optionally emit a chunk manifest.
+    // 10. Optionally emit a chunk manifest.
     let chunk_manifest = if input.options.emit_chunk_manifest {
         let hash = blake3::hash(code.as_bytes()).to_hex();
         let bundle_id = hash[..16].to_string();
         let output_file = format!("{bundle_id}.js");
         let sm_file = source_map.as_ref().map(|_| format!("{bundle_id}.js.map"));
 
-        let modules: Vec<String> = linker::ordered_project_modules(&compiled)
+        let modules: Vec<String> = linker::ordered_project_modules(&linked_modules)
             .iter()
             .filter(|m| !m.is_external)
             .map(|m| m.path.display().to_string().replace('\\', "/"))
             .collect();
 
-        let dynamic_imports = dynamic_import_chunks(&compiled, &chunks);
+        let dynamic_imports = dynamic_import_chunks(&compiled, &dynamic_import_files);
 
         Some(ChunkManifest {
             bundle_id,
@@ -380,6 +399,12 @@ mod tests {
         assert_eq!(out.chunks.len(), 1);
         assert_eq!(manifest.dynamic_imports[0].file, out.chunks[0].file_name);
         assert!(out.chunks[0].code.contains("export default"));
+        assert!(out.code.contains(&format!(
+            "import(\"./{}\").then((module) => module.default)",
+            out.chunks[0].file_name
+        )));
+        assert!(!out.code.contains("const label = \"Lazy\";"));
+        assert!(out.chunks[0].code.contains("const label = \"Lazy\";"));
     }
 
     #[test]
@@ -403,6 +428,7 @@ mod tests {
 
         assert!(output.chunk_manifest.is_none());
         assert!(output.chunks.is_empty());
+        assert!(output.code.contains("Promise.resolve("));
     }
 
     #[test]

@@ -16,7 +16,8 @@ architecture is lower risk than importing those internals into Ruvyxa's framewor
 virtual route entry
   -> Ruvyxa resolver/cache/plugins
   -> Ruvyxa TS/JSX/MDX compiler
-  -> Ruvyxa boundary checks and linker
+  -> Ruvyxa boundary checks and dynamic chunk plan
+  -> static entry linker + lazily loaded dynamic chunk linkers
   -> Ruvyxa explicit export pruning
   -> Oxc parser -> semantic minifier/mangler -> code generator
   -> Ruvyxa output wrappers, chunks, manifests, source maps
@@ -47,7 +48,9 @@ Oxc pass because semantic mangling cannot safely be performed independently per 
    JSX output, and malformed linked input.
 2. Make scan, link, and render metadata explicit types (rather than replacing the whole linker),
    following Rolldown's staged ownership pattern.
-3. Prototype Oxc transformer or resolver behind an internal adapter only after the fixture suite
+3. Wire the persisted graph manifest into the production bundle context only after it has per-stage
+   invalidation metrics and lifecycle coverage.
+4. Prototype Oxc transformer or resolver behind an internal adapter only after the fixture suite
    proves Ruvyxa plugin and framework semantics are preserved.
 
 ## Constraints and risks
@@ -59,3 +62,8 @@ Oxc pass because semantic mangling cannot safely be performed independently per 
 - Rolldown/SWC are reference implementations, not runtime dependencies. Directly importing either
   bundler would bypass Ruvyxa's public configuration and plugin contracts without a proven migration
   path.
+- Client dynamic chunks now follow an explicit scan → plan → link flow. The entry follows static
+  edges only, each dynamic root receives a deterministic graph-versioned filename, and runtime
+  `import()` resolves the chunk's original module namespace. The graph-level fingerprint
+  deliberately invalidates dependent chunk names together, prioritizing cache correctness over
+  premature fine-grained hashing.

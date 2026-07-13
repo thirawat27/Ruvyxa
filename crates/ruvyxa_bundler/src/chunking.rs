@@ -1,38 +1,66 @@
-//! Chunk graph helpers for dynamic imports and future shared chunk loading.
+//! Chunk planning and rendering for dynamic imports.
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use crate::ast::{self, ImportKind};
 use crate::compiler::CompiledModule;
 use crate::{
-    BundleInput, DynamicImportChunk, OutputChunk, OutputChunkKind, Result, ast, linker, minifier,
+    BundleInput, DynamicImportChunk, OutputChunk, OutputChunkKind, Result, linker, minifier,
 };
+
+/// Plan deterministic filenames for every project-local dynamic-import root.
+///
+/// The graph fingerprint intentionally includes every project module. This makes chunk references
+/// change together when a nested dynamic dependency changes, avoiding a stale parent chunk pointing
+/// at an obsolete child filename.
+pub(crate) fn plan_dynamic_chunk_files(compiled: &[CompiledModule]) -> BTreeMap<PathBuf, String> {
+    let module_map = project_module_map(compiled);
+    let dynamic_roots = dynamic_roots(compiled, &module_map);
+    let graph_fingerprint = graph_fingerprint(compiled);
+
+    dynamic_roots
+        .into_iter()
+        .map(|root| {
+            let fingerprint =
+                blake3::hash(format!("{graph_fingerprint}\0{}", root.display()).as_bytes())
+                    .to_hex();
+            (root, format!("chunk.{}.js", &fingerprint[..16]))
+        })
+        .collect()
+}
+
+/// Return the modules that must be evaluated with the entry bundle.
+///
+/// Only static, re-export, side-effect, and CommonJS require edges are followed. Dynamic edges are
+/// intentionally excluded so their code is evaluated only when its runtime import executes.
+pub(crate) fn static_entry_modules(
+    compiled: &[CompiledModule],
+    entry: &Path,
+) -> Vec<CompiledModule> {
+    let module_map = project_module_map(compiled);
+    let mut selected = BTreeSet::new();
+    collect_static_transitive_modules(entry, &module_map, &mut selected);
+
+    compiled
+        .iter()
+        .filter(|module| selected.contains(&module.path))
+        .cloned()
+        .collect()
+}
 
 /// Build output chunks for project-local dynamic import split points.
 pub(crate) fn build_dynamic_output_chunks(
     compiled: &[CompiledModule],
     input: &BundleInput,
+    dynamic_import_files: &BTreeMap<PathBuf, String>,
 ) -> Result<Vec<OutputChunk>> {
-    let module_map: BTreeMap<PathBuf, &CompiledModule> = compiled
-        .iter()
-        .filter(|module| !module.is_external)
-        .map(|module| (module.path.clone(), module))
-        .collect();
-    let mut dynamic_roots = BTreeSet::<PathBuf>::new();
+    let module_map = project_module_map(compiled);
+    let mut chunks = Vec::with_capacity(dynamic_import_files.len());
 
-    for module in compiled.iter().filter(|module| !module.is_external) {
-        let ast = ast::parse_module(&module.js);
-        for specifier in ast.dynamic_import_specifiers() {
-            if let Some(dep) = linker::find_dep_for_specifier(&specifier, &module.deps) {
-                dynamic_roots.insert(dep.clone());
-            }
-        }
-    }
-
-    let mut chunks = Vec::new();
-    for root in dynamic_roots {
+    for (root, file_name) in dynamic_import_files {
         let mut selected = BTreeSet::new();
-        collect_transitive_modules(&root, &module_map, &mut selected);
+        collect_static_transitive_modules(root, &module_map, &mut selected);
         let modules = compiled
             .iter()
             .filter(|module| selected.contains(&module.path))
@@ -43,9 +71,10 @@ pub(crate) fn build_dynamic_output_chunks(
             continue;
         }
 
-        let mut linked = linker::link_parallel(&modules, input)?;
+        let mut linked =
+            linker::link_parallel_with_dynamic_imports(&modules, input, dynamic_import_files)?;
         linked.push_str("export default ");
-        linked.push_str(&linker::module_id(&root));
+        linked.push_str(&linker::module_id(root));
         linked.push_str(";\n");
 
         let code = if input.options.minify {
@@ -53,15 +82,13 @@ pub(crate) fn build_dynamic_output_chunks(
         } else {
             linked
         };
-        let hash = blake3::hash(code.as_bytes()).to_hex();
-        let file_name = format!("chunk.{}.js", &hash[..16]);
         let modules = modules
             .iter()
             .map(|module| module.path.display().to_string().replace('\\', "/"))
             .collect::<Vec<_>>();
 
         chunks.push(OutputChunk {
-            file_name,
+            file_name: file_name.clone(),
             code,
             modules,
             kind: OutputChunkKind::DynamicImport,
@@ -73,26 +100,19 @@ pub(crate) fn build_dynamic_output_chunks(
 
 pub(crate) fn dynamic_import_chunks(
     compiled: &[CompiledModule],
-    output_chunks: &[OutputChunk],
+    dynamic_import_files: &BTreeMap<PathBuf, String>,
 ) -> Vec<DynamicImportChunk> {
     let mut dynamic_imports = Vec::new();
     for module in compiled.iter().filter(|module| !module.is_external) {
         let ast = ast::parse_module(&module.js);
         for specifier in ast.dynamic_import_specifiers() {
-            if let Some(dep) = linker::find_dep_for_specifier(&specifier, &module.deps) {
-                let module_path = dep.display().to_string().replace('\\', "/");
-                let file = output_chunks
-                    .iter()
-                    .find(|chunk| chunk.modules.iter().any(|m| m == &module_path))
-                    .map(|chunk| chunk.file_name.clone())
-                    .unwrap_or_else(|| {
-                        let hash = blake3::hash(module_path.as_bytes()).to_hex();
-                        format!("chunk.{}.js", &hash[..16])
-                    });
+            if let Some(dep) = linker::find_dep_for_specifier(&specifier, &module.deps)
+                && let Some(file) = dynamic_import_files.get(dep)
+            {
                 dynamic_imports.push(DynamicImportChunk {
                     importer: module.path.display().to_string().replace('\\', "/"),
-                    module: module_path,
-                    file,
+                    module: dep.display().to_string().replace('\\', "/"),
+                    file: file.clone(),
                 });
             }
         }
@@ -100,12 +120,38 @@ pub(crate) fn dynamic_import_chunks(
     dynamic_imports
 }
 
-fn collect_transitive_modules(
-    path: &PathBuf,
+fn project_module_map(compiled: &[CompiledModule]) -> BTreeMap<PathBuf, &CompiledModule> {
+    compiled
+        .iter()
+        .filter(|module| !module.is_external)
+        .map(|module| (module.path.clone(), module))
+        .collect()
+}
+
+fn dynamic_roots(
+    compiled: &[CompiledModule],
+    module_map: &BTreeMap<PathBuf, &CompiledModule>,
+) -> BTreeSet<PathBuf> {
+    let mut roots = BTreeSet::new();
+    for module in compiled.iter().filter(|module| !module.is_external) {
+        let ast = ast::parse_module(&module.js);
+        for specifier in ast.dynamic_import_specifiers() {
+            if let Some(dep) = linker::find_dep_for_specifier(&specifier, &module.deps)
+                && module_map.contains_key(dep)
+            {
+                roots.insert(dep.clone());
+            }
+        }
+    }
+    roots
+}
+
+fn collect_static_transitive_modules(
+    path: &Path,
     module_map: &BTreeMap<PathBuf, &CompiledModule>,
     selected: &mut BTreeSet<PathBuf>,
 ) {
-    if !selected.insert(path.clone()) {
+    if !selected.insert(path.to_path_buf()) {
         return;
     }
 
@@ -113,9 +159,27 @@ fn collect_transitive_modules(
         return;
     };
 
-    for dep in &module.deps {
-        if module_map.contains_key(dep) {
-            collect_transitive_modules(dep, module_map, selected);
+    let ast = ast::parse_module(&module.js);
+    for edge in ast
+        .imports
+        .iter()
+        .filter(|edge| edge.kind != ImportKind::Dynamic)
+    {
+        if let Some(dep) = linker::find_dep_for_specifier(&edge.specifier, &module.deps)
+            && module_map.contains_key(dep)
+        {
+            collect_static_transitive_modules(dep, module_map, selected);
         }
     }
+}
+
+fn graph_fingerprint(compiled: &[CompiledModule]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    for module in compiled.iter().filter(|module| !module.is_external) {
+        hasher.update(module.path.to_string_lossy().as_bytes());
+        hasher.update(b"\0");
+        hasher.update(module.js.as_bytes());
+        hasher.update(b"\0");
+    }
+    hasher.finalize().to_hex().to_string()
 }

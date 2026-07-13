@@ -118,12 +118,16 @@ fn dfs_detect_cycle(
 /// [`BundleError::CircularDependency`] if a cycle is found.
 pub fn link(modules: &[CompiledModule], input: &BundleInput) -> Result<String> {
     detect_cycles(modules)?;
-    link_inner(modules, input)
+    link_inner(modules, input, &BTreeMap::new())
 }
 
 /// Inner link implementation — does NOT check for cycles.
 /// Called by `link` and `link_parallel` after cycle detection.
-fn link_inner(modules: &[CompiledModule], input: &BundleInput) -> Result<String> {
+fn link_inner(
+    modules: &[CompiledModule],
+    input: &BundleInput,
+    dynamic_import_files: &BTreeMap<PathBuf, String>,
+) -> Result<String> {
     let project_modules = ordered_project_modules(modules);
 
     // Pre-calculate output capacity to avoid reallocations.
@@ -168,7 +172,15 @@ fn link_inner(modules: &[CompiledModule], input: &BundleInput) -> Result<String>
             "  var process = globalThis.process || { env: { NODE_ENV: \"production\" } };\n",
         );
 
-        rewrite_module_into(&module.js, &module.deps, modules, &mut out, true, true)?;
+        rewrite_module_into(
+            &module.js,
+            &module.deps,
+            modules,
+            dynamic_import_files,
+            &mut out,
+            true,
+            true,
+        )?;
 
         out.push_str("  return module.exports;\n");
         out.push_str("})();\n\n");
@@ -193,6 +205,18 @@ fn link_inner(modules: &[CompiledModule], input: &BundleInput) -> Result<String>
 /// For small graphs (<8 modules), falls back to sequential linking to avoid
 /// rayon scheduling overhead. Circular dependencies are detected before linking.
 pub fn link_parallel(modules: &[CompiledModule], input: &BundleInput) -> Result<String> {
+    link_parallel_with_dynamic_imports(modules, input, &BTreeMap::new())
+}
+
+/// Link modules while preserving selected dynamic imports as relative ESM chunk loads.
+///
+/// The map is internal to chunk planning: keys are resolved module paths and values are emitted
+/// chunk filenames. Imports not present in the map keep the existing inline namespace behavior.
+pub(crate) fn link_parallel_with_dynamic_imports(
+    modules: &[CompiledModule],
+    input: &BundleInput,
+    dynamic_import_files: &BTreeMap<PathBuf, String>,
+) -> Result<String> {
     // Cycle detection runs regardless of graph size — cheap O(V+E) DFS.
     detect_cycles(modules)?;
 
@@ -201,7 +225,7 @@ pub fn link_parallel(modules: &[CompiledModule], input: &BundleInput) -> Result<
     // For small graphs, sequential is faster (avoids rayon overhead).
     // Note: we already detected cycles above so pass directly to `link` internals.
     if project_modules.len() < 8 {
-        return link_inner(modules, input);
+        return link_inner(modules, input, dynamic_import_files);
     }
 
     // Phase 1: Compute external imports (sequential — cheap BTreeSet scan).
@@ -233,7 +257,15 @@ pub fn link_parallel(modules: &[CompiledModule], input: &BundleInput) -> Result<
                 "  var process = globalThis.process || { env: { NODE_ENV: \"production\" } };\n",
             );
 
-            rewrite_module_into(&module.js, &module.deps, modules, &mut segment, true, true)?;
+            rewrite_module_into(
+                &module.js,
+                &module.deps,
+                modules,
+                dynamic_import_files,
+                &mut segment,
+                true,
+                true,
+            )?;
 
             segment.push_str("  return module.exports;\n");
             segment.push_str("})();\n\n");
@@ -357,6 +389,7 @@ fn rewrite_module_into(
     source: &str,
     deps: &[PathBuf],
     all_modules: &[CompiledModule],
+    dynamic_import_files: &BTreeMap<PathBuf, String>,
     out: &mut String,
     indent: bool,
     drop_external_imports: bool,
@@ -382,7 +415,7 @@ fn rewrite_module_into(
             None => line,
         };
 
-        let dynamic_rewritten = rewrite_dynamic_imports(content, deps);
+        let dynamic_rewritten = rewrite_dynamic_imports(content, deps, dynamic_import_files);
         let commonjs_rewritten = rewrite_commonjs_requires(&dynamic_rewritten, deps);
         write_rewritten_line(out, &commonjs_rewritten, indent);
     }
@@ -428,7 +461,11 @@ fn rewrite_commonjs_requires(line: &str, deps: &[PathBuf]) -> String {
     output
 }
 
-fn rewrite_dynamic_imports(line: &str, deps: &[PathBuf]) -> String {
+fn rewrite_dynamic_imports(
+    line: &str,
+    deps: &[PathBuf],
+    dynamic_import_files: &BTreeMap<PathBuf, String>,
+) -> String {
     let mut out = String::with_capacity(line.len());
     let mut search_start = 0;
     let marker = "import(";
@@ -445,9 +482,17 @@ fn rewrite_dynamic_imports(line: &str, deps: &[PathBuf]) -> String {
         };
 
         if let Some(dep_path) = find_dep_for_specifier(&specifier, deps) {
-            out.push_str("Promise.resolve(");
-            out.push_str(&module_id(dep_path));
-            out.push(')');
+            if let Some(file_name) = dynamic_import_files.get(dep_path) {
+                // Chunks export their original module namespace as the default export, keeping
+                // `await import()` observably equivalent to the inline linker path.
+                out.push_str(&format!(
+                    "import(\"./{file_name}\").then((module) => module.default)"
+                ));
+            } else {
+                out.push_str("Promise.resolve(");
+                out.push_str(&module_id(dep_path));
+                out.push(')');
+            }
             let after_value = value_start + consumed;
             if line[after_value..].starts_with(')') {
                 search_start = after_value + 1;
@@ -1116,11 +1161,28 @@ mod tests {
         let result = rewrite_dynamic_imports(
             "const mod = await import(\"./lazy\");",
             std::slice::from_ref(&dep),
+            &BTreeMap::new(),
         );
 
         assert_eq!(
             result,
             format!("const mod = await Promise.resolve({dep_id});")
+        );
+    }
+
+    #[test]
+    fn rewrites_planned_dynamic_import_to_an_emitted_chunk() {
+        let dep = PathBuf::from("/app/lazy.ts");
+        let files = BTreeMap::from([(dep.clone(), "chunk.lazy.js".to_string())]);
+        let result = rewrite_dynamic_imports(
+            "const mod = await import(\"./lazy\");",
+            std::slice::from_ref(&dep),
+            &files,
+        );
+
+        assert_eq!(
+            result,
+            "const mod = await import(\"./chunk.lazy.js\").then((module) => module.default);"
         );
     }
 
