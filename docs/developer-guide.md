@@ -39,9 +39,9 @@ packages/
   └─ create-ruvyxa             scaffold command and minimal template packaging
 ```
 
-The [Bundler Modernization doc](architecture/bundler-modernization.md) describes
-the oxc integration boundary and the reasoning behind keeping resolution, linking,
-and diagnostics in Ruvyxa while delegating minification to Oxc.
+The [Bundler Modernization doc](architecture/bundler-modernization.md) describes the oxc integration
+boundary and the reasoning behind keeping resolution, linking, and diagnostics in Ruvyxa while
+delegating minification to Oxc.
 
 Framework contracts often span Rust and TypeScript. A change to configuration, runtime files,
 package exports, or starter behaviour must be checked in both places. Do not change a TypeScript

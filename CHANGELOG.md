@@ -11,8 +11,8 @@
 - `build.treeShaking` keeps its public meaning: enabled uses Oxc full compression; disabled uses
   `CompressOptions::safest()` to preserve unused bindings
 - Removed the old selective token compressor from production code paths; `minify_parallel` now
-  delegates to a single whole-program Oxc pass since semantic mangling cannot be performed per linker
-  segment
+  delegates to a single whole-program Oxc pass since semantic mangling cannot be performed per
+  linker segment
 - Removed unused `compile_graph`, `CompilerError`, `compile_graph_resilient`, and
   `parse_error_location` utilities, simplifying the compiler public API
 - Added `base64-simd`, `compact_str`, and `num-bigint` for performance-critical operations in the
@@ -22,8 +22,8 @@
 
 ### Linker and Resolver Improvements
 
-- Added CommonJS `module.exports` / `__exports` / `process.env` shims for compatibility with CommonJS
-  bundles expecting Node.js globals; `process.env` stubs default to production
+- Added CommonJS `module.exports` / `__exports` / `process.env` shims for compatibility with
+  CommonJS bundles expecting Node.js globals; `process.env` stubs default to production
 - Implemented tsconfig/jsconfig content fingerprinting and cached path resolution to avoid repeated
   I/O and parsing across multi-file builds; invalidates cached configuration on file modification
 - Added support for `import Default, * as ns` import clause combinations
@@ -36,8 +36,8 @@
 ### Packaging
 
 - Bumped all npm packages and Rust crates from 1.0.11 to 1.0.12
-- Applied consistent compact array syntax to `files`, `keywords`, `os`, and `cpu` fields across
-  all platform CLI packages, adapter packages, core, react, and create-ruvyxa package manifests
+- Applied consistent compact array syntax to `files`, `keywords`, `os`, and `cpu` fields across all
+  platform CLI packages, adapter packages, core, react, and create-ruvyxa package manifests
 
 ## v1.0.11 (2026-07-12)
 

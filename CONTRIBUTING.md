@@ -21,6 +21,10 @@ cd ruvyxa
 pnpm install
 ```
 
+`pnpm install` enables the repository pre-commit hook. It automatically formats staged files that
+Prettier supports and re-stages only those files. When Rust files are staged, the hook verifies
+their `cargo fmt` formatting before allowing the commit.
+
 ### Verify Everything Works
 
 ```bash
