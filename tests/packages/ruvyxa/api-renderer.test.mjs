@@ -17,7 +17,7 @@ describe('API renderer request forwarding', () => {
         root,
         routeFile,
         'POST',
-        '/api/echo',
+        '/api/echo?source=cli',
         '{}',
         JSON.stringify({ title: 'from-cli' }),
         JSON.stringify({ 'content-type': 'application/json', 'x-test': 'cli' }),
@@ -27,6 +27,7 @@ describe('API renderer request forwarding', () => {
       assert.deepEqual(JSON.parse(result.body), {
         body: { title: 'from-cli' },
         header: 'cli',
+        query: 'cli',
       })
     })
   })
@@ -39,7 +40,7 @@ describe('API renderer request forwarding', () => {
         projectRoot: root,
         routeFile,
         method: 'POST',
-        requestPath: '/api/echo',
+        requestPath: '/api/echo?source=worker',
         params: {},
         headers: { 'content-type': 'application/json', 'x-test': 'worker' },
         body: JSON.stringify({ title: 'from-worker' }),
@@ -49,7 +50,43 @@ describe('API renderer request forwarding', () => {
       assert.deepEqual(JSON.parse(result.body), {
         body: { title: 'from-worker' },
         header: 'worker',
+        query: 'worker',
       })
+    })
+  })
+
+  it('preserves binary API bodies, duplicate request headers, and repeated Set-Cookie values', async () => {
+    await withFixture(async ({ root, routeFile }) => {
+      const body = Buffer.from([0, 255, 128, 13, 10])
+      const result = await runWorkerJson({
+        id: 'api-binary-and-headers-test',
+        type: 'api',
+        projectRoot: root,
+        routeFile,
+        method: 'POST',
+        requestPath: '/api/echo',
+        params: {},
+        headers: { 'content-type': 'application/octet-stream' },
+        headerPairs: [
+          ['content-type', 'application/octet-stream'],
+          ['x-repeat', 'first'],
+          ['x-repeat', 'second'],
+        ],
+        bodyBase64: body.toString('base64'),
+      })
+
+      assert.equal(result.status, 200)
+      assert.deepEqual(JSON.parse(result.body), {
+        bytes: [...body],
+        repeated: 'first, second',
+      })
+      assert.deepEqual(
+        result.headerPairs.filter(([name]) => name === 'set-cookie'),
+        [
+          ['set-cookie', 'first=1; Path=/'],
+          ['set-cookie', 'second=2; Path=/'],
+        ],
+      )
     })
   })
 
@@ -169,9 +206,22 @@ async function withFixture(run) {
     routeFile,
     `
       export async function POST({ request }) {
+        if (request.headers.get('content-type') === 'application/octet-stream') {
+          return new Response(JSON.stringify({
+            bytes: [...new Uint8Array(await request.arrayBuffer())],
+            repeated: request.headers.get('x-repeat'),
+          }), {
+            headers: [
+              ['content-type', 'application/json; charset=utf-8'],
+              ['set-cookie', 'first=1; Path=/'],
+              ['set-cookie', 'second=2; Path=/'],
+            ],
+          })
+        }
         return Response.json({
           body: await request.json(),
           header: request.headers.get('x-test'),
+          query: new URL(request.url).searchParams.get('source'),
         })
       }
     `,

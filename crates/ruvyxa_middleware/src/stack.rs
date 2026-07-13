@@ -139,6 +139,33 @@ impl MiddlewareStack {
             }
         }
 
+        if let Some(rate) = &self.config.builtin.rate_limit {
+            if rate.max_requests == 0 {
+                return Err("Rate limit 'max' must be greater than 0".to_string());
+            }
+            if rate.window_secs == 0 {
+                return Err("Rate limit 'window' must be greater than 0".to_string());
+            }
+            if rate.key_by == "ip" {
+                // The transport peer is the only implicit key source. Forwarded
+                // client identity remains opt-in through an explicit header.
+            } else if let Some(header_name) = rate.key_by.strip_prefix("header:") {
+                if header_name.is_empty()
+                    || axum::http::HeaderName::from_bytes(header_name.as_bytes()).is_err()
+                {
+                    return Err(format!(
+                        "Rate limit 'key' must be 'ip' or 'header:<valid-header-name>', got '{}'",
+                        rate.key_by
+                    ));
+                }
+            } else {
+                return Err(format!(
+                    "Rate limit 'key' must be 'ip' or 'header:<valid-header-name>', got '{}'",
+                    rate.key_by
+                ));
+            }
+        }
+
         // Reject plugins when wasm feature is disabled
         #[cfg(not(feature = "wasm-plugins"))]
         if !self.config.plugins.is_empty() {
@@ -205,7 +232,7 @@ impl MiddlewareStack {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::LayerConfig;
+    use crate::config::{LayerConfig, RateLimitConfig};
 
     #[test]
     fn rejects_unsupported_custom_layers_before_server_startup() {
@@ -216,5 +243,47 @@ mod tests {
         });
 
         assert!(MiddlewareStack::new(config).validate().is_err());
+    }
+
+    #[test]
+    fn rejects_rate_limits_that_could_disable_protection() {
+        for (max_requests, window_secs) in [(0, 60), (10, 0)] {
+            let mut config = MiddlewareConfig::default();
+            config.builtin.rate_limit = Some(RateLimitConfig {
+                max_requests,
+                window_secs,
+                key_by: "ip".to_string(),
+            });
+
+            assert!(MiddlewareStack::new(config).validate().is_err());
+        }
+    }
+
+    #[test]
+    fn rejects_unknown_rate_limit_key_selectors() {
+        for key_by in ["forwarded", "header:", "header:invalid header"] {
+            let mut config = MiddlewareConfig::default();
+            config.builtin.rate_limit = Some(RateLimitConfig {
+                max_requests: 10,
+                window_secs: 60,
+                key_by: key_by.to_string(),
+            });
+
+            assert!(MiddlewareStack::new(config).validate().is_err(), "{key_by}");
+        }
+    }
+
+    #[test]
+    fn accepts_ip_and_header_rate_limit_keys() {
+        for key_by in ["ip", "header:x-api-key"] {
+            let mut config = MiddlewareConfig::default();
+            config.builtin.rate_limit = Some(RateLimitConfig {
+                max_requests: 10,
+                window_secs: 60,
+                key_by: key_by.to_string(),
+            });
+
+            assert!(MiddlewareStack::new(config).validate().is_ok(), "{key_by}");
+        }
     }
 }

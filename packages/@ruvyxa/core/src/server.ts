@@ -132,8 +132,9 @@ class CacheStore {
   }
 
   set(key: string, entry: CacheEntry): void {
-    // Evict LRU entries if over capacity
-    while (this.#entries.size >= this.#maxEntries) {
+    // Updating an existing key does not increase the cache size. Evicting before
+    // that check would discard an unrelated LRU entry on every refresh at capacity.
+    while (!this.#entries.has(key) && this.#entries.size >= this.#maxEntries) {
       this.#evictOldest()
     }
 
@@ -262,23 +263,26 @@ export function cache(key: string): CacheBuilder {
       }
 
       // Stale hit with SWR: return stale value and refresh in background
-      if (cached && cached.staleUntil > now && !cached.refreshing) {
-        cached.refreshing = true
-        // Fire-and-forget background refresh
-        Promise.resolve()
-          .then(() => producer())
-          .then((value) => {
-            cacheStore.set(key, {
-              value,
-              expiresAt: Date.now() + ttlMs,
-              staleUntil: Date.now() + ttlMs + swrMs,
-              refreshing: false,
+      if (cached && cached.staleUntil > now) {
+        if (!cached.refreshing) {
+          cached.refreshing = true
+          // Fire-and-forget background refresh. All concurrent stale readers
+          // receive the stale value; only the first reader starts the refresh.
+          Promise.resolve()
+            .then(() => producer())
+            .then((value) => {
+              cacheStore.set(key, {
+                value,
+                expiresAt: Date.now() + ttlMs,
+                staleUntil: Date.now() + ttlMs + swrMs,
+                refreshing: false,
+              })
             })
-          })
-          .catch(() => {
-            // Producer failed during background refresh — keep serving stale
-            cached.refreshing = false
-          })
+            .catch(() => {
+              // Producer failed during background refresh — keep serving stale
+              cached.refreshing = false
+            })
+        }
         return cached.value as T
       }
 

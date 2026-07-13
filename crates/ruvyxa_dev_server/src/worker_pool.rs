@@ -72,8 +72,18 @@ pub enum WorkerRequest {
         method: String,
         #[serde(rename = "requestPath")]
         request_path: String,
+        /// Legacy collapsed headers, retained so older worker scripts can still
+        /// execute the request. New workers must prefer `headerPairs` below.
         headers: BTreeMap<String, String>,
+        /// Ordered request header values. An HTTP header name can occur more
+        /// than once, so a map would silently discard values at this boundary.
+        #[serde(rename = "headerPairs")]
+        header_pairs: Vec<(String, String)>,
         body: Option<String>,
+        /// Lossless request body transport for bytes that are not valid UTF-8.
+        /// The explicit field name is the NDJSON protocol tag for base64 data.
+        #[serde(rename = "bodyBase64", skip_serializing_if = "Option::is_none")]
+        body_base64: Option<String>,
         params: BTreeMap<String, String>,
     },
     #[serde(rename = "action")]
@@ -165,6 +175,9 @@ pub struct WorkerResponse {
     pub script: Option<String>,
     pub status: Option<u16>,
     pub headers: Option<BTreeMap<String, String>>,
+    /// Ordered response headers. Prefer this over `headers` so repeated
+    /// `Set-Cookie` values survive the Node-to-Rust boundary.
+    pub header_pairs: Option<Vec<(String, String)>>,
     pub body: Option<String>,
     pub code: Option<String>,
     pub message: Option<String>,
@@ -377,8 +390,8 @@ pub(crate) struct RenderApiRequest<'a> {
     pub route_file: &'a Path,
     pub method: &'a str,
     pub request_path: &'a str,
-    pub headers: &'a BTreeMap<String, String>,
-    pub body: Option<&'a str>,
+    pub headers: &'a [(String, String)],
+    pub body: Option<&'a [u8]>,
     pub params: &'a BTreeMap<String, String>,
 }
 
@@ -646,14 +659,22 @@ impl NodeWorkerPool {
     }
 
     pub(crate) async fn render_api(&self, api: RenderApiRequest<'_>) -> Result<WorkerResponse> {
+        let headers = api.headers.iter().cloned().collect::<BTreeMap<_, _>>();
+        let body_base64 = api.body.map(base64_encode);
         let request = WorkerRequest::Api {
             id: next_request_id(),
             project_root: api.project_root.display().to_string(),
             route_file: api.route_file.display().to_string(),
             method: api.method.to_string(),
             request_path: api.request_path.to_string(),
-            headers: api.headers.clone(),
-            body: api.body.map(str::to_string),
+            headers,
+            header_pairs: api.headers.to_vec(),
+            // Keep the legacy field for text-only workers. Binary data is sent
+            // exclusively through the explicitly tagged base64 field.
+            body: api
+                .body
+                .and_then(|body| std::str::from_utf8(body).ok().map(str::to_string)),
+            body_base64,
             params: api.params.clone(),
         };
         self.send(request).await
@@ -720,6 +741,29 @@ impl NodeWorkerPool {
     }
 }
 
+fn base64_encode(bytes: &[u8]) -> String {
+    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let first = chunk[0];
+        let second = *chunk.get(1).unwrap_or(&0);
+        let third = *chunk.get(2).unwrap_or(&0);
+        encoded.push(ALPHABET[(first >> 2) as usize] as char);
+        encoded.push(ALPHABET[(((first & 0b0000_0011) << 4) | (second >> 4)) as usize] as char);
+        encoded.push(if chunk.len() > 1 {
+            ALPHABET[(((second & 0b0000_1111) << 2) | (third >> 6)) as usize] as char
+        } else {
+            '='
+        });
+        encoded.push(if chunk.len() > 2 {
+            ALPHABET[(third & 0b0011_1111) as usize] as char
+        } else {
+            '='
+        });
+    }
+    encoded
+}
+
 fn find_worker_script(root: &Path) -> Option<PathBuf> {
     let cwd_script = std::env::current_dir()
         .ok()
@@ -739,6 +783,36 @@ fn find_worker_script(root: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn api_worker_request_serializes_lossless_body_and_header_pairs() {
+        let request = WorkerRequest::Api {
+            id: "test".to_string(),
+            project_root: "/project".to_string(),
+            route_file: "/project/app/api/upload/route.ts".to_string(),
+            method: "POST".to_string(),
+            request_path: "/api/upload".to_string(),
+            headers: BTreeMap::from([("x-repeat".to_string(), "second".to_string())]),
+            header_pairs: vec![
+                ("x-repeat".to_string(), "first".to_string()),
+                ("x-repeat".to_string(), "second".to_string()),
+            ],
+            body: None,
+            body_base64: Some(base64_encode(&[0, 255, 128, 13, 10])),
+            params: BTreeMap::new(),
+        };
+
+        let value = serde_json::to_value(request).unwrap();
+        assert_eq!(
+            value["headerPairs"][0],
+            serde_json::json!(["x-repeat", "first"])
+        );
+        assert_eq!(
+            value["headerPairs"][1],
+            serde_json::json!(["x-repeat", "second"])
+        );
+        assert_eq!(value["bodyBase64"], "AP+ADQo=");
+    }
 
     #[tokio::test]
     async fn pool_shutdown_closes_owned_node_workers() {

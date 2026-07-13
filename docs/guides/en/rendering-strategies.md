@@ -68,6 +68,9 @@ export default async function ProductPage() {
 }
 ```
 
+Cached output remains available while regeneration runs. Ruvyxa starts that background work only
+after the configured interval and coalesces concurrent requests for the same route into one refresh.
+
 ## PPR — Partial Pre-rendering
 
 Static shell with dynamic `Suspense` regions:

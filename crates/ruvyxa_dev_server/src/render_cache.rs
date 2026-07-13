@@ -124,6 +124,16 @@ impl RenderCache {
         None
     }
 
+    /// Return a cached value and its age without applying the cache TTL.
+    /// ISR deliberately serves stale output while it regenerates in the
+    /// background, so it cannot use the normal freshness-enforcing getters.
+    pub async fn get_stale_with_age(&self, key: &str) -> Option<(String, Duration)> {
+        let entries = self.entries.read().await;
+        let entry = entries.get(key)?;
+        self.hits.fetch_add(1, Ordering::Relaxed);
+        Some((entry.value.to_string(), entry.created_at.elapsed()))
+    }
+
     /// Insert a value into the cache, evicting the oldest entry if at capacity.
     pub async fn put(&self, key: String, value: String) {
         // A zero-sized cache is explicitly disabled. Without this guard, the
@@ -335,6 +345,22 @@ mod tests {
         // Small delay to ensure TTL elapses
         tokio::time::sleep(Duration::from_millis(10)).await;
         assert_eq!(cache.get("a").await, None);
+    }
+
+    #[tokio::test]
+    async fn stale_lookup_keeps_isr_content_available_after_ttl() {
+        let cache = RenderCache::new(1, 0);
+        cache.put("isr:/".into(), "stale".into()).await;
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        assert_eq!(
+            cache
+                .get_stale_with_age("isr:/")
+                .await
+                .map(|(value, _)| value),
+            Some("stale".to_string())
+        );
+        assert_eq!(cache.get("isr:/").await, None);
     }
 
     #[tokio::test]

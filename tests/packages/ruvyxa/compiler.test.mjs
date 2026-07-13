@@ -6,7 +6,13 @@ import path from 'node:path'
 import { describe, it } from 'node:test'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-import { compileBundle, toImportPath } from '../../../packages/ruvyxa/runtime/compiler.mjs'
+import {
+  clearCompilerCache,
+  compilerCacheStats,
+  compileBundle,
+  invalidateCompilerCache,
+  toImportPath,
+} from '../../../packages/ruvyxa/runtime/compiler.mjs'
 
 const workspaceRoot = path.resolve(fileURLToPath(new URL('../../..', import.meta.url)))
 const exampleRoot = path.join(workspaceRoot, 'examples/demo')
@@ -96,6 +102,53 @@ import Card from './Card.js'
 
       const mod = await import(pathToFileURL(outfile).href + `?t=${Date.now()}`)
       assert.equal(await mod.load(), 42)
+    })
+  })
+
+  it('recompiles a changed source after compiler-cache invalidation', async () => {
+    await withFixture(async ({ root, outDir }) => {
+      const pageFile = path.join(root, 'page.ts')
+      const outfile = path.join(outDir, 'cache-invalidation.mjs')
+      const compile = () =>
+        compileBundle({
+          projectRoot: root,
+          entrySource: `export { value } from ${JSON.stringify(toImportPath(pageFile))}`,
+          sourcefile: 'ruvyxa:cache-invalidation-entry.ts',
+          outfile,
+          platform: 'node',
+        })
+
+      await writeFile(pageFile, `export const value = 'first'\n`)
+      await compile()
+      await writeFile(pageFile, `export const value = 'other'\n`)
+      invalidateCompilerCache([pageFile])
+      await compile()
+
+      const mod = await import(pathToFileURL(outfile).href + `?t=${Date.now()}`)
+      assert.equal(mod.value, 'other')
+      clearCompilerCache()
+    })
+  })
+
+  it('bounds compiler derivation caches across many unique bundles', async () => {
+    await withFixture(async ({ root, outDir }) => {
+      const outfile = path.join(outDir, 'bounded-cache.mjs')
+      clearCompilerCache()
+      for (let index = 0; index < 513; index++) {
+        await compileBundle({
+          projectRoot: root,
+          entrySource: `export const value = ${index}\n`,
+          sourcefile: `ruvyxa:bounded-cache-${index}.ts`,
+          outfile,
+          platform: 'node',
+        })
+      }
+
+      const stats = compilerCacheStats()
+      assert.equal(stats.rewrites, stats.maxEntries)
+      assert.ok(stats.sources <= stats.maxEntries)
+      assert.ok(stats.content <= stats.maxEntries)
+      clearCompilerCache()
     })
   })
 
@@ -619,6 +672,30 @@ import Card from './Card.js'
       assert.match(
         legacyMiddlewareKey.parsed.message,
         /RUV1602 unknown config\.middleware\.builtin field: logging/,
+      )
+    })
+  })
+
+  it('rejects config values whose scalar types do not match the schema', async () => {
+    await withFixture(async ({ root }) => {
+      await writeFile(
+        path.join(root, 'ruvyxa.config.ts'),
+        `export default { server: { port: '3000' } }`,
+      )
+
+      const invalidNumber = await runJsonResult(configRenderer, [root], {})
+      assert.equal(invalidNumber.exitCode, 1)
+      assert.match(invalidNumber.parsed.message, /RUV1602 config\.server\.port must be number/)
+
+      await writeFile(
+        path.join(root, 'ruvyxa.config.ts'),
+        `export default { security: { trustedProxyIps: '127.0.0.1' } }`,
+      )
+      const invalidArray = await runJsonResult(configRenderer, [root], {})
+      assert.equal(invalidArray.exitCode, 1)
+      assert.match(
+        invalidArray.parsed.message,
+        /RUV1602 config\.security\.trustedProxyIps must be string\[\]/,
       )
     })
   })

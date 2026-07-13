@@ -45,4 +45,7 @@ export function GET() {
 
 Handler ที่ไม่รองรับ method จะตอบ 405 โดยอัตโนมัติ
 
+Ruvyxa ส่ง query string, bytes ของ request body และ header ที่ซ้ำกันไปยัง `Request` โดยไม่แปลง
+ข้อมูล binary เป็นข้อความ และ response จะคง header ซ้ำ เช่น `Set-Cookie` หลายค่าไว้ครบถ้วน
+
 ดูเพิ่มเติม: [Configuration](configuration.md)

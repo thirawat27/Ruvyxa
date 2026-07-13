@@ -8,11 +8,47 @@ import { fileURLToPath } from 'node:url'
 
 const JS_EXTENSIONS = ['', '.ts', '.tsx', '.js', '.jsx', '.mts', '.mjs', '.md', '.mdx']
 const ASSET_EXTENSIONS = new Set(['.css', '.scss', '.sass', '.less'])
+const COMPILER_CACHE_MAX_ENTRIES = 512
 const compilerCache = (globalThis.__RUVYXA_COMPILER_CACHE__ ??= {
   sources: new Map(),
   rewrites: new Map(),
   content: new Map(),
 })
+
+/**
+ * Drop compiler entries associated with changed files, or every entry when the
+ * caller cannot identify the change. Worker invalidation and memory-pressure
+ * handling call this before compiling another bundle.
+ */
+export function invalidateCompilerCache(paths) {
+  if (!paths || paths.length === 0) {
+    clearCompilerCache()
+    return
+  }
+
+  const normalizedPaths = new Set(paths.map((file) => path.resolve(file)))
+  for (const key of compilerCache.sources.keys()) {
+    if (normalizedPaths.has(key)) compilerCache.sources.delete(key)
+  }
+  // Rewrite keys embed module keys and dependency aliases, so selectively
+  // removing them is less reliable than rebuilding these bounded derivations.
+  compilerCache.rewrites.clear()
+}
+
+export function clearCompilerCache() {
+  compilerCache.sources.clear()
+  compilerCache.rewrites.clear()
+  compilerCache.content.clear()
+}
+
+export function compilerCacheStats() {
+  return {
+    sources: compilerCache.sources.size,
+    rewrites: compilerCache.rewrites.size,
+    content: compilerCache.content.size,
+    maxEntries: COMPILER_CACHE_MAX_ENTRIES,
+  }
+}
 
 export function collectLayouts(appDir, routeDir) {
   const layouts = []
@@ -475,7 +511,7 @@ function rewriteModule(module) {
       .filter(Boolean),
     reExportAll,
   }
-  compilerCache.rewrites.set(rewriteKey, result)
+  setBoundedCacheEntry(compilerCache.rewrites, rewriteKey, result)
   return result
 }
 
@@ -730,7 +766,7 @@ async function readSourceFile(file) {
     return cached.source
   }
   const source = await readFile(file, 'utf8')
-  compilerCache.sources.set(cacheKey, {
+  setBoundedCacheEntry(compilerCache.sources, cacheKey, {
     mtimeMs: stats.mtimeMs,
     size: stats.size,
     source,
@@ -773,8 +809,16 @@ async function compileContentSource(source, filePath) {
     .filter(Boolean)
     .join('\n')
   const output = `${compiled}\n${prefix}\n`
-  compilerCache.content.set(cacheKey, output)
+  setBoundedCacheEntry(compilerCache.content, cacheKey, output)
   return output
+}
+
+function setBoundedCacheEntry(cache, key, value) {
+  cache.delete(key)
+  cache.set(key, value)
+  while (cache.size > COMPILER_CACHE_MAX_ENTRIES) {
+    cache.delete(cache.keys().next().value)
+  }
 }
 
 function contentExport(compiled, name, value) {

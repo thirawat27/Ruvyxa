@@ -112,12 +112,16 @@ fn bundle_with_parts(
     let split_dynamic_imports =
         input.target == BundleTarget::Client && input.options.emit_chunk_manifest;
     let dynamic_import_files = if split_dynamic_imports {
-        plan_dynamic_chunk_files(&compiled)
+        plan_dynamic_chunk_files(&compiled, &PathBuf::from(&entry_label))
     } else {
         Default::default()
     };
     let linked_modules = if split_dynamic_imports {
-        static_entry_modules(&compiled, &PathBuf::from(&entry_label))
+        static_entry_modules(
+            &compiled,
+            &PathBuf::from(&entry_label),
+            &dynamic_import_files,
+        )
     } else {
         compiled.clone()
     };
@@ -405,6 +409,40 @@ mod tests {
         )));
         assert!(!out.code.contains("const label = \"Lazy\";"));
         assert!(out.chunks[0].code.contains("const label = \"Lazy\";"));
+    }
+
+    #[test]
+    fn keeps_overlapping_dynamic_closures_in_the_entry_bundle() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let app = root.join("app");
+        fs::create_dir_all(&app).unwrap();
+
+        let page = app.join("page.tsx");
+        fs::write(
+            &page,
+            "import { singleton } from './shared'; export default async function Page() { return <main>{singleton + (await import('./lazy')).label}</main>; }",
+        )
+        .unwrap();
+        fs::write(
+            app.join("shared.ts"),
+            "export const singleton = globalThis.__ruvyxa_shared = (globalThis.__ruvyxa_shared || 0) + 1;",
+        )
+        .unwrap();
+        fs::write(
+            app.join("lazy.ts"),
+            "import { singleton } from './shared'; export const label = singleton;",
+        )
+        .unwrap();
+
+        let out = bundle(client_input(&root, &app, page, vec![], "/")).unwrap();
+        assert!(out.chunks.is_empty());
+        assert_eq!(
+            out.code.matches("__ruvyxa_shared").count(),
+            2,
+            "{}",
+            out.code
+        );
     }
 
     #[test]

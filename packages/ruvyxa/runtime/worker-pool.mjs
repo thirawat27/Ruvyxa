@@ -27,10 +27,16 @@ import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { createInterface } from 'node:readline'
 
-import { compileBundleWithMetadata, runtimeAliases, toImportPath } from './compiler.mjs'
+import {
+  clearCompilerCache,
+  compileBundleWithMetadata,
+  invalidateCompilerCache,
+  runtimeAliases,
+  toImportPath,
+} from './compiler.mjs'
 
 // --- Configuration ---
-const MAX_BUNDLE_CACHE_ENTRIES = parseInt(process.env.RUVYXA_CACHE_MAX_ENTRIES || '256', 10)
+const MAX_BUNDLE_CACHE_ENTRIES = positiveIntegerEnv('RUVYXA_CACHE_MAX_ENTRIES', 256)
 const WORKER_REQUEST_TIMEOUT_MS = parseInt(process.env.RUVYXA_WORKER_TIMEOUT_MS || '30000', 10)
 const MEMORY_PRESSURE_THRESHOLD_MB = parseInt(process.env.RUVYXA_MEMORY_LIMIT_MB || '512', 10)
 const runtimeDir = path.dirname(fileURLToPath(import.meta.url))
@@ -141,6 +147,7 @@ const memoryCheckInterval = setInterval(() => {
       deleteBundleCacheEntry(value)
     }
     moduleCache.clear()
+    clearCompilerCache()
   }
 }, 30_000)
 memoryCheckInterval.unref()
@@ -402,7 +409,9 @@ async function handleApi(request) {
     requestPath,
     params,
     headers: requestHeaders = {},
+    headerPairs,
     body: requestBody,
+    bodyBase64,
   } = request
 
   const resolvedRoot = path.resolve(projectRoot || process.cwd())
@@ -420,17 +429,38 @@ async function handleApi(request) {
   }
 
   const upperMethod = method.toUpperCase()
-  const requestInit = { method: upperMethod, headers: requestHeaders }
-  if (requestBody != null && upperMethod !== 'GET' && upperMethod !== 'HEAD') {
-    requestInit.body = requestBody
+  const requestInit = {
+    method: upperMethod,
+    // headerPairs preserves duplicate values; retain the object fallback for
+    // older Rust workers that only send the legacy headers field.
+    headers: Array.isArray(headerPairs) ? headerPairs : requestHeaders,
+  }
+  if (upperMethod !== 'GET' && upperMethod !== 'HEAD') {
+    if (typeof bodyBase64 === 'string') {
+      requestInit.body = Buffer.from(bodyBase64, 'base64')
+    } else if (requestBody != null) {
+      requestInit.body = requestBody
+    }
   }
   const req = new Request(`http://localhost${requestPath}`, requestInit)
   const result = await handler({ request: req, params: params || {} })
   const response = normalizeResponse(result)
   const body = await response.text()
-  const headers = Object.fromEntries(response.headers.entries())
+  const headerPairsResult = responseHeaderPairs(response)
+  const headers = Object.fromEntries(headerPairsResult)
 
-  return { ok: true, status: response.status, headers, body }
+  return { ok: true, status: response.status, headers, headerPairs: headerPairsResult, body }
+}
+
+function responseHeaderPairs(response) {
+  const headerPairs = []
+  for (const [name, value] of response.headers.entries()) {
+    if (name !== 'set-cookie') headerPairs.push([name, value])
+  }
+  for (const value of response.headers.getSetCookie()) {
+    headerPairs.push(['set-cookie', value])
+  }
+  return headerPairs
 }
 
 // --- Action Handler ---
@@ -493,6 +523,7 @@ async function handleClient(request) {
 
 // --- Bundle Cache Invalidation ---
 function invalidateBundleCache(paths) {
+  invalidateCompilerCache(paths)
   if (!paths || paths.length === 0) {
     const invalidated = bundleCache.size
     bundleCache.clear()
@@ -515,6 +546,11 @@ function invalidateBundleCache(paths) {
     }
   }
   return { invalidated }
+}
+
+function positiveIntegerEnv(name, fallback) {
+  const value = Number.parseInt(process.env[name] ?? '', 10)
+  return Number.isSafeInteger(value) && value > 0 ? value : fallback
 }
 
 function normalizeAbsolutePath(file) {

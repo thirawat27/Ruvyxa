@@ -385,8 +385,10 @@ pub struct RateLimitLayer {
 impl RateLimitLayer {
     pub fn from_config(config: &RateLimitConfig) -> Self {
         Self {
-            max_requests: config.max_requests,
-            window: Duration::from_secs(config.window_secs),
+            // MiddlewareStack rejects zero values at startup. Keep this public
+            // constructor safe for direct Tower users that bypass that stack.
+            max_requests: config.max_requests.max(1),
+            window: Duration::from_secs(config.window_secs.max(1)),
             state: Arc::new(Mutex::new(BTreeMap::new())),
         }
     }
@@ -413,9 +415,21 @@ impl RateLimitLayer {
     fn allow(&self, key: &str) -> bool {
         let mut state = self.state.lock().expect("rate limiter mutex poisoned");
         let now = Instant::now();
-        state.retain(|_, bucket| now.duration_since(bucket.last_refill) < self.window);
+        let expired_current_key = state
+            .get(key)
+            .is_some_and(|bucket| now.duration_since(bucket.last_refill) >= self.window);
+        if expired_current_key {
+            state.remove(key);
+        }
+
         if !state.contains_key(key) && state.len() >= MAX_TRACKED_RATE_LIMIT_KEYS {
-            return false;
+            // The ordinary path only examines the current key. A full sweep is
+            // reserved for capacity pressure so high-cardinality traffic cannot
+            // make every request scan the whole map while holding this mutex.
+            state.retain(|_, bucket| now.duration_since(bucket.last_refill) < self.window);
+            if state.len() >= MAX_TRACKED_RATE_LIMIT_KEYS {
+                return false;
+            }
         }
         let bucket = state.entry(key.to_string()).or_insert(RateBucket {
             tokens: self.max_requests,
@@ -548,5 +562,44 @@ mod tests {
             RateLimitLayer::extract_key(&request, "header:x-forwarded-for"),
             "203.0.113.8"
         );
+    }
+
+    #[test]
+    fn evicts_expired_buckets_only_when_capacity_is_reached() {
+        let limiter = RateLimitLayer::from_config(&RateLimitConfig {
+            max_requests: 1,
+            window_secs: 1,
+            key_by: "ip".to_string(),
+        });
+        let expired = Instant::now() - Duration::from_secs(2);
+        {
+            let mut state = limiter.state.lock().unwrap();
+            for index in 0..MAX_TRACKED_RATE_LIMIT_KEYS {
+                state.insert(
+                    format!("expired-{index}"),
+                    RateBucket {
+                        tokens: 0,
+                        last_refill: expired,
+                    },
+                );
+            }
+        }
+
+        assert!(limiter.allow("new-client"));
+        let state = limiter.state.lock().unwrap();
+        assert_eq!(state.len(), 1);
+        assert!(state.contains_key("new-client"));
+    }
+
+    #[test]
+    fn direct_layer_construction_does_not_disable_limits_for_zero_values() {
+        let limiter = RateLimitLayer::from_config(&RateLimitConfig {
+            max_requests: 0,
+            window_secs: 0,
+            key_by: "ip".to_string(),
+        });
+
+        assert!(limiter.allow("client"));
+        assert!(!limiter.allow("client"));
     }
 }

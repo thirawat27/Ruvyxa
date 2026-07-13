@@ -241,6 +241,9 @@ fn tsconfig_fingerprint(project_root: &Path) -> TsConfigFingerprint {
 /// A parsed subset of `tsconfig.json` relevant to module resolution.
 #[derive(Debug, Clone, Default)]
 pub struct TsConfigPaths {
+    /// Directory containing tsconfig.json. `paths` targets are resolved from
+    /// `baseUrl` when present, otherwise from this directory.
+    pub config_dir: PathBuf,
     /// Base URL for non-relative imports (usually the project root or `src/`).
     pub base_url: Option<PathBuf>,
     /// Path alias mappings, e.g. `"@/*" → ["./src/*"]`.
@@ -292,10 +295,14 @@ impl TsConfigPaths {
                     let target_without_star = target.trim_end_matches('*');
                     let candidate_str = format!("{target_without_star}{suffix}");
 
-                    let candidate = if let Some(base) = &self.base_url {
-                        base.join(&candidate_str)
+                    let target = Path::new(&candidate_str);
+                    let candidate = if target.is_absolute() {
+                        target.to_path_buf()
                     } else {
-                        PathBuf::from(&candidate_str)
+                        self.base_url
+                            .as_ref()
+                            .unwrap_or(&self.config_dir)
+                            .join(target)
                     };
 
                     if let Some(resolved) = resolve_file_candidate(&candidate) {
@@ -351,21 +358,18 @@ fn parse_tsconfig_paths(content: &str, project_root: &Path) -> Option<TsConfigPa
                 let target_strs: Vec<String> = arr
                     .iter()
                     .filter_map(|v| v.as_str())
-                    .map(|s| {
-                        // Resolve relative to the tsconfig location (project_root).
-                        if s.starts_with("./") || s.starts_with("../") {
-                            project_root.join(s).to_string_lossy().replace('\\', "/")
-                        } else {
-                            s.to_string()
-                        }
-                    })
+                    .map(ToString::to_string)
                     .collect();
                 paths.push((pattern.clone(), target_strs));
             }
         }
     }
 
-    Some(TsConfigPaths { base_url, paths })
+    Some(TsConfigPaths {
+        config_dir: project_root.to_path_buf(),
+        base_url,
+        paths,
+    })
 }
 
 /// Strip `//` line comments from a JSON string so `serde_json` can parse it.
@@ -1169,6 +1173,37 @@ export default function Card() { return <div className={cn("card")} /> }"#,
             resolved_path.to_string_lossy().contains("Button"),
             "resolved path should point to Button: {}",
             resolved_path.display()
+        );
+    }
+
+    #[test]
+    fn tsconfig_paths_resolve_targets_relative_to_base_url() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let components = root.join("src/components");
+        fs::create_dir_all(&components).unwrap();
+        fs::write(
+            components.join("Button.tsx"),
+            "export default function Button() {}",
+        )
+        .unwrap();
+
+        let tsconfig = serde_json::json!({
+            "compilerOptions": {
+                "baseUrl": "src",
+                "paths": { "@/*": ["./components/*"] }
+            }
+        });
+        fs::write(
+            root.join("tsconfig.json"),
+            serde_json::to_string(&tsconfig).unwrap(),
+        )
+        .unwrap();
+
+        let resolved = TsConfigPaths::load(root).resolve("@/Button");
+        assert_eq!(
+            resolved,
+            Some(components.join("Button.tsx").canonicalize().unwrap())
         );
     }
 

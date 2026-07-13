@@ -61,6 +61,9 @@ use wasmtime_wasi::p1::WasiP1Ctx;
 
 use crate::config::{PluginConfig, PluginPermissions, PluginPhase};
 
+const PLUGIN_RESULT_READ_CHUNK_BYTES: usize = 4 * 1024;
+const MAX_PLUGIN_RESULT_BYTES: usize = 1024 * 1024;
+
 /// Represents an HTTP request passed to/from a Wasm plugin.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PluginRequest {
@@ -429,23 +432,129 @@ impl WasmPluginRuntime {
             .call(&mut *store, (input_ptr, input_bytes.len() as i32))
             .map_err(|e| format!("Plugin function '{func_name}' trapped: {e}"))?;
 
-        let mut result_buf = vec![0u8; 4096];
-        memory
-            .read(&*store, result_ptr as usize, &mut result_buf)
-            .map_err(|e| format!("Failed to read plugin result: {e}"))?;
-
-        let result_str = String::from_utf8_lossy(
-            &result_buf[..result_buf
-                .iter()
-                .position(|&b| b == 0)
-                .unwrap_or(result_buf.len())],
-        )
-        .to_string();
+        let result_str = Self::read_nul_terminated_result(store, &memory, result_ptr)?;
 
         if result_str.is_empty() {
             Ok(serde_json::to_string(&PluginResult::default()).unwrap())
         } else {
             Ok(result_str)
         }
+    }
+
+    /// Read the legacy pointer-based result ABI without assuming a fixed result
+    /// size. Results must be NUL-terminated UTF-8 JSON and stay within a
+    /// bounded size so a plugin cannot force an unbounded host allocation.
+    fn read_nul_terminated_result(
+        store: &Store<PluginStore>,
+        memory: &Memory,
+        result_ptr: i32,
+    ) -> std::result::Result<String, String> {
+        let result_start = usize::try_from(result_ptr)
+            .map_err(|_| "Plugin returned a negative result pointer".to_string())?;
+        let memory_len = memory.data_size(store);
+        if result_start >= memory_len {
+            return Err(format!(
+                "Plugin result pointer {result_start} is outside its {} byte memory",
+                memory_len
+            ));
+        }
+
+        let readable_len = memory_len - result_start;
+        // Read one extra byte so a result exactly at the safety limit can still
+        // provide its required NUL terminator.
+        let max_read_len = readable_len.min(MAX_PLUGIN_RESULT_BYTES + 1);
+        let mut result = Vec::with_capacity(max_read_len.min(PLUGIN_RESULT_READ_CHUNK_BYTES));
+        let mut offset = 0;
+
+        while offset < max_read_len {
+            let chunk_len = (max_read_len - offset).min(PLUGIN_RESULT_READ_CHUNK_BYTES);
+            let mut chunk = vec![0u8; chunk_len];
+            memory
+                .read(store, result_start + offset, &mut chunk)
+                .map_err(|e| format!("Failed to read plugin result: {e}"))?;
+
+            if let Some(nul_index) = chunk.iter().position(|&byte| byte == 0) {
+                result.extend_from_slice(&chunk[..nul_index]);
+                return String::from_utf8(result)
+                    .map_err(|_| "Plugin result is not valid UTF-8".to_string());
+            }
+
+            result.extend_from_slice(&chunk);
+            offset += chunk_len;
+        }
+
+        if readable_len > MAX_PLUGIN_RESULT_BYTES {
+            Err(format!(
+                "Plugin result exceeds the {} byte safety limit",
+                MAX_PLUGIN_RESULT_BYTES
+            ))
+        } else {
+            Err("Plugin result is not NUL-terminated before the end of plugin memory".to_string())
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn test_permissions() -> PluginPermissions {
+        PluginPermissions {
+            env: Vec::new(),
+            fs_read: Vec::new(),
+            net: Vec::new(),
+            timeout_ms: 5_000,
+            max_memory_bytes: 64 * 1024,
+        }
+    }
+
+    #[test]
+    fn reads_plugin_results_larger_than_the_legacy_four_kib_limit() {
+        let engine = Engine::default();
+        let padding = "a".repeat(5_000);
+        let expected = format!(
+            r#"{{"action":"continue","request":null,"response":null,"padding":"{padding}"}}"#
+        );
+        let encoded = expected.replace('"', "\\22");
+        let wasm = format!(
+            r#"(module
+                (memory (export "memory") 1)
+                (data (i32.const 8192) "{encoded}\00")
+                (func (export "on_request") (param i32 i32) (result i32)
+                    i32.const 8192))"#
+        );
+        let module = Module::new(&engine, wasm).unwrap();
+        let mut store = WasmPluginRuntime::create_store(&engine, &test_permissions()).unwrap();
+        let instance = WasmPluginRuntime::instantiate(&engine, &mut store, &module).unwrap();
+
+        let actual =
+            WasmPluginRuntime::call_plugin_func(&mut store, &instance, "on_request", "{}", "{}")
+                .unwrap();
+
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn rejects_unterminated_plugin_results_instead_of_silently_truncating_them() {
+        let engine = Engine::default();
+        let wasm = r#"(module
+            (memory (export "memory") 1)
+            (func (export "on_request") (param i32 i32) (result i32)
+                i32.const 8192))"#;
+        let module = Module::new(&engine, wasm).unwrap();
+        let mut store = WasmPluginRuntime::create_store(&engine, &test_permissions()).unwrap();
+        let instance = WasmPluginRuntime::instantiate(&engine, &mut store, &module).unwrap();
+        let memory = instance.get_memory(&mut store, "memory").unwrap();
+        let result_start = 8192;
+        let result_len = memory.data_size(&store) - result_start;
+        memory
+            .write(&mut store, result_start, &vec![b'a'; result_len])
+            .unwrap();
+
+        let error =
+            WasmPluginRuntime::call_plugin_func(&mut store, &instance, "on_request", "{}", "{}")
+                .unwrap_err();
+
+        assert!(error.contains("not NUL-terminated"));
     }
 }

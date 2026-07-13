@@ -61,6 +61,22 @@ The later Full Mode pass also applies the following root-cause repairs:
 - Built-in IP rate limiting uses the transport peer by default. A header-based key remains an
   explicit middleware configuration choice.
 
+The completed follow-up repair pass also closes the remaining confirmed findings:
+
+- API worker IPC now preserves query strings, binary request bodies, ordered duplicate headers, and
+  repeated `Set-Cookie` response values while retaining legacy fields for installed runtimes.
+- ISR uses the route's `revalidate` interval, serves stale content during a coalesced refresh, and
+  refuses unsafe prerender paths before joining them to the prerender directory.
+- Built-in middleware rate limiting avoids a full bucket sweep on each request; invalid rate
+  limits/selectors fail validation. Wasm plugin output keeps its existing ABI, supports results
+  above 4 KiB, and has a bounded 1 MiB decode limit.
+- Bundling and graph analysis now preserve exactly-once evaluation for overlapping dynamic chunks,
+  resolve `baseUrl` path targets correctly, inspect local imports/layouts before implicit SSG, and
+  validate literal dynamic import/require edges without rewriting comments or strings.
+- Core/runtime caches preserve full-cache refreshes, serve stale values consistently to concurrent
+  readers, bound compiler derivation caches, invalidate them on worker changes, and reject invalid
+  scalar configuration values instead of silently dropping them.
+
 ## Validation
 
 - `cargo test --workspace --locked`: passed (279 Rust tests).
@@ -77,6 +93,10 @@ The later Full Mode pass also applies the following root-cause repairs:
   parity), `pnpm -r test`, `pnpm format:check`,
   `cargo run -p ruvyxa_cli -- check --root examples/demo`, and
   `cargo run -p ruvyxa_cli -- test:parity --root examples/demo` passed.
+- Follow-up repair validation: `cargo test --workspace --locked` (299 Rust tests),
+  `cargo clippy --workspace --locked -- -D warnings`, `pnpm -r build`, `pnpm -r check`,
+  `pnpm -r test` (including 38 `ruvyxa` tests), `pnpm format:check`, `pnpm release:validate`,
+  `pnpm pack:smoke`, and the direct 16-route demo check/parity commands passed on Windows x64.
 
 ## Risks and Unknowns
 

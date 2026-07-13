@@ -120,6 +120,29 @@ describe('cache', () => {
     assert.equal(stats.maxEntries, 1024)
   })
 
+  it('does not evict an unrelated entry when refreshing a full cache', async () => {
+    for (let index = 0; index < 1024; index++) {
+      await cache(`capacity:${index}`)
+        .ttl('10s')
+        .get(() => index)
+    }
+
+    await cache('capacity:0')
+      .ttl('10s')
+      .get(() => 'refreshed')
+
+    let producerCalls = 0
+    const retained = await cache('capacity:1')
+      .ttl('10s')
+      .get(() => {
+        producerCalls++
+        return 'unexpected'
+      })
+    assert.equal(retained, 1)
+    assert.equal(producerCalls, 0)
+    assert.equal(cacheStats().size, 1024)
+  })
+
   it('returns stale value when producer fails and stale data exists', async () => {
     await cache('fragile')
       .ttl('1ms')
@@ -134,6 +157,39 @@ describe('cache', () => {
         throw new Error('oops')
       })
     assert.equal(result, 'good')
+  })
+
+  it('serves stale data to concurrent readers while one refresh runs', async () => {
+    await cache('swr-concurrent')
+      .ttl('1ms')
+      .swr('1s')
+      .get(() => 'stale')
+    await new Promise((resolve) => setTimeout(resolve, 5))
+
+    let refreshCalls = 0
+    let resolveRefresh: (value: string) => void = () => {}
+    const refresh = new Promise<string>((resolve) => {
+      resolveRefresh = resolve
+    })
+    const producer = () => {
+      refreshCalls++
+      return refresh
+    }
+
+    const first = await cache('swr-concurrent').ttl('1ms').swr('1s').get(producer)
+    await Promise.resolve()
+    const second = await cache('swr-concurrent')
+      .ttl('1ms')
+      .swr('1s')
+      .get(() => {
+        refreshCalls++
+        return 'unexpected'
+      })
+
+    assert.equal(first, 'stale')
+    assert.equal(second, 'stale')
+    assert.equal(refreshCalls, 1)
+    resolveRefresh('fresh')
   })
 
   it('throws when producer fails and no stale data exists', async () => {

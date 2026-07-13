@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs;
 use std::future::IntoFuture;
 use std::io::{ErrorKind, IsTerminal};
@@ -176,6 +176,7 @@ struct AppState {
     action_limiter: Arc<Mutex<ActionRateLimiter>>,
     worker_pool: Arc<NodeWorkerPool>,
     render_cache: Arc<RenderCache>,
+    isr_revalidating: Arc<tokio::sync::Mutex<HashSet<String>>>,
     hmr_tracker: Arc<HmrTracker>,
     plugin_runtime: Option<Arc<WasmPluginRuntime>>,
 }
@@ -332,6 +333,7 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
         ))),
         worker_pool: worker_pool.clone(),
         render_cache,
+        isr_revalidating: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
         hmr_tracker,
         plugin_runtime,
     };
@@ -1076,10 +1078,17 @@ async fn handle_request(
     let mut headers = parts.headers;
     let mut method = parts.method.as_str().to_string();
     let mut request_path = parts.uri.path().to_string();
+    // Routing and static-file lookup must use only the path, while an API handler's
+    // standard Request must retain the original query string.
+    let mut request_target = parts
+        .uri
+        .path_and_query()
+        .map(|target| target.as_str().to_string())
+        .unwrap_or_else(|| request_path.clone());
     let mut request_body = if request_method_allows_body(&method) {
         match to_bytes(body, state.config.api_body_limit_bytes).await {
             Ok(bytes) if bytes.is_empty() => None,
-            Ok(bytes) => Some(String::from_utf8_lossy(&bytes).into_owned()),
+            Ok(bytes) => Some(bytes.to_vec()),
             Err(error) => {
                 return with_security_headers(
                     (
@@ -1100,18 +1109,22 @@ async fn handle_request(
         method: method.clone(),
         path: request_path.clone(),
         headers: headers_to_plugin_pairs(&headers),
-        body: request_body.as_ref().map(|body| body.as_bytes().to_vec()),
+        body: request_body.clone(),
     };
     match apply_request_plugins(&state, &mut plugin_request).await {
         Ok(Some(response)) => return response,
         Ok(None) => {
+            let path_was_modified = plugin_request.path != request_path;
             method = plugin_request.method.clone();
             request_path = plugin_request.path.clone();
+            if path_was_modified {
+                // Middleware plugins operate on a path, not a URI target. Once a
+                // plugin supplies a replacement path, retaining the old query
+                // string would attach it to the wrong resource.
+                request_target = request_path.clone();
+            }
             headers = plugin_headers(&plugin_request.headers);
-            request_body = plugin_request
-                .body
-                .as_deref()
-                .map(|body| String::from_utf8_lossy(body).into_owned());
+            request_body = plugin_request.body.clone();
         }
         Err(error) => {
             return with_security_headers(
@@ -1127,6 +1140,7 @@ async fn handle_request(
     let render_result = render_request_pooled(
         &state,
         &request_path,
+        &request_target,
         &method,
         &headers,
         request_body.as_deref(),
@@ -1330,7 +1344,7 @@ fn status_text(status: StatusCode) -> String {
     paint(status.as_u16().to_string(), color)
 }
 
-fn worker_request_headers(headers: &HeaderMap) -> BTreeMap<String, String> {
+fn worker_request_headers(headers: &HeaderMap) -> Vec<(String, String)> {
     headers
         .iter()
         .filter_map(|(name, value)| {
@@ -1443,9 +1457,10 @@ fn serve_client_file_sync(client_dir: &Path, request_path: &str) -> Result<Optio
 async fn render_request_pooled(
     state: &AppState,
     request_path: &str,
+    request_target: &str,
     method: &str,
     request_headers: &HeaderMap,
-    request_body: Option<&str>,
+    request_body: Option<&[u8]>,
 ) -> Result<Response> {
     if let Some(client_response) = serve_client_file(
         &state.config.client_dir,
@@ -1496,7 +1511,7 @@ async fn render_request_pooled(
             render_api_pooled(
                 state,
                 route_match.route,
-                request_path,
+                request_target,
                 method,
                 &headers,
                 request_body,
@@ -1602,10 +1617,14 @@ async fn render_page_isr(
 ) -> Result<String> {
     let cache_key = format!("isr:{}", render_cache::ssr_cache_key(request_path, params));
 
-    // Try to serve stale content immediately (from cache or prerendered file)
-    if let Some(cached) = state.render_cache.get(&cache_key).await {
-        // Trigger background revalidation
-        spawn_isr_revalidation(state, route, request_path, params, styles, &cache_key);
+    let revalidate_after = Duration::from_secs(route.render.revalidate.unwrap_or(60));
+
+    // Serve stale content immediately. Only revalidate after the route's
+    // configured interval, and coalesce concurrent requests for the same key.
+    if let Some((cached, age)) = state.render_cache.get_stale_with_age(&cache_key).await {
+        if age >= revalidate_after {
+            spawn_isr_revalidation(state, route, request_path, params, styles, &cache_key);
+        }
         return Ok(cached);
     }
 
@@ -1613,12 +1632,12 @@ async fn render_page_isr(
     if !state.config.watch
         && let Some(html) = serve_prerendered_html(&state.config.prerender_dir, request_path)
     {
-        // Store in cache and schedule revalidation
+        // Store in cache. The first background revalidation waits until the
+        // route's declared interval instead of firing once per request.
         state
             .render_cache
             .put(cache_key.clone(), html.clone())
             .await;
-        spawn_isr_revalidation(state, route, request_path, params, styles, &cache_key);
         return Ok(html);
     }
 
@@ -1683,12 +1702,21 @@ fn spawn_isr_revalidation(
     styles: &str,
     cache_key: &str,
 ) {
+    let Ok(mut in_flight) = state.isr_revalidating.try_lock() else {
+        return;
+    };
+    if !in_flight.insert(cache_key.to_string()) {
+        return;
+    }
+    drop(in_flight);
+
     let revalidate_state = state.clone();
     let revalidate_route = route.clone();
     let revalidate_path = request_path.to_string();
     let revalidate_params = params.clone();
     let revalidate_styles = styles.to_string();
     let revalidate_key = cache_key.to_string();
+    let revalidating = state.isr_revalidating.clone();
 
     tokio::spawn(async move {
         if let Ok(html) = render_isr_background(
@@ -1702,9 +1730,10 @@ fn spawn_isr_revalidation(
         {
             revalidate_state
                 .render_cache
-                .put(revalidate_key, html)
+                .put(revalidate_key.clone(), html)
                 .await;
         }
+        revalidating.lock().await.remove(&revalidate_key);
     });
 }
 
@@ -1712,6 +1741,9 @@ fn spawn_isr_revalidation(
 /// Returns `Some(html)` if the file exists, `None` otherwise.
 fn serve_prerendered_html(prerender_dir: &Path, request_path: &str) -> Option<String> {
     let sanitized = request_path.trim_start_matches('/');
+    if !sanitized.is_empty() && !is_safe_relative_path(sanitized) {
+        return None;
+    }
     let html_path = if sanitized.is_empty() {
         prerender_dir.join("index.html")
     } else {
@@ -1928,8 +1960,8 @@ async fn render_api_pooled(
     route: &RouteEntry,
     request_path: &str,
     method: &str,
-    headers: &BTreeMap<String, String>,
-    body: Option<&str>,
+    headers: &[(String, String)],
+    body: Option<&[u8]>,
     params: &BTreeMap<String, String>,
 ) -> Result<Response> {
     let response = state
@@ -1968,7 +2000,11 @@ async fn render_api_pooled(
     let body = response.body.unwrap_or_default();
     let mut http_response = (status, body).into_response();
 
-    if let Some(headers) = response.headers {
+    if let Some(headers) = response.header_pairs.or_else(|| {
+        response
+            .headers
+            .map(|headers| headers.into_iter().collect::<Vec<_>>())
+    }) {
         for (name, value) in headers {
             let Ok(name) = HeaderName::from_bytes(name.as_bytes()) else {
                 continue;
@@ -1976,7 +2012,7 @@ async fn render_api_pooled(
             let Ok(value) = HeaderValue::from_str(&value) else {
                 continue;
             };
-            http_response.headers_mut().insert(name, value);
+            http_response.headers_mut().append(name, value);
         }
     }
 
@@ -3893,6 +3929,19 @@ mod tests {
         assert!(!is_safe_relative_path(""));
         assert!(!is_safe_relative_path("../secret.txt"));
         assert!(!is_safe_relative_path("images\\logo.png"));
+    }
+
+    #[test]
+    fn prerendered_html_rejects_path_traversal() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(temp.path().join("index.html"), "safe").unwrap();
+        fs::write(temp.path().parent().unwrap().join("secret.html"), "secret").unwrap();
+
+        assert_eq!(
+            serve_prerendered_html(temp.path(), "/"),
+            Some("safe".to_string())
+        );
+        assert_eq!(serve_prerendered_html(temp.path(), "/../secret.html"), None);
     }
 
     #[test]

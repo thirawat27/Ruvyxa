@@ -395,6 +395,7 @@ fn rewrite_module_into(
     drop_external_imports: bool,
 ) -> Result<()> {
     let mut pending_exports = Vec::new();
+    let mut in_block_comment = false;
 
     for line in source.lines() {
         let trimmed = line.trim();
@@ -415,7 +416,8 @@ fn rewrite_module_into(
             None => line,
         };
 
-        let dynamic_rewritten = rewrite_dynamic_imports(content, deps, dynamic_import_files);
+        let dynamic_rewritten =
+            rewrite_dynamic_imports(content, deps, dynamic_import_files, &mut in_block_comment);
         let commonjs_rewritten = rewrite_commonjs_requires(&dynamic_rewritten, deps);
         write_rewritten_line(out, &commonjs_rewritten, indent);
     }
@@ -465,23 +467,60 @@ fn rewrite_dynamic_imports(
     line: &str,
     deps: &[PathBuf],
     dynamic_import_files: &BTreeMap<PathBuf, String>,
+    in_block_comment: &mut bool,
 ) -> String {
     let mut out = String::with_capacity(line.len());
-    let mut search_start = 0;
-    let marker = "import(";
+    let bytes = line.as_bytes();
+    let mut index = 0;
 
-    while let Some(relative_index) = line[search_start..].find(marker) {
-        let marker_start = search_start + relative_index;
-        let value_start = marker_start + marker.len();
-        out.push_str(&line[search_start..marker_start]);
-
-        let Some((specifier, consumed)) = quoted_value_with_len(&line[value_start..]) else {
-            out.push_str(marker);
-            search_start = value_start;
+    while index < bytes.len() {
+        if *in_block_comment {
+            if bytes[index..].starts_with(b"*/") {
+                out.push_str("*/");
+                index += 2;
+                *in_block_comment = false;
+            } else {
+                push_next_char(line, &mut out, &mut index);
+            }
             continue;
-        };
+        }
 
-        if let Some(dep_path) = find_dep_for_specifier(&specifier, deps) {
+        if bytes[index..].starts_with(b"//") {
+            out.push_str(&line[index..]);
+            break;
+        }
+        if bytes[index..].starts_with(b"/*") {
+            out.push_str("/*");
+            index += 2;
+            *in_block_comment = true;
+            continue;
+        }
+        if matches!(bytes[index], b'\'' | b'\"' | b'`') {
+            let quote = bytes[index];
+            let start = index;
+            index += 1;
+            while index < bytes.len() {
+                if bytes[index] == b'\\' {
+                    index += 1;
+                    if index < bytes.len() {
+                        advance_char(line, &mut index);
+                    }
+                } else if bytes[index] == quote {
+                    index += 1;
+                    break;
+                } else {
+                    advance_char(line, &mut index);
+                }
+            }
+            out.push_str(&line[start..index]);
+            continue;
+        }
+
+        if bytes[index..].starts_with(b"import")
+            && is_import_boundary(bytes, index)
+            && let Some((specifier, after_call)) = dynamic_import_call(line, index + "import".len())
+            && let Some(dep_path) = find_dep_for_specifier(&specifier, deps)
+        {
             if let Some(file_name) = dynamic_import_files.get(dep_path) {
                 // Chunks export their original module namespace as the default export, keeping
                 // `await import()` observably equivalent to the inline linker path.
@@ -493,21 +532,59 @@ fn rewrite_dynamic_imports(
                 out.push_str(&module_id(dep_path));
                 out.push(')');
             }
-            let after_value = value_start + consumed;
-            if line[after_value..].starts_with(')') {
-                search_start = after_value + 1;
-            } else {
-                search_start = after_value;
-            }
-        } else {
-            out.push_str(marker);
-            out.push_str(&line[value_start..value_start + consumed]);
-            search_start = value_start + consumed;
+            index = after_call;
+            continue;
         }
+
+        push_next_char(line, &mut out, &mut index);
     }
 
-    out.push_str(&line[search_start..]);
     out
+}
+
+fn is_import_boundary(bytes: &[u8], index: usize) -> bool {
+    index == 0
+        || !matches!(
+            bytes[index - 1],
+            b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'$' | b'.'
+        )
+}
+
+fn dynamic_import_call(line: &str, mut index: usize) -> Option<(String, usize)> {
+    let bytes = line.as_bytes();
+    while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+        index += 1;
+    }
+    if bytes.get(index) != Some(&b'(') {
+        return None;
+    }
+    index += 1;
+    while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+        index += 1;
+    }
+    let (specifier, consumed) = quoted_value_with_len(&line[index..])?;
+    index += consumed;
+    while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+        index += 1;
+    }
+    (bytes.get(index) == Some(&b')')).then_some((specifier, index + 1))
+}
+
+fn push_next_char(line: &str, out: &mut String, index: &mut usize) {
+    let character = line[*index..]
+        .chars()
+        .next()
+        .expect("index always points at a char boundary");
+    out.push(character);
+    *index += character.len_utf8();
+}
+
+fn advance_char(line: &str, index: &mut usize) {
+    *index += line[*index..]
+        .chars()
+        .next()
+        .expect("index always points at a char boundary")
+        .len_utf8();
 }
 
 fn write_rewritten_line(out: &mut String, content: &str, indent: bool) {
@@ -1158,10 +1235,12 @@ mod tests {
     fn rewrites_local_dynamic_import_to_module_namespace_promise() {
         let dep = PathBuf::from("/app/lazy.ts");
         let dep_id = module_id(&dep);
+        let mut in_block_comment = false;
         let result = rewrite_dynamic_imports(
             "const mod = await import(\"./lazy\");",
             std::slice::from_ref(&dep),
             &BTreeMap::new(),
+            &mut in_block_comment,
         );
 
         assert_eq!(
@@ -1174,16 +1253,46 @@ mod tests {
     fn rewrites_planned_dynamic_import_to_an_emitted_chunk() {
         let dep = PathBuf::from("/app/lazy.ts");
         let files = BTreeMap::from([(dep.clone(), "chunk.lazy.js".to_string())]);
+        let mut in_block_comment = false;
         let result = rewrite_dynamic_imports(
             "const mod = await import(\"./lazy\");",
             std::slice::from_ref(&dep),
             &files,
+            &mut in_block_comment,
         );
 
         assert_eq!(
             result,
             "const mod = await import(\"./chunk.lazy.js\").then((module) => module.default);"
         );
+    }
+
+    #[test]
+    fn does_not_rewrite_dynamic_import_text_in_strings_or_comments() {
+        let dep = PathBuf::from("/app/lazy.ts");
+        let mut in_block_comment = false;
+        let lines = [
+            "const example = 'import(\"./lazy\")'; // import(\"./lazy\")",
+            "/* import(\"./lazy\")",
+            "   import(\"./lazy\") */",
+            "const mod = import(\"./lazy\");",
+        ];
+        let output = lines
+            .iter()
+            .map(|line| {
+                rewrite_dynamic_imports(
+                    line,
+                    std::slice::from_ref(&dep),
+                    &BTreeMap::new(),
+                    &mut in_block_comment,
+                )
+            })
+            .collect::<Vec<_>>();
+
+        assert!(output[0].contains("'import(\"./lazy\")'"));
+        assert!(output[1].contains("import(\"./lazy\")"));
+        assert!(output[2].contains("import(\"./lazy\")"));
+        assert!(output[3].contains("Promise.resolve("));
     }
 
     #[test]

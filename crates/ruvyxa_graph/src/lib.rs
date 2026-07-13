@@ -158,13 +158,14 @@ pub fn discover_routes(options: DiscoverOptions) -> Result<RouteManifest> {
         let relative_dir = route_dir.strip_prefix(&app_dir).unwrap_or(route_dir);
         let path = route_path_from_dir(relative_dir)?;
         let id = route_id(&app_dir, &file);
+        let layout_chain = layout_chain(&app_dir, route_dir);
 
         routes.push(RouteEntry {
             id,
             path: path.clone(),
             kind,
             file: file.clone(),
-            layout_chain: layout_chain(&app_dir, route_dir),
+            layout_chain: layout_chain.clone(),
             server_modules: sibling_modules(
                 route_dir,
                 &["server.ts", "server.js", "action.ts", "action.js"],
@@ -173,7 +174,7 @@ pub fn discover_routes(options: DiscoverOptions) -> Result<RouteManifest> {
             runtime: RuntimeTarget::Node,
             render: if kind == RouteKind::Page {
                 apply_rendering_defaults(
-                    detect_render_strategy(&file, &path),
+                    detect_render_strategy(&file, &path, &layout_chain),
                     default_render_strategy,
                     default_revalidate,
                 )
@@ -440,6 +441,65 @@ fn import_specifiers(source: &str) -> Vec<String> {
             && let Some(specifier) = quoted_value(line.trim_start_matches("import").trim())
         {
             imports.push(specifier);
+        }
+    }
+
+    imports.extend(call_import_specifiers(&source, "import"));
+    imports.extend(call_import_specifiers(&source, "require"));
+
+    imports
+}
+
+fn call_import_specifiers(source: &str, keyword: &str) -> Vec<String> {
+    let bytes = source.as_bytes();
+    let mut imports = Vec::new();
+    let mut index = 0;
+
+    while index + keyword.len() <= bytes.len() {
+        let Some(relative) = source[index..].find(keyword) else {
+            break;
+        };
+        let start = index + relative;
+        index = start + keyword.len();
+        if start > 0
+            && matches!(
+                bytes[start - 1],
+                b'a'..=b'z' | b'A'..=b'Z' | b'0'..=b'9' | b'_' | b'$' | b'.'
+            )
+        {
+            continue;
+        }
+
+        let mut cursor = index;
+        while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+            cursor += 1;
+        }
+        if bytes.get(cursor) != Some(&b'(') {
+            continue;
+        }
+        cursor += 1;
+        while bytes.get(cursor).is_some_and(u8::is_ascii_whitespace) {
+            cursor += 1;
+        }
+        let Some(quote) = bytes
+            .get(cursor)
+            .copied()
+            .filter(|byte| *byte == b'\'' || *byte == b'\"')
+        else {
+            continue;
+        };
+        let value_start = cursor + 1;
+        let Some(value_len) = source[value_start..].find(quote as char) else {
+            continue;
+        };
+        let after_quote = value_start + value_len + 1;
+        let mut after_call = after_quote;
+        while bytes.get(after_call).is_some_and(u8::is_ascii_whitespace) {
+            after_call += 1;
+        }
+        if bytes.get(after_call) == Some(&b')') {
+            imports.push(source[value_start..value_start + value_len].to_string());
+            index = after_call + 1;
         }
     }
 
@@ -878,12 +938,16 @@ fn sibling_modules(route_dir: &Path, names: &[&str]) -> Vec<String> {
 /// 4. `export function getStaticParams` or `export async function getStaticParams` → SSG
 /// 5. Route has no dynamic segments and no data fetching → SSG candidate (static routes)
 /// 6. Default → SSR
-fn detect_render_strategy(file: &Path, route_path: &str) -> RenderMeta {
+fn detect_render_strategy(file: &Path, route_path: &str, layout_chain: &[String]) -> RenderMeta {
     let Ok(source) = fs::read_to_string(file) else {
         return RenderMeta::default();
     };
 
     let code = code_without_strings_and_comments(&source);
+    let Some(reachable_code) = render_reachable_code(file, layout_chain) else {
+        // An unreadable route dependency must never be guessed to be static.
+        return RenderMeta::default();
+    };
 
     // 1. Check for "use client" directive (must be in original source, at top)
     let trimmed = source.trim_start();
@@ -924,7 +988,7 @@ fn detect_render_strategy(file: &Path, route_path: &str) -> RenderMeta {
     }
 
     // 5. Static routes with no dynamic data markers can be pre-rendered.
-    if !route_has_dynamic_segments(route_path) && !has_dynamic_data_markers(&code) {
+    if !route_has_dynamic_segments(route_path) && !has_dynamic_data_markers(&reachable_code) {
         return RenderMeta {
             strategy: RenderStrategy::Ssg,
             ..Default::default()
@@ -933,6 +997,25 @@ fn detect_render_strategy(file: &Path, route_path: &str) -> RenderMeta {
 
     // 6. Default: SSR
     RenderMeta::default()
+}
+
+/// Return all statically reachable route and layout source after stripping strings/comments.
+/// Route-level rendering exports are intentionally handled from the page source only, while data
+/// markers in any dependency make automatic SSG unsafe.
+fn render_reachable_code(file: &Path, layout_chain: &[String]) -> Option<String> {
+    let mut files = collect_relative_graph(file);
+    for layout in layout_chain {
+        let layout = PathBuf::from(layout);
+        files.extend(collect_relative_graph(&layout));
+    }
+
+    let mut code = String::new();
+    for path in files {
+        let source = fs::read_to_string(path).ok()?;
+        code.push_str(&code_without_strings_and_comments(&source));
+        code.push('\n');
+    }
+    Some(code)
 }
 
 fn apply_rendering_defaults(
@@ -1307,6 +1390,46 @@ mod tests {
     }
 
     #[test]
+    fn keeps_pages_with_reachable_data_fetching_as_ssr() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        fs::create_dir_all(app.join("news")).unwrap();
+        fs::write(
+            app.join("news/page.tsx"),
+            "import { load } from './data'; export default function Page() { return <main>{load}</main>; }",
+        )
+        .unwrap();
+        fs::write(
+            app.join("news/data.ts"),
+            "export const load = fetch('https://example.com/news');",
+        )
+        .unwrap();
+
+        let manifest = discover_routes(DiscoverOptions::new(&app)).unwrap();
+        assert_eq!(manifest.routes[0].render.strategy, RenderStrategy::Ssr);
+    }
+
+    #[test]
+    fn keeps_pages_with_data_fetching_layouts_as_ssr() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        fs::create_dir_all(app.join("docs")).unwrap();
+        fs::write(
+            app.join("layout.tsx"),
+            "export default function Layout({ children }) { headers(); return children; }",
+        )
+        .unwrap();
+        fs::write(
+            app.join("docs/page.tsx"),
+            "export default function Page() { return <main>Docs</main>; }",
+        )
+        .unwrap();
+
+        let manifest = discover_routes(DiscoverOptions::new(&app)).unwrap();
+        assert_eq!(manifest.routes[0].render.strategy, RenderStrategy::Ssr);
+    }
+
+    #[test]
     fn validates_client_and_server_boundaries() {
         let temp = tempfile::tempdir().unwrap();
         let app = temp.path().join("app");
@@ -1345,6 +1468,44 @@ mod tests {
         assert!(codes.contains(&"RUV1007"));
         assert!(codes.contains(&"RUV1008"));
         assert!(codes.contains(&"RUV1010"));
+    }
+
+    #[test]
+    fn validates_dynamic_imports_and_requires_in_boundary_graphs() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        fs::create_dir_all(app.join("api")).unwrap();
+        fs::write(
+            app.join("page.tsx"),
+            "export default async function Page() { return (await import('./secret')).default; }",
+        )
+        .unwrap();
+        fs::write(
+            app.join("secret.ts"),
+            "import 'server-only'; export default 'secret';",
+        )
+        .unwrap();
+        fs::write(
+            app.join("api/route.ts"),
+            "const browser = require('./browser'); export const GET = () => browser;",
+        )
+        .unwrap();
+        fs::write(
+            app.join("api/browser.ts"),
+            "import 'client-only'; export default {}; ",
+        )
+        .unwrap();
+
+        let manifest = discover_routes(DiscoverOptions::new(&app)).unwrap();
+        let report = validate_app(temp.path(), &manifest).unwrap();
+        let codes = report
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code)
+            .collect::<Vec<_>>();
+
+        assert!(codes.contains(&"RUV1007"), "{codes:?}");
+        assert!(codes.contains(&"RUV1009"), "{codes:?}");
     }
 
     #[test]

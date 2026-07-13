@@ -14,12 +14,42 @@ use crate::{
 /// The graph fingerprint intentionally includes every project module. This makes chunk references
 /// change together when a nested dynamic dependency changes, avoiding a stale parent chunk pointing
 /// at an obsolete child filename.
-pub(crate) fn plan_dynamic_chunk_files(compiled: &[CompiledModule]) -> BTreeMap<PathBuf, String> {
+pub(crate) fn plan_dynamic_chunk_files(
+    compiled: &[CompiledModule],
+    entry: &Path,
+) -> BTreeMap<PathBuf, String> {
     let module_map = project_module_map(compiled);
     let dynamic_roots = dynamic_roots(compiled, &module_map);
     let graph_fingerprint = graph_fingerprint(compiled);
+    let mut entry_modules = BTreeSet::new();
+    collect_static_transitive_modules(entry, &module_map, &mut entry_modules);
 
-    dynamic_roots
+    // Chunks cannot safely share our closure-scoped module namespaces.  Splitting roots whose
+    // static closures overlap would execute a shared module once in each output file.  Keep every
+    // overlapping root in the entry instead; this preserves evaluation semantics until a shared
+    // chunk runtime exists.
+    let closures = dynamic_roots
+        .iter()
+        .map(|root| {
+            let mut closure = BTreeSet::new();
+            collect_static_transitive_modules(root, &module_map, &mut closure);
+            (root.clone(), closure)
+        })
+        .collect::<Vec<_>>();
+    // A root is split only when its closure is disjoint from the entry and every other dynamic
+    // closure. Roots with any overlap are linked into the entry by `entry_modules` below.
+    let split_roots = closures
+        .iter()
+        .filter(|(root, closure)| {
+            closure.is_disjoint(&entry_modules)
+                && closures.iter().all(|(other_root, other_closure)| {
+                    root == other_root || closure.is_disjoint(other_closure)
+                })
+        })
+        .map(|(root, _)| root.clone())
+        .collect::<BTreeSet<_>>();
+
+    split_roots
         .into_iter()
         .map(|root| {
             let fingerprint =
@@ -37,10 +67,19 @@ pub(crate) fn plan_dynamic_chunk_files(compiled: &[CompiledModule]) -> BTreeMap<
 pub(crate) fn static_entry_modules(
     compiled: &[CompiledModule],
     entry: &Path,
+    dynamic_import_files: &BTreeMap<PathBuf, String>,
 ) -> Vec<CompiledModule> {
     let module_map = project_module_map(compiled);
     let mut selected = BTreeSet::new();
     collect_static_transitive_modules(entry, &module_map, &mut selected);
+
+    // Any dynamic root that was not emitted as an isolated chunk must be present in the entry so
+    // its rewritten `import()` can resolve to the existing namespace without duplicating it.
+    for root in dynamic_roots(compiled, &module_map) {
+        if !dynamic_import_files.contains_key(&root) {
+            collect_static_transitive_modules(&root, &module_map, &mut selected);
+        }
+    }
 
     compiled
         .iter()

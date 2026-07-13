@@ -108,4 +108,8 @@ When a handler does not export a given method, the server responds with `405 Met
 API routes automatically receive security headers, rate limiting, and middleware configured in
 `ruvyxa.config.ts`.
 
+Ruvyxa forwards the original URL query string, request bytes, and repeated request headers to the
+standard `Request` object without converting binary data to text. Responses also preserve repeated
+headers, including multiple `Set-Cookie` values.
+
 See [Configuration](configuration.md) for security and middleware settings.

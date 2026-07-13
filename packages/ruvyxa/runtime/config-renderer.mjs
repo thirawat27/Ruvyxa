@@ -152,6 +152,7 @@ async function sanitizeConfig(config) {
       ])
     }
   }
+  assertConfigValueShape(config)
 
   return {
     appDir: stringValue(config.appDir),
@@ -213,6 +214,78 @@ async function sanitizeConfig(config) {
     adapterOptions: safeJsonValue(config.adapterOptions),
     plugins: pluginDescriptors(config.plugins),
   }
+}
+
+function assertConfigValueShape(config) {
+  assertShape(config, 'config', {
+    appDir: 'string',
+    outDir: 'string',
+    runtime: 'string',
+    react: 'boolean',
+    typescript: { strict: 'boolean' },
+    css: { entries: 'string[]' },
+    server: { host: 'string', port: 'number' },
+    build: {
+      minify: 'boolean',
+      map: 'boolean',
+      treeShake: 'boolean',
+      split: 'string',
+      workers: 'number',
+      jsx: 'string',
+      target: 'string',
+      manifest: 'boolean',
+      warm: 'boolean',
+    },
+    render: { strategy: 'string', revalidate: 'number' },
+    debug: { overlay: 'boolean', traces: 'boolean' },
+    image: { optimize: 'boolean', quality: 'number', lossless: 'boolean', workers: 'number' },
+    security: {
+      actionLimit: 'number',
+      apiLimit: 'number',
+      pluginLimit: 'number',
+      actionRateLimit: { max: 'number', window: 'number' },
+      sameOrigin: 'boolean',
+      fetchMeta: 'boolean',
+      trustedProxyIps: 'string[]',
+      headers: 'boolean',
+    },
+    cache: { routes: 'boolean', css: 'boolean', dir: 'string' },
+    middleware: 'object',
+    adapter: 'object',
+    adapterOptions: 'object',
+    plugins: 'array',
+  })
+}
+
+function assertShape(value, field, shape) {
+  if (!isObject(value)) {
+    throw new Error(`RUV1602 ${field} must be an object.`)
+  }
+  for (const [key, expected] of Object.entries(shape)) {
+    const candidate = value[key]
+    if (candidate === undefined) continue
+    const childField = `${field}.${key}`
+    if (typeof expected === 'object') {
+      assertShape(candidate, childField, expected)
+      continue
+    }
+    const valid =
+      (expected === 'string' && typeof candidate === 'string') ||
+      (expected === 'number' && Number.isFinite(candidate)) ||
+      (expected === 'boolean' && typeof candidate === 'boolean') ||
+      (expected === 'object' && isObject(candidate)) ||
+      (expected === 'array' && Array.isArray(candidate)) ||
+      (expected === 'string[]' &&
+        Array.isArray(candidate) &&
+        candidate.every((item) => typeof item === 'string'))
+    if (!valid) {
+      throw new Error(`RUV1602 ${childField} must be ${expected}.`)
+    }
+  }
+}
+
+function isObject(value) {
+  return Boolean(value) && typeof value === 'object' && !Array.isArray(value)
 }
 
 async function adapterOutput(adapter, root, outDir) {

@@ -35,6 +35,9 @@ export const getStaticParams: GetStaticParams<{ slug: string }> = async () => [
 export const revalidate = 60
 ```
 
+ระบบจะส่ง cached output เดิมระหว่าง regenerate และจะเริ่มงาน background หลังครบช่วงเวลาที่กำหนด โดย
+request พร้อมกันของ route เดียวกันจะใช้การ refresh เดียวร่วมกัน
+
 ## PPR
 
 ```tsx
