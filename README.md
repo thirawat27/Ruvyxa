@@ -25,45 +25,157 @@
 
 ## Why Ruvyxa
 
-- **Clean starter** — new apps start with the same small surface you expect from file-system app
-  routers.
-- **Fast core** — Rust handles routing, validation, production builds, and the dev server. A
-  persistent Node worker pool eliminates per-request subprocess overhead.
-- **Radix-tree routing** — O(path-depth) route resolution regardless of the number of registered
-  routes.
-- **SSR** — React pages render on the server via a persistent Node worker pool with layout nesting
-  and route-level hydration bundles.
-- **FIFO render cache** — SSR pages and client bundles are cached in-memory (capacity 1024 dev / 512
-  prod, TTL 5 min dev / 30 min prod), invalidated automatically on file change. Configurable via
-  `RUVYXA_RENDER_CACHE_SIZE`.
+### Rust core
+
 - **Native Rust bundler** — TypeScript/JSX/Markdown/MDX compilation, module resolution,
-  tree-shaking, minification, and source map generation in one self-contained binary.
-- **Built-in content routes** — `page.md` and `page.mdx` support frontmatter, heading exports, GFM,
-  JSX components, expressions, SSG, and the same dev/prod pipeline as TSX.
-- **Fast WebP image pipeline** — production builds replace copied PNG/JPEG assets with one cached,
-  parallel-encoded WebP output plus React image primitives for low CLS.
-- **SEO primitives** — typed canonical, robots, Open Graph, Twitter Card, and safe JSON-LD metadata.
-- **Gzip + Brotli compression** — all responses compressed automatically via tower-http middleware.
-- **Tower-based middleware** — composable CORS, timing, logging, rate limiting, and custom headers
-  via `ruvyxa.config.ts`.
-- **Wasm plugin runtime** — sandboxed WebAssembly request/response plugins powered by Wasmtime with
-  explicit environment access, execution timeouts, and memory limits.
-- **Parallel production bundling** — page client bundles are emitted concurrently via scoped threads
-  and written back in deterministic route order.
-- **Honest checks** — `ruvyxa check` runs type checking, build validation, dev/prod parity, and page
-  smoke rendering before deploy.
-- **Multiple rendering strategies** — SSR (default), SSG, ISR, CSR, and PPR — configurable per-route
-  via `ruvyxa.config.ts` or inline exports.
-- **SSR-first React** — pages render on the server, with route-level client bundles for hydration.
-- **Secure server actions** — validation hooks, origin checks, Fetch Metadata guards, a 1 MB body
-  limit, a 10 MB API body limit (`security.apiLimit`), and per-client/action rate limiting (600
-  req/min default via `security.actionRateLimit`) are built in.
-- **Dev/prod parity** — `dev` and `start` share routing, rendering, static asset, and
-  security-header semantics.
-- **ETag / 304 support** — static assets include BLAKE3-256-based ETags for efficient browser
-  caching.
+  tree-shaking, Oxc-backed minification, and source map generation in one self-contained binary.
+- **Radix-trie routing** — O(path-depth) route resolution regardless of the number of registered
+  routes. Duplicate and ambiguous routes are rejected at graph validation time.
+- **Persistent Node worker pool** — eliminates 100–500 ms per-request subprocess overhead for SSR.
+  Shared across requests with layout nesting and route-level hydration bundles.
+- **FIFO render cache** — SSR pages and client bundles cached in-memory (capacity 1024 dev / 512
+  prod, TTL 5 min dev / 30 min prod), invalidated automatically on file change. Configurable via
+  `RUVYXA_RENDER_CACHE_SIZE`. Backed by `RwLock` for concurrent readers.
+- **Parallel production bundling** — page client bundles emitted concurrently via scoped threads,
+  written back in deterministic route order.
 - **Async I/O** — file serving uses `tokio::fs` to avoid blocking the async runtime under concurrent
   load.
+- **Incremental bundler cache** — blake3+mtime fingerprinting recompiles only changed modules across
+  dev restarts. Shared compile cache at `.ruvyxa/cache/bundler/` survives clean builds.
+- **Bundler plugin pipeline** — `NativeBundlerPlugin` hooks for `resolve_id()` and `transform()`,
+  plus JS config plugins bridged via persistent Node subprocess. AST-based import/export extraction
+  and CommonJS detection for npm dependencies.
+- **Gzip + Brotli compression** — all responses compressed automatically via tower-http middleware.
+- **ETag / 304 support** — static assets include BLAKE3-256-based ETags for efficient browser
+  caching. Bundle names are BLAKE3-content-addressed for deterministic cache busting.
+
+### Dev server & HMR
+
+- **Hot Module Replacement** — style and component updates streamed over WebSocket without full-page
+  reloads. CSS collection, minification, and HMR are handled natively by the dev server.
+- **Debug overlay** — in-browser error overlay during development with source-mapped stack traces.
+- **Dev/prod parity** — `dev` and `start` share routing, rendering, static asset, security-header,
+  and compression semantics.
+- **Port conflict detection** — auto-scans 100 subsequent ports with process-owner identification
+  (Windows `netstat`/`tasklist`, Unix `lsof`).
+
+### Rendering strategies
+
+- **SSR-first React** — pages render on the server with layout nesting, route-level client bundles
+  for hydration, and the persistent worker pool.
+- **Five rendering strategies** — SSR (default), SSG, ISR, CSR, and PPR. Configurable per-route via
+  `ruvyxa.config.ts` or inline exports (`revalidate`, `ppr`, `getStaticParams`, `'use client'`).
+- **Partial Pre-rendering (PPR)** — static shell with streamed dynamic slots via React `<Suspense>`
+  boundaries and `onShellReady` streaming.
+- **Incremental Static Regeneration (ISR)** — stale-while-revalidate with configurable TTL.
+- **`getStaticParams`** — generate static paths at build time for dynamic SSG routes.
+- **CDN-ready code splitting** — route-level, shared, or vendor chunk splitting via `build.split`
+  with tree-shaking applied per-split.
+
+### File-system routing
+
+- **App directory router** — `app/` discovers `page.tsx`, `page.md`, `page.mdx`, `route.ts`,
+  `layout.tsx`, `server.ts`, and `action.ts` automatically.
+- **Dynamic segments** — `[param]`, `[...catchAll]`, and `[[...optionalCatchAll]]` with full param
+  access injected into loaders and page components.
+- **Route groups** — `(group)` directories for logical organization without affecting the URL.
+- **Parallel route slots** — `@slot/` directories for parallel-rendered route segments.
+- **API routes** — named HTTP-method exports (`GET`, `POST`, `PUT`, `DELETE`, `PATCH`) in `route.ts`
+  files.
+- **Duplicate & ambiguous route rejection** — the graph validator catches conflicts before they
+  reach production.
+
+### Content & images
+
+- **Built-in content routes** — `page.md` and `page.mdx` support frontmatter, heading exports, GFM
+  (GitHub Flavored Markdown), JSX components, expressions, and SSG. Same dev/prod pipeline as TSX
+  routes.
+- **Fast WebP image pipeline** — production builds replace copied PNG/JPEG assets with cached,
+  parallel-encoded WebP output for low CLS.
+
+### CSS pipeline
+
+- **Dependency-driven CSS imports** — application modules import `.css` from anywhere; no separate
+  import manifest required.
+- **CSS entries for globals** — unimported global stylesheets via `css.entries` in config.
+- **CSS-in-JS compatible** — React style objects and `<style>` elements work natively.
+- **CSS caching & minification** — production builds minify collected styles with cached results.
+- **Tailwind CSS auto-detection** — detects `@import "tailwindcss"` in stylesheets, invokes
+  `@tailwindcss/cli` with `--minify` in production. SCSS/SASS/LESS imports produce clear
+  diagnostics.
+
+### Data loading & cache
+
+- **Co-located data fetching** — server-only `server.ts` files beside routes with `loader()` and
+  `cache()` utilities.
+- **Real TTL caching** — human-readable durations (`"30s"`, `"5m"`, `"1h"`, `"1d"`) with
+  `invalidateCache(key)` or `invalidateCache()` (clear all) from server actions. Stale-while-
+  revalidate keeps responses fast during background refresh. `cacheStats()` provides runtime
+  observability (`{ size, maxEntries }`).
+
+### Server actions
+
+- **Type-safe server actions** — `action.input()` with validation parser and `.handler()` with typed
+  input and cache invalidation callback.
+- **Content type support** — `application/json` and `application/x-www-form-urlencoded`.
+- **Module isolation** — actions run in isolated contexts with bounded resource usage.
+
+### React primitives
+
+- **Error boundary** — `<RuvyxaErrorBoundary>` with typed `fallback({ error, resetError })` for
+  per-route error isolation. `resetError()` clears state for retry without full-page reload.
+- **Hydration** — `hydrate()` attaches React to server-rendered DOM with automatic error reporting
+  and fallback rendering when hydration fails.
+- **Image components** — `<Image>` (responsive, `fill`, `priority`, `loader`, `unoptimized`,
+  `fetchPriority`) and `<Picture>` for art-direction with multi-source support.
+- **SEO component** — `<Seo>` with typed canonical, robots, Open Graph, Twitter Card, and safe
+  JSON-LD structured data.
+- **Client loader hook** — `useRuvyxaLoader` returns `{ data, loading, error, refetch }` with
+  built-in race-condition handling and mount-safety checks.
+
+### Security
+
+- **Server/client boundary enforcement** — `server-only`, `client-only`, and `server/` imports are
+  validated at build time. Private environment variables never leak to client bundles; only
+  `RUVYXA_PUBLIC_`-prefixed variables are accessible on the client.
+- **Server action guards** — same-origin checks, Fetch Metadata guards, 1 MB body limit
+  (`security.actionLimit`), 10 MB API body limit (`security.apiLimit`), and per-client/action rate
+  limiting (600 req/min default via `security.actionRateLimit`).
+- **Security headers** — configurable response headers with sensible production defaults.
+- **Config safety** — unknown configuration keys fail intentionally; typos never silently change
+  deployment behavior.
+
+### Middleware & plugins
+
+- **Tower-based middleware** — composable CORS, timing, logging, rate limiting, and custom headers
+  via `ruvyxa.config.ts`. Route-scoped middleware targets specific path patterns.
+- **Wasm plugin runtime** — sandboxed WebAssembly request/response plugins powered by Wasmtime with
+  fuel-based execution limits, explicit environment access (`allow.env`), and memory bounds.
+  Optional via the `wasm-plugins` feature.
+- **Route-scoped plugins** — plugins can target specific patterns (`/api/*`) with per-plugin
+  configuration and timeout/memory allowances.
+
+### CLI & diagnostics
+
+- **12 verified commands** — `dev`, `build`, `check`, `start`, `preview`, `routes`, `analyze`,
+  `doctor`, `clean`, `trace`, `bench`, and `test:parity`.
+- **`build`** — production output supports `--target node`, `edge`, or `static`. Pre-renders SSG,
+  ISR, PPR, and CSR pages at build time via parallel worker pool (`MAX_PRERENDER_PARALLELISM: 2`).
+- **`check`** — type checking, production build, dev/prod route parity, and page smoke rendering in
+  one command.
+- **`analyze`** — structured JSON validation of routes, imports, and server/client boundaries.
+- **`doctor`** — project health check covering dependencies, environment, and native CLI status.
+- **`bench`** — benchmark route discovery, analysis, validation, and production builds.
+- **`test:parity`** — compare dev/prod routes and smoke-render page routes.
+- **Structured diagnostics** — `RUV####` error codes with file locations and suggested fixes. Never
+  a generic build error when the framework can pinpoint the source.
+
+### Scaffold & adapters
+
+- **Clean starter** — `npm create ruvyxa@latest` scaffolds a minimal app from `templates/minimal/`
+  with `app/`, `public/`, `ruvyxa.config.ts`, and `tsconfig.json`.
+- **Six deployment adapters** — `@ruvyxa/adapter-node`, `adapter-vercel`, `adapter-cloudflare`,
+  `adapter-netlify`, `adapter-bun`, and `adapter-static` for typed, serializable output metadata.
 
 ---
 
@@ -130,7 +242,7 @@ Standalone JavaScript and TypeScript tests live under `tests/` and are routed by
 
 ---
 
-## App Router
+## App Directory
 
 Routes are discovered from `app/`. Every `page.tsx` must export a default component; every
 `route.ts` exports named HTTP-method handlers.

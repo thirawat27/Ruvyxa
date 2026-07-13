@@ -7,7 +7,7 @@ import { join, relative } from 'node:path'
 import { createRuvyxaApp } from '../../../packages/create-ruvyxa/dist/index.js'
 
 describe('createRuvyxaApp', () => {
-  it('creates the minimal Next-style starter shape', async () => {
+  it('creates the minimal file-system starter shape', async () => {
     const tempRoot = await mkdtemp(join(tmpdir(), 'ruvyxa-create-'))
     const target = join(tempRoot, 'my-app')
 

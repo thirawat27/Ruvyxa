@@ -1,7 +1,7 @@
 # Ruvyxa App Agent Guide
 
 You are working in a Ruvyxa application. Keep this starter small, explicit, and close to the
-file-system app-router shape:
+file-system route shape:
 
 - `app/layout.tsx` wraps all pages.
 - `app/page.tsx` is the home route.

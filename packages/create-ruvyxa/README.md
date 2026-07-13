@@ -1,6 +1,6 @@
 # create-ruvyxa
 
-Create a clean Ruvyxa app with a minimal Next-style app-router starter.
+Create a clean Ruvyxa app with a minimal file-system route starter.
 
 ## Usage
 
