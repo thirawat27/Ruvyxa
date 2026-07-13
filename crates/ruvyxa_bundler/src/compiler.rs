@@ -41,7 +41,6 @@ use crate::cache::{CacheLookup, CompileCache};
 use crate::plugin::{PluginContext, PluginPipeline};
 use crate::resolver::ResolvedModule;
 use crate::{BundleError, BundleInput, JsxRuntime, Result};
-use ruvyxa_diagnostics::{Diagnostic, SourceSpan};
 
 /// A compiled module: TypeScript/JSX has been converted to plain JS.
 #[derive(Debug, Clone)]
@@ -61,12 +60,6 @@ pub struct CompiledModule {
 struct CompiledModuleOutput {
     module: CompiledModule,
     plugin_source_map: Option<String>,
-}
-
-/// Compile every module in the resolved graph.
-pub fn compile_graph(graph: &[ResolvedModule], input: &BundleInput) -> Result<Vec<CompiledModule>> {
-    let cache = CompileCache::new(&input.project_root, true);
-    compile_graph_with_cache(graph, input, &cache)
 }
 
 /// Compile every module in the resolved graph, using the provided cache.
@@ -113,158 +106,6 @@ pub(crate) fn compile_graph_with_pipeline_and_maps(
         modules.push(output.module);
     }
     Ok((modules, source_maps))
-}
-
-/// A compiler error with source location information.
-#[derive(Debug, Clone)]
-pub struct CompilerError {
-    /// Human-readable error message.
-    pub message: String,
-    /// 1-based line number in the source file.
-    pub line: u32,
-    /// 1-based column number in the source file.
-    pub column: u32,
-    /// Path to the file that caused the error.
-    pub file: PathBuf,
-}
-
-impl CompilerError {
-    /// Convert this compiler error into a structured [`Diagnostic`].
-    pub fn to_diagnostic(&self) -> Diagnostic {
-        Diagnostic::new("RUV1300", format!("Compile error: {}", self.message))
-            .explain(format!(
-                "The TypeScript/JSX compiler encountered an error at line {}, column {}.",
-                self.line, self.column
-            ))
-            .at_file(&self.file)
-            .suggest("Check the syntax at the indicated position.")
-    }
-}
-
-/// Compile the graph with error recovery: failed modules are replaced with
-/// stub modules that emit a runtime error, and compile errors are collected
-/// as diagnostics instead of aborting the build.
-pub fn compile_graph_resilient(
-    graph: &[ResolvedModule],
-    input: &BundleInput,
-    cache: &CompileCache,
-    diagnostics: &mut Vec<Diagnostic>,
-) -> Vec<CompiledModule> {
-    let results: Vec<(usize, Result<CompiledModule>)> = graph
-        .par_iter()
-        .enumerate()
-        .map(|(idx, module)| {
-            (
-                idx,
-                compile_module(module, input, cache, &PluginPipeline::empty())
-                    .map(|output| output.module),
-            )
-        })
-        .collect();
-
-    let mut compiled = Vec::with_capacity(graph.len());
-
-    for (idx, result) in results {
-        match result {
-            Ok(module) => compiled.push(module),
-            Err(err) => {
-                let source_module = &graph[idx];
-
-                let diagnostic = match &err {
-                    BundleError::Compiler(msg) => {
-                        let (line, col) = parse_error_location(msg);
-                        let mut diag = Diagnostic::new(
-                            "RUV1300",
-                            format!("Compile error in {}", source_module.path.display()),
-                        )
-                        .explain(msg.clone())
-                        .suggest("Fix the syntax error and rebuild.");
-
-                        diag.span = Some(SourceSpan {
-                            file: source_module.path.clone(),
-                            line: Some(line),
-                            column: Some(col),
-                        });
-                        diag
-                    }
-                    BundleError::Unresolved {
-                        specifier,
-                        importer,
-                    } => Diagnostic::new(
-                        "RUV1302",
-                        format!("Cannot resolve '{specifier}' from {}", importer.display()),
-                    )
-                    .at_file(&source_module.path)
-                    .suggest(format!(
-                        "Check that the module '{specifier}' exists and the import path is correct."
-                    )),
-                    other => Diagnostic::new("RUV1301", format!("Module error: {other}"))
-                        .at_file(&source_module.path),
-                };
-
-                diagnostics.push(diagnostic);
-
-                let error_msg = format!(
-                    "Ruvyxa compile error in {}: {}",
-                    source_module.path.display(),
-                    err
-                );
-                let stub_js = format!(
-                    "console.error({}); throw new Error({});",
-                    serde_json::to_string(&error_msg)
-                        .unwrap_or_else(|_| "\"compile error\"".into()),
-                    serde_json::to_string(&error_msg)
-                        .unwrap_or_else(|_| "\"compile error\"".into()),
-                );
-
-                compiled.push(CompiledModule {
-                    path: source_module.path.clone(),
-                    js: stub_js,
-                    deps: Vec::new(),
-                    is_external: source_module.is_external,
-                    cache_hit: false,
-                });
-            }
-        }
-    }
-
-    compiled
-}
-
-/// Parse line:col from an error message like "file.tsx:5:12: unexpected token"
-fn parse_error_location(msg: &str) -> (u32, u32) {
-    let parts: Vec<&str> = msg.splitn(4, ':').collect();
-    if parts.len() >= 3
-        && let (Ok(line), Ok(col)) = (
-            parts[1].trim().parse::<u32>(),
-            parts[2].trim().parse::<u32>(),
-        )
-        && line > 0
-        && col > 0
-    {
-        return (line, col);
-    }
-    if let Some(line_idx) = msg.find("line ") {
-        let after_line = &msg[line_idx + 5..];
-        let line_str: String = after_line
-            .chars()
-            .take_while(|c| c.is_ascii_digit())
-            .collect();
-        if let Ok(line) = line_str.parse::<u32>() {
-            if let Some(col_idx) = msg.find("column ") {
-                let after_col = &msg[col_idx + 7..];
-                let col_str: String = after_col
-                    .chars()
-                    .take_while(|c| c.is_ascii_digit())
-                    .collect();
-                if let Ok(col) = col_str.parse::<u32>() {
-                    return (line, col);
-                }
-            }
-            return (line, 1);
-        }
-    }
-    (1, 1)
 }
 
 fn compile_module(

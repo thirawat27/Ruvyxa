@@ -470,25 +470,6 @@ fn read_source_fast(path: &Path, len: u64) -> Result<String> {
     Ok(fs::read_to_string(path)?)
 }
 
-/// Walk the import graph starting from a virtual entry source string.
-///
-/// Returns an ordered `Vec` of [`ResolvedModule`] values.  The virtual entry
-/// is always first; thereafter modules appear in BFS discovery order.
-pub fn resolve_graph(
-    entry_source: &str,
-    entry_label: &str,
-    project_root: &Path,
-    app_dir: &Path,
-) -> Result<Vec<ResolvedModule>> {
-    resolve_graph_with_cache(
-        entry_source,
-        entry_label,
-        project_root,
-        app_dir,
-        &ResolveGraphCache::new(),
-    )
-}
-
 /// Walk the import graph using a shared resolver/source cache.
 ///
 /// Uses a parallel BFS strategy: after the initial entry is resolved, each

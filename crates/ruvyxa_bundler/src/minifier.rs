@@ -40,22 +40,6 @@ pub fn minify_with_options(
     minify_javascript(&stage0, tree_shaking)
 }
 
-/// Compatibility entry point for callers that previously requested parallel
-/// text minification. Oxc needs the complete linked program to build semantic
-/// scope information safely, so it performs one whole-program AST pass.
-pub fn minify_parallel(source: &str, _target: BundleTarget) -> Result<String> {
-    minify_parallel_with_options(source, _target, true)
-}
-
-/// Parallel minification with explicit tree-shaking control.
-pub fn minify_parallel_with_options(
-    source: &str,
-    _target: BundleTarget,
-    tree_shaking: bool,
-) -> Result<String> {
-    minify_with_options(source, _target, tree_shaking)
-}
-
 fn minify_javascript(source: &str, tree_shaking: bool) -> Result<String> {
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::unambiguous()).parse();

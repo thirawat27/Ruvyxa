@@ -63,13 +63,6 @@ pub fn bundle(input: BundleInput) -> Result<BundleOutput> {
     bundle_with_context(input, &context)
 }
 
-/// Bundle a single route using a caller-provided compile cache.
-pub fn bundle_with_cache(input: BundleInput, cache: &CompileCache) -> Result<BundleOutput> {
-    let graph_cache = ResolveGraphCache::new();
-    let plugins = PluginPipeline::empty();
-    bundle_with_parts(input, cache, &graph_cache, &plugins)
-}
-
 /// Bundle a single route using shared batch context.
 pub fn bundle_with_context(input: BundleInput, context: &BundleContext) -> Result<BundleOutput> {
     bundle_with_parts(
@@ -123,7 +116,7 @@ fn bundle_with_parts(
     };
     let minify_output = input.options.minify;
     let final_code = if minify_output {
-        minifier::minify_parallel_with_options(&optimized_linked, input.target, false)?
+        minifier::minify_with_options(&optimized_linked, input.target, false)?
     } else {
         optimized_linked.clone()
     };

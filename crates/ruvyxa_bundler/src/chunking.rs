@@ -49,7 +49,7 @@ pub(crate) fn build_dynamic_output_chunks(
         linked.push_str(";\n");
 
         let code = if input.options.minify {
-            minifier::minify_parallel_with_options(&linked, input.target, false)?
+            minifier::minify_with_options(&linked, input.target, false)?
         } else {
             linked
         };

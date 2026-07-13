@@ -305,9 +305,12 @@ impl IncrementalGraphCache {
         let temp_path = self.manifest_path.with_extension("json.tmp");
         fs::write(&temp_path, json.as_bytes())?;
         if fs::rename(&temp_path, &self.manifest_path).is_err() {
-            // Fallback: direct write if rename fails (cross-device).
-            fs::write(&self.manifest_path, json.as_bytes())?;
+            // Cross-device and Windows replacement semantics can reject rename.
+            // Preserve the manifest update and always clean the temporary file,
+            // including when the direct write itself fails.
+            let write_result = fs::write(&self.manifest_path, json.as_bytes());
             let _ = fs::remove_file(&temp_path);
+            write_result?;
         }
 
         Ok(())
@@ -585,5 +588,32 @@ mod tests {
         let loaded = IncrementalGraphCache::new(tmp.path(), true);
         assert_eq!(loaded.previous_module_count(), 1);
         assert_eq!(loaded.cached_compile_key(&page), Some("compile_abc123"),);
+    }
+
+    #[test]
+    fn repeated_save_replaces_the_manifest_without_leaving_a_temp_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let page = temp.path().join("app/page.tsx");
+        fs::create_dir_all(page.parent().unwrap()).unwrap();
+        fs::write(&page, "export default function Page() {}").unwrap();
+
+        let mut cache = IncrementalGraphCache::new(temp.path(), true);
+        cache.record_module(
+            page.clone(),
+            "export default function Page() {}",
+            vec![],
+            None,
+        );
+        cache.save().unwrap();
+        cache.record_module(
+            page,
+            "export default function Page() { return null }",
+            vec![],
+            None,
+        );
+        cache.save().unwrap();
+
+        assert!(cache.manifest_path.is_file());
+        assert!(!cache.manifest_path.with_extension("json.tmp").exists());
     }
 }
