@@ -1337,7 +1337,7 @@ mod tests {
         let dependency = PathBuf::from("/app/node_modules/example/index.js");
         let linked = rewrite_commonjs_requires(
             "module.exports = require(\"example\");",
-            &[dependency.clone()],
+            std::slice::from_ref(&dependency),
         );
         assert_eq!(
             linked,

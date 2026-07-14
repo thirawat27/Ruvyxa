@@ -138,59 +138,175 @@ fn is_inside_server_dir(path: &Path, project_root: &Path) -> bool {
     let Ok(rel) = path.strip_prefix(project_root) else {
         return false;
     };
-    rel.components().any(|c| c.as_os_str() == "server")
+    rel.components()
+        .next()
+        .is_some_and(|component| component.as_os_str() == "server")
 }
 
 /// Scan source text for statically-known `process.env` reads that are not
 /// `RUVYXA_PUBLIC_*` or `NODE_ENV`.
 fn find_private_env_reads(source: &str) -> Vec<String> {
     let mut names = Vec::new();
-    let marker = "process.env";
-    let mut offset = 0;
-
-    while let Some(index) = source[offset..].find(marker) {
-        let start = offset + index + marker.len();
-        let rest = &source[start..];
-        let trimmed = rest.trim_start_matches(char::is_whitespace);
-        let name = if let Some(rest) = trimmed.strip_prefix('.') {
-            rest.chars()
-                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
-                .collect()
-        } else if let Some(bracket_offset) = rest.find('[') {
-            let before_bracket = &rest[..bracket_offset];
-            if before_bracket.chars().all(char::is_whitespace) {
-                literal_env_name(&source[start + bracket_offset..]).unwrap_or_default()
-            } else {
-                String::new()
-            }
-        } else {
-            String::new()
-        };
-
-        if !name.is_empty() && name != "NODE_ENV" && !name.starts_with("RUVYXA_PUBLIC_") {
-            names.push(name);
-        }
-        offset = start;
-    }
+    let mut index = 0;
+    scan_code_for_env_reads(source.as_bytes(), &mut index, 0, &mut names);
 
     names
 }
 
-fn literal_env_name(source: &str) -> Option<String> {
-    let source = source.strip_prefix('[')?.trim_start();
-    let quote = source.chars().next()?;
-    if quote != '\'' && quote != '"' {
+fn scan_code_for_env_reads(
+    source: &[u8],
+    index: &mut usize,
+    mut template_expression_depth: usize,
+    names: &mut Vec<String>,
+) {
+    while *index < source.len() {
+        match source[*index] {
+            b'\'' | b'"' => skip_quoted_bytes(source, index),
+            b'`' => skip_template_literal(source, index, names),
+            b'/' if source.get(*index + 1) == Some(&b'/') => skip_line_comment_bytes(source, index),
+            b'/' if source.get(*index + 1) == Some(&b'*') => {
+                skip_block_comment_bytes(source, index)
+            }
+            b'{' if template_expression_depth > 0 => {
+                template_expression_depth += 1;
+                *index += 1;
+            }
+            b'}' if template_expression_depth > 0 => {
+                template_expression_depth -= 1;
+                *index += 1;
+                if template_expression_depth == 0 {
+                    return;
+                }
+            }
+            _ if starts_env_read(source, *index) => {
+                if let Some(name) = parse_env_name(source, *index + b"process.env".len())
+                    && name != "NODE_ENV"
+                    && !name.starts_with("RUVYXA_PUBLIC_")
+                {
+                    names.push(name);
+                }
+                *index += b"process.env".len();
+            }
+            _ => *index += 1,
+        }
+    }
+}
+
+fn starts_env_read(source: &[u8], index: usize) -> bool {
+    const MARKER: &[u8] = b"process.env";
+    source.get(index..index + MARKER.len()) == Some(MARKER)
+        && source
+            .get(index.wrapping_sub(1))
+            .is_none_or(|previous| !is_identifier_byte(*previous) && *previous != b'.')
+}
+
+fn parse_env_name(source: &[u8], mut index: usize) -> Option<String> {
+    while source.get(index).is_some_and(u8::is_ascii_whitespace) {
+        index += 1;
+    }
+
+    if source.get(index) == Some(&b'.') {
+        index += 1;
+        let start = index;
+        while source
+            .get(index)
+            .is_some_and(|byte| is_identifier_byte(*byte))
+        {
+            index += 1;
+        }
+        return std::str::from_utf8(&source[start..index])
+            .ok()
+            .filter(|name| !name.is_empty())
+            .map(str::to_owned);
+    }
+
+    if source.get(index) != Some(&b'[') {
         return None;
     }
-    let rest = &source[quote.len_utf8()..];
-    let end = rest.find(quote)?;
-    let name = &rest[..end];
-    rest[end + quote.len_utf8()..]
-        .trim_start()
-        .strip_prefix(']')?;
-    name.chars()
-        .all(|character| character.is_ascii_alphanumeric() || character == '_')
-        .then(|| name.to_string())
+    index += 1;
+    while source.get(index).is_some_and(u8::is_ascii_whitespace) {
+        index += 1;
+    }
+    let quote = *source.get(index)?;
+    if quote != b'\'' && quote != b'"' {
+        return None;
+    }
+    index += 1;
+    let start = index;
+    while source
+        .get(index)
+        .is_some_and(|byte| is_identifier_byte(*byte))
+    {
+        index += 1;
+    }
+    let name = std::str::from_utf8(&source[start..index])
+        .ok()
+        .filter(|name| !name.is_empty())?
+        .to_owned();
+    if source.get(index) != Some(&quote) {
+        return None;
+    }
+    index += 1;
+    while source.get(index).is_some_and(u8::is_ascii_whitespace) {
+        index += 1;
+    }
+    (source.get(index) == Some(&b']')).then_some(name)
+}
+
+fn skip_quoted_bytes(source: &[u8], index: &mut usize) {
+    let quote = source[*index];
+    *index += 1;
+    while *index < source.len() {
+        match source[*index] {
+            b'\\' => *index = (*index + 2).min(source.len()),
+            byte if byte == quote => {
+                *index += 1;
+                return;
+            }
+            _ => *index += 1,
+        }
+    }
+}
+
+fn skip_template_literal(source: &[u8], index: &mut usize, names: &mut Vec<String>) {
+    *index += 1;
+    while *index < source.len() {
+        match source[*index] {
+            b'\\' => *index = (*index + 2).min(source.len()),
+            b'`' => {
+                *index += 1;
+                return;
+            }
+            b'$' if source.get(*index + 1) == Some(&b'{') => {
+                *index += 2;
+                scan_code_for_env_reads(source, index, 1, names);
+            }
+            _ => *index += 1,
+        }
+    }
+}
+
+fn skip_line_comment_bytes(source: &[u8], index: &mut usize) {
+    *index += 2;
+    while source.get(*index).is_some_and(|byte| *byte != b'\n') {
+        *index += 1;
+    }
+}
+
+fn skip_block_comment_bytes(source: &[u8], index: &mut usize) {
+    *index += 2;
+    while *index + 1 < source.len() {
+        if source[*index] == b'*' && source[*index + 1] == b'/' {
+            *index += 2;
+            return;
+        }
+        *index += 1;
+    }
+    *index = source.len();
+}
+
+fn is_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'$')
 }
 
 #[cfg(test)]
@@ -208,6 +324,30 @@ mod tests {
     fn allows_public_env_and_node_env() {
         let source = "if (process.env.NODE_ENV === 'production') {}";
         assert!(find_private_env_reads(source).is_empty());
+    }
+
+    #[test]
+    fn ignores_env_text_in_comments_and_strings_but_keeps_template_expressions() {
+        let source = r#"
+            const docs = "process.env.DATABASE_URL";
+            // process.env.API_KEY
+            const rendered = `${process.env.DATABASE_URL}`;
+        "#;
+
+        assert_eq!(find_private_env_reads(source), vec!["DATABASE_URL"]);
+    }
+
+    #[test]
+    fn reserves_only_the_project_level_server_directory() {
+        let root = Path::new("/project");
+        assert!(is_inside_server_dir(
+            Path::new("/project/server/secret.ts"),
+            root
+        ));
+        assert!(!is_inside_server_dir(
+            Path::new("/project/app/server/page.tsx"),
+            root
+        ));
     }
 
     #[test]

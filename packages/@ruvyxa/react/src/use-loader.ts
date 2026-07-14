@@ -57,6 +57,10 @@ export function useRuvyxaLoader<T>(
   // Track the current request to handle race conditions
   const requestIdRef = useRef(0)
   const mountedRef = useRef(true)
+  // Inline loaders are the documented API. Keep their latest implementation without
+  // treating each render as a request invalidation; `deps` owns automatic refetching.
+  const loaderRef = useRef(loader)
+  loaderRef.current = loader
 
   const execute = useCallback(() => {
     if (!enabled) return
@@ -65,7 +69,8 @@ export function useRuvyxaLoader<T>(
     setLoading(true)
     setError(undefined)
 
-    loader()
+    loaderRef
+      .current()
       .then((result) => {
         // Only update state if this is still the latest request and component is mounted
         if (mountedRef.current && currentId === requestIdRef.current) {
@@ -80,7 +85,7 @@ export function useRuvyxaLoader<T>(
         }
       })
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [enabled, loader])
+  }, [enabled])
 
   useEffect(() => {
     mountedRef.current = true

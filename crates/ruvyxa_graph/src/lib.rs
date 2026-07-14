@@ -174,7 +174,7 @@ pub fn discover_routes(options: DiscoverOptions) -> Result<RouteManifest> {
             runtime: RuntimeTarget::Node,
             render: if kind == RouteKind::Page {
                 apply_rendering_defaults(
-                    detect_render_strategy(&file, &path, &layout_chain),
+                    detect_render_strategy(&app_dir, &file, &path, &layout_chain),
                     default_render_strategy,
                     default_revalidate,
                 )
@@ -261,7 +261,12 @@ pub fn validate_app(root: &Path, manifest: &RouteManifest) -> Result<ValidationR
                     );
                 }
 
-                let graph = collect_relative_graph(&route.file);
+                let mut graph = collect_relative_graph(&route.file);
+                for layout in &route.layout_chain {
+                    if let Some(layout) = resolve_layout_file(&manifest.app_dir, layout) {
+                        graph.extend(collect_relative_graph(&layout));
+                    }
+                }
                 for module in graph {
                     client_modules.insert(module.clone());
                     // Skip if already validated — avoids redundant fs::read + canonicalize.
@@ -913,6 +918,23 @@ fn layout_chain(app_dir: &Path, route_dir: &Path) -> Vec<String> {
     layouts
 }
 
+fn resolve_layout_file(app_dir: &Path, layout_id: &str) -> Option<PathBuf> {
+    let layout = PathBuf::from(layout_id);
+    let project_root = app_dir.parent().unwrap_or(app_dir);
+    let app_relative = layout
+        .strip_prefix("app")
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|_| layout.clone());
+    let candidates = [project_root.join(&layout), app_dir.join(app_relative)];
+
+    candidates.into_iter().find_map(|candidate| {
+        [candidate.clone(), candidate.with_extension("tsx")]
+            .into_iter()
+            .find(|file| file.is_file())
+            .and_then(|file| file.canonicalize().ok().or(Some(file)))
+    })
+}
+
 fn sibling_module(route_dir: &Path, name: &str) -> Vec<String> {
     let module = route_dir.join(name);
     if module.exists() {
@@ -938,13 +960,18 @@ fn sibling_modules(route_dir: &Path, names: &[&str]) -> Vec<String> {
 /// 4. `export function getStaticParams` or `export async function getStaticParams` → SSG
 /// 5. Route has no dynamic segments and no data fetching → SSG candidate (static routes)
 /// 6. Default → SSR
-fn detect_render_strategy(file: &Path, route_path: &str, layout_chain: &[String]) -> RenderMeta {
+fn detect_render_strategy(
+    app_dir: &Path,
+    file: &Path,
+    route_path: &str,
+    layout_chain: &[String],
+) -> RenderMeta {
     let Ok(source) = fs::read_to_string(file) else {
         return RenderMeta::default();
     };
 
     let code = code_without_strings_and_comments(&source);
-    let Some(reachable_code) = render_reachable_code(file, layout_chain) else {
+    let Some(reachable_code) = render_reachable_code(app_dir, file, layout_chain) else {
         // An unreadable route dependency must never be guessed to be static.
         return RenderMeta::default();
     };
@@ -1002,10 +1029,10 @@ fn detect_render_strategy(file: &Path, route_path: &str, layout_chain: &[String]
 /// Return all statically reachable route and layout source after stripping strings/comments.
 /// Route-level rendering exports are intentionally handled from the page source only, while data
 /// markers in any dependency make automatic SSG unsafe.
-fn render_reachable_code(file: &Path, layout_chain: &[String]) -> Option<String> {
+fn render_reachable_code(app_dir: &Path, file: &Path, layout_chain: &[String]) -> Option<String> {
     let mut files = collect_relative_graph(file);
     for layout in layout_chain {
-        let layout = PathBuf::from(layout);
+        let layout = resolve_layout_file(app_dir, layout)?;
         files.extend(collect_relative_graph(&layout));
     }
 
@@ -1468,6 +1495,39 @@ mod tests {
         assert!(codes.contains(&"RUV1007"));
         assert!(codes.contains(&"RUV1008"));
         assert!(codes.contains(&"RUV1010"));
+    }
+
+    #[test]
+    fn validates_layouts_in_the_client_boundary_graph() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(
+            app.join("layout.tsx"),
+            r#"
+                import "server-only";
+                export default function Layout({ children }) {
+                    return <main>{process.env.DATABASE_URL}{children}</main>;
+                }
+            "#,
+        )
+        .unwrap();
+        fs::write(
+            app.join("page.tsx"),
+            "export default function Page() { return <p>Safe page</p>; }",
+        )
+        .unwrap();
+
+        let manifest = discover_routes(DiscoverOptions::new(&app)).unwrap();
+        let report = validate_app(temp.path(), &manifest).unwrap();
+        let codes = report
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code)
+            .collect::<Vec<_>>();
+
+        assert!(codes.contains(&"RUV1007"), "{codes:?}");
+        assert!(codes.contains(&"RUV1008"), "{codes:?}");
     }
 
     #[test]

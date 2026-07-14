@@ -10,6 +10,7 @@ dist/
 *.pid
 .npm-pack/
 .npm-smoke/
+.pnpm-store/
 packages/ruvyxa/native-bin/
 packages/create-ruvyxa/template/
 packages/@ruvyxa/cli-*/bin/

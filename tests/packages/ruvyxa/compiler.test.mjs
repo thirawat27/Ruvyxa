@@ -105,6 +105,34 @@ import Card from './Card.js'
     })
   })
 
+  it('keeps code valid when runtime compiler minification is requested', async () => {
+    await withFixture(async ({ root, outDir }) => {
+      const pageFile = path.join(root, 'page.ts')
+      const outfile = path.join(outDir, 'minified.mjs')
+      await writeFile(
+        pageFile,
+        `
+          export const label = 'preserve  internal  whitespace'
+          // This comment must not consume the following export.
+          export const answer = 42
+        `,
+      )
+
+      await compileBundle({
+        projectRoot: root,
+        entrySource: `export { label, answer } from ${JSON.stringify(toImportPath(pageFile))}`,
+        sourcefile: 'ruvyxa:minify-entry.ts',
+        outfile,
+        platform: 'browser',
+        minify: true,
+      })
+
+      const mod = await import(pathToFileURL(outfile).href + `?t=${Date.now()}`)
+      assert.equal(mod.label, 'preserve  internal  whitespace')
+      assert.equal(mod.answer, 42)
+    })
+  })
+
   it('recompiles a changed source after compiler-cache invalidation', async () => {
     await withFixture(async ({ root, outDir }) => {
       const pageFile = path.join(root, 'page.ts')

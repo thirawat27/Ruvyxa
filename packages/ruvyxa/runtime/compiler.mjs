@@ -346,10 +346,12 @@ function linkModules(modules, externals, { minify, outfile, sourceMap }) {
   if (sourceMap && !minify) push(`//# sourceMappingURL=${path.basename(outfile)}.map`)
 
   const code = out.join('\n')
-  const canMinify = minify && !modules.some((module) => module.filePath?.includes('node_modules'))
   return {
-    code: canMinify ? code.replace(/\s+/g, ' ') : code,
-    map: sourceMap && !canMinify ? buildSourceMap(outfile, lineMappings, mapSources) : null,
+    // Whitespace replacement is not JavaScript minification: it corrupts strings,
+    // regexes, template literals, and line comments. Native production builds use
+    // the Oxc minifier; the runtime compiler keeps generated code semantically exact.
+    code,
+    map: sourceMap ? buildSourceMap(outfile, lineMappings, mapSources) : null,
   }
 }
 
