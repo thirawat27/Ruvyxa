@@ -20,7 +20,8 @@ use chrono::Local;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use ruvyxa_diagnostics::{Diagnostic, Result, RuvyxaError};
 use ruvyxa_graph::{
-    DiscoverOptions, RenderStrategy, RouteEntry, RouteKind, RouteManifest, discover_routes,
+    DiscoverOptions, RenderStrategy, RouteEntry, RouteKind, RouteManifest, RouteParams,
+    discover_routes,
 };
 use ruvyxa_middleware::{
     MiddlewareConfig, MiddlewareStack, PluginRequest, PluginResponse, WasmPluginRuntime,
@@ -964,7 +965,7 @@ struct RuntimeTrace {
     path: String,
     matched: bool,
     route: Option<RouteEntry>,
-    params: BTreeMap<String, String>,
+    params: RouteParams,
     runtime: &'static str,
     assets: TraceAssets,
 }
@@ -1527,7 +1528,7 @@ async fn render_page_by_strategy(
     state: &AppState,
     route: &RouteEntry,
     request_path: &str,
-    params: &BTreeMap<String, String>,
+    params: &RouteParams,
     styles: &str,
 ) -> Result<String> {
     match route.render.strategy {
@@ -1548,7 +1549,7 @@ async fn render_page_ssg(
     state: &AppState,
     route: &RouteEntry,
     request_path: &str,
-    params: &BTreeMap<String, String>,
+    params: &RouteParams,
     styles: &str,
 ) -> Result<String> {
     // In production, try to serve the pre-rendered HTML file directly
@@ -1612,7 +1613,7 @@ async fn render_page_isr(
     state: &AppState,
     route: &RouteEntry,
     request_path: &str,
-    params: &BTreeMap<String, String>,
+    params: &RouteParams,
     styles: &str,
 ) -> Result<String> {
     let cache_key = format!("isr:{}", render_cache::ssr_cache_key(request_path, params));
@@ -1652,7 +1653,7 @@ async fn render_isr_background(
     state: &AppState,
     route: &RouteEntry,
     request_path: &str,
-    params: &BTreeMap<String, String>,
+    params: &RouteParams,
     styles: &str,
 ) -> Result<String> {
     let response = state
@@ -1698,7 +1699,7 @@ fn spawn_isr_revalidation(
     state: &AppState,
     route: &RouteEntry,
     request_path: &str,
-    params: &BTreeMap<String, String>,
+    params: &RouteParams,
     styles: &str,
     cache_key: &str,
 ) {
@@ -1760,7 +1761,7 @@ async fn render_page_csr(
     state: &AppState,
     route: &RouteEntry,
     request_path: &str,
-    params: &BTreeMap<String, String>,
+    params: &RouteParams,
     styles: &str,
 ) -> Result<String> {
     // In production, serve the pre-rendered CSR shell
@@ -1813,7 +1814,7 @@ async fn render_page_ppr(
     state: &AppState,
     route: &RouteEntry,
     request_path: &str,
-    params: &BTreeMap<String, String>,
+    params: &RouteParams,
     styles: &str,
 ) -> Result<String> {
     // In production, serve the pre-rendered PPR shell
@@ -1874,7 +1875,7 @@ async fn render_page_pooled(
     state: &AppState,
     route: &RouteEntry,
     request_path: &str,
-    params: &BTreeMap<String, String>,
+    params: &RouteParams,
     styles: &str,
 ) -> Result<String> {
     // Check render cache first
@@ -1962,7 +1963,7 @@ async fn render_api_pooled(
     method: &str,
     headers: &[(String, String)],
     body: Option<&[u8]>,
-    params: &BTreeMap<String, String>,
+    params: &RouteParams,
 ) -> Result<Response> {
     let response = state
         .worker_pool
@@ -2460,7 +2461,7 @@ fn render_page(
     config: &ServerConfig,
     route: &RouteEntry,
     request_path: &str,
-    params: &BTreeMap<String, String>,
+    params: &RouteParams,
     styles: &str,
 ) -> Result<String> {
     let source = fs::read_to_string(&route.file).map_err(|source| RuvyxaError::Io {
@@ -2528,7 +2529,7 @@ fn render_react_page(
     config: &ServerConfig,
     route: &RouteEntry,
     request_path: &str,
-    params: &BTreeMap<String, String>,
+    params: &RouteParams,
 ) -> Result<String> {
     let renderer = find_ssr_renderer(&config.root).ok_or_else(|| {
         Diagnostic::new("RUV1102", "SSR renderer was not found")
@@ -2685,7 +2686,7 @@ fn render_api(
     route: &RouteEntry,
     request_path: &str,
     method: &str,
-    params: &BTreeMap<String, String>,
+    params: &RouteParams,
 ) -> Result<Response> {
     let renderer = find_api_renderer(&config.root).ok_or_else(|| {
         Diagnostic::new("RUV1202", "API renderer was not found")
@@ -2873,7 +2874,7 @@ fn client_hydration_script(
     config: &ServerConfig,
     route: &RouteEntry,
     request_path: &str,
-    params: &BTreeMap<String, String>,
+    params: &RouteParams,
 ) -> String {
     let params_json = serde_json::to_string(params).unwrap_or_else(|_| "{}".to_string());
     let params_json = safe_json_for_script(&params_json);
@@ -3642,7 +3643,7 @@ mod tests {
             .unwrap();
 
         assert!(trace.matched);
-        assert_eq!(trace.params.get("slug"), Some(&"hello".to_string()));
+        assert_eq!(trace.params.get("slug"), Some(&serde_json::json!("hello")));
         assert_eq!(trace.runtime, "dev");
         assert!(trace.route.unwrap().server_modules[0].ends_with("action.ts"));
     }

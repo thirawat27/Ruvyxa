@@ -5,9 +5,8 @@
 //! Lookup time is proportional to the number of path segments, not the number
 //! of registered routes.
 
-use std::collections::BTreeMap;
-
-use ruvyxa_graph::{RouteEntry, RouteManifest};
+use ruvyxa_graph::{RouteEntry, RouteManifest, RouteParams};
+use serde_json::Value;
 
 /// A compiled router that resolves paths in O(depth) time.
 #[derive(Debug, Clone)]
@@ -19,11 +18,11 @@ pub struct RadixRouter {
 struct TrieNode {
     /// Static children keyed by path segment.
     static_children: Vec<(String, TrieNode)>,
-    /// Dynamic parameter child (`:param`).
+    /// Dynamic parameter child (`[param]`).
     param_child: Option<Box<ParamChild>>,
-    /// Catch-all wildcard child (`*rest`).
+    /// Catch-all child (`[...rest]`).
     wildcard: Option<Box<WildcardChild>>,
-    /// Optional catch-all wildcard child (`*rest?`).
+    /// Optional catch-all child (`[[...rest]]`).
     optional_wildcard: Option<Box<WildcardChild>>,
     /// Route stored at this node (if a route terminates here).
     route_index: Option<usize>,
@@ -43,7 +42,7 @@ struct WildcardChild {
 
 pub struct RouteMatch<'a> {
     pub route: &'a RouteEntry,
-    pub params: BTreeMap<String, String>,
+    pub params: RouteParams,
 }
 
 impl RadixRouter {
@@ -66,7 +65,7 @@ impl RadixRouter {
         request_path: &str,
     ) -> Option<RouteMatch<'a>> {
         let parts = split_path(request_path);
-        let mut params = BTreeMap::new();
+        let mut params = RouteParams::new();
 
         let route_index = self.root.lookup(&parts, 0, &mut params)?;
         let route = manifest.routes.get(route_index)?;
@@ -138,12 +137,7 @@ impl TrieNode {
         }
     }
 
-    fn lookup(
-        &self,
-        parts: &[&str],
-        index: usize,
-        params: &mut BTreeMap<String, String>,
-    ) -> Option<usize> {
+    fn lookup(&self, parts: &[&str], index: usize, params: &mut RouteParams) -> Option<usize> {
         // If we've consumed all path segments, check if this node has a route
         if index >= parts.len() {
             if let Some(route_index) = self.route_index {
@@ -164,7 +158,7 @@ impl TrieNode {
 
         // 2. Try dynamic parameter child
         if let Some(param_child) = &self.param_child {
-            params.insert(param_child.name.clone(), segment.to_string());
+            params.insert(param_child.name.clone(), Value::String(segment.to_string()));
             if let Some(result) = param_child.node.lookup(parts, index + 1, params) {
                 return Some(result);
             }
@@ -173,15 +167,29 @@ impl TrieNode {
 
         // 3. Try required catch-all.
         if let Some(wildcard) = &self.wildcard {
-            let rest = parts[index..].join("/");
-            params.insert(wildcard.name.clone(), rest);
+            params.insert(
+                wildcard.name.clone(),
+                Value::Array(
+                    parts[index..]
+                        .iter()
+                        .map(|segment| Value::String((*segment).to_string()))
+                        .collect(),
+                ),
+            );
             return Some(wildcard.route_index);
         }
 
         // 4. Try optional catch-all (lowest priority).
         if let Some(wildcard) = &self.optional_wildcard {
-            let rest = parts[index..].join("/");
-            params.insert(wildcard.name.clone(), rest);
+            params.insert(
+                wildcard.name.clone(),
+                Value::Array(
+                    parts[index..]
+                        .iter()
+                        .map(|segment| Value::String((*segment).to_string()))
+                        .collect(),
+                ),
+            );
             return Some(wildcard.route_index);
         }
 
@@ -192,7 +200,7 @@ impl TrieNode {
         &self,
         parts: &[&str],
         index: usize,
-        params: &mut BTreeMap<String, String>,
+        params: &mut RouteParams,
     ) -> Option<usize> {
         let segment = parts[index];
         for (key, child) in &self.static_children {
@@ -218,17 +226,27 @@ fn parse_pattern(pattern: &str) -> Vec<PatternSegment> {
     split_path(pattern)
         .into_iter()
         .map(|segment| {
-            if segment.starts_with('*') && segment.ends_with('?') {
+            if segment.starts_with("[[...") && segment.ends_with("]]") {
                 PatternSegment::OptionalWildcard(
                     segment
-                        .trim_start_matches('*')
-                        .trim_end_matches('?')
+                        .trim_start_matches("[[...")
+                        .trim_end_matches("]]")
                         .to_string(),
                 )
-            } else if segment.starts_with('*') {
-                PatternSegment::Wildcard(segment.trim_start_matches('*').to_string())
-            } else if segment.starts_with(':') {
-                PatternSegment::Param(segment.trim_start_matches(':').to_string())
+            } else if segment.starts_with("[...") && segment.ends_with(']') {
+                PatternSegment::Wildcard(
+                    segment
+                        .trim_start_matches("[...")
+                        .trim_end_matches(']')
+                        .to_string(),
+                )
+            } else if segment.starts_with('[') && segment.ends_with(']') {
+                PatternSegment::Param(
+                    segment
+                        .trim_start_matches('[')
+                        .trim_end_matches(']')
+                        .to_string(),
+                )
             } else {
                 PatternSegment::Static(segment.to_string())
             }
@@ -247,6 +265,7 @@ fn split_path(path: &str) -> Vec<&str> {
 mod tests {
     use super::*;
     use ruvyxa_graph::{RenderMeta, RouteEntry, RouteKind, RouteManifest, RuntimeTarget};
+    use serde_json::json;
     use std::path::PathBuf;
 
     fn make_manifest(routes: Vec<(&str, RouteKind)>) -> RouteManifest {
@@ -296,27 +315,27 @@ mod tests {
     #[test]
     fn test_dynamic_params() {
         let manifest = make_manifest(vec![
-            ("/blog/:slug", RouteKind::Page),
-            ("/users/:id/posts/:post_id", RouteKind::Page),
+            ("/blog/[slug]", RouteKind::Page),
+            ("/users/[id]/posts/[post_id]", RouteKind::Page),
         ]);
         let router = RadixRouter::compile(&manifest);
 
         let m = router.find(&manifest, "/blog/hello-world").unwrap();
-        assert_eq!(m.route.path, "/blog/:slug");
-        assert_eq!(m.params["slug"], "hello-world");
+        assert_eq!(m.route.path, "/blog/[slug]");
+        assert_eq!(m.params["slug"], json!("hello-world"));
 
         let m = router.find(&manifest, "/users/42/posts/99").unwrap();
-        assert_eq!(m.params["id"], "42");
-        assert_eq!(m.params["post_id"], "99");
+        assert_eq!(m.params["id"], json!("42"));
+        assert_eq!(m.params["post_id"], json!("99"));
     }
 
     #[test]
     fn test_optional_catch_all() {
-        let manifest = make_manifest(vec![("/shop/*slug?", RouteKind::Page)]);
+        let manifest = make_manifest(vec![("/shop/[[...slug]]", RouteKind::Page)]);
         let router = RadixRouter::compile(&manifest);
 
         let m = router.find(&manifest, "/shop/clothes/tops").unwrap();
-        assert_eq!(m.params["slug"], "clothes/tops");
+        assert_eq!(m.params["slug"], json!(["clothes", "tops"]));
 
         let m = router.find(&manifest, "/shop").unwrap();
         assert!(m.params.is_empty());
@@ -324,14 +343,14 @@ mod tests {
 
     #[test]
     fn test_wildcard() {
-        let manifest = make_manifest(vec![("/docs/*path", RouteKind::Page)]);
+        let manifest = make_manifest(vec![("/docs/[...path]", RouteKind::Page)]);
         let router = RadixRouter::compile(&manifest);
 
         let m = router.find(&manifest, "/docs/getting-started").unwrap();
-        assert_eq!(m.params["path"], "getting-started");
+        assert_eq!(m.params["path"], json!(["getting-started"]));
 
         let m = router.find(&manifest, "/docs/guides/routing").unwrap();
-        assert_eq!(m.params["path"], "guides/routing");
+        assert_eq!(m.params["path"], json!(["guides", "routing"]));
 
         assert!(router.find(&manifest, "/docs").is_none());
     }
@@ -340,7 +359,7 @@ mod tests {
     fn test_static_takes_priority_over_dynamic() {
         let manifest = make_manifest(vec![
             ("/blog/featured", RouteKind::Page),
-            ("/blog/:slug", RouteKind::Page),
+            ("/blog/[slug]", RouteKind::Page),
         ]);
         let router = RadixRouter::compile(&manifest);
 
@@ -348,14 +367,14 @@ mod tests {
         assert_eq!(m.route.path, "/blog/featured");
 
         let m = router.find(&manifest, "/blog/other").unwrap();
-        assert_eq!(m.route.path, "/blog/:slug");
+        assert_eq!(m.route.path, "/blog/[slug]");
     }
 
     #[test]
     fn test_static_takes_priority_over_optional_catch_all() {
         let manifest = make_manifest(vec![
             ("/shop", RouteKind::Page),
-            ("/shop/*slug?", RouteKind::Page),
+            ("/shop/[[...slug]]", RouteKind::Page),
         ]);
         let router = RadixRouter::compile(&manifest);
 
@@ -363,7 +382,7 @@ mod tests {
         assert_eq!(m.route.path, "/shop");
 
         let m = router.find(&manifest, "/shop/clothes").unwrap();
-        assert_eq!(m.route.path, "/shop/*slug?");
-        assert_eq!(m.params["slug"], "clothes");
+        assert_eq!(m.route.path, "/shop/[[...slug]]");
+        assert_eq!(m.params["slug"], json!(["clothes"]));
     }
 }

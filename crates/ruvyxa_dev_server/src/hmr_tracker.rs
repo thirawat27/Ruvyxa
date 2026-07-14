@@ -38,7 +38,7 @@ impl Default for HmrTracker {
 /// Result of computing affected routes from changed files.
 #[derive(Debug, Clone)]
 pub struct HmrUpdate {
-    /// Route paths that need re-rendering (e.g., "/", "/blog/:slug").
+    /// Route paths that need re-rendering (e.g., "/", "/blog/[slug]").
     pub affected_routes: Vec<String>,
     /// Whether a full reload is needed (e.g., layout change affects all routes).
     pub full_reload: bool,

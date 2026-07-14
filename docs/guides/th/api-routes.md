@@ -17,7 +17,8 @@ export async function POST({ request }: { request: Request }) {
 Handler ได้รับ `{ request, params }`:
 
 - `request` — Web API `Request` object
-- `params` — route parameters
+- `params` — dynamic route parameters: `[id]` เป็น `string`, `[...slug]` เป็น `string[]`, และ
+  `[[...slug]]` ที่ไม่มี segment เป็น `undefined`
 
 ## Response Types
 

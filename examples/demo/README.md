@@ -44,7 +44,7 @@ pnpm --dir examples/demo analyze   # route/import/server-client diagnostics
 pnpm --dir examples/demo typecheck
 pnpm --dir examples/demo check     # typecheck + build + parity + page smoke render
 pnpm --dir examples/demo parity    # parity only
-pnpm --dir examples/demo trace /blog/:slug
+pnpm --dir examples/demo trace /blog/[slug]
 ```
 
 Start with `analyze` after adding or moving a route, import, environment variable, or configuration

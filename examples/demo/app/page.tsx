@@ -23,7 +23,7 @@ export default function Home() {
         <a className="feature-card" href="/blog">
           <h3>Blog + Dynamic Routes</h3>
           <p>app/blog/page.tsx + {'[slug]'}</p>
-          <code>GET /blog/:slug</code>
+          <code>GET /blog/[slug]</code>
         </a>
         <a className="feature-card" href="/catchall/a/b/c">
           <h3>Catch-all Route</h3>

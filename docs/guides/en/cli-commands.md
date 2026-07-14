@@ -2,22 +2,22 @@
 
 ## Quick Reference
 
-| Command                        | Purpose                                                            |
-| ------------------------------ | ------------------------------------------------------------------ |
-| `npm run dev`                  | Development server with hot reload and route watching              |
-| `npm run build`                | Build the application for production output                        |
-| `npm run start`                | Serve an existing production build                                 |
-| `npm run typecheck`            | Run `tsc --noEmit`                                                 |
-| `npm run check`                | Run app-level production readiness checks                          |
-| `npx ruvyxa preview`           | Preview an existing production build locally                       |
-| `npx ruvyxa routes`            | Print routes and their discovered render strategy                  |
-| `npx ruvyxa analyze`           | Validate routes, imports, and server/client boundaries             |
-| `npx ruvyxa doctor`            | Inspect project setup, tools, dependencies, and diagnostics        |
-| `npx ruvyxa trace /blog/:slug` | Inspect one route manifest entry                                   |
-| `npx ruvyxa bench`             | Benchmark route discovery, analysis, and production build          |
-| `npx ruvyxa test:parity`       | Compare development and production routes, then smoke render pages |
-| `npx ruvyxa parity`            | Alias for `test:parity`                                            |
-| `npx ruvyxa clean`             | Remove generated `.ruvyxa/` output                                 |
+| Command                         | Purpose                                                            |
+| ------------------------------- | ------------------------------------------------------------------ |
+| `npm run dev`                   | Development server with hot reload and route watching              |
+| `npm run build`                 | Build the application for production output                        |
+| `npm run start`                 | Serve an existing production build                                 |
+| `npm run typecheck`             | Run `tsc --noEmit`                                                 |
+| `npm run check`                 | Run app-level production readiness checks                          |
+| `npx ruvyxa preview`            | Preview an existing production build locally                       |
+| `npx ruvyxa routes`             | Print routes and their discovered render strategy                  |
+| `npx ruvyxa analyze`            | Validate routes, imports, and server/client boundaries             |
+| `npx ruvyxa doctor`             | Inspect project setup, tools, dependencies, and diagnostics        |
+| `npx ruvyxa trace /blog/[slug]` | Inspect one route manifest entry                                   |
+| `npx ruvyxa bench`              | Benchmark route discovery, analysis, and production build          |
+| `npx ruvyxa test:parity`        | Compare development and production routes, then smoke render pages |
+| `npx ruvyxa parity`             | Alias for `test:parity`                                            |
+| `npx ruvyxa clean`              | Remove generated `.ruvyxa/` output                                 |
 
 ## Common Options
 
@@ -117,7 +117,7 @@ Prints the discovered route table with detected rendering strategies:
 Route                    Strategy
 /                        ssg
 /about                   ssg
-/blog/:slug              ssr
+/blog/[slug]             ssr
 /api/health              api
 ```
 
@@ -157,7 +157,7 @@ Reports:
 
 ```bash
 npx ruvyxa trace /blog/hello-world
-npx ruvyxa trace /blog/:slug
+npx ruvyxa trace /blog/[slug]
 ```
 
 Inspects one route manifest entry: source file, matching pattern, rendering strategy, layout

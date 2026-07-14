@@ -20,6 +20,7 @@ use tokio::sync::{Mutex, mpsc, oneshot};
 use tracing::{debug, error, warn};
 
 use ruvyxa_diagnostics::{Diagnostic, Result, RuvyxaError};
+use ruvyxa_graph::RouteParams;
 
 /// Number of worker processes to maintain in the pool.
 /// Defaults to the number of available CPU cores (clamped to 2..8) for optimal
@@ -60,7 +61,7 @@ pub enum WorkerRequest {
         page_file: String,
         #[serde(rename = "requestPath")]
         request_path: String,
-        params: BTreeMap<String, String>,
+        params: RouteParams,
     },
     #[serde(rename = "api")]
     Api {
@@ -84,7 +85,7 @@ pub enum WorkerRequest {
         /// The explicit field name is the NDJSON protocol tag for base64 data.
         #[serde(rename = "bodyBase64", skip_serializing_if = "Option::is_none")]
         body_base64: Option<String>,
-        params: BTreeMap<String, String>,
+        params: RouteParams,
     },
     #[serde(rename = "action")]
     Action {
@@ -111,7 +112,7 @@ pub enum WorkerRequest {
         page_file: String,
         #[serde(rename = "requestPath")]
         request_path: String,
-        params: BTreeMap<String, String>,
+        params: RouteParams,
     },
     #[serde(rename = "invalidate")]
     Invalidate { id: String, paths: Vec<String> },
@@ -136,7 +137,7 @@ pub enum WorkerRequest {
         page_file: String,
         #[serde(rename = "requestPath")]
         request_path: String,
-        params: BTreeMap<String, String>,
+        params: RouteParams,
         /// "full" | "ppr" — controls whether to wait for all content or just the shell.
         mode: String,
     },
@@ -392,7 +393,7 @@ pub(crate) struct RenderApiRequest<'a> {
     pub request_path: &'a str,
     pub headers: &'a [(String, String)],
     pub body: Option<&'a [u8]>,
-    pub params: &'a BTreeMap<String, String>,
+    pub params: &'a RouteParams,
 }
 
 impl NodeWorkerPool {
@@ -645,7 +646,7 @@ impl NodeWorkerPool {
         app_dir: &Path,
         page_file: &Path,
         request_path: &str,
-        params: &BTreeMap<String, String>,
+        params: &RouteParams,
     ) -> Result<WorkerResponse> {
         let request = WorkerRequest::Ssr {
             id: next_request_id(),
@@ -705,7 +706,7 @@ impl NodeWorkerPool {
         app_dir: &Path,
         page_file: &Path,
         request_path: &str,
-        params: &BTreeMap<String, String>,
+        params: &RouteParams,
     ) -> Result<WorkerResponse> {
         let request = WorkerRequest::Client {
             id: next_request_id(),
@@ -725,7 +726,7 @@ impl NodeWorkerPool {
         app_dir: &Path,
         page_file: &Path,
         request_path: &str,
-        params: &BTreeMap<String, String>,
+        params: &RouteParams,
         mode: &str,
     ) -> Result<WorkerResponse> {
         let request = WorkerRequest::Ssg {

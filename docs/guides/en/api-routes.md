@@ -26,7 +26,8 @@ Supported methods: `GET`, `POST`, `PUT`, `DELETE`, `PATCH`, `HEAD`, `OPTIONS`.
 Each handler receives `{ request, params }`:
 
 - `request` — standard Web API `Request` object
-- `params` — route parameters (for dynamic routes only)
+- `params` — dynamic route parameters: `[id]` is a `string`, `[...slug]` is a `string[]`, and an
+  omitted `[[...slug]]` is `undefined`.
 
 ## Response Types
 

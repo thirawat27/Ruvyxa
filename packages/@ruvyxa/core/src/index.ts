@@ -16,6 +16,8 @@ export type {
   RateLimitConfig,
   RenderConfig,
   RenderStrategy,
+  RouteParamValue,
+  RouteParams,
   RuvyxaConfig,
   RuvyxaPlugin,
   StaticParamsContext,

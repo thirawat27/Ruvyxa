@@ -17,6 +17,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use ruvyxa_graph::RouteParams;
 use tokio::sync::RwLock;
 
 /// Default max entries in the render cache.
@@ -260,35 +261,21 @@ impl RenderCache {
 }
 
 /// Generate a cache key for SSR pages.
-pub fn ssr_cache_key(
-    request_path: &str,
-    params: &std::collections::BTreeMap<String, String>,
-) -> String {
+pub fn ssr_cache_key(request_path: &str, params: &RouteParams) -> String {
     if params.is_empty() {
         format!("ssr:{request_path}")
     } else {
-        let params_str: String = params
-            .iter()
-            .map(|(k, v)| format!("{k}={v}"))
-            .collect::<Vec<_>>()
-            .join("&");
+        let params_str = serde_json::to_string(params).unwrap_or_default();
         format!("ssr:{request_path}?{params_str}")
     }
 }
 
 /// Generate a cache key for client bundles.
-pub fn client_cache_key(
-    request_path: &str,
-    params: &std::collections::BTreeMap<String, String>,
-) -> String {
+pub fn client_cache_key(request_path: &str, params: &RouteParams) -> String {
     if params.is_empty() {
         format!("client:{request_path}")
     } else {
-        let params_str: String = params
-            .iter()
-            .map(|(k, v)| format!("{k}={v}"))
-            .collect::<Vec<_>>()
-            .join("&");
+        let params_str = serde_json::to_string(params).unwrap_or_default();
         format!("client:{request_path}?{params_str}")
     }
 }
@@ -393,7 +380,7 @@ mod tests {
         cache.put("isr:ssr:/blog/two".into(), "3".into()).await;
         cache.put("ssr:/about".into(), "4".into()).await;
 
-        assert_eq!(cache.invalidate_route("/blog/:slug").await, 3);
+        assert_eq!(cache.invalidate_route("/blog/[slug]").await, 3);
         assert_eq!(cache.get("ssr:/about").await, Some("4".into()));
     }
 

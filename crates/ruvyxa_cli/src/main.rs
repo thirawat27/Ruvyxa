@@ -18,8 +18,8 @@ use ruvyxa_dev_server::{
 };
 use ruvyxa_diagnostics::Diagnostic;
 use ruvyxa_graph::{
-    DiscoverOptions, RenderStrategy, RouteEntry, RouteManifest, discover_routes, validate_app,
-    write_manifest,
+    DiscoverOptions, RenderStrategy, RouteEntry, RouteManifest, RouteParams, discover_routes,
+    validate_app, write_manifest,
 };
 use tracing::info;
 use walkdir::WalkDir;
@@ -1169,7 +1169,7 @@ enum PrerenderJobKind {
 struct PrerenderJob {
     route_path: String,
     render_path: String,
-    params: BTreeMap<String, String>,
+    params: RouteParams,
     strategy: RenderStrategy,
     revalidate: Option<u64>,
     kind: PrerenderJobKind,
@@ -1234,7 +1234,7 @@ fn prerender_static_routes(
                 jobs.push(PrerenderJob {
                     route_path: route.path.clone(),
                     render_path: route.path.clone(),
-                    params: BTreeMap::new(),
+                    params: RouteParams::new(),
                     strategy: RenderStrategy::Csr,
                     revalidate: None,
                     kind: PrerenderJobKind::Csr,
@@ -1242,20 +1242,19 @@ fn prerender_static_routes(
             }
             RenderStrategy::Ssg | RenderStrategy::Isr | RenderStrategy::Ppr => {
                 // For dynamic routes with getStaticParams, resolve static paths first
-                let paths_to_render = if route.render.has_static_params
-                    && (route.path.contains(':') || route.path.contains('*'))
-                {
-                    resolve_static_params(root, app_dir, route, &renderer_script)?
-                } else if !route.path.contains(':') && !route.path.contains('*') {
-                    // Pure static route — render the single path
-                    vec![StaticRouteParams {
-                        path: route.path.clone(),
-                        params: BTreeMap::new(),
-                    }]
-                } else {
-                    // Dynamic route without getStaticParams — skip (will be rendered at request time)
-                    continue;
-                };
+                let paths_to_render =
+                    if route.render.has_static_params && route_has_dynamic_segments(&route.path) {
+                        resolve_static_params(root, app_dir, route, &renderer_script)?
+                    } else if !route_has_dynamic_segments(&route.path) {
+                        // Pure static route — render the single path
+                        vec![StaticRouteParams {
+                            path: route.path.clone(),
+                            params: RouteParams::new(),
+                        }]
+                    } else {
+                        // Dynamic route without getStaticParams — skip (will be rendered at request time)
+                        continue;
+                    };
 
                 let mode = match route.render.strategy {
                     RenderStrategy::Ppr => "ppr",
@@ -1430,7 +1429,7 @@ fn render_prerender_job(
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct StaticRouteParams {
     path: String,
-    params: BTreeMap<String, String>,
+    params: RouteParams,
 }
 
 fn resolve_static_params(
@@ -1483,16 +1482,8 @@ fn resolve_static_params(
             })?;
             let params = params
                 .iter()
-                .map(|(key, value)| {
-                    let value = value.as_str().ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "getStaticParams for {} returned a non-string value for '{key}'",
-                            route.path
-                        )
-                    })?;
-                    Ok((key.clone(), value.to_string()))
-                })
-                .collect::<anyhow::Result<BTreeMap<_, _>>>()?;
+                .map(|(key, value)| Ok((key.clone(), value.clone())))
+                .collect::<anyhow::Result<RouteParams>>()?;
             Ok(StaticRouteParams {
                 path: static_route_path(&route.path, &params)?,
                 params,
@@ -1501,32 +1492,67 @@ fn resolve_static_params(
         .collect()
 }
 
-fn static_route_path(
-    route_path: &str,
-    params: &BTreeMap<String, String>,
-) -> anyhow::Result<String> {
+fn static_route_path(route_path: &str, params: &RouteParams) -> anyhow::Result<String> {
     let mut segments = Vec::new();
     for segment in route_path
         .trim_matches('/')
         .split('/')
         .filter(|segment| !segment.is_empty())
     {
-        if let Some(name) = segment.strip_prefix(':') {
-            let value = params.get(name).ok_or_else(|| {
-                anyhow::anyhow!("getStaticParams is missing '{name}' for route {route_path}")
-            })?;
+        if segment.starts_with('[')
+            && segment.ends_with(']')
+            && !segment.starts_with("[...")
+            && !segment.starts_with("[[...")
+        {
+            let name = &segment[1..segment.len() - 1];
+            let value = params
+                .get(name)
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    anyhow::anyhow!("getStaticParams is missing '{name}' for route {route_path}")
+                })?;
             validate_static_path_segment(value, name, route_path)?;
-            segments.push(value.clone());
-        } else if let Some(name) = segment.strip_prefix('*') {
-            let optional = name.ends_with('?');
-            let name = name.trim_end_matches('?');
+            segments.push(value.to_string());
+        } else if segment.starts_with("[...") && segment.ends_with(']') {
+            let name = &segment[4..segment.len() - 1];
             let Some(value) = params.get(name) else {
-                if optional {
-                    continue;
-                }
                 anyhow::bail!("getStaticParams is missing '{name}' for route {route_path}");
             };
-            for value_segment in value.split('/') {
+            let values = value.as_array().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "getStaticParams for {route_path} must return a string array for catch-all '{name}'"
+                )
+            })?;
+            if values.is_empty() {
+                anyhow::bail!(
+                    "getStaticParams returned an empty catch-all '{name}' for route {route_path}"
+                );
+            }
+            for value_segment in values {
+                let value_segment = value_segment.as_str().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "getStaticParams for {route_path} must return strings in catch-all '{name}'"
+                    )
+                })?;
+                validate_static_path_segment(value_segment, name, route_path)?;
+                segments.push(value_segment.to_string());
+            }
+        } else if segment.starts_with("[[...") && segment.ends_with("]]") {
+            let name = &segment[5..segment.len() - 2];
+            let Some(value) = params.get(name) else {
+                continue;
+            };
+            let values = value.as_array().ok_or_else(|| {
+                anyhow::anyhow!(
+                    "getStaticParams for {route_path} must return a string array for optional catch-all '{name}'"
+                )
+            })?;
+            for value_segment in values {
+                let value_segment = value_segment.as_str().ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "getStaticParams for {route_path} must return strings in optional catch-all '{name}'"
+                    )
+                })?;
                 validate_static_path_segment(value_segment, name, route_path)?;
                 segments.push(value_segment.to_string());
             }
@@ -1548,6 +1574,12 @@ fn validate_static_path_segment(value: &str, name: &str, route_path: &str) -> an
         );
     }
     Ok(())
+}
+
+fn route_has_dynamic_segments(route_path: &str) -> bool {
+    route_path
+        .split('/')
+        .any(|segment| segment.starts_with('[') && segment.ends_with(']'))
 }
 
 /// Generate the output HTML file path for a pre-rendered route.
@@ -1645,7 +1677,7 @@ fn inject_prerender_client_assets(
     client_dir: &Path,
     route_path: &str,
     request_path: &str,
-    params: &BTreeMap<String, String>,
+    params: &RouteParams,
 ) -> String {
     let Some(assets) = prerender_client_assets(client_dir, route_path) else {
         return html.to_string();
@@ -3111,11 +3143,11 @@ fn parity_smoke_path(route_path: &str) -> String {
         .trim_start_matches('/')
         .split('/')
         .filter_map(|segment| {
-            if segment.starts_with('*') && segment.ends_with('?') {
+            if segment.starts_with("[[...") && segment.ends_with("]]") {
                 None
-            } else if segment.starts_with('*') {
+            } else if segment.starts_with("[...") && segment.ends_with(']') {
                 Some("smoke/path")
-            } else if segment.starts_with(':') {
+            } else if segment.starts_with('[') && segment.ends_with(']') {
                 Some("smoke")
             } else {
                 Some(segment)
@@ -4106,16 +4138,16 @@ mod tests {
         std::fs::create_dir_all(&client_dir).unwrap();
         std::fs::write(
             client_dir.join("manifest.json"),
-            r#"{"routes":[{"path":"/docs/:slug","src":"/__ruvyxa/client/docs.123.js","sharedChunks":[{"src":"/__ruvyxa/client/shared.456.js"}]}]}"#,
+            r#"{"routes":[{"path":"/docs/[slug]","src":"/__ruvyxa/client/docs.123.js","sharedChunks":[{"src":"/__ruvyxa/client/shared.456.js"}]}]}"#,
         )
         .unwrap();
 
         let html = inject_prerender_client_assets(
             "<!doctype html><html><head><title>Docs</title></head><body><main>Guide</main></body></html>",
             &client_dir,
-            "/docs/:slug",
+            "/docs/[slug]",
             "/docs/start",
-            &BTreeMap::from([("slug".to_string(), "start".to_string())]),
+            &BTreeMap::from([("slug".to_string(), serde_json::json!("start"))]),
         );
 
         assert!(
@@ -4542,9 +4574,9 @@ export default {
     #[test]
     fn builds_smoke_paths_for_dynamic_routes() {
         assert_eq!(parity_smoke_path("/"), "/");
-        assert_eq!(parity_smoke_path("/blog/:slug"), "/blog/smoke");
-        assert_eq!(parity_smoke_path("/docs/*path"), "/docs/smoke/path");
-        assert_eq!(parity_smoke_path("/shop/*category?"), "/shop");
+        assert_eq!(parity_smoke_path("/blog/[slug]"), "/blog/smoke");
+        assert_eq!(parity_smoke_path("/docs/[...path]"), "/docs/smoke/path");
+        assert_eq!(parity_smoke_path("/shop/[[...category]]"), "/shop");
     }
 
     #[test]
@@ -4605,22 +4637,33 @@ export default {
 
     #[test]
     fn static_route_path_preserves_page_params_and_rejects_traversal() {
-        let params = BTreeMap::from([("slug".to_string(), "hello-world".to_string())]);
+        let params = BTreeMap::from([("slug".to_string(), serde_json::json!("hello-world"))]);
         assert_eq!(
-            static_route_path("/blog/:slug", &params).unwrap(),
+            static_route_path("/blog/[slug]", &params).unwrap(),
             "/blog/hello-world"
         );
 
-        let unsafe_params = BTreeMap::from([("slug".to_string(), "../manifest.json".to_string())]);
-        assert!(static_route_path("/blog/:slug", &unsafe_params).is_err());
+        let unsafe_params =
+            BTreeMap::from([("slug".to_string(), serde_json::json!("../manifest.json"))]);
+        assert!(static_route_path("/blog/[slug]", &unsafe_params).is_err());
     }
 
     #[test]
     fn static_route_path_allows_valid_catch_all_segments() {
-        let params = BTreeMap::from([("path".to_string(), "guides/routing".to_string())]);
+        let params =
+            BTreeMap::from([("path".to_string(), serde_json::json!(["guides", "routing"]))]);
         assert_eq!(
-            static_route_path("/docs/*path", &params).unwrap(),
+            static_route_path("/docs/[...path]", &params).unwrap(),
             "/docs/guides/routing"
+        );
+    }
+
+    #[test]
+    fn static_route_path_allows_an_omitted_optional_catch_all() {
+        let params = RouteParams::new();
+        assert_eq!(
+            static_route_path("/shop/[[...path]]", &params).unwrap(),
+            "/shop"
         );
     }
 

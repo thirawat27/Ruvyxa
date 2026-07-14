@@ -6,6 +6,12 @@ use ruvyxa_diagnostics::{Diagnostic, Result, RuvyxaError};
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
+/// Route parameters passed from the matcher to page and API renderers.
+///
+/// Values are JSON-shaped because catch-all segments are arrays while an
+/// omitted optional catch-all has no entry.
+pub type RouteParams = BTreeMap<String, serde_json::Value>;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RouteManifest {
@@ -832,7 +838,7 @@ fn route_segment(segment: &str, is_last: bool) -> Result<String> {
         if !is_last {
             return Err(catch_all_must_be_last());
         }
-        return Ok(format!("*{name}?"));
+        return Ok(segment.to_string());
     }
 
     if segment.starts_with("[...") && segment.ends_with(']') {
@@ -841,13 +847,13 @@ fn route_segment(segment: &str, is_last: bool) -> Result<String> {
         if !is_last {
             return Err(catch_all_must_be_last());
         }
-        return Ok(format!("*{name}"));
+        return Ok(segment.to_string());
     }
 
     if segment.starts_with('[') && segment.ends_with(']') {
         let name = &segment[1..segment.len() - 1];
         validate_dynamic_name(name)?;
-        return Ok(format!(":{name}"));
+        return Ok(segment.to_string());
     }
 
     if segment.contains('[') || segment.contains(']') {
@@ -1068,7 +1074,7 @@ fn apply_rendering_defaults(
 fn route_has_dynamic_segments(route_path: &str) -> bool {
     route_path
         .split('/')
-        .any(|segment| segment.starts_with(':') || segment.starts_with('*'))
+        .any(|segment| segment.starts_with('[') && segment.ends_with(']'))
 }
 
 fn has_dynamic_data_markers(code: &str) -> bool {
@@ -1167,10 +1173,12 @@ fn detect_conflicts(routes: &[RouteEntry]) -> Result<()> {
 fn route_match_shape(path: &str) -> String {
     path.split('/')
         .map(|segment| {
-            if segment.starts_with(':') {
-                ":"
-            } else if segment.starts_with('*') {
+            if segment.starts_with("[[...") && segment.ends_with("]]") {
+                "*?"
+            } else if segment.starts_with("[...") && segment.ends_with(']') {
                 "*"
+            } else if segment.starts_with('[') && segment.ends_with(']') {
+                ":"
             } else {
                 segment
             }
@@ -1210,7 +1218,7 @@ mod tests {
             .map(|route| route.path.as_str())
             .collect::<Vec<_>>();
 
-        assert_eq!(paths, vec!["/", "/about", "/blog/:slug"]);
+        assert_eq!(paths, vec!["/", "/about", "/blog/[slug]"]);
     }
 
     #[test]
@@ -1255,7 +1263,10 @@ mod tests {
             .map(|route| route.path.as_str())
             .collect::<Vec<_>>();
 
-        assert_eq!(paths, vec!["/docs/*slug", "/pricing", "/shop/*category?"]);
+        assert_eq!(
+            paths,
+            vec!["/docs/[...slug]", "/pricing", "/shop/[[...category]]"]
+        );
     }
 
     #[test]
@@ -1404,7 +1415,7 @@ mod tests {
         let dynamic = manifest
             .routes
             .iter()
-            .find(|route| route.path == "/blog/:slug")
+            .find(|route| route.path == "/blog/[slug]")
             .unwrap();
         let latest = manifest
             .routes

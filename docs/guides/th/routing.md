@@ -1,41 +1,46 @@
 # Routing
 
-Routes ใน Ruvyxa มาจากชื่อไฟล์และโฟลเดอร์
+Ruvyxa สร้าง route จากโฟลเดอร์ใน `app/` โดยตรง จึงไม่มี syntax ของ URL อีกชุดที่ต้องจำ:
 
-| File                               | URL            |
-| ---------------------------------- | -------------- |
-| `app/page.tsx`                     | `/`            |
-| `app/about/page.tsx`               | `/about`       |
-| `app/blog/[slug]/page.tsx`         | `/blog/:slug`  |
-| `app/docs/[...path]/page.tsx`      | `/docs/*path`  |
-| `app/shop/[[...path]]/page.tsx`    | `/shop/*path?` |
-| `app/(marketing)/pricing/page.tsx` | `/pricing`     |
-| `app/api/health/route.ts`          | `/api/health`  |
-| `app/guide/page.md` or `page.mdx`  | `/guide`       |
+```text
+app/blog/[slug]/page.tsx
+app/docs/[...path]/page.tsx
+app/shop/[[...path]]/page.tsx
+```
 
 ## Dynamic Segments
 
-- `[name]` — required parameter
-- `[...path]` — catch-all (1+ segments)
-- `[[...path]]` — optional catch-all (0+ segments)
+- `[name]` ได้ค่า `string`
+- `[...path]` ได้ค่า `string[]` ที่มีอย่างน้อยหนึ่ง segment
+- `[[...path]]` ได้ `string[] | undefined` และเข้าถึง parent route ได้ด้วย
 
 ```tsx
-// app/blog/[slug]/page.tsx
 import type { PageProps } from 'ruvyxa/config'
 
-export default function BlogPost({ params }: PageProps<{ slug: string }>) {
-  return <h1>Post: {params.slug}</h1>
+export default function Docs({ params }: PageProps<{ path: string[] }>) {
+  return <h1>{params.path.join('/')}</h1>
 }
 ```
 
+```tsx
+export default function Shop({ params }: PageProps<{ path?: string[] }>) {
+  return <h1>{params.path?.join('/') ?? 'All products'}</h1>
+}
+```
+
+`params` ของ Ruvyxa เป็น synchronous ตาม contract ของ renderer ปัจจุบัน จึงไม่ได้อ้างว่า รองรับ
+Promise params ของ Next.js ซึ่งต้องใช้ RSC transport.
+
 ## Route Groups
 
-ใช้วงเล็บ `(...)` จัดกลุ่มโดยไม่กระทบ URL: `app/(marketing)/about/page.tsx` → `/about`
+ใช้ `(...)` จัดโครงสร้างไฟล์โดยไม่เพิ่ม URL segment เช่น `app/(marketing)/pricing/page.tsx`
 
-## กฎการตั้งชื่อ
+โฟลเดอร์ที่ขึ้นต้นด้วย `_` หรือ `@` จะถูก ignore และ Ruvyxa จะปฏิเสธ route ที่ ambiguous เช่น `[id]`
+กับ `[slug]` ในตำแหน่งเดียวกัน
 
-- โฟลเดอร์ที่ขึ้นต้นด้วย `_` หรือ `@` ถูก ignore
-- Ruvyxa **ปฏิเสธ** โครงสร้างที่ ambiguous
-- รัน `npx ruvyxa analyze` หลังจากเปลี่ยน routes
+```bash
+npx ruvyxa analyze
+npx ruvyxa routes
+```
 
 ดูเพิ่มเติม: [API Routes](api-routes.md)

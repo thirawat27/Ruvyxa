@@ -1,8 +1,8 @@
-export default function CatchAll({ params }: { params: { slug: string } }) {
+export default function CatchAll({ params }: { params: { slug: string[] } }) {
   return (
     <main className="page">
       <p className="eyebrow">Catch-all route segment</p>
-      <h1>Catch-all: /{params.slug ?? ''}</h1>
+      <h1>Catch-all: /{params.slug.join('/')}</h1>
       <p>
         Rendered from the <code>catchall/{'[...slug]'}/page.tsx</code> file.
       </p>

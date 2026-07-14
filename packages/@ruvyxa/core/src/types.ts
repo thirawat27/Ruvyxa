@@ -122,6 +122,12 @@ export interface StaticParamsContext {
   routes: Array<{ path: string; id: string }>
 }
 
+/** A value captured from a Next-style dynamic route segment. */
+export type RouteParamValue = string | string[] | undefined
+
+/** Parameter object shared by pages, layouts, and route handlers. */
+export type RouteParams = Record<string, RouteParamValue>
+
 /**
  * Type for the `getStaticParams` page export used by SSG and ISR routes
  * with dynamic segments.
@@ -134,14 +140,14 @@ export interface StaticParamsContext {
  * }
  * ```
  */
-export type GetStaticParams<TParams extends Record<string, string> = Record<string, string>> = (
+export type GetStaticParams<TParams extends RouteParams = RouteParams> = (
   ctx: StaticParamsContext,
 ) => TParams[] | Promise<TParams[]>
 
 /**
  * Props provided to a page component during rendering.
  */
-export interface PageProps<TParams extends Record<string, string> = Record<string, string>> {
+export interface PageProps<TParams extends RouteParams = RouteParams> {
   params: TParams
   requestPath: string
 }

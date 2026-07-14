@@ -247,20 +247,10 @@ Standalone JavaScript and TypeScript tests live under `tests/` and are routed by
 Routes are discovered from `app/`. Every `page.tsx` must export a default component; every
 `route.ts` exports named HTTP-method handlers.
 
-| File                               | Route          |
-| ---------------------------------- | -------------- |
-| `app/page.tsx`                     | `/`            |
-| `app/docs/page.md`                 | `/docs`        |
-| `app/guide/page.mdx`               | `/guide`       |
-| `app/about/page.tsx`               | `/about`       |
-| `app/blog/[slug]/page.tsx`         | `/blog/:slug`  |
-| `app/docs/[...path]/page.tsx`      | `/docs/*path`  |
-| `app/shop/[[...path]]/page.tsx`    | `/shop/*path?` |
-| `app/(marketing)/pricing/page.tsx` | `/pricing`     |
-| `app/api/health/route.ts`          | `/api/health`  |
-
-Route groups (parentheses), dynamic segments (brackets), and catch-all segments (`[...param]` /
-`[[...param]]`) are all supported. Directories starting with `_` or `@` are ignored.
+The folder name is the complete route contract: use `[slug]` for one segment, `[...path]` for a
+required `string[]`, and `[[...path]]` for an optional `string[]`. Route groups (`(...)`) organize
+files without adding a segment. There is no separate `:param` or `*param` route syntax to configure.
+Directories starting with `_` or `@` are ignored.
 
 ```tsx
 export default function Home() {
