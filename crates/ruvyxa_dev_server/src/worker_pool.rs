@@ -35,6 +35,8 @@ const MAX_POOL_SIZE: usize = 8;
 
 /// Maximum time to wait for a worker response before considering it dead.
 const WORKER_TIMEOUT_MS: u64 = 10_000;
+/// Build prerendering can legitimately take longer than an interactive request.
+const BUILD_WORKER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 /// Maximum time a worker receives to exit after its stdin closes before it is killed.
 const WORKER_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
@@ -140,6 +142,17 @@ pub enum WorkerRequest {
         params: RouteParams,
         /// "full" | "ppr" — controls whether to wait for all content or just the shell.
         mode: String,
+        /// Build-only isolation: reload the module without discarding the compiled bundle cache.
+        fresh: bool,
+    },
+    /// Resolve static route parameters during production builds.
+    #[serde(rename = "staticParams")]
+    StaticParams {
+        id: String,
+        #[serde(rename = "projectRoot")]
+        project_root: String,
+        #[serde(rename = "pageFile")]
+        page_file: String,
     },
 }
 
@@ -151,6 +164,7 @@ impl WorkerRequest {
             self,
             Self::Ssr { .. }
                 | Self::Ssg { .. }
+                | Self::StaticParams { .. }
                 | Self::Client { .. }
                 | Self::Ping { .. }
                 | Self::Warmup { .. }
@@ -186,6 +200,7 @@ pub struct WorkerResponse {
     pub pong: Option<bool>,
     pub warmed: Option<usize>,
     pub module_cache_size: Option<usize>,
+    pub params: Option<Vec<RouteParams>>,
 }
 
 // --- Worker Process ---
@@ -313,7 +328,11 @@ impl Worker {
         }
     }
 
-    async fn send(&self, request: &WorkerRequest) -> Result<WorkerResponse> {
+    async fn send(
+        &self,
+        request: &WorkerRequest,
+        response_timeout: std::time::Duration,
+    ) -> Result<WorkerResponse> {
         if !self.alive.load(Ordering::Acquire) {
             return Err(RuvyxaError::Message(
                 "Worker process has exited".to_string(),
@@ -327,7 +346,8 @@ impl Worker {
             | WorkerRequest::Invalidate { id, .. }
             | WorkerRequest::Ping { id, .. }
             | WorkerRequest::Warmup { id, .. }
-            | WorkerRequest::Ssg { id, .. } => id.clone(),
+            | WorkerRequest::Ssg { id, .. }
+            | WorkerRequest::StaticParams { id, .. } => id.clone(),
         };
 
         let (tx, rx) = oneshot::channel();
@@ -361,7 +381,7 @@ impl Worker {
             ));
         }
 
-        match tokio::time::timeout(std::time::Duration::from_millis(WORKER_TIMEOUT_MS), rx).await {
+        match tokio::time::timeout(response_timeout, rx).await {
             Ok(Ok(response)) => Ok(response),
             Ok(Err(_)) => Err(RuvyxaError::Message(
                 "Worker response channel closed unexpectedly".to_string(),
@@ -370,7 +390,8 @@ impl Worker {
                 let mut pending = self.pending.lock().await;
                 pending.remove(&id);
                 Err(RuvyxaError::Message(format!(
-                    "Worker request timed out after {WORKER_TIMEOUT_MS}ms"
+                    "Worker request timed out after {}ms",
+                    response_timeout.as_millis()
                 )))
             }
         }
@@ -384,6 +405,7 @@ pub struct NodeWorkerPool {
     worker_script: PathBuf,
     env: BTreeMap<String, String>,
     next_worker: AtomicU64,
+    response_timeout: std::time::Duration,
 }
 
 pub(crate) struct RenderApiRequest<'a> {
@@ -398,6 +420,38 @@ pub(crate) struct RenderApiRequest<'a> {
 
 impl NodeWorkerPool {
     pub async fn start(root: &Path, env: BTreeMap<String, String>) -> Result<Self> {
+        Self::start_with_timeout(
+            root,
+            env,
+            None,
+            std::time::Duration::from_millis(WORKER_TIMEOUT_MS),
+        )
+        .await
+    }
+
+    /// Start a pool with an optional bounded worker count.
+    ///
+    /// Build-time prerendering uses this to avoid starting idle Node processes
+    /// beyond its already configured render concurrency.
+    pub async fn start_with_size(
+        root: &Path,
+        mut env: BTreeMap<String, String>,
+        worker_count: Option<usize>,
+    ) -> Result<Self> {
+        // Keep the Node worker's own watchdog aligned with the Rust caller.
+        // This is build-only; the interactive server continues to use its
+        // shorter response budget.
+        env.entry("RUVYXA_WORKER_TIMEOUT_MS".to_string())
+            .or_insert_with(|| BUILD_WORKER_TIMEOUT.as_millis().to_string());
+        Self::start_with_timeout(root, env, worker_count, BUILD_WORKER_TIMEOUT).await
+    }
+
+    async fn start_with_timeout(
+        root: &Path,
+        env: BTreeMap<String, String>,
+        worker_count: Option<usize>,
+        response_timeout: std::time::Duration,
+    ) -> Result<Self> {
         let worker_script = find_worker_script(root).ok_or_else(|| {
             Diagnostic::new("RUV1702", "Worker pool script was not found")
                 .explain(
@@ -408,16 +462,21 @@ impl NodeWorkerPool {
                 )
         })?;
 
-        let pool_size = std::env::var("RUVYXA_WORKER_POOL_SIZE")
-            .ok()
-            .and_then(|value| value.parse::<usize>().ok())
-            .unwrap_or_else(|| {
-                // Auto-size: use available CPU cores clamped to a reasonable range.
-                std::thread::available_parallelism()
-                    .map(usize::from)
-                    .unwrap_or(DEFAULT_POOL_SIZE)
-            })
-            .clamp(MIN_POOL_SIZE, MAX_POOL_SIZE);
+        let pool_size = match worker_count {
+            // A short-lived build may have one prerender job. Do not start an
+            // idle second process solely because the long-lived dev server has
+            // a higher minimum concurrency target.
+            Some(worker_count) => worker_count.clamp(1, MAX_POOL_SIZE),
+            None => std::env::var("RUVYXA_WORKER_POOL_SIZE")
+                .ok()
+                .and_then(|value| value.parse::<usize>().ok())
+                .unwrap_or_else(|| {
+                    std::thread::available_parallelism()
+                        .map(usize::from)
+                        .unwrap_or(DEFAULT_POOL_SIZE)
+                })
+                .clamp(MIN_POOL_SIZE, MAX_POOL_SIZE),
+        };
 
         let mut workers = Vec::with_capacity(pool_size);
         for _ in 0..pool_size {
@@ -428,7 +487,7 @@ impl NodeWorkerPool {
         let ping = WorkerRequest::Ping {
             id: next_request_id(),
         };
-        match workers[0].send(&ping).await {
+        match workers[0].send(&ping, response_timeout).await {
             Ok(response) if response.ok => {
                 debug!(pool_size, "Node worker pool started successfully");
             }
@@ -450,6 +509,7 @@ impl NodeWorkerPool {
             worker_script,
             env,
             next_worker: AtomicU64::new(0),
+            response_timeout,
         })
     }
 
@@ -477,7 +537,7 @@ impl NodeWorkerPool {
             let index = self.next_worker.fetch_add(1, Ordering::Relaxed) as usize % workers.len();
             (index, workers[index].clone())
         };
-        let response = worker.send(&request).await;
+        let response = worker.send(&request, self.response_timeout).await;
 
         if response.is_err()
             && let Some(replacement) = self.replace_failed_worker(index, &worker).await
@@ -487,7 +547,7 @@ impl NodeWorkerPool {
                 failed_worker = index,
                 "retrying idempotent request on replacement worker"
             );
-            return replacement.send(&request).await;
+            return replacement.send(&request, self.response_timeout).await;
         }
 
         response
@@ -622,7 +682,7 @@ impl NodeWorkerPool {
                 project_root: project_root.to_string(),
                 routes: routes.clone(),
             };
-            match worker.send(&request).await {
+            match worker.send(&request, self.response_timeout).await {
                 Ok(response) if response.ok => {
                     warmed += response.warmed.unwrap_or_default();
                 }
@@ -729,6 +789,54 @@ impl NodeWorkerPool {
         params: &RouteParams,
         mode: &str,
     ) -> Result<WorkerResponse> {
+        self.render_ssg_with_fresh(
+            project_root,
+            app_dir,
+            page_file,
+            request_path,
+            params,
+            mode,
+            false,
+        )
+        .await
+    }
+
+    /// Pre-render with a fresh module import while keeping compiled bundles cached.
+    ///
+    /// Production builds historically used one Node process per path. Retaining
+    /// import isolation avoids exposing mutable page-module state across paths.
+    pub async fn render_ssg_isolated(
+        &self,
+        project_root: &Path,
+        app_dir: &Path,
+        page_file: &Path,
+        request_path: &str,
+        params: &RouteParams,
+        mode: &str,
+    ) -> Result<WorkerResponse> {
+        self.render_ssg_with_fresh(
+            project_root,
+            app_dir,
+            page_file,
+            request_path,
+            params,
+            mode,
+            true,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn render_ssg_with_fresh(
+        &self,
+        project_root: &Path,
+        app_dir: &Path,
+        page_file: &Path,
+        request_path: &str,
+        params: &RouteParams,
+        mode: &str,
+        fresh: bool,
+    ) -> Result<WorkerResponse> {
         let request = WorkerRequest::Ssg {
             id: next_request_id(),
             project_root: project_root.display().to_string(),
@@ -737,8 +845,23 @@ impl NodeWorkerPool {
             request_path: request_path.to_string(),
             params: params.clone(),
             mode: mode.to_string(),
+            fresh,
         };
         self.send(request).await
+    }
+
+    /// Resolve `getStaticParams` through the persistent worker cache.
+    pub async fn resolve_static_params(
+        &self,
+        project_root: &Path,
+        page_file: &Path,
+    ) -> Result<WorkerResponse> {
+        self.send(WorkerRequest::StaticParams {
+            id: next_request_id(),
+            project_root: project_root.display().to_string(),
+            page_file: page_file.display().to_string(),
+        })
+        .await
     }
 }
 
@@ -833,6 +956,7 @@ mod tests {
             worker_script,
             env: BTreeMap::new(),
             next_worker: AtomicU64::new(0),
+            response_timeout: std::time::Duration::from_millis(WORKER_TIMEOUT_MS),
         };
 
         pool.shutdown().await;
@@ -864,8 +988,14 @@ mod tests {
         let request = WorkerRequest::Ping {
             id: next_request_id(),
         };
-        let result =
-            tokio::time::timeout(std::time::Duration::from_secs(2), worker.send(&request)).await;
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            worker.send(
+                &request,
+                std::time::Duration::from_millis(WORKER_TIMEOUT_MS),
+            ),
+        )
+        .await;
 
         assert!(result.is_ok(), "worker exit left the request pending");
         let error = result.unwrap().unwrap_err();
@@ -898,6 +1028,7 @@ mod tests {
             worker_script,
             env: BTreeMap::new(),
             next_worker: AtomicU64::new(0),
+            response_timeout: std::time::Duration::from_millis(WORKER_TIMEOUT_MS),
         };
 
         let mut child = failed_worker.child.lock().await;

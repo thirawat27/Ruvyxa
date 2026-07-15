@@ -17,6 +17,10 @@
 | `npx ruvyxa parity`             | Alias `test:parity`                        |
 | `npx ruvyxa clean`              | ลบ `.ruvyxa/`                              |
 
+`build.json.timing` บันทึกเวลาของ route discovery, validation, preparation, client bundling,
+prerender และเวลารวมเป็นมิลลิวินาที ใช้คู่กับ `ruvyxa bench` เพื่อหาขั้นตอนที่ควรตรวจสอบก่อน ปรับ
+build settings
+
 ## Options
 
 | Option     | ใช้กับ                    | คำอธิบาย                 |

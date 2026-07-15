@@ -420,8 +420,8 @@ async fn main() -> anyhow::Result<()> {
                 .await
                 .context("dev server failed")?;
         }
-        Command::Build(args) => build(args).context("build failed")?,
-        Command::Check(args) => check(args).context("check failed")?,
+        Command::Build(args) => build(args).await.context("build failed")?,
+        Command::Check(args) => check(args).await.context("check failed")?,
         Command::Start(args) | Command::Preview(args) => {
             let config = load_project_config(&args.root)?;
             serve(production_server_config(&args, &config))
@@ -433,8 +433,8 @@ async fn main() -> anyhow::Result<()> {
         Command::Doctor(args) => doctor(args).context("doctor failed")?,
         Command::Clean(args) => clean(args).context("clean failed")?,
         Command::Trace(args) => trace(args).context("trace failed")?,
-        Command::Bench(args) => bench(args).context("benchmark failed")?,
-        Command::TestParity(args) => test_parity(args).context("parity test failed")?,
+        Command::Bench(args) => bench(args).await.context("benchmark failed")?,
+        Command::TestParity(args) => test_parity(args).await.context("parity test failed")?,
     }
 
     Ok(())
@@ -778,20 +778,25 @@ fn diagnostic_stream(value: &str) -> String {
     }
 }
 
-fn build(args: BuildArgs) -> anyhow::Result<()> {
-    build_with_output(args, true)
+async fn build(args: BuildArgs) -> anyhow::Result<()> {
+    build_with_output(args, true).await
 }
 
-fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> {
+async fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> {
     let started = Instant::now();
     let config = load_project_config(&args.root)?;
     let target = config.build_target(args.target);
     let app_dir = args.root.join(config.app_dir());
     let out_dir = args.root.join(config.out_dir());
 
+    let phase_started = Instant::now();
     let manifest = discover_project_routes(&args.root, &config)?;
+    let route_discovery_duration = phase_started.elapsed();
+    let phase_started = Instant::now();
     let validation = validate_app(&args.root, &manifest)?;
     fail_on_diagnostics(&validation.diagnostics)?;
+    let validation_duration = phase_started.elapsed();
+    let phase_started = Instant::now();
     let style_collection =
         ruvyxa_dev_server::collect_styles(&args.root, &app_dir, &config.style_entries(&args.root))?;
 
@@ -822,7 +827,9 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
     let asset_files = count_files(&assets_dir);
     fs::create_dir_all(&client_dir)?;
     write_manifest(&manifest, &staging_dir.join("manifest.json"))?;
+    let preparation_duration = phase_started.elapsed();
 
+    let phase_started = Instant::now();
     let client_manifest = emit_client_bundles(
         &args.root,
         &app_dir,
@@ -839,9 +846,11 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
         client_dir.join("manifest.json"),
         serde_json::to_string_pretty(&client_manifest)?,
     )?;
+    let client_bundle_duration = phase_started.elapsed();
 
     // ─── SSG / ISR / PPR pre-rendering at build time ──────────────────────────
     let prerender_dir = staging_dir.join("prerender");
+    let phase_started = Instant::now();
     let prerendered = prerender_static_routes(
         &args.root,
         &app_dir,
@@ -850,9 +859,11 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
         &client_dir,
         &style_collection.css,
         config.build.parallelism,
-    )?;
+    )
+    .await?;
+    let prerender_duration = phase_started.elapsed();
 
-    let build_info = serde_json::json!({
+    let mut build_info = serde_json::json!({
         "framework": "Ruvyxa",
         "version": env!("CARGO_PKG_VERSION"),
         "target": format!("{:?}", target).to_lowercase(),
@@ -900,6 +911,13 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
                 "strategy": format!("{:?}", p.strategy).to_lowercase(),
                 "revalidate": p.revalidate,
             })).collect::<Vec<_>>()
+        },
+        "timing": {
+            "routeDiscoveryMs": duration_ms(route_discovery_duration),
+            "validationMs": duration_ms(validation_duration),
+            "preparationMs": duration_ms(preparation_duration),
+            "clientBundleMs": duration_ms(client_bundle_duration),
+            "prerenderMs": duration_ms(prerender_duration)
         }
     });
     fs::write(
@@ -909,6 +927,11 @@ fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> 
 
     commit_staged_build_outputs(&staging_dir, &out_dir)
         .with_context(|| format!("failed to commit build output into {}", out_dir.display()))?;
+    build_info["timing"]["totalMs"] = serde_json::json!(duration_ms(started.elapsed()));
+    fs::write(
+        out_dir.join("build.json"),
+        serde_json::to_string_pretty(&build_info)?,
+    )?;
 
     info!(
         target = ?target,
@@ -1185,7 +1208,7 @@ struct PrerenderJob {
 /// - CSR routes: emits a minimal shell HTML (no server rendering)
 ///
 /// Returns a list of all pre-rendered routes with their metadata.
-fn prerender_static_routes(
+async fn prerender_static_routes(
     root: &Path,
     app_dir: &Path,
     manifest: &RouteManifest,
@@ -1217,34 +1240,38 @@ fn prerender_static_routes(
 
     fs::create_dir_all(prerender_dir)?;
 
-    let Some(renderer_script) = find_runtime_script(root, "ssg-renderer.mjs") else {
-        // If the SSG renderer isn't available, skip pre-rendering with a warning
-        tracing::warn!(
-            "SSG renderer script not found; skipping pre-rendering of {} routes",
-            routes_to_prerender.len()
-        );
-        return Ok(Vec::new());
-    };
+    let parallelism = prerender_parallelism(configured_parallelism, routes_to_prerender.len());
+    let worker_pool = std::sync::Arc::new(
+        ruvyxa_dev_server::NodeWorkerPool::start_with_size(
+            root,
+            ruvyxa_dev_server::project_env(root)?,
+            Some(parallelism),
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?,
+    );
 
-    let mut jobs = Vec::new();
+    let prerendered = async {
+        let mut jobs = Vec::new();
 
-    for route in routes_to_prerender {
-        match route.render.strategy {
-            RenderStrategy::Csr => {
-                jobs.push(PrerenderJob {
-                    route_path: route.path.clone(),
-                    render_path: route.path.clone(),
-                    params: RouteParams::new(),
-                    strategy: RenderStrategy::Csr,
-                    revalidate: None,
-                    kind: PrerenderJobKind::Csr,
-                });
-            }
-            RenderStrategy::Ssg | RenderStrategy::Isr | RenderStrategy::Ppr => {
-                // For dynamic routes with getStaticParams, resolve static paths first
-                let paths_to_render =
-                    if route.render.has_static_params && route_has_dynamic_segments(&route.path) {
-                        resolve_static_params(root, app_dir, route, &renderer_script)?
+        for route in routes_to_prerender {
+            match route.render.strategy {
+                RenderStrategy::Csr => {
+                    jobs.push(PrerenderJob {
+                        route_path: route.path.clone(),
+                        render_path: route.path.clone(),
+                        params: RouteParams::new(),
+                        strategy: RenderStrategy::Csr,
+                        revalidate: None,
+                        kind: PrerenderJobKind::Csr,
+                    });
+                }
+                RenderStrategy::Ssg | RenderStrategy::Isr | RenderStrategy::Ppr => {
+                    // For dynamic routes with getStaticParams, resolve static paths first
+                    let paths_to_render = if route.render.has_static_params
+                        && route_has_dynamic_segments(&route.path)
+                    {
+                        resolve_static_params(&worker_pool, root, route).await?
                     } else if !route_has_dynamic_segments(&route.path) {
                         // Pure static route — render the single path
                         vec![StaticRouteParams {
@@ -1256,105 +1283,107 @@ fn prerender_static_routes(
                         continue;
                     };
 
-                let mode = match route.render.strategy {
-                    RenderStrategy::Ppr => "ppr",
-                    _ => "full",
-                };
-                for static_route in paths_to_render {
-                    jobs.push(PrerenderJob {
-                        route_path: route.path.clone(),
-                        render_path: static_route.path,
-                        params: static_route.params,
-                        strategy: route.render.strategy,
-                        revalidate: route.render.revalidate,
-                        kind: PrerenderJobKind::Render {
-                            route_file: route.file.clone(),
-                            mode,
-                        },
-                    });
+                    let mode = match route.render.strategy {
+                        RenderStrategy::Ppr => "ppr",
+                        _ => "full",
+                    };
+                    for static_route in paths_to_render {
+                        jobs.push(PrerenderJob {
+                            route_path: route.path.clone(),
+                            render_path: static_route.path,
+                            params: static_route.params,
+                            strategy: route.render.strategy,
+                            revalidate: route.render.revalidate,
+                            kind: PrerenderJobKind::Render {
+                                route_file: route.file.clone(),
+                                mode,
+                            },
+                        });
+                    }
                 }
+                _ => {}
             }
-            _ => {}
         }
-    }
 
-    let parallelism = prerender_parallelism(configured_parallelism, jobs.len());
-    let chunk_size = jobs.len().max(1).div_ceil(parallelism);
-    let mut prerendered = Vec::with_capacity(jobs.len());
+        let parallelism = prerender_parallelism(configured_parallelism, jobs.len());
+        let mut pending = tokio::task::JoinSet::new();
+        let mut jobs = jobs.into_iter().enumerate();
+        let mut prerendered = Vec::new();
 
-    std::thread::scope(|scope| -> anyhow::Result<()> {
-        let mut handles = Vec::new();
+        loop {
+            while pending.len() < parallelism {
+                let Some((index, job)) = jobs.next() else {
+                    break;
+                };
+                let worker_pool = worker_pool.clone();
+                let root = root.to_path_buf();
+                let app_dir = app_dir.to_path_buf();
+                let prerender_dir = prerender_dir.to_path_buf();
+                let client_dir = client_dir.to_path_buf();
+                let styles = styles.to_string();
+                pending.spawn(async move {
+                    render_prerender_job(
+                        &worker_pool,
+                        &root,
+                        &app_dir,
+                        &prerender_dir,
+                        &client_dir,
+                        &styles,
+                        &job,
+                    )
+                    .await
+                    .map(|route| (index, route))
+                });
+            }
 
-        for (chunk_index, chunk) in jobs.chunks(chunk_size).enumerate() {
-            let jobs = chunk.to_vec();
-            let offset = chunk_index * chunk_size;
-            let renderer_script = renderer_script.clone();
-
-            handles.push(
-                scope.spawn(move || -> anyhow::Result<Vec<(usize, PrerenderedRoute)>> {
-                    jobs.iter()
-                        .enumerate()
-                        .map(|(index, job)| {
-                            render_prerender_job(
-                                root,
-                                app_dir,
-                                prerender_dir,
-                                client_dir,
-                                styles,
-                                &renderer_script,
-                                job,
-                            )
-                            .map(|route| (offset + index, route))
-                        })
-                        .collect()
-                }),
+            let Some(result) = pending.join_next().await else {
+                break;
+            };
+            prerendered.push(
+                result
+                    .map_err(|error| anyhow::anyhow!("pre-render worker panicked: {error}"))??,
             );
         }
 
-        for handle in handles {
-            let mut next = handle
-                .join()
-                .map_err(|_| anyhow::anyhow!("pre-render worker panicked"))??;
-            prerendered.append(&mut next);
-        }
+        prerendered.sort_by_key(|(index, _)| *index);
+        let prerendered = prerendered
+            .into_iter()
+            .map(|(_, route)| route)
+            .collect::<Vec<_>>();
 
-        Ok(())
-    })?;
-    prerendered.sort_by_key(|(index, _)| *index);
-    let prerendered = prerendered
-        .into_iter()
-        .map(|(_, route)| route)
-        .collect::<Vec<_>>();
+        // Write pre-render manifest for the production server
+        let prerender_manifest = serde_json::json!({
+            "routes": prerendered.iter().map(|p| serde_json::json!({
+                "path": p.path,
+                "strategy": format!("{:?}", p.strategy).to_lowercase(),
+                "revalidate": p.revalidate,
+                "htmlFile": p.html_file.file_name().and_then(|n| n.to_str()).unwrap_or_default(),
+            })).collect::<Vec<_>>()
+        });
+        fs::write(
+            prerender_dir.join("manifest.json"),
+            serde_json::to_string_pretty(&prerender_manifest)?,
+        )?;
 
-    // Write pre-render manifest for the production server
-    let prerender_manifest = serde_json::json!({
-        "routes": prerendered.iter().map(|p| serde_json::json!({
-            "path": p.path,
-            "strategy": format!("{:?}", p.strategy).to_lowercase(),
-            "revalidate": p.revalidate,
-            "htmlFile": p.html_file.file_name().and_then(|n| n.to_str()).unwrap_or_default(),
-        })).collect::<Vec<_>>()
-    });
-    fs::write(
-        prerender_dir.join("manifest.json"),
-        serde_json::to_string_pretty(&prerender_manifest)?,
-    )?;
+        info!(
+            prerendered = prerendered.len(),
+            "pre-rendered static routes"
+        );
 
-    info!(
-        prerendered = prerendered.len(),
-        "pre-rendered static routes"
-    );
-
-    Ok(prerendered)
+        Ok(prerendered)
+    }
+    .await;
+    worker_pool.shutdown().await;
+    prerendered
 }
 
-fn render_prerender_job(
+async fn render_prerender_job(
+    worker_pool: &ruvyxa_dev_server::NodeWorkerPool,
     root: &Path,
     app_dir: &Path,
     prerender_dir: &Path,
     client_dir: &Path,
     styles: &str,
-    renderer_script: &Path,
     job: &PrerenderJob,
 ) -> anyhow::Result<PrerenderedRoute> {
     let html_path = prerender_html_path(prerender_dir, &job.render_path);
@@ -1365,46 +1394,36 @@ fn render_prerender_job(
     let html = match &job.kind {
         PrerenderJobKind::Csr => csr_shell_html(&job.route_path, client_dir, styles),
         PrerenderJobKind::Render { route_file, mode } => {
-            let output = ProcessCommand::new("node")
-                .arg(renderer_script)
-                .arg(root)
-                .arg(app_dir)
-                .arg(route_file)
-                .arg(&job.render_path)
-                .arg(mode)
-                .arg(serde_json::to_string(&job.params)?)
-                .output()
-                .with_context(|| format!("SSG renderer failed for route {}", job.render_path))?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let stdout = String::from_utf8_lossy(&output.stdout);
+            let result = worker_pool
+                .render_ssg_isolated(
+                    root,
+                    app_dir,
+                    Path::new(route_file),
+                    &job.render_path,
+                    &job.params,
+                    mode,
+                )
+                .await
+                .map_err(|error| {
+                    anyhow::anyhow!("Pre-rendering failed for {}: {error}", job.render_path)
+                })?;
+            if !result.ok {
+                let message = result
+                    .message
+                    .unwrap_or_else(|| "unknown error".to_string());
+                let code = result.code.unwrap_or_default();
                 anyhow::bail!(
-                    "Pre-rendering failed for {}: {}{}",
-                    job.render_path,
-                    stderr,
-                    stdout
+                    "Pre-rendering failed for {}: {code} {message}",
+                    job.render_path
                 );
             }
-
-            let result: serde_json::Value =
-                serde_json::from_slice(&output.stdout).with_context(|| {
-                    format!("SSG renderer returned invalid JSON for {}", job.render_path)
-                })?;
-
-            if result.get("ok").and_then(|v| v.as_bool()) != Some(true) {
-                let message = result
-                    .get("message")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("unknown error");
-                anyhow::bail!("Pre-rendering failed for {}: {}", job.render_path, message);
-            }
-
-            let html = result
-                .get("html")
-                .and_then(|v| v.as_str())
-                .unwrap_or_default();
-            let html = inject_prerender_styles(html, styles);
+            let html = result.html.ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Pre-rendering failed for {}: worker completed without HTML",
+                    job.render_path
+                )
+            })?;
+            let html = inject_prerender_styles(&html, styles);
             inject_prerender_client_assets(
                 &html,
                 client_dir,
@@ -1432,58 +1451,31 @@ struct StaticRouteParams {
     params: RouteParams,
 }
 
-fn resolve_static_params(
+async fn resolve_static_params(
+    worker_pool: &ruvyxa_dev_server::NodeWorkerPool,
     root: &Path,
-    app_dir: &Path,
     route: &RouteEntry,
-    renderer_script: &Path,
 ) -> anyhow::Result<Vec<StaticRouteParams>> {
-    let output = ProcessCommand::new("node")
-        .arg(renderer_script)
-        .arg(root)
-        .arg(app_dir)
-        .arg(&route.file)
-        .arg("__resolve_params__")
-        .arg("params")
-        .output()
-        .with_context(|| format!("Failed to resolve static params for {}", route.path))?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        anyhow::bail!("getStaticParams failed for {}: {}", route.path, stderr);
+    let result = worker_pool
+        .resolve_static_params(root, Path::new(&route.file))
+        .await
+        .map_err(|error| anyhow::anyhow!("getStaticParams failed for {}: {error}", route.path))?;
+    if !result.ok {
+        anyhow::bail!(
+            "getStaticParams failed for {}: {} {}",
+            route.path,
+            result.code.unwrap_or_default(),
+            result
+                .message
+                .unwrap_or_else(|| "unknown error".to_string())
+        );
     }
-
-    let result: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .with_context(|| format!("Invalid JSON from getStaticParams for {}", route.path))?;
-
-    if result.get("ok").and_then(|v| v.as_bool()) != Some(true) {
-        let message = result
-            .get("message")
-            .and_then(|v| v.as_str())
-            .unwrap_or("unknown error");
-        anyhow::bail!("getStaticParams failed for {}: {}", route.path, message);
-    }
-
-    let params_list = result
-        .get("params")
-        .and_then(|v| v.as_array())
-        .cloned()
-        .unwrap_or_default();
+    let params_list = result.params.unwrap_or_default();
 
     params_list
         .iter()
-        .enumerate()
-        .map(|(index, value)| {
-            let params = value.as_object().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "getStaticParams for {} returned item {index}, which is not an object",
-                    route.path
-                )
-            })?;
-            let params = params
-                .iter()
-                .map(|(key, value)| Ok((key.clone(), value.clone())))
-                .collect::<anyhow::Result<RouteParams>>()?;
+        .map(|value| {
+            let params = value.clone();
             Ok(StaticRouteParams {
                 path: static_route_path(&route.path, &params)?,
                 params,
@@ -2709,14 +2701,14 @@ fn analyze(args: ProjectArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn check(args: ProjectArgs) -> anyhow::Result<()> {
+async fn check(args: ProjectArgs) -> anyhow::Result<()> {
     let started = Instant::now();
     print_tui_header("Check");
     print_field("root", path_text(&args.root));
     println!();
 
     run_typecheck(&args.root)?;
-    test_parity(args)?;
+    test_parity(args).await?;
 
     println!(
         "{} Production readiness checks passed in {}\n",
@@ -2864,7 +2856,7 @@ fn trace(args: TraceArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn bench(args: BenchArgs) -> anyhow::Result<()> {
+async fn bench(args: BenchArgs) -> anyhow::Result<()> {
     let started = Instant::now();
     let samples = args.samples.max(1);
     let root = args.root;
@@ -2882,7 +2874,9 @@ fn bench(args: BenchArgs) -> anyhow::Result<()> {
         fail_on_diagnostics(&validation.diagnostics)?;
         Ok(())
     })?);
-    results.push(run_benchmark("production-build", samples, || {
+    let mut build_timings = Vec::with_capacity(samples);
+    for _ in 0..samples {
+        let started = Instant::now();
         build_with_output(
             BuildArgs {
                 root: root.clone(),
@@ -2890,7 +2884,10 @@ fn bench(args: BenchArgs) -> anyhow::Result<()> {
             },
             false,
         )
-    })?);
+        .await?;
+        build_timings.push(started.elapsed());
+    }
+    results.push(summarize_benchmark("production-build", build_timings));
 
     if args.json {
         println!("{}", serde_json::to_string_pretty(&results)?);
@@ -2955,7 +2952,7 @@ fn duration_ms(duration: Duration) -> f64 {
     duration.as_secs_f64() * 1000.0
 }
 
-fn test_parity(args: ProjectArgs) -> anyhow::Result<()> {
+async fn test_parity(args: ProjectArgs) -> anyhow::Result<()> {
     let started = Instant::now();
     let config = load_project_config(&args.root)?;
     print_tui_header("Parity");
@@ -2975,7 +2972,8 @@ fn test_parity(args: ProjectArgs) -> anyhow::Result<()> {
     build(BuildArgs {
         root: args.root.clone(),
         target: Some(BuildTarget::Node),
-    })?;
+    })
+    .await?;
 
     let dev_manifest = discover_project_routes(&args.root, &config)?;
     let prod_manifest = discover_routes(

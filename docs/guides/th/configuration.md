@@ -38,12 +38,12 @@ export default config({
 
 ### build
 
-| Field     | Default    | Options                           |
-| --------- | ---------- | --------------------------------- |
-| `minify`  | `true`     | Oxc minification                  |
-| `split`   | `"route"`  | `"single"`, `"route"`, `"manual"` |
-| `target`  | `"es2022"` | `es2018`–`esnext`                 |
-| `workers` | CPU count  | จำนวน threads (override ได้)      |
+| Field     | Default    | Options                                                                                                              |
+| --------- | ---------- | -------------------------------------------------------------------------------------------------------------------- |
+| `minify`  | `true`     | Oxc minification                                                                                                     |
+| `split`   | `"route"`  | `"single"`, `"route"`, `"manual"`                                                                                    |
+| `target`  | `"es2022"` | `es2018`–`esnext`                                                                                                    |
+| `workers` | CPU count  | จำนวน threads สำหรับ bundle และ prerender (override ได้ โดย prerender มีเพดานเพื่อไม่ให้เปิด Node process มากเกินไป) |
 
 ### render
 

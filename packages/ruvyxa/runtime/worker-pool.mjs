@@ -123,6 +123,7 @@ let warmupTimer = null
 
 let activeRequests = 0
 let isShuttingDown = false
+let moduleImportVersion = 0
 
 // --- Graceful Shutdown ---
 function shutdown() {
@@ -204,6 +205,8 @@ async function dispatchRequest(request) {
       return handleSsrCoalesced(request)
     case 'ssg':
       return handleSsgCoalesced(request)
+    case 'staticParams':
+      return handleStaticParams(request)
     case 'api':
       return handleApi(request)
     case 'action':
@@ -277,7 +280,7 @@ async function importModule(outfile, forceReload = false) {
     if (cached) return cached
   }
   // Use timestamp only when we need to bust Node's ESM cache
-  const mod = await import(pathToFileURL(outfile).href + `?t=${Date.now()}`)
+  const mod = await import(pathToFileURL(outfile).href + `?t=${++moduleImportVersion}`)
   moduleCache.set(outfile, mod)
   return mod
 }
@@ -364,8 +367,8 @@ async function handleSsr(request) {
 
 // --- SSG Handler with Request Coalescing ---
 async function handleSsgCoalesced(request) {
-  const { pageFile, requestPath, params, mode } = request
-  const coalesceKey = `ssg:${pageFile}:${requestPath}:${JSON.stringify(params || {})}:${mode || 'full'}`
+  const { pageFile, requestPath, params, mode, fresh } = request
+  const coalesceKey = `ssg:${pageFile}:${requestPath}:${JSON.stringify(params || {})}:${mode || 'full'}:${fresh ? 'fresh' : 'cached'}`
 
   if (renderCoalesceMap.has(coalesceKey)) {
     return renderCoalesceMap.get(coalesceKey)
@@ -382,7 +385,7 @@ async function handleSsgCoalesced(request) {
 // Renders a page at build time (or for ISR background revalidation).
 // mode: "full" = wait for all content, "ppr" = shell only (Suspense fallbacks).
 async function handleSsg(request) {
-  const { projectRoot, appDir, pageFile, requestPath, params, mode } = request
+  const { projectRoot, appDir, pageFile, requestPath, params, mode, fresh } = request
 
   const resolvedRoot = path.resolve(projectRoot || process.cwd())
   ensureReactDeps(resolvedRoot)
@@ -394,10 +397,54 @@ async function handleSsg(request) {
     layouts,
     mode || 'full',
   )
-  const mod = await importModule(outfile, freshBuild)
+  const mod = await importModule(outfile, freshBuild || fresh)
   const html = await mod.render({ path: requestPath, params: params || {} })
 
   return { ok: true, html }
+}
+
+// --- Static parameter discovery ---
+// Keep this in the persistent worker so build-time dynamic SSG routes reuse the
+// same dependency checks, compiler cache, and module cache as page rendering.
+async function handleStaticParams(request) {
+  const { projectRoot, pageFile } = request
+  const resolvedRoot = path.resolve(projectRoot || process.cwd())
+  ensureReactDeps(resolvedRoot)
+
+  const cacheDir = path.join(resolvedRoot, '.ruvyxa', 'cache', 'ssg')
+  await ensureDir(cacheDir)
+  const moduleCode = `export { getStaticParams } from ${JSON.stringify(toImportPath(pageFile))}`
+  const hash = createHash('sha256')
+    .update(moduleCode)
+    .update(pageFile)
+    .update('params')
+    .digest('hex')
+    .slice(0, 16)
+  const outfile = path.join(cacheDir, `${hash}.mjs`)
+  const cacheKey = `ssg-params:${pageFile}:${hash}`
+
+  const { freshBuild } = await withBuildLock(cacheKey, async () => {
+    const cached = bundleCache.get(cacheKey)
+    if (cached) return { outfile: cached, freshBuild: false }
+
+    const bundle = await compileBundleWithMetadata({
+      projectRoot: resolvedRoot,
+      entrySource: moduleCode,
+      sourcefile: 'ruvyxa:ssg-params-entry.ts',
+      outfile,
+      platform: 'node',
+      external: ['react', 'react-dom/server', 'node:stream'],
+      aliases: runtimeAliases(runtimeDir),
+    })
+    cacheBundle(cacheKey, outfile, resolvedRoot, bundle.inputs)
+    return { outfile, freshBuild: true }
+  })
+
+  const mod = await importModule(outfile, freshBuild)
+  if (typeof mod.getStaticParams !== 'function') return { ok: true, params: [] }
+
+  const params = await mod.getStaticParams({ routes: [] })
+  return { ok: true, params: Array.isArray(params) ? params : [] }
 }
 
 // --- API Handler ---

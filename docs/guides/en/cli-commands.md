@@ -80,6 +80,10 @@ Pipeline:
 └── build.json      # Build metadata, config snapshot, render summary
 ```
 
+`build.json.timing` records route discovery, validation, preparation, client bundling, prerendering,
+and total build durations in milliseconds. Use it with `ruvyxa bench` to identify the stage to
+investigate before changing build settings.
+
 ### `check`
 
 ```bash

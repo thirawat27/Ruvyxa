@@ -2624,7 +2624,8 @@ fn node_command(root: &Path) -> Result<Command> {
     Ok(command)
 }
 
-fn project_env(root: &Path) -> Result<BTreeMap<String, String>> {
+/// Load project environment values for Node runtime processes.
+pub fn project_env(root: &Path) -> Result<BTreeMap<String, String>> {
     let mut values = BTreeMap::new();
 
     for file_name in [".env", ".env.local"] {
