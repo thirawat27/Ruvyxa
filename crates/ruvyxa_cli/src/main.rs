@@ -1707,6 +1707,7 @@ fn inline_script_json<T: serde::Serialize + ?Sized>(value: &T, fallback: &str) -
         .replace('\u{2029}', "\\u2029")
 }
 
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 struct ClientBundle {
     path: String,
     entry: PathBuf,
@@ -1720,8 +1721,18 @@ struct ClientBundle {
     module_count: usize,
     cache_hits: usize,
     tree_shaken_modules: usize,
+    artifact_cache_hit: bool,
+    module_paths: BTreeSet<PathBuf>,
     chunk_manifest: Option<serde_json::Value>,
     chunks: Vec<ruvyxa_bundler::OutputChunk>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct CachedClientArtifact {
+    version: u8,
+    dependency_hash: String,
+    files: BTreeMap<PathBuf, String>,
+    bundle: ClientBundle,
 }
 
 struct SharedRouteChunk {
@@ -1995,6 +2006,8 @@ fn emit_client_bundles(
         .collect::<Vec<_>>();
     let parallelism = build_parallelism(build.parallelism, page_routes.len());
     let chunk_size = page_routes.len().max(1).div_ceil(parallelism);
+    let artifact_cache_dir = cache.directory.to_path_buf();
+    let artifact_dependency_hash = cache.dependency_hash.to_string();
     let mut bundles = Vec::new();
 
     std::thread::scope(|scope| -> anyhow::Result<()> {
@@ -2004,6 +2017,8 @@ fn emit_client_bundles(
             let routes = chunk.to_vec();
             let offset = chunk_index * chunk_size;
             let bundle_context = bundle_context.clone();
+            let artifact_cache_dir = artifact_cache_dir.clone();
+            let artifact_dependency_hash = artifact_dependency_hash.clone();
 
             handles.push(
                 scope.spawn(move || -> anyhow::Result<Vec<(usize, ClientBundle)>> {
@@ -2011,8 +2026,19 @@ fn emit_client_bundles(
                         .iter()
                         .enumerate()
                         .map(|(index, route)| {
-                            bundle_client_route(root, app_dir, route, build, &bundle_context)
-                                .map(|bundle| (offset + index, bundle))
+                            bundle_client_route(
+                                root,
+                                app_dir,
+                                route,
+                                build,
+                                &bundle_context,
+                                &BTreeSet::new(),
+                                None,
+                                &artifact_cache_dir,
+                                &artifact_dependency_hash,
+                                "base",
+                            )
+                            .map(|bundle| (offset + index, bundle))
                         })
                         .collect()
                 }),
@@ -2030,6 +2056,73 @@ fn emit_client_bundles(
     })?;
 
     bundles.sort_by_key(|(index, _)| *index);
+
+    let shared_route_chunks = if parse_split_strategy(build.split_strategy.as_deref())?
+        == ruvyxa_bundler::SplitStrategy::Route
+    {
+        let shared_modules = shared_route_module_paths(&bundles);
+        if shared_modules.is_empty() {
+            Vec::new()
+        } else {
+            let shared_output = ruvyxa_bundler::bundle_shared_route_modules(
+                root.canonicalize().unwrap_or_else(|_| root.to_path_buf()),
+                app_dir
+                    .canonicalize()
+                    .unwrap_or_else(|_| app_dir.to_path_buf()),
+                &shared_modules,
+                client_bundle_options(build)?,
+                &bundle_context,
+            )
+            .map_err(|error| anyhow::anyhow!("native shared route bundler error: {error}"))?;
+            let executable_modules = shared_output
+                .modules
+                .into_iter()
+                .map(|path| path.canonicalize().unwrap_or(path))
+                .collect::<BTreeSet<_>>();
+            let shared_chunk = emit_shared_route_chunk(
+                client_dir,
+                shared_output.code,
+                &executable_modules,
+                &bundles,
+            )?;
+            let original_modules = bundles
+                .iter()
+                .map(|(_, bundle)| (bundle.path.clone(), bundle.module_paths.clone()))
+                .collect::<BTreeMap<_, _>>();
+            let mut rebuilt = Vec::with_capacity(page_routes.len());
+            for (index, route) in page_routes.iter().enumerate() {
+                let route_modules = original_modules
+                    .get(&route.path)
+                    .cloned()
+                    .unwrap_or_default();
+                let route_shared_modules = route_modules
+                    .intersection(&executable_modules)
+                    .cloned()
+                    .collect::<BTreeSet<_>>();
+                let shared_file =
+                    (!route_shared_modules.is_empty()).then_some(shared_chunk.file_name.as_str());
+                rebuilt.push((
+                    index,
+                    bundle_client_route(
+                        root,
+                        app_dir,
+                        route,
+                        build,
+                        &bundle_context,
+                        &route_shared_modules,
+                        shared_file,
+                        &artifact_cache_dir,
+                        &artifact_dependency_hash,
+                        &shared_chunk.file_name,
+                    )?,
+                ));
+            }
+            bundles = rebuilt;
+            vec![shared_chunk]
+        }
+    } else {
+        Vec::new()
+    };
 
     let mut routes = Vec::new();
     let mut route_chunk_manifests = Vec::new();
@@ -2074,6 +2167,7 @@ fn emit_client_bundles(
             "durationMs": bundle.duration_ms,
             "moduleCount": bundle.module_count,
             "cacheHits": bundle.cache_hits,
+            "artifactCacheHit": bundle.artifact_cache_hit,
             "treeShakenModules": bundle.tree_shaken_modules,
             "optimized": true,
             "treeShaken": build.tree_shaking.unwrap_or(true),
@@ -2093,14 +2187,6 @@ fn emit_client_bundles(
 
         routes.push(route_info);
     }
-
-    let shared_route_chunks = if parse_split_strategy(build.split_strategy.as_deref())?
-        == ruvyxa_bundler::SplitStrategy::Route
-    {
-        emit_shared_route_chunks(client_dir, &route_chunk_manifests)?
-    } else {
-        Vec::new()
-    };
 
     for route in &mut routes {
         let route_path = route
@@ -2138,6 +2224,8 @@ fn emit_client_bundles(
         )?;
     }
 
+    let bundle_budget = bundle_budget_report(&routes);
+
     Ok(serde_json::json!({
         "chunkStrategy": build.split_strategy.as_deref().unwrap_or("route"),
         "minify": build.minify.unwrap_or(true),
@@ -2153,6 +2241,7 @@ fn emit_client_bundles(
         "durationMs": total_duration_ms,
         "cacheHits": total_cache_hits,
         "treeShakenModules": total_tree_shaken_modules,
+        "budget": bundle_budget,
         "plugins": build_plugin_manifest(plugins),
         "sharedRouteChunks": shared_route_chunks
             .iter()
@@ -2165,6 +2254,39 @@ fn emit_client_bundles(
         },
         "routes": routes
     }))
+}
+
+/// Summarize first-load bundle offenders without turning a build observation
+/// into a new failing production contract.
+fn bundle_budget_report(routes: &[serde_json::Value]) -> serde_json::Value {
+    const DEFAULT_FIRST_LOAD_BUDGET_BYTES: usize = 250 * 1024;
+    let mut offenders = routes
+        .iter()
+        .map(|route| {
+            let first_load = first_load_bytes(route);
+            serde_json::json!({
+                "path": route.get("path").and_then(serde_json::Value::as_str).unwrap_or("/"),
+                "firstLoadBytes": first_load,
+                "estimatedGzBytes": route.get("estimatedGzBytes").and_then(serde_json::Value::as_u64).unwrap_or_default(),
+                "overBudget": first_load > DEFAULT_FIRST_LOAD_BUDGET_BYTES
+            })
+        })
+        .collect::<Vec<_>>();
+    offenders.sort_by(|left, right| {
+        right["firstLoadBytes"]
+            .as_u64()
+            .cmp(&left["firstLoadBytes"].as_u64())
+            .then_with(|| left["path"].as_str().cmp(&right["path"].as_str()))
+    });
+    let over_budget_count = offenders
+        .iter()
+        .filter(|route| route["overBudget"].as_bool() == Some(true))
+        .count();
+    serde_json::json!({
+        "firstLoadBytes": DEFAULT_FIRST_LOAD_BUDGET_BYTES,
+        "overBudgetCount": over_budget_count,
+        "topRoutes": offenders.into_iter().take(10).collect::<Vec<_>>(),
+    })
 }
 
 fn build_parallelism(configured: Option<usize>, work_items: usize) -> usize {
@@ -2202,13 +2324,24 @@ fn build_plugin_manifest(plugins: &[BuildPluginConfig]) -> serde_json::Value {
 }
 
 /// Bundle a client route using the native Rust bundler (ruvyxa_bundler).
+#[allow(clippy::too_many_arguments)]
 fn bundle_client_route(
     root: &Path,
     app_dir: &Path,
     route: &RouteEntry,
     build: &BuildConfigOptions,
     bundle_context: &ruvyxa_bundler::BundleContext,
+    shared_modules: &BTreeSet<PathBuf>,
+    shared_chunk_file: Option<&str>,
+    cache_dir: &Path,
+    dependency_hash: &str,
+    cache_variant: &str,
 ) -> anyhow::Result<ClientBundle> {
+    if let Some(bundle) =
+        load_client_artifact(cache_dir, dependency_hash, &route.path, cache_variant)
+    {
+        return Ok(bundle);
+    }
     use ruvyxa_bundler::{BundleInput, BundleOptions, BundleTarget};
 
     let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
@@ -2237,10 +2370,12 @@ fn bundle_client_route(
             es_target: parse_es_target(build.es_target.as_deref())?,
             split_strategy: parse_split_strategy(build.split_strategy.as_deref())?,
             emit_chunk_manifest: build.emit_chunk_manifest.unwrap_or(false),
+            collect_module_manifest: parse_split_strategy(build.split_strategy.as_deref())?
+                == ruvyxa_bundler::SplitStrategy::Route,
         },
     };
 
-    let output = ruvyxa_bundler::bundle_with_context(input, bundle_context)
+    let output = ruvyxa_bundler::bundle_with_shared_modules(input, bundle_context, shared_modules)
         .map_err(|e| anyhow::anyhow!("native bundler error for {}: {e}", route.path))?;
 
     // Report non-fatal diagnostics.
@@ -2248,34 +2383,60 @@ fn bundle_client_route(
         tracing::warn!("{diagnostic}");
     }
 
-    let hash = content_hash(&output.code);
+    let code = shared_chunk_file.map_or_else(
+        || output.code.clone(),
+        |file_name| format!("import \"./{file_name}\";\n{}", output.code),
+    );
+    let hash = content_hash(&code);
     let file_name = format!("{hash}.js");
     let source_map_file = output.source_map.as_ref().map(|_| format!("{hash}.js.map"));
     let script = if let Some(source_map_file) = &source_map_file {
-        format!("{}\n//# sourceMappingURL={source_map_file}\n", output.code)
+        format!("{code}\n//# sourceMappingURL={source_map_file}\n")
     } else {
-        output.code.clone()
+        code.clone()
     };
+    let module_paths = output
+        .chunk_manifest
+        .as_ref()
+        .map(|manifest| {
+            manifest
+                .modules
+                .iter()
+                .map(PathBuf::from)
+                .map(|path| path.canonicalize().unwrap_or(path))
+                .collect()
+        })
+        .unwrap_or_default();
 
-    Ok(ClientBundle {
+    let bundle = ClientBundle {
         path: route.path.clone(),
         entry: route.file.clone(),
         file_name,
         script,
         source_map_file,
         source_map: output.source_map,
-        output_bytes: output.stats.output_bytes,
-        estimated_gz_bytes: output.stats.estimated_gz_bytes,
+        output_bytes: code.len(),
+        estimated_gz_bytes: (code.len() as f64 * 0.35) as usize,
         duration_ms: output.stats.duration_ms,
         module_count: output.stats.module_count,
         cache_hits: output.stats.cache_hits,
         tree_shaken_modules: output.stats.tree_shaken_modules,
+        artifact_cache_hit: false,
+        module_paths,
         chunk_manifest: output
             .chunk_manifest
             .map(serde_json::to_value)
             .transpose()?,
         chunks: output.chunks,
-    })
+    };
+    store_client_artifact(
+        cache_dir,
+        dependency_hash,
+        &route.path,
+        cache_variant,
+        &bundle,
+    );
+    Ok(bundle)
 }
 
 fn output_chunk_manifest(chunk: &ruvyxa_bundler::OutputChunk) -> serde_json::Value {
@@ -2288,61 +2449,66 @@ fn output_chunk_manifest(chunk: &ruvyxa_bundler::OutputChunk) -> serde_json::Val
     })
 }
 
-fn emit_shared_route_chunks(
-    client_dir: &Path,
-    route_manifests: &[serde_json::Value],
-) -> anyhow::Result<Vec<SharedRouteChunk>> {
-    let mut module_routes = BTreeMap::<String, BTreeSet<String>>::new();
+fn client_bundle_options(
+    build: &BuildConfigOptions,
+) -> anyhow::Result<ruvyxa_bundler::BundleOptions> {
+    Ok(ruvyxa_bundler::BundleOptions {
+        minify: build.minify.unwrap_or(true),
+        source_map: false,
+        tree_shaking: false,
+        jsx_runtime: parse_jsx_runtime(build.jsx_runtime.as_deref())?,
+        es_target: parse_es_target(build.es_target.as_deref())?,
+        split_strategy: parse_split_strategy(build.split_strategy.as_deref())?,
+        emit_chunk_manifest: false,
+        collect_module_manifest: false,
+    })
+}
 
-    for manifest in route_manifests {
-        let route = manifest
-            .get("route")
-            .and_then(|value| value.as_str())
-            .unwrap_or("/")
-            .to_string();
-        let Some(modules) = manifest.get("modules").and_then(|value| value.as_array()) else {
-            continue;
-        };
-
-        for module in modules.iter().filter_map(|value| value.as_str()) {
+fn shared_route_module_paths(bundles: &[(usize, ClientBundle)]) -> BTreeSet<PathBuf> {
+    let mut module_routes = BTreeMap::<PathBuf, BTreeSet<String>>::new();
+    for (_, bundle) in bundles {
+        for module in &bundle.module_paths {
             module_routes
-                .entry(module.to_string())
+                .entry(module.clone())
                 .or_default()
-                .insert(route.clone());
+                .insert(bundle.path.clone());
         }
     }
-
-    let shared_modules = module_routes
-        .iter()
-        .filter(|(_, routes)| routes.len() >= 2)
-        .map(|(module, _)| module.clone())
-        .collect::<Vec<_>>();
-
-    if shared_modules.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let shared_routes = module_routes
-        .values()
-        .flat_map(|routes| routes.iter().cloned())
-        .collect::<BTreeSet<_>>()
+    module_routes
         .into_iter()
-        .collect::<Vec<_>>();
+        .filter_map(|(module, routes)| (routes.len() >= 2 && module.is_file()).then_some(module))
+        .collect()
+}
 
-    let code = format!(
-        "// Generated by Ruvyxa. Shared route chunk metadata.\nexport const modules = {};\nexport const routes = {};\nexport default {{ modules, routes }};\n",
-        serde_json::to_string(&shared_modules)?,
-        serde_json::to_string(&shared_routes)?,
-    );
+fn emit_shared_route_chunk(
+    client_dir: &Path,
+    code: String,
+    module_paths: &BTreeSet<PathBuf>,
+    bundles: &[(usize, ClientBundle)],
+) -> anyhow::Result<SharedRouteChunk> {
+    let modules = module_paths
+        .iter()
+        .map(|path| path.display().to_string().replace('\\', "/"))
+        .collect::<Vec<_>>();
+    let routes = bundles
+        .iter()
+        .filter(|(_, bundle)| {
+            bundle
+                .module_paths
+                .iter()
+                .any(|module| module_paths.contains(module))
+        })
+        .map(|(_, bundle)| bundle.path.clone())
+        .collect::<Vec<_>>();
     let file_name = format!("shared.{}.js", content_hash(&code));
     fs::write(client_dir.join(&file_name), code.as_bytes())?;
 
-    Ok(vec![SharedRouteChunk {
+    Ok(SharedRouteChunk {
         file_name,
         code,
-        modules: shared_modules,
-        routes: shared_routes,
-    }])
+        modules,
+        routes,
+    })
 }
 
 fn shared_route_chunk_manifest(chunk: &SharedRouteChunk) -> serde_json::Value {
@@ -2419,6 +2585,84 @@ fn parse_split_strategy(value: Option<&str>) -> anyhow::Result<ruvyxa_bundler::S
 
 fn content_hash(input: &str) -> String {
     blake3::hash(input.as_bytes()).to_hex().to_string()
+}
+
+fn client_artifact_cache_file(cache_dir: &Path, route_path: &str, variant: &str) -> PathBuf {
+    let key = content_hash(&format!("{route_path}\0{variant}"));
+    cache_dir.join("client-routes").join(format!("{key}.json"))
+}
+
+fn load_client_artifact(
+    cache_dir: &Path,
+    dependency_hash: &str,
+    route_path: &str,
+    variant: &str,
+) -> Option<ClientBundle> {
+    let source =
+        fs::read_to_string(client_artifact_cache_file(cache_dir, route_path, variant)).ok()?;
+    let artifact: CachedClientArtifact = serde_json::from_str(&source).ok()?;
+    if artifact.version != 1
+        || artifact.dependency_hash != dependency_hash
+        || artifact.files.is_empty()
+    {
+        return None;
+    }
+    let valid = artifact.files.iter().all(|(path, expected)| {
+        fs::read(path)
+            .ok()
+            .map(|source| content_hash(&String::from_utf8_lossy(&source)))
+            .as_deref()
+            == Some(expected.as_str())
+    });
+    valid.then_some(ClientBundle {
+        artifact_cache_hit: true,
+        ..artifact.bundle
+    })
+}
+
+fn store_client_artifact(
+    cache_dir: &Path,
+    dependency_hash: &str,
+    route_path: &str,
+    variant: &str,
+    bundle: &ClientBundle,
+) {
+    let files = bundle
+        .module_paths
+        .iter()
+        .filter_map(|path| {
+            fs::read(path).ok().map(|source| {
+                (
+                    path.clone(),
+                    content_hash(&String::from_utf8_lossy(&source)),
+                )
+            })
+        })
+        .collect::<BTreeMap<_, _>>();
+    if files.is_empty() {
+        return;
+    }
+    let artifact = CachedClientArtifact {
+        version: 1,
+        dependency_hash: dependency_hash.to_string(),
+        files,
+        bundle: bundle.clone(),
+    };
+    let Ok(source) = serde_json::to_vec(&artifact) else {
+        return;
+    };
+    let path = client_artifact_cache_file(cache_dir, route_path, variant);
+    let Some(parent) = path.parent() else {
+        return;
+    };
+    if fs::create_dir_all(parent).is_err() {
+        return;
+    }
+    let temp = path.with_extension("json.tmp");
+    if fs::write(&temp, source).is_ok() && fs::rename(&temp, &path).is_err() {
+        let _ = fs::write(&path, fs::read(&temp).unwrap_or_default());
+        let _ = fs::remove_file(temp);
+    }
 }
 
 fn canonical_route_file(root: &Path, file: &Path) -> PathBuf {
@@ -4045,39 +4289,6 @@ mod tests {
     }
 
     #[test]
-    fn shared_route_chunks_are_emitted_for_modules_used_by_multiple_routes() {
-        let temp = tempfile::tempdir().unwrap();
-        let client_dir = temp.path().join("client");
-        std::fs::create_dir_all(&client_dir).unwrap();
-
-        let route_manifests = vec![
-            serde_json::json!({
-                "route": "/",
-                "modules": ["/app/page.tsx", "/app/shared.ts"]
-            }),
-            serde_json::json!({
-                "route": "/about",
-                "modules": ["/app/about/page.tsx", "/app/shared.ts"]
-            }),
-        ];
-
-        let chunks = emit_shared_route_chunks(&client_dir, &route_manifests).unwrap();
-
-        assert_eq!(chunks.len(), 1);
-        assert!(chunks[0].modules.contains(&"/app/shared.ts".to_string()));
-        assert!(client_dir.join(&chunks[0].file_name).is_file());
-
-        let manifest = shared_route_chunk_manifest(&chunks[0]);
-        assert_eq!(manifest["routes"].as_array().unwrap().len(), 2);
-        assert!(
-            manifest["src"]
-                .as_str()
-                .unwrap()
-                .starts_with("/__ruvyxa/client/shared.")
-        );
-    }
-
-    #[test]
     fn client_manifest_attaches_shared_chunks_to_affected_routes() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
@@ -4087,13 +4298,18 @@ mod tests {
         std::fs::create_dir_all(&client_dir).unwrap();
         std::fs::write(app.join("shared.ts"), "export const label = 'shared'").unwrap();
         std::fs::write(
+            app.join("layout.tsx"),
+            "import { label } from './shared';\nexport default function Layout({ children }) { return <section data-label={label}>{children}</section> }",
+        )
+        .unwrap();
+        std::fs::write(
             app.join("page.tsx"),
-            "import { label } from './shared'; export default function Page() { return <main>{label}</main> }",
+            "export default function Page() { return <main>Home</main> }",
         )
         .unwrap();
         std::fs::write(
             app.join("about/page.tsx"),
-            "import { label } from '../shared'; export default function About() { return <main>{label}</main> }",
+            "export default function About() { return <main>About</main> }",
         )
         .unwrap();
         let manifest = discover_routes(DiscoverOptions::new(&app)).unwrap();
@@ -4126,7 +4342,47 @@ mod tests {
                     .unwrap()
                     .starts_with("/__ruvyxa/client/shared.")
             );
+            let route_file = route["file"].as_str().unwrap();
+            let route_code = std::fs::read_to_string(client_dir.join(route_file)).unwrap();
+            assert!(route_code.starts_with("import \"./shared."), "{route_code}");
+            assert!(
+                !route_code.contains("const label = 'shared'"),
+                "{route_code}"
+            );
         }
+        let shared_file = client_manifest["sharedRouteChunks"][0]["file"]
+            .as_str()
+            .unwrap();
+        let shared_code = std::fs::read_to_string(client_dir.join(shared_file)).unwrap();
+        assert!(
+            shared_code.contains("__RUVYXA_SHARED_MODULES__"),
+            "{shared_code}"
+        );
+        assert!(
+            shared_code.contains("const label = 'shared'"),
+            "{shared_code}"
+        );
+
+        let cached_manifest = emit_client_bundles(
+            root,
+            &app,
+            &manifest,
+            &client_dir,
+            &build,
+            &[],
+            NativeBuildCache {
+                dependency_hash: "no-config",
+                directory: &root.join(".ruvyxa/cache/bundler"),
+            },
+        )
+        .unwrap();
+        assert!(
+            cached_manifest["routes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|route| route["artifactCacheHit"] == true)
+        );
     }
 
     #[test]

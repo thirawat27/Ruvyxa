@@ -21,6 +21,10 @@
 prerender และเวลารวมเป็นมิลลิวินาที ใช้คู่กับ `ruvyxa bench` เพื่อหาขั้นตอนที่ควรตรวจสอบก่อน ปรับ
 build settings
 
+client manifest มี `budget` สำหรับแสดง 10 route ที่มี first-load ใหญ่ที่สุดเทียบกับ budget
+สำหรับสังเกตการณ์ 250 KiB โดยไม่ทำให้ build ล้มเหลว และแต่ละ route มี `artifactCacheHit` เมื่อ reuse
+client artifact ที่ fingerprint จาก dependency graph ได้
+
 ## Options
 
 | Option     | ใช้กับ                    | คำอธิบาย                 |

@@ -1,14 +1,14 @@
-//! In-memory FIFO cache for rendered pages and client bundles.
+//! In-memory LRU cache for rendered pages and client bundles.
 //!
 //! Caches SSR HTML and client JS bundles keyed by (route_path, request_path, params).
-//! Entries are invalidated on file change and evicted by FIFO policy when the
+//! Entries are invalidated on file change and evicted by least-recently-used policy when the
 //! cache reaches its capacity limit.
 //!
 //! ## Performance characteristics
 //!
-//! - `get()`: O(1) with a **read lock** on hit (no write lock contention).
-//! - `put()`: O(1) for new keys; replacing an existing key removes its prior
-//!   queue slot to keep memory bounded and FIFO bookkeeping correct.
+//! - `get()`: O(1) lookup, then refreshes recency bookkeeping on hit.
+//! - `put()`: inserts or refreshes an entry and evicts the least recently used
+//!   key when the cache reaches capacity.
 //! - Values are stored behind `Arc<str>` so concurrent readers share memory
 //!   rather than cloning large HTML/JS strings.
 
@@ -36,10 +36,10 @@ struct CacheEntry {
     created_at: Instant,
 }
 
-/// Thread-safe FIFO render cache with O(1) reads and O(1) eviction.
+/// Thread-safe LRU render cache.
 pub struct RenderCache {
     entries: RwLock<HashMap<String, CacheEntry>>,
-    /// Insertion-order queue for FIFO eviction.
+    /// Least-to-most recently used key order.
     order: RwLock<VecDeque<String>>,
     capacity: usize,
     ttl: Duration,
@@ -78,24 +78,28 @@ impl RenderCache {
 
     /// Try to get a cached value. Returns None on miss or expired entry.
     ///
-    /// Uses a **read lock** for the fast path (cache hit, not expired).
-    /// Acquires a write lock only if the entry needs removal.
+    /// A successful read promotes the entry to most recently used.
     pub async fn get(&self, key: &str) -> Option<String> {
-        let expired = {
+        let cached = {
             let entries = self.entries.read().await;
             if let Some(entry) = entries.get(key) {
                 if entry.created_at.elapsed() <= self.ttl {
-                    self.hits.fetch_add(1, Ordering::Relaxed);
-                    return Some(entry.value.to_string());
+                    Some(entry.value.to_string())
+                } else {
+                    None
                 }
-                true
             } else {
-                self.misses.fetch_add(1, Ordering::Relaxed);
-                return None;
+                None
             }
         };
 
-        if expired {
+        if let Some(value) = cached {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+            self.promote(key).await;
+            return Some(value);
+        }
+
+        if self.entries.read().await.contains_key(key) {
             self.remove_if_expired(key).await;
         }
         self.misses.fetch_add(1, Ordering::Relaxed);
@@ -104,21 +108,26 @@ impl RenderCache {
 
     /// Get a cached value as an `Arc<str>` (zero-copy for callers that can use it).
     pub async fn get_arc(&self, key: &str) -> Option<Arc<str>> {
-        let expired = {
+        let cached = {
             let entries = self.entries.read().await;
             if let Some(entry) = entries.get(key) {
                 if entry.created_at.elapsed() <= self.ttl {
-                    self.hits.fetch_add(1, Ordering::Relaxed);
-                    return Some(Arc::clone(&entry.value));
+                    Some(Arc::clone(&entry.value))
+                } else {
+                    None
                 }
-                true
             } else {
-                self.misses.fetch_add(1, Ordering::Relaxed);
-                return None;
+                None
             }
         };
 
-        if expired {
+        if let Some(value) = cached {
+            self.hits.fetch_add(1, Ordering::Relaxed);
+            self.promote(key).await;
+            return Some(value);
+        }
+
+        if self.entries.read().await.contains_key(key) {
             self.remove_if_expired(key).await;
         }
         self.misses.fetch_add(1, Ordering::Relaxed);
@@ -129,10 +138,14 @@ impl RenderCache {
     /// ISR deliberately serves stale output while it regenerates in the
     /// background, so it cannot use the normal freshness-enforcing getters.
     pub async fn get_stale_with_age(&self, key: &str) -> Option<(String, Duration)> {
-        let entries = self.entries.read().await;
-        let entry = entries.get(key)?;
+        let cached = {
+            let entries = self.entries.read().await;
+            let entry = entries.get(key)?;
+            (entry.value.to_string(), entry.created_at.elapsed())
+        };
         self.hits.fetch_add(1, Ordering::Relaxed);
-        Some((entry.value.to_string(), entry.created_at.elapsed()))
+        self.promote(key).await;
+        Some(cached)
     }
 
     /// Insert a value into the cache, evicting the oldest entry if at capacity.
@@ -147,8 +160,7 @@ impl RenderCache {
         let mut order = self.order.write().await;
 
         if entries.contains_key(&key) {
-            // Replacements must discard the old queue position. Keeping it
-            // would later evict the fresh value and grow the queue unbounded.
+            // A replacement becomes the most recently used value.
             order.retain(|queued_key| queued_key != &key);
         } else {
             while entries.len() >= self.capacity {
@@ -258,6 +270,16 @@ impl RenderCache {
                 .retain(|queued_key| queued_key != key);
         }
     }
+
+    async fn promote(&self, key: &str) {
+        let mut order = self.order.write().await;
+        if let Some(position) = order.iter().position(|queued_key| queued_key == key) {
+            let key = order
+                .remove(position)
+                .expect("queue position must remain valid while holding its lock");
+            order.push_back(key);
+        }
+    }
 }
 
 /// Generate a cache key for SSR pages.
@@ -312,15 +334,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_fifo_eviction() {
+    async fn test_lru_eviction() {
         let cache = RenderCache::new(3, 60);
         cache.put("a".into(), "1".into()).await;
         cache.put("b".into(), "2".into()).await;
         cache.put("c".into(), "3".into()).await;
-        // Cache is full. Next insert should evict the oldest (a).
+        assert_eq!(cache.get("a").await, Some("1".into()));
+        // Cache is full. `a` was just read, so `b` is now least recently used.
         cache.put("d".into(), "4".into()).await;
-        assert_eq!(cache.get("a").await, None, "oldest entry should be evicted");
-        assert_eq!(cache.get("b").await, Some("2".into()));
+        assert_eq!(cache.get("a").await, Some("1".into()));
+        assert_eq!(
+            cache.get("b").await,
+            None,
+            "least recently used entry should be evicted"
+        );
         assert_eq!(cache.get("c").await, Some("3".into()));
         assert_eq!(cache.get("d").await, Some("4".into()));
     }
@@ -408,7 +435,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn replacing_a_key_keeps_fifo_bookkeeping_in_sync() {
+    async fn replacing_a_key_keeps_lru_bookkeeping_in_sync() {
         let cache = RenderCache::new(2, 60);
         cache.put("a".into(), "first".into()).await;
         cache.put("b".into(), "second".into()).await;
@@ -423,7 +450,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn expired_entries_do_not_leave_stale_fifo_slots() {
+    async fn expired_entries_do_not_leave_stale_lru_slots() {
         let cache = RenderCache::new(2, 0);
         cache.put("a".into(), "first".into()).await;
         cache.put("b".into(), "second".into()).await;

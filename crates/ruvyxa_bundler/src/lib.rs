@@ -38,6 +38,7 @@ pub mod resolver;
 pub mod sourcemap;
 pub mod types;
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -69,12 +70,97 @@ pub fn bundle(input: BundleInput) -> Result<BundleOutput> {
 
 /// Bundle a single route using shared batch context.
 pub fn bundle_with_context(input: BundleInput, context: &BundleContext) -> Result<BundleOutput> {
+    bundle_with_shared_modules(input, context, &BTreeSet::new())
+}
+
+/// Bundle a route while reading selected modules from a previously imported
+/// executable shared-route registry.
+pub fn bundle_with_shared_modules(
+    input: BundleInput,
+    context: &BundleContext,
+    shared_modules: &BTreeSet<PathBuf>,
+) -> Result<BundleOutput> {
     bundle_with_parts(
         input,
         context.compile_cache(),
         context.graph_cache(),
         context.plugins(),
+        shared_modules,
     )
+}
+
+/// Compile shared route modules into one executable browser registry.
+///
+/// The caller supplies paths already proven common to multiple routes. Their
+/// static closure is linked dependency-first so a route bundle can safely read
+/// the registry after importing this output.
+pub fn bundle_shared_route_modules(
+    project_root: PathBuf,
+    app_dir: PathBuf,
+    module_paths: &BTreeSet<PathBuf>,
+    options: BundleOptions,
+    context: &BundleContext,
+) -> Result<SharedRouteBundleOutput> {
+    let entry_label = "ruvyxa:shared-route-entry.ts".to_string();
+    let entry_source = module_paths
+        .iter()
+        .enumerate()
+        .map(|(index, path)| {
+            let path = path.to_string_lossy().replace('\\', "/");
+            let path = path
+                .strip_prefix("//?/")
+                .or_else(|| path.strip_prefix("\\\\?\\"))
+                .unwrap_or(&path);
+            format!(
+                "import * as __ruvyxa_shared_{index} from \"{}\";",
+                path.replace('"', "\\\"")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let input = BundleInput {
+        entry: PathBuf::from(&entry_label),
+        project_root,
+        app_dir,
+        layouts: Vec::new(),
+        request_path: "/__ruvyxa/shared".to_string(),
+        target: BundleTarget::Client,
+        options,
+    };
+    let graph = resolver::resolve_graph_with_plugins(
+        &entry_source,
+        &entry_label,
+        &input.project_root,
+        &input.app_dir,
+        context.graph_cache(),
+        context.plugins(),
+        input.target,
+    )?;
+    let (compiled, _) = compiler::compile_graph_with_pipeline_and_maps(
+        &graph,
+        &input,
+        context.compile_cache(),
+        context.plugins(),
+    )?;
+    let mut diagnostics = Vec::new();
+    boundary::check(&compiled, &input, &mut diagnostics)?;
+    let shared_modules = compiled
+        .into_iter()
+        .filter(|module| !module.is_external && module.path != *entry_label)
+        .collect::<Vec<_>>();
+    let linked = linker::link_shared_route_modules(&shared_modules, &input)?;
+    let code = if input.options.minify {
+        minifier::minify_with_options(&linked, input.target, false)?
+    } else {
+        linked
+    };
+    Ok(SharedRouteBundleOutput {
+        code,
+        modules: shared_modules
+            .into_iter()
+            .map(|module| module.path)
+            .collect(),
+    })
 }
 
 fn bundle_with_parts(
@@ -82,6 +168,7 @@ fn bundle_with_parts(
     compile_cache: &CompileCache,
     graph_cache: &ResolveGraphCache,
     plugins: &PluginPipeline,
+    shared_modules: &BTreeSet<PathBuf>,
 ) -> Result<BundleOutput> {
     let started = Instant::now();
 
@@ -116,7 +203,7 @@ fn bundle_with_parts(
     } else {
         Default::default()
     };
-    let linked_modules = if split_dynamic_imports {
+    let static_modules = if split_dynamic_imports {
         static_entry_modules(
             &compiled,
             &PathBuf::from(&entry_label),
@@ -125,6 +212,11 @@ fn bundle_with_parts(
     } else {
         compiled.clone()
     };
+    let linked_modules = static_modules
+        .iter()
+        .filter(|module| !shared_modules.contains(&module.path))
+        .cloned()
+        .collect::<Vec<_>>();
     let chunks = if split_dynamic_imports {
         build_dynamic_output_chunks(&compiled, &input, &dynamic_import_files)?
     } else {
@@ -133,8 +225,12 @@ fn bundle_with_parts(
 
     // 6. Link modules into a single concatenated script. This also detects circular dependencies
     // and returns an error.
-    let linked =
-        linker::link_parallel_with_dynamic_imports(&linked_modules, &input, &dynamic_import_files)?;
+    let linked = linker::link_parallel_with_dynamic_imports_and_shared_modules(
+        &linked_modules,
+        &input,
+        &dynamic_import_files,
+        shared_modules,
+    )?;
 
     // 7. Optionally tree-shake, then minify. Tree-shaking is controlled
     // independently from whitespace/identifier minification.
@@ -193,32 +289,33 @@ fn bundle_with_parts(
     };
 
     // 10. Optionally emit a chunk manifest.
-    let chunk_manifest = if input.options.emit_chunk_manifest {
-        let hash = blake3::hash(code.as_bytes()).to_hex();
-        let bundle_id = hash[..16].to_string();
-        let output_file = format!("{bundle_id}.js");
-        let sm_file = source_map.as_ref().map(|_| format!("{bundle_id}.js.map"));
+    let chunk_manifest =
+        if input.options.emit_chunk_manifest || input.options.collect_module_manifest {
+            let hash = blake3::hash(code.as_bytes()).to_hex();
+            let bundle_id = hash[..16].to_string();
+            let output_file = format!("{bundle_id}.js");
+            let sm_file = source_map.as_ref().map(|_| format!("{bundle_id}.js.map"));
 
-        let modules: Vec<String> = linker::ordered_project_modules(&linked_modules)
-            .iter()
-            .filter(|m| !m.is_external)
-            .map(|m| m.path.display().to_string().replace('\\', "/"))
-            .collect();
+            let modules: Vec<String> = linker::ordered_project_modules(&static_modules)
+                .iter()
+                .filter(|m| !m.is_external)
+                .map(|m| m.path.display().to_string().replace('\\', "/"))
+                .collect();
 
-        let dynamic_imports = dynamic_import_chunks(&compiled, &dynamic_import_files);
+            let dynamic_imports = dynamic_import_chunks(&compiled, &dynamic_import_files);
 
-        Some(ChunkManifest {
-            bundle_id,
-            route: input.request_path.clone(),
-            modules,
-            output_file,
-            source_map_file: sm_file,
-            size_bytes: code.len(),
-            dynamic_imports,
-        })
-    } else {
-        None
-    };
+            Some(ChunkManifest {
+                bundle_id,
+                route: input.request_path.clone(),
+                modules,
+                output_file,
+                source_map_file: sm_file,
+                size_bytes: code.len(),
+                dynamic_imports,
+            })
+        } else {
+            None
+        };
 
     // Count modules removed by tree-shaking.
     let tree_shaken_modules = if input.options.tree_shaking {

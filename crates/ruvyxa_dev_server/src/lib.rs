@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs;
 use std::future::IntoFuture;
 use std::io::{ErrorKind, IsTerminal};
@@ -185,8 +185,14 @@ struct AppState {
 #[derive(Default)]
 struct RuntimeCache {
     manifest: tokio::sync::RwLock<Option<RouteManifest>>,
-    styles: tokio::sync::RwLock<Option<String>>,
+    styles: tokio::sync::RwLock<Option<StyleCacheEntry>>,
     router: tokio::sync::RwLock<Option<RadixRouter>>,
+}
+
+#[derive(Debug, Clone)]
+struct StyleCacheEntry {
+    css: String,
+    files: BTreeSet<PathBuf>,
 }
 
 impl RuntimeCache {
@@ -247,20 +253,47 @@ impl RuntimeCache {
         {
             let cached = self.styles.read().await;
             if let Some(styles) = cached.as_ref() {
-                return Ok(styles.clone());
+                return Ok(styles.css.clone());
             }
         }
 
-        let mut styles = collect_styles(&config.root, &config.app_dir, &config.style_entries)?.css;
+        let collection = collect_styles(&config.root, &config.app_dir, &config.style_entries)?;
+        let mut styles = collection.css;
         // Minify CSS in production mode to reduce inline style payload.
         if !config.watch {
             styles = style::minify_css(&styles);
         }
         {
             let mut cached = self.styles.write().await;
-            *cached = Some(styles.clone());
+            *cached = Some(StyleCacheEntry {
+                css: styles.clone(),
+                files: collection
+                    .files
+                    .into_iter()
+                    .map(|path| normalize_cache_path(&path))
+                    .collect(),
+            });
         }
         Ok(styles)
+    }
+
+    /// Invalidate cached CSS only when a watched event changed a CSS source
+    /// collected for the current style graph. This preserves the style cache
+    /// for component-only HMR updates.
+    fn invalidate_styles_for_paths(&self, paths: &[PathBuf]) -> bool {
+        let changed = paths
+            .iter()
+            .map(|path| normalize_cache_path(path))
+            .collect::<BTreeSet<_>>();
+        let intersects = self
+            .styles
+            .blocking_read()
+            .as_ref()
+            .is_some_and(|cached| !cached.files.is_disjoint(&changed));
+        if intersects {
+            *self.styles.blocking_write() = None;
+        }
+        intersects
     }
 
     fn invalidate(&self) {
@@ -275,6 +308,27 @@ impl RuntimeCache {
         *self.manifest.write().await = None;
         *self.styles.write().await = None;
         *self.router.write().await = None;
+    }
+}
+
+fn normalize_cache_path(path: &Path) -> PathBuf {
+    let absolute = path.canonicalize().unwrap_or_else(|_| {
+        if path.is_absolute() {
+            path.to_path_buf()
+        } else {
+            std::env::current_dir()
+                .map(|current_dir| current_dir.join(path))
+                .unwrap_or_else(|_| path.to_path_buf())
+        }
+    });
+
+    #[cfg(windows)]
+    {
+        PathBuf::from(absolute.to_string_lossy().to_ascii_lowercase())
+    }
+    #[cfg(not(windows))]
+    {
+        absolute
     }
 }
 
@@ -747,8 +801,9 @@ fn start_watcher(
                     render_cache.invalidate_all_blocking();
                 } else {
                     // Selective invalidation: only evict affected route caches.
-                    // Styles always need refresh if any source file changed.
-                    *runtime_cache.styles.blocking_write() = None;
+                    // Refresh styles only when the current CSS dependency graph
+                    // intersects a changed path. Component-only updates retain it.
+                    runtime_cache.invalidate_styles_for_paths(&paths);
 
                     // Selectively invalidate render cache for affected routes only.
                     for route_path in &hmr_update.affected_routes {
@@ -4148,6 +4203,54 @@ mod tests {
         assert_eq!(cache.manifest(&config).await.unwrap().routes.len(), 1);
         cache.invalidate_async().await;
         assert_eq!(cache.manifest(&config).await.unwrap().routes.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn runtime_cache_invalidates_styles_only_for_collected_dependencies() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        let styles = temp.path().join("styles");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(&styles).unwrap();
+        std::fs::write(app.join("page.tsx"), "import '../styles/site.css'").unwrap();
+        let stylesheet = styles.join("site.css");
+        std::fs::write(&stylesheet, "body { color: navy; }").unwrap();
+
+        let config = ServerConfig::dev(temp.path(), "localhost", 3000);
+        let cache = Arc::new(RuntimeCache::default());
+        assert!(cache.styles(&config).await.unwrap().contains("navy"));
+
+        let unrelated = app.join("page.tsx");
+        let unchanged_cache = cache.clone();
+        assert!(
+            !tokio::task::spawn_blocking(move || {
+                unchanged_cache.invalidate_styles_for_paths(&[unrelated])
+            })
+            .await
+            .unwrap()
+        );
+        assert!(
+            cache
+                .styles
+                .read()
+                .await
+                .as_ref()
+                .is_some_and(|cached| cached.css.contains("navy"))
+        );
+
+        std::fs::write(&stylesheet, "body { color: teal; }").unwrap();
+        let changed_cache = cache.clone();
+        assert!(
+            tokio::task::spawn_blocking(move || {
+                changed_cache.invalidate_styles_for_paths(&[stylesheet])
+            })
+            .await
+            .unwrap()
+        );
+        assert!(cache.styles(&config).await.unwrap().contains("teal"));
+
+        cache.invalidate_async().await;
+        assert!(cache.styles.read().await.is_none());
     }
 
     #[test]

@@ -84,6 +84,10 @@ Pipeline:
 and total build durations in milliseconds. Use it with `ruvyxa bench` to identify the stage to
 investigate before changing build settings.
 
+The client manifest's `budget` lists the ten largest first-load routes against a 250 KiB observation
+budget without failing the build. Each route also exposes `artifactCacheHit` when its
+graph-fingerprinted client artifact was reused.
+
 ### `check`
 
 ```bash

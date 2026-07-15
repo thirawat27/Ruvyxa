@@ -57,6 +57,9 @@ pub struct BundleOptions {
     pub es_target: EsTarget,
     pub split_strategy: SplitStrategy,
     pub emit_chunk_manifest: bool,
+    /// Collect a module graph for internal multi-route coordination without
+    /// requiring a user-facing chunk manifest file.
+    pub collect_module_manifest: bool,
 }
 
 impl Default for BundleOptions {
@@ -69,6 +72,7 @@ impl Default for BundleOptions {
             es_target: EsTarget::Es2022,
             split_strategy: SplitStrategy::Single,
             emit_chunk_manifest: false,
+            collect_module_manifest: false,
         }
     }
 }
@@ -107,6 +111,13 @@ pub struct BundleOutput {
     pub stats: BundleStats,
     pub chunk_manifest: Option<ChunkManifest>,
     pub chunks: Vec<OutputChunk>,
+}
+
+/// Executable module registry shared by more than one route bundle.
+#[derive(Debug, Clone)]
+pub struct SharedRouteBundleOutput {
+    pub code: String,
+    pub modules: Vec<PathBuf>,
 }
 
 /// A JSON-serializable chunk manifest for use in preload link injection.
