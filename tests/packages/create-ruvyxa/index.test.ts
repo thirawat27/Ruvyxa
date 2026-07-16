@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 
@@ -55,6 +55,44 @@ describe('createRuvyxaApp', () => {
   it('rejects project names ending with unsafe Windows characters', async () => {
     await assert.rejects(createRuvyxaApp('my-app.'), /reserved or unsafe/)
     await assert.rejects(createRuvyxaApp('my-app '), /whitespace/)
+  })
+
+  it('explains how to use an existing Ruvyxa project without changing it', async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), 'ruvyxa-create-'))
+    const target = join(tempRoot, 'existing-app')
+
+    try {
+      await mkdir(target)
+      const packagePath = join(target, 'package.json')
+      const originalPackage = JSON.stringify({ dependencies: { ruvyxa: '^1.0.14' } })
+      await writeFile(packagePath, originalPackage)
+
+      await assert.rejects(
+        createRuvyxaApp(target),
+        /An existing Ruvyxa project was detected[\s\S]*npm run dev[\s\S]*No files were changed/,
+      )
+      assert.equal(await readFile(packagePath, 'utf8'), originalPackage)
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
+  it('gives non-destructive guidance for a generic non-empty directory', async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), 'ruvyxa-create-'))
+    const target = join(tempRoot, 'notes')
+
+    try {
+      await mkdir(target)
+      await writeFile(join(target, 'notes.txt'), 'keep me')
+      await writeFile(join(target, 'package.json'), '{ malformed')
+
+      await assert.rejects(
+        createRuvyxaApp(target),
+        /move or rename the existing directory[\s\S]*No files were changed/,
+      )
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
   })
 })
 

@@ -103,9 +103,19 @@ export async function createRuvyxaApp(targetDir: string): Promise<void> {
 
     const entries = await readdir(resolvedTarget)
     if (entries.length > 0) {
+      const existingProjectHint = (await isRuvyxaProject(resolvedTarget))
+        ? `\n  An existing Ruvyxa project was detected.\n` +
+          `  To use it:\n` +
+          `    cd "${trimmed}"\n` +
+          `    npm run dev\n\n` +
+          `  To create a different project:\n` +
+          `    npm create ruvyxa@latest "${trimmed}-new"`
+        : `\n  Choose a different name, or move or rename the existing directory before trying again.`
+
       throw new Error(
         `Directory "${trimmed}" already exists and is not empty.\n` +
-          '  Please choose a different name or remove the existing directory.',
+          existingProjectHint +
+          '\n\n  No files were changed.',
       )
     }
   }
@@ -164,6 +174,37 @@ export async function createRuvyxaApp(targetDir: string): Promise<void> {
         `  ${message}\n` +
         '  Check disk space and filesystem access.',
     )
+  }
+}
+
+/** Detect an existing Ruvyxa app without failing on an unrelated or malformed manifest. */
+async function isRuvyxaProject(targetDir: string): Promise<boolean> {
+  const configFiles = [
+    'ruvyxa.config.ts',
+    'ruvyxa.config.js',
+    'ruvyxa.config.mjs',
+    'ruvyxa.config.cjs',
+  ]
+  if (configFiles.some((file) => existsSync(resolve(targetDir, file)))) return true
+
+  const packagePath = resolve(targetDir, 'package.json')
+  if (!existsSync(packagePath)) return false
+
+  try {
+    const packageJson: unknown = JSON.parse(await readFile(packagePath, 'utf8'))
+    if (!packageJson || typeof packageJson !== 'object') return false
+
+    const manifest = packageJson as Record<string, unknown>
+    return ['dependencies', 'devDependencies', 'peerDependencies'].some((field) => {
+      const dependencies = manifest[field]
+      return (
+        dependencies !== null &&
+        typeof dependencies === 'object' &&
+        ('ruvyxa' in dependencies || '@ruvyxa/react' in dependencies)
+      )
+    })
+  } catch {
+    return false
   }
 }
 
