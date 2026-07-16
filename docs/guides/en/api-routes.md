@@ -91,6 +91,33 @@ export default config({
 })
 ```
 
+## Streaming Responses
+
+API handlers can return a `Response` backed by a `ReadableStream`. Ruvyxa forwards the status and
+headers first, then streams binary-safe body chunks through the persistent worker boundary into the
+HTTP response. The runtime does not materialize the complete response as one text value.
+
+```ts
+export function GET() {
+  const encoder = new TextEncoder()
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode('first\n'))
+      controller.enqueue(encoder.encode('second\n'))
+      controller.close()
+    },
+  })
+
+  return new Response(body, {
+    headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+  })
+}
+```
+
+Worker IPC uses bounded 64 KiB frames and a bounded per-response queue. A stalled producer or
+consumer fails that response stream instead of allowing its pending memory to grow without a bound.
+This is automatic; route handlers do not need a Ruvyxa-specific response type.
+
 ## Unsupported Methods
 
 When a handler does not export a given method, the server responds with `405 Method Not Allowed`:
@@ -111,6 +138,7 @@ API routes automatically receive security headers, rate limiting, and middleware
 
 Ruvyxa forwards the original URL query string, request bytes, and repeated request headers to the
 standard `Request` object without converting binary data to text. Responses also preserve repeated
-headers, including multiple `Set-Cookie` values.
+headers, including multiple `Set-Cookie` values, and preserve binary response bodies while streaming
+them.
 
 See [Configuration](configuration.md) for security and middleware settings.

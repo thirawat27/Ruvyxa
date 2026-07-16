@@ -8,15 +8,21 @@
 //! creation, V8 startup, and renderer initialization.
 
 use std::collections::BTreeMap;
+use std::io;
 use std::path::{Path, PathBuf};
+use std::pin::Pin;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
+use std::task::{Context, Poll};
 
+use axum::body::{Body, Bytes};
+use base64::Engine;
+use futures_core::Stream;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
-use tokio::sync::{Mutex, mpsc, oneshot};
+use tokio::sync::{Mutex, mpsc};
 use tracing::{debug, error, warn};
 
 use ruvyxa_diagnostics::{Diagnostic, Result, RuvyxaError};
@@ -40,6 +46,10 @@ const BUILD_WORKER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs
 
 /// Maximum time a worker receives to exit after its stdin closes before it is killed.
 const WORKER_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Maximum number of decoded response frames waiting for one HTTP consumer.
+/// At 64 KiB per frame this bounds queued raw body data to roughly 1 MiB.
+const MAX_PENDING_RESPONSE_FRAMES: usize = 16;
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
 
@@ -87,6 +97,10 @@ pub enum WorkerRequest {
         /// The explicit field name is the NDJSON protocol tag for base64 data.
         #[serde(rename = "bodyBase64", skip_serializing_if = "Option::is_none")]
         body_base64: Option<String>,
+        /// Ask workers that support framed responses to stream the API body.
+        /// Older workers ignore this additive field and return the legacy body.
+        #[serde(rename = "streamResponse")]
+        stream_response: bool,
         params: RouteParams,
     },
     #[serde(rename = "action")]
@@ -157,6 +171,20 @@ pub enum WorkerRequest {
 }
 
 impl WorkerRequest {
+    fn id(&self) -> &str {
+        match self {
+            Self::Ssr { id, .. }
+            | Self::Api { id, .. }
+            | Self::Action { id, .. }
+            | Self::Client { id, .. }
+            | Self::Invalidate { id, .. }
+            | Self::Ping { id, .. }
+            | Self::Warmup { id, .. }
+            | Self::Ssg { id, .. }
+            | Self::StaticParams { id, .. } => id,
+        }
+    }
+
     /// Returns `true` if this request type is safe to retry without risk of
     /// duplicate side effects. Actions and API calls are NOT idempotent.
     pub fn is_idempotent(&self) -> bool {
@@ -181,11 +209,13 @@ pub struct WarmupRoute {
     pub app_dir: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkerResponse {
     pub id: String,
     pub ok: bool,
+    /// Framed API response discriminator. Absent for the legacy one-message protocol.
+    pub frame: Option<String>,
     pub html: Option<String>,
     pub script: Option<String>,
     pub status: Option<u16>,
@@ -194,6 +224,8 @@ pub struct WorkerResponse {
     /// `Set-Cookie` values survive the Node-to-Rust boundary.
     pub header_pairs: Option<Vec<(String, String)>>,
     pub body: Option<String>,
+    /// Base64-encoded bytes for an `api-chunk` frame.
+    pub body_base64: Option<String>,
     pub code: Option<String>,
     pub message: Option<String>,
     pub stack: Option<String>,
@@ -203,11 +235,164 @@ pub struct WorkerResponse {
     pub params: Option<Vec<RouteParams>>,
 }
 
+impl WorkerResponse {
+    fn is_terminal(&self) -> bool {
+        !matches!(self.frame.as_deref(), Some("api-start" | "api-chunk"))
+    }
+
+    fn stream_error(id: String, message: impl Into<String>) -> Self {
+        Self {
+            id,
+            frame: Some("api-error".to_string()),
+            code: Some("RUV1704".to_string()),
+            message: Some(message.into()),
+            ..Self::default()
+        }
+    }
+}
+
+#[derive(Clone)]
+struct PendingResponse {
+    sender: mpsc::UnboundedSender<WorkerResponse>,
+    queued: Arc<AtomicUsize>,
+}
+
+type PendingResponses = Arc<Mutex<BTreeMap<String, PendingResponse>>>;
+
+struct ResponseChannel {
+    id: String,
+    receiver: mpsc::UnboundedReceiver<WorkerResponse>,
+    queued: Arc<AtomicUsize>,
+}
+
+pub(crate) struct WorkerApiResponse {
+    pub response: WorkerResponse,
+    pub body: Option<Body>,
+}
+
+struct WorkerBodyStream {
+    id: String,
+    receiver: mpsc::UnboundedReceiver<WorkerResponse>,
+    queued: Arc<AtomicUsize>,
+    pending: PendingResponses,
+    idle_timeout: std::time::Duration,
+    deadline: Pin<Box<tokio::time::Sleep>>,
+    finished: bool,
+}
+
+impl WorkerBodyStream {
+    fn new(
+        channel: ResponseChannel,
+        pending: PendingResponses,
+        idle_timeout: std::time::Duration,
+    ) -> Self {
+        Self {
+            id: channel.id,
+            receiver: channel.receiver,
+            queued: channel.queued,
+            pending,
+            idle_timeout,
+            deadline: Box::pin(tokio::time::sleep(idle_timeout)),
+            finished: false,
+        }
+    }
+
+    fn remove_pending(&self) {
+        let pending = Arc::clone(&self.pending);
+        let id = self.id.clone();
+        if let Ok(handle) = tokio::runtime::Handle::try_current() {
+            handle.spawn(async move {
+                pending.lock().await.remove(&id);
+            });
+        }
+    }
+}
+
+impl Stream for WorkerBodyStream {
+    type Item = std::result::Result<Bytes, io::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        match self.receiver.poll_recv(cx) {
+            Poll::Ready(Some(response)) => {
+                self.queued.fetch_sub(1, Ordering::AcqRel);
+                let idle_timeout = self.idle_timeout;
+                self.deadline
+                    .as_mut()
+                    .reset(tokio::time::Instant::now() + idle_timeout);
+
+                match response.frame.as_deref() {
+                    Some("api-chunk") => {
+                        let encoded = response.body_base64.ok_or_else(|| {
+                            io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "API stream chunk did not include bodyBase64",
+                            )
+                        });
+                        Poll::Ready(Some(encoded.and_then(|encoded| {
+                            base64::engine::general_purpose::STANDARD
+                                .decode(encoded)
+                                .map(Bytes::from)
+                                .map_err(|error| {
+                                    io::Error::new(
+                                        io::ErrorKind::InvalidData,
+                                        format!("API stream chunk was not valid base64: {error}"),
+                                    )
+                                })
+                        })))
+                    }
+                    Some("api-error") => {
+                        self.finished = true;
+                        Poll::Ready(Some(Err(io::Error::other(
+                            response
+                                .message
+                                .unwrap_or_else(|| "Node worker API stream failed".to_string()),
+                        ))))
+                    }
+                    frame => {
+                        self.finished = true;
+                        Poll::Ready(Some(Err(io::Error::new(
+                            io::ErrorKind::InvalidData,
+                            format!("Unexpected worker API stream frame: {frame:?}"),
+                        ))))
+                    }
+                }
+            }
+            Poll::Ready(None) => {
+                self.finished = true;
+                Poll::Ready(None)
+            }
+            Poll::Pending => {
+                if self.deadline.as_mut().poll(cx).is_ready() {
+                    self.finished = true;
+                    self.remove_pending();
+                    Poll::Ready(Some(Err(io::Error::new(
+                        io::ErrorKind::TimedOut,
+                        format!(
+                            "Worker API response stream was idle for {}ms",
+                            self.idle_timeout.as_millis()
+                        ),
+                    ))))
+                } else {
+                    Poll::Pending
+                }
+            }
+        }
+    }
+}
+
+impl Drop for WorkerBodyStream {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.remove_pending();
+        }
+    }
+}
+
 // --- Worker Process ---
 
 struct Worker {
     stdin_tx: StdMutex<Option<mpsc::Sender<String>>>,
-    pending: Arc<Mutex<BTreeMap<String, oneshot::Sender<WorkerResponse>>>>,
+    pending: PendingResponses,
     child: Mutex<Option<Child>>,
     alive: Arc<AtomicBool>,
 }
@@ -234,8 +419,7 @@ impl Worker {
         let stdout = child.stdout.take().expect("stdout was piped");
         let stderr = child.stderr.take().expect("stderr was piped");
 
-        let pending: Arc<Mutex<BTreeMap<String, oneshot::Sender<WorkerResponse>>>> =
-            Arc::new(Mutex::new(BTreeMap::new()));
+        let pending: PendingResponses = Arc::new(Mutex::new(BTreeMap::new()));
         let alive = Arc::new(AtomicBool::new(true));
 
         // Spawn stdin writer task
@@ -275,12 +459,43 @@ impl Worker {
                     }
                 };
                 let id = response.id.clone();
-                let sender = {
+                let terminal = response.is_terminal();
+                let end_frame = response.frame.as_deref() == Some("api-end");
+                let pending_response = {
                     let mut map = reader_pending.lock().await;
-                    map.remove(&id)
+                    if terminal {
+                        map.remove(&id)
+                    } else {
+                        map.get(&id).cloned()
+                    }
                 };
-                if let Some(sender) = sender {
-                    let _ = sender.send(response);
+                let Some(pending_response) = pending_response else {
+                    continue;
+                };
+                if end_frame {
+                    continue;
+                }
+
+                let queued = pending_response.queued.fetch_add(1, Ordering::AcqRel) + 1;
+                if queued > MAX_PENDING_RESPONSE_FRAMES {
+                    pending_response.queued.fetch_sub(1, Ordering::AcqRel);
+                    reader_pending.lock().await.remove(&id);
+                    let overflow = WorkerResponse::stream_error(
+                        id,
+                        format!(
+                            "API response stream exceeded the {}-frame consumer queue",
+                            MAX_PENDING_RESPONSE_FRAMES
+                        ),
+                    );
+                    if pending_response.sender.send(overflow).is_ok() {
+                        pending_response.queued.fetch_add(1, Ordering::AcqRel);
+                    }
+                    continue;
+                }
+
+                if pending_response.sender.send(response).is_err() {
+                    pending_response.queued.fetch_sub(1, Ordering::AcqRel);
+                    reader_pending.lock().await.remove(&id);
                 }
             }
             // Dropping every sender wakes requests immediately when the worker
@@ -333,30 +548,75 @@ impl Worker {
         request: &WorkerRequest,
         response_timeout: std::time::Duration,
     ) -> Result<WorkerResponse> {
-        if !self.alive.load(Ordering::Acquire) {
-            return Err(RuvyxaError::Message(
-                "Worker process has exited".to_string(),
-            ));
+        let mut channel = self.open_response(request).await?;
+
+        match tokio::time::timeout(response_timeout, channel.receiver.recv()).await {
+            Ok(Some(response)) => {
+                channel.queued.fetch_sub(1, Ordering::AcqRel);
+                Ok(response)
+            }
+            Ok(None) => Err(RuvyxaError::Message(
+                "Worker response channel closed unexpectedly".to_string(),
+            )),
+            Err(_) => {
+                self.pending.lock().await.remove(&channel.id);
+                Err(RuvyxaError::Message(format!(
+                    "Worker request timed out after {}ms",
+                    response_timeout.as_millis()
+                )))
+            }
         }
-        let id = match request {
-            WorkerRequest::Ssr { id, .. }
-            | WorkerRequest::Api { id, .. }
-            | WorkerRequest::Action { id, .. }
-            | WorkerRequest::Client { id, .. }
-            | WorkerRequest::Invalidate { id, .. }
-            | WorkerRequest::Ping { id, .. }
-            | WorkerRequest::Warmup { id, .. }
-            | WorkerRequest::Ssg { id, .. }
-            | WorkerRequest::StaticParams { id, .. } => id.clone(),
+    }
+
+    async fn start_api_response(
+        &self,
+        request: &WorkerRequest,
+        response_timeout: std::time::Duration,
+    ) -> Result<WorkerApiResponse> {
+        let mut channel = self.open_response(request).await?;
+        let response = match tokio::time::timeout(response_timeout, channel.receiver.recv()).await {
+            Ok(Some(response)) => {
+                channel.queued.fetch_sub(1, Ordering::AcqRel);
+                response
+            }
+            Ok(None) => {
+                return Err(RuvyxaError::Message(
+                    "Worker response channel closed unexpectedly".to_string(),
+                ));
+            }
+            Err(_) => {
+                self.pending.lock().await.remove(&channel.id);
+                return Err(RuvyxaError::Message(format!(
+                    "Worker request timed out after {}ms",
+                    response_timeout.as_millis()
+                )));
+            }
         };
 
-        let (tx, rx) = oneshot::channel();
-        {
-            let mut pending = self.pending.lock().await;
-            pending.insert(id.clone(), tx);
+        match response.frame.as_deref() {
+            Some("api-start") => Ok(WorkerApiResponse {
+                response,
+                body: Some(Body::from_stream(WorkerBodyStream::new(
+                    channel,
+                    Arc::clone(&self.pending),
+                    response_timeout,
+                ))),
+            }),
+            None => Ok(WorkerApiResponse {
+                response,
+                body: None,
+            }),
+            frame => {
+                self.pending.lock().await.remove(&channel.id);
+                Err(RuvyxaError::Message(format!(
+                    "Worker returned an unexpected first API response frame: {frame:?}"
+                )))
+            }
         }
+    }
+
+    async fn open_response(&self, request: &WorkerRequest) -> Result<ResponseChannel> {
         if !self.alive.load(Ordering::Acquire) {
-            self.pending.lock().await.remove(&id);
             return Err(RuvyxaError::Message(
                 "Worker process has exited".to_string(),
             ));
@@ -365,7 +625,6 @@ impl Worker {
         let line = serde_json::to_string(request)
             .map_err(|error| RuvyxaError::Message(error.to_string()))?
             + "\n";
-
         let stdin_tx = self
             .stdin_tx
             .lock()
@@ -373,28 +632,35 @@ impl Worker {
             .clone()
             .ok_or_else(|| RuvyxaError::Message("Worker process is shutting down".to_string()))?;
 
+        let id = request.id().to_string();
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let queued = Arc::new(AtomicUsize::new(0));
+        self.pending.lock().await.insert(
+            id.clone(),
+            PendingResponse {
+                sender,
+                queued: Arc::clone(&queued),
+            },
+        );
+        if !self.alive.load(Ordering::Acquire) {
+            self.pending.lock().await.remove(&id);
+            return Err(RuvyxaError::Message(
+                "Worker process has exited".to_string(),
+            ));
+        }
+
         if stdin_tx.send(line).await.is_err() {
-            let mut pending = self.pending.lock().await;
-            pending.remove(&id);
+            self.pending.lock().await.remove(&id);
             return Err(RuvyxaError::Message(
                 "Worker process stdin closed".to_string(),
             ));
         }
 
-        match tokio::time::timeout(response_timeout, rx).await {
-            Ok(Ok(response)) => Ok(response),
-            Ok(Err(_)) => Err(RuvyxaError::Message(
-                "Worker response channel closed unexpectedly".to_string(),
-            )),
-            Err(_) => {
-                let mut pending = self.pending.lock().await;
-                pending.remove(&id);
-                Err(RuvyxaError::Message(format!(
-                    "Worker request timed out after {}ms",
-                    response_timeout.as_millis()
-                )))
-            }
-        }
+        Ok(ResponseChannel {
+            id,
+            receiver,
+            queued,
+        })
     }
 }
 
@@ -527,16 +793,7 @@ impl NodeWorkerPool {
 
     /// Send a request to the next available worker (round-robin).
     pub async fn send(&self, request: WorkerRequest) -> Result<WorkerResponse> {
-        let (index, worker) = {
-            let workers = self.workers.read().expect("worker pool lock poisoned");
-            if workers.is_empty() {
-                return Err(RuvyxaError::Message(
-                    "Worker pool has no workers".to_string(),
-                ));
-            }
-            let index = self.next_worker.fetch_add(1, Ordering::Relaxed) as usize % workers.len();
-            (index, workers[index].clone())
-        };
+        let (index, worker) = self.select_worker()?;
         let response = worker.send(&request, self.response_timeout).await;
 
         if response.is_err()
@@ -551,6 +808,17 @@ impl NodeWorkerPool {
         }
 
         response
+    }
+
+    fn select_worker(&self) -> Result<(usize, Arc<Worker>)> {
+        let workers = self.workers.read().expect("worker pool lock poisoned");
+        if workers.is_empty() {
+            return Err(RuvyxaError::Message(
+                "Worker pool has no workers".to_string(),
+            ));
+        }
+        let index = self.next_worker.fetch_add(1, Ordering::Relaxed) as usize % workers.len();
+        Ok((index, workers[index].clone()))
     }
 
     /// Replaces a failed worker before the next request can select its slot.
@@ -719,7 +987,7 @@ impl NodeWorkerPool {
         self.send(request).await
     }
 
-    pub(crate) async fn render_api(&self, api: RenderApiRequest<'_>) -> Result<WorkerResponse> {
+    pub(crate) async fn render_api(&self, api: RenderApiRequest<'_>) -> Result<WorkerApiResponse> {
         let headers = api.headers.iter().cloned().collect::<BTreeMap<_, _>>();
         let body_base64 = api.body.map(base64_encode);
         let request = WorkerRequest::Api {
@@ -736,9 +1004,17 @@ impl NodeWorkerPool {
                 .body
                 .and_then(|body| std::str::from_utf8(body).ok().map(str::to_string)),
             body_base64,
+            stream_response: true,
             params: api.params.clone(),
         };
-        self.send(request).await
+        let (index, worker) = self.select_worker()?;
+        let response = worker
+            .start_api_response(&request, self.response_timeout)
+            .await;
+        if response.is_err() {
+            self.replace_failed_worker(index, &worker).await;
+        }
+        response
     }
 
     pub async fn render_action(
@@ -866,26 +1142,7 @@ impl NodeWorkerPool {
 }
 
 fn base64_encode(bytes: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut encoded = String::with_capacity(bytes.len().div_ceil(3) * 4);
-    for chunk in bytes.chunks(3) {
-        let first = chunk[0];
-        let second = *chunk.get(1).unwrap_or(&0);
-        let third = *chunk.get(2).unwrap_or(&0);
-        encoded.push(ALPHABET[(first >> 2) as usize] as char);
-        encoded.push(ALPHABET[(((first & 0b0000_0011) << 4) | (second >> 4)) as usize] as char);
-        encoded.push(if chunk.len() > 1 {
-            ALPHABET[(((second & 0b0000_1111) << 2) | (third >> 6)) as usize] as char
-        } else {
-            '='
-        });
-        encoded.push(if chunk.len() > 2 {
-            ALPHABET[(third & 0b0011_1111) as usize] as char
-        } else {
-            '='
-        });
-    }
-    encoded
+    base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
 fn find_worker_script(root: &Path) -> Option<PathBuf> {
@@ -923,6 +1180,7 @@ mod tests {
             ],
             body: None,
             body_base64: Some(base64_encode(&[0, 255, 128, 13, 10])),
+            stream_response: true,
             params: BTreeMap::new(),
         };
 
@@ -936,6 +1194,154 @@ mod tests {
             serde_json::json!(["x-repeat", "second"])
         );
         assert_eq!(value["bodyBase64"], "AP+ADQo=");
+        assert_eq!(value["streamResponse"], true);
+    }
+
+    #[tokio::test]
+    async fn api_body_stream_decodes_binary_frames_without_text_conversion() {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let queued = Arc::new(AtomicUsize::new(1));
+        sender
+            .send(WorkerResponse {
+                id: "stream".to_string(),
+                ok: true,
+                frame: Some("api-chunk".to_string()),
+                body_base64: Some("AP+ADQo=".to_string()),
+                ..WorkerResponse::default()
+            })
+            .unwrap();
+        drop(sender);
+
+        let body = Body::from_stream(WorkerBodyStream::new(
+            ResponseChannel {
+                id: "stream".to_string(),
+                receiver,
+                queued,
+            },
+            Arc::new(Mutex::new(BTreeMap::new())),
+            std::time::Duration::from_secs(1),
+        ));
+        let bytes = axum::body::to_bytes(body, 1024).await.unwrap();
+
+        assert_eq!(bytes.as_ref(), &[0, 255, 128, 13, 10]);
+    }
+
+    #[tokio::test]
+    async fn api_body_stream_propagates_worker_errors() {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        let queued = Arc::new(AtomicUsize::new(1));
+        sender
+            .send(WorkerResponse::stream_error(
+                "stream".to_string(),
+                "route stream failed",
+            ))
+            .unwrap();
+        drop(sender);
+
+        let body = Body::from_stream(WorkerBodyStream::new(
+            ResponseChannel {
+                id: "stream".to_string(),
+                receiver,
+                queued,
+            },
+            Arc::new(Mutex::new(BTreeMap::new())),
+            std::time::Duration::from_secs(1),
+        ));
+        let error = axum::body::to_bytes(body, 1024).await.unwrap_err();
+
+        assert!(error.to_string().contains("route stream failed"));
+    }
+
+    #[tokio::test]
+    async fn api_body_stream_times_out_when_worker_stalls() {
+        let (_sender, receiver) = mpsc::unbounded_channel::<WorkerResponse>();
+        let body = Body::from_stream(WorkerBodyStream::new(
+            ResponseChannel {
+                id: "stream".to_string(),
+                receiver,
+                queued: Arc::new(AtomicUsize::new(0)),
+            },
+            Arc::new(Mutex::new(BTreeMap::new())),
+            std::time::Duration::from_millis(20),
+        ));
+        let error = axum::body::to_bytes(body, 1024).await.unwrap_err();
+
+        assert!(error.to_string().contains("idle for 20ms"));
+    }
+
+    #[tokio::test]
+    async fn api_response_accepts_legacy_single_message_workers() {
+        let temp = tempfile::tempdir().unwrap();
+        let worker_script = temp.path().join("worker.mjs");
+        std::fs::write(
+            &worker_script,
+            "import { createInterface } from 'node:readline'; createInterface({ input: process.stdin }).on('line', (line) => { const { id } = JSON.parse(line); process.stdout.write(JSON.stringify({ id, ok: true, status: 200, body: 'legacy' }) + '\\n'); });",
+        )
+        .unwrap();
+        let worker = Worker::spawn(&worker_script, &BTreeMap::new())
+            .await
+            .unwrap();
+        let request = WorkerRequest::Api {
+            id: next_request_id(),
+            project_root: temp.path().display().to_string(),
+            route_file: temp.path().join("route.mjs").display().to_string(),
+            method: "GET".to_string(),
+            request_path: "/api/legacy".to_string(),
+            headers: BTreeMap::new(),
+            header_pairs: Vec::new(),
+            body: None,
+            body_base64: None,
+            stream_response: true,
+            params: BTreeMap::new(),
+        };
+
+        let response = worker
+            .start_api_response(&request, std::time::Duration::from_secs(2))
+            .await
+            .unwrap();
+
+        assert!(response.body.is_none());
+        assert_eq!(response.response.body.as_deref(), Some("legacy"));
+        worker.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn api_response_queue_fails_instead_of_growing_without_bound() {
+        let temp = tempfile::tempdir().unwrap();
+        let worker_script = temp.path().join("worker.mjs");
+        std::fs::write(
+            &worker_script,
+            "import { createInterface } from 'node:readline'; createInterface({ input: process.stdin }).on('line', (line) => { const { id } = JSON.parse(line); const write = (value) => process.stdout.write(JSON.stringify({ id, ...value }) + '\\n'); write({ frame: 'api-start', ok: true, status: 200 }); for (let index = 0; index < 17; index++) write({ frame: 'api-chunk', ok: true, bodyBase64: 'AA==' }); write({ frame: 'api-end', ok: true }); });",
+        )
+        .unwrap();
+        let worker = Worker::spawn(&worker_script, &BTreeMap::new())
+            .await
+            .unwrap();
+        let request = WorkerRequest::Api {
+            id: next_request_id(),
+            project_root: temp.path().display().to_string(),
+            route_file: temp.path().join("route.mjs").display().to_string(),
+            method: "GET".to_string(),
+            request_path: "/api/overflow".to_string(),
+            headers: BTreeMap::new(),
+            header_pairs: Vec::new(),
+            body: None,
+            body_base64: None,
+            stream_response: true,
+            params: BTreeMap::new(),
+        };
+        let response = worker
+            .start_api_response(&request, std::time::Duration::from_secs(2))
+            .await
+            .unwrap();
+
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        let error = axum::body::to_bytes(response.body.unwrap(), 1024)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("consumer queue"));
+        worker.shutdown().await;
     }
 
     #[tokio::test]

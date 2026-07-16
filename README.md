@@ -33,9 +33,10 @@
   routes. Duplicate and ambiguous routes are rejected at graph validation time.
 - **Persistent Node worker pool** — eliminates 100–500 ms per-request subprocess overhead for SSR.
   Shared across requests with layout nesting and route-level hydration bundles.
-- **FIFO render cache** — SSR pages and client bundles cached in-memory (capacity 1024 dev / 512
+- **LRU render cache** — SSR pages and client bundles cached in-memory (capacity 1024 dev / 512
   prod, TTL 5 min dev / 30 min prod), invalidated automatically on file change. Configurable via
-  `RUVYXA_RENDER_CACHE_SIZE`. Backed by `RwLock` for concurrent readers.
+  `RUVYXA_RENDER_CACHE_SIZE` (`0` disables it; environment values are capped at 16,384). Backed by
+  `RwLock` for concurrent readers.
 - **Parallel production bundling** — page client bundles emitted concurrently via scoped threads,
   written back in deterministic route order.
 - **Async I/O** — file serving uses `tokio::fs` to avoid blocking the async runtime under concurrent
@@ -81,7 +82,7 @@
 - **Route groups** — `(group)` directories for logical organization without affecting the URL.
 - **Parallel route slots** — `@slot/` directories for parallel-rendered route segments.
 - **API routes** — named HTTP-method exports (`GET`, `POST`, `PUT`, `DELETE`, `PATCH`) in `route.ts`
-  files.
+  files, with binary-safe response streaming through bounded worker IPC.
 - **Duplicate & ambiguous route rejection** — the graph validator catches conflicts before they
   reach production.
 
@@ -522,7 +523,8 @@ Routes with `getStaticParams` export generate static paths at build time.
 
 - Persistent Node worker pool (eliminates 100-500ms/request subprocess overhead)
 - Radix-trie route matching (O(depth) instead of O(n))
-- FIFO render cache with TTL (sub-ms repeated page loads)
+- LRU render cache with TTL (sub-ms repeated page loads)
+- Bounded, binary-safe API response streaming across worker IPC
 - Async file I/O via tokio::fs (no thread starvation)
 - SSR via `renderToString` with layout nesting
 - Gzip + Brotli compression (tower-http)

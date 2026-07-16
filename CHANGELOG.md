@@ -2,6 +2,27 @@
 
 ## v1.0.14 (2026-07-16)
 
+### Reliability and Configuration Safety
+
+- Normalized `RUVYXA_WORKER_TIMEOUT_MS` and `RUVYXA_MEMORY_LIMIT_MB` in the persistent Node worker:
+  invalid or zero values now safely retain the 30-second watchdog and 512 MiB cache-pressure
+  threshold instead of silently disabling protection.
+- Bounded environment-derived `RUVYXA_RENDER_CACHE_SIZE` at 16,384 entries before render-cache
+  allocation, while preserving `0` as an explicit cache-disable setting and preserving existing
+  development and production defaults.
+- Added regression coverage for worker environment fallback and render-cache capacity normalization.
+- Streamed API response bodies from Node workers into Axum with binary-safe 64 KiB Base64 frames, a
+  bounded 16-frame per-response queue, idle timeouts, stdout backpressure, and stream error
+  propagation instead of materializing each response as one text value.
+- Kept the API worker protocol backward-compatible: new Rust callers accept legacy single-message
+  responses, while new Node workers retain that response shape unless streaming is requested.
+- Added Rust and Node regressions for binary reconstruction, large multi-frame responses, queue
+  overflow, stalled streams, worker errors, request capability serialization, and legacy fallback.
+- Corrected the README cache description from FIFO to its implemented LRU policy and documented the
+  supported worker/cache environment settings in English and Thai CLI guides.
+- Refreshed the July reliability audit with current v1.0.14 bundler context, applied repairs, and
+  the completed streaming API-response IPC repair.
+
 ### Bundler and Build Pipeline
 
 - Added shared module bundling and a shared-route registry so modules common to multiple routes can

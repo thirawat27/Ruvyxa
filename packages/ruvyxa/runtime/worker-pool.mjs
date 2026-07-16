@@ -20,6 +20,7 @@
  *   - Memory pressure monitoring with automatic cache eviction
  */
 import { createHash } from 'node:crypto'
+import { once } from 'node:events'
 import { existsSync } from 'node:fs'
 import { mkdir, readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
@@ -37,8 +38,9 @@ import {
 
 // --- Configuration ---
 const MAX_BUNDLE_CACHE_ENTRIES = positiveIntegerEnv('RUVYXA_CACHE_MAX_ENTRIES', 256)
-const WORKER_REQUEST_TIMEOUT_MS = parseInt(process.env.RUVYXA_WORKER_TIMEOUT_MS || '30000', 10)
-const MEMORY_PRESSURE_THRESHOLD_MB = parseInt(process.env.RUVYXA_MEMORY_LIMIT_MB || '512', 10)
+const WORKER_REQUEST_TIMEOUT_MS = positiveIntegerEnv('RUVYXA_WORKER_TIMEOUT_MS', 30_000)
+const MEMORY_PRESSURE_THRESHOLD_MB = positiveIntegerEnv('RUVYXA_MEMORY_LIMIT_MB', 512)
+const API_STREAM_CHUNK_BYTES = 64 * 1024
 const runtimeDir = path.dirname(fileURLToPath(import.meta.url))
 
 // --- LRU Cache ---
@@ -170,29 +172,28 @@ rl.on('line', async (line) => {
   if (!id) return
 
   activeRequests++
-  let result
 
   try {
-    result = await withTimeout(
+    const result = await withTimeout(
       dispatchRequest(request),
       WORKER_REQUEST_TIMEOUT_MS,
       `Request ${request.type}:${id} timed out after ${WORKER_REQUEST_TIMEOUT_MS}ms`,
     )
+    if (result?.streamResponse instanceof Response) {
+      await emitApiStream(id, result)
+    } else {
+      await writeWorkerMessage({ id, ...result })
+    }
   } catch (error) {
-    result = {
-      ok: false,
-      code: 'RUV1700',
-      message: error instanceof Error ? error.message : String(error),
-      stack: error?.stack,
+    try {
+      await writeWorkerMessage({ id, ...workerError(error) })
+    } catch {
+      shutdown()
     }
   } finally {
     activeRequests--
+    if (isShuttingDown && activeRequests === 0) process.exit(0)
   }
-
-  result.id = id
-  process.stdout.write(JSON.stringify(result) + '\n')
-
-  if (isShuttingDown && activeRequests === 0) process.exit(0)
 })
 
 rl.on('close', () => shutdown('stdin-close'))
@@ -223,6 +224,8 @@ async function dispatchRequest(request) {
         moduleCacheSize: moduleCache.size,
         activeRequests,
         coalesceMapSize: renderCoalesceMap.size,
+        workerRequestTimeoutMs: WORKER_REQUEST_TIMEOUT_MS,
+        memoryPressureThresholdMb: MEMORY_PRESSURE_THRESHOLD_MB,
       }
     case 'invalidate':
       return { ok: true, ...invalidateBundleCache(request.paths) }
@@ -248,6 +251,63 @@ function withTimeout(promise, ms, message) {
       },
     )
   })
+}
+
+function workerError(error) {
+  return {
+    ok: false,
+    code: 'RUV1700',
+    message: error instanceof Error ? error.message : String(error),
+    stack: error?.stack,
+  }
+}
+
+async function writeWorkerMessage(message) {
+  if (!process.stdout.write(`${JSON.stringify(message)}\n`)) {
+    await once(process.stdout, 'drain')
+  }
+}
+
+async function emitApiStream(id, result) {
+  const { streamResponse, ...head } = result
+  await writeWorkerMessage({ id, frame: 'api-start', ...head })
+
+  const reader = streamResponse.body?.getReader()
+  if (!reader) {
+    await writeWorkerMessage({ id, frame: 'api-end', ok: true })
+    return
+  }
+
+  try {
+    while (true) {
+      const { done, value } = await withTimeout(
+        reader.read(),
+        WORKER_REQUEST_TIMEOUT_MS,
+        `API response stream ${id} was idle for ${WORKER_REQUEST_TIMEOUT_MS}ms`,
+      )
+      if (done) break
+
+      const bytes = Buffer.from(value.buffer, value.byteOffset, value.byteLength)
+      for (let offset = 0; offset < bytes.length; offset += API_STREAM_CHUNK_BYTES) {
+        await writeWorkerMessage({
+          id,
+          frame: 'api-chunk',
+          ok: true,
+          bodyBase64: bytes.subarray(offset, offset + API_STREAM_CHUNK_BYTES).toString('base64'),
+        })
+      }
+    }
+    await writeWorkerMessage({ id, frame: 'api-end', ok: true })
+  } catch (error) {
+    try {
+      await reader.cancel(error)
+    } catch {
+      // The source may already be closed; the protocol error below is authoritative.
+    }
+    await writeWorkerMessage({ id, frame: 'api-error', ...workerError(error) })
+  } finally {
+    reader.releaseLock()
+  }
 }
 
 // --- Build Lock ---
@@ -459,6 +519,7 @@ async function handleApi(request) {
     headerPairs,
     body: requestBody,
     bodyBase64,
+    streamResponse,
   } = request
 
   const resolvedRoot = path.resolve(projectRoot || process.cwd())
@@ -492,9 +553,20 @@ async function handleApi(request) {
   const req = new Request(`http://localhost${requestPath}`, requestInit)
   const result = await handler({ request: req, params: params || {} })
   const response = normalizeResponse(result)
-  const body = await response.text()
   const headerPairsResult = responseHeaderPairs(response)
   const headers = Object.fromEntries(headerPairsResult)
+
+  if (streamResponse) {
+    return {
+      ok: true,
+      status: response.status,
+      headers,
+      headerPairs: headerPairsResult,
+      streamResponse: response,
+    }
+  }
+
+  const body = await response.text()
 
   return { ok: true, status: response.status, headers, headerPairs: headerPairsResult, body }
 }

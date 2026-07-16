@@ -1,5 +1,48 @@
 # Reliability Audit — 2026-07
 
+## Follow-up update — 2026-07-16
+
+This document retains the July 13 repair record below and adds the current follow-up evidence for
+v1.0.14. The current production pipeline uses the Ruvyxa resolver/linker/cache layers with Oxc
+0.139.0 for TypeScript/JSX transformation and minification; see
+`docs/architecture/bundler-modernization.md` for the ownership boundary.
+
+### Confirmed follow-up findings and repairs
+
+| #   | Finding                                                                                                                                                                       | Evidence                                        | Impact                                                                                                              | Severity | Confidence | Applied correction                                                                                                                                                    |
+| --- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- | -------- | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 1   | The persistent Node worker parsed `RUVYXA_WORKER_TIMEOUT_MS` and `RUVYXA_MEMORY_LIMIT_MB` directly. Invalid or zero values disabled the timeout or cache-pressure protection. | `packages/ruvyxa/runtime/worker-pool.mjs`       | A malformed deployment environment could leave hung work unbounded or prevent cache shedding under memory pressure. | High     | Direct     | Both settings now use the existing positive-integer parser and safely fall back to 30,000 ms and 512 MiB. A worker IPC regression test verifies the effective values. |
+| 2   | `RUVYXA_RENDER_CACHE_SIZE` was used directly for `HashMap` and queue pre-allocation.                                                                                          | `crates/ruvyxa_dev_server/src/render_cache.rs`  | An accidentally extreme value could request an excessive allocation while the server starts.                        | High     | Direct     | Environment-derived capacity now clamps to 16,384. `0` remains the documented cache-disable setting, and invalid values retain the mode-specific default.             |
+| 3   | API responses were converted with `response.text()` and returned to Rust as one NDJSON value.                                                                                 | Node worker protocol and Rust worker dispatcher | Large or binary responses required whole-body text materialization on both sides of the worker boundary.            | High     | Direct     | API responses now use opt-in start/chunk/end/error frames, binary-safe Base64 payloads, bounded per-response queues, idle timeouts, and legacy fallback.              |
+
+### Completed API streaming boundary
+
+Rust now requests streaming with the additive `streamResponse` capability. Supporting Node workers
+send response metadata first and then binary-safe 64 KiB frames; Axum exposes the receiver as its
+HTTP body instead of waiting for one complete text response. Each response has a 16-frame pending
+queue, and worker exit, stream error, queue overflow, or idle timeout closes only the affected body.
+
+Compatibility is bidirectional across the additive protocol: a new Rust runtime accepts the legacy
+single-message response from an older worker, and a new Node worker keeps returning the legacy shape
+when the caller does not request streaming. Base64 remains intentional here: it has native fast
+paths, less expansion than Base58, and is safe inside JSON strings. A separate binary transport
+would be the appropriate future optimization if encoding overhead becomes material.
+
+### Follow-up validation
+
+- `cargo test --workspace --locked` passed 301 Rust tests, including the render-cache and streamed
+  worker-body regressions.
+- `cargo clippy --workspace --locked -- -D warnings` and `pnpm format:check` passed.
+- Focused Rust worker tests passed for binary reconstruction, queue overflow, idle timeout, stream
+  error propagation, and legacy response fallback.
+- The focused Node worker suite passed four tests, including a 150,000-byte multi-frame binary
+  response and the worker-environment regression.
+- `pnpm -r build`, `pnpm -r check`, and `pnpm -r test` passed. The `ruvyxa` package passed 43 tests,
+  and the demo passed build plus 16-route parity and smoke rendering.
+- `pnpm check:cargo-lock` passed after adding the explicit Base64 and stream-trait dependencies.
+- `pnpm release:validate` and `pnpm pack:smoke` passed, confirming package metadata and tarball
+  contents remain valid.
+
 ## Scope
 
 - Project: Ruvyxa monorepo

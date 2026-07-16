@@ -8,8 +8,10 @@ rust-version.workspace = true
 
 [dependencies]
 axum.workspace = true
+base64.workspace = true
 blake3.workspace = true
 chrono.workspace = true
+futures-core.workspace = true
 notify.workspace = true
 parking_lot.workspace = true
 ruvyxa_diagnostics = { path = "../ruvyxa_diagnostics" }

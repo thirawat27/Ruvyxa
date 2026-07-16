@@ -9,6 +9,42 @@ import test from 'node:test'
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..')
 const workerScript = path.join(repoRoot, 'packages/ruvyxa/runtime/worker-pool.mjs')
 
+test('uses safe worker defaults when numeric environment values are invalid', async (t) => {
+  const worker = spawn(process.execPath, [workerScript], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      RUVYXA_WORKER_TIMEOUT_MS: '0',
+      RUVYXA_MEMORY_LIMIT_MB: 'not-a-number',
+    },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  })
+  const lines = createInterface({ input: worker.stdout })
+
+  t.after(async () => {
+    lines.close()
+    worker.stdin.end()
+    await Promise.race([
+      new Promise((resolve) => worker.once('exit', resolve)),
+      new Promise((resolve) => setTimeout(resolve, 2_000)),
+    ])
+    if (worker.exitCode === null) worker.kill()
+  })
+
+  const response = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('worker ping timed out')), 10_000)
+    lines.once('line', (line) => {
+      clearTimeout(timer)
+      resolve(JSON.parse(line))
+    })
+    worker.stdin.write(`${JSON.stringify({ id: 'configuration', type: 'ping' })}\n`)
+  })
+
+  assert.equal(response.ok, true)
+  assert.equal(response.workerRequestTimeoutMs, 30_000)
+  assert.equal(response.memoryPressureThresholdMb, 512)
+})
+
 test('invalidates a cached route bundle when an imported utility changes', async (t) => {
   const projectRoot = await mkdtemp(path.join(repoRoot, '.worker-pool-test-'))
   const appDir = path.join(projectRoot, 'app/api/value')
@@ -148,5 +184,85 @@ export default function Page({ params }) {
     })
     assert.equal(render.ok, true)
     assert.match(render.html, new RegExp(`${id}:1`))
+  }
+})
+
+test('streams large binary API responses as bounded frames', async (t) => {
+  const projectRoot = await mkdtemp(path.join(repoRoot, '.worker-pool-stream-test-'))
+  const appDir = path.join(projectRoot, 'app/api/binary')
+  const routeFile = path.join(appDir, 'route.ts')
+  await mkdir(appDir, { recursive: true })
+  await writeFile(
+    routeFile,
+    `export function GET() {
+  const bytes = new Uint8Array(150_000)
+  for (let index = 0; index < bytes.length; index++) bytes[index] = index % 251
+  return new Response(bytes, {
+    status: 206,
+    headers: { 'content-type': 'application/octet-stream', 'x-streamed': 'yes' },
+  })
+}
+`,
+  )
+
+  const worker = spawn(process.execPath, [workerScript], {
+    cwd: repoRoot,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  })
+  const lines = createInterface({ input: worker.stdout })
+
+  t.after(async () => {
+    lines.close()
+    worker.stdin.end()
+    await Promise.race([
+      new Promise((resolve) => worker.once('exit', resolve)),
+      new Promise((resolve) => setTimeout(resolve, 2_000)),
+    ])
+    if (worker.exitCode === null) worker.kill()
+    await rm(projectRoot, { recursive: true, force: true })
+  })
+
+  const frames = await new Promise((resolve, reject) => {
+    const received = []
+    const timer = setTimeout(() => reject(new Error('streamed worker request timed out')), 10_000)
+    lines.on('line', (line) => {
+      const response = JSON.parse(line)
+      if (response.id !== 'stream') return
+      received.push(response)
+      if (response.frame === 'api-end' || response.frame === 'api-error' || !response.frame) {
+        clearTimeout(timer)
+        resolve(received)
+      }
+    })
+    worker.stdin.write(
+      `${JSON.stringify({
+        id: 'stream',
+        type: 'api',
+        projectRoot,
+        routeFile,
+        method: 'GET',
+        requestPath: '/api/binary',
+        headers: {},
+        params: {},
+        streamResponse: true,
+      })}\n`,
+    )
+  })
+
+  assert.equal(frames[0].frame, 'api-start', frames[0].message)
+  assert.equal(frames[0].status, 206)
+  assert.equal(frames[0].headers['content-type'], 'application/octet-stream')
+  assert.equal(frames[0].headers['x-streamed'], 'yes')
+  assert.equal(frames.at(-1).frame, 'api-end')
+
+  const chunks = frames.filter((frame) => frame.frame === 'api-chunk')
+  assert.ok(chunks.length >= 3)
+  const decoded = chunks.map((frame) => Buffer.from(frame.bodyBase64, 'base64'))
+  assert.ok(decoded.every((chunk) => chunk.length <= 64 * 1024))
+
+  const body = Buffer.concat(decoded)
+  assert.equal(body.length, 150_000)
+  for (const index of [0, 1, 250, 251, 65_535, 149_999]) {
+    assert.equal(body[index], index % 251)
   }
 })

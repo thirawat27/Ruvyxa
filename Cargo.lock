@@ -2689,8 +2689,10 @@ name = "ruvyxa_dev_server"
 version = "1.0.14"
 dependencies = [
  "axum",
+ "base64",
  "blake3",
  "chrono",
+ "futures-core",
  "notify",
  "parking_lot",
  "ruvyxa_bundler",

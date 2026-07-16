@@ -42,11 +42,39 @@ export function GET() {
 | -------- | ------- | ------------------- |
 | API body | 10 MiB  | `security.apiLimit` |
 
+## Streaming Responses
+
+API handler สามารถคืน `Response` ที่มี body เป็น `ReadableStream` ได้ Ruvyxa จะส่ง status และ
+headers ก่อน แล้วทยอยส่ง chunk ของ body แบบ binary-safe ผ่าน persistent worker ไปยัง HTTP response
+โดยไม่รวม response ทั้งหมดเป็นข้อความก้อนเดียว
+
+```ts
+export function GET() {
+  const encoder = new TextEncoder()
+  const body = new ReadableStream({
+    start(controller) {
+      controller.enqueue(encoder.encode('first\n'))
+      controller.enqueue(encoder.encode('second\n'))
+      controller.close()
+    },
+  })
+
+  return new Response(body, {
+    headers: { 'Content-Type': 'text/plain; charset=utf-8' },
+  })
+}
+```
+
+Worker IPC ใช้ frame ขนาดไม่เกิน 64 KiB และจำกัด queue แยกต่อ response หาก producer หรือ consumer
+ค้าง ระบบจะยุติเฉพาะ stream นั้นแทนการปล่อยให้หน่วยความจำที่รอส่งโตไม่จำกัด ทั้งหมดนี้ทำงานอัตโนมัติ
+โดย handler ยังใช้ Web API `Response` ตามปกติ
+
 ## Unsupported Methods → 405
 
 Handler ที่ไม่รองรับ method จะตอบ 405 โดยอัตโนมัติ
 
 Ruvyxa ส่ง query string, bytes ของ request body และ header ที่ซ้ำกันไปยัง `Request` โดยไม่แปลง
-ข้อมูล binary เป็นข้อความ และ response จะคง header ซ้ำ เช่น `Set-Cookie` หลายค่าไว้ครบถ้วน
+ข้อมูล binary เป็นข้อความ ส่วน response จะคง header ซ้ำ เช่น `Set-Cookie` หลายค่าไว้ครบถ้วน และส่ง
+binary response body แบบ streaming
 
 ดูเพิ่มเติม: [Configuration](configuration.md)

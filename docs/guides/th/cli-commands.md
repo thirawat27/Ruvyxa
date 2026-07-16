@@ -41,4 +41,14 @@ client artifact ที่ fingerprint จาก dependency graph ได้
 3. `check` — readiness signal (ก่อน deploy)
 4. `build` + `start` — ทดสอบ production ในเครื่อง
 
+## Environment Variables ที่เกี่ยวข้อง
+
+| Variable                   | หน้าที่                                                                   | ค่าเริ่มต้น             |
+| -------------------------- | ------------------------------------------------------------------------- | ----------------------- |
+| `RUVYXA_RENDER_CACHE_SIZE` | จำนวน render cache; `0` คือปิด cache และค่าที่เกิน 16,384 จะถูกจำกัด      | 1024 (dev), 512 (prod)  |
+| `RUVYXA_BUILD_CACHE_DIR`   | เปลี่ยนตำแหน่ง build cache                                                | `.ruvyxa/cache/bundler` |
+| `RUVYXA_WORKER_TIMEOUT_MS` | watchdog ของ request ใน Node worker; ค่าไม่ถูกต้องหรือ `0` ใช้ค่าเริ่มต้น | 30,000 ms               |
+| `RUVYXA_MEMORY_LIMIT_MB`   | จุดเริ่มลด worker cache ตาม memory; ค่าไม่ถูกต้องหรือ `0` ใช้ค่าเริ่มต้น  | 512 MiB                 |
+| `RUVYXA_CACHE_MAX_ENTRIES` | จำนวน compiled bundle/module ที่เก็บสูงสุดต่อ worker                      | 256                     |
+
 ดูฉบับเต็ม (อังกฤษ): [CLI Commands (EN)](../en/cli-commands.md)

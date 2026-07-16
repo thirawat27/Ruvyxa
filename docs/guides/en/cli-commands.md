@@ -211,7 +211,10 @@ When making risky changes:
 
 ## Relevant Environment Variables
 
-| Variable                   | Purpose                        | Default                 |
-| -------------------------- | ------------------------------ | ----------------------- |
-| `RUVYXA_RENDER_CACHE_SIZE` | Render cache capacity          | 1024 (dev), 512 (prod)  |
-| `RUVYXA_BUILD_CACHE_DIR`   | Override build cache directory | `.ruvyxa/cache/bundler` |
+| Variable                   | Purpose                                                                   | Default                 |
+| -------------------------- | ------------------------------------------------------------------------- | ----------------------- |
+| `RUVYXA_RENDER_CACHE_SIZE` | Render-cache capacity; `0` disables it and values above 16,384 clamp.     | 1024 (dev), 512 (prod)  |
+| `RUVYXA_BUILD_CACHE_DIR`   | Override build cache directory                                            | `.ruvyxa/cache/bundler` |
+| `RUVYXA_WORKER_TIMEOUT_MS` | Node-worker request watchdog; invalid or zero values use the default.     | 30,000 ms               |
+| `RUVYXA_MEMORY_LIMIT_MB`   | Node-worker cache-pressure threshold; invalid or zero values use default. | 512 MiB                 |
+| `RUVYXA_CACHE_MAX_ENTRIES` | Per-worker compiled-bundle and module-cache capacity.                     | 256                     |

@@ -33,7 +33,7 @@ use tracing::{info, warn};
 
 mod worker_pool;
 pub use worker_pool::NodeWorkerPool;
-use worker_pool::RenderApiRequest;
+use worker_pool::{RenderApiRequest, WorkerApiResponse};
 
 mod router;
 pub use router::RadixRouter;
@@ -2020,7 +2020,10 @@ async fn render_api_pooled(
     body: Option<&[u8]>,
     params: &RouteParams,
 ) -> Result<Response> {
-    let response = state
+    let WorkerApiResponse {
+        mut response,
+        body: streamed_body,
+    } = state
         .worker_pool
         .render_api(RenderApiRequest {
             project_root: &state.config.root,
@@ -2053,12 +2056,14 @@ async fn render_api_pooled(
     let status = response.status.unwrap_or(200);
     let status = StatusCode::from_u16(status)
         .map_err(|error| RuvyxaError::Message(format!("Invalid API response status: {error}")))?;
-    let body = response.body.unwrap_or_default();
+    let body =
+        streamed_body.unwrap_or_else(|| Body::from(response.body.take().unwrap_or_default()));
     let mut http_response = (status, body).into_response();
 
-    if let Some(headers) = response.header_pairs.or_else(|| {
+    if let Some(headers) = response.header_pairs.take().or_else(|| {
         response
             .headers
+            .take()
             .map(|headers| headers.into_iter().collect::<Vec<_>>())
     }) {
         for (name, value) in headers {

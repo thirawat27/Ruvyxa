@@ -26,7 +26,12 @@ const DEFAULT_CAPACITY: usize = 1024;
 /// Default TTL for cached entries (5 minutes in dev, effectively infinite in prod).
 const DEFAULT_TTL_SECS: u64 = 300;
 
-/// When evicting, remove this fraction of entries (the oldest 25%).
+/// Maximum capacity accepted from `RUVYXA_RENDER_CACHE_SIZE`.
+///
+/// `RenderCache::new` remains useful for internal callers that need an exact capacity. This limit
+/// applies only to the environment-controlled default constructors, preventing a typo in a process
+/// environment from triggering an unbounded eager allocation during server startup.
+const MAX_ENV_RENDER_CACHE_CAPACITY: usize = 16_384;
 
 #[derive(Debug, Clone)]
 struct CacheEntry {
@@ -60,18 +65,14 @@ impl RenderCache {
     }
 
     pub fn default_dev() -> Self {
-        let capacity = std::env::var("RUVYXA_RENDER_CACHE_SIZE")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(DEFAULT_CAPACITY);
+        let configured = std::env::var("RUVYXA_RENDER_CACHE_SIZE").ok();
+        let capacity = render_cache_capacity(configured.as_deref(), DEFAULT_CAPACITY);
         Self::new(capacity, DEFAULT_TTL_SECS)
     }
 
     pub fn default_production() -> Self {
-        let capacity = std::env::var("RUVYXA_RENDER_CACHE_SIZE")
-            .ok()
-            .and_then(|v| v.parse().ok())
-            .unwrap_or(512);
+        let configured = std::env::var("RUVYXA_RENDER_CACHE_SIZE").ok();
+        let capacity = render_cache_capacity(configured.as_deref(), 512);
         // 30 minutes TTL in production
         Self::new(capacity, 1800)
     }
@@ -282,6 +283,13 @@ impl RenderCache {
     }
 }
 
+fn render_cache_capacity(value: Option<&str>, default: usize) -> usize {
+    value
+        .and_then(|value| value.parse::<usize>().ok())
+        .map(|capacity| capacity.min(MAX_ENV_RENDER_CACHE_CAPACITY))
+        .unwrap_or(default)
+}
+
 /// Generate a cache key for SSR pages.
 pub fn ssr_cache_key(request_path: &str, params: &RouteParams) -> String {
     if params.is_empty() {
@@ -480,5 +488,22 @@ mod tests {
         assert_eq!(cache.get("a").await, None);
         assert!(cache.entries.read().await.is_empty());
         assert!(cache.order.read().await.is_empty());
+    }
+
+    #[test]
+    fn environment_cache_capacity_is_bounded_without_removing_the_disable_setting() {
+        assert_eq!(
+            render_cache_capacity(None, DEFAULT_CAPACITY),
+            DEFAULT_CAPACITY
+        );
+        assert_eq!(
+            render_cache_capacity(Some("not-a-number"), DEFAULT_CAPACITY),
+            DEFAULT_CAPACITY
+        );
+        assert_eq!(render_cache_capacity(Some("0"), DEFAULT_CAPACITY), 0);
+        assert_eq!(
+            render_cache_capacity(Some("999999999"), DEFAULT_CAPACITY),
+            MAX_ENV_RENDER_CACHE_CAPACITY
+        );
     }
 }
