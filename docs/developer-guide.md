@@ -26,7 +26,7 @@ npm package: ruvyxa
   └─ bin/ruvyxa.js -> platform-specific native CLI
        ├─ crates/ruvyxa_cli          commands, config loading, build orchestration
        ├─ crates/ruvyxa_graph        route discovery, render detection, validation
-       ├─ crates/ruvyxa_bundler      TS/JSX/MDX compilation, resolution, linking, maps, Oxc-backed minification
+       ├─ crates/ruvyxa_bundler      Oxc TS/JSX compilation, MDX, resolution, linking, maps, minification
        ├─ crates/ruvyxa_dev_server   Axum server, HMR, router, cache, Node worker pool, CSS minification
        ├─ crates/ruvyxa_middleware   Tower middleware and Wasm plugin support
        └─ crates/ruvyxa_diagnostics  structured RUV#### diagnostics
@@ -42,7 +42,7 @@ packages/
 
 The [Bundler Modernization doc](architecture/bundler-modernization.md) describes the oxc integration
 boundary and the reasoning behind keeping resolution, linking, and diagnostics in Ruvyxa while
-delegating minification to Oxc.
+delegating TypeScript/JSX transformation and minification to Oxc.
 
 Framework contracts often span Rust and TypeScript. A change to configuration, runtime files,
 package exports, or starter behaviour must be checked in both places. Do not change a TypeScript
@@ -93,7 +93,7 @@ to hide a file-lock problem.
 | ---------------------------------------------------------- | --------------------------------------------- | ------------------------------------- |
 | CLI command, config parsing, build orchestration           | `crates/ruvyxa_cli/src/main.rs`               | relevant Rust test plus demo `check`  |
 | route matching, validation, rendering detection            | `crates/ruvyxa_graph/src/lib.rs`              | graph test plus `routes`/`analyze`    |
-| compilation, linking, source maps, Oxc-backed minification | `crates/ruvyxa_bundler`                       | bundler tests plus demo build         |
+| Oxc TS/JSX compilation, linking, source maps, minification | `crates/ruvyxa_bundler`                       | bundler tests plus demo build         |
 | CSS collection, minification, style HMR                    | `crates/ruvyxa_dev_server/src/style.rs`       | crate tests plus demo build           |
 | API/action/HMR/server behaviour                            | `crates/ruvyxa_dev_server`                    | crate tests plus parity               |
 | core config or server API                                  | `packages/@ruvyxa/core/src`                   | package test/check                    |

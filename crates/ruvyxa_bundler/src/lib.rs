@@ -12,8 +12,7 @@
 //! Entry file (TSX/TS/JSX/JS)
 //!   └─ resolver   → resolve all imports to absolute paths
 //!                   (package.json `exports` map, tsconfig `paths`/`baseUrl`)
-//!   └─ compiler   → strip types + transform JSX (classic or automatic runtime)
-//!                   + expand enums + strip decorators
+//!   └─ compiler   → Oxc TypeScript/JSX transform (classic or automatic runtime)
 //!   └─ boundary   → enforce server/client rules (RUV1007, RUV1008, RUV1010)
 //!   └─ linker     → topological sort + concatenate modules
 //!                   (circular dependency detection)
@@ -39,7 +38,7 @@ pub mod sourcemap;
 pub mod types;
 
 use std::collections::BTreeSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use crate::cache::CompileCache;
@@ -87,6 +86,107 @@ pub fn bundle_with_shared_modules(
         context.plugins(),
         shared_modules,
     )
+}
+
+/// Compile and link a virtual runtime entry without synthesizing a route
+/// wrapper. This is the single native path used by Node renderers and config
+/// loading after the JavaScript runtime compiler is removed.
+pub fn bundle_runtime(input: RuntimeBundleInput) -> Result<RuntimeBundleOutput> {
+    let context = BundleContext::new(&input.project_root);
+    let entry_label = input.sourcefile.clone();
+    let bundle_input = BundleInput {
+        entry: PathBuf::from(&entry_label),
+        project_root: input.project_root.clone(),
+        app_dir: input.project_root.clone(),
+        layouts: Vec::new(),
+        request_path: "/__ruvyxa/runtime".to_string(),
+        target: input.target,
+        options: input.options,
+    };
+    let graph = resolver::resolve_runtime_graph(
+        &input.entry_source,
+        &entry_label,
+        &input.project_root,
+        context.graph_cache(),
+        input.target,
+        &input.aliases,
+        &input.external,
+    )?;
+    let (compiled, plugin_source_maps) = compiler::compile_graph_with_pipeline_and_maps(
+        &graph,
+        &bundle_input,
+        context.compile_cache(),
+        context.plugins(),
+    )?;
+
+    let mut diagnostics = Vec::new();
+    boundary::check(&compiled, &bundle_input, &mut diagnostics)?;
+    let entry_exports = compiled
+        .iter()
+        .find(|module| module.path.as_path() == Path::new(&entry_label))
+        .map(|module| ast::parse_module(&module.js).exports)
+        .unwrap_or_default()
+        .into_iter()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>();
+    let linked = linker::link_runtime(&compiled, &bundle_input, &entry_label, &entry_exports)?;
+    let code = if bundle_input.options.minify {
+        minifier::minify_with_options(&linked, bundle_input.target, false)?
+    } else {
+        linked
+    };
+
+    let source_map = if bundle_input.options.source_map {
+        let map_file = input
+            .outfile
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("bundle.js")
+            .to_string();
+        let mut builder = sourcemap::SourceMapBuilder::new(&map_file, &input.project_root);
+        let mut current_line = 0;
+        for module in linker::ordered_project_modules(&compiled) {
+            if module.path.as_path() == Path::new(&entry_label) || module.is_external {
+                continue;
+            }
+            let source_idx = builder.add_source(&module.path, Some(&module.js));
+            let imported_plugin_map = plugin_source_maps
+                .get(&module.path)
+                .map(String::as_str)
+                .is_some_and(|map| builder.add_source_map(map, current_line));
+            if !imported_plugin_map {
+                builder.add_identity_mappings(source_idx, &module.js, current_line);
+            }
+            current_line += module.js.lines().count() as u32 + 5;
+        }
+        Some(builder.to_json())
+    } else {
+        None
+    };
+
+    let dependency_hash = {
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(input.entry_source.as_bytes());
+        let mut inputs = Vec::new();
+        for module in &graph {
+            if module.path.to_string_lossy().starts_with("ruvyxa:") {
+                continue;
+            }
+            hasher.update(module.path.to_string_lossy().as_bytes());
+            hasher.update(module.source.as_bytes());
+            inputs.push(module.path.clone());
+        }
+        (hasher.finalize().to_hex().to_string(), inputs)
+    };
+
+    Ok(RuntimeBundleOutput {
+        code,
+        source_map,
+        diagnostics,
+        dependency_hash: dependency_hash.0,
+        inputs: dependency_hash.1,
+    })
 }
 
 /// Compile shared route modules into one executable browser registry.

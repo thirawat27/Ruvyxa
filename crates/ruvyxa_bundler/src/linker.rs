@@ -121,6 +121,40 @@ pub fn link(modules: &[CompiledModule], input: &BundleInput) -> Result<String> {
     link_inner(modules, input, &BTreeMap::new(), &BTreeSet::new())
 }
 
+/// Link a virtual runtime entry and expose the entry module's ESM exports.
+pub fn link_runtime(
+    modules: &[CompiledModule],
+    input: &BundleInput,
+    entry_label: &str,
+    export_names: &[String],
+) -> Result<String> {
+    let mut link_input = input.clone();
+    // The normal linker only uses this field to append the route `render`
+    // export. Runtime entries provide their own export list below.
+    link_input.target = BundleTarget::Client;
+    let mut output = link_parallel_with_dynamic_imports(modules, &link_input, &BTreeMap::new())?;
+    let entry_id = module_id(&PathBuf::from(entry_label));
+
+    if export_names.iter().any(|name| name == "default") {
+        output.push_str("export default ");
+        output.push_str(&entry_id);
+        output.push_str(".default;\n");
+    }
+    for name in export_names {
+        if name == "default" || !is_identifier(name) {
+            continue;
+        }
+        output.push_str("export const ");
+        output.push_str(name);
+        output.push_str(" = ");
+        output.push_str(&entry_id);
+        output.push('.');
+        output.push_str(name);
+        output.push_str(";\n");
+    }
+    Ok(output)
+}
+
 /// Inner link implementation — does NOT check for cycles.
 /// Called by `link` and `link_parallel` after cycle detection.
 fn link_inner(
@@ -489,13 +523,18 @@ fn rewrite_module_into(
 ) -> Result<()> {
     let mut pending_exports = Vec::new();
     let mut in_block_comment = false;
+    let mut in_template = false;
 
-    for line in source.lines() {
+    for line in logical_module_lines(source) {
         let trimmed = line.trim();
 
-        let rewritten = try_rewrite_import(trimmed, deps, all_modules, drop_external_imports)?
-            .map(Rewrite::Inline)
-            .or_else(|| try_rewrite_export_statement(trimmed, deps, all_modules));
+        let rewritten = if in_template {
+            None
+        } else {
+            try_rewrite_import(trimmed, deps, all_modules, drop_external_imports)?
+                .map(Rewrite::Inline)
+                .or_else(|| try_rewrite_export_statement(trimmed, deps, all_modules))
+        };
 
         let content = match rewritten {
             Some(Rewrite::Inline(ref content)) => content.as_str(),
@@ -506,13 +545,14 @@ fn rewrite_module_into(
                 pending_exports.push(assignment.clone());
                 line.as_str()
             }
-            None => line,
+            None => line.as_str(),
         };
 
         let dynamic_rewritten =
             rewrite_dynamic_imports(content, deps, dynamic_import_files, &mut in_block_comment);
         let commonjs_rewritten = rewrite_commonjs_requires(&dynamic_rewritten, deps);
         write_rewritten_line(out, &commonjs_rewritten, indent);
+        update_template_state(&line, &mut in_template);
     }
 
     for assignment in pending_exports {
@@ -520,6 +560,86 @@ fn rewrite_module_into(
     }
 
     Ok(())
+}
+
+fn update_template_state(line: &str, in_template: &mut bool) {
+    let mut escaped = false;
+    for ch in line.chars() {
+        if escaped {
+            escaped = false;
+        } else if ch == '\\' {
+            escaped = true;
+        } else if ch == '`' {
+            *in_template = !*in_template;
+        }
+    }
+}
+
+/// Return source lines with multiline `export default` expressions folded into
+/// one logical statement. The linker is intentionally line-oriented for import
+/// and export rewriting, while Oxc may print object/array expressions across
+/// several lines.
+fn logical_module_lines(source: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut pending: Option<(String, i32)> = None;
+
+    for raw_line in source.lines() {
+        let trimmed = raw_line.trim();
+        if let Some((statement, depth)) = pending.as_mut() {
+            statement.push('\n');
+            statement.push_str(trimmed);
+            *depth += delimiter_delta(trimmed);
+            if *depth <= 0 && trimmed.ends_with(';') {
+                lines.push(std::mem::take(statement));
+                pending = None;
+            }
+            continue;
+        }
+
+        let is_default_expression = trimmed.starts_with("export default")
+            && !trimmed.starts_with("export default function")
+            && !trimmed.starts_with("export default class")
+            && !trimmed.starts_with("export default async");
+        if is_default_expression {
+            let depth = delimiter_delta(trimmed);
+            if depth > 0 && !trimmed.ends_with(';') {
+                pending = Some((trimmed.to_string(), depth));
+                continue;
+            }
+        }
+
+        lines.push(raw_line.to_string());
+    }
+
+    if let Some((statement, _)) = pending {
+        lines.push(statement);
+    }
+    lines
+}
+
+fn delimiter_delta(line: &str) -> i32 {
+    let mut delta = 0;
+    let mut quote = None;
+    let mut escaped = false;
+    for ch in line.chars() {
+        if let Some(current) = quote {
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == current {
+                quote = None;
+            }
+            continue;
+        }
+        match ch {
+            '\'' | '"' | '`' => quote = Some(ch),
+            '{' | '[' | '(' => delta += 1,
+            '}' | ']' | ')' => delta -= 1,
+            _ => {}
+        }
+    }
+    delta
 }
 
 fn rewrite_commonjs_requires(line: &str, deps: &[PathBuf]) -> String {
@@ -707,13 +827,17 @@ fn try_rewrite_import(
     _all_modules: &[CompiledModule],
     drop_external_imports: bool,
 ) -> Result<Option<String>> {
-    if !line.starts_with("import ") {
+    let Some(import_rest) = line.strip_prefix("import") else {
+        return Ok(None);
+    };
+    let import_rest = import_rest.trim_start();
+    if import_rest.starts_with('(') {
         return Ok(None);
     }
 
     // Side-effect import: `import "./styles.css"` → remove (CSS handled separately)
-    if line.starts_with("import \"") || line.starts_with("import '") {
-        return Ok(Some(format!("// [bundled] {line}")));
+    if import_rest.starts_with('"') || import_rest.starts_with('\'') {
+        return Ok(Some(String::new()));
     }
 
     // Extract the `from "specifier"` part.
@@ -732,7 +856,7 @@ fn try_rewrite_import(
     let dep_id = module_id(dep_path);
 
     // Parse the import clause (the part between `import` and `from`).
-    let Some(clause) = before_from.strip_prefix("import ") else {
+    let Some(clause) = before_from.strip_prefix("import") else {
         return Ok(None);
     };
     let clause = clause.trim();
@@ -746,12 +870,16 @@ fn collect_external_imports(modules: &[&CompiledModule]) -> Vec<String> {
     for module in modules {
         for line in module.js.lines() {
             let trimmed = line.trim();
-            if !trimmed.starts_with("import ") {
+            let Some(import_rest) = trimmed.strip_prefix("import") else {
+                continue;
+            };
+            let import_rest = import_rest.trim_start();
+            if import_rest.starts_with('(') {
                 continue;
             }
 
-            let specifier = if trimmed.starts_with("import \"") || trimmed.starts_with("import '") {
-                extract_quoted_string(trimmed.strip_prefix("import ").unwrap_or(trimmed))
+            let specifier = if import_rest.starts_with('"') || import_rest.starts_with('\'') {
+                extract_quoted_string(import_rest)
             } else {
                 split_from_specifier(trimmed).map(|(_, specifier)| specifier)
             };
@@ -807,13 +935,18 @@ fn try_rewrite_export_statement(
     deps: &[PathBuf],
     _all_modules: &[CompiledModule],
 ) -> Option<Rewrite> {
-    if !line.starts_with("export ") {
-        return None;
-    }
+    let export_rest = line.strip_prefix("export")?;
+    let export_rest = export_rest.trim_start();
 
     // `export default function/class name` or `export default expr`
-    if line.starts_with("export default ") {
-        let expr = line.strip_prefix("export default ")?.trim();
+    if let Some(expr) = export_rest.strip_prefix("default")
+        && (expr.is_empty()
+            || expr
+                .chars()
+                .next()
+                .is_some_and(|c| !c.is_ascii_alphanumeric() && c != '_' && c != '$'))
+    {
+        let expr = expr.trim();
         // If it's a function/class declaration, keep the declaration and assign.
         if expr.starts_with("function ") || expr.starts_with("class ") {
             // `export default function Foo() {}` → `function Foo() {} __exports.default = Foo;`
@@ -831,12 +964,11 @@ fn try_rewrite_export_statement(
     }
 
     // `export { a, b } from "./mod"` — re-export from another module
-    if line.contains(" from ") {
-        let (before_from, specifier) = split_from_specifier(line)?;
+    if let Some((before_from, specifier)) = split_from_specifier(line) {
         let dep_path = find_dep_for_specifier(&specifier, deps)?;
         let dep_id = module_id(dep_path);
 
-        let clause = before_from.strip_prefix("export ")?.trim();
+        let clause = before_from.strip_prefix("export")?.trim();
 
         // `export * from "./mod"` → `Object.assign(__exports, __ruv_xxx__)`
         if clause == "*" {
@@ -859,11 +991,11 @@ fn try_rewrite_export_statement(
     }
 
     // `export const name = …` / `export let name = …` / `export var name = …`
-    if line.starts_with("export const ")
-        || line.starts_with("export let ")
-        || line.starts_with("export var ")
+    if export_rest.starts_with("const ")
+        || export_rest.starts_with("let ")
+        || export_rest.starts_with("var ")
     {
-        let decl = line.strip_prefix("export ")?;
+        let decl = export_rest;
         let name = extract_var_declaration_name(decl);
         if let Some(name) = name {
             return Some(Rewrite::Pending {
@@ -875,11 +1007,11 @@ fn try_rewrite_export_statement(
     }
 
     // `export function name(…)` / `export class name`
-    if line.starts_with("export function ")
-        || line.starts_with("export class ")
-        || line.starts_with("export async function ")
+    if export_rest.starts_with("function ")
+        || export_rest.starts_with("class ")
+        || export_rest.starts_with("async function ")
     {
-        let decl = line.strip_prefix("export ").unwrap_or(line);
+        let decl = export_rest;
         let name = extract_declaration_name(decl);
         if let Some(name) = name {
             return Some(Rewrite::Pending {
@@ -891,8 +1023,8 @@ fn try_rewrite_export_statement(
     }
 
     // `export { a, b }` — named exports from current module (no `from`)
-    if line.starts_with("export {") && !line.contains(" from ") {
-        let clause = line.strip_prefix("export ")?.trim().trim_end_matches(';');
+    if export_rest.starts_with('{') && split_from_specifier(line).is_none() {
+        let clause = export_rest.trim().trim_end_matches(';');
         let names = parse_named_bindings(clause);
         let assignments: Vec<String> = names
             .iter()
@@ -1010,13 +1142,20 @@ fn parse_named_bindings(clause: &str) -> Vec<(String, String)> {
 /// Split a line at `from "specifier"` or `from 'specifier'`.
 /// Returns (everything before "from", the specifier string).
 fn split_from_specifier(line: &str) -> Option<(String, String)> {
-    let from_idx = line.rfind(" from ")?;
-    let before = line[..from_idx].to_string();
-    let after = line[from_idx + 6..].trim();
-
-    // Extract quoted specifier.
-    let specifier = extract_quoted_string(after)?;
-    Some((before, specifier))
+    for (from_idx, _) in line.match_indices("from") {
+        let raw_before = &line[..from_idx];
+        let before = raw_before.trim_end();
+        let after = line[from_idx + "from".len()..].trim_start();
+        let preceding = raw_before.chars().last();
+        if !matches!(preceding, Some(c) if c.is_whitespace() || c == '}' || c == '*') {
+            continue;
+        }
+        let Some(specifier) = extract_quoted_string(after) else {
+            continue;
+        };
+        return Some((before.to_string(), specifier));
+    }
+    None
 }
 
 /// Extract a quoted string value: `"foo"` → `foo`, `'bar'` → `bar`.
@@ -1043,13 +1182,21 @@ pub(crate) fn find_dep_for_specifier<'a>(
     specifier: &str,
     deps: &'a [PathBuf],
 ) -> Option<&'a PathBuf> {
-    let normalized = specifier.replace('\\', "/");
+    let normalized = normalize_path_string(specifier);
+    let canonical_normalized = Path::new(specifier)
+        .canonicalize()
+        .ok()
+        .map(|path| normalize_path_string(&path.display().to_string()));
 
     deps.iter().find(|dep| {
-        let dep_str = dep.display().to_string().replace('\\', "/");
+        let dep_str = normalize_path_string(&dep.display().to_string());
 
         // Direct path match.
-        if dep_str.ends_with(&normalized) {
+        if dep_str.ends_with(&normalized)
+            || canonical_normalized
+                .as_deref()
+                .is_some_and(|canonical| dep_str == canonical)
+        {
             return true;
         }
 
@@ -1059,8 +1206,12 @@ pub(crate) fn find_dep_for_specifier<'a>(
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_default();
         let spec_file = normalized.rsplit('/').next().unwrap_or(&normalized);
+        let spec_stem = Path::new(spec_file)
+            .file_stem()
+            .map(|value| value.to_string_lossy().to_string())
+            .unwrap_or_else(|| spec_file.to_string());
 
-        if stem == spec_file {
+        if stem == spec_stem {
             // Verify directory context matches.
             let spec_dir = normalized.rsplit_once('/').map(|(d, _)| d).unwrap_or("");
             if spec_dir.is_empty() || dep_str.contains(spec_dir) {
@@ -1101,6 +1252,14 @@ pub(crate) fn find_dep_for_specifier<'a>(
 
         false
     })
+}
+
+fn normalize_path_string(value: &str) -> String {
+    let normalized = value.replace('\\', "/");
+    normalized
+        .strip_prefix("//?/")
+        .unwrap_or(&normalized)
+        .to_string()
 }
 
 /// Extract the declared name from `function Name(…)` or `class Name …`.
@@ -1321,7 +1480,7 @@ mod tests {
     #[test]
     fn side_effect_import_commented() {
         let result = try_rewrite_import("import \"./styles.css\"", &[], &[], false);
-        assert!(result.unwrap().unwrap().starts_with("// [bundled]"));
+        assert_eq!(result.unwrap(), Some(String::new()));
     }
 
     #[test]

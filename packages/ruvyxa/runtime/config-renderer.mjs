@@ -7,7 +7,7 @@ import {
   compileBundleWithMetadata,
   runtimeAliases,
   toImportPath,
-} from './compiler.mjs'
+} from './ruvyxa-compiler.mjs'
 
 const [projectRootArg] = process.argv.slice(2)
 

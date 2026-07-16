@@ -1,7 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
-use std::io::{BufRead, BufReader, IsTerminal, Write};
+use std::io::{BufRead, BufReader, IsTerminal, Read, Write};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command as ProcessCommand, Stdio};
@@ -81,6 +81,11 @@ enum Command {
         about = "Compare dev/prod routes and smoke-render page routes"
     )]
     TestParity(ProjectArgs),
+    #[command(
+        hide = true,
+        about = "Compile a virtual runtime entry through the native bundler"
+    )]
+    CompileRuntime,
 }
 
 #[derive(Debug, Clone, Parser)]
@@ -435,8 +440,52 @@ async fn main() -> anyhow::Result<()> {
         Command::Trace(args) => trace(args).context("trace failed")?,
         Command::Bench(args) => bench(args).await.context("benchmark failed")?,
         Command::TestParity(args) => test_parity(args).await.context("parity test failed")?,
+        Command::CompileRuntime => compile_runtime().context("runtime compilation failed")?,
     }
 
+    Ok(())
+}
+
+fn compile_runtime() -> anyhow::Result<()> {
+    let mut request = String::new();
+    std::io::stdin()
+        .read_to_string(&mut request)
+        .context("failed to read runtime bundle request")?;
+    let input: ruvyxa_bundler::RuntimeBundleInput =
+        serde_json::from_str(&request).context("invalid runtime bundle request JSON")?;
+    let outfile = input.outfile.clone();
+    let output = ruvyxa_bundler::bundle_runtime(input)
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+
+    if let Some(parent) = outfile.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    write_file_if_changed(&outfile, output.code.as_bytes())?;
+    if let Some(source_map) = output.source_map {
+        let map_path = outfile.with_file_name(format!(
+            "{}.map",
+            outfile
+                .file_name()
+                .and_then(|name| name.to_str())
+                .unwrap_or("bundle.js")
+        ));
+        write_file_if_changed(&map_path, source_map.as_bytes())?;
+    }
+
+    let response = serde_json::json!({
+        "outfile": outfile,
+        "dependencyHash": output.dependency_hash,
+        "inputs": output.inputs,
+    });
+    println!("{}", serde_json::to_string(&response)?);
+    Ok(())
+}
+
+fn write_file_if_changed(path: &Path, contents: &[u8]) -> anyhow::Result<()> {
+    if fs::read(path).is_ok_and(|existing| existing == contents) {
+        return Ok(());
+    }
+    fs::write(path, contents)?;
     Ok(())
 }
 
@@ -4346,7 +4395,8 @@ mod tests {
             let route_code = std::fs::read_to_string(client_dir.join(route_file)).unwrap();
             assert!(route_code.starts_with("import \"./shared."), "{route_code}");
             assert!(
-                !route_code.contains("const label = 'shared'"),
+                !route_code.contains("const label = 'shared'")
+                    && !route_code.contains("const label = \"shared\""),
                 "{route_code}"
             );
         }
@@ -4359,7 +4409,8 @@ mod tests {
             "{shared_code}"
         );
         assert!(
-            shared_code.contains("const label = 'shared'"),
+            shared_code.contains("const label = 'shared'")
+                || shared_code.contains("const label = \"shared\""),
             "{shared_code}"
         );
 

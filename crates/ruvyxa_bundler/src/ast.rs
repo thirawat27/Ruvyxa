@@ -107,6 +107,7 @@ pub fn parse_module(source: &str) -> ModuleAst {
                 if let Some(name) = export_name(source, index) {
                     ast.exports.push(name);
                 }
+                ast.exports.extend(named_export_names(source, index));
             }
             "enum" => {
                 ast.has_enums = true;
@@ -236,6 +237,36 @@ fn export_name(source: &str, after_keyword: usize) -> Option<String> {
     }
     let end = skip_identifier(bytes, index);
     (end > index).then(|| source[index..end].to_string())
+}
+
+fn named_export_names(source: &str, after_keyword: usize) -> Vec<String> {
+    let bytes = source.as_bytes();
+    let mut index = skip_whitespace_and_comments(bytes, after_keyword);
+    if word_at(source, index) == Some("default") {
+        return vec!["default".to_string()];
+    }
+    if bytes.get(index) != Some(&b'{') {
+        return Vec::new();
+    }
+    index += 1;
+    let Some(close) = source[index..].find('}') else {
+        return Vec::new();
+    };
+    source[index..index + close]
+        .split(',')
+        .filter_map(|part| {
+            let part = part.trim();
+            if part.is_empty() {
+                return None;
+            }
+            Some(
+                part.split_once(" as ")
+                    .map(|(_, exported)| exported.trim())
+                    .unwrap_or_else(|| part.split_whitespace().next().unwrap_or(part))
+                    .to_string(),
+            )
+        })
+        .collect()
 }
 
 fn word_at(source: &str, start: usize) -> Option<&str> {

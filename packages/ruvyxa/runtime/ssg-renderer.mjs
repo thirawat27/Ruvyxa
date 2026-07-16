@@ -27,7 +27,7 @@ import {
   compileBundle,
   runtimeAliases,
   toImportPath,
-} from './compiler.mjs'
+} from './ruvyxa-compiler.mjs'
 
 const [
   projectRootArg,

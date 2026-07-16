@@ -3,8 +3,9 @@
 ## Decision
 
 Ruvyxa owns framework-specific module resolution, plugins, route entry generation, server/client
-boundary diagnostics, linking, chunk manifests, and source-map composition. Oxc 0.139.0 owns final
-JavaScript parsing, semantic compression, name mangling, and minified code generation.
+boundary diagnostics, linking, chunk manifests, and source-map composition. Oxc 0.136.0 owns
+TypeScript/JSX parsing and lowering plus final JavaScript parsing, semantic compression, name
+mangling, and code generation.
 
 This is intentionally not a Rolldown dependency. Rolldown is a bundler workspace with tightly
 coupled scanner, module graph, linker, chunk graph, and render stages; borrowing its staged
@@ -15,7 +16,7 @@ architecture is lower risk than importing those internals into Ruvyxa's framewor
 ```text
 virtual route entry
   -> Ruvyxa resolver/cache/plugins
-  -> Ruvyxa TS/JSX/MDX compiler
+  -> Ruvyxa MDX compiler -> Oxc TS/JSX parser/transformer/codegen
   -> Ruvyxa boundary checks and dynamic chunk plan
   -> static entry linker + lazily loaded dynamic chunk linkers
   -> Ruvyxa explicit export pruning
@@ -38,7 +39,7 @@ Oxc pass because semantic mangling cannot safely be performed independently per 
 | ------------------------ | ------------------------------------------ | ---------------------------------------------------------- | --------------------------------------------------------------------- |
 | JavaScript minification  | `minifier.rs`                              | Oxc parser, minifier, codegen                              | Oxc source-map integration after mapping-quality fixtures             |
 | Module resolution        | `resolver.rs`                              | Keep current package exports, tsconfig paths, plugin hooks | Evaluate `oxc_resolver` only behind adapter conformance tests         |
-| TS/JSX transform         | `compiler.rs`                              | Keep behavior stable                                       | Introduce Oxc transform behind compiler parity fixtures               |
+| TS/JSX transform         | `compiler.rs`                              | Oxc parser, semantic model, transformer, codegen           | Oxc source-map integration after mapping-quality fixtures             |
 | Scan/link/chunk render   | `ast.rs`, `linker.rs`, `chunking.rs`       | Keep Ruvyxa output contracts                               | Borrow Rolldown's explicit scan -> link -> render metadata boundaries |
 | Caching/incremental work | `cache.rs`, `context.rs`, `incremental.rs` | Keep current shared context and cache keys                 | Add per-stage invalidation metrics before changing algorithms         |
 
@@ -50,13 +51,15 @@ Oxc pass because semantic mangling cannot safely be performed independently per 
    following Rolldown's staged ownership pattern.
 3. Wire the persisted graph manifest into the production bundle context only after it has per-stage
    invalidation metrics and lifecycle coverage.
-4. Prototype Oxc transformer or resolver behind an internal adapter only after the fixture suite
-   proves Ruvyxa plugin and framework semantics are preserved.
+4. Evaluate `oxc_resolver` behind an internal adapter only after resolver fixtures prove Ruvyxa
+   plugin and framework semantics are preserved.
 
 ## Constraints and risks
 
-- Oxc adds 52 locked packages. It is pinned exactly to `0.139.0`; upgrading it is a deliberate
-  compatibility review, not a floating dependency update.
+- Oxc is pinned exactly to `0.136.0`; upgrading it is a deliberate compatibility review, not a
+  floating dependency update.
+- Runtime renderers invoke the same native bundler through `runtime/ruvyxa-compiler.mjs`; the old
+  JavaScript `runtime/compiler.mjs` transformer is not shipped or used.
 - The current Ruvyxa source-map builder remains in place. Oxc reprints the final code, so mapping
   fidelity needs dedicated fixtures before replacing map handling.
 - Rolldown/SWC are reference implementations, not runtime dependencies. Directly importing either
