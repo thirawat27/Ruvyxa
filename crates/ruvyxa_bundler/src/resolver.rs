@@ -565,56 +565,6 @@ pub fn resolve_graph_with_plugins(
     plugins: &PluginPipeline,
     target: BundleTarget,
 ) -> Result<Vec<ResolvedModule>> {
-    resolve_graph_with_options(
-        entry_source,
-        entry_label,
-        project_root,
-        cache,
-        plugins,
-        target,
-        &ResolverOptions::default(),
-    )
-}
-
-/// Resolve a virtual runtime entry with explicit package aliases and externals.
-pub fn resolve_runtime_graph(
-    entry_source: &str,
-    entry_label: &str,
-    project_root: &Path,
-    cache: &ResolveGraphCache,
-    target: BundleTarget,
-    aliases: &BTreeMap<String, PathBuf>,
-    external: &BTreeSet<String>,
-) -> Result<Vec<ResolvedModule>> {
-    resolve_graph_with_options(
-        entry_source,
-        entry_label,
-        project_root,
-        cache,
-        &PluginPipeline::empty(),
-        target,
-        &ResolverOptions {
-            aliases: aliases.clone(),
-            external: external.clone(),
-        },
-    )
-}
-
-#[derive(Debug, Clone, Default)]
-struct ResolverOptions {
-    aliases: BTreeMap<String, PathBuf>,
-    external: BTreeSet<String>,
-}
-
-fn resolve_graph_with_options(
-    entry_source: &str,
-    entry_label: &str,
-    project_root: &Path,
-    cache: &ResolveGraphCache,
-    plugins: &PluginPipeline,
-    target: BundleTarget,
-    resolver_options: &ResolverOptions,
-) -> Result<Vec<ResolvedModule>> {
     let project_root = project_root
         .canonicalize()
         .unwrap_or_else(|_| project_root.to_path_buf());
@@ -638,7 +588,6 @@ fn resolve_graph_with_options(
         cache,
         plugins,
         target,
-        resolver_options,
     )?;
 
     order.push(entry_key.clone());
@@ -703,7 +652,6 @@ fn resolve_graph_with_options(
                         cache,
                         plugins,
                         target,
-                        resolver_options,
                     )?
                 };
 
@@ -748,9 +696,6 @@ fn resolve_graph_with_options(
 /// Specifiers within a single module are resolved sequentially (they share
 /// the same base_dir and are typically few), but the cache lookups are
 /// contention-free thanks to DashMap's sharded design.
-// The resolver cache key deliberately receives each graph/config input
-// separately; grouping them would obscure which input invalidates a lookup.
-#[allow(clippy::too_many_arguments)]
 fn collect_deps_cached(
     source: &str,
     base_dir: &Path,
@@ -759,7 +704,6 @@ fn collect_deps_cached(
     cache: &ResolveGraphCache,
     plugins: &PluginPipeline,
     target: BundleTarget,
-    resolver_options: &ResolverOptions,
 ) -> Result<Vec<PathBuf>> {
     let specifiers = extract_specifiers(source);
     let mut deps = Vec::with_capacity(specifiers.len());
@@ -770,22 +714,15 @@ fn collect_deps_cached(
             continue;
         }
 
-        if resolver_options.external.contains(&specifier) {
-            continue;
-        }
-
         let plugin_ctx = PluginContext {
             project_root: project_root.to_path_buf(),
             importer: Some(base_dir.to_path_buf()),
             target,
         };
         let plugin_resolved = plugins.resolve_id(&specifier, Some(base_dir), &plugin_ctx)?;
-        let has_runtime_alias = resolver_options.aliases.contains_key(&specifier);
 
         let resolved = if let Some(path) = plugin_resolved {
             Some(path)
-        } else if let Some(alias) = resolver_options.aliases.get(&specifier) {
-            resolve_project_specifier(project_root, &alias.to_string_lossy())
         } else if specifier.starts_with('.') {
             // Relative import: check resolution cache first (lock-free DashMap read).
             if let Some(cached) = cache.resolution(&base_dir_str, &specifier) {
@@ -820,10 +757,7 @@ fn collect_deps_cached(
 
         match resolved {
             Some(abs_path) => {
-                if has_runtime_alias
-                    || is_project_local(&abs_path, project_root)
-                    || target == BundleTarget::Client
-                {
+                if is_project_local(&abs_path, project_root) || target == BundleTarget::Client {
                     deps.push(abs_path);
                 }
             }
@@ -1053,7 +987,6 @@ mod tests {
             &ResolveGraphCache::new(),
             &PluginPipeline::empty(),
             BundleTarget::Client,
-            &ResolverOptions::default(),
         )
         .unwrap();
 
@@ -1077,40 +1010,10 @@ mod tests {
             &ResolveGraphCache::new(),
             &PluginPipeline::empty(),
             BundleTarget::Client,
-            &ResolverOptions::default(),
         )
         .unwrap();
 
         assert!(deps.is_empty());
-    }
-
-    #[test]
-    fn runtime_aliases_can_resolve_sources_outside_the_project_root() {
-        let temp = tempfile::tempdir().unwrap();
-        let project = temp.path().join("project");
-        let package = temp.path().join("package");
-        fs::create_dir_all(&project).unwrap();
-        fs::create_dir_all(&package).unwrap();
-        let alias_file = package.join("index.ts");
-        fs::write(&alias_file, "export const value = 42;").unwrap();
-
-        let aliases = BTreeMap::from([("virtual-package".to_string(), alias_file.clone())]);
-        let graph = resolve_runtime_graph(
-            "export { value } from \"virtual-package\";",
-            "ruvyxa:alias-entry.ts",
-            &project,
-            &ResolveGraphCache::new(),
-            BundleTarget::Ssr,
-            &aliases,
-            &BTreeSet::new(),
-        )
-        .unwrap();
-
-        assert!(
-            graph
-                .iter()
-                .any(|module| module.path == alias_file.canonicalize().unwrap())
-        );
     }
 
     #[test]

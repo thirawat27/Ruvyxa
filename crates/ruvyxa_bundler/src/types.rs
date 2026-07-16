@@ -89,34 +89,6 @@ pub struct BundleInput {
     pub options: BundleOptions,
 }
 
-/// A virtual-entry bundle used by Node renderers and config loading.
-///
-/// Unlike [`BundleInput`], this contract does not synthesize a route wrapper;
-/// the caller supplies the entry module source and receives its exports.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct RuntimeBundleInput {
-    pub project_root: PathBuf,
-    pub entry_source: String,
-    pub sourcefile: String,
-    pub outfile: PathBuf,
-    pub target: BundleTarget,
-    pub options: BundleOptions,
-    #[serde(default)]
-    pub aliases: std::collections::BTreeMap<String, PathBuf>,
-    #[serde(default)]
-    pub external: std::collections::BTreeSet<String>,
-}
-
-/// Native output for a virtual runtime bundle.
-#[derive(Debug, Clone)]
-pub struct RuntimeBundleOutput {
-    pub code: String,
-    pub source_map: Option<String>,
-    pub diagnostics: Vec<Diagnostic>,
-    pub dependency_hash: String,
-    pub inputs: Vec<PathBuf>,
-}
-
 /// Statistics emitted alongside a completed bundle.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BundleStats {

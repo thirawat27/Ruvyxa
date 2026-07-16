@@ -36,7 +36,7 @@ const MEMORY_CACHE_LIMIT: usize = 512;
 const COMPILER_VERSION: &str = concat!(
     "ruvyxa_bundler:",
     env!("CARGO_PKG_VERSION"),
-    ":oxc-transformer-v1"
+    ":ast-plugin-pipeline"
 );
 
 /// Atomic counter for unique temp file names.

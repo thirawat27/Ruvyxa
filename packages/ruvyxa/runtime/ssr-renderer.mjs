@@ -9,7 +9,7 @@ import {
   compileBundle,
   runtimeAliases,
   toImportPath,
-} from './ruvyxa-compiler.mjs'
+} from './compiler.mjs'
 
 const [projectRootArg, appDirArg, pageFileArg, requestPath = '/', paramsJson = '{}'] =
   process.argv.slice(2)

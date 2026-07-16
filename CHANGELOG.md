@@ -1,50 +1,5 @@
 # Changelog
 
-## v1.0.14 (2026-07-16)
-
-### Native Runtime Compiler
-
-- Removed the JavaScript `runtime/compiler.mjs` implementation and migrated every runtime renderer
-  to the cross-platform `runtime/ruvyxa-compiler.mjs` native CLI adapter.
-- Adopted the Oxc parser, semantic model, transformer, and code generator for TypeScript and JSX;
-  the previous character-level transformer is no longer retained as a fallback.
-- Added native runtime bundling for virtual entries, aliases, external packages, dynamic imports,
-  source maps, dependency fingerprints, and unchanged-output writes.
-- CI now builds and exercises the native CLI on Linux x64/arm64, macOS arm64, and Windows x64/arm64
-  before running package tests.
-
-### Async Build Phases and Parallel Pre-rendering
-
-- Converted build, check, benchmark, and parity workflows to async execution with timing metrics for
-  route discovery, validation, preparation, client bundling, pre-rendering, and total build
-  duration.
-- Added async static route pre-rendering with an adaptive `NodeWorkerPool` and parallelism based on
-  route count and available CPUs.
-- Included per-phase duration data in `build.json` and updated the CLI, dev server, runtime worker
-  pool, and English/Thai configuration and CLI documentation.
-
-### Shared Module Bundling and Registry
-
-- Added shared route module bundling and a registry so common modules are compiled once and excluded
-  from individual route bundles to prevent duplication.
-- Added linking support for shared modules and dynamic imports, renamed `linked_modules` to
-  `static_modules` for clearer manifest tracking, and made manifest collection configurable.
-- Integrated shared module results with the dev-server render cache and documented the shared
-  bundling behavior in the English and Thai CLI guides.
-
-### Release Metadata
-
-- Bumped all Rust crates, npm packages, platform CLI packages, adapters, core packages, and the
-  minimal template to `1.0.14`.
-- Updated the lockfile and normalized package manifest formatting where required by the release.
-
-### Ruvyxa Bundler Branding
-
-- Standardized native bundler terminology as `Ruvyxa Bundler` across code, package metadata, README,
-  architecture documentation, plugin pipeline documentation, and changelog entries.
-- Renamed `NativeBundlerPlugin` to `RuvyxaBundlerPlugin` and clarified the bundler's role in the
-  architecture.
-
 ## v1.0.13 (2026-07-14)
 
 ### Runtime Path Compatibility

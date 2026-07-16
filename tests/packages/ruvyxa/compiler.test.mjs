@@ -12,7 +12,7 @@ import {
   compileBundle,
   invalidateCompilerCache,
   toImportPath,
-} from '../../../packages/ruvyxa/runtime/ruvyxa-compiler.mjs'
+} from '../../../packages/ruvyxa/runtime/compiler.mjs'
 
 const workspaceRoot = path.resolve(fileURLToPath(new URL('../../..', import.meta.url)))
 const exampleRoot = path.join(workspaceRoot, 'examples/demo')
@@ -29,18 +29,13 @@ describe('runtime compiler', () => {
       await mkdir(runtimeDir, { recursive: true })
       await mkdir(sourceDir, { recursive: true })
       await copyFile(
-        path.join(workspaceRoot, 'packages/ruvyxa/runtime/ruvyxa-compiler.mjs'),
-        path.join(runtimeDir, 'ruvyxa-compiler.mjs'),
-      )
-      await mkdir(path.join(packageRoot, 'scripts'), { recursive: true })
-      await copyFile(
-        path.join(workspaceRoot, 'packages/ruvyxa/scripts/native-platform.mjs'),
-        path.join(packageRoot, 'scripts/native-platform.mjs'),
+        path.join(workspaceRoot, 'packages/ruvyxa/runtime/compiler.mjs'),
+        path.join(runtimeDir, 'compiler.mjs'),
       )
       await writeFile(path.join(sourceDir, 'index.ts'), 'export {}\n')
 
       const copiedCompiler = await import(
-        `${pathToFileURL(path.join(runtimeDir, 'ruvyxa-compiler.mjs')).href}?t=${Date.now()}`
+        `${pathToFileURL(path.join(runtimeDir, 'compiler.mjs')).href}?t=${Date.now()}`
       )
       const aliases = copiedCompiler.runtimeAliases()
 
@@ -163,20 +158,24 @@ import Card from './Card.js'
     })
   })
 
-  it('does not retain JavaScript compiler derivation caches', async () => {
+  it('bounds compiler derivation caches across many unique bundles', async () => {
     await withFixture(async ({ root, outDir }) => {
       const outfile = path.join(outDir, 'bounded-cache.mjs')
       clearCompilerCache()
-      await compileBundle({
-        projectRoot: root,
-        entrySource: 'export const value = 1\n',
-        sourcefile: 'ruvyxa:native-cache.ts',
-        outfile,
-        platform: 'node',
-      })
+      for (let index = 0; index < 513; index++) {
+        await compileBundle({
+          projectRoot: root,
+          entrySource: `export const value = ${index}\n`,
+          sourcefile: `ruvyxa:bounded-cache-${index}.ts`,
+          outfile,
+          platform: 'node',
+        })
+      }
 
       const stats = compilerCacheStats()
-      assert.deepEqual(stats, { sources: 0, rewrites: 0, content: 0 })
+      assert.equal(stats.rewrites, stats.maxEntries)
+      assert.ok(stats.sources <= stats.maxEntries)
+      assert.ok(stats.content <= stats.maxEntries)
       clearCompilerCache()
     })
   })
@@ -238,7 +237,7 @@ import Card from './Card.js'
 
       const output = await readFile(outfile, 'utf8')
       assert.match(output, /React\.Fragment/)
-      assert.match(output, /(?:Object\.assign|\.\.\.props)/)
+      assert.match(output, /Object\.assign/)
       assert.doesNotMatch(output, /ignored/)
     })
   })
@@ -442,7 +441,7 @@ import Card from './Card.js'
       })
 
       const output = await readFile(outfile, 'utf8')
-      assert.match(output, /(?:"style"|style): \{ color: accent \}/)
+      assert.match(output, /"style": \{ color: accent \}/)
       assert.match(output, /React\.createElement\("style"/)
       assert.match(output, /\.card \{ color:/)
     })

@@ -33,7 +33,7 @@ import {
   invalidateCompilerCache,
   runtimeAliases,
   toImportPath,
-} from './ruvyxa-compiler.mjs'
+} from './compiler.mjs'
 
 // --- Configuration ---
 const MAX_BUNDLE_CACHE_ENTRIES = positiveIntegerEnv('RUVYXA_CACHE_MAX_ENTRIES', 256)

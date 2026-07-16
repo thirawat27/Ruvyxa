@@ -16,7 +16,7 @@
     "runtime/action-renderer.mjs",
     "runtime/api-renderer.mjs",
     "runtime/client-renderer.mjs",
-    "runtime/ruvyxa-compiler.mjs",
+    "runtime/compiler.mjs",
     "runtime/config-renderer.mjs",
     "runtime/plugin-runner.mjs",
     "runtime/ssg-renderer.mjs",

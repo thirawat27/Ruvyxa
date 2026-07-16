@@ -3,7 +3,7 @@ import path from 'node:path'
 import { createInterface } from 'node:readline'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-import { cacheFileName, compileBundle, runtimeAliases, toImportPath } from './ruvyxa-compiler.mjs'
+import { cacheFileName, compileBundle, runtimeAliases, toImportPath } from './compiler.mjs'
 
 const [projectRootArg, mode] = process.argv.slice(2)
 

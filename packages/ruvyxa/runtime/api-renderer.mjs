@@ -2,7 +2,7 @@
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-import { cacheFileName, compileBundle, runtimeAliases, toImportPath } from './ruvyxa-compiler.mjs'
+import { cacheFileName, compileBundle, runtimeAliases, toImportPath } from './compiler.mjs'
 
 const [
   projectRootArg,
