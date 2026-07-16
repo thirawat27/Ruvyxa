@@ -1,6 +1,6 @@
 {
   "name": "ruvyxa",
-  "version": "1.0.13",
+  "version": "1.0.14",
   "description": "The Ruvyxa CLI and runtime for building, validating, serving, and shipping production-minded web applications.",
   "license": "Apache-2.0",
   "type": "module",
