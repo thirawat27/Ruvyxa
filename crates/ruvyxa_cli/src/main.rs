@@ -1766,7 +1766,7 @@ struct PluginRunnerOutput {
     stack: Option<String>,
 }
 
-impl ruvyxa_bundler::plugin::NativeBundlerPlugin for JsConfigPluginBridge {
+impl ruvyxa_bundler::plugin::RuvyxaBundlerPlugin for JsConfigPluginBridge {
     fn name(&self) -> &str {
         "ruvyxa-config-js-plugins"
     }
@@ -2073,7 +2073,7 @@ fn emit_client_bundles(
                 client_bundle_options(build)?,
                 &bundle_context,
             )
-            .map_err(|error| anyhow::anyhow!("native shared route bundler error: {error}"))?;
+            .map_err(|error| anyhow::anyhow!("Ruvyxa Bundler shared route error: {error}"))?;
             let executable_modules = shared_output
                 .modules
                 .into_iter()
@@ -2323,7 +2323,7 @@ fn build_plugin_manifest(plugins: &[BuildPluginConfig]) -> serde_json::Value {
     )
 }
 
-/// Bundle a client route using the native Rust bundler (ruvyxa_bundler).
+/// Bundle a client route using Ruvyxa Bundler (`ruvyxa_bundler`).
 #[allow(clippy::too_many_arguments)]
 fn bundle_client_route(
     root: &Path,
@@ -2376,7 +2376,7 @@ fn bundle_client_route(
     };
 
     let output = ruvyxa_bundler::bundle_with_shared_modules(input, bundle_context, shared_modules)
-        .map_err(|e| anyhow::anyhow!("native bundler error for {}: {e}", route.path))?;
+        .map_err(|e| anyhow::anyhow!("Ruvyxa Bundler error for {}: {e}", route.path))?;
 
     // Report non-fatal diagnostics.
     for diagnostic in &output.diagnostics {
@@ -4142,7 +4142,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_native_bundler_build_options() {
+    fn parses_ruvyxa_bundler_build_options() {
         assert!(matches!(
             parse_jsx_runtime(Some("automatic")).unwrap(),
             ruvyxa_bundler::JsxRuntime::Automatic
@@ -4235,7 +4235,7 @@ mod tests {
     }
 
     #[test]
-    fn rejects_invalid_native_bundler_build_options() {
+    fn rejects_invalid_ruvyxa_bundler_build_options() {
         assert!(parse_jsx_runtime(Some("runtime-x")).is_err());
         assert!(parse_es_target(Some("es5")).is_err());
         assert!(parse_split_strategy(Some("vendor")).is_err());
@@ -4641,7 +4641,7 @@ export default {
             target: ruvyxa_bundler::BundleTarget::Client,
         };
 
-        let first = ruvyxa_bundler::plugin::NativeBundlerPlugin::transform(
+        let first = ruvyxa_bundler::plugin::RuvyxaBundlerPlugin::transform(
             &bridge,
             "export const value = 1",
             &root.join("first.ts"),
@@ -4649,7 +4649,7 @@ export default {
         )
         .unwrap()
         .unwrap();
-        let second = ruvyxa_bundler::plugin::NativeBundlerPlugin::transform(
+        let second = ruvyxa_bundler::plugin::RuvyxaBundlerPlugin::transform(
             &bridge,
             "export const value = 2",
             &root.join("second.ts"),

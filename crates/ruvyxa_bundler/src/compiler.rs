@@ -1,6 +1,6 @@
-//! Ruvyxa Native TypeScript/JSX Compiler
+//! Ruvyxa Bundler TypeScript/JSX Compiler
 //!
-//! A native Rust TypeScript and JSX transformer
+//! The TypeScript and JSX transformer used by Ruvyxa Bundler
 //! designed specifically for the Ruvyxa framework.
 //!
 //! ## Strategy

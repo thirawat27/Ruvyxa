@@ -1,6 +1,6 @@
 //! # ruvyxa_bundler
 //!
-//! Native TypeScript/JSX compiler and module bundler for the Ruvyxa framework.
+//! Ruvyxa Bundler TypeScript/JSX compiler and module bundler for the Ruvyxa framework.
 //!
 //! This crate provides Ruvyxa's native production bundling pipeline and
 //! integrates directly with [`ruvyxa_diagnostics`]

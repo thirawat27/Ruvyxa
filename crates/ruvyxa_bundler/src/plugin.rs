@@ -1,7 +1,7 @@
-//! Native bundler plugin pipeline.
+//! Ruvyxa Bundler plugin pipeline.
 //!
 //! Plugins are synchronous Rust hooks for the native pipeline. JavaScript config
-//! plugin functions remain typed at the package layer, but the Rust bundler now
+//! plugin functions remain typed at the package layer, while Ruvyxa Bundler
 //! has a first-class pipeline that adapters or embedded callers can populate
 //! without forking resolver or compiler code.
 
@@ -35,7 +35,7 @@ impl TransformResult {
 }
 
 /// Native plugin hook contract.
-pub trait NativeBundlerPlugin: Send + Sync {
+pub trait RuvyxaBundlerPlugin: Send + Sync {
     fn name(&self) -> &str;
 
     fn resolve_id(
@@ -60,7 +60,7 @@ pub trait NativeBundlerPlugin: Send + Sync {
 /// Ordered plugin collection.
 #[derive(Clone, Default)]
 pub struct PluginPipeline {
-    plugins: Arc<Vec<Arc<dyn NativeBundlerPlugin>>>,
+    plugins: Arc<Vec<Arc<dyn RuvyxaBundlerPlugin>>>,
 }
 
 impl std::fmt::Debug for PluginPipeline {
@@ -76,7 +76,7 @@ impl PluginPipeline {
         Self::default()
     }
 
-    pub fn new(plugins: Vec<Arc<dyn NativeBundlerPlugin>>) -> Self {
+    pub fn new(plugins: Vec<Arc<dyn RuvyxaBundlerPlugin>>) -> Self {
         Self {
             plugins: Arc::new(plugins),
         }
@@ -148,7 +148,7 @@ mod tests {
 
     struct BannerPlugin;
 
-    impl NativeBundlerPlugin for BannerPlugin {
+    impl RuvyxaBundlerPlugin for BannerPlugin {
         fn name(&self) -> &str {
             "banner"
         }
@@ -165,7 +165,7 @@ mod tests {
 
     struct MapPlugin;
 
-    impl NativeBundlerPlugin for MapPlugin {
+    impl RuvyxaBundlerPlugin for MapPlugin {
         fn name(&self) -> &str {
             "source-map"
         }

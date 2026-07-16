@@ -27,8 +27,8 @@
 
 ### Rust core
 
-- **Native Rust bundler** — TypeScript/JSX/Markdown/MDX compilation, module resolution,
-  tree-shaking, Oxc-backed minification, and source map generation in one self-contained binary.
+- **Ruvyxa Bundler** — TypeScript/JSX/Markdown/MDX compilation, module resolution, tree-shaking,
+  Oxc-backed minification, and source map generation in one self-contained binary.
 - **Radix-trie routing** — O(path-depth) route resolution regardless of the number of registered
   routes. Duplicate and ambiguous routes are rejected at graph validation time.
 - **Persistent Node worker pool** — eliminates 100–500 ms per-request subprocess overhead for SSR.
@@ -42,9 +42,9 @@
   load.
 - **Incremental bundler cache** — blake3+mtime fingerprinting recompiles only changed modules across
   dev restarts. Shared compile cache at `.ruvyxa/cache/bundler/` survives clean builds.
-- **Bundler plugin pipeline** — `NativeBundlerPlugin` hooks for `resolve_id()` and `transform()`,
-  plus JS config plugins bridged via persistent Node subprocess. AST-based import/export extraction
-  and CommonJS detection for npm dependencies.
+- **Ruvyxa Bundler plugin pipeline** — `RuvyxaBundlerPlugin` hooks for `resolve_id()` and
+  `transform()`, plus JS config plugins bridged via persistent Node subprocess. AST-based
+  import/export extraction and CommonJS detection for npm dependencies.
 - **Gzip + Brotli compression** — all responses compressed automatically via tower-http middleware.
 - **ETag / 304 support** — static assets include BLAKE3-256-based ETags for efficient browser
   caching. Bundle names are BLAKE3-content-addressed for deterministic cache busting.
@@ -502,7 +502,7 @@ Routes with `getStaticParams` export generate static paths at build time.
 ┌─────────────────┴───────────────────────────────────────────┐
 │                   Rust Workspace (crates/)                   │
 ├─────────────────────────────────────────────────────────────┤
-│ ruvyxa_bundler      │ native TS/JSX bundler: compiler,       │
+│ ruvyxa_bundler      │ Ruvyxa Bundler: compiler,              │
 │                     │ minifier, linker, resolver, source maps│
 │ ruvyxa_cli          │ CLI commands, config loading, build    │
 │                     │ orchestration, production output       │

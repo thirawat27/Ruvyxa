@@ -1,4 +1,4 @@
-//! Lightweight AST facts used by the native bundler pipeline.
+//! Lightweight AST facts used by the Ruvyxa Bundler pipeline.
 //!
 //! This is intentionally smaller than a full JavaScript parser, but it gives
 //! the resolver and transformer a shared structured view of imports, exports,

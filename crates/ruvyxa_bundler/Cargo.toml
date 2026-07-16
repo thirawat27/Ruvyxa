@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "Native TypeScript/JSX bundler and compiler for Ruvyxa"
+description = "Ruvyxa Bundler TypeScript/JSX compiler"
 
 [dependencies]
 ruvyxa_diagnostics = { path = "../ruvyxa_diagnostics" }

@@ -36,7 +36,7 @@
 ```mermaid
 flowchart LR
   CLI["ruvyxa CLI"] --> Graph["route graph"]
-  CLI --> Bundler["native bundler"]
+  CLI --> Bundler["Ruvyxa Bundler"]
   CLI --> Server["Axum server"]
   Graph --> Server
   Bundler --> Server

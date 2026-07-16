@@ -251,7 +251,7 @@
 
 - Added first-class `page.md` and `page.mdx` routes with frontmatter, heading metadata, GFM
   Markdown, MDX ESM imports, JSX components, expressions, SSG, and HMR support
-- Shared content compilation across the native Rust bundler and Node runtime compiler, including
+- Shared content compilation across Ruvyxa Bundler and Node runtime compiler, including
   content-aware dependency scanning that ignores imports inside fenced code examples
 - Added `frontmatter`, `meta`, `headings`, and `contentFormat` exports to generated content modules
 - Rebuilt image optimization around a single-output `.webp` pipeline that replaces local PNG/JPEG
@@ -479,7 +479,7 @@
 
 ### Highlights
 
-- Full native bundler pipeline with AST parsing, plugin system, chunking, and tree-shaking
+- Full Ruvyxa Bundler pipeline with AST parsing, plugin system, chunking, and tree-shaking
 - New `demo` example app replacing `basic-app`
 - Comprehensive end-to-end test script (`test-full-flow.ps1`)
 - Project structure and engineering backlog documentation
@@ -677,7 +677,7 @@
 
 ### Highlights
 
-- First release of `ruvyxa_bundler` — native Rust bundler
+- First release of `ruvyxa_bundler` — Ruvyxa Bundler
 - `ruvyxa_middleware` crate with WASM plugin support
 - Compression, caching, and worker pool in dev server
 - Upgraded toolchain: Node.js 22, Rust 1.96, pnpm 10
@@ -685,7 +685,7 @@
 ### Rust Crates
 
 - **ruvyxa_bundler** (new crate):
-  - Native Rust TypeScript/JSX compiler pipeline
+  - Ruvyxa Bundler TypeScript/JSX compiler pipeline
   - Boundary checker for server/client module isolation
   - Caching layer with blake3 hashing for incremental builds
   - AST transformation and code generation

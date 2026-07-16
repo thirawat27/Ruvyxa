@@ -169,7 +169,7 @@ export function customAdapter(): Adapter {
 
 Custom build plugins use the exported `RuvyxaPlugin`, `PluginContext`, and `TransformResult` types.
 During `ruvyxa build`, `resolveId` and `transform` hooks from `ruvyxa.config.ts` are bridged into
-the native bundler pipeline:
+the Ruvyxa Bundler pipeline:
 
 ```ts
 import type { PluginContext, RuvyxaPlugin, TransformResult } from '@ruvyxa/core'
