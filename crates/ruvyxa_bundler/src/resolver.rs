@@ -140,7 +140,12 @@ impl ResolveGraphCache {
 
     /// Read source text for a file, using the cache and mmap for large files.
     fn read_source(&self, path: &Path) -> Result<String> {
-        let metadata = fs::metadata(path)?;
+        let metadata = fs::metadata(path).map_err(|error| {
+            BundleError::Io(std::io::Error::new(
+                error.kind(),
+                format!("{}: {}", path.display(), error),
+            ))
+        })?;
         let fingerprint = SourceFingerprint {
             modified: metadata.modified().ok(),
             len: metadata.len(),
@@ -515,7 +520,12 @@ fn read_source_fast(path: &Path, len: u64) -> Result<String> {
     if len >= MMAP_THRESHOLD_BYTES {
         // Memory-map for large files: exploits OS page cache, zero-copy into
         // address space, and avoids a full heap allocation + copy.
-        let file = fs::File::open(path)?;
+        let file = fs::File::open(path).map_err(|error| {
+            BundleError::Io(std::io::Error::new(
+                error.kind(),
+                format!("{}: {}", path.display(), error),
+            ))
+        })?;
         let mapped = unsafe { memmap2::Mmap::map(&file) };
         match mapped {
             Ok(mmap) => {
@@ -528,7 +538,12 @@ fn read_source_fast(path: &Path, len: u64) -> Result<String> {
             }
         }
     }
-    Ok(fs::read_to_string(path)?)
+    Ok(fs::read_to_string(path).map_err(|error| {
+        BundleError::Io(std::io::Error::new(
+            error.kind(),
+            format!("{}: {}", path.display(), error),
+        ))
+    })?)
 }
 
 /// Walk the import graph using a shared resolver/source cache.
