@@ -7,6 +7,11 @@
 - Normalized `RUVYXA_WORKER_TIMEOUT_MS` and `RUVYXA_MEMORY_LIMIT_MB` in the persistent Node worker:
   invalid or zero values now safely retain the 30-second watchdog and 512 MiB cache-pressure
   threshold instead of silently disabling protection.
+- Aligned the Rust worker-response and API stream-idle timeout with the normalized
+  `RUVYXA_WORKER_TIMEOUT_MS` value passed to Node. Interactive requests now consistently use the
+  documented 30-second fallback, while build workers retain their 300-second fallback unless
+  explicitly overridden. Values above Node's 2,147,483,647 ms timer limit now fall back safely
+  instead of being coerced by Node to a 1 ms timeout.
 - Bounded environment-derived `RUVYXA_RENDER_CACHE_SIZE` at 16,384 entries before render-cache
   allocation, while preserving `0` as an explicit cache-disable setting and preserving existing
   development and production defaults.

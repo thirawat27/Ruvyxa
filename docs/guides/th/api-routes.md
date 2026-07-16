@@ -66,8 +66,10 @@ export function GET() {
 ```
 
 Worker IPC ใช้ frame ขนาดไม่เกิน 64 KiB และจำกัด queue แยกต่อ response หาก producer หรือ consumer
-ค้าง ระบบจะยุติเฉพาะ stream นั้นแทนการปล่อยให้หน่วยความจำที่รอส่งโตไม่จำกัด ทั้งหมดนี้ทำงานอัตโนมัติ
-โดย handler ยังใช้ Web API `Response` ตามปกติ
+ค้าง ระบบจะยุติเฉพาะ stream นั้นแทนการปล่อยให้หน่วยความจำที่รอส่งโตไม่จำกัด
+ค่าเริ่มต้นสำหรับช่วงว่างระหว่าง worker response event คือ 30 วินาที และปรับได้ด้วย
+`RUVYXA_WORKER_TIMEOUT_MS` โดย Rust และ Node จะใช้ค่าที่ normalize แล้วค่าเดียวกัน
+ทั้งหมดนี้ทำงานอัตโนมัติ โดย handler ยังใช้ Web API `Response` ตามปกติ
 
 ## Unsupported Methods → 405
 

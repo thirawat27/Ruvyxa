@@ -38,7 +38,12 @@ import {
 
 // --- Configuration ---
 const MAX_BUNDLE_CACHE_ENTRIES = positiveIntegerEnv('RUVYXA_CACHE_MAX_ENTRIES', 256)
-const WORKER_REQUEST_TIMEOUT_MS = positiveIntegerEnv('RUVYXA_WORKER_TIMEOUT_MS', 30_000)
+const MAX_NODE_TIMEOUT_MS = 2_147_483_647
+const WORKER_REQUEST_TIMEOUT_MS = positiveIntegerEnv(
+  'RUVYXA_WORKER_TIMEOUT_MS',
+  30_000,
+  MAX_NODE_TIMEOUT_MS,
+)
 const MEMORY_PRESSURE_THRESHOLD_MB = positiveIntegerEnv('RUVYXA_MEMORY_LIMIT_MB', 512)
 const API_STREAM_CHUNK_BYTES = 64 * 1024
 const runtimeDir = path.dirname(fileURLToPath(import.meta.url))
@@ -667,9 +672,9 @@ function invalidateBundleCache(paths) {
   return { invalidated }
 }
 
-function positiveIntegerEnv(name, fallback) {
+function positiveIntegerEnv(name, fallback, maximum = Number.MAX_SAFE_INTEGER) {
   const value = Number.parseInt(process.env[name] ?? '', 10)
-  return Number.isSafeInteger(value) && value > 0 ? value : fallback
+  return Number.isSafeInteger(value) && value > 0 && value <= maximum ? value : fallback
 }
 
 function normalizeAbsolutePath(file) {

@@ -39,10 +39,13 @@ const MIN_POOL_SIZE: usize = 2;
 /// Maximum pool size to prevent excessive memory usage from many Node processes.
 const MAX_POOL_SIZE: usize = 8;
 
-/// Maximum time to wait for a worker response before considering it dead.
-const WORKER_TIMEOUT_MS: u64 = 10_000;
+const WORKER_TIMEOUT_ENV: &str = "RUVYXA_WORKER_TIMEOUT_MS";
+/// Interactive fallback shared by the Rust response receiver and Node watchdog.
+const DEFAULT_WORKER_TIMEOUT_MS: u64 = 30_000;
 /// Build prerendering can legitimately take longer than an interactive request.
-const BUILD_WORKER_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
+const BUILD_WORKER_TIMEOUT_MS: u64 = 300_000;
+/// Node timers coerce larger delays to 1 ms instead of waiting longer.
+const MAX_NODE_TIMEOUT_MS: u64 = 2_147_483_647;
 
 /// Maximum time a worker receives to exit after its stdin closes before it is killed.
 const WORKER_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
@@ -685,14 +688,9 @@ pub(crate) struct RenderApiRequest<'a> {
 }
 
 impl NodeWorkerPool {
-    pub async fn start(root: &Path, env: BTreeMap<String, String>) -> Result<Self> {
-        Self::start_with_timeout(
-            root,
-            env,
-            None,
-            std::time::Duration::from_millis(WORKER_TIMEOUT_MS),
-        )
-        .await
+    pub async fn start(root: &Path, mut env: BTreeMap<String, String>) -> Result<Self> {
+        let response_timeout = configure_worker_timeout(&mut env, DEFAULT_WORKER_TIMEOUT_MS);
+        Self::start_with_timeout(root, env, None, response_timeout).await
     }
 
     /// Start a pool with an optional bounded worker count.
@@ -704,12 +702,8 @@ impl NodeWorkerPool {
         mut env: BTreeMap<String, String>,
         worker_count: Option<usize>,
     ) -> Result<Self> {
-        // Keep the Node worker's own watchdog aligned with the Rust caller.
-        // This is build-only; the interactive server continues to use its
-        // shorter response budget.
-        env.entry("RUVYXA_WORKER_TIMEOUT_MS".to_string())
-            .or_insert_with(|| BUILD_WORKER_TIMEOUT.as_millis().to_string());
-        Self::start_with_timeout(root, env, worker_count, BUILD_WORKER_TIMEOUT).await
+        let response_timeout = configure_worker_timeout(&mut env, BUILD_WORKER_TIMEOUT_MS);
+        Self::start_with_timeout(root, env, worker_count, response_timeout).await
     }
 
     async fn start_with_timeout(
@@ -1145,6 +1139,33 @@ fn base64_encode(bytes: &[u8]) -> String {
     base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
+fn configure_worker_timeout(
+    env: &mut BTreeMap<String, String>,
+    fallback_ms: u64,
+) -> std::time::Duration {
+    let inherited = std::env::var(WORKER_TIMEOUT_ENV).ok();
+    let configured = env
+        .get(WORKER_TIMEOUT_ENV)
+        .map(String::as_str)
+        .or(inherited.as_deref());
+    let timeout_ms = configured
+        .and_then(positive_worker_timeout_ms)
+        .unwrap_or(fallback_ms);
+
+    // Explicitly pass the normalized value so Node and Rust cannot apply
+    // different parsing or fallback behavior to the same worker request.
+    env.insert(WORKER_TIMEOUT_ENV.to_string(), timeout_ms.to_string());
+    std::time::Duration::from_millis(timeout_ms)
+}
+
+fn positive_worker_timeout_ms(value: &str) -> Option<u64> {
+    value
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .filter(|value| *value > 0 && *value <= MAX_NODE_TIMEOUT_MS)
+}
+
 fn find_worker_script(root: &Path) -> Option<PathBuf> {
     let cwd_script = std::env::current_dir()
         .ok()
@@ -1164,6 +1185,34 @@ fn find_worker_script(root: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn worker_timeout_normalizes_valid_project_configuration() {
+        let mut env = BTreeMap::from([(WORKER_TIMEOUT_ENV.to_string(), " 45000 ".to_string())]);
+
+        let timeout = configure_worker_timeout(&mut env, DEFAULT_WORKER_TIMEOUT_MS);
+
+        assert_eq!(timeout, std::time::Duration::from_millis(45_000));
+        assert_eq!(env[WORKER_TIMEOUT_ENV], "45000");
+    }
+
+    #[test]
+    fn worker_timeout_normalizes_invalid_configuration_to_each_mode_fallback() {
+        for (configured, fallback_ms) in [
+            ("0", DEFAULT_WORKER_TIMEOUT_MS),
+            ("invalid", DEFAULT_WORKER_TIMEOUT_MS),
+            ("30000ms", DEFAULT_WORKER_TIMEOUT_MS),
+            ("2147483648", BUILD_WORKER_TIMEOUT_MS),
+        ] {
+            let mut env =
+                BTreeMap::from([(WORKER_TIMEOUT_ENV.to_string(), configured.to_string())]);
+
+            let timeout = configure_worker_timeout(&mut env, fallback_ms);
+
+            assert_eq!(timeout, std::time::Duration::from_millis(fallback_ms));
+            assert_eq!(env[WORKER_TIMEOUT_ENV], fallback_ms.to_string());
+        }
+    }
 
     #[test]
     fn api_worker_request_serializes_lossless_body_and_header_pairs() {
@@ -1362,7 +1411,7 @@ mod tests {
             worker_script,
             env: BTreeMap::new(),
             next_worker: AtomicU64::new(0),
-            response_timeout: std::time::Duration::from_millis(WORKER_TIMEOUT_MS),
+            response_timeout: std::time::Duration::from_millis(DEFAULT_WORKER_TIMEOUT_MS),
         };
 
         pool.shutdown().await;
@@ -1398,7 +1447,7 @@ mod tests {
             std::time::Duration::from_secs(2),
             worker.send(
                 &request,
-                std::time::Duration::from_millis(WORKER_TIMEOUT_MS),
+                std::time::Duration::from_millis(DEFAULT_WORKER_TIMEOUT_MS),
             ),
         )
         .await;
@@ -1434,7 +1483,7 @@ mod tests {
             worker_script,
             env: BTreeMap::new(),
             next_worker: AtomicU64::new(0),
-            response_timeout: std::time::Duration::from_millis(WORKER_TIMEOUT_MS),
+            response_timeout: std::time::Duration::from_millis(DEFAULT_WORKER_TIMEOUT_MS),
         };
 
         let mut child = failed_worker.child.lock().await;

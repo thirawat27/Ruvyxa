@@ -14,6 +14,7 @@ v1.0.14. The current production pipeline uses the Ruvyxa resolver/linker/cache l
 | 1   | The persistent Node worker parsed `RUVYXA_WORKER_TIMEOUT_MS` and `RUVYXA_MEMORY_LIMIT_MB` directly. Invalid or zero values disabled the timeout or cache-pressure protection. | `packages/ruvyxa/runtime/worker-pool.mjs`       | A malformed deployment environment could leave hung work unbounded or prevent cache shedding under memory pressure. | High     | Direct     | Both settings now use the existing positive-integer parser and safely fall back to 30,000 ms and 512 MiB. A worker IPC regression test verifies the effective values. |
 | 2   | `RUVYXA_RENDER_CACHE_SIZE` was used directly for `HashMap` and queue pre-allocation.                                                                                          | `crates/ruvyxa_dev_server/src/render_cache.rs`  | An accidentally extreme value could request an excessive allocation while the server starts.                        | High     | Direct     | Environment-derived capacity now clamps to 16,384. `0` remains the documented cache-disable setting, and invalid values retain the mode-specific default.             |
 | 3   | API responses were converted with `response.text()` and returned to Rust as one NDJSON value.                                                                                 | Node worker protocol and Rust worker dispatcher | Large or binary responses required whole-body text materialization on both sides of the worker boundary.            | High     | Direct     | API responses now use opt-in start/chunk/end/error frames, binary-safe Base64 payloads, bounded per-response queues, idle timeouts, and legacy fallback.              |
+| 4   | The interactive Rust worker receiver used a fixed 10-second timeout while Node and operator guidance used `RUVYXA_WORKER_TIMEOUT_MS` with a 30-second fallback.               | Rust/Node worker timeout configuration          | Slow streams could end before the configured watchdog; values above Node's timer limit were coerced to 1 ms.        | Medium   | Direct     | Rust now normalizes one effective timeout, passes it to Node, uses it for response/idle gaps, and rejects values above 2,147,483,647 ms.                              |
 
 ### Completed API streaming boundary
 
@@ -21,6 +22,8 @@ Rust now requests streaming with the additive `streamResponse` capability. Suppo
 send response metadata first and then binary-safe 64 KiB frames; Axum exposes the receiver as its
 HTTP body instead of waiting for one complete text response. Each response has a 16-frame pending
 queue, and worker exit, stream error, queue overflow, or idle timeout closes only the affected body.
+The interactive receiver and Node watchdog now share the normalized `RUVYXA_WORKER_TIMEOUT_MS`
+value, with a 30-second fallback. Build workers keep a 300-second fallback when no override exists.
 
 Compatibility is bidirectional across the additive protocol: a new Rust runtime accepts the legacy
 single-message response from an older worker, and a new Node worker keeps returning the legacy shape
@@ -30,7 +33,7 @@ would be the appropriate future optimization if encoding overhead becomes materi
 
 ### Follow-up validation
 
-- `cargo test --workspace --locked` passed 301 Rust tests, including the render-cache and streamed
+- `cargo test --workspace --locked` passed 303 Rust tests, including the render-cache and streamed
   worker-body regressions.
 - `cargo clippy --workspace --locked -- -D warnings` and `pnpm format:check` passed.
 - Focused Rust worker tests passed for binary reconstruction, queue overflow, idle timeout, stream

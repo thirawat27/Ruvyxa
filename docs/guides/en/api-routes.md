@@ -116,7 +116,9 @@ export function GET() {
 
 Worker IPC uses bounded 64 KiB frames and a bounded per-response queue. A stalled producer or
 consumer fails that response stream instead of allowing its pending memory to grow without a bound.
-This is automatic; route handlers do not need a Ruvyxa-specific response type.
+The interactive default is 30 seconds between worker response events and can be changed with
+`RUVYXA_WORKER_TIMEOUT_MS`. Rust and Node use the same normalized value. This is automatic; route
+handlers do not need a Ruvyxa-specific response type.
 
 ## Unsupported Methods
 

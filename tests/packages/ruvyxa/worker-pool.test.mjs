@@ -14,7 +14,7 @@ test('uses safe worker defaults when numeric environment values are invalid', as
     cwd: repoRoot,
     env: {
       ...process.env,
-      RUVYXA_WORKER_TIMEOUT_MS: '0',
+      RUVYXA_WORKER_TIMEOUT_MS: '2147483648',
       RUVYXA_MEMORY_LIMIT_MB: 'not-a-number',
     },
     stdio: ['pipe', 'pipe', 'pipe'],
