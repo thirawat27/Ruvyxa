@@ -18,12 +18,25 @@ to submit changes.
 ```bash
 git clone https://github.com/thirawat27/ruvyxa.git
 cd ruvyxa
-pnpm install
 ```
 
-`pnpm install` enables the repository pre-commit hook. It automatically formats staged files that
-Prettier supports and re-stages only those files. When Rust files are staged, the hook verifies
-their `cargo fmt` formatting before allowing the commit.
+On Windows, run:
+
+```bat
+setup.bat
+```
+
+On macOS or Linux, run:
+
+```bash
+./setup.sh
+```
+
+Both scripts install the locked dependencies, build workspace packages, and compile the native CLI.
+
+`pnpm install`, which is run by both setup scripts, enables the repository pre-commit hook. It
+automatically formats staged files that Prettier supports and re-stages only those files. When Rust
+files are staged, the hook verifies their `cargo fmt` formatting before allowing the commit.
 
 ### Verify Everything Works
 

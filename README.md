@@ -224,9 +224,12 @@ strategies, see [examples/demo](examples/demo).
 ## From Source
 
 ```bash
-pnpm install
+./setup.sh
 cargo run -p ruvyxa_cli -- dev --root examples/demo
 ```
+
+On Windows, use `setup.bat` instead of `./setup.sh`. The setup script installs locked dependencies,
+builds workspace packages, and compiles the native CLI.
 
 Build and test all packages:
 

@@ -4,32 +4,50 @@
 
 ### Bundler and Build Pipeline
 
-- Added shared module bundling and a shared-route registry to reduce duplicated client code across
-  route bundles
-- Added async build phases and a worker pool for parallel prerendering
-- Modernized the native compiler pipeline and runtime compiler integration
-- Improved resolver and compiler cache behavior for repeated multi-route builds
+- Added shared module bundling and a shared-route registry so modules common to multiple routes can
+  be compiled once and reused instead of duplicated in every client bundle
+- Added `bundle_shared_route_modules()` and shared-route output types for producing executable
+  shared module registries
+- Added linker support for shared modules, dynamic imports, dependency-first linking, and exclusion
+  of already-emitted shared modules from individual route bundles
+- Added `collect_module_manifest` and improved static-module tracking for more accurate chunk and
+  module manifests
+- Integrated shared-module output with the CLI build pipeline, render cache, and development server
+- Added async build phases for route discovery, validation, preparation, client bundling, and
+  prerendering
+- Added per-phase timing metrics and total build duration reporting in build output metadata
+- Added a prerender worker pool that chooses parallelism from route count and available CPU capacity
+- Migrated static prerendering and SSG rendering to the async worker-pool workflow
+- Modernized the native TypeScript/JSX compiler and runtime compiler boundary, including the
+  `ruvyxa-compiler` runtime integration
+- Improved resolver, compiler, and graph-cache reuse across multi-route builds
 - Rebranded native bundler references to **Ruvyxa Bundler** across diagnostics, documentation, and
   package metadata
 
 ### Runtime and Developer Experience
 
-- Improved worker-pool and prerender reliability for production builds
+- Improved worker-pool lifecycle and prerender reliability for production builds
+- Added consistent millisecond-duration reporting for build and render phases
+- Improved runtime worker-pool coordination for asynchronous route rendering
 - Added clearer file I/O errors that include the missing source path, making dependency and package
   setup failures easier to diagnose
+- Updated compiler and worker-pool regression coverage for the new asynchronous execution model
 - Added cross-platform project setup scripts:
   - `setup.mjs` for Windows, macOS, and Linux
   - `setup.bat` as a Windows launcher
   - `setup.sh` as a macOS/Linux launcher
-- Setup now installs locked workspace dependencies, builds npm packages, and compiles the Ruvyxa CLI
-  before development
+- Setup now installs locked workspace dependencies, builds all npm workspace packages, and compiles
+  the Ruvyxa CLI before development
 
 ### Release and Documentation
 
 - Bumped workspace packages and Rust crates to `1.0.14`
-- Updated CLI and configuration documentation for the new build and worker-pool behavior
-- Updated bundler architecture and production-readiness documentation
-- Added and updated compiler and worker-pool regression coverage
+- Updated English and Thai CLI documentation for shared bundling, async builds, and prerender
+  parallelism
+- Updated English and Thai configuration documentation for the new build behavior
+- Updated bundler architecture, developer, package, and production-readiness documentation
+- Added and updated compiler, parser compatibility, shared bundling, and worker-pool regression
+  coverage
 
 ## v1.0.13 (2026-07-14)
 

@@ -6,11 +6,23 @@ with the [User Guide](guides/index.md).
 
 ## 1. Local requirements and setup
 
-Install Node.js 22 or later, pnpm 11 or later, and Rust 1.96 or later (Rust edition 2024). Then
-install dependencies and inspect the integration fixture:
+Install Node.js 22 or later, pnpm 11 or later, and Rust 1.96 or later (Rust edition 2024). Then run
+the platform setup script from the repository root:
+
+```powershell
+.\setup.bat
+```
+
+On macOS or Linux, run:
 
 ```bash
-pnpm install
+./setup.sh
+```
+
+The setup script installs the locked dependencies, builds all workspace packages, and compiles the
+native CLI. Then inspect the integration fixture:
+
+```bash
 cargo run -p ruvyxa_cli -- doctor --root examples/demo
 cargo run -p ruvyxa_cli -- routes --root examples/demo
 ```
