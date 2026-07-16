@@ -6,8 +6,9 @@ with the [User Guide](guides/index.md).
 
 ## 1. Local requirements and setup
 
-Install Node.js 22 or later, pnpm 11 or later, and Rust 1.96 or later (Rust edition 2024). Then run
-the platform setup script from the repository root:
+Install Node.js 22.12 or later, pnpm 11 or later, and Rust 1.96 or later (Rust edition 2024). The
+minimum Node version matches the native Oxc transformer used by the runtime compiler. Then run the
+platform setup script from the repository root:
 
 ```powershell
 .\setup.bat
@@ -38,7 +39,7 @@ npm package: ruvyxa
   └─ bin/ruvyxa.js -> platform-specific native CLI
        ├─ crates/ruvyxa_cli          commands, config loading, build orchestration
        ├─ crates/ruvyxa_graph        route discovery, render detection, validation
-       ├─ crates/ruvyxa_bundler      TS/JSX/MDX compilation, resolution, linking, maps, Oxc-backed minification
+       ├─ crates/ruvyxa_bundler      TS/JSX/MDX compilation, Oxc transforms, resolution, linking, maps, minification
        ├─ crates/ruvyxa_dev_server   Axum server, HMR, router, cache, Node worker pool, CSS minification
        ├─ crates/ruvyxa_middleware   Tower middleware and Wasm plugin support
        └─ crates/ruvyxa_diagnostics  structured RUV#### diagnostics
@@ -52,9 +53,9 @@ packages/
   └─ create-ruvyxa             scaffold command and minimal template packaging
 ```
 
-The [Bundler Modernization doc](architecture/bundler-modernization.md) describes the oxc integration
-boundary and the reasoning behind keeping resolution, linking, and diagnostics in Ruvyxa while
-delegating minification to Oxc.
+The [Bundler Modernization doc](architecture/bundler-modernization.md) describes the Oxc integration
+boundary and the reasoning behind keeping resolution, linking, diagnostics, and framework contracts
+in Ruvyxa while delegating source transformation and minification to Oxc.
 
 Framework contracts often span Rust and TypeScript. A change to configuration, runtime files,
 package exports, or starter behaviour must be checked in both places. Do not change a TypeScript
@@ -101,17 +102,17 @@ to hide a file-lock problem.
 
 ## 4. Change map
 
-| Change                                                     | Primary surface                               | Minimum proof                         |
-| ---------------------------------------------------------- | --------------------------------------------- | ------------------------------------- |
-| CLI command, config parsing, build orchestration           | `crates/ruvyxa_cli/src/main.rs`               | relevant Rust test plus demo `check`  |
-| route matching, validation, rendering detection            | `crates/ruvyxa_graph/src/lib.rs`              | graph test plus `routes`/`analyze`    |
-| compilation, linking, source maps, Oxc-backed minification | `crates/ruvyxa_bundler`                       | bundler tests plus demo build         |
-| CSS collection, minification, style HMR                    | `crates/ruvyxa_dev_server/src/style.rs`       | crate tests plus demo build           |
-| API/action/HMR/server behaviour                            | `crates/ruvyxa_dev_server`                    | crate tests plus parity               |
-| core config or server API                                  | `packages/@ruvyxa/core/src`                   | package test/check                    |
-| npm launcher or runtime script                             | `packages/ruvyxa`                             | package test and `pnpm pack:smoke`    |
-| generated starter                                          | `templates/minimal`, `packages/create-ruvyxa` | create-package test and pack smoke    |
-| cross-cutting application behaviour                        | `examples/demo`                               | `analyze`, `check`, and `test:parity` |
+| Change                                                         | Primary surface                               | Minimum proof                         |
+| -------------------------------------------------------------- | --------------------------------------------- | ------------------------------------- |
+| CLI command, config parsing, build orchestration               | `crates/ruvyxa_cli/src/main.rs`               | relevant Rust test plus demo `check`  |
+| route matching, validation, rendering detection                | `crates/ruvyxa_graph/src/lib.rs`              | graph test plus `routes`/`analyze`    |
+| compilation, linking, source maps, Oxc transforms/minification | `crates/ruvyxa_bundler`                       | bundler tests plus demo build         |
+| CSS collection, minification, style HMR                        | `crates/ruvyxa_dev_server/src/style.rs`       | crate tests plus demo build           |
+| API/action/HMR/server behaviour                                | `crates/ruvyxa_dev_server`                    | crate tests plus parity               |
+| core config or server API                                      | `packages/@ruvyxa/core/src`                   | package test/check                    |
+| npm launcher or runtime script                                 | `packages/ruvyxa`                             | package test and `pnpm pack:smoke`    |
+| generated starter                                              | `templates/minimal`, `packages/create-ruvyxa` | create-package test and pack smoke    |
+| cross-cutting application behaviour                            | `examples/demo`                               | `analyze`, `check`, and `test:parity` |
 
 Add a Rust test beside shared Rust behaviour. Add a Node test under `tests/packages/**` when
 changing a public config, runtime, package, or template contract. Never weaken an existing test just

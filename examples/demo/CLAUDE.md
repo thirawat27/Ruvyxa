@@ -2,8 +2,8 @@
 
 Read `AGENTS.md` first and follow it as the source of truth.
 
-This is a Ruvyxa app with file-based routing under `app/`, React 19, TypeScript, and Node.js 22 or
-newer.
+This is a Ruvyxa app with file-based routing under `app/`, React 19, TypeScript, and Node.js 22.12
+or newer.
 
 This project supports multiple package managers. The examples below use `npm`; use the equivalent
 command for `pnpm`, `yarn`, or `bun` when appropriate.

@@ -105,6 +105,36 @@ import Card from './Card.js'
     })
   })
 
+  it('lowers TypeScript enums and namespaces through Oxc', async () => {
+    await withFixture(async ({ root, outDir }) => {
+      const moduleFile = path.join(root, 'typed.ts')
+      const outfile = path.join(outDir, 'typed.mjs')
+      await writeFile(
+        moduleFile,
+        `
+          enum Mode { Development, Production = 4 }
+          namespace BuildInfo { export const label: string = 'ready' }
+          export const mode = Mode.Production
+          export const label = BuildInfo.label
+        `,
+      )
+
+      await compileBundle({
+        projectRoot: root,
+        entrySource: `export { mode, label } from ${JSON.stringify(toImportPath(moduleFile))}`,
+        sourcefile: 'ruvyxa:typed-entry.ts',
+        outfile,
+        platform: 'node',
+      })
+
+      const output = await readFile(outfile, 'utf8')
+      const mod = await import(pathToFileURL(outfile).href + `?t=${Date.now()}`)
+      assert.doesNotMatch(output, /\benum\s+Mode\b|\bnamespace\s+BuildInfo\b/)
+      assert.equal(mod.mode, 4)
+      assert.equal(mod.label, 'ready')
+    })
+  })
+
   it('keeps code valid when runtime compiler minification is requested', async () => {
     await withFixture(async ({ root, outDir }) => {
       const pageFile = path.join(root, 'page.ts')
@@ -441,7 +471,7 @@ import Card from './Card.js'
       })
 
       const output = await readFile(outfile, 'utf8')
-      assert.match(output, /"style": \{ color: accent \}/)
+      assert.match(output, /style:\s*\{\s*color:\s*accent\s*\}/)
       assert.match(output, /React\.createElement\("style"/)
       assert.match(output, /\.card \{ color:/)
     })

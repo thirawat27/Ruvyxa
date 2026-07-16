@@ -3,7 +3,6 @@ import { existsSync, statSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import path from 'node:path'
-import { stripTypeScriptTypes } from 'node:module'
 import { fileURLToPath } from 'node:url'
 
 const JS_EXTENSIONS = ['', '.ts', '.tsx', '.js', '.jsx', '.mts', '.mjs', '.md', '.mdx']
@@ -438,8 +437,7 @@ function rewriteModule(module) {
   const cached = compilerCache.rewrites.get(rewriteKey)
   if (cached) return cached
 
-  let source = shouldTransformJsx(module) ? transformJsx(module.source) : module.source
-  source = stripTypes(source)
+  const source = transformModuleSource(module)
   const codeOnly = maskNonCode(source)
 
   const lines = []
@@ -525,11 +523,6 @@ function isBalancedDefaultExpression(lines) {
     else if (char === ')' || char === '}' || char === ']') depth -= 1
   }
   return depth <= 0
-}
-
-function shouldTransformJsx(module) {
-  const name = module.filePath || module.key || ''
-  return name.endsWith('.tsx') || name.endsWith('.jsx')
 }
 
 function rewriteImport(line, module) {
@@ -897,8 +890,47 @@ async function writeIfChanged(file, contents) {
   await writeFile(file, contents)
 }
 
-function stripTypes(source) {
-  return stripTypeScriptTypes(source, { mode: 'strip' })
+function transformModuleSource(module) {
+  // Resolve lazily so tools that copy compiler.mjs for path-isolation checks do
+  // not need the package dependency beside the copied file until compilation.
+  const filename = String(module.filePath || module.key || 'ruvyxa:module.ts')
+  const extension = path.extname(filename).toLowerCase()
+  const lang =
+    extension === '.tsx'
+      ? 'tsx'
+      : extension === '.jsx'
+        ? 'jsx'
+        : extension === '.ts' || extension === '.mts' || extension === '.cts'
+          ? 'ts'
+          : 'js'
+  const { transformSync } = createRequire(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), '__ruvyxa-transform.cjs'),
+  )('oxc-transform')
+  const result = transformSync(filename, module.source, {
+    lang,
+    sourceType: 'module',
+    target: 'esnext',
+    typescript: {
+      onlyRemoveTypeImports: false,
+      allowNamespaces: true,
+      optimizeConstEnums: false,
+      optimizeEnums: false,
+    },
+    jsx: {
+      runtime: 'classic',
+      development: false,
+      throwIfNamespace: false,
+      pure: false,
+      pragma: 'React.createElement',
+      pragmaFrag: 'React.Fragment',
+    },
+  })
+
+  if (result.errors.length > 0) {
+    const detail = result.errors.map((error) => error.message).join('; ')
+    throw new Error(`RUV1802 Oxc transform failed for ${filename}: ${detail}`)
+  }
+  return result.code
 }
 
 function checkClientBoundary(root, filePath, source) {
@@ -919,220 +951,6 @@ function checkClientBoundary(root, filePath, source) {
       `RUV1008: Private environment variable ${envName} used in client bundle: ${filePath}`,
     )
   }
-}
-
-function transformJsx(source) {
-  const parser = new JsxTransformer(source)
-  return parser.run()
-}
-
-class JsxTransformer {
-  constructor(source) {
-    this.source = source
-    this.index = 0
-    this.output = ''
-  }
-
-  run() {
-    while (this.index < this.source.length) {
-      if (this.source.startsWith('<>', this.index)) {
-        this.output += this.parseFragment()
-      } else if (
-        this.source[this.index] === '<' &&
-        /[A-Za-z]/.test(this.source[this.index + 1] || '')
-      ) {
-        this.output += this.parseElement()
-      } else {
-        this.output += this.source[this.index++]
-      }
-    }
-    return this.output
-  }
-
-  parseFragment() {
-    this.index += 2
-    const children = this.readChildren(null)
-    return `React.createElement(React.Fragment, null${children.length ? `, ${children.join(', ')}` : ''})`
-  }
-
-  parseElement() {
-    this.expect('<')
-    const tag = this.readName()
-    const props = []
-    while (this.index < this.source.length) {
-      this.skipWhitespace()
-      if (this.source.startsWith('/>', this.index)) {
-        this.index += 2
-        return `React.createElement(${formatTag(tag)}, ${formatProps(props)})`
-      }
-      if (this.source[this.index] === '>') {
-        this.index++
-        break
-      }
-      props.push(this.readProp())
-    }
-
-    const children = this.readChildren(tag)
-    return `React.createElement(${formatTag(tag)}, ${formatProps(props)}${children.length ? `, ${children.join(', ')}` : ''})`
-  }
-
-  readChildren(tag) {
-    const children = []
-    while (this.index < this.source.length) {
-      if (tag === null && this.source.startsWith('</>', this.index)) {
-        this.index += 3
-        break
-      }
-      if (tag !== null && this.source.startsWith(`</${tag}`, this.index)) {
-        this.index += tag.length + 2
-        while (this.source[this.index] !== '>' && this.index < this.source.length) this.index++
-        this.index++
-        break
-      }
-      if (this.source.startsWith('<>', this.index)) {
-        children.push(this.parseFragment())
-        continue
-      }
-      if (this.source[this.index] === '<' && /[A-Za-z]/.test(this.source[this.index + 1] || '')) {
-        children.push(this.parseElement())
-        continue
-      }
-      if (this.source[this.index] === '{') {
-        const expr = this.readBalanced('{', '}')
-        const inner = expr.slice(1, -1).trim()
-        if (inner && !isJsxComment(inner)) children.push(transformJsxExpression(inner))
-        continue
-      }
-      const text = this.readText()
-      if (text.trim()) children.push(JSON.stringify(text.replace(/\s+/g, ' ').trim()))
-    }
-
-    return children
-  }
-
-  readProp() {
-    if (this.source.startsWith('{...', this.index)) {
-      const expr = this.readBalanced('{', '}')
-      return { spread: transformJsxExpression(expr.slice(4, -1).trim()) }
-    }
-    const name = this.readName()
-    this.skipWhitespace()
-    if (this.source[this.index] !== '=') return [name, 'true']
-    this.index++
-    this.skipWhitespace()
-    const quote = this.source[this.index]
-    if (quote === '"' || quote === "'") {
-      this.index++
-      const start = this.index
-      while (this.source[this.index] !== quote && this.index < this.source.length) this.index++
-      const value = this.source.slice(start, this.index)
-      this.index++
-      return [name, JSON.stringify(value)]
-    }
-    if (this.source[this.index] === '{') {
-      const expr = this.readBalanced('{', '}')
-      return [name, transformJsxExpression(expr.slice(1, -1).trim())]
-    }
-    return [name, 'true']
-  }
-
-  readText() {
-    const start = this.index
-    while (
-      this.index < this.source.length &&
-      this.source[this.index] !== '<' &&
-      this.source[this.index] !== '{'
-    ) {
-      this.index++
-    }
-    return this.source.slice(start, this.index)
-  }
-
-  readBalanced(open, close) {
-    const start = this.index
-    let depth = 0
-    while (this.index < this.source.length) {
-      const char = this.source[this.index++]
-      if (char === '"' || char === "'" || char === '`') {
-        this.skipString(char)
-        continue
-      }
-      if (char === open) depth++
-      if (char === close && --depth === 0) break
-    }
-    return this.source.slice(start, this.index)
-  }
-
-  skipString(quote) {
-    while (this.index < this.source.length) {
-      const char = this.source[this.index++]
-      if (char === '\\') {
-        this.index++
-        continue
-      }
-      if (char === quote) return
-    }
-  }
-
-  readName() {
-    const start = this.index
-    while (/[A-Za-z0-9_$:.-]/.test(this.source[this.index] || '')) this.index++
-    return this.source.slice(start, this.index)
-  }
-
-  skipWhitespace() {
-    while (/\s/.test(this.source[this.index] || '')) this.index++
-  }
-
-  expect(char) {
-    if (this.source[this.index] !== char) {
-      const line = this.source.slice(0, this.index).split('\n').length
-      const col = this.index - (this.source.lastIndexOf('\n', this.index - 1) + 1)
-      const ctx = this.source
-        .slice(Math.max(0, this.index - 20), this.index + 20)
-        .replace(/\n/g, '\\n')
-      throw new Error(`Expected '${char}' at line ${line}:${col} near "...${ctx}..."`)
-    }
-    this.index++
-  }
-}
-
-function formatTag(tag) {
-  return /^[a-z]/.test(tag) ? JSON.stringify(tag) : tag
-}
-
-function formatProps(props) {
-  if (!props.length) return 'null'
-  const objects = []
-  let current = []
-
-  for (const prop of props) {
-    if (prop.spread) {
-      if (current.length) {
-        objects.push(`{ ${current.join(', ')} }`)
-        current = []
-      }
-      objects.push(prop.spread)
-      continue
-    }
-    const [name, value] = prop
-    current.push(`${JSON.stringify(name)}: ${value}`)
-  }
-
-  if (current.length) objects.push(`{ ${current.join(', ')} }`)
-  return objects.length === 1 ? objects[0] : `Object.assign({}, ${objects.join(', ')})`
-}
-
-function isJsxComment(value) {
-  return value.startsWith('/*') && value.endsWith('*/')
-}
-
-function transformJsxExpression(value) {
-  return maybeContainsJsx(value) ? transformJsx(value) : value
-}
-
-function maybeContainsJsx(value) {
-  return /<[A-Za-z][\w:.-]*(\s|>|\/)/.test(value) || value.includes('<>')
 }
 
 function privateEnvReads(source) {

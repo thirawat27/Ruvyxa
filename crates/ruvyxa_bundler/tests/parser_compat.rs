@@ -81,7 +81,7 @@ fn transforms_decorators_satisfies_implements_enums_and_using_fixture() {
     assert!(!output.contains("@sealed"), "{output}");
     assert!(!output.contains("implements Disposable"), "{output}");
     assert!(!output.contains("satisfies Config"), "{output}");
-    assert!(output.contains("const Mode"), "{output}");
+    assert!(output.contains("Mode[Mode[\"Development\"]"), "{output}");
     assert!(output.contains("await using resource"), "{output}");
 }
 
@@ -102,5 +102,5 @@ fn transforms_fragments_member_tags_namespaced_tags_and_spread_props() {
         output.contains("React.createElement(\"svg:path\""),
         "{output}"
     );
-    assert!(output.contains("Object.assign"), "{output}");
+    assert!(output.contains("...extra"), "{output}");
 }

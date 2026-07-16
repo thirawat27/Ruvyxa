@@ -11,7 +11,7 @@ file-system route shape:
 
 ## Rules
 
-- Use Node.js 22 or newer.
+- Use Node.js 22.12 or newer.
 - Keep route files under `app/`. Pages use `page.tsx`; API routes use `route.ts`.
 - Server-rendered pages are the default. Add `'use client'` only when browser-only interactivity is
   required.

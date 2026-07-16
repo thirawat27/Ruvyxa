@@ -538,12 +538,12 @@ fn read_source_fast(path: &Path, len: u64) -> Result<String> {
             }
         }
     }
-    Ok(fs::read_to_string(path).map_err(|error| {
+    fs::read_to_string(path).map_err(|error| {
         BundleError::Io(std::io::Error::new(
             error.kind(),
             format!("{}: {}", path.display(), error),
         ))
-    })?)
+    })
 }
 
 /// Walk the import graph using a shared resolver/source cache.

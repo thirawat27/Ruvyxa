@@ -12,8 +12,8 @@
 //! Entry file (TSX/TS/JSX/JS)
 //!   └─ resolver   → resolve all imports to absolute paths
 //!                   (package.json `exports` map, tsconfig `paths`/`baseUrl`)
-//!   └─ compiler   → strip types + transform JSX (classic or automatic runtime)
-//!                   + expand enums + strip decorators
+//!   └─ compiler   → Oxc TypeScript stripping + JSX transform (classic or automatic runtime)
+//!                   + Ruvyxa decorator compatibility pre-pass
 //!   └─ boundary   → enforce server/client rules (RUV1007, RUV1008, RUV1010)
 //!   └─ linker     → topological sort + concatenate modules
 //!                   (circular dependency detection)

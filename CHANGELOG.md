@@ -18,8 +18,25 @@
 - Added per-phase timing metrics and total build duration reporting in build output metadata
 - Added a prerender worker pool that chooses parallelism from route count and available CPU capacity
 - Migrated static prerendering and SSG rendering to the async worker-pool workflow
-- Modernized the native TypeScript/JSX compiler and runtime compiler boundary, including the
-  `ruvyxa-compiler` runtime integration
+- Replaced the duplicated hand-written TypeScript stripping and JSX lowering paths in both the Rust
+  bundler and `runtime/compiler.mjs` with Oxc 0.139.0 transformers
+- Preserved the existing resolver, graph cache, plugin ordering, linker, module metadata, client
+  boundary validation, and public compile APIs while moving syntax transformation behind narrow Oxc
+  adapters
+- Added Oxc semantic analysis before Rust-side transformation so TypeScript enums, namespaces,
+  `satisfies`, typed destructuring, JSX fragments, spread props, and namespaced JSX tags continue to
+  compile through one parser-backed pipeline
+- Kept classic React JSX output as the compatibility default and retained the automatic JSX runtime
+  option without changing caller-facing compiler configuration
+- Retained the Rust bundler's historical decorator behavior with a compatibility pre-pass, avoiding
+  unresolved `@oxc-project/runtime` helper imports until helper-aware graph integration is
+  introduced
+- Removed Node's experimental `stripTypeScriptTypes` dependency and the custom runtime
+  `JsxTransformer`; all Node renderers now reach the same Oxc-backed compiler entry points
+- Pinned the Rust and npm transformer implementations to Oxc `0.139.0` and included native bindings
+  for supported Windows, macOS, Linux, and WASI targets in the package lock
+- Raised the framework, workspace, demo, and starter app Node requirement from `22.0.0` to `22.12.0`
+  to match the native Oxc transformer runtime contract
 - Improved resolver, compiler, and graph-cache reuse across multi-route builds
 - Rebranded native bundler references to **Ruvyxa Bundler** across diagnostics, documentation, and
   package metadata
@@ -31,13 +48,18 @@
 - Improved runtime worker-pool coordination for asynchronous route rendering
 - Added clearer file I/O errors that include the missing source path, making dependency and package
   setup failures easier to diagnose
+- Simplified the path-aware resolver read helper so strict workspace Clippy passes without the
+  redundant enclosing `Ok(...)` and `?`, while preserving the original I/O error kind and path
 - Updated compiler and worker-pool regression coverage for the new asynchronous execution model
+- Expanded compiler parity coverage across Rust parser fixtures and the published Node runtime. Rust
+  fixtures cover annotations, enums, decorators, fragments, spreads, and nested expressions; Node
+  runtime tests cover enum and namespace lowering, TSX, CSS-in-JS objects, dynamic imports, cache
+  invalidation, source maps, and paths containing spaces
 - Added cross-platform project setup scripts:
-  - `setup.mjs` for Windows, macOS, and Linux
-  - `setup.bat` as a Windows launcher
-  - `setup.sh` as a macOS/Linux launcher
+  - `setup.bat` with the complete Windows setup workflow
+  - `setup.sh` with the complete macOS/Linux setup workflow
 - Setup now installs locked workspace dependencies, builds all npm workspace packages, and compiles
-  the Ruvyxa CLI before development
+  the Ruvyxa CLI before development, without depending on a shared `setup.mjs` launcher
 
 ### Release and Documentation
 
@@ -46,6 +68,8 @@
   parallelism
 - Updated English and Thai configuration documentation for the new build behavior
 - Updated bundler architecture, developer, package, and production-readiness documentation
+- Documented the Oxc ownership boundary, decorator compatibility strategy, source-map follow-up, and
+  native Node version requirement
 - Added and updated compiler, parser compatibility, shared bundling, and worker-pool regression
   coverage
 

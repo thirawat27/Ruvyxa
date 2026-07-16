@@ -4,6 +4,8 @@ CLI, runtime bridge, and public framework entrypoints for Ruvyxa apps.
 
 ## Install
 
+Node.js 22.12 or later is required by the native Oxc transformer.
+
 ```bash
 npm install ruvyxa react react-dom
 ```
@@ -139,17 +141,17 @@ generated client maps.
 
 The runtime files included in this package:
 
-| File                          | Purpose                                            |
-| ----------------------------- | -------------------------------------------------- |
-| `runtime/worker-pool.mjs`     | Persistent IPC worker for all rendering            |
-| `runtime/ssr-renderer.mjs`    | Server-side React rendering                        |
-| `runtime/client-renderer.mjs` | Client hydration bundle generation                 |
-| `runtime/compiler.mjs`        | Ruvyxa runtime compiler used by all Node renderers |
-| `runtime/api-renderer.mjs`    | API route execution                                |
-| `runtime/action-renderer.mjs` | Server action execution                            |
-| `runtime/config-renderer.mjs` | Config file loading                                |
-| `runtime/plugin-runner.mjs`   | Persistent config-plugin hook worker               |
-| `runtime/ssg-renderer.mjs`    | Build-time SSG/ISR/PPR pre-rendering               |
+| File                          | Purpose                                                |
+| ----------------------------- | ------------------------------------------------------ |
+| `runtime/worker-pool.mjs`     | Persistent IPC worker for all rendering                |
+| `runtime/ssr-renderer.mjs`    | Server-side React rendering                            |
+| `runtime/client-renderer.mjs` | Client hydration bundle generation                     |
+| `runtime/compiler.mjs`        | Oxc-backed runtime compiler used by all Node renderers |
+| `runtime/api-renderer.mjs`    | API route execution                                    |
+| `runtime/action-renderer.mjs` | Server action execution                                |
+| `runtime/config-renderer.mjs` | Config file loading                                    |
+| `runtime/plugin-runner.mjs`   | Persistent config-plugin hook worker                   |
+| `runtime/ssg-renderer.mjs`    | Build-time SSG/ISR/PPR pre-rendering                   |
 
 ## Native CLI
 

@@ -4345,10 +4345,7 @@ mod tests {
             let route_file = route["file"].as_str().unwrap();
             let route_code = std::fs::read_to_string(client_dir.join(route_file)).unwrap();
             assert!(route_code.starts_with("import \"./shared."), "{route_code}");
-            assert!(
-                !route_code.contains("const label = 'shared'"),
-                "{route_code}"
-            );
+            assert!(!route_code.contains("const label = "), "{route_code}");
         }
         let shared_file = client_manifest["sharedRouteChunks"][0]["file"]
             .as_str()
@@ -4359,7 +4356,10 @@ mod tests {
             "{shared_code}"
         );
         assert!(
-            shared_code.contains("const label = 'shared'"),
+            shared_code.lines().any(|line| {
+                let line = line.trim();
+                line.starts_with("const label = ") && line.contains("shared")
+            }),
             "{shared_code}"
         );
 
