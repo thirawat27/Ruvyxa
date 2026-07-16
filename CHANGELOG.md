@@ -1,5 +1,36 @@
 # Changelog
 
+## v1.0.14 (2026-07-16)
+
+### Bundler and Build Pipeline
+
+- Added shared module bundling and a shared-route registry to reduce duplicated client code across
+  route bundles
+- Added async build phases and a worker pool for parallel prerendering
+- Modernized the native compiler pipeline and runtime compiler integration
+- Improved resolver and compiler cache behavior for repeated multi-route builds
+- Rebranded native bundler references to **Ruvyxa Bundler** across diagnostics, documentation, and
+  package metadata
+
+### Runtime and Developer Experience
+
+- Improved worker-pool and prerender reliability for production builds
+- Added clearer file I/O errors that include the missing source path, making dependency and package
+  setup failures easier to diagnose
+- Added cross-platform project setup scripts:
+  - `setup.mjs` for Windows, macOS, and Linux
+  - `setup.bat` as a Windows launcher
+  - `setup.sh` as a macOS/Linux launcher
+- Setup now installs locked workspace dependencies, builds npm packages, and compiles the Ruvyxa CLI
+  before development
+
+### Release and Documentation
+
+- Bumped workspace packages and Rust crates to `1.0.14`
+- Updated CLI and configuration documentation for the new build and worker-pool behavior
+- Updated bundler architecture and production-readiness documentation
+- Added and updated compiler and worker-pool regression coverage
+
 ## v1.0.13 (2026-07-14)
 
 ### Runtime Path Compatibility
