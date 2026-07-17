@@ -1,6 +1,6 @@
 {
   "name": "@ruvyxa/adapter-static",
-  "version": "1.0.14",
+  "version": "1.0.15",
   "description": "Prepare Ruvyxa routes and assets for static output targets through the first-party adapter contract.",
   "license": "Apache-2.0",
   "type": "module",

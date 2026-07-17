@@ -163,6 +163,56 @@ import Card from './Card.js'
     })
   })
 
+  it('initializes shared dependencies before importers across client graph branches', async () => {
+    await withFixture(async ({ root, outDir }) => {
+      const reactFile = path.join(root, 'react.js')
+      const rendererFile = path.join(root, 'renderer.js')
+      const pageFile = path.join(root, 'page.js')
+      const outfile = path.join(outDir, 'dependency-order.mjs')
+
+      await writeFile(
+        reactFile,
+        `
+          export function useState(value) { return [value] }
+          export function useEffect() {}
+        `,
+      )
+      await writeFile(
+        rendererFile,
+        `
+          import { useState } from 'react'
+          export function render(Page) { return Page(useState) }
+        `,
+      )
+      await writeFile(
+        pageFile,
+        `
+          'use client'
+          import { useEffect, useState } from 'react'
+          export default function Page(rendererHook) {
+            return rendererHook === useState && typeof useEffect === 'function'
+          }
+        `,
+      )
+
+      await compileBundle({
+        projectRoot: root,
+        entrySource: `
+          import { render } from ${JSON.stringify(toImportPath(rendererFile))}
+          import Page from ${JSON.stringify(toImportPath(pageFile))}
+          export const initialized = render(Page)
+        `,
+        sourcefile: 'ruvyxa:client-dependency-order-entry.tsx',
+        outfile,
+        platform: 'browser',
+        aliases: { react: reactFile },
+      })
+
+      const mod = await import(pathToFileURL(outfile).href + `?t=${Date.now()}`)
+      assert.equal(mod.initialized, true)
+    })
+  })
+
   it('recompiles a changed source after compiler-cache invalidation', async () => {
     await withFixture(async ({ root, outDir }) => {
       const pageFile = path.join(root, 'page.ts')

@@ -1,6 +1,6 @@
 {
   "name": "@ruvyxa/cli-darwin-arm64",
-  "version": "1.0.14",
+  "version": "1.0.15",
   "description": "Prebuilt Ruvyxa native CLI binary for macOS arm64.",
   "license": "Apache-2.0",
   "type": "module",

@@ -307,7 +307,7 @@ function linkModules(modules, externals, { minify, outfile, sourceMap }) {
 
   const rewrittenModules = new Map(modules.map((module) => [module.id, rewriteModule(module)]))
 
-  for (const module of modules.slice().reverse()) {
+  for (const module of orderModulesByDependencies(modules)) {
     const rewritten = rewrittenModules.get(module.id)
     const sourceIndex =
       sourceMap && module.filePath
@@ -352,6 +352,34 @@ function linkModules(modules, externals, { minify, outfile, sourceMap }) {
     code,
     map: sourceMap ? buildSourceMap(outfile, lineMappings, mapSources) : null,
   }
+}
+
+/**
+ * Return modules in stable dependency-first order.
+ *
+ * Discovery order is depth-first from the synthetic entry, but reversing that
+ * order is not a valid topological sort when separate branches share a module.
+ * Eager IIFE wrappers must initialize each local dependency before any importer
+ * reads its namespace object.
+ */
+function orderModulesByDependencies(modules) {
+  const ordered = []
+  const visiting = new Set()
+  const visited = new Set()
+
+  const visit = (module) => {
+    if (visited.has(module.id) || visiting.has(module.id)) return
+    visiting.add(module.id)
+    for (const dependency of module.deps.values()) {
+      if (!dependency.external) visit(dependency)
+    }
+    visiting.delete(module.id)
+    visited.add(module.id)
+    ordered.push(module)
+  }
+
+  for (const module of modules) visit(module)
+  return ordered
 }
 
 function collectLinkedExportNames(moduleId, rewrittenModules, seen = new Set()) {

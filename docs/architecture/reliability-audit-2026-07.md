@@ -1,5 +1,36 @@
 # Reliability Audit — 2026-07
 
+## Follow-up update — 2026-07-17 (v1.0.15)
+
+The Node runtime compiler previously emitted `modules.slice().reverse()` after depth-first module
+discovery. Reversal only works for a single dependency branch; when the synthetic client entry
+discovered React through one branch and a client page imported the same React module through a later
+branch, the page wrapper could execute first and read React's `__m…` namespace while it was still in
+the temporal dead zone. The browser then failed at `/__ruvyxa/client` with
+`Cannot access '__m…' before initialization`.
+
+`packages/ruvyxa/runtime/compiler.mjs` now computes a stable dependency-first order from each
+module's resolved local dependency edges before emitting eager IIFE wrappers. Public compiler
+inputs, entry exports, module IDs, source maps, external imports, and the Rust bundler remain
+unchanged. The Rust linker already used dependency-first ordering.
+
+A focused Node regression builds the cross-branch graph with a client page importing `useState` and
+`useEffect`, then imports the generated bundle. It reproduced the temporal-dead-zone failure before
+the correction and passes after the correction.
+
+### v1.0.15 validation
+
+- The focused dependency-order regression passed, and the complete runtime compiler suite passed 25
+  tests. The full `ruvyxa` package suite passed 44 tests.
+- `pnpm -r test` passed across the npm workspace, and `cargo test --workspace --locked` passed 303
+  Rust tests.
+- `pnpm -r build` and `pnpm -r check` passed, including production build, dev/production parity, and
+  smoke rendering for all 16 demo routes.
+- `pnpm release:validate` confirmed 15 npm package manifests and six Rust crate manifests at
+  `1.0.15`; `pnpm pack:smoke` packed the release and installed/type-checked a clean starter using
+  `ruvyxa` and `@ruvyxa/react` 1.0.15.
+- Cargo formatting and Prettier checks passed for every tracked file changed by this release.
+
 ## Follow-up update — 2026-07-16
 
 This document retains the July 13 repair record below and adds the current follow-up evidence for

@@ -55,14 +55,21 @@ for (const dir of crateDirs) {
   }
 }
 
-// Update template dependency
+// Update framework dependencies in the source starter template. The
+// create-ruvyxa package copies this directory during prepack.
 const templatePkg = 'templates/minimal/package.json'
 try {
   const tmpl = JSON.parse(readFileSync(templatePkg, 'utf8'))
-  if (tmpl.dependencies?.ruvyxa) {
-    tmpl.dependencies.ruvyxa = `^${newVersion}`
+  let changed = false
+  for (const dependency of ['ruvyxa', '@ruvyxa/react']) {
+    if (tmpl.dependencies?.[dependency] && tmpl.dependencies[dependency] !== `^${newVersion}`) {
+      tmpl.dependencies[dependency] = `^${newVersion}`
+      changed = true
+    }
+  }
+  if (changed) {
     writeFileSync(templatePkg, JSON.stringify(tmpl, null, 2) + '\n')
-    console.log(`template ruvyxa dep → ^${newVersion}`)
+    console.log(`template framework deps → ^${newVersion}`)
   }
 } catch {
   // template may not exist in all contexts

@@ -1,5 +1,30 @@
 # Changelog
 
+## v1.0.15 (2026-07-17)
+
+### Client Bundling Reliability
+
+- Fixed the Node runtime compiler's client-module initialization order. It now performs a stable
+  dependency-first traversal instead of reversing module discovery order, which was not a valid
+  topological order when separate graph branches shared React or another dependency.
+- Prevented client components that import React hooks from failing at `/__ruvyxa/client` with
+  `Cannot access '__m…' before initialization` during development or hydration bundle evaluation.
+- Added a runtime compiler regression that reproduces the cross-branch shared-dependency graph and
+  evaluates the generated bundle to prove every acyclic local dependency initializes before its
+  importers.
+- Kept the Node runtime behavior aligned with the Rust bundler's existing dependency-first linker
+  without changing compiler APIs, entry exports, module identifiers, or source-map behavior.
+
+### Release Metadata and Documentation
+
+- Bumped all npm workspace packages and Rust crates to `1.0.15` and regenerated `Cargo.lock`.
+- Updated the minimal starter to require both `ruvyxa` and `@ruvyxa/react` `^1.0.15`.
+- Updated the version-bump workflow so future releases keep both starter framework dependencies in
+  sync; the ignored `create-ruvyxa` package copy continues to be regenerated from the source
+  template during prepack.
+- Documented the client initialization root cause, applied repair, and regression evidence in the
+  July reliability audit.
+
 ## v1.0.14 (2026-07-16)
 
 ### Reliability and Configuration Safety

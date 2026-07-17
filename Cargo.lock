@@ -2642,7 +2642,7 @@ checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 
 [[package]]
 name = "ruvyxa_bundler"
-version = "1.0.14"
+version = "1.0.15"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2661,7 +2661,7 @@ dependencies = [
 
 [[package]]
 name = "ruvyxa_cli"
-version = "1.0.14"
+version = "1.0.15"
 dependencies = [
  "anyhow",
  "blake3",
@@ -2686,7 +2686,7 @@ dependencies = [
 
 [[package]]
 name = "ruvyxa_dev_server"
-version = "1.0.14"
+version = "1.0.15"
 dependencies = [
  "axum",
  "base64",
@@ -2710,7 +2710,7 @@ dependencies = [
 
 [[package]]
 name = "ruvyxa_diagnostics"
-version = "1.0.14"
+version = "1.0.15"
 dependencies = [
  "serde",
  "thiserror 2.0.18",
@@ -2718,7 +2718,7 @@ dependencies = [
 
 [[package]]
 name = "ruvyxa_graph"
-version = "1.0.14"
+version = "1.0.15"
 dependencies = [
  "ruvyxa_diagnostics",
  "serde",
@@ -2729,7 +2729,7 @@ dependencies = [
 
 [[package]]
 name = "ruvyxa_middleware"
-version = "1.0.14"
+version = "1.0.15"
 dependencies = [
  "axum",
  "ruvyxa_diagnostics",

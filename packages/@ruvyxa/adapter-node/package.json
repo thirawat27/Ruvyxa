@@ -1,6 +1,6 @@
 {
   "name": "@ruvyxa/adapter-node",
-  "version": "1.0.14",
+  "version": "1.0.15",
   "description": "Run Ruvyxa on Node with a clean adapter contract for server output, assets, and production runtime metadata.",
   "license": "Apache-2.0",
   "type": "module",

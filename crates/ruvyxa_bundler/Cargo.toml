@@ -1,6 +1,6 @@
 [package]
 name = "ruvyxa_bundler"
-version = "1.0.14"
+version = "1.0.15"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
