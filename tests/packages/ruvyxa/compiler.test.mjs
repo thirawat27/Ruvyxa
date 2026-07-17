@@ -213,6 +213,73 @@ import Card from './Card.js'
     })
   })
 
+  it('rejects circular local dependencies before emitting an invalid bundle', async () => {
+    await withFixture(async ({ root, outDir }) => {
+      const firstFile = path.join(root, 'first.js')
+      const secondFile = path.join(root, 'second.js')
+      const outfile = path.join(outDir, 'circular.mjs')
+
+      await writeFile(
+        firstFile,
+        `import { second } from './second.js'\nexport const first = 'first:' + second\n`,
+      )
+      await writeFile(
+        secondFile,
+        `import { first } from './first.js'\nexport const second = 'second:' + first\n`,
+      )
+
+      await assert.rejects(
+        compileBundle({
+          projectRoot: root,
+          entrySource: `export { first } from ${JSON.stringify(toImportPath(firstFile))}`,
+          sourcefile: 'ruvyxa:circular-entry.js',
+          outfile,
+          platform: 'browser',
+        }),
+        /RUV1803 circular dependency detected: first\.js -> second\.js -> first\.js/,
+      )
+    })
+  })
+
+  it('rewrites executable CommonJS requires without changing literal examples', async () => {
+    await withFixture(async ({ root, outDir }) => {
+      const dependencyFile = path.join(root, 'dependency.cjs')
+      const entryFile = path.join(root, 'entry.js')
+      const outfile = path.join(outDir, 'commonjs-literals.mjs')
+      const specifier = './dependency.cjs'
+
+      await writeFile(dependencyFile, `module.exports = { value: 42 }\n`)
+      await writeFile(
+        entryFile,
+        [
+          `const dependency = require(${JSON.stringify(specifier)})`,
+          `const example = ${JSON.stringify(`require(${JSON.stringify(specifier)})`)}`,
+          `const template = \`require(${JSON.stringify(specifier)})\``,
+          `// require(${JSON.stringify(specifier)}) must stay documentation`,
+          `export const result = { value: dependency.value, example, template }`,
+          '',
+        ].join('\n'),
+      )
+
+      await compileBundle({
+        projectRoot: root,
+        entrySource: `export { result } from ${JSON.stringify(toImportPath(entryFile))}`,
+        sourcefile: 'ruvyxa:commonjs-literal-entry.js',
+        outfile,
+        platform: 'browser',
+      })
+
+      const output = await readFile(outfile, 'utf8')
+      const mod = await import(pathToFileURL(outfile).href + `?t=${Date.now()}`)
+      assert.deepEqual(mod.result, {
+        value: 42,
+        example: `require(${JSON.stringify(specifier)})`,
+        template: `require(${JSON.stringify(specifier)})`,
+      })
+      assert.match(output, /must stay documentation/)
+    })
+  })
+
   it('recompiles a changed source after compiler-cache invalidation', async () => {
     await withFixture(async ({ root, outDir }) => {
       const pageFile = path.join(root, 'page.ts')

@@ -5,13 +5,14 @@
   "license": "Apache-2.0",
   "type": "module",
   "main": "./dist/index.js",
-  "types": "./dist/index.d.ts",
+  "types": "./types/index.d.ts",
   "bin": {
     "ruvyxa": "./bin/ruvyxa.js"
   },
   "files": [
     "bin",
     "dist",
+    "types",
     "native-bin",
     "runtime/action-renderer.mjs",
     "runtime/api-renderer.mjs",
@@ -52,15 +53,15 @@
   },
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
+      "types": "./types/index.d.ts",
       "default": "./dist/index.js"
     },
     "./server": {
-      "types": "./dist/server.d.ts",
+      "types": "./types/server.d.ts",
       "default": "./dist/server.js"
     },
     "./config": {
-      "types": "./dist/config.d.ts",
+      "types": "./types/config.d.ts",
       "default": "./dist/config.js"
     }
   },

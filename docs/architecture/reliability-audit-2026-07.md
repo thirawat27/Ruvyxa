@@ -1,5 +1,29 @@
 # Reliability Audit — 2026-07
 
+## Root-cause hardening — 2026-07-17
+
+The v1.0.15 dependency-first traversal is the root correction for the `report.md` failure on valid,
+acyclic module graphs: eager module wrappers now execute only after every local dependency they
+read. The follow-up review found three adjacent contract gaps and corrected them at their ownership
+boundaries:
+
+| Finding                                                                                                                                                    | Evidence                                                                                  | Impact                                                                                                                                      | Severity | Confidence | Applied correction                                                                                                                                                    |
+| ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- | -------- | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| The Node traversal treated an edge back to a currently visiting module as already handled.                                                                 | `packages/ruvyxa/runtime/compiler.mjs`                                                    | Circular imports still produced an invalid eager-IIFE order and failed later with a TDZ error.                                              | High     | Direct     | The Node compiler now reports deterministic `RUV1803` cycle paths before emission, matching the existing native Rust linker contract.                                 |
+| CommonJS discovery masked the quoted argument of `require()`, while the Node and Rust rewrites could also match require-like text outside executable code. | Node compiler masker and both linker rewrite paths                                        | Local CommonJS dependencies could remain unresolved, and matching examples in strings or comments could be changed into module identifiers. | High     | Direct     | Require specifiers are preserved only for dependency discovery; rewrites now check executable lexical context and retain string/comment contents.                     |
+| CSS ambient types were owned by each generated app, while the starter referenced a package declaration file that did not exist.                            | `templates/minimal/app/css.d.ts`, starter `tsconfig.json`, `packages/ruvyxa/package.json` | Every user project carried framework boilerplate, and removing it exposed a package/type-resolution gap.                                    | High     | Direct     | `ruvyxa` now ships `types/css.d.ts`; every public package type entry references it, and new starters no longer contain or explicitly include a local CSS declaration. |
+
+The packed-install smoke test creates a starter without `app/css.d.ts`, installs the freshly packed
+`ruvyxa` and `@ruvyxa/react` tarballs, and passes `tsc --noEmit`. The focused Node compiler suite
+passes 27 tests, the Rust bundler passes 135 unit tests plus four parser-compatibility tests, and
+the scaffolder passes six tests.
+
+Broad verification also passed 304 Rust workspace tests, all npm workspace tests (including 46 in
+the `ruvyxa` package), workspace clippy with warnings denied, package build/check, release metadata
+validation, and dev/production parity plus smoke rendering for all 16 demo routes. The package smoke
+confirmed all four framework type entry files are present in the tarball and resolvable by a clean
+consumer.
+
 ## Follow-up update — 2026-07-17 (v1.0.15)
 
 The Node runtime compiler previously emitted `modules.slice().reverse()` after depth-first module

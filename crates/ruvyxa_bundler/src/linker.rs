@@ -489,6 +489,7 @@ fn rewrite_module_into(
 ) -> Result<()> {
     let mut pending_exports = Vec::new();
     let mut in_block_comment = false;
+    let mut in_commonjs_block_comment = false;
 
     for line in source.lines() {
         let trimmed = line.trim();
@@ -511,7 +512,11 @@ fn rewrite_module_into(
 
         let dynamic_rewritten =
             rewrite_dynamic_imports(content, deps, dynamic_import_files, &mut in_block_comment);
-        let commonjs_rewritten = rewrite_commonjs_requires(&dynamic_rewritten, deps);
+        let commonjs_rewritten = rewrite_commonjs_requires_with_state(
+            &dynamic_rewritten,
+            deps,
+            &mut in_commonjs_block_comment,
+        );
         write_rewritten_line(out, &commonjs_rewritten, indent);
     }
 
@@ -522,38 +527,97 @@ fn rewrite_module_into(
     Ok(())
 }
 
+#[cfg(test)]
 fn rewrite_commonjs_requires(line: &str, deps: &[PathBuf]) -> String {
-    let mut output = String::with_capacity(line.len());
-    let mut search_start = 0;
+    rewrite_commonjs_requires_with_state(line, deps, &mut false)
+}
 
-    while let Some(relative_index) = line[search_start..].find("require(") {
-        let require_start = search_start + relative_index;
-        let value_start = require_start + "require(".len();
-        output.push_str(&line[search_start..require_start]);
+fn rewrite_commonjs_requires_with_state(
+    line: &str,
+    deps: &[PathBuf],
+    in_block_comment: &mut bool,
+) -> String {
+    let mut out = String::with_capacity(line.len());
+    let bytes = line.as_bytes();
+    let mut index = 0;
 
-        let Some((specifier, consumed)) = quoted_value_with_len(&line[value_start..]) else {
-            output.push_str("require(");
-            search_start = value_start;
-            continue;
-        };
-
-        let after_value = value_start + consumed;
-        if let Some(dep_path) = find_dep_for_specifier(&specifier, deps) {
-            output.push_str(&module_id(dep_path));
-            search_start = if line[after_value..].starts_with(')') {
-                after_value + 1
+    while index < bytes.len() {
+        if *in_block_comment {
+            if bytes[index..].starts_with(b"*/") {
+                out.push_str("*/");
+                index += 2;
+                *in_block_comment = false;
             } else {
-                after_value
-            };
-        } else {
-            output.push_str("require(");
-            output.push_str(&line[value_start..after_value]);
-            search_start = after_value;
+                push_next_char(line, &mut out, &mut index);
+            }
+            continue;
         }
+
+        if bytes[index..].starts_with(b"//") {
+            out.push_str(&line[index..]);
+            break;
+        }
+        if bytes[index..].starts_with(b"/*") {
+            out.push_str("/*");
+            index += 2;
+            *in_block_comment = true;
+            continue;
+        }
+        if matches!(bytes[index], b'\'' | b'"' | b'`') {
+            let quote = bytes[index];
+            let start = index;
+            index += 1;
+            while index < bytes.len() {
+                if bytes[index] == b'\\' {
+                    index += 1;
+                    if index < bytes.len() {
+                        advance_char(line, &mut index);
+                    }
+                } else if bytes[index] == quote {
+                    index += 1;
+                    break;
+                } else {
+                    advance_char(line, &mut index);
+                }
+            }
+            out.push_str(&line[start..index]);
+            continue;
+        }
+
+        if bytes[index..].starts_with(b"require")
+            && is_import_boundary(bytes, index)
+            && let Some((specifier, after_call)) = require_call(line, index + "require".len())
+            && let Some(dep_path) = find_dep_for_specifier(&specifier, deps)
+        {
+            out.push_str(&module_id(dep_path));
+            index = after_call;
+            continue;
+        }
+
+        push_next_char(line, &mut out, &mut index);
     }
 
-    output.push_str(&line[search_start..]);
-    output
+    out
+}
+
+fn require_call(line: &str, mut index: usize) -> Option<(String, usize)> {
+    let bytes = line.as_bytes();
+    while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+        index += 1;
+    }
+    if bytes.get(index) != Some(&b'(') {
+        return None;
+    }
+    index += 1;
+    while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+        index += 1;
+    }
+    let (specifier, consumed) = quoted_value_with_len(&line[index..])?;
+    index += consumed;
+    while bytes.get(index).is_some_and(u8::is_ascii_whitespace) {
+        index += 1;
+    }
+    (bytes.get(index) == Some(&b')')).then_some((specifier, index + 1))
 }
 
 fn rewrite_dynamic_imports(
@@ -1436,6 +1500,24 @@ mod tests {
             linked,
             format!("module.exports = {};", module_id(&dependency))
         );
+    }
+
+    #[test]
+    fn commonjs_rewrite_preserves_string_and_comment_examples() {
+        let dependency = PathBuf::from("/app/node_modules/example/index.js");
+        let source = concat!(
+            "const actual = require(\"example\"); ",
+            "const example = 'require(\"example\")'; ",
+            "const template = `require(\"example\")`; ",
+            "// require(\"example\") must stay documentation"
+        );
+
+        let linked = rewrite_commonjs_requires(source, std::slice::from_ref(&dependency));
+
+        assert!(linked.contains(&format!("const actual = {};", module_id(&dependency))));
+        assert!(linked.contains("const example = 'require(\"example\")';"));
+        assert!(linked.contains("const template = `require(\"example\")`;"));
+        assert!(linked.contains("// require(\"example\") must stay documentation"));
     }
 
     #[test]

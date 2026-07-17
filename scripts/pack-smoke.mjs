@@ -76,6 +76,12 @@ for (const file of readdirSync(destination).filter((name) => name.endsWith('.tgz
         `ruvyxa package missing runtime/${runtimeFile}`,
       )
     }
+    for (const typeFile of ['css.d.ts', 'index.d.ts', 'config.d.ts', 'server.d.ts']) {
+      assert(
+        listing.includes(`package/types/${typeFile}`),
+        `ruvyxa package missing types/${typeFile}`,
+      )
+    }
   }
 
   if (packageJson.name === 'create-ruvyxa') {
@@ -143,6 +149,10 @@ execFileSync(
   },
 )
 assert(existsSync(`${extracted}/scaffolded-app/.gitignore`), 'scaffolded app missing .gitignore')
+assert(
+  !existsSync(`${extracted}/scaffolded-app/app/css.d.ts`),
+  'scaffolded app should use the framework-owned CSS declaration',
+)
 
 // Verify the scaffolded template can install and type-check.
 // Install freshly packed packages, not registry releases, so unpublished versions are covered.
@@ -153,6 +163,10 @@ const workspaceTarball = (file) => `file:../${destination}/${file}`
 scaffoldPackageJson.dependencies.ruvyxa = scaffoldTarball(ruvyxaTgz)
 scaffoldPackageJson.dependencies['@ruvyxa/react'] = scaffoldTarball(reactTgz)
 writeFileSync(scaffoldPackageJsonPath, JSON.stringify(scaffoldPackageJson, null, 2) + '\n')
+writeFileSync(
+  `${extracted}/scaffolded-app/app/framework-type-entries.ts`,
+  ["import 'ruvyxa'", "import 'ruvyxa/config'", "import 'ruvyxa/server'", ''].join('\n'),
+)
 writeFileSync(
   `${extracted}/pnpm-workspace.yaml`,
   [

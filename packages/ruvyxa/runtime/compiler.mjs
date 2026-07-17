@@ -364,15 +364,24 @@ function linkModules(modules, externals, { minify, outfile, sourceMap }) {
  */
 function orderModulesByDependencies(modules) {
   const ordered = []
-  const visiting = new Set()
+  const visiting = new Map()
   const visited = new Set()
+  const stack = []
 
   const visit = (module) => {
-    if (visited.has(module.id) || visiting.has(module.id)) return
-    visiting.add(module.id)
+    if (visited.has(module.id)) return
+    if (visiting.has(module.id)) {
+      const cycleStart = visiting.get(module.id)
+      const cycle = [...stack.slice(cycleStart), module].map(moduleDisplayName).join(' -> ')
+      throw new Error(`RUV1803 circular dependency detected: ${cycle}`)
+    }
+
+    visiting.set(module.id, stack.length)
+    stack.push(module)
     for (const dependency of module.deps.values()) {
       if (!dependency.external) visit(dependency)
     }
+    stack.pop()
     visiting.delete(module.id)
     visited.add(module.id)
     ordered.push(module)
@@ -380,6 +389,10 @@ function orderModulesByDependencies(modules) {
 
   for (const module of modules) visit(module)
   return ordered
+}
+
+function moduleDisplayName(module) {
+  return module.filePath ? path.basename(module.filePath) : module.key
 }
 
 function collectLinkedExportNames(moduleId, rewrittenModules, seen = new Set()) {
@@ -666,7 +679,9 @@ function rewriteDynamicImports(line, module) {
 }
 
 function rewriteCommonJsRequires(line, module) {
+  const codeOnly = maskNonCode(line, { preserveRequireCallSpecifiers: true })
   return line.replace(/\brequire\s*\(\s*["']([^"']+)["']\s*\)/g, (match, specifier, offset) => {
+    if (codeOnly.slice(offset, offset + match.length).trim() !== match) return match
     const source = module.deps.get(specifier)
     return source && !source.external ? source.id : match
   })
@@ -692,6 +707,7 @@ function extractSpecifiers(source) {
   const codeOnly = maskNonCode(source, {
     preserveImportExportSpecifiers: true,
     preserveImportCallSpecifiers: true,
+    preserveRequireCallSpecifiers: true,
   })
   const specifiers = []
   const patterns = [
@@ -1001,6 +1017,7 @@ function privateEnvReads(source) {
 function maskNonCode(source, options = {}) {
   const preserveImportExportSpecifiers = options.preserveImportExportSpecifiers === true
   const preserveImportCallSpecifiers = options.preserveImportCallSpecifiers === true
+  const preserveRequireCallSpecifiers = options.preserveRequireCallSpecifiers === true
   let output = ''
   let index = 0
 
@@ -1030,7 +1047,8 @@ function maskNonCode(source, options = {}) {
       const previous = source.slice(Math.max(0, index - 32), index)
       const preserve =
         (preserveImportExportSpecifiers && /\b(?:from|import)\s*$/.test(previous)) ||
-        (preserveImportCallSpecifiers && /\bimport\s*\(\s*$/.test(previous))
+        (preserveImportCallSpecifiers && /\bimport\s*\(\s*$/.test(previous)) ||
+        (preserveRequireCallSpecifiers && /\brequire\s*\(\s*$/.test(previous))
       output += preserve ? literal : maskRange(literal)
       index = end
       continue
