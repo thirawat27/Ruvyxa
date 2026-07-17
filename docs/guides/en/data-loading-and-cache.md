@@ -29,6 +29,53 @@ export default async function ProductsPage() {
 }
 ```
 
+## Client-Side Data Loading
+
+Use `useRuvyxaLoader` from `@ruvyxa/react` when data must be loaded in the browser, for example when
+it depends on a client-side value or should refresh without a full page navigation.
+
+```tsx
+'use client'
+
+import { useRuvyxaLoader } from '@ruvyxa/react'
+
+export function UserProfile({ userId }: { userId: string }) {
+  const { data, loading, error, refetch } = useRuvyxaLoader(
+    () => fetch(`/api/users/${userId}`).then((response) => response.json()),
+    { deps: [userId] },
+  )
+
+  if (loading) return <p>Loading...</p>
+  if (error) return <p>Could not load the user: {error.message}</p>
+
+  return (
+    <section>
+      <pre>{JSON.stringify(data, null, 2)}</pre>
+      <button type="button" onClick={refetch}>
+        Refresh
+      </button>
+    </section>
+  )
+}
+```
+
+The hook runs the loader automatically on mount. Set `deps` to the values that should trigger a new
+request, and call `refetch()` to reload manually. Set `enabled: false` to keep it disabled:
+
+```tsx
+const result = useRuvyxaLoader(loadPreview, { enabled: false })
+```
+
+The result contains:
+
+- `data`: the most recent successful value, or `undefined` while no value is available.
+- `loading`: whether a request is currently running.
+- `error`: the loader error, if the request failed.
+- `refetch`: starts another request when the hook is enabled.
+
+`useRuvyxaLoader` also ignores stale requests when dependencies change and avoids updating state
+after the component unmounts.
+
 ## Cache API
 
 `cache(key)` creates an in-memory cache entry with TTL:

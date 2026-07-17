@@ -131,8 +131,9 @@
   `fetchPriority`) and `<Picture>` for art-direction with multi-source support.
 - **SEO component** — `<Seo>` with typed canonical, robots, Open Graph, Twitter Card, and safe
   JSON-LD structured data.
-- **Client loader hook** — `useRuvyxaLoader` returns `{ data, loading, error, refetch }` with
-  built-in race-condition handling and mount-safety checks.
+- **Client loader hook** — `useRuvyxaLoader` loads client-side data and returns
+  `{ data, loading, error, refetch }` with built-in race-condition handling and mount-safety checks.
+  See the [client loader guide](docs/guides/en/data-loading-and-cache.md#client-side-data-loading).
 
 ### Security
 
