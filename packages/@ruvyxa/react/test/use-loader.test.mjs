@@ -16,9 +16,24 @@ function assertLoaderLifecycleContract(candidate) {
   assert.doesNotMatch(code, /\}, \[enabled, loader\]\)/)
 }
 
+function assertLoaderFailureContract(candidate) {
+  const code = candidate.replace(/\s+/g, ' ')
+
+  assert.match(
+    code,
+    /if \(!enabled\) \{ .*requestIdRef\.current\+\+.*setLoading\(false\).*return.*\}/,
+  )
+  assert.match(code, /Promise\.resolve\(\) \.then\(\(\) => loaderRef\.current\(\)\)/)
+}
+
 describe('useRuvyxaLoader request lifecycle', () => {
   it('keeps inline loaders out of automatic refetch dependencies after formatting', async () => {
     assertLoaderLifecycleContract(source)
     assertLoaderLifecycleContract(await format(source, { filepath: sourceFile }))
+  })
+
+  it('invalidates disabled requests and normalizes synchronous loader failures', async () => {
+    assertLoaderFailureContract(source)
+    assertLoaderFailureContract(await format(source, { filepath: sourceFile }))
   })
 })

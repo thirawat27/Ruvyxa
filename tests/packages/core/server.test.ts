@@ -207,4 +207,16 @@ describe('cache', () => {
     assert.throws(() => cache('invalid-duration').ttl('soon'), /Invalid cache duration "soon"/)
     assert.throws(() => cache('invalid-swr').swr('1 week'), /Invalid cache duration "1 week"/)
   })
+
+  it('rejects cache durations that are zero or exceed safe millisecond precision', () => {
+    assert.throws(() => cache('zero-duration').ttl('0s'), /Invalid cache duration "0s"/)
+    assert.throws(
+      () => cache('unsafe-amount').ttl('9007199254740992ms'),
+      /Invalid cache duration "9007199254740992ms"/,
+    )
+    assert.throws(
+      () => cache('unsafe-product').swr('9007199254740991d'),
+      /Invalid cache duration "9007199254740991d"/,
+    )
+  })
 })

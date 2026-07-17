@@ -63,14 +63,22 @@ export function useRuvyxaLoader<T>(
   loaderRef.current = loader
 
   const execute = useCallback(() => {
-    if (!enabled) return
+    if (!enabled) {
+      // Disabling the hook must retire an in-flight request. Otherwise its
+      // completion can update state after the caller has disabled loading.
+      requestIdRef.current++
+      setLoading(false)
+      return
+    }
 
     const currentId = ++requestIdRef.current
     setLoading(true)
     setError(undefined)
 
-    loaderRef
-      .current()
+    // Start through a resolved promise so a loader that throws before returning
+    // its promise follows the same error-state path as an async rejection.
+    Promise.resolve()
+      .then(() => loaderRef.current())
       .then((result) => {
         // Only update state if this is still the latest request and component is mounted
         if (mountedRef.current && currentId === requestIdRef.current) {

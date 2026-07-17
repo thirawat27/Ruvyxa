@@ -259,7 +259,13 @@ where
     }
 
     fn call(&mut self, request: Request<ReqBody>) -> Self::Future {
-        let is_preflight = request.method() == axum::http::Method::OPTIONS;
+        let is_preflight = request.method() == axum::http::Method::OPTIONS
+            && request
+                .headers()
+                .get(header::ACCESS_CONTROL_REQUEST_METHOD)
+                .and_then(|value| value.to_str().ok())
+                .and_then(|value| axum::http::Method::from_bytes(value.as_bytes()).ok())
+                .is_some();
         let origin = request
             .headers()
             .get(header::ORIGIN)
@@ -350,15 +356,19 @@ fn apply_cors_headers<B>(
 
 fn append_vary_origin(headers: &mut axum::http::HeaderMap) {
     let mut values = headers
-        .get(header::VARY)
-        .and_then(|value| value.to_str().ok())
-        .map(|value| value.split(',').map(str::trim).collect::<Vec<_>>())
-        .unwrap_or_default();
+        .get_all(header::VARY)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
     if !values
         .iter()
         .any(|value| value.eq_ignore_ascii_case("origin"))
     {
-        values.push("Origin");
+        values.push("Origin".to_string());
     }
     if let Ok(value) = HeaderValue::from_str(&values.join(", ")) {
         headers.insert(header::VARY, value);
@@ -548,7 +558,100 @@ where
 
 #[cfg(test)]
 mod tests {
+    use std::convert::Infallible;
+
     use super::*;
+
+    fn test_cors_layer() -> CorsLayer {
+        CorsLayer {
+            origins: vec!["https://app.example".to_string()],
+            methods: vec!["GET".to_string(), "POST".to_string(), "OPTIONS".to_string()],
+            headers: vec!["Content-Type".to_string()],
+            credentials: true,
+            max_age: 3600,
+        }
+    }
+
+    #[tokio::test]
+    async fn ordinary_options_requests_reach_the_inner_service() {
+        let inner = tower::service_fn(|_request: Request<Body>| async {
+            Ok::<_, Infallible>(Response::new(Body::from("handled")))
+        });
+        let mut service = test_cors_layer().layer(inner);
+        let request = Request::builder()
+            .method(axum::http::Method::OPTIONS)
+            .header(header::ORIGIN, "https://app.example")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = service.call(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn cors_preflight_requests_are_short_circuited() {
+        let inner = tower::service_fn(|_request: Request<Body>| async {
+            Ok::<_, Infallible>(Response::new(Body::from("handled")))
+        });
+        let mut service = test_cors_layer().layer(inner);
+        let request = Request::builder()
+            .method(axum::http::Method::OPTIONS)
+            .header(header::ORIGIN, "https://app.example")
+            .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = service.call(request).await.unwrap();
+
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert_eq!(
+            response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
+            Some(&HeaderValue::from_static("https://app.example"))
+        );
+    }
+
+    #[tokio::test]
+    async fn cors_preserves_every_existing_vary_field_value() {
+        let inner = tower::service_fn(|_request: Request<Body>| async {
+            let mut response = Response::new(Body::empty());
+            response
+                .headers_mut()
+                .append(header::VARY, HeaderValue::from_static("Accept-Encoding"));
+            response
+                .headers_mut()
+                .append(header::VARY, HeaderValue::from_static("Accept-Language"));
+            Ok::<_, Infallible>(response)
+        });
+        let mut service = test_cors_layer().layer(inner);
+        let request = Request::builder()
+            .header(header::ORIGIN, "https://app.example")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = service.call(request).await.unwrap();
+        let vary = response
+            .headers()
+            .get_all(header::VARY)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .flat_map(|value| value.split(','))
+            .map(str::trim)
+            .collect::<Vec<_>>();
+
+        assert!(
+            vary.iter()
+                .any(|value| value.eq_ignore_ascii_case("accept-encoding"))
+        );
+        assert!(
+            vary.iter()
+                .any(|value| value.eq_ignore_ascii_case("accept-language"))
+        );
+        assert!(
+            vary.iter()
+                .any(|value| value.eq_ignore_ascii_case("origin"))
+        );
+    }
 
     #[test]
     fn default_rate_limit_key_does_not_trust_forwarded_headers() {

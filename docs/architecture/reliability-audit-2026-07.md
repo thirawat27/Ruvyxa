@@ -1,5 +1,55 @@
 # Reliability Audit — 2026-07
 
+## Full-system follow-up — 2026-07-17
+
+This follow-up started from a clean `main` worktree and revalidated the current repository rather
+than treating earlier audit results as current evidence. The baseline passed 304 Rust workspace
+tests, all npm workspace tests, Rust clippy with warnings denied, formatting, package build and type
+checks, and dev/production parity plus smoke rendering for all 16 demo routes.
+
+### Confirmed findings and root corrections
+
+| Finding                                                                                                                                 | Dimension                | Evidence                                                                            | Impact                                                                                                                                                   | Severity | Confidence | Applied correction                                                                                                                                               |
+| --------------------------------------------------------------------------------------------------------------------------------------- | ------------------------ | ----------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------- | -------- | ---------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| CORS classified every allowed-origin `OPTIONS` request as a preflight even when `Access-Control-Request-Method` was absent.             | Flow conflict            | `crates/ruvyxa_middleware/src/builtin.rs` and the new ordinary-OPTIONS regression   | A real application `OPTIONS` route could be replaced with an empty framework-generated 204 response before its handler ran.                              | High     | Direct     | Preflight short-circuiting now requires a syntactically valid `Access-Control-Request-Method`; ordinary `OPTIONS` requests continue to the inner service.        |
+| Adding `Vary: Origin` read only one existing `Vary` field and then replaced the full header entry.                                      | Boundary violation       | `crates/ruvyxa_middleware/src/builtin.rs` and the new multi-value `Vary` regression | Cache dimensions such as `Accept-Language` could be lost, allowing an intermediary cache to reuse the wrong representation.                              | High     | Direct     | CORS now collects every existing `Vary` field value before appending `Origin` and emits the complete combined value.                                             |
+| `useRuvyxaLoader` invoked the loader before entering a promise chain and did not retire an active request when `enabled` became false.  | Flow conflict            | `packages/@ruvyxa/react/src/use-loader.ts` and its lifecycle contract tests         | A synchronous loader throw escaped the hook error state, while a disabled hook could still accept a stale completion and remain marked as loading.       | High     | Direct     | Loader invocation now begins inside a resolved promise, and disabling increments the request generation and clears loading without changing the public hook API. |
+| Cache duration parsing accepted zero and numeric values whose amount or millisecond product exceeded JavaScript safe-integer precision. | Project convention drift | `packages/@ruvyxa/core/src/server.ts` and `tests/packages/core/server.test.ts`      | Invalid configuration could silently disable effective caching or create an effectively permanent/unsafe expiry instead of failing at configuration use. | Medium   | Direct     | Duration parsing now requires a positive safe integer and a safe derived millisecond value for every supported unit.                                             |
+
+The corrections preserve the public CLI, route, middleware configuration, hook result, cache
+builder, adapter, and package contracts. No dependency or generated artifact changed.
+
+### Pass and validation gates
+
+- Pass level: Full Mode. Trigger: the user requested a whole-system bug scan and findings crossed
+  Rust middleware, React runtime, and core cache ownership. Staying in Scan Mode would not cover the
+  Rust/TypeScript contract and integration proof surface.
+- Claim traceability: every finding is Direct and tied to changed source plus a regression test.
+- Scope alignment: inspection covered all tracked source categories and existing architecture
+  records; edits stayed within the three confirmed ownership boundaries and this audit.
+- Handoff readiness: the remaining limitation is platform execution—this workstation proves Windows
+  behavior, while macOS/Linux behavior remains covered by the existing CI matrix.
+- Open architecture questions: None identified.
+- Proposed redesigns or decisions requiring approval: None. The user's repair request already
+  authorized the compatible root corrections above.
+
+### Follow-up validation
+
+- `cargo test -p ruvyxa_middleware --locked`: passed 12 tests, including three new CORS regressions.
+- `pnpm --filter @ruvyxa/react test` and `check`: passed 7 tests and TypeScript validation.
+- `pnpm --filter @ruvyxa/core test` and `check`: passed 15 tests and TypeScript validation.
+- `cargo test --workspace --locked`: passed 307 Rust tests; workspace clippy passed with warnings
+  denied.
+- `pnpm -r test`: passed 80 npm tests; package build/check and formatting passed.
+- Demo production readiness, dev/production parity, and smoke rendering passed for all 16 routes.
+- Cargo lock synchronization and release metadata validation passed for 15 npm packages and six Rust
+  crates.
+- `pnpm pack:smoke`: packed the release surface, installed the packed `ruvyxa` and `@ruvyxa/react`
+  into a clean scaffold, and passed `tsc --noEmit`.
+- `pnpm audit --prod --audit-level high`: no known vulnerabilities. A Rust advisory scan was not run
+  because `cargo-audit` is not installed on this workstation; no new audit tool was added to the
+  repository.
+
 ## Root-cause hardening — 2026-07-17
 
 The v1.0.15 dependency-first traversal is the root correction for the `report.md` failure on valid,

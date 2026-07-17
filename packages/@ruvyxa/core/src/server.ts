@@ -208,26 +208,41 @@ if (typeof setInterval !== 'undefined') {
 function parseTtl(value: string): number {
   const match = value.match(/^(\d+)\s*(ms|s|m|h|d)$/)
   if (!match) {
-    throw new Error(
-      `Invalid cache duration "${value}". Use a positive value such as "30s", "5m", "1h", or "1d".`,
-    )
+    throw invalidCacheDuration(value)
   }
-  const amount = parseInt(match[1], 10)
-  switch (match[2]) {
-    case 'ms':
-      return amount
-    case 's':
-      return amount * 1000
-    case 'm':
-      return amount * 60_000
-    case 'h':
-      return amount * 3_600_000
-    case 'd':
-      return amount * 86_400_000
-    default: {
-      throw new Error(`Unsupported cache duration unit: ${match[2]}`)
+  const amount = Number(match[1])
+  if (!Number.isSafeInteger(amount) || amount <= 0) {
+    throw invalidCacheDuration(value)
+  }
+
+  const multiplier = (() => {
+    switch (match[2]) {
+      case 'ms':
+        return 1
+      case 's':
+        return 1000
+      case 'm':
+        return 60_000
+      case 'h':
+        return 3_600_000
+      case 'd':
+        return 86_400_000
+      default: {
+        throw new Error(`Unsupported cache duration unit: ${match[2]}`)
+      }
     }
+  })()
+  const duration = amount * multiplier
+  if (!Number.isSafeInteger(duration)) {
+    throw invalidCacheDuration(value)
   }
+  return duration
+}
+
+function invalidCacheDuration(value: string): Error {
+  return new Error(
+    `Invalid cache duration "${value}". Use a positive value within JavaScript's safe integer range, such as "30s", "5m", "1h", or "1d".`,
+  )
 }
 
 /**
