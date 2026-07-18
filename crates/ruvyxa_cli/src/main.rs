@@ -898,7 +898,7 @@ async fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Resul
             "map": config.build.sourcemap.unwrap_or(false),
             "treeShake": config.build.tree_shaking.unwrap_or(true),
             "split": config.build.split_strategy.as_deref().unwrap_or("route"),
-            "jsx": config.build.jsx_runtime.as_deref().unwrap_or("classic"),
+            "jsx": config.build.jsx_runtime.as_deref().unwrap_or("automatic"),
             "target": config.build.es_target.as_deref().unwrap_or("es2022"),
             "manifest": config.build.emit_chunk_manifest.unwrap_or(false),
             "warm": config.build.prebundle_dependencies.unwrap_or(true),
@@ -2270,7 +2270,7 @@ fn emit_client_bundles(
         "minify": build.minify.unwrap_or(true),
         "sourcemap": build.sourcemap.unwrap_or(false),
         "treeShaking": build.tree_shaking.unwrap_or(true),
-        "jsxRuntime": build.jsx_runtime.as_deref().unwrap_or("classic"),
+        "jsxRuntime": build.jsx_runtime.as_deref().unwrap_or("automatic"),
         "esTarget": build.es_target.as_deref().unwrap_or("es2022"),
         "emitChunkManifest": build.emit_chunk_manifest.unwrap_or(false),
         "parallelism": parallelism,
@@ -2590,7 +2590,7 @@ fn attach_shared_chunks_to_manifest(
 }
 
 fn parse_jsx_runtime(value: Option<&str>) -> anyhow::Result<ruvyxa_bundler::JsxRuntime> {
-    match value.unwrap_or("classic").to_ascii_lowercase().as_str() {
+    match value.unwrap_or("automatic").to_ascii_lowercase().as_str() {
         "classic" => Ok(ruvyxa_bundler::JsxRuntime::Classic),
         "automatic" => Ok(ruvyxa_bundler::JsxRuntime::Automatic),
         other => anyhow::bail!(
@@ -4182,6 +4182,10 @@ mod tests {
 
     #[test]
     fn parses_ruvyxa_bundler_build_options() {
+        assert!(matches!(
+            parse_jsx_runtime(None).unwrap(),
+            ruvyxa_bundler::JsxRuntime::Automatic
+        ));
         assert!(matches!(
             parse_jsx_runtime(Some("automatic")).unwrap(),
             ruvyxa_bundler::JsxRuntime::Automatic

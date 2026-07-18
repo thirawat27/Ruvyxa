@@ -412,7 +412,7 @@ export default config({
     map: false,
     treeShake: true,
     split: 'route',
-    jsx: 'classic',
+    jsx: 'automatic',
     target: 'es2022',
     workers: 4,
     manifest: false,

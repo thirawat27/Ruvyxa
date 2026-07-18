@@ -16,7 +16,7 @@ export default config({
     treeShake: true,
     split: 'route',
     workers: 4,
-    jsx: 'classic',
+    jsx: 'automatic',
     target: 'es2022',
     manifest: false,
     warm: true,
@@ -87,7 +87,7 @@ silently changing deployment behaviour.
 | `treeShake` | `boolean` | `true`           | Linker-aware tree shaking                                                                                                                              |
 | `split`     | `string`  | `"route"`        | `"single"`, `"route"`, `"manual"`                                                                                                                      |
 | `workers`   | `number`  | CPU count (auto) | Bounded bundle and prerender concurrency. Example `workers: 4` is an explicit override; prerendering remains capped to avoid excessive Node processes. |
-| `jsx`       | `string`  | `"classic"`      | JSX runtime mode                                                                                                                                       |
+| `jsx`       | `string`  | `"automatic"`    | JSX runtime mode; use `"classic"` only for code that provides a React global/import                                                                    |
 | `target`    | `string`  | `"es2022"`       | `"es2018"`, `"es2019"`, `"es2020"`, `"es2022"`, `"esnext"`                                                                                             |
 | `manifest`  | `boolean` | `false`          | Emit chunk manifest                                                                                                                                    |
 | `warm`      | `boolean` | `true`           | Pre-bundle dependencies                                                                                                                                |
