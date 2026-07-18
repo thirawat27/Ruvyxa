@@ -37,9 +37,14 @@
   prod, TTL 5 min dev / 30 min prod), invalidated automatically on file change. Configurable via
   `RUVYXA_RENDER_CACHE_SIZE` (`0` disables it; environment values are capped at 16,384). Backed by
   `RwLock` for concurrent readers.
-- **Parallel production bundling** — initial and shared-route client bundle passes run with bounded
-  concurrency, then emit in deterministic route order. Warm-build artifact validation fingerprints
-  each shared dependency once per build instead of once per route.
+- **Parallel production bundling** — route graphs are prepared once with bounded concurrency, then
+  emitted once with shared-route modules in deterministic route order. Lightweight route plans and
+  final/shared artifacts are content-validated, with each shared dependency fingerprinted once per
+  build. Plugin-free cold shared output reuses prepared modules; warm builds reuse the validated
+  registry.
+- **Bounded build reuse** — Node transforms, plugin-free native dependency closures, and native
+  Markdown/MDX output reuse content-keyed results. Prerendering loads its asset index once and
+  shares immutable CSS across the bounded worker pool.
 - **Async I/O** — file serving uses `tokio::fs` to avoid blocking the async runtime under concurrent
   load.
 - **Incremental bundler cache** — blake3+mtime fingerprinting recompiles only changed modules across

@@ -1245,6 +1245,8 @@ async fn prerender_static_routes(
     }
 
     fs::create_dir_all(prerender_dir)?;
+    let client_assets = Arc::new(load_prerender_client_assets(client_dir));
+    let shared_styles = Arc::<str>::from(styles);
 
     let parallelism = prerender_parallelism(build.parallelism, routes_to_prerender.len());
     let jsx_runtime = parse_jsx_runtime(build.jsx_runtime.as_deref())?;
@@ -1330,15 +1332,15 @@ async fn prerender_static_routes(
                 let root = root.to_path_buf();
                 let app_dir = app_dir.to_path_buf();
                 let prerender_dir = prerender_dir.to_path_buf();
-                let client_dir = client_dir.to_path_buf();
-                let styles = styles.to_string();
+                let client_assets = client_assets.clone();
+                let styles = shared_styles.clone();
                 pending.spawn(async move {
                     render_prerender_job(
                         &worker_pool,
                         &root,
                         &app_dir,
                         &prerender_dir,
-                        &client_dir,
+                        &client_assets,
                         &styles,
                         &job,
                     )
@@ -1393,7 +1395,7 @@ async fn render_prerender_job(
     root: &Path,
     app_dir: &Path,
     prerender_dir: &Path,
-    client_dir: &Path,
+    client_assets: &BTreeMap<String, PrerenderClientAssets>,
     styles: &str,
     job: &PrerenderJob,
 ) -> anyhow::Result<PrerenderedRoute> {
@@ -1403,7 +1405,7 @@ async fn render_prerender_job(
     }
 
     let html = match &job.kind {
-        PrerenderJobKind::Csr => csr_shell_html(&job.route_path, client_dir, styles),
+        PrerenderJobKind::Csr => csr_shell_html(&job.route_path, client_assets, styles),
         PrerenderJobKind::Render { route_file, mode } => {
             let result = worker_pool
                 .render_ssg_isolated(
@@ -1437,7 +1439,7 @@ async fn render_prerender_job(
             let html = inject_prerender_styles(&html, styles);
             inject_prerender_client_assets(
                 &html,
-                client_dir,
+                client_assets,
                 &job.route_path,
                 &job.render_path,
                 &job.params,
@@ -1635,13 +1637,17 @@ fn prerender_html_path(prerender_dir: &Path, route_path: &str) -> PathBuf {
 }
 
 /// Generate a minimal CSR shell HTML document.
-fn csr_shell_html(route_path: &str, client_dir: &Path, styles: &str) -> String {
-    let assets = prerender_client_assets(client_dir, route_path);
+fn csr_shell_html(
+    route_path: &str,
+    client_assets: &BTreeMap<String, PrerenderClientAssets>,
+    styles: &str,
+) -> String {
+    let assets = client_assets.get(route_path);
     let preload_links = assets
         .as_ref()
         .map(|assets| module_preload_links(&assets.preloads))
         .unwrap_or_default();
-    let client_src = assets.map(|assets| assets.src).unwrap_or_else(|| {
+    let client_src = assets.map(|assets| assets.src.clone()).unwrap_or_else(|| {
         format!(
             "/__ruvyxa/client/{}.js",
             route_path.trim_start_matches('/').replace('/', "__")
@@ -1681,30 +1687,39 @@ fn inject_prerender_styles(html: &str, styles: &str) -> String {
     format!("<!doctype html><html><head>{style_tag}</head><body>{html}</body></html>")
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct PrerenderClientAssets {
     src: String,
     preloads: Vec<String>,
 }
 
-fn prerender_client_assets(client_dir: &Path, route_path: &str) -> Option<PrerenderClientAssets> {
-    let source = fs::read_to_string(client_dir.join("manifest.json")).ok()?;
-    let manifest: serde_json::Value = serde_json::from_str(&source).ok()?;
-    let route = manifest
-        .get("routes")?
-        .as_array()?
+fn load_prerender_client_assets(client_dir: &Path) -> BTreeMap<String, PrerenderClientAssets> {
+    let Ok(source) = fs::read_to_string(client_dir.join("manifest.json")) else {
+        return BTreeMap::new();
+    };
+    let Ok(manifest) = serde_json::from_str::<serde_json::Value>(&source) else {
+        return BTreeMap::new();
+    };
+    let Some(routes) = manifest.get("routes").and_then(|routes| routes.as_array()) else {
+        return BTreeMap::new();
+    };
+
+    routes
         .iter()
-        .find(|route| route.get("path").and_then(|path| path.as_str()) == Some(route_path))?;
-    let src = route.get("src")?.as_str()?.to_string();
-    let preloads = route
-        .get("sharedChunks")
-        .and_then(|chunks| chunks.as_array())
-        .into_iter()
-        .flatten()
-        .filter_map(|chunk| chunk.get("src").and_then(|src| src.as_str()))
-        .map(str::to_string)
-        .collect();
-    Some(PrerenderClientAssets { src, preloads })
+        .filter_map(|route| {
+            let path = route.get("path")?.as_str()?.to_string();
+            let src = route.get("src")?.as_str()?.to_string();
+            let preloads = route
+                .get("sharedChunks")
+                .and_then(|chunks| chunks.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|chunk| chunk.get("src").and_then(|src| src.as_str()))
+                .map(str::to_string)
+                .collect();
+            Some((path, PrerenderClientAssets { src, preloads }))
+        })
+        .collect()
 }
 
 fn module_preload_links(preloads: &[String]) -> String {
@@ -1716,12 +1731,12 @@ fn module_preload_links(preloads: &[String]) -> String {
 
 fn inject_prerender_client_assets(
     html: &str,
-    client_dir: &Path,
+    client_assets: &BTreeMap<String, PrerenderClientAssets>,
     route_path: &str,
     request_path: &str,
     params: &RouteParams,
 ) -> String {
-    let Some(assets) = prerender_client_assets(client_dir, route_path) else {
+    let Some(assets) = client_assets.get(route_path) else {
         return html.to_string();
     };
     let preload_links = module_preload_links(&assets.preloads);
@@ -1773,6 +1788,7 @@ struct ClientBundle {
     tree_shaken_modules: usize,
     artifact_cache_hit: bool,
     module_paths: BTreeSet<PathBuf>,
+    dependency_paths: BTreeSet<PathBuf>,
     chunk_manifest: Option<serde_json::Value>,
     chunks: Vec<ruvyxa_bundler::OutputChunk>,
 }
@@ -1783,6 +1799,30 @@ struct CachedClientArtifact {
     dependency_hash: String,
     files: BTreeMap<PathBuf, String>,
     bundle: ClientBundle,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct CachedClientPlan {
+    version: u8,
+    dependency_hash: String,
+    files: BTreeMap<PathBuf, String>,
+    module_paths: BTreeSet<PathBuf>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct CachedSharedRouteArtifact {
+    version: u8,
+    dependency_hash: String,
+    files: BTreeMap<PathBuf, String>,
+    code: String,
+    modules: Vec<PathBuf>,
+}
+
+#[derive(Clone)]
+struct ClientRoutePlan {
+    path: String,
+    module_paths: BTreeSet<PathBuf>,
+    prepared: Option<Arc<ruvyxa_bundler::PreparedBundle>>,
 }
 
 /// One production build observes a stable content snapshot. Sharing these
@@ -2047,7 +2087,7 @@ fn bundle_context_for_build(
     if !has_resolve_id && !has_transform {
         return Ok(ruvyxa_bundler::BundleContext::with_all_caches(
             compile_cache,
-            ruvyxa_bundler::resolver::ResolveGraphCache::new(),
+            ruvyxa_bundler::resolver::ResolveGraphCache::for_build(),
             ruvyxa_bundler::incremental::IncrementalGraphCache::new(root, true),
         ));
     }
@@ -2065,7 +2105,7 @@ fn bundle_context_for_build(
 
     Ok(ruvyxa_bundler::BundleContext::with_plugins(
         compile_cache,
-        ruvyxa_bundler::resolver::ResolveGraphCache::new(),
+        ruvyxa_bundler::resolver::ResolveGraphCache::for_build(),
         ruvyxa_bundler::incremental::IncrementalGraphCache::new(root, true),
         ruvyxa_bundler::plugin::PluginPipeline::new(vec![Arc::new(bridge)]),
     ))
@@ -2093,39 +2133,97 @@ fn emit_client_bundles(
     let artifact_dependency_hash = cache.dependency_hash.to_string();
     let artifact_fingerprints = ArtifactFingerprintCache::default();
     let empty_shared_modules = BTreeSet::new();
-    let mut bundles = bundle_routes_parallel(&page_routes, parallelism, |route| {
-        bundle_client_route(
-            root,
-            app_dir,
-            route,
-            build,
-            &bundle_context,
-            &empty_shared_modules,
-            None,
-            &artifact_cache_dir,
-            &artifact_dependency_hash,
-            "base",
-            &artifact_fingerprints,
-        )
-    })?;
-
-    let shared_route_chunks = if parse_split_strategy(build.split_strategy.as_deref())?
-        == ruvyxa_bundler::SplitStrategy::Route
-    {
-        let shared_modules = shared_route_module_paths(&bundles);
-        if shared_modules.is_empty() {
-            Vec::new()
-        } else {
-            let shared_output = ruvyxa_bundler::bundle_shared_route_modules(
-                root.canonicalize().unwrap_or_else(|_| root.to_path_buf()),
-                app_dir
-                    .canonicalize()
-                    .unwrap_or_else(|_| app_dir.to_path_buf()),
-                &shared_modules,
-                client_bundle_options(build)?,
+    let split_strategy = parse_split_strategy(build.split_strategy.as_deref())?;
+    let (bundles, shared_route_chunks) = if split_strategy == ruvyxa_bundler::SplitStrategy::Route {
+        let plan_variant = format!(
+            "route-v2-manifest-{}",
+            build.emit_chunk_manifest.unwrap_or(false)
+        );
+        let plans = bundle_routes_parallel(&page_routes, parallelism, |route| {
+            prepare_client_route_plan(
+                root,
+                app_dir,
+                route,
+                build,
                 &bundle_context,
+                &artifact_cache_dir,
+                &artifact_dependency_hash,
+                &plan_variant,
+                &artifact_fingerprints,
             )
-            .map_err(|error| anyhow::anyhow!("Ruvyxa Bundler shared route error: {error}"))?;
+        })?;
+        let plans_by_route = plans
+            .iter()
+            .map(|(_, plan)| (plan.path.clone(), plan.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let shared_modules = shared_route_module_paths(&plans);
+        if shared_modules.is_empty() {
+            let bundles = bundle_routes_parallel(&page_routes, parallelism, |route| {
+                let prepared = plans_by_route
+                    .get(&route.path)
+                    .and_then(|plan| plan.prepared.as_deref());
+                bundle_client_route(
+                    root,
+                    app_dir,
+                    route,
+                    build,
+                    &bundle_context,
+                    prepared,
+                    &empty_shared_modules,
+                    None,
+                    &artifact_cache_dir,
+                    &artifact_dependency_hash,
+                    "base",
+                    &artifact_fingerprints,
+                )
+            })?;
+            (bundles, Vec::new())
+        } else {
+            let shared_options = client_bundle_options(build)?;
+            let shared_variant = serde_json::to_string(&shared_options)?;
+            let shared_output = if let Some(output) = load_shared_route_artifact(
+                &artifact_cache_dir,
+                &artifact_dependency_hash,
+                &shared_modules,
+                &shared_variant,
+                &artifact_fingerprints,
+            ) {
+                output
+            } else {
+                let prepared_routes = plans
+                    .iter()
+                    .filter_map(|(_, plan)| plan.prepared.as_deref())
+                    .collect::<Vec<_>>();
+                let output = if prepared_routes.len() == plans.len()
+                    && bundle_context.plugins().plugin_count() == 0
+                {
+                    ruvyxa_bundler::bundle_shared_prepared_route_modules(
+                        &prepared_routes,
+                        &shared_modules,
+                        shared_options,
+                    )
+                } else {
+                    ruvyxa_bundler::bundle_shared_route_modules(
+                        root.canonicalize().unwrap_or_else(|_| root.to_path_buf()),
+                        app_dir
+                            .canonicalize()
+                            .unwrap_or_else(|_| app_dir.to_path_buf()),
+                        &shared_modules,
+                        shared_options,
+                        &bundle_context,
+                    )
+                }
+                .map_err(|error| anyhow::anyhow!("Ruvyxa Bundler shared route error: {error}"))?;
+                store_shared_route_artifact(
+                    &artifact_cache_dir,
+                    &artifact_dependency_hash,
+                    &shared_modules,
+                    &shared_variant,
+                    &output,
+                    &artifact_fingerprints,
+                );
+                output
+            };
             let executable_modules = shared_output
                 .modules
                 .into_iter()
@@ -2135,21 +2233,16 @@ fn emit_client_bundles(
                 client_dir,
                 shared_output.code,
                 &executable_modules,
-                &bundles,
+                &plans,
             )?;
-            let original_modules = bundles
-                .iter()
-                .map(|(_, bundle)| (bundle.path.clone(), bundle.module_paths.clone()))
-                .collect::<BTreeMap<_, _>>();
-            bundles = bundle_routes_parallel(&page_routes, parallelism, |route| {
-                let route_modules = original_modules
-                    .get(&route.path)
-                    .cloned()
-                    .unwrap_or_default();
-                let route_shared_modules = route_modules
-                    .intersection(&executable_modules)
-                    .cloned()
-                    .collect::<BTreeSet<_>>();
+            let bundles = bundle_routes_parallel(&page_routes, parallelism, |route| {
+                let plan = plans_by_route.get(&route.path);
+                let route_shared_modules = plan.map_or_else(BTreeSet::new, |plan| {
+                    plan.module_paths
+                        .intersection(&executable_modules)
+                        .cloned()
+                        .collect::<BTreeSet<_>>()
+                });
                 let shared_file =
                     (!route_shared_modules.is_empty()).then_some(shared_chunk.file_name.as_str());
                 bundle_client_route(
@@ -2158,6 +2251,7 @@ fn emit_client_bundles(
                     route,
                     build,
                     &bundle_context,
+                    plan.and_then(|plan| plan.prepared.as_deref()),
                     &route_shared_modules,
                     shared_file,
                     &artifact_cache_dir,
@@ -2166,10 +2260,26 @@ fn emit_client_bundles(
                     &artifact_fingerprints,
                 )
             })?;
-            vec![shared_chunk]
+            (bundles, vec![shared_chunk])
         }
     } else {
-        Vec::new()
+        let bundles = bundle_routes_parallel(&page_routes, parallelism, |route| {
+            bundle_client_route(
+                root,
+                app_dir,
+                route,
+                build,
+                &bundle_context,
+                None,
+                &empty_shared_modules,
+                None,
+                &artifact_cache_dir,
+                &artifact_dependency_hash,
+                "base",
+                &artifact_fingerprints,
+            )
+        })?;
+        (bundles, Vec::new())
     };
 
     let mut routes = Vec::new();
@@ -2304,13 +2414,14 @@ fn emit_client_bundles(
     }))
 }
 
-fn bundle_routes_parallel<F>(
+fn bundle_routes_parallel<F, T>(
     routes: &[RouteEntry],
     parallelism: usize,
     bundle_route: F,
-) -> anyhow::Result<Vec<(usize, ClientBundle)>>
+) -> anyhow::Result<Vec<(usize, T)>>
 where
-    F: Fn(&RouteEntry) -> anyhow::Result<ClientBundle> + Sync,
+    F: Fn(&RouteEntry) -> anyhow::Result<T> + Sync,
+    T: Send,
 {
     if routes.is_empty() {
         return Ok(Vec::new());
@@ -2422,6 +2533,7 @@ fn bundle_client_route(
     route: &RouteEntry,
     build: &BuildConfigOptions,
     bundle_context: &ruvyxa_bundler::BundleContext,
+    prepared: Option<&ruvyxa_bundler::PreparedBundle>,
     shared_modules: &BTreeSet<PathBuf>,
     shared_chunk_file: Option<&str>,
     cache_dir: &Path,
@@ -2438,41 +2550,13 @@ fn bundle_client_route(
     ) {
         return Ok(bundle);
     }
-    use ruvyxa_bundler::{BundleInput, BundleOptions, BundleTarget};
-
-    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let app_dir = app_dir
-        .canonicalize()
-        .unwrap_or_else(|_| app_dir.to_path_buf());
-    let entry = canonical_route_file(&root, &route.file);
-    let layouts: Vec<PathBuf> = route
-        .layout_chain
-        .iter()
-        .filter_map(|layout_path| resolve_layout_file(&root, &app_dir, layout_path))
-        .collect();
-
-    let input = BundleInput {
-        entry,
-        project_root: root,
-        app_dir,
-        layouts,
-        request_path: route.path.clone(),
-        target: BundleTarget::Client,
-        options: BundleOptions {
-            minify: build.minify.unwrap_or(true),
-            source_map: build.sourcemap.unwrap_or(false),
-            tree_shaking: build.tree_shaking.unwrap_or(true),
-            jsx_runtime: parse_jsx_runtime(build.jsx_runtime.as_deref())?,
-            es_target: parse_es_target(build.es_target.as_deref())?,
-            split_strategy: parse_split_strategy(build.split_strategy.as_deref())?,
-            emit_chunk_manifest: build.emit_chunk_manifest.unwrap_or(false),
-            collect_module_manifest: parse_split_strategy(build.split_strategy.as_deref())?
-                == ruvyxa_bundler::SplitStrategy::Route,
-        },
-    };
-
-    let output = ruvyxa_bundler::bundle_with_shared_modules(input, bundle_context, shared_modules)
-        .map_err(|e| anyhow::anyhow!("Ruvyxa Bundler error for {}: {e}", route.path))?;
+    let output = if let Some(prepared) = prepared {
+        ruvyxa_bundler::bundle_prepared(prepared, shared_modules)
+    } else {
+        let input = client_bundle_input(root, app_dir, route, build)?;
+        ruvyxa_bundler::bundle_with_shared_modules(input, bundle_context, shared_modules)
+    }
+    .map_err(|e| anyhow::anyhow!("Ruvyxa Bundler error for {}: {e}", route.path))?;
 
     // Report non-fatal diagnostics.
     for diagnostic in &output.diagnostics {
@@ -2491,7 +2575,7 @@ fn bundle_client_route(
     } else {
         code.clone()
     };
-    let module_paths = output
+    let module_paths: BTreeSet<PathBuf> = output
         .chunk_manifest
         .as_ref()
         .map(|manifest| {
@@ -2503,6 +2587,17 @@ fn bundle_client_route(
                 .collect()
         })
         .unwrap_or_default();
+    let dependency_paths = module_paths
+        .iter()
+        .cloned()
+        .chain(output.chunks.iter().flat_map(|chunk| {
+            chunk
+                .modules
+                .iter()
+                .map(PathBuf::from)
+                .map(|path| path.canonicalize().unwrap_or(path))
+        }))
+        .collect();
 
     let bundle = ClientBundle {
         path: route.path.clone(),
@@ -2519,6 +2614,7 @@ fn bundle_client_route(
         tree_shaken_modules: output.stats.tree_shaken_modules,
         artifact_cache_hit: false,
         module_paths,
+        dependency_paths,
         chunk_manifest: output
             .chunk_manifest
             .map(serde_json::to_value)
@@ -2534,6 +2630,103 @@ fn bundle_client_route(
         artifact_fingerprints,
     );
     Ok(bundle)
+}
+
+fn client_bundle_input(
+    root: &Path,
+    app_dir: &Path,
+    route: &RouteEntry,
+    build: &BuildConfigOptions,
+) -> anyhow::Result<ruvyxa_bundler::BundleInput> {
+    use ruvyxa_bundler::{BundleInput, BundleOptions, BundleTarget};
+
+    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let app_dir = app_dir
+        .canonicalize()
+        .unwrap_or_else(|_| app_dir.to_path_buf());
+    let entry = canonical_route_file(&root, &route.file);
+    let layouts = route
+        .layout_chain
+        .iter()
+        .filter_map(|layout_path| resolve_layout_file(&root, &app_dir, layout_path))
+        .collect();
+
+    Ok(BundleInput {
+        entry,
+        project_root: root,
+        app_dir,
+        layouts,
+        request_path: route.path.clone(),
+        target: BundleTarget::Client,
+        options: BundleOptions {
+            minify: build.minify.unwrap_or(true),
+            source_map: build.sourcemap.unwrap_or(false),
+            tree_shaking: build.tree_shaking.unwrap_or(true),
+            jsx_runtime: parse_jsx_runtime(build.jsx_runtime.as_deref())?,
+            es_target: parse_es_target(build.es_target.as_deref())?,
+            split_strategy: parse_split_strategy(build.split_strategy.as_deref())?,
+            emit_chunk_manifest: build.emit_chunk_manifest.unwrap_or(false),
+            collect_module_manifest: parse_split_strategy(build.split_strategy.as_deref())?
+                == ruvyxa_bundler::SplitStrategy::Route,
+        },
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn prepare_client_route_plan(
+    root: &Path,
+    app_dir: &Path,
+    route: &RouteEntry,
+    build: &BuildConfigOptions,
+    bundle_context: &ruvyxa_bundler::BundleContext,
+    cache_dir: &Path,
+    dependency_hash: &str,
+    cache_variant: &str,
+    fingerprints: &ArtifactFingerprintCache,
+) -> anyhow::Result<ClientRoutePlan> {
+    if let Some(module_paths) = load_client_plan(
+        cache_dir,
+        dependency_hash,
+        &route.path,
+        cache_variant,
+        fingerprints,
+    ) {
+        return Ok(ClientRoutePlan {
+            path: route.path.clone(),
+            module_paths,
+            prepared: None,
+        });
+    }
+
+    let input = client_bundle_input(root, app_dir, route, build)?;
+    let prepared = Arc::new(
+        ruvyxa_bundler::prepare_bundle(input, bundle_context)
+            .map_err(|error| anyhow::anyhow!("Ruvyxa Bundler error for {}: {error}", route.path))?,
+    );
+    let module_paths = prepared
+        .module_paths()
+        .into_iter()
+        .map(|path| path.canonicalize().unwrap_or(path))
+        .collect();
+    let dependency_paths = prepared
+        .dependency_paths()
+        .into_iter()
+        .map(|path| path.canonicalize().unwrap_or(path))
+        .collect::<BTreeSet<_>>();
+    store_client_plan(
+        cache_dir,
+        dependency_hash,
+        &route.path,
+        cache_variant,
+        &module_paths,
+        &dependency_paths,
+        fingerprints,
+    );
+    Ok(ClientRoutePlan {
+        path: route.path.clone(),
+        module_paths,
+        prepared: Some(prepared),
+    })
 }
 
 fn output_chunk_manifest(chunk: &ruvyxa_bundler::OutputChunk) -> serde_json::Value {
@@ -2561,14 +2754,14 @@ fn client_bundle_options(
     })
 }
 
-fn shared_route_module_paths(bundles: &[(usize, ClientBundle)]) -> BTreeSet<PathBuf> {
+fn shared_route_module_paths(plans: &[(usize, ClientRoutePlan)]) -> BTreeSet<PathBuf> {
     let mut module_routes = BTreeMap::<PathBuf, BTreeSet<String>>::new();
-    for (_, bundle) in bundles {
-        for module in &bundle.module_paths {
+    for (_, plan) in plans {
+        for module in &plan.module_paths {
             module_routes
                 .entry(module.clone())
                 .or_default()
-                .insert(bundle.path.clone());
+                .insert(plan.path.clone());
         }
     }
     module_routes
@@ -2581,21 +2774,20 @@ fn emit_shared_route_chunk(
     client_dir: &Path,
     code: String,
     module_paths: &BTreeSet<PathBuf>,
-    bundles: &[(usize, ClientBundle)],
+    plans: &[(usize, ClientRoutePlan)],
 ) -> anyhow::Result<SharedRouteChunk> {
     let modules = module_paths
         .iter()
         .map(|path| path.display().to_string().replace('\\', "/"))
         .collect::<Vec<_>>();
-    let routes = bundles
+    let routes = plans
         .iter()
-        .filter(|(_, bundle)| {
-            bundle
-                .module_paths
+        .filter(|(_, plan)| {
+            plan.module_paths
                 .iter()
                 .any(|module| module_paths.contains(module))
         })
-        .map(|(_, bundle)| bundle.path.clone())
+        .map(|(_, plan)| plan.path.clone())
         .collect::<Vec<_>>();
     let file_name = format!("shared.{}.js", content_hash(&code));
     fs::write(client_dir.join(&file_name), code.as_bytes())?;
@@ -2693,6 +2885,152 @@ fn client_artifact_cache_file(cache_dir: &Path, route_path: &str, variant: &str)
     cache_dir.join("client-routes").join(format!("{key}.json"))
 }
 
+fn client_plan_cache_file(cache_dir: &Path, route_path: &str, variant: &str) -> PathBuf {
+    let key = content_hash(&format!("{route_path}\0{variant}"));
+    cache_dir
+        .join("client-route-plans")
+        .join(format!("{key}.json"))
+}
+
+fn shared_route_artifact_cache_file(
+    cache_dir: &Path,
+    module_paths: &BTreeSet<PathBuf>,
+    variant: &str,
+) -> PathBuf {
+    let mut key_source = String::from(variant);
+    for path in module_paths {
+        key_source.push('\0');
+        key_source.push_str(&path.to_string_lossy());
+    }
+    cache_dir
+        .join("shared-route-artifacts")
+        .join(format!("{}.json", content_hash(&key_source)))
+}
+
+fn load_shared_route_artifact(
+    cache_dir: &Path,
+    dependency_hash: &str,
+    module_paths: &BTreeSet<PathBuf>,
+    variant: &str,
+    fingerprints: &ArtifactFingerprintCache,
+) -> Option<ruvyxa_bundler::SharedRouteBundleOutput> {
+    let source = fs::read_to_string(shared_route_artifact_cache_file(
+        cache_dir,
+        module_paths,
+        variant,
+    ))
+    .ok()?;
+    let artifact: CachedSharedRouteArtifact = serde_json::from_str(&source).ok()?;
+    if artifact.version != 1
+        || artifact.dependency_hash != dependency_hash
+        || artifact.files.is_empty()
+        || artifact.modules.is_empty()
+    {
+        return None;
+    }
+    artifact
+        .files
+        .iter()
+        .all(|(path, expected)| fingerprints.fingerprint(path).as_deref() == Some(expected))
+        .then_some(ruvyxa_bundler::SharedRouteBundleOutput {
+            code: artifact.code,
+            modules: artifact.modules,
+        })
+}
+
+fn store_shared_route_artifact(
+    cache_dir: &Path,
+    dependency_hash: &str,
+    module_paths: &BTreeSet<PathBuf>,
+    variant: &str,
+    output: &ruvyxa_bundler::SharedRouteBundleOutput,
+    fingerprints: &ArtifactFingerprintCache,
+) {
+    let files = output
+        .modules
+        .iter()
+        .filter_map(|path| {
+            fingerprints
+                .fingerprint(path)
+                .map(|fingerprint| (path.clone(), fingerprint))
+        })
+        .collect::<BTreeMap<_, _>>();
+    if files.is_empty() {
+        return;
+    }
+    let artifact = CachedSharedRouteArtifact {
+        version: 1,
+        dependency_hash: dependency_hash.to_string(),
+        files,
+        code: output.code.clone(),
+        modules: output.modules.clone(),
+    };
+    let Ok(source) = serde_json::to_vec(&artifact) else {
+        return;
+    };
+    write_client_cache_file(
+        shared_route_artifact_cache_file(cache_dir, module_paths, variant),
+        source,
+    );
+}
+
+fn load_client_plan(
+    cache_dir: &Path,
+    dependency_hash: &str,
+    route_path: &str,
+    variant: &str,
+    fingerprints: &ArtifactFingerprintCache,
+) -> Option<BTreeSet<PathBuf>> {
+    let source = fs::read_to_string(client_plan_cache_file(cache_dir, route_path, variant)).ok()?;
+    let plan: CachedClientPlan = serde_json::from_str(&source).ok()?;
+    if plan.version != 2
+        || plan.dependency_hash != dependency_hash
+        || plan.files.is_empty()
+        || plan.module_paths.is_empty()
+    {
+        return None;
+    }
+    plan.files
+        .iter()
+        .all(|(path, expected)| fingerprints.fingerprint(path).as_deref() == Some(expected))
+        .then_some(plan.module_paths)
+}
+
+fn store_client_plan(
+    cache_dir: &Path,
+    dependency_hash: &str,
+    route_path: &str,
+    variant: &str,
+    module_paths: &BTreeSet<PathBuf>,
+    dependency_paths: &BTreeSet<PathBuf>,
+    fingerprints: &ArtifactFingerprintCache,
+) {
+    let files = dependency_paths
+        .iter()
+        .filter_map(|path| {
+            fingerprints
+                .fingerprint(path)
+                .map(|fingerprint| (path.clone(), fingerprint))
+        })
+        .collect::<BTreeMap<_, _>>();
+    if files.is_empty() {
+        return;
+    }
+    let plan = CachedClientPlan {
+        version: 2,
+        dependency_hash: dependency_hash.to_string(),
+        files,
+        module_paths: module_paths.clone(),
+    };
+    let Ok(source) = serde_json::to_vec(&plan) else {
+        return;
+    };
+    write_client_cache_file(
+        client_plan_cache_file(cache_dir, route_path, variant),
+        source,
+    );
+}
+
 fn load_client_artifact(
     cache_dir: &Path,
     dependency_hash: &str,
@@ -2703,7 +3041,7 @@ fn load_client_artifact(
     let source =
         fs::read_to_string(client_artifact_cache_file(cache_dir, route_path, variant)).ok()?;
     let artifact: CachedClientArtifact = serde_json::from_str(&source).ok()?;
-    if artifact.version != 1
+    if artifact.version != 2
         || artifact.dependency_hash != dependency_hash
         || artifact.files.is_empty()
     {
@@ -2728,7 +3066,7 @@ fn store_client_artifact(
     fingerprints: &ArtifactFingerprintCache,
 ) {
     let files = bundle
-        .module_paths
+        .dependency_paths
         .iter()
         .filter_map(|path| {
             fingerprints
@@ -2740,7 +3078,7 @@ fn store_client_artifact(
         return;
     }
     let artifact = CachedClientArtifact {
-        version: 1,
+        version: 2,
         dependency_hash: dependency_hash.to_string(),
         files,
         bundle: bundle.clone(),
@@ -2748,7 +3086,13 @@ fn store_client_artifact(
     let Ok(source) = serde_json::to_vec(&artifact) else {
         return;
     };
-    let path = client_artifact_cache_file(cache_dir, route_path, variant);
+    write_client_cache_file(
+        client_artifact_cache_file(cache_dir, route_path, variant),
+        source,
+    );
+}
+
+fn write_client_cache_file(path: PathBuf, source: Vec<u8>) {
     let Some(parent) = path.parent() else {
         return;
     };
@@ -4487,8 +4831,9 @@ mod tests {
         assert_eq!(actual_order, expected_order);
         let shared_file = client_manifest["sharedRouteChunks"][0]["file"]
             .as_str()
-            .unwrap();
-        let shared_code = std::fs::read_to_string(client_dir.join(shared_file)).unwrap();
+            .unwrap()
+            .to_string();
+        let shared_code = std::fs::read_to_string(client_dir.join(&shared_file)).unwrap();
         assert!(
             shared_code.contains("__RUVYXA_SHARED_MODULES__"),
             "{shared_code}"
@@ -4499,6 +4844,26 @@ mod tests {
                 line.starts_with("const label = ") && line.contains("shared")
             }),
             "{shared_code}"
+        );
+
+        let plan_dir = root.join(".ruvyxa/cache/bundler/client-route-plans");
+        let plan_files = std::fs::read_dir(&plan_dir)
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(plan_files.len(), 2);
+        let cached_plan: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(plan_files[0].path()).unwrap()).unwrap();
+        assert!(cached_plan["module_paths"].is_array());
+        assert!(cached_plan.get("bundle").is_none());
+        let shared_artifact_dir = root.join(".ruvyxa/cache/bundler/shared-route-artifacts");
+        assert_eq!(
+            std::fs::read_dir(&shared_artifact_dir)
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+                .len(),
+            1
         );
 
         let cached_manifest = emit_client_bundles(
@@ -4521,6 +4886,90 @@ mod tests {
                 .iter()
                 .all(|route| route["artifactCacheHit"] == true)
         );
+
+        std::fs::write(app.join("shared.ts"), "export const label = 'shared-after'").unwrap();
+        let invalidated_manifest = emit_client_bundles(
+            root,
+            &app,
+            &manifest,
+            &client_dir,
+            &build,
+            &[],
+            NativeBuildCache {
+                dependency_hash: "no-config",
+                directory: &root.join(".ruvyxa/cache/bundler"),
+            },
+        )
+        .unwrap();
+        assert!(
+            invalidated_manifest["routes"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|route| route["artifactCacheHit"] == false)
+        );
+        let invalidated_shared_file = invalidated_manifest["sharedRouteChunks"][0]["file"]
+            .as_str()
+            .unwrap();
+        assert_ne!(invalidated_shared_file, shared_file);
+        let invalidated_shared_code =
+            std::fs::read_to_string(client_dir.join(invalidated_shared_file)).unwrap();
+        assert!(
+            invalidated_shared_code.contains("shared-after"),
+            "{invalidated_shared_code}"
+        );
+    }
+
+    #[test]
+    fn client_artifact_cache_invalidates_dynamic_import_dependencies() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let app = root.join("app");
+        let client_dir = root.join("client");
+        let cache_dir = root.join(".ruvyxa/cache/bundler");
+        std::fs::create_dir_all(&app).unwrap();
+        std::fs::create_dir_all(&client_dir).unwrap();
+        std::fs::write(
+            app.join("page.tsx"),
+            "export default async function Page() { return (await import('./lazy')).label }",
+        )
+        .unwrap();
+        std::fs::write(app.join("lazy.ts"), "export const label = 'before'").unwrap();
+        let manifest = discover_routes(DiscoverOptions::new(&app)).unwrap();
+        let build = BuildConfigOptions {
+            minify: Some(false),
+            split_strategy: Some("route".to_string()),
+            emit_chunk_manifest: Some(true),
+            parallelism: Some(1),
+            ..BuildConfigOptions::default()
+        };
+        let emit = || {
+            emit_client_bundles(
+                root,
+                &app,
+                &manifest,
+                &client_dir,
+                &build,
+                &[],
+                NativeBuildCache {
+                    dependency_hash: "no-config",
+                    directory: &cache_dir,
+                },
+            )
+            .unwrap()
+        };
+
+        let first = emit();
+        assert_eq!(first["routes"][0]["artifactCacheHit"], false);
+        let warm = emit();
+        assert_eq!(warm["routes"][0]["artifactCacheHit"], true);
+
+        std::fs::write(app.join("lazy.ts"), "export const label = 'after'").unwrap();
+        let changed = emit();
+        assert_eq!(changed["routes"][0]["artifactCacheHit"], false);
+        let chunk_file = changed["routes"][0]["chunks"][0]["file"].as_str().unwrap();
+        let chunk = std::fs::read_to_string(client_dir.join(chunk_file)).unwrap();
+        assert!(chunk.contains("after"), "{chunk}");
     }
 
     #[test]
@@ -4533,10 +4982,12 @@ mod tests {
             r#"{"routes":[{"path":"/docs/[slug]","src":"/__ruvyxa/client/docs.123.js","sharedChunks":[{"src":"/__ruvyxa/client/shared.456.js"}]}]}"#,
         )
         .unwrap();
+        let client_assets = load_prerender_client_assets(&client_dir);
+        assert_eq!(client_assets.len(), 1);
 
         let html = inject_prerender_client_assets(
             "<!doctype html><html><head><title>Docs</title></head><body><main>Guide</main></body></html>",
-            &client_dir,
+            &client_assets,
             "/docs/[slug]",
             "/docs/start",
             &BTreeMap::from([("slug".to_string(), serde_json::json!("start"))]),

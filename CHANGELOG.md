@@ -4,7 +4,13 @@
 
 ### Large-Build and Content Compiler Follow-up
 
-- Parallelized both initial and shared-route client bundle passes while retaining deterministic
+- Split route bundling into reusable prepare/emit stages so cold route-split builds resolve,
+  compile, validate, and plan dynamic imports once, then perform only the final shared-aware
+  link/minify/output pass.
+- Added lightweight content-validated route-plan caching while preserving final artifact reuse;
+  dynamic-import dependencies now participate in artifact invalidation instead of allowing stale
+  lazy chunks after a source edit.
+- Parallelized route preparation and final client emission while retaining deterministic
   manifest/output order and the existing `build.workers` bound.
 - Replaced per-route dependency re-reading during warm artifact validation with one build-scoped,
   content-based fingerprint snapshot, preventing shared layouts and packages from being hashed
@@ -22,6 +28,17 @@
   GFM surface, and derives stable heading exports and rendered IDs from the same MDX AST.
 - Added focused cache/concurrency regressions plus native MDX unit, full-bundler integration, and
   Node runtime parity coverage.
+- Reused the first Oxc transform during Node module linking and added a bounded content-keyed
+  transform cache, removing repeated work both within a graph and across identical route inputs.
+- Memoized plugin-free native dependency closures, reused a production-build source snapshot, and
+  cached successful native Markdown/MDX compilation results with bounded storage.
+- Loaded prerender client assets once per build and shared immutable CSS across jobs instead of
+  parsing the manifest and cloning the complete stylesheet for every route.
+- Emitted the cold shared-route registry from prepared modules for plugin-free builds and persisted
+  a fingerprint-validated warm artifact; shared source edits invalidate both the registry and
+  affected route artifacts, while plugin builds retain their existing hook pass.
+- Reduced the isolated 16-route demo benchmark from 13.61s to 4.02s cold and from 1.94s to a 1.62s
+  warm median, with cold prerender down 89.2% and warm client bundling down 93.3%.
 
 ## v1.0.15 (2026-07-18)
 

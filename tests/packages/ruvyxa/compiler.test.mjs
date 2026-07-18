@@ -416,8 +416,35 @@ A note[^1]
 
       const stats = compilerCacheStats()
       assert.equal(stats.rewrites, stats.maxEntries)
+      assert.equal(stats.transforms, stats.maxEntries)
       assert.ok(stats.sources <= stats.maxEntries)
       assert.ok(stats.content <= stats.maxEntries)
+      clearCompilerCache()
+    })
+  })
+
+  it('reuses transformed modules across bundles with the same inputs', async () => {
+    await withFixture(async ({ root, outDir }) => {
+      const pageFile = path.join(root, 'page.tsx')
+      await writeFile(
+        pageFile,
+        'export default function Page() { return <main>cached transform</main> }\n',
+      )
+      clearCompilerCache()
+      const input = {
+        projectRoot: root,
+        entrySource: `export { default } from ${JSON.stringify(toImportPath(pageFile))}`,
+        sourcefile: 'ruvyxa:transform-cache-entry.ts',
+        platform: 'node',
+      }
+
+      await compileBundle({ ...input, outfile: path.join(outDir, 'first.mjs') })
+      const afterFirst = compilerCacheStats()
+      await compileBundle({ ...input, outfile: path.join(outDir, 'second.mjs') })
+      const afterSecond = compilerCacheStats()
+
+      assert.ok(afterFirst.transforms > 0)
+      assert.equal(afterSecond.transforms, afterFirst.transforms)
       clearCompilerCache()
     })
   })

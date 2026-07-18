@@ -4,8 +4,9 @@
 //! existing TypeScript/JSX compiler. This keeps resolution, boundary checks,
 //! linking, source hashing, and compile caching identical for every page type.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap, VecDeque};
 use std::path::Path;
+use std::sync::{Arc, Mutex, OnceLock};
 
 use markdown::mdast::{AlignKind, AttributeContent, AttributeValue, Node};
 use markdown::{Constructs, MdxSignal, ParseOptions};
@@ -14,6 +15,16 @@ use oxc::parser::Parser;
 use oxc::span::SourceType;
 use serde_json::{Value, json};
 
+const CONTENT_CACHE_LIMIT: usize = 512;
+
+#[derive(Default)]
+struct ContentModuleCache {
+    entries: HashMap<String, Arc<str>>,
+    insertion_order: VecDeque<String>,
+}
+
+static CONTENT_MODULE_CACHE: OnceLock<Mutex<ContentModuleCache>> = OnceLock::new();
+
 /// Compile a `.md` or `.mdx` document into a React ESM page module.
 pub fn compile_content_module(source: &str, path: &Path) -> Result<String, String> {
     let extension = path
@@ -21,17 +32,57 @@ pub fn compile_content_module(source: &str, path: &Path) -> Result<String, Strin
         .and_then(|extension| extension.to_str())
         .unwrap_or_default()
         .to_ascii_lowercase();
+    let cache_key = content_cache_key(&extension, source);
+    if let Some(cached) = CONTENT_MODULE_CACHE
+        .get_or_init(|| Mutex::new(ContentModuleCache::default()))
+        .lock()
+        .ok()
+        .and_then(|cache| cache.entries.get(&cache_key).cloned())
+    {
+        return Ok(cached.to_string());
+    }
+
     let (frontmatter, body) = split_frontmatter(source)?;
     let frontmatter_json = parse_frontmatter(frontmatter.as_deref())?;
 
-    match extension.as_str() {
+    let compiled = match extension.as_str() {
         "md" => compile_markdown(&body, &frontmatter_json),
         "mdx" => compile_mdx(&body, &frontmatter_json),
         _ => Err(format!(
             "RUV1310: unsupported content extension for {}",
             path.display()
         )),
+    }?;
+    store_content_module(cache_key, &compiled);
+    Ok(compiled)
+}
+
+fn content_cache_key(extension: &str, source: &str) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(extension.as_bytes());
+    hasher.update(b"\0");
+    hasher.update(source.as_bytes());
+    hasher.finalize().to_hex().to_string()
+}
+
+fn store_content_module(key: String, compiled: &str) {
+    let Ok(mut cache) = CONTENT_MODULE_CACHE
+        .get_or_init(|| Mutex::new(ContentModuleCache::default()))
+        .lock()
+    else {
+        return;
+    };
+    if cache.entries.contains_key(&key) {
+        return;
     }
+    while cache.entries.len() >= CONTENT_CACHE_LIMIT {
+        let Some(oldest) = cache.insertion_order.pop_front() else {
+            break;
+        };
+        cache.entries.remove(&oldest);
+    }
+    cache.insertion_order.push_back(key.clone());
+    cache.entries.insert(key, Arc::from(compiled));
 }
 
 fn compile_markdown(body: &str, frontmatter: &Value) -> Result<String, String> {
@@ -798,6 +849,27 @@ mod tests {
         assert!(module.contains("\"draft\":false"));
         assert!(module.contains("loading: \"lazy\""));
         assert!(module.contains("export const headings"));
+    }
+
+    #[test]
+    fn caches_successful_content_compilation_by_format_and_source() {
+        let source = "# Native content cache 019f7516";
+        let first = compile_content_module(source, Path::new("first.md")).unwrap();
+        let second = compile_content_module(source, Path::new("second.md")).unwrap();
+        let markdown_key = content_cache_key("md", source);
+        let mdx_key = content_cache_key("mdx", source);
+
+        assert_eq!(second, first);
+        assert_ne!(markdown_key, mdx_key);
+        assert!(
+            CONTENT_MODULE_CACHE
+                .get()
+                .unwrap()
+                .lock()
+                .unwrap()
+                .entries
+                .contains_key(&markdown_key)
+        );
     }
 
     #[test]

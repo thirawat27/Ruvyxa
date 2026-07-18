@@ -39,9 +39,9 @@ pub mod sourcemap;
 pub mod style_module;
 pub mod types;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::PathBuf;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::cache::CompileCache;
 use crate::chunking::{
@@ -52,6 +52,48 @@ use crate::plugin::PluginPipeline;
 use crate::resolver::ResolveGraphCache;
 pub use context::BundleContext;
 pub use types::*;
+
+/// A route graph that has already completed resolution, compilation, boundary
+/// validation, and dynamic-import planning.
+///
+/// Keeping this plan in memory lets callers discover common route modules and
+/// then emit the final route bundle without repeating the expensive front half
+/// of the bundling pipeline.
+pub struct PreparedBundle {
+    input: BundleInput,
+    compiled: Vec<compiler::CompiledModule>,
+    plugin_source_maps: BTreeMap<PathBuf, String>,
+    diagnostics: Vec<ruvyxa_diagnostics::Diagnostic>,
+    dynamic_import_files: BTreeMap<PathBuf, String>,
+    static_modules: Vec<compiler::CompiledModule>,
+    graph_module_count: usize,
+    prepare_duration: Duration,
+}
+
+impl PreparedBundle {
+    /// Project modules in the static entry graph, using the same ordering and
+    /// selection rules as the emitted chunk manifest.
+    #[must_use]
+    pub fn module_paths(&self) -> BTreeSet<PathBuf> {
+        linker::ordered_project_modules(&self.static_modules)
+            .into_iter()
+            .filter(|module| !module.is_external)
+            .map(|module| module.path.clone())
+            .collect()
+    }
+
+    /// Every project module compiled for this route, including modules emitted
+    /// into dynamic-import chunks. Callers can use this complete set for cache
+    /// invalidation without changing static shared-chunk membership.
+    #[must_use]
+    pub fn dependency_paths(&self) -> BTreeSet<PathBuf> {
+        self.compiled
+            .iter()
+            .filter(|module| !module.is_external)
+            .map(|module| module.path.clone())
+            .collect()
+    }
+}
 
 // ─────────────────────────────────────────────
 // Entry point
@@ -81,13 +123,32 @@ pub fn bundle_with_shared_modules(
     context: &BundleContext,
     shared_modules: &BTreeSet<PathBuf>,
 ) -> Result<BundleOutput> {
-    bundle_with_parts(
+    let prepared = prepare_bundle_with_parts(
         input,
         context.compile_cache(),
         context.graph_cache(),
         context.plugins(),
-        shared_modules,
+    )?;
+    bundle_prepared(&prepared, shared_modules)
+}
+
+/// Resolve and compile a route once so it can be inspected and emitted later.
+pub fn prepare_bundle(input: BundleInput, context: &BundleContext) -> Result<PreparedBundle> {
+    prepare_bundle_with_parts(
+        input,
+        context.compile_cache(),
+        context.graph_cache(),
+        context.plugins(),
     )
+}
+
+/// Emit a previously prepared route while reading selected modules from a
+/// shared-route registry.
+pub fn bundle_prepared(
+    prepared: &PreparedBundle,
+    shared_modules: &BTreeSet<PathBuf>,
+) -> Result<BundleOutput> {
+    emit_prepared_bundle(prepared, shared_modules)
 }
 
 /// Compile shared route modules into one executable browser registry.
@@ -149,6 +210,68 @@ pub fn bundle_shared_route_modules(
         .into_iter()
         .filter(|module| !module.is_external && module.path != *entry_label)
         .collect::<Vec<_>>();
+    emit_shared_route_modules(shared_modules, input)
+}
+
+/// Emit a shared-route registry directly from routes prepared in the same
+/// immutable build snapshot.
+///
+/// This preserves the legacy synthetic-entry breadth-first module order while
+/// avoiding a second resolve and compile pass for the selected closure.
+pub fn bundle_shared_prepared_route_modules(
+    prepared_routes: &[&PreparedBundle],
+    module_paths: &BTreeSet<PathBuf>,
+    options: BundleOptions,
+) -> Result<SharedRouteBundleOutput> {
+    let Some(first) = prepared_routes.first() else {
+        return Err(BundleError::Compiler(
+            "shared route preparation requires at least one prepared route".to_string(),
+        ));
+    };
+    let available = prepared_routes
+        .iter()
+        .flat_map(|prepared| prepared.compiled.iter())
+        .filter(|module| {
+            !module.is_external && !module.path.to_string_lossy().starts_with("ruvyxa:")
+        })
+        .map(|module| (module.path.clone(), module))
+        .collect::<BTreeMap<_, _>>();
+    let mut queue = module_paths.iter().cloned().collect::<VecDeque<_>>();
+    let mut visited = BTreeSet::new();
+    let mut shared_modules = Vec::new();
+    while let Some(path) = queue.pop_front() {
+        if !visited.insert(path.clone()) {
+            continue;
+        }
+        let Some(module) = available.get(&path) else {
+            return Err(BundleError::Compiler(format!(
+                "prepared shared route module is unavailable: {}",
+                path.display()
+            )));
+        };
+        for dependency in &module.deps {
+            if available.contains_key(dependency) && !visited.contains(dependency) {
+                queue.push_back(dependency.clone());
+            }
+        }
+        shared_modules.push((*module).clone());
+    }
+
+    let mut input = first.input.clone();
+    input.entry = PathBuf::from("ruvyxa:shared-route-entry.ts");
+    input.layouts.clear();
+    input.request_path = "/__ruvyxa/shared".to_string();
+    input.target = BundleTarget::Client;
+    input.options = options;
+    let mut diagnostics = Vec::new();
+    boundary::check(&shared_modules, &input, &mut diagnostics)?;
+    emit_shared_route_modules(shared_modules, input)
+}
+
+fn emit_shared_route_modules(
+    shared_modules: Vec<compiler::CompiledModule>,
+    input: BundleInput,
+) -> Result<SharedRouteBundleOutput> {
     let linked = linker::link_shared_route_modules(&shared_modules, &input)?;
     let code = if input.options.minify {
         minifier::minify_with_options(&linked, input.target, false)?
@@ -164,13 +287,12 @@ pub fn bundle_shared_route_modules(
     })
 }
 
-fn bundle_with_parts(
+fn prepare_bundle_with_parts(
     input: BundleInput,
     compile_cache: &CompileCache,
     graph_cache: &ResolveGraphCache,
     plugins: &PluginPipeline,
-    shared_modules: &BTreeSet<PathBuf>,
-) -> Result<BundleOutput> {
+) -> Result<PreparedBundle> {
     let started = Instant::now();
 
     // 1. Build the virtual entry source that wires layouts → page.
@@ -213,13 +335,38 @@ fn bundle_with_parts(
     } else {
         compiled.clone()
     };
+
+    Ok(PreparedBundle {
+        input,
+        compiled,
+        plugin_source_maps,
+        diagnostics,
+        dynamic_import_files,
+        static_modules,
+        graph_module_count: graph.len(),
+        prepare_duration: started.elapsed(),
+    })
+}
+
+fn emit_prepared_bundle(
+    prepared: &PreparedBundle,
+    shared_modules: &BTreeSet<PathBuf>,
+) -> Result<BundleOutput> {
+    let started = Instant::now();
+    let input = &prepared.input;
+    let compiled = &prepared.compiled;
+    let plugin_source_maps = &prepared.plugin_source_maps;
+    let dynamic_import_files = &prepared.dynamic_import_files;
+    let static_modules = &prepared.static_modules;
+    let split_dynamic_imports =
+        input.target == BundleTarget::Client && input.options.emit_chunk_manifest;
     let linked_modules = static_modules
         .iter()
         .filter(|module| !shared_modules.contains(&module.path))
         .cloned()
         .collect::<Vec<_>>();
     let chunks = if split_dynamic_imports {
-        build_dynamic_output_chunks(&compiled, &input, &dynamic_import_files)?
+        build_dynamic_output_chunks(compiled, input, dynamic_import_files)?
     } else {
         Vec::new()
     };
@@ -228,8 +375,8 @@ fn bundle_with_parts(
     // and returns an error.
     let linked = linker::link_parallel_with_dynamic_imports_and_shared_modules(
         &linked_modules,
-        &input,
-        &dynamic_import_files,
+        input,
+        dynamic_import_files,
         shared_modules,
     )?;
 
@@ -248,7 +395,7 @@ fn bundle_with_parts(
     };
 
     // 8. Wrap in the appropriate output format.
-    let code = output::wrap(final_code, &input);
+    let code = output::wrap(final_code, input);
 
     // Count modules whose JS came from the compile cache, not freshly compiled.
     let cache_hits = compiled.iter().filter(|m| m.cache_hit).count();
@@ -297,13 +444,13 @@ fn bundle_with_parts(
             let output_file = format!("{bundle_id}.js");
             let sm_file = source_map.as_ref().map(|_| format!("{bundle_id}.js.map"));
 
-            let modules: Vec<String> = linker::ordered_project_modules(&static_modules)
+            let modules: Vec<String> = linker::ordered_project_modules(static_modules)
                 .iter()
                 .filter(|m| !m.is_external)
                 .map(|m| m.path.display().to_string().replace('\\', "/"))
                 .collect();
 
-            let dynamic_imports = dynamic_import_chunks(&compiled, &dynamic_import_files);
+            let dynamic_imports = dynamic_import_chunks(compiled, dynamic_import_files);
 
             Some(ChunkManifest {
                 bundle_id,
@@ -332,12 +479,12 @@ fn bundle_with_parts(
 
     let output_bytes = code.len();
     let stats = BundleStats {
-        module_count: graph.len(),
+        module_count: prepared.graph_module_count,
         output_bytes,
         estimated_gz_bytes: (output_bytes as f64 * 0.35) as usize,
         minified: minify_output,
         tree_shaken: input.options.tree_shaking,
-        duration_ms: started.elapsed().as_millis() as u64,
+        duration_ms: (prepared.prepare_duration + started.elapsed()).as_millis() as u64,
         tree_shaken_modules,
         cache_hits,
     };
@@ -345,7 +492,7 @@ fn bundle_with_parts(
     Ok(BundleOutput {
         code,
         source_map,
-        diagnostics,
+        diagnostics: prepared.diagnostics.clone(),
         stats,
         chunk_manifest,
         chunks,
@@ -558,6 +705,114 @@ mod tests {
         )));
         assert!(!out.code.contains("const label = \"Lazy\";"));
         assert!(out.chunks[0].code.contains("const label = \"Lazy\";"));
+    }
+
+    #[test]
+    fn prepared_bundle_emits_the_same_route_output_as_direct_bundling() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let app = root.join("app");
+        fs::create_dir_all(&app).unwrap();
+
+        let page = app.join("page.mdx");
+        let card = app.join("Card.tsx");
+        fs::write(
+            &page,
+            "import { Card } from './Card'\n\n# Prepared MDX\n\n<Card>Ready</Card>",
+        )
+        .unwrap();
+        fs::write(
+            &card,
+            "export function Card({ children }) { return <aside>{children}</aside>; }",
+        )
+        .unwrap();
+
+        let input = client_input(&root, &app, page, vec![], "/prepared");
+        let direct_context = BundleContext::new(&root);
+        let direct = bundle_with_context(input.clone(), &direct_context).unwrap();
+        let prepared_context = BundleContext::new(&root);
+        let prepared = prepare_bundle(input, &prepared_context).unwrap();
+        let emitted = bundle_prepared(&prepared, &BTreeSet::new()).unwrap();
+
+        assert!(prepared.module_paths().contains(&card));
+        assert_eq!(emitted.code, direct.code);
+        assert_eq!(emitted.source_map, direct.source_map);
+        assert_eq!(emitted.diagnostics, direct.diagnostics);
+        assert_eq!(
+            serde_json::to_value(&emitted.chunk_manifest).unwrap(),
+            serde_json::to_value(&direct.chunk_manifest).unwrap()
+        );
+        assert_eq!(
+            serde_json::to_value(&emitted.chunks).unwrap(),
+            serde_json::to_value(&direct.chunks).unwrap()
+        );
+        assert_eq!(emitted.stats.module_count, direct.stats.module_count);
+        assert_eq!(emitted.stats.output_bytes, direct.stats.output_bytes);
+        assert_eq!(
+            emitted.stats.tree_shaken_modules,
+            direct.stats.tree_shaken_modules
+        );
+    }
+
+    #[test]
+    fn prepared_shared_registry_matches_the_legacy_synthetic_entry() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let app = root.join("app");
+        fs::create_dir_all(&app).unwrap();
+        let shared = app.join("shared.ts");
+        let page_a = app.join("a.tsx");
+        let page_b = app.join("b.tsx");
+        fs::write(&shared, "export const label = 'shared';").unwrap();
+        fs::write(
+            &page_a,
+            "import { label } from './shared'; export default function A() { return <main>{label}</main> }",
+        )
+        .unwrap();
+        fs::write(
+            &page_b,
+            "import { label } from './shared'; export default function B() { return <aside>{label}</aside> }",
+        )
+        .unwrap();
+        let context = BundleContext::new(&root);
+        let prepared_a =
+            prepare_bundle(client_input(&root, &app, page_a, vec![], "/a"), &context).unwrap();
+        let prepared_b =
+            prepare_bundle(client_input(&root, &app, page_b, vec![], "/b"), &context).unwrap();
+        let shared_paths = prepared_a
+            .module_paths()
+            .intersection(&prepared_b.module_paths())
+            .filter(|path| path.is_file())
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let options = BundleOptions {
+            minify: false,
+            source_map: false,
+            tree_shaking: false,
+            jsx_runtime: JsxRuntime::Automatic,
+            es_target: EsTarget::Es2022,
+            split_strategy: SplitStrategy::Route,
+            emit_chunk_manifest: false,
+            collect_module_manifest: false,
+        };
+
+        let legacy = bundle_shared_route_modules(
+            root.clone(),
+            app,
+            &shared_paths,
+            options.clone(),
+            &context,
+        )
+        .unwrap();
+        let prepared = bundle_shared_prepared_route_modules(
+            &[&prepared_a, &prepared_b],
+            &shared_paths,
+            options,
+        )
+        .unwrap();
+
+        assert_eq!(prepared.modules, legacy.modules);
+        assert_eq!(prepared.code, legacy.code);
     }
 
     #[test]

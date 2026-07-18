@@ -93,6 +93,13 @@ struct CachedTsConfig {
 /// Resolution cache key: (base_dir, specifier).
 type ResolutionKey = (Arc<str>, Arc<str>);
 
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+struct DependencyCacheKey {
+    base_dir: Arc<str>,
+    source_hash: [u8; 32],
+    target: u8,
+}
+
 /// Threshold above which source files are read via memory-mapping.
 const MMAP_THRESHOLD_BYTES: u64 = 64 * 1024;
 
@@ -109,6 +116,11 @@ pub struct ResolveGraphCache {
     sources: Arc<DashMap<PathBuf, CachedSource>>,
     /// Parsed tsconfig/jsconfig cache, keyed by canonical project root.
     tsconfigs: Arc<DashMap<PathBuf, CachedTsConfig>>,
+    /// Fully resolved dependency lists for plugin-free source snapshots.
+    dependencies: Arc<DashMap<DependencyCacheKey, Arc<[PathBuf]>>>,
+    /// Production builds operate on one immutable input snapshot and can skip
+    /// repeated metadata checks after the first source read.
+    stable_snapshot: bool,
 }
 
 impl ResolveGraphCache {
@@ -117,12 +129,22 @@ impl ResolveGraphCache {
         Self::default()
     }
 
+    /// Create a cache for one immutable production-build input snapshot.
+    pub fn for_build() -> Self {
+        Self {
+            stable_snapshot: true,
+            ..Self::default()
+        }
+    }
+
     /// Create a cache pre-sized for an expected module count.
     pub fn with_capacity(resolution_hint: usize, source_hint: usize) -> Self {
         Self {
             resolutions: Arc::new(DashMap::with_capacity(resolution_hint)),
             sources: Arc::new(DashMap::with_capacity(source_hint)),
             tsconfigs: Arc::new(DashMap::with_capacity(1)),
+            dependencies: Arc::new(DashMap::with_capacity(source_hint)),
+            stable_snapshot: false,
         }
     }
 
@@ -142,6 +164,11 @@ impl ResolveGraphCache {
 
     /// Read source text for a file, using the cache and mmap for large files.
     fn read_source(&self, path: &Path) -> Result<String> {
+        if self.stable_snapshot
+            && let Some(entry) = self.sources.get(path)
+        {
+            return Ok(entry.source.to_string());
+        }
         let metadata = fs::metadata(path).map_err(|error| {
             BundleError::Io(std::io::Error::new(
                 error.kind(),
@@ -177,6 +204,11 @@ impl ResolveGraphCache {
 
     /// Load resolver aliases once per configuration version across route builds.
     fn tsconfig_paths(&self, project_root: &Path) -> TsConfigPaths {
+        if self.stable_snapshot
+            && let Some(entry) = self.tsconfigs.get(project_root)
+        {
+            return entry.paths.clone();
+        }
         let fingerprint = tsconfig_fingerprint(project_root);
         if let Some(entry) = self.tsconfigs.get(project_root)
             && entry.fingerprint == fingerprint
@@ -205,6 +237,11 @@ impl ResolveGraphCache {
         self.sources.len()
     }
 
+    /// Number of content-keyed dependency lists retained by this context.
+    pub fn dependency_count(&self) -> usize {
+        self.dependencies.len()
+    }
+
     /// Invalidate entries for specific file paths (called on file change).
     pub fn invalidate_paths(&self, paths: &[PathBuf]) {
         for path in paths {
@@ -215,6 +252,7 @@ impl ResolveGraphCache {
                 path != &root.join("tsconfig.json") && path != &root.join("jsconfig.json")
             });
         }
+        self.dependencies.clear();
     }
 
     /// Clear all cached data.
@@ -222,6 +260,7 @@ impl ResolveGraphCache {
         self.resolutions.clear();
         self.sources.clear();
         self.tsconfigs.clear();
+        self.dependencies.clear();
     }
 }
 
@@ -932,6 +971,54 @@ fn collect_deps_cached(
     plugins: &PluginPipeline,
     target: BundleTarget,
 ) -> Result<Vec<PathBuf>> {
+    if plugins.plugin_count() == 0 {
+        let key = DependencyCacheKey {
+            base_dir: Arc::from(base_dir.to_string_lossy().as_ref()),
+            source_hash: *blake3::hash(source.as_bytes()).as_bytes(),
+            target: match target {
+                BundleTarget::Client => 0,
+                BundleTarget::Ssr => 1,
+            },
+        };
+        if let Some(dependencies) = cache.dependencies.get(&key) {
+            return Ok(dependencies.to_vec());
+        }
+        let dependencies = collect_deps_uncached(
+            source,
+            base_dir,
+            project_root,
+            tsconfig,
+            cache,
+            plugins,
+            target,
+        )?;
+        cache
+            .dependencies
+            .insert(key, Arc::from(dependencies.as_slice()));
+        return Ok(dependencies);
+    }
+
+    collect_deps_uncached(
+        source,
+        base_dir,
+        project_root,
+        tsconfig,
+        cache,
+        plugins,
+        target,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_deps_uncached(
+    source: &str,
+    base_dir: &Path,
+    project_root: &Path,
+    tsconfig: &TsConfigPaths,
+    cache: &ResolveGraphCache,
+    plugins: &PluginPipeline,
+    target: BundleTarget,
+) -> Result<Vec<PathBuf>> {
     let specifiers = extract_specifiers(source);
     let mut deps = Vec::with_capacity(specifiers.len());
     let base_dir_str = base_dir.to_string_lossy();
@@ -1280,6 +1367,7 @@ mod tests {
             &cache,
         )
         .unwrap();
+        let dependencies_after_first_route = cache.dependency_count();
         resolve_graph_with_cache(
             &format!(
                 "import Page from {};",
@@ -1294,6 +1382,26 @@ mod tests {
 
         assert_eq!(cache.source_count(), 3);
         assert!(cache.resolution_count() >= 1);
+        assert_eq!(
+            cache.dependency_count(),
+            dependencies_after_first_route + 1,
+            "only the second virtual entry is new; identical page and shared scans are reused"
+        );
+    }
+
+    #[test]
+    fn production_snapshot_skips_revalidation_until_explicit_invalidation() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("source.ts");
+        fs::write(&source, "export const value = 'first';").unwrap();
+        let cache = ResolveGraphCache::for_build();
+
+        assert!(cache.read_source(&source).unwrap().contains("first"));
+        fs::write(&source, "export const value = 'after';").unwrap();
+        assert!(cache.read_source(&source).unwrap().contains("first"));
+
+        cache.invalidate_paths(std::slice::from_ref(&source));
+        assert!(cache.read_source(&source).unwrap().contains("after"));
     }
 
     #[test]

@@ -10,9 +10,11 @@ const ASSET_EXTENSIONS = new Set(['.css', '.scss', '.sass', '.less'])
 const COMPILER_CACHE_MAX_ENTRIES = 512
 const compilerCache = (globalThis.__RUVYXA_COMPILER_CACHE__ ??= {
   sources: new Map(),
+  transforms: new Map(),
   rewrites: new Map(),
   content: new Map(),
 })
+compilerCache.transforms ??= new Map()
 
 /**
  * Drop compiler entries associated with changed files, or every entry when the
@@ -36,6 +38,7 @@ export function invalidateCompilerCache(paths) {
 
 export function clearCompilerCache() {
   compilerCache.sources.clear()
+  compilerCache.transforms.clear()
   compilerCache.rewrites.clear()
   compilerCache.content.clear()
 }
@@ -43,6 +46,7 @@ export function clearCompilerCache() {
 export function compilerCacheStats() {
   return {
     sources: compilerCache.sources.size,
+    transforms: compilerCache.transforms.size,
     rewrites: compilerCache.rewrites.size,
     content: compilerCache.content.size,
     maxEntries: COMPILER_CACHE_MAX_ENTRIES,
@@ -261,6 +265,7 @@ async function visitModule(context) {
   // scanning only the source would otherwise drop those bindings in wrapped
   // Node bundles and leave `_jsx` undefined at render time.
   const transformedSource = transformModuleSource(module)
+  module.transformedSource = transformedSource
   for (const specifier of extractSpecifiers(transformedSource)) {
     if (isAssetSpecifier(specifier) && !isCssModuleSpecifier(specifier)) continue
 
@@ -499,7 +504,7 @@ function rewriteModule(module) {
   const cached = compilerCache.rewrites.get(rewriteKey)
   if (cached) return cached
 
-  const source = transformModuleSource(module)
+  const source = module.transformedSource ?? transformModuleSource(module)
   const codeOnly = maskNonCode(source)
 
   const lines = []
@@ -1186,6 +1191,15 @@ function transformModuleSource(module) {
         : extension === '.ts' || extension === '.mts' || extension === '.cts'
           ? 'ts'
           : 'js'
+  const transformKey = createHash('sha256')
+    .update(lang)
+    .update('\0')
+    .update(module.jsxRuntime)
+    .update('\0')
+    .update(module.source)
+    .digest('hex')
+  const cached = compilerCache.transforms.get(transformKey)
+  if (cached) return cached
   const { transformSync } = createRequire(
     path.join(path.dirname(fileURLToPath(import.meta.url)), '__ruvyxa-transform.cjs'),
   )('oxc-transform')
@@ -1213,6 +1227,7 @@ function transformModuleSource(module) {
     const detail = result.errors.map((error) => error.message).join('; ')
     throw new Error(`RUV1802 Oxc transform failed for ${filename}: ${detail}`)
   }
+  setBoundedCacheEntry(compilerCache.transforms, transformKey, result.code)
   return result.code
 }
 
