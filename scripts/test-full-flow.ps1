@@ -115,7 +115,7 @@ if (Test-Path $CreateDist) {
     New-Item -ItemType Directory -Path $CreateRoot -Force | Out-Null
     node "$RepoRoot\packages\create-ruvyxa\bin\create-ruvyxa.js" "$CreateApp"
     Write-Host "[OK] create-ruvyxa generates correct file structure" -ForegroundColor Green
-    Write-Host "     (use examples/basic-app for remaining tests; created demo at $CreateApp)" -ForegroundColor Gray
+    Write-Host "     (use examples/demo for remaining tests; created demo at $CreateApp)" -ForegroundColor Gray
     Remove-Item $CreateRoot -Recurse -Force -ErrorAction SilentlyContinue
 } else {
     Write-Host "[SKIP] create-ruvyxa dist not built (run 'pnpm -r build' first)" -ForegroundColor DarkYellow

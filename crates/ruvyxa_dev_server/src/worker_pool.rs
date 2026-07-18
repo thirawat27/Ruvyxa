@@ -279,6 +279,9 @@ impl WorkerResponse {
 struct PendingResponse {
     sender: mpsc::UnboundedSender<WorkerResponse>,
     queued: Arc<AtomicUsize>,
+    /// Set after an API response has started streaming. A worker exit must be
+    /// delivered to these consumers as a body error rather than a clean EOF.
+    streaming: Arc<AtomicBool>,
 }
 
 type PendingResponses = Arc<Mutex<BTreeMap<String, PendingResponse>>>;
@@ -287,6 +290,7 @@ struct ResponseChannel {
     id: String,
     receiver: mpsc::UnboundedReceiver<WorkerResponse>,
     queued: Arc<AtomicUsize>,
+    streaming: Arc<AtomicBool>,
 }
 
 pub(crate) struct WorkerApiResponse {
@@ -372,6 +376,10 @@ impl Stream for WorkerBodyStream {
                                 .unwrap_or_else(|| "Node worker API stream failed".to_string()),
                         ))))
                     }
+                    Some("api-end") => {
+                        self.finished = true;
+                        Poll::Ready(None)
+                    }
                     frame => {
                         self.finished = true;
                         Poll::Ready(Some(Err(io::Error::new(
@@ -383,7 +391,10 @@ impl Stream for WorkerBodyStream {
             }
             Poll::Ready(None) => {
                 self.finished = true;
-                Poll::Ready(None)
+                Poll::Ready(Some(Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "Node worker API stream ended before api-end",
+                ))))
             }
             Poll::Pending => {
                 if self.deadline.as_mut().poll(cx).is_ready() {
@@ -484,7 +495,6 @@ impl Worker {
                 };
                 let id = response.id.clone();
                 let terminal = response.is_terminal();
-                let end_frame = response.frame.as_deref() == Some("api-end");
                 let pending_response = {
                     let mut map = reader_pending.lock().await;
                     if terminal {
@@ -496,9 +506,6 @@ impl Worker {
                 let Some(pending_response) = pending_response else {
                     continue;
                 };
-                if end_frame {
-                    continue;
-                }
 
                 let queued = pending_response.queued.fetch_add(1, Ordering::AcqRel) + 1;
                 if queued > MAX_PENDING_RESPONSE_FRAMES {
@@ -522,10 +529,25 @@ impl Worker {
                     reader_pending.lock().await.remove(&id);
                 }
             }
-            // Dropping every sender wakes requests immediately when the worker
-            // exits, instead of leaving them to wait for the request timeout.
+            // Requests that have not started streaming still observe their
+            // channel closing and let the pool replace the failed worker.
+            // Streams must instead receive an explicit error: a clean EOF is
+            // only valid after the worker has sent `api-end`.
             reader_alive.store(false, Ordering::Release);
-            reader_pending.lock().await.clear();
+            let pending = std::mem::take(&mut *reader_pending.lock().await);
+            for (id, pending_response) in pending {
+                if !pending_response.streaming.load(Ordering::Acquire) {
+                    continue;
+                }
+
+                let error = WorkerResponse::stream_error(
+                    id,
+                    "Node worker exited before completing API response stream",
+                );
+                if pending_response.sender.send(error).is_ok() {
+                    pending_response.queued.fetch_add(1, Ordering::AcqRel);
+                }
+            }
             debug!("worker stdout reader exited");
         });
 
@@ -618,14 +640,17 @@ impl Worker {
         };
 
         match response.frame.as_deref() {
-            Some("api-start") => Ok(WorkerApiResponse {
-                response,
-                body: Some(Body::from_stream(WorkerBodyStream::new(
-                    channel,
-                    Arc::clone(&self.pending),
-                    response_timeout,
-                ))),
-            }),
+            Some("api-start") => {
+                channel.streaming.store(true, Ordering::Release);
+                Ok(WorkerApiResponse {
+                    response,
+                    body: Some(Body::from_stream(WorkerBodyStream::new(
+                        channel,
+                        Arc::clone(&self.pending),
+                        response_timeout,
+                    ))),
+                })
+            }
             None => Ok(WorkerApiResponse {
                 response,
                 body: None,
@@ -659,11 +684,13 @@ impl Worker {
         let id = request.id().to_string();
         let (sender, receiver) = mpsc::unbounded_channel();
         let queued = Arc::new(AtomicUsize::new(0));
+        let streaming = Arc::new(AtomicBool::new(false));
         self.pending.lock().await.insert(
             id.clone(),
             PendingResponse {
                 sender,
                 queued: Arc::clone(&queued),
+                streaming: Arc::clone(&streaming),
             },
         );
         if !self.alive.load(Ordering::Acquire) {
@@ -684,6 +711,7 @@ impl Worker {
             id,
             receiver,
             queued,
+            streaming,
         })
     }
 }
@@ -1276,13 +1304,21 @@ mod tests {
     #[tokio::test]
     async fn api_body_stream_decodes_binary_frames_without_text_conversion() {
         let (sender, receiver) = mpsc::unbounded_channel();
-        let queued = Arc::new(AtomicUsize::new(1));
+        let queued = Arc::new(AtomicUsize::new(2));
         sender
             .send(WorkerResponse {
                 id: "stream".to_string(),
                 ok: true,
                 frame: Some("api-chunk".to_string()),
                 body_base64: Some("AP+ADQo=".to_string()),
+                ..WorkerResponse::default()
+            })
+            .unwrap();
+        sender
+            .send(WorkerResponse {
+                id: "stream".to_string(),
+                ok: true,
+                frame: Some("api-end".to_string()),
                 ..WorkerResponse::default()
             })
             .unwrap();
@@ -1293,6 +1329,7 @@ mod tests {
                 id: "stream".to_string(),
                 receiver,
                 queued,
+                streaming: Arc::new(AtomicBool::new(true)),
             },
             Arc::new(Mutex::new(BTreeMap::new())),
             std::time::Duration::from_secs(1),
@@ -1300,6 +1337,35 @@ mod tests {
         let bytes = axum::body::to_bytes(body, 1024).await.unwrap();
 
         assert_eq!(bytes.as_ref(), &[0, 255, 128, 13, 10]);
+    }
+
+    #[tokio::test]
+    async fn api_body_stream_rejects_eof_before_api_end() {
+        let (sender, receiver) = mpsc::unbounded_channel();
+        sender
+            .send(WorkerResponse {
+                id: "stream".to_string(),
+                ok: true,
+                frame: Some("api-chunk".to_string()),
+                body_base64: Some("AA==".to_string()),
+                ..WorkerResponse::default()
+            })
+            .unwrap();
+        drop(sender);
+
+        let body = Body::from_stream(WorkerBodyStream::new(
+            ResponseChannel {
+                id: "stream".to_string(),
+                receiver,
+                queued: Arc::new(AtomicUsize::new(1)),
+                streaming: Arc::new(AtomicBool::new(true)),
+            },
+            Arc::new(Mutex::new(BTreeMap::new())),
+            std::time::Duration::from_secs(1),
+        ));
+        let error = axum::body::to_bytes(body, 1024).await.unwrap_err();
+
+        assert!(error.to_string().contains("before api-end"));
     }
 
     #[tokio::test]
@@ -1319,6 +1385,7 @@ mod tests {
                 id: "stream".to_string(),
                 receiver,
                 queued,
+                streaming: Arc::new(AtomicBool::new(true)),
             },
             Arc::new(Mutex::new(BTreeMap::new())),
             std::time::Duration::from_secs(1),
@@ -1336,6 +1403,7 @@ mod tests {
                 id: "stream".to_string(),
                 receiver,
                 queued: Arc::new(AtomicUsize::new(0)),
+                streaming: Arc::new(AtomicBool::new(true)),
             },
             Arc::new(Mutex::new(BTreeMap::new())),
             std::time::Duration::from_millis(20),
@@ -1417,6 +1485,48 @@ mod tests {
             .unwrap_err();
 
         assert!(error.to_string().contains("consumer queue"));
+        worker.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn api_response_stream_reports_worker_exit_before_api_end() {
+        let temp = tempfile::tempdir().unwrap();
+        let worker_script = temp.path().join("worker.mjs");
+        std::fs::write(
+            &worker_script,
+            "import { createInterface } from 'node:readline'; createInterface({ input: process.stdin }).on('line', (line) => { const { id } = JSON.parse(line); const write = (value, done) => process.stdout.write(JSON.stringify({ id, ...value }) + '\\n', done); write({ frame: 'api-start', ok: true, status: 200 }); write({ frame: 'api-chunk', ok: true, bodyBase64: 'AA==' }, () => process.exit(0)); });",
+        )
+        .unwrap();
+        let worker = Worker::spawn(&worker_script, &BTreeMap::new())
+            .await
+            .unwrap();
+        let request = WorkerRequest::Api {
+            id: next_request_id(),
+            project_root: temp.path().display().to_string(),
+            route_file: temp.path().join("route.mjs").display().to_string(),
+            method: "GET".to_string(),
+            request_path: "/api/interrupted".to_string(),
+            headers: BTreeMap::new(),
+            header_pairs: Vec::new(),
+            body: None,
+            body_base64: None,
+            stream_response: true,
+            params: BTreeMap::new(),
+        };
+
+        let response = worker
+            .start_api_response(&request, std::time::Duration::from_secs(2))
+            .await
+            .unwrap();
+        let error = axum::body::to_bytes(response.body.unwrap(), 1024)
+            .await
+            .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("exited before completing API response stream")
+        );
         worker.shutdown().await;
     }
 

@@ -18,6 +18,7 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use chrono::Local;
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
+use ruvyxa_bundler::JsxRuntime;
 use ruvyxa_diagnostics::{Diagnostic, Result, RuvyxaError};
 use ruvyxa_graph::{
     DiscoverOptions, RenderStrategy, RouteEntry, RouteKind, RouteManifest, RouteParams,
@@ -76,6 +77,8 @@ pub struct ServerConfig {
     pub style_entries: Vec<PathBuf>,
     /// Precompile route modules and load their dependencies in dev workers.
     pub prebundle_dependencies: bool,
+    /// JSX transform runtime passed to every Node renderer and worker.
+    pub jsx_runtime: JsxRuntime,
     /// Render actionable source-aware error overlays in development.
     pub error_overlay: bool,
     /// Expose runtime route traces from the development diagnostics endpoint.
@@ -119,6 +122,7 @@ impl ServerConfig {
             cache_css: true,
             style_entries: Vec::new(),
             prebundle_dependencies: true,
+            jsx_runtime: JsxRuntime::Automatic,
             error_overlay: true,
             debug_traces: false,
             action_body_limit_bytes: MAX_ACTION_BODY_BYTES,
@@ -151,6 +155,7 @@ impl ServerConfig {
             cache_css: true,
             style_entries: Vec::new(),
             prebundle_dependencies: false,
+            jsx_runtime: JsxRuntime::Automatic,
             error_overlay: false,
             debug_traces: false,
             action_body_limit_bytes: MAX_ACTION_BODY_BYTES,
@@ -345,7 +350,7 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
     let (reload_tx, _) = broadcast::channel(64);
     let runtime_cache = Arc::new(RuntimeCache::with_manifest(manifest.clone()));
 
-    let env = project_env(&config.root)?;
+    let env = runtime_env(&config)?;
     let worker_pool = Arc::new(NodeWorkerPool::start(&config.root, env).await?);
     info!("Node worker pool ready");
 
@@ -1133,7 +1138,18 @@ async fn handle_request(
     let (parts, body) = request.into_parts();
     let mut headers = parts.headers;
     let mut method = parts.method.as_str().to_string();
-    let mut request_path = parts.uri.path().to_string();
+    let mut request_path = match canonical_request_path(parts.uri.path()) {
+        Ok(path) => path,
+        Err(error) => {
+            return with_security_headers(
+                (
+                    StatusCode::BAD_REQUEST,
+                    format!("Invalid request path: {error}"),
+                )
+                    .into_response(),
+            );
+        }
+    };
     // Routing and static-file lookup must use only the path, while an API handler's
     // standard Request must retain the original query string.
     let mut request_target = parts
@@ -1367,6 +1383,77 @@ fn should_log_dev_request(request_path: &str) -> bool {
         return true;
     }
     Path::new(request_path).extension().is_none()
+}
+
+/// Decode each URI path segment without allowing encoded bytes to introduce a
+/// new path boundary or filesystem traversal component.
+fn canonical_request_path(raw_path: &str) -> Result<String> {
+    if !raw_path.starts_with('/') {
+        return Err(RuvyxaError::Message(
+            "request path must start with '/'.".to_string(),
+        ));
+    }
+
+    let mut segments = Vec::new();
+    for segment in raw_path.split('/').filter(|segment| !segment.is_empty()) {
+        let decoded = decode_path_segment(segment)?;
+        if decoded.is_empty()
+            || matches!(decoded.as_str(), "." | "..")
+            || decoded.contains(['/', '\\'])
+            || decoded.chars().any(char::is_control)
+        {
+            return Err(RuvyxaError::Message(
+                "request path contains an unsafe segment.".to_string(),
+            ));
+        }
+        segments.push(decoded);
+    }
+
+    Ok(if segments.is_empty() {
+        "/".to_string()
+    } else {
+        format!("/{}", segments.join("/"))
+    })
+}
+
+fn decode_path_segment(segment: &str) -> Result<String> {
+    let bytes = segment.as_bytes();
+    let mut decoded = Vec::with_capacity(bytes.len());
+    let mut index = 0;
+
+    while index < bytes.len() {
+        if bytes[index] != b'%' {
+            decoded.push(bytes[index]);
+            index += 1;
+            continue;
+        }
+
+        let Some(high) = bytes.get(index + 1).and_then(|byte| hex_value(*byte)) else {
+            return Err(RuvyxaError::Message(
+                "request path contains malformed percent encoding.".to_string(),
+            ));
+        };
+        let Some(low) = bytes.get(index + 2).and_then(|byte| hex_value(*byte)) else {
+            return Err(RuvyxaError::Message(
+                "request path contains malformed percent encoding.".to_string(),
+            ));
+        };
+        decoded.push((high << 4) | low);
+        index += 3;
+    }
+
+    String::from_utf8(decoded).map_err(|_| {
+        RuvyxaError::Message("request path contains invalid UTF-8 encoding.".to_string())
+    })
+}
+
+fn hex_value(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn dev_page_request_log(
@@ -2597,7 +2684,7 @@ fn render_react_page(
             .suggest("Run pnpm install from the monorepo root, or install the ruvyxa package in the app.")
     })?;
 
-    let output = node_command(&config.root)?
+    let output = node_command(config)?
         .arg(&renderer)
         .arg(&config.root)
         .arg(&config.app_dir)
@@ -2678,10 +2765,26 @@ fn find_runtime_script(root: &Path, file_name: &str) -> Option<PathBuf> {
     None
 }
 
-fn node_command(root: &Path) -> Result<Command> {
+fn node_command(config: &ServerConfig) -> Result<Command> {
     let mut command = Command::new("node");
-    command.envs(project_env(root)?);
+    command.envs(runtime_env(config)?);
     Ok(command)
+}
+
+fn runtime_env(config: &ServerConfig) -> Result<BTreeMap<String, String>> {
+    let mut env = project_env(&config.root)?;
+    env.insert(
+        "RUVYXA_JSX_RUNTIME".to_string(),
+        jsx_runtime_name(config.jsx_runtime).to_string(),
+    );
+    Ok(env)
+}
+
+fn jsx_runtime_name(runtime: JsxRuntime) -> &'static str {
+    match runtime {
+        JsxRuntime::Classic => "classic",
+        JsxRuntime::Automatic => "automatic",
+    }
 }
 
 /// Load project environment values for Node runtime processes.
@@ -2755,7 +2858,7 @@ fn render_api(
             .suggest("Run pnpm install from the monorepo root, or install the ruvyxa package in the app.")
     })?;
 
-    let output = node_command(&config.root)?
+    let output = node_command(config)?
         .arg(&renderer)
         .arg(&config.root)
         .arg(&route.file)
@@ -3959,6 +4062,21 @@ mod tests {
     }
 
     #[test]
+    fn runtime_env_uses_the_configured_jsx_runtime() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = ServerConfig::dev(temp.path(), "localhost", 3000);
+        config.jsx_runtime = JsxRuntime::Classic;
+
+        assert_eq!(
+            runtime_env(&config)
+                .unwrap()
+                .get("RUVYXA_JSX_RUNTIME")
+                .map(String::as_str),
+            Some("classic")
+        );
+    }
+
+    #[test]
     fn action_security_options_control_request_validation() {
         let mut headers = HeaderMap::new();
         headers.insert(header::HOST, HeaderValue::from_static("localhost:3000"));
@@ -3991,6 +4109,47 @@ mod tests {
         assert!(!is_safe_relative_path(""));
         assert!(!is_safe_relative_path("../secret.txt"));
         assert!(!is_safe_relative_path("images\\logo.png"));
+    }
+
+    #[test]
+    fn canonical_request_path_decodes_segments_for_routing_and_prerendering() {
+        assert_eq!(
+            canonical_request_path("/blog/hello%20world").unwrap(),
+            "/blog/hello world"
+        );
+        assert_eq!(
+            canonical_request_path("/%E0%B8%97%E0%B8%94%E0%B8%AA%E0%B8%AD%E0%B8%9A").unwrap(),
+            "/ทดสอบ"
+        );
+
+        let temp = tempfile::tempdir().unwrap();
+        let page_dir = temp.path().join("blog").join("hello world");
+        fs::create_dir_all(&page_dir).unwrap();
+        fs::write(page_dir.join("index.html"), "rendered").unwrap();
+        let path = canonical_request_path("/blog/hello%20world").unwrap();
+
+        assert_eq!(
+            serve_prerendered_html(temp.path(), &path),
+            Some("rendered".to_string())
+        );
+    }
+
+    #[test]
+    fn canonical_request_path_rejects_encoded_boundaries_and_malformed_values() {
+        for raw_path in [
+            "/blog/%2Fsecret",
+            "/blog/%5Csecret",
+            "/blog/%2E%2E",
+            "/blog/%00",
+            "/blog/%",
+            "/blog/%GG",
+            "/blog/%FF",
+        ] {
+            assert!(
+                canonical_request_path(raw_path).is_err(),
+                "{raw_path} must be rejected"
+            );
+        }
     }
 
     #[test]

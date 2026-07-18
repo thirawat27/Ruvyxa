@@ -42,6 +42,8 @@ use std::sync::Arc;
 
 use dashmap::DashMap;
 use rayon::prelude::*;
+use serde::de::{MapAccess, SeqAccess, Visitor};
+use serde::{Deserialize, Deserializer};
 
 use crate::plugin::{PluginContext, PluginPipeline};
 use crate::{BundleError, BundleTarget, Result};
@@ -426,24 +428,164 @@ fn strip_json_comments(input: &str) -> String {
 /// Attempt to resolve a bare package specifier (e.g. `"react/server"`) using
 /// the package's `package.json` `exports` map.
 ///
-/// Returns `Some(absolute_path)` if the exports map resolves the sub-path,
-/// `None` if there is no exports map or the sub-path isn't listed.
-fn resolve_package_exports(project_root: &Path, specifier: &str) -> Option<PathBuf> {
-    let (pkg_name, export_key) = package_name_and_export_key(specifier)?;
+#[derive(Debug, PartialEq, Eq)]
+enum PackageExportsResolution {
+    Unavailable,
+    Blocked,
+    Resolved(PathBuf),
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum ExportTargets {
+    Targets(Vec<String>),
+    Blocked,
+    Unmatched,
+}
+
+/// Minimal JSON representation that preserves object declaration order.
+/// Conditional `exports` keys are evaluated in declaration order by Node, so
+/// `serde_json::Value`'s default sorted map representation is not sufficient.
+#[derive(Debug, PartialEq)]
+enum PackageJsonValue {
+    Null,
+    String(String),
+    Array(Vec<Self>),
+    Object(Vec<(String, Self)>),
+    Unsupported,
+}
+
+impl<'de> Deserialize<'de> for PackageJsonValue {
+    fn deserialize<D>(deserializer: D) -> std::result::Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        deserializer.deserialize_any(PackageJsonVisitor)
+    }
+}
+
+struct PackageJsonVisitor;
+
+impl<'de> Visitor<'de> for PackageJsonVisitor {
+    type Value = PackageJsonValue;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a JSON value")
+    }
+
+    fn visit_unit<E>(self) -> std::result::Result<Self::Value, E> {
+        Ok(PackageJsonValue::Null)
+    }
+
+    fn visit_none<E>(self) -> std::result::Result<Self::Value, E> {
+        Ok(PackageJsonValue::Null)
+    }
+
+    fn visit_bool<E>(self, _value: bool) -> std::result::Result<Self::Value, E> {
+        Ok(PackageJsonValue::Unsupported)
+    }
+
+    fn visit_i64<E>(self, _value: i64) -> std::result::Result<Self::Value, E> {
+        Ok(PackageJsonValue::Unsupported)
+    }
+
+    fn visit_u64<E>(self, _value: u64) -> std::result::Result<Self::Value, E> {
+        Ok(PackageJsonValue::Unsupported)
+    }
+
+    fn visit_f64<E>(self, _value: f64) -> std::result::Result<Self::Value, E> {
+        Ok(PackageJsonValue::Unsupported)
+    }
+
+    fn visit_str<E>(self, value: &str) -> std::result::Result<Self::Value, E>
+    where
+        E: serde::de::Error,
+    {
+        Ok(PackageJsonValue::String(value.to_string()))
+    }
+
+    fn visit_string<E>(self, value: String) -> std::result::Result<Self::Value, E> {
+        Ok(PackageJsonValue::String(value))
+    }
+
+    fn visit_seq<A>(self, mut sequence: A) -> std::result::Result<Self::Value, A::Error>
+    where
+        A: SeqAccess<'de>,
+    {
+        let mut values = Vec::new();
+        while let Some(value) = sequence.next_element()? {
+            values.push(value);
+        }
+        Ok(PackageJsonValue::Array(values))
+    }
+
+    fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+    where
+        A: MapAccess<'de>,
+    {
+        let mut entries = Vec::new();
+        while let Some(entry) = map.next_entry()? {
+            entries.push(entry);
+        }
+        Ok(PackageJsonValue::Object(entries))
+    }
+}
+
+/// Resolve a bare package specifier through its `exports` map. A `null` map
+/// entry is distinct from an absent map: it explicitly blocks filesystem
+/// fallback for that subpath.
+fn resolve_package_exports(
+    project_root: &Path,
+    specifier: &str,
+    target: BundleTarget,
+) -> PackageExportsResolution {
+    let Some((pkg_name, export_key)) = package_name_and_export_key(specifier) else {
+        return PackageExportsResolution::Unavailable;
+    };
 
     let pkg_dir = project_root.join("node_modules").join(pkg_name);
     let pkg_json_path = pkg_dir.join("package.json");
 
-    let content = fs::read_to_string(&pkg_json_path).ok()?;
-    let pkg: serde_json::Value = serde_json::from_str(&content).ok()?;
+    let Ok(content) = fs::read_to_string(&pkg_json_path) else {
+        return PackageExportsResolution::Unavailable;
+    };
+    let Ok(pkg) = serde_json::from_str::<PackageJsonValue>(&content) else {
+        return PackageExportsResolution::Unavailable;
+    };
 
-    let exports = pkg.get("exports")?;
+    let PackageJsonValue::Object(package_fields) = pkg else {
+        return PackageExportsResolution::Unavailable;
+    };
+    let Some((_, exports)) = package_fields.iter().find(|(field, _)| field == "exports") else {
+        return PackageExportsResolution::Unavailable;
+    };
 
-    // Resolve: exports[cond_key] → first "import" or "default" condition.
-    let resolved_rel = resolve_exports_entry(exports, &export_key)?;
+    match resolve_exports_entry(exports, &export_key, target) {
+        ExportTargets::Blocked => PackageExportsResolution::Blocked,
+        ExportTargets::Unmatched => PackageExportsResolution::Unavailable,
+        ExportTargets::Targets(targets) => targets
+            .into_iter()
+            .find_map(|target| resolve_export_target(&pkg_dir, &target))
+            .map(PackageExportsResolution::Resolved)
+            .unwrap_or(PackageExportsResolution::Unavailable),
+    }
+}
 
-    let abs = pkg_dir.join(&resolved_rel);
-    abs.canonicalize().ok().or(Some(abs))
+fn resolve_export_target(pkg_dir: &Path, target: &str) -> Option<PathBuf> {
+    let relative = target.strip_prefix("./")?;
+    if relative.is_empty() || relative.contains('\\') {
+        return None;
+    }
+    let relative = Path::new(relative);
+    if !relative
+        .components()
+        .all(|component| matches!(component, std::path::Component::Normal(_)))
+    {
+        return None;
+    }
+
+    let package_root = pkg_dir.canonicalize().ok()?;
+    let candidate = pkg_dir.join(relative).canonicalize().ok()?;
+    candidate.starts_with(package_root).then_some(candidate)
 }
 
 /// Split a package specifier into the package directory name and `exports` key.
@@ -480,38 +622,108 @@ fn package_name_and_export_key(specifier: &str) -> Option<(String, String)> {
     Some((pkg_name, export_key))
 }
 
-/// Walk the exports map to find the file for a given sub-path under the
-/// `"import"` or `"default"` condition.
-fn resolve_exports_entry(exports: &serde_json::Value, key: &str) -> Option<String> {
+/// Walk a Node-style exports map for a requested subpath and bundle target.
+fn resolve_exports_entry(
+    exports: &PackageJsonValue,
+    key: &str,
+    target: BundleTarget,
+) -> ExportTargets {
     match exports {
-        serde_json::Value::String(s) => Some(s.trim_start_matches("./").to_string()),
-        serde_json::Value::Object(map) => {
-            // Try exact key match first (e.g. `"."` or `"./server"`).
-            if let Some(val) = map.get(key) {
-                return resolve_exports_condition(val);
+        PackageJsonValue::Null => ExportTargets::Blocked,
+        PackageJsonValue::String(_) | PackageJsonValue::Array(_) => {
+            if key == "." {
+                resolve_exports_value(exports, target, None)
+            } else {
+                ExportTargets::Unmatched
             }
-            // Try condition keys (e.g. `"import"`, `"default"`).
-            resolve_exports_condition(exports)
         }
-        _ => None,
+        PackageJsonValue::Object(map) => {
+            if map.iter().any(|(entry, _)| entry.starts_with('.')) {
+                resolve_exports_subpath(map, key, target)
+            } else {
+                resolve_exports_value(exports, target, None)
+            }
+        }
+        PackageJsonValue::Unsupported => ExportTargets::Unmatched,
     }
 }
 
-fn resolve_exports_condition(val: &serde_json::Value) -> Option<String> {
-    match val {
-        serde_json::Value::String(s) => Some(s.trim_start_matches("./").to_string()),
-        serde_json::Value::Object(map) => {
-            // Prefer "import" > "module" > "default" for ESM builds.
-            for key in &["import", "module", "default", "require"] {
-                if let Some(v) = map.get(*key)
-                    && let Some(s) = resolve_exports_condition(v)
-                {
-                    return Some(s);
+fn resolve_exports_subpath(
+    map: &[(String, PackageJsonValue)],
+    key: &str,
+    target: BundleTarget,
+) -> ExportTargets {
+    if let Some((_, value)) = map.iter().find(|(entry, _)| entry == key) {
+        return resolve_exports_value(value, target, None);
+    }
+
+    map.iter()
+        .filter_map(|(pattern, value)| {
+            let (prefix, suffix) = pattern.split_once('*')?;
+            if pattern.matches('*').count() != 1
+                || !key.starts_with(prefix)
+                || !key.ends_with(suffix)
+                || key.len() < prefix.len() + suffix.len()
+            {
+                return None;
+            }
+            let wildcard = &key[prefix.len()..key.len() - suffix.len()];
+            Some((prefix.len(), suffix.len(), wildcard, value))
+        })
+        .max_by_key(|(prefix_len, suffix_len, _, _)| (*prefix_len, *suffix_len))
+        .map_or(ExportTargets::Unmatched, |(_, _, wildcard, value)| {
+            resolve_exports_value(value, target, Some(wildcard))
+        })
+}
+
+fn resolve_exports_value(
+    value: &PackageJsonValue,
+    target: BundleTarget,
+    wildcard: Option<&str>,
+) -> ExportTargets {
+    match value {
+        PackageJsonValue::Null => ExportTargets::Blocked,
+        PackageJsonValue::String(path) => {
+            let path = wildcard
+                .map(|wildcard| path.replace('*', wildcard))
+                .unwrap_or_else(|| path.clone());
+            if path.starts_with("./") {
+                ExportTargets::Targets(vec![path])
+            } else {
+                ExportTargets::Unmatched
+            }
+        }
+        PackageJsonValue::Array(values) => {
+            let mut targets = Vec::new();
+            for value in values {
+                match resolve_exports_value(value, target, wildcard) {
+                    ExportTargets::Targets(mut candidates) => targets.append(&mut candidates),
+                    ExportTargets::Blocked if targets.is_empty() => return ExportTargets::Blocked,
+                    ExportTargets::Blocked | ExportTargets::Unmatched => {}
                 }
             }
-            None
+            if targets.is_empty() {
+                ExportTargets::Unmatched
+            } else {
+                ExportTargets::Targets(targets)
+            }
         }
-        _ => None,
+        PackageJsonValue::Object(map) => {
+            let conditions: &[&str] = match target {
+                BundleTarget::Client => &["browser", "import", "module", "default", "require"],
+                BundleTarget::Ssr => &["node", "import", "module", "default", "require"],
+            };
+            for (condition, value) in map {
+                if conditions.contains(&condition.as_str()) {
+                    let resolved = resolve_exports_value(value, target, wildcard);
+                    if !matches!(resolved, ExportTargets::Unmatched) {
+                        return resolved;
+                    }
+                }
+            }
+            ExportTargets::Unmatched
+        }
+        PackageJsonValue::Unsupported => ExportTargets::Unmatched,
     }
 }
 
@@ -756,17 +968,20 @@ fn collect_deps_cached(
             let tsconfig_result = tsconfig.resolve(&specifier);
             if tsconfig_result.is_some() {
                 tsconfig_result
-            } else if let Some(project_local) = resolve_project_specifier(project_root, &specifier)
-            {
-                if is_project_local(&project_local, project_root) {
-                    Some(project_local)
-                } else {
-                    // Try package.json exports map for bare specifiers.
-                    resolve_package_exports(project_root, &specifier).or(Some(project_local))
-                }
             } else {
-                // Try package.json exports map (e.g. `react/server`).
-                resolve_package_exports(project_root, &specifier)
+                let project_local = resolve_project_specifier(project_root, &specifier);
+                if project_local
+                    .as_ref()
+                    .is_some_and(|path| is_project_local(path, project_root))
+                {
+                    project_local
+                } else {
+                    match resolve_package_exports(project_root, &specifier, target) {
+                        PackageExportsResolution::Resolved(path) => Some(path),
+                        PackageExportsResolution::Blocked => None,
+                        PackageExportsResolution::Unavailable => project_local,
+                    }
+                }
             }
         };
 
@@ -1293,7 +1508,11 @@ export default function Card() { return <div className={cn("card")} /> }"#,
         )
         .unwrap();
 
-        let resolved = resolve_package_exports(root, "pkg/runtime").unwrap();
+        let PackageExportsResolution::Resolved(resolved) =
+            resolve_package_exports(root, "pkg/runtime", BundleTarget::Ssr)
+        else {
+            panic!("expected package exports resolution");
+        };
         assert!(resolved.ends_with("dist/runtime.mjs"));
     }
 
@@ -1310,7 +1529,135 @@ export default function Card() { return <div className={cn("card")} /> }"#,
         )
         .unwrap();
 
-        let resolved = resolve_package_exports(root, "@scope/pkg").unwrap();
+        let PackageExportsResolution::Resolved(resolved) =
+            resolve_package_exports(root, "@scope/pkg", BundleTarget::Ssr)
+        else {
+            panic!("expected package exports resolution");
+        };
         assert!(resolved.ends_with("dist/index.js"));
+    }
+
+    #[test]
+    fn resolves_exports_wildcards_and_array_fallbacks() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let pkg = root.join("node_modules").join("pkg");
+        fs::create_dir_all(pkg.join("dist/features")).unwrap();
+        fs::write(
+            pkg.join("dist/features/alpha.mjs"),
+            "export const alpha = 1;",
+        )
+        .unwrap();
+        fs::write(pkg.join("dist/fallback.js"), "export default 1;").unwrap();
+        fs::write(
+            pkg.join("package.json"),
+            r#"{"exports":{"./features/*":"./dist/features/*.mjs","./fallback":["./dist/missing.js","./dist/fallback.js"]}}"#,
+        )
+        .unwrap();
+
+        let PackageExportsResolution::Resolved(wildcard) =
+            resolve_package_exports(root, "pkg/features/alpha", BundleTarget::Client)
+        else {
+            panic!("expected wildcard resolution");
+        };
+        assert!(wildcard.ends_with("dist/features/alpha.mjs"));
+
+        let PackageExportsResolution::Resolved(fallback) =
+            resolve_package_exports(root, "pkg/fallback", BundleTarget::Client)
+        else {
+            panic!("expected fallback resolution");
+        };
+        assert!(fallback.ends_with("dist/fallback.js"));
+    }
+
+    #[test]
+    fn resolves_exports_for_the_active_runtime_condition() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let pkg = root.join("node_modules").join("pkg");
+        fs::create_dir_all(pkg.join("dist")).unwrap();
+        fs::write(
+            pkg.join("dist/browser.js"),
+            "export const runtime = 'browser';",
+        )
+        .unwrap();
+        fs::write(pkg.join("dist/node.js"), "export const runtime = 'node';").unwrap();
+        fs::write(
+            pkg.join("package.json"),
+            r#"{"exports":{".":{"browser":"./dist/browser.js","node":"./dist/node.js","default":"./dist/default.js"}}}"#,
+        )
+        .unwrap();
+
+        let PackageExportsResolution::Resolved(browser) =
+            resolve_package_exports(root, "pkg", BundleTarget::Client)
+        else {
+            panic!("expected browser export resolution");
+        };
+        let PackageExportsResolution::Resolved(node) =
+            resolve_package_exports(root, "pkg", BundleTarget::Ssr)
+        else {
+            panic!("expected node export resolution");
+        };
+
+        assert!(browser.ends_with("dist/browser.js"));
+        assert!(node.ends_with("dist/node.js"));
+    }
+
+    #[test]
+    fn resolves_conditional_exports_in_package_declaration_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let pkg = root.join("node_modules").join("pkg");
+        fs::create_dir_all(pkg.join("dist")).unwrap();
+        fs::write(
+            pkg.join("dist/default.js"),
+            "export const runtime = 'default';",
+        )
+        .unwrap();
+        fs::write(
+            pkg.join("dist/browser.js"),
+            "export const runtime = 'browser';",
+        )
+        .unwrap();
+        fs::write(
+            pkg.join("package.json"),
+            r#"{"exports":{".":{"default":"./dist/default.js","browser":"./dist/browser.js"}}}"#,
+        )
+        .unwrap();
+
+        let PackageExportsResolution::Resolved(resolved) =
+            resolve_package_exports(root, "pkg", BundleTarget::Client)
+        else {
+            panic!("expected conditional export resolution");
+        };
+
+        assert!(resolved.ends_with("dist/default.js"));
+    }
+
+    #[test]
+    fn package_exports_blocks_null_entries_and_rejects_path_escape() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let pkg = root.join("node_modules").join("pkg");
+        fs::create_dir_all(&pkg).unwrap();
+        fs::write(
+            root.join("node_modules/secret.js"),
+            "export default 'secret';",
+        )
+        .unwrap();
+        fs::write(
+            pkg.join("package.json"),
+            r#"{"exports":{"./private":null,"./escape":"./../secret.js"}}"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            resolve_package_exports(root, "pkg/private", BundleTarget::Ssr),
+            PackageExportsResolution::Blocked
+        );
+        assert_eq!(
+            resolve_package_exports(root, "pkg/escape", BundleTarget::Ssr),
+            PackageExportsResolution::Unavailable
+        );
     }
 }

@@ -1,5 +1,54 @@
 # Reliability Audit — 2026-07
 
+## Full-system stabilization and compatibility hardening — 2026-07-18
+
+This pass inspected the complete tracked Rust, TypeScript, JavaScript, package, template, script,
+test, and documentation surface, then changed only defects supported by direct source and regression
+evidence. Generated output, dependency trees, caches, packed archives, binaries, and secret material
+were excluded from source review.
+
+### Confirmed findings and root corrections
+
+| Finding                                                                                                                                       | Evidence                                                                                         | Impact                                                                                                                                                 | Severity | Confidence | Applied correction                                                                                                                                                          |
+| --------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------ | -------- | ---------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| A streamed API response could end when the worker channel closed without an explicit successful terminal frame.                               | `crates/ruvyxa_dev_server/src/worker_pool.rs` and worker-exit/early-EOF regressions              | A crashed Node worker could turn a truncated response into an apparently successful HTTP body.                                                         | High     | Direct     | The protocol now requires `api-end`; premature EOF and worker exit are propagated to the body consumer as stream errors.                                                    |
+| Request-path decoding did not reject malformed escapes or encoded path boundaries before routing and filesystem lookup.                       | `crates/ruvyxa_dev_server/src/lib.rs`, `router.rs`, and canonical-path regressions               | Encoded separators, dot segments, or invalid percent escapes could produce inconsistent route, prerender, and asset behavior across platforms.         | High     | Direct     | One canonical path function now validates and decodes segments, rejects encoded boundaries/traversal, and supplies the same safe path to every downstream consumer.         |
+| JSX runtime defaults and runtime-helper linking differed across native build, CLI, dev server, and Node render paths.                         | bundler/CLI/dev-server contracts, `packages/ruvyxa/runtime/*.mjs`, and JSX integration tests     | Default TSX could compile differently by execution path, while automatic JSX output could reference an unlinked `react/jsx-runtime` helper.            | High     | Direct     | Automatic JSX is now the shared default, classic remains explicit opt-in, config is validated at startup, and transformed helper imports are linked/externalized correctly. |
+| The package `exports` resolver omitted blocked entries, wildcard/array fallback behavior, target conditions, path containment, and key order. | `crates/ruvyxa_bundler/src/resolver.rs` and package-resolution regressions                       | Modern dependencies could resolve the wrong browser/server file, bypass a blocked subpath, escape a package root, or differ from Node condition order. | High     | Direct     | Resolution now handles those contracts, canonicalizes targets inside the package root, and preserves conditional-key declaration order without changing JSON globally.      |
+| Node numeric environment parsing accepted a valid integer prefix followed by arbitrary text.                                                  | `packages/ruvyxa/runtime/worker-pool.mjs` and the trailing-unit worker regression                | Values such as `1234ms` silently became short production timeouts instead of using the safe fallback already selected by Rust.                         | Medium   | Direct     | Numeric environment values are trimmed, validated as complete positive decimal integers, range-checked, and otherwise replaced by the documented fallback.                  |
+| `RUV1803` identified both circular dependencies and invalid JSX runtime configuration.                                                        | `packages/ruvyxa/runtime/compiler.mjs` and compiler diagnostic regressions                       | Automation and users could not classify two unrelated compiler failures reliably.                                                                      | Low      | Direct     | Circular dependencies retain `RUV1803`; invalid JSX runtime configuration now has the unique `RUV1804` code.                                                                |
+| Thai configuration guidance and the full-flow script retained stale defaults/example paths.                                                   | `docs/guides/th/configuration.md`, `packages/ruvyxa/README.md`, and `scripts/test-full-flow.ps1` | Operators could configure legacy JSX behavior or follow a fixture path that no longer exists.                                                          | Low      | Direct     | Documentation now states the automatic JSX default and the script points to the maintained `examples/demo` fixture.                                                         |
+
+### Cleanup and restoration assessment
+
+- No tracked source file is deleted or missing, and no critical runtime restoration is required. The
+  packed `ruvyxa` artifact contains every renderer, compiler, worker, native binary, and public type
+  entry needed by a clean consumer.
+- Clippy with warnings denied and all package type checks found no compiler-detectable dead private
+  code or unused local bindings. No dependency was removed because the audit found no orphan with
+  sufficient direct evidence; package entry points and runtime-loaded modules make import-text-only
+  deletion unsafe.
+- Dedicated `cargo-machete` and `knip` analyzers are not installed on this workstation, so the
+  absence of orphaned manifest dependencies is an honest residual uncertainty rather than an
+  unqualified claim.
+- Generated `.ruvyxa`, `dist`, `.npm-pack`, `.npm-smoke`, `target`, and `node_modules` content
+  remains ignored and outside the tracked change set.
+
+### Validation
+
+- `cargo fmt --all -- --check` and `cargo clippy --workspace --locked -- -D warnings` passed.
+- `cargo test --workspace --locked` passed 325 Rust tests, including the new ordered-exports and
+  stream protocol regressions.
+- `pnpm -r build`, `pnpm -r check`, and `pnpm -r test` passed; focused worker and compiler suites
+  passed 5 and 30 tests respectively.
+- `cargo run -p ruvyxa_cli -- check --root examples/demo` passed production readiness and
+  dev/production parity for all 16 routes.
+- `pnpm release:validate` validated 15 npm package manifests and six Rust crate manifests.
+- `pnpm pack:smoke` packed the release surface, scaffolded every starter, installed the packed
+  packages, and passed consumer `tsc --noEmit` checks.
+- Platform execution in this pass is Windows x64. macOS, Linux, and Arm behavior remains delegated
+  to the existing CI matrix.
+
 ## Full-system follow-up — 2026-07-17
 
 This follow-up started from a clean `main` worktree and revalidated the current repository rather

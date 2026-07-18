@@ -321,6 +321,7 @@ impl ProjectConfig {
             validate_positive_limit("security.actionRateLimit.window", rate_limit.window)?;
         }
         validate_trusted_proxy_ips(&self.security.trusted_proxy_ips)?;
+        parse_jsx_runtime(self.build.jsx_runtime.as_deref())?;
         Ok(())
     }
 
@@ -416,7 +417,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Dev(args) => {
             let config = load_project_config(&args.root)?;
-            serve(dev_server_config(&args, &config))
+            serve(dev_server_config(&args, &config)?)
                 .await
                 .context("dev server failed")?;
         }
@@ -424,7 +425,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Check(args) => check(args).await.context("check failed")?,
         Command::Start(args) | Command::Preview(args) => {
             let config = load_project_config(&args.root)?;
-            serve(production_server_config(&args, &config))
+            serve(production_server_config(&args, &config)?)
                 .await
                 .context("production server failed")?;
         }
@@ -548,7 +549,7 @@ fn canonical_command_name(command: &str) -> Option<&'static str> {
     }
 }
 
-fn dev_server_config(args: &ServerArgs, config: &ProjectConfig) -> ServerConfig {
+fn dev_server_config(args: &ServerArgs, config: &ProjectConfig) -> anyhow::Result<ServerConfig> {
     let mut server = ServerConfig::dev(
         &args.root,
         args.host
@@ -566,6 +567,7 @@ fn dev_server_config(args: &ServerArgs, config: &ProjectConfig) -> ServerConfig 
     server.cache_css = config.cache.css.unwrap_or(true);
     server.style_entries = config.style_entries(&args.root);
     server.prebundle_dependencies = config.build.prebundle_dependencies.unwrap_or(true);
+    server.jsx_runtime = parse_jsx_runtime(config.build.jsx_runtime.as_deref())?;
     server.error_overlay = config.debug.overlay.unwrap_or(true);
     server.debug_traces = config.debug.traces.unwrap_or(false);
     server.action_body_limit_bytes = config
@@ -609,10 +611,13 @@ fn dev_server_config(args: &ServerArgs, config: &ProjectConfig) -> ServerConfig 
     server.middleware = config.middleware.clone();
     server.default_render_strategy = config.rendering.default_strategy;
     server.default_revalidate = config.rendering.default_revalidate;
-    server
+    Ok(server)
 }
 
-fn production_server_config(args: &ServerArgs, config: &ProjectConfig) -> ServerConfig {
+fn production_server_config(
+    args: &ServerArgs,
+    config: &ProjectConfig,
+) -> anyhow::Result<ServerConfig> {
     let mut server = ServerConfig::production(
         &args.root,
         args.host
@@ -629,6 +634,7 @@ fn production_server_config(args: &ServerArgs, config: &ProjectConfig) -> Server
     server.cache_route_manifest = config.cache.route_manifest.unwrap_or(true);
     server.cache_css = config.cache.css.unwrap_or(true);
     server.style_entries = config.style_entries(&out_dir.join("server"));
+    server.jsx_runtime = parse_jsx_runtime(config.build.jsx_runtime.as_deref())?;
     server.action_body_limit_bytes = config
         .security
         .action_body_limit_bytes
@@ -670,7 +676,7 @@ fn production_server_config(args: &ServerArgs, config: &ProjectConfig) -> Server
     server.middleware = config.middleware.clone();
     server.default_render_strategy = config.rendering.default_strategy;
     server.default_revalidate = config.rendering.default_revalidate;
-    server
+    Ok(server)
 }
 
 fn load_project_config(root: &Path) -> anyhow::Result<ProjectConfig> {
@@ -858,7 +864,7 @@ async fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Resul
         &prerender_dir,
         &client_dir,
         &style_collection.css,
-        config.build.parallelism,
+        &config.build,
     )
     .await?;
     let prerender_duration = phase_started.elapsed();
@@ -1215,7 +1221,7 @@ async fn prerender_static_routes(
     prerender_dir: &Path,
     client_dir: &Path,
     styles: &str,
-    configured_parallelism: Option<usize>,
+    build: &BuildConfigOptions,
 ) -> anyhow::Result<Vec<PrerenderedRoute>> {
     use ruvyxa_graph::RouteKind;
 
@@ -1240,15 +1246,20 @@ async fn prerender_static_routes(
 
     fs::create_dir_all(prerender_dir)?;
 
-    let parallelism = prerender_parallelism(configured_parallelism, routes_to_prerender.len());
+    let parallelism = prerender_parallelism(build.parallelism, routes_to_prerender.len());
+    let jsx_runtime = parse_jsx_runtime(build.jsx_runtime.as_deref())?;
+    let mut worker_env = ruvyxa_dev_server::project_env(root)?;
+    worker_env.insert(
+        "RUVYXA_JSX_RUNTIME".to_string(),
+        match jsx_runtime {
+            ruvyxa_bundler::JsxRuntime::Classic => "classic".to_string(),
+            ruvyxa_bundler::JsxRuntime::Automatic => "automatic".to_string(),
+        },
+    );
     let worker_pool = std::sync::Arc::new(
-        ruvyxa_dev_server::NodeWorkerPool::start_with_size(
-            root,
-            ruvyxa_dev_server::project_env(root)?,
-            Some(parallelism),
-        )
-        .await
-        .map_err(|error| anyhow::anyhow!(error.to_string()))?,
+        ruvyxa_dev_server::NodeWorkerPool::start_with_size(root, worker_env, Some(parallelism))
+            .await
+            .map_err(|error| anyhow::anyhow!(error.to_string()))?,
     );
 
     let prerendered = async {
@@ -1305,7 +1316,7 @@ async fn prerender_static_routes(
             }
         }
 
-        let parallelism = prerender_parallelism(configured_parallelism, jobs.len());
+        let parallelism = prerender_parallelism(build.parallelism, jobs.len());
         let mut pending = tokio::task::JoinSet::new();
         let mut jobs = jobs.into_iter().enumerate();
         let mut prerendered = Vec::new();
@@ -3304,7 +3315,7 @@ async fn test_parity(args: ProjectArgs) -> anyhow::Result<()> {
                 port: None,
             },
             &config,
-        ),
+        )?,
         &production_server_config(
             &ServerArgs {
                 root: args.root.clone(),
@@ -3312,7 +3323,7 @@ async fn test_parity(args: ProjectArgs) -> anyhow::Result<()> {
                 port: None,
             },
             &config,
-        ),
+        )?,
         &dev_manifest,
     ));
 
@@ -4065,8 +4076,8 @@ mod tests {
         }))
         .unwrap();
 
-        let enabled = dev_server_config(&args, &enabled);
-        let disabled = dev_server_config(&args, &disabled);
+        let enabled = dev_server_config(&args, &enabled).unwrap();
+        let disabled = dev_server_config(&args, &disabled).unwrap();
         assert!(enabled.error_overlay);
         assert!(enabled.debug_traces);
         assert!(!disabled.error_overlay);
@@ -4081,6 +4092,7 @@ mod tests {
             port: None,
         };
         let config: ProjectConfig = serde_json::from_value(json!({
+            "build": { "jsx": "classic" },
             "security": {
                 "actionLimit": 8192,
                 "apiLimit": 16384,
@@ -4095,8 +4107,8 @@ mod tests {
         .unwrap();
 
         for server in [
-            dev_server_config(&args, &config),
-            production_server_config(&args, &config),
+            dev_server_config(&args, &config).unwrap(),
+            production_server_config(&args, &config).unwrap(),
         ] {
             assert_eq!(server.action_body_limit_bytes, 8192);
             assert_eq!(server.api_body_limit_bytes, 16384);
@@ -4113,6 +4125,10 @@ mod tests {
                 ]
             );
             assert!(!server.security_headers);
+            assert!(matches!(
+                server.jsx_runtime,
+                ruvyxa_bundler::JsxRuntime::Classic
+            ));
         }
     }
 
@@ -4766,7 +4782,7 @@ export default {
             "Ruvyxa",
             "BUILD",
             "--root",
-            "examples/basic-app",
+            "examples/demo",
         ])))
         .unwrap();
 
@@ -4779,7 +4795,7 @@ export default {
             "Ruvyxa",
             "CHECK",
             "--root",
-            "examples/basic-app",
+            "examples/demo",
         ])))
         .unwrap();
 
@@ -4794,7 +4810,7 @@ export default {
             "--target",
             "EDGE",
             "--root",
-            "examples/basic-app",
+            "examples/demo",
         ])))
         .unwrap();
 
@@ -4811,7 +4827,7 @@ export default {
             "BUILD",
             "--TARGET=EDGE",
             "--ROOT",
-            "examples/basic-app",
+            "examples/demo",
         ])))
         .unwrap();
 
@@ -4819,7 +4835,7 @@ export default {
             panic!("expected build command");
         };
         assert!(matches!(args.target, Some(BuildTarget::Edge)));
-        assert_eq!(args.root, PathBuf::from("examples/basic-app"));
+        assert_eq!(args.root, PathBuf::from("examples/demo"));
     }
 
     #[test]
@@ -4828,7 +4844,7 @@ export default {
             "Ruvyxa",
             "PARITY",
             "--root",
-            "examples/basic-app",
+            "examples/demo",
         ])))
         .unwrap();
 

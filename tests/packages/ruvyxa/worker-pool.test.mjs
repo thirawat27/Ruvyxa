@@ -45,6 +45,42 @@ test('uses safe worker defaults when numeric environment values are invalid', as
   assert.equal(response.memoryPressureThresholdMb, 512)
 })
 
+test('rejects numeric environment values with trailing units', async (t) => {
+  const worker = spawn(process.execPath, [workerScript], {
+    cwd: repoRoot,
+    env: {
+      ...process.env,
+      RUVYXA_WORKER_TIMEOUT_MS: '1234ms',
+      RUVYXA_MEMORY_LIMIT_MB: '64mb',
+    },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  })
+  const lines = createInterface({ input: worker.stdout })
+
+  t.after(async () => {
+    lines.close()
+    worker.stdin.end()
+    await Promise.race([
+      new Promise((resolve) => worker.once('exit', resolve)),
+      new Promise((resolve) => setTimeout(resolve, 2_000)),
+    ])
+    if (worker.exitCode === null) worker.kill()
+  })
+
+  const response = await new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('worker ping timed out')), 10_000)
+    lines.once('line', (line) => {
+      clearTimeout(timer)
+      resolve(JSON.parse(line))
+    })
+    worker.stdin.write(`${JSON.stringify({ id: 'configuration', type: 'ping' })}\n`)
+  })
+
+  assert.equal(response.ok, true)
+  assert.equal(response.workerRequestTimeoutMs, 30_000)
+  assert.equal(response.memoryPressureThresholdMb, 512)
+})
+
 test('invalidates a cached route bundle when an imported utility changes', async (t) => {
   const projectRoot = await mkdtemp(path.join(repoRoot, '.worker-pool-test-'))
   const appDir = path.join(projectRoot, 'app/api/value')
@@ -125,8 +161,7 @@ test('resolves static params and isolates build-time page module state', async (
   await writeFile(paramsFile, "export const suffix = 'first'\n")
   await writeFile(
     pageFile,
-    `import React from 'react'
-import { suffix } from './params'
+    `import { suffix } from './params'
 let renders = 0
 let discoveries = 0
 export function getStaticParams({ routes, route }) {
@@ -138,7 +173,7 @@ export function getStaticParams({ routes, route }) {
 }
 export default function Page({ params }) {
   renders += 1
-  return React.createElement('main', null, params.id + ':' + renders)
+  return <main>{params.id + ':' + renders}</main>
 }
 `,
   )
@@ -193,6 +228,19 @@ export default function Page({ params }) {
   assert.deepEqual(staticParams.params, [{ id: 'one-first-1' }, { id: 'two-first-1' }])
   assert.equal(staticParams.cached, false)
 
+  const automaticRender = await request({
+    type: 'ssg',
+    projectRoot,
+    appDir: path.dirname(path.dirname(appDir)),
+    pageFile,
+    requestPath: '/products/one-first-1',
+    params: { id: 'one-first-1' },
+    mode: 'full',
+    fresh: true,
+  })
+  assert.equal(automaticRender.ok, true, automaticRender.message)
+  assert.match(automaticRender.html, /one-first-1:1/)
+
   const cachedParams = await request(staticParamsRequest)
   assert.equal(cachedParams.ok, true, cachedParams.message)
   assert.deepEqual(cachedParams.params, staticParams.params)
@@ -207,7 +255,7 @@ export default function Page({ params }) {
   await writeFile(paramsFile, "export const suffix = 'second'\n")
   const invalidation = await request({ type: 'invalidate', paths: [paramsFile] })
   assert.equal(invalidation.ok, true)
-  assert.equal(invalidation.invalidated, 1)
+  assert.equal(invalidation.invalidated, 2)
   const refreshedParams = await request(staticParamsRequest)
   assert.equal(refreshedParams.ok, true, refreshedParams.message)
   assert.deepEqual(refreshedParams.params, [{ id: 'one-second-1' }, { id: 'two-second-1' }])

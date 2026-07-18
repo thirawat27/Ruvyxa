@@ -19,8 +19,8 @@ pub enum BundleTarget {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum JsxRuntime {
-    #[default]
     Classic,
+    #[default]
     Automatic,
 }
 
@@ -68,7 +68,7 @@ impl Default for BundleOptions {
             minify: true,
             source_map: false,
             tree_shaking: true,
-            jsx_runtime: JsxRuntime::Classic,
+            jsx_runtime: JsxRuntime::Automatic,
             es_target: EsTarget::Es2022,
             split_strategy: SplitStrategy::Single,
             emit_chunk_manifest: false,

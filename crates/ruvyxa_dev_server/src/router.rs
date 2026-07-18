@@ -324,6 +324,9 @@ mod tests {
         assert_eq!(m.route.path, "/blog/[slug]");
         assert_eq!(m.params["slug"], json!("hello-world"));
 
+        let m = router.find(&manifest, "/blog/hello world").unwrap();
+        assert_eq!(m.params["slug"], json!("hello world"));
+
         let m = router.find(&manifest, "/users/42/posts/99").unwrap();
         assert_eq!(m.params["id"], json!("42"));
         assert_eq!(m.params["post_id"], json!("99"));

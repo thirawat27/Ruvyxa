@@ -381,12 +381,54 @@ import Card from './Card.js'
         outfile,
         platform: 'browser',
         external: ['react'],
+        jsxRuntime: 'classic',
       })
 
       const output = await readFile(outfile, 'utf8')
       assert.match(output, /React\.Fragment/)
       assert.match(output, /Object\.assign/)
       assert.doesNotMatch(output, /ignored/)
+    })
+  })
+
+  it('uses the automatic JSX runtime by default and keeps classic mode opt-in', async () => {
+    await withFixture(async ({ root, outDir }) => {
+      const pageFile = path.join(root, 'page.tsx')
+      const automaticOutfile = path.join(outDir, 'automatic-jsx.mjs')
+      const classicOutfile = path.join(outDir, 'classic-jsx.mjs')
+      await writeFile(pageFile, `export default function Page() { return <main>ready</main> }`)
+
+      const input = {
+        projectRoot: root,
+        entrySource: `export { default } from ${JSON.stringify(toImportPath(pageFile))}`,
+        sourcefile: 'ruvyxa:jsx-runtime-entry.tsx',
+        platform: 'browser',
+        external: ['react', 'react/jsx-runtime'],
+      }
+      await compileBundle({ ...input, outfile: automaticOutfile })
+      await compileBundle({ ...input, outfile: classicOutfile, jsxRuntime: 'classic' })
+
+      const automatic = await readFile(automaticOutfile, 'utf8')
+      const classic = await readFile(classicOutfile, 'utf8')
+      assert.match(automatic, /jsx/)
+      assert.doesNotMatch(automatic, /React\.createElement/)
+      assert.match(classic, /React\.createElement/)
+    })
+  })
+
+  it('uses a unique diagnostic code for invalid JSX runtime configuration', async () => {
+    await withFixture(async ({ root, outDir }) => {
+      await assert.rejects(
+        compileBundle({
+          projectRoot: root,
+          entrySource: 'export default function Page() { return null }',
+          sourcefile: 'ruvyxa:invalid-jsx-runtime.tsx',
+          outfile: path.join(outDir, 'invalid-jsx-runtime.mjs'),
+          platform: 'browser',
+          jsxRuntime: 'invalid',
+        }),
+        /RUV1804 JSX runtime must be `classic` or `automatic`, got `invalid`/,
+      )
     })
   })
 
@@ -440,6 +482,7 @@ import Card from './Card.js'
         outfile,
         platform: 'browser',
         external: ['react'],
+        jsxRuntime: 'classic',
       })
 
       const output = await readFile(outfile, 'utf8')
@@ -478,6 +521,7 @@ import Card from './Card.js'
         outfile,
         platform: 'browser',
         external: ['react'],
+        jsxRuntime: 'classic',
       })
 
       const output = await readFile(outfile, 'utf8')
@@ -518,6 +562,7 @@ import Card from './Card.js'
         outfile,
         platform: 'browser',
         external: ['react'],
+        jsxRuntime: 'classic',
       })
 
       const output = await readFile(outfile, 'utf8')
@@ -554,6 +599,7 @@ import Card from './Card.js'
         outfile,
         platform: 'browser',
         external: ['react'],
+        jsxRuntime: 'classic',
       })
 
       const output = await readFile(outfile, 'utf8')
@@ -622,6 +668,7 @@ import Card from './Card.js'
         outfile,
         platform: 'browser',
         external: ['react'],
+        jsxRuntime: 'classic',
       })
 
       const output = await readFile(outfile, 'utf8')

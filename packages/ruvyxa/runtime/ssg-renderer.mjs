@@ -80,7 +80,7 @@ async function resolveStaticParams() {
     sourcefile: 'ruvyxa:ssg-params-entry.ts',
     outfile,
     platform: 'node',
-    external: ['react', 'react-dom/server', 'node:stream'],
+    external: ['react', 'react/jsx-runtime', 'react-dom/server', 'node:stream'],
     aliases: runtimeAliases(runtimeDir),
   })
 
@@ -208,7 +208,7 @@ export async function render(ctx) {
     sourcefile: 'ruvyxa:ssg-entry.tsx',
     outfile,
     platform: 'node',
-    external: ['react', 'react-dom/server', 'node:stream'],
+    external: ['react', 'react/jsx-runtime', 'react-dom/server', 'node:stream'],
     aliases: runtimeAliases(runtimeDir),
   })
 

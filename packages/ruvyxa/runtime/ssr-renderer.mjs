@@ -69,7 +69,7 @@ export async function render(ctx) {
     sourcefile: 'ruvyxa:ssr-entry.tsx',
     outfile,
     platform: 'node',
-    external: ['react', 'react-dom/server'],
+    external: ['react', 'react/jsx-runtime', 'react-dom/server'],
     aliases: runtimeAliases(path.dirname(fileURLToPath(import.meta.url))),
   })
 

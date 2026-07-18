@@ -509,7 +509,7 @@ async function handleStaticParams(request) {
       sourcefile: 'ruvyxa:ssg-params-entry.ts',
       outfile,
       platform: 'node',
-      external: ['react', 'react-dom/server', 'node:stream'],
+      external: ['react', 'react/jsx-runtime', 'react-dom/server', 'node:stream'],
       aliases: runtimeAliases(runtimeDir),
     })
     cacheBundle(cacheKey, outfile, resolvedRoot, bundle.inputs, bundle.dependencyHash)
@@ -789,7 +789,9 @@ function invalidateBundleCache(paths) {
 }
 
 function positiveIntegerEnv(name, fallback, maximum = Number.MAX_SAFE_INTEGER) {
-  const value = Number.parseInt(process.env[name] ?? '', 10)
+  const rawValue = (process.env[name] ?? '').trim()
+  if (!/^\+?\d+$/.test(rawValue)) return fallback
+  const value = Number(rawValue)
   return Number.isSafeInteger(value) && value > 0 && value <= maximum ? value : fallback
 }
 
@@ -916,7 +918,7 @@ export async function render(ctx) {
       sourcefile: 'ruvyxa:ssr-entry.tsx',
       outfile,
       platform: 'node',
-      external: ['react', 'react-dom/server', 'node:stream'],
+      external: ['react', 'react/jsx-runtime', 'react-dom/server', 'node:stream'],
       aliases: runtimeAliases(runtimeDir),
     })
 
@@ -1123,7 +1125,7 @@ export async function render(ctx) {
       sourcefile: 'ruvyxa:ssg-entry.tsx',
       outfile,
       platform: 'node',
-      external: ['react', 'react-dom/server', 'node:stream'],
+      external: ['react', 'react/jsx-runtime', 'react-dom/server', 'node:stream'],
       aliases: runtimeAliases(runtimeDir),
     })
 

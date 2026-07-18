@@ -82,7 +82,9 @@ export async function compileBundleWithMetadata({
   aliases = {},
   minify = false,
   sourceMap = true,
+  jsxRuntime = process.env.RUVYXA_JSX_RUNTIME ?? 'automatic',
 }) {
+  const normalizedJsxRuntime = normalizeJsxRuntime(jsxRuntime)
   const root = path.resolve(projectRoot)
   const modules = []
   const byKey = new Map()
@@ -103,6 +105,7 @@ export async function compileBundleWithMetadata({
     externalSet,
     aliases,
     platform,
+    jsxRuntime: normalizedJsxRuntime,
   })
 
   const linked = linkModules(modules, externals, { minify, outfile, sourceMap })
@@ -226,6 +229,7 @@ async function visitModule(context) {
     externalSet,
     aliases,
     platform,
+    jsxRuntime,
   } = context
 
   if (byKey.has(key)) return byKey.get(key)
@@ -243,6 +247,7 @@ async function visitModule(context) {
     baseDir,
     deps: new Map(),
     assetInputs: styleModule?.inputs ?? [],
+    jsxRuntime,
   }
   byKey.set(key, module)
   modules.push(module)
@@ -251,7 +256,12 @@ async function visitModule(context) {
     checkClientBoundary(root, filePath, compiledSource)
   }
 
-  for (const specifier of extractSpecifiers(compiledSource)) {
+  // Inspect the transformed module so automatic JSX helper imports are linked
+  // like ordinary dependencies. Oxc adds `react/jsx-runtime` during transform;
+  // scanning only the source would otherwise drop those bindings in wrapped
+  // Node bundles and leave `_jsx` undefined at render time.
+  const transformedSource = transformModuleSource(module)
+  for (const specifier of extractSpecifiers(transformedSource)) {
     if (isAssetSpecifier(specifier) && !isCssModuleSpecifier(specifier)) continue
 
     const resolvedAlias = aliases[specifier]
@@ -275,6 +285,7 @@ async function visitModule(context) {
         externalSet,
         aliases,
         platform,
+        jsxRuntime,
       })
       module.deps.set(specifier, dep)
       continue
@@ -480,6 +491,7 @@ function rewriteModule(module) {
   const rewriteKey = [
     module.key,
     createHash('sha256').update(module.source).digest('hex'),
+    module.jsxRuntime,
     [...module.deps.entries()]
       .map(([specifier, dep]) => `${specifier}:${dep.external ? dep.alias : dep.id}`)
       .join('|'),
@@ -1117,7 +1129,7 @@ function transformModuleSource(module) {
       optimizeEnums: false,
     },
     jsx: {
-      runtime: 'classic',
+      runtime: module.jsxRuntime,
       development: false,
       throwIfNamespace: false,
       pure: false,
@@ -1131,6 +1143,12 @@ function transformModuleSource(module) {
     throw new Error(`RUV1802 Oxc transform failed for ${filename}: ${detail}`)
   }
   return result.code
+}
+
+function normalizeJsxRuntime(value) {
+  const runtime = String(value).toLowerCase()
+  if (runtime === 'classic' || runtime === 'automatic') return runtime
+  throw new Error(`RUV1804 JSX runtime must be \`classic\` or \`automatic\`, got \`${value}\``)
 }
 
 function checkClientBoundary(root, filePath, source) {
