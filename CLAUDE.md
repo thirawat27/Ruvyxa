@@ -33,5 +33,5 @@ tree-shaking, minification, and source maps natively.
 - **packages/** — npm packages: CLI wrapper, runtime, adapters, core primitives
 - **tests/** — Node package tests (organized by package)
 - **examples/demo/** — full-featured demo app
-- **templates/minimal/** — template for `create-ruvyxa`
+- **templates/** — templates for `create-ruvyxa` (minimal, blog, crud, api-backend)
 - **docs/** — user-facing documentation

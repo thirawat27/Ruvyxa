@@ -1,12 +1,12 @@
-# Plan: Ruvyxa 1.0.15 Styling, SSG, and Starters
+# Plan: Ruvyxa Styling, SSG, and Starters
 
 > Created by Squirrel on 2026-07-18
 
 ## Goal
 
-Complete the Ruvyxa 1.0.15 developer experience by adding automatic SCSS and CSS Modules support,
-making dynamic SSG parameters easier to declare and safely cache, exposing three production-ready
-starter choices, and documenting the shipped behavior in English and Thai.
+Complete the Ruvyxa developer experience by adding automatic SCSS and CSS Modules support, making
+dynamic SSG parameters easier to declare and safely cache, exposing three production-ready starter
+choices, and documenting the shipped behavior in English and Thai.
 
 ## Architecture Focus
 
@@ -59,8 +59,8 @@ starter choices, and documenting the shipped behavior in English and Thai.
 
 ### Layer 4 — Documentation and release surface
 
-- [x] 🟢 Update README, create-ruvyxa README, EN/TH guides, guide index, and 1.0.15 release notes
-      for SCSS/CSS Modules, SSG shorthand/cache, and starter selection.
+- [x] 🟢 Update README, create-ruvyxa README, EN/TH guides, guide index, and release notes for
+      SCSS/CSS Modules, SSG shorthand/cache, and starter selection.
 
 ### Layer 5 — Verification
 
@@ -93,5 +93,5 @@ support; naming is normalized to `blog`, `crud`, and `api-backend`.
 | Test     | Complete | Focused, workspace, demo, and tarball suites passed            |
 | Bug Hunt | Complete | Pack smoke corrected an invalid API starter contract           |
 | Polish   | Complete | Format, lint, audit, and diff checks passed                    |
-| Document | Complete | EN/TH guides, READMEs, and 1.0.15 notes updated                |
+| Document | Complete | EN/TH guides, READMEs, and release notes updated               |
 | Ship     | Complete | Release validation, demo parity, and pack smoke passed         |

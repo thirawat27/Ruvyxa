@@ -52,9 +52,9 @@ builder, adapter, and package contracts. No dependency or generated artifact cha
 
 ## Root-cause hardening — 2026-07-17
 
-The v1.0.15 dependency-first traversal is the root correction for the `report.md` failure on valid,
-acyclic module graphs: eager module wrappers now execute only after every local dependency they
-read. The follow-up review found three adjacent contract gaps and corrected them at their ownership
+The dependency-first traversal is the root correction for the `report.md` failure on valid, acyclic
+module graphs: eager module wrappers now execute only after every local dependency they read. The
+follow-up review found three adjacent contract gaps and corrected them at their ownership
 boundaries:
 
 | Finding                                                                                                                                                    | Evidence                                                                                  | Impact                                                                                                                                      | Severity | Confidence | Applied correction                                                                                                                                                    |
@@ -74,7 +74,7 @@ validation, and dev/production parity plus smoke rendering for all 16 demo route
 confirmed all four framework type entry files are present in the tarball and resolvable by a clean
 consumer.
 
-## Follow-up update — 2026-07-17 (v1.0.15)
+## Follow-up update — 2026-07-17
 
 The Node runtime compiler previously emitted `modules.slice().reverse()` after depth-first module
 discovery. Reversal only works for a single dependency branch; when the synthetic client entry
@@ -92,7 +92,7 @@ A focused Node regression builds the cross-branch graph with a client page impor
 `useEffect`, then imports the generated bundle. It reproduced the temporal-dead-zone failure before
 the correction and passes after the correction.
 
-### v1.0.15 validation
+### Release validation
 
 - The focused dependency-order regression passed, and the complete runtime compiler suite passed 25
   tests. The full `ruvyxa` package suite passed 44 tests.
@@ -100,16 +100,16 @@ the correction and passes after the correction.
   Rust tests.
 - `pnpm -r build` and `pnpm -r check` passed, including production build, dev/production parity, and
   smoke rendering for all 16 demo routes.
-- `pnpm release:validate` confirmed 15 npm package manifests and six Rust crate manifests at
-  `1.0.15`; `pnpm pack:smoke` packed the release and installed/type-checked a clean starter using
-  `ruvyxa` and `@ruvyxa/react` 1.0.15.
+- `pnpm release:validate` confirmed all npm package manifests and Rust crate manifests;
+  `pnpm pack:smoke` packed the release and installed/type-checked a clean starter using the latest
+  `ruvyxa` and `@ruvyxa/react`.
 - Cargo formatting and Prettier checks passed for every tracked file changed by this release.
 
 ## Follow-up update — 2026-07-16
 
 This document retains the July 13 repair record below and adds the current follow-up evidence for
-v1.0.14. The current production pipeline uses the Ruvyxa resolver/linker/cache layers with Oxc
-0.139.0 for TypeScript/JSX transformation and minification; see
+the latest release. The current production pipeline uses the Ruvyxa resolver/linker/cache layers
+with Oxc for TypeScript/JSX transformation and minification; see
 `docs/architecture/bundler-modernization.md` for the ownership boundary.
 
 ### Confirmed follow-up findings and repairs

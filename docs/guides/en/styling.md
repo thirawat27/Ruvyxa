@@ -1,7 +1,7 @@
 # Styling, SCSS, and CSS Modules
 
-Ruvyxa 1.0.15 handles global CSS, SCSS/Sass, and locally scoped CSS Modules in the normal module
-graph. Imported styles can live anywhere inside the project.
+Ruvyxa handles global CSS, SCSS/Sass, and locally scoped CSS Modules in the normal module graph.
+Imported styles can live anywhere inside the project.
 
 ## Global CSS and SCSS
 
@@ -58,7 +58,7 @@ project-relative file path and original class. The emitted CSS uses the same nam
 collisions across components while keeping builds reproducible. Production minification and dev HMR
 use the same module mapping.
 
-CSS Modules in 1.0.15 scope local class selectors. CSS Modules extensions such as `composes` and
+CSS Modules scope local class selectors. CSS Modules extensions such as `composes` and
 `:global(...)` are not part of the public contract.
 
 ## TypeScript

@@ -30,7 +30,7 @@ my-app/
 └── tsconfig.json
 ```
 
-The default starter is `minimal`. Version 1.0.15 also provides focused starters:
+The default starter is `minimal`. Ruvyxa also provides focused starters:
 
 ```bash
 npm create ruvyxa@latest my-blog -- --template blog

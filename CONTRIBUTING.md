@@ -177,7 +177,8 @@ When adding a new error that users will see:
 1. Choose the next available `RUV####` code in the relevant range.
 2. Create a `Diagnostic` with `code`, `title`, `explanation`, and `suggested_fix`.
 3. Add the file location with `.at_file()`.
-4. Document it in `docs/developer-guide.md` (and `docs/user-guide.md` when users need the fix).
+4. Document it in `docs/developer-guide.md` (and the relevant English guide under `docs/guides/en/`
+   when users need the fix).
 
 ```rust
 Diagnostic::new("RUV1011", "Your error title")
@@ -193,7 +194,7 @@ Diagnostic::new("RUV1011", "Your error title")
 1. Create `packages/@ruvyxa/adapter-<name>/`.
 2. Implement the `Adapter` interface from `@ruvyxa/core`.
 3. Add a `package.json` with `@ruvyxa/core` as a dependency.
-4. Document its user-facing setup in `docs/user-guide.md`.
+4. Document its user-facing setup in `docs/guides/en/deployment.md`.
 5. Add its release checks to `docs/developer-guide.md`.
 
 ---

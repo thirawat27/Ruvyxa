@@ -3,9 +3,9 @@
 ## Decision
 
 Ruvyxa owns framework-specific module resolution, plugins, route entry generation, server/client
-boundary diagnostics, linking, chunk manifests, and source-map composition. Oxc 0.139.0 owns
-TypeScript stripping, JSX lowering, final JavaScript parsing, semantic compression, name mangling,
-and minified code generation.
+boundary diagnostics, linking, chunk manifests, and source-map composition. Oxc owns TypeScript
+stripping, JSX lowering, final JavaScript parsing, semantic compression, name mangling, and minified
+code generation.
 
 This is intentionally not a Rolldown dependency. Rolldown is a bundler workspace with tightly
 coupled scanner, module graph, linker, chunk graph, and render stages; borrowing its staged
@@ -39,7 +39,7 @@ Oxc pass because semantic mangling cannot safely be performed independently per 
 | ------------------------ | ------------------------------------------------------------ | ---------------------------------------------------------- | --------------------------------------------------------------------- |
 | JavaScript minification  | `minifier.rs`                                                | Oxc parser, minifier, codegen                              | Oxc source-map integration after mapping-quality fixtures             |
 | Module resolution        | `resolver.rs`                                                | Keep current package exports, tsconfig paths, plugin hooks | Evaluate `oxc_resolver` only behind adapter conformance tests         |
-| TS/JSX transform         | Oxc transformer via `compiler.rs` and `runtime/compiler.mjs` | Oxc 0.139.0 with parity fixtures                           | Revisit decorator lowering and source-map fidelity after adoption     |
+| TS/JSX transform         | Oxc transformer via `compiler.rs` and `runtime/compiler.mjs` | Oxc with parity fixtures                                   | Revisit decorator lowering and source-map fidelity after adoption     |
 | Scan/link/chunk render   | `ast.rs`, `linker.rs`, `chunking.rs`                         | Keep Ruvyxa output contracts                               | Borrow Rolldown's explicit scan -> link -> render metadata boundaries |
 | Caching/incremental work | `cache.rs`, `context.rs`, `incremental.rs`                   | Keep current shared context and cache keys                 | Add per-stage invalidation metrics before changing algorithms         |
 
@@ -56,7 +56,7 @@ Oxc pass because semantic mangling cannot safely be performed independently per 
 
 ## Constraints and risks
 
-- Oxc adds 52 locked packages. It is pinned exactly to `0.139.0`; upgrading it is a deliberate
+- Oxc adds locked packages. It is pinned to a fixed compatible version; upgrading it is a deliberate
   compatibility review, not a floating dependency update.
 - The current Ruvyxa source-map builder remains in place. Oxc reprints transformed code, so mapping
   fidelity needs dedicated fixtures before replacing map handling.

@@ -30,7 +30,7 @@ my-app/
 └── tsconfig.json
 ```
 
-ค่าเริ่มต้นคือ starter แบบ `minimal` และในเวอร์ชัน 1.0.15 สามารถเลือกแบบอื่นได้ดังนี้:
+ค่าเริ่มต้นคือ starter แบบ `minimal` สามารถเลือกแบบอื่นได้ดังนี้:
 
 ```bash
 npm create ruvyxa@latest my-blog -- --template blog

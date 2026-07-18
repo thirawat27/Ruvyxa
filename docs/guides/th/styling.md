@@ -1,6 +1,6 @@
 # Styling, SCSS และ CSS Modules
 
-Ruvyxa 1.0.15 รองรับ global CSS, SCSS/Sass และ CSS Modules แบบ local scope ผ่าน module graph ตามปกติ
+Ruvyxa รองรับ global CSS, SCSS/Sass และ CSS Modules แบบ local scope ผ่าน module graph ตามปกติ
 ไฟล์ที่ import สามารถอยู่ที่ใดก็ได้ภายในโปรเจค
 
 ## Global CSS และ SCSS
@@ -53,8 +53,8 @@ export function Card() {
 deterministic CSS ที่ส่งออกใช้ชื่อเดียวกัน จึงไม่ชนกันข้าม component และผล build ทำซ้ำได้ ทั้ง
 production minification และ dev HMR ใช้ mapping เดียวกัน
 
-CSS Modules ใน 1.0.15 รับประกัน local class selectors ส่วน `composes` และ `:global(...)` ยังไม่ใช่
-public contract
+CSS Modules รับประกัน local class selectors ส่วน `composes` และ `:global(...)` ยังไม่ใช่ public
+contract
 
 TypeScript declarations มาจาก package `ruvyxa` โดยตรง จึงไม่ต้องสร้าง `css.d.ts` ในแอป ส่วน LESS
 ยังไม่อยู่ใน built-in pipeline และจะแสดง diagnostic หาก import โดยไม่มี transform plugin

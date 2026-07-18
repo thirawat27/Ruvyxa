@@ -20,6 +20,8 @@ file-system route shape:
 - Prefer typed public APIs from `ruvyxa`, `ruvyxa/server`, and `ruvyxa/config`.
 - Keep external CSS project-relative. Imported CSS can live outside `app/`; use `css.entries` in
   `ruvyxa.config.ts` for global CSS files or directories that are not imported by application code.
+- Import `.scss` or `.sass` directly when Sass is useful. Use `.module.css`, `.module.scss`, or
+  `.module.sass` when styles should expose a locally scoped class map to a component.
 - Runtime CSS-in-JS through React `style` objects and `<style>` elements is supported. Libraries
   that require compile-time transforms should be wired through a transform plugin.
 - Do not commit `.env`, `.ruvyxa/`, `dist/`, `node_modules/`, or other generated output.

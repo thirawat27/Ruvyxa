@@ -255,7 +255,7 @@ Document only what source code and tests support.
 - `check` is an application-readiness signal, not a browser E2E suite, load test, or security audit.
   Add verification in the layer changed by a feature.
 
-The maintained documentation is intentionally split in two: `docs/user-guide.md` for application
-authors and `docs/developer-guide.md` for framework contributors. Keep the root README,
-create-package README, demo README, commands, defaults, security limits, and deployment statements
-in agreement whenever a user journey changes.
+The maintained documentation is intentionally split: `docs/guides/` for application authors and
+`docs/developer-guide.md` for framework contributors. Keep the root README, create-package README,
+demo README, commands, defaults, security limits, and deployment statements in agreement whenever a
+user journey changes.
