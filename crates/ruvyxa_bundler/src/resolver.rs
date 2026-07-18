@@ -725,7 +725,7 @@ fn collect_deps_cached(
     let base_dir_str = base_dir.to_string_lossy();
 
     for specifier in specifiers {
-        if is_non_js_asset_specifier(&specifier) {
+        if is_non_js_asset_specifier(&specifier) && !is_css_module_specifier(&specifier) {
             continue;
         }
 
@@ -798,6 +798,12 @@ fn is_non_js_asset_specifier(specifier: &str) -> bool {
         Path::new(&lower).extension().and_then(|ext| ext.to_str()),
         Some("css" | "scss" | "sass" | "less")
     )
+}
+
+fn is_css_module_specifier(specifier: &str) -> bool {
+    crate::style_module::is_css_module_path(Path::new(
+        specifier.split(['?', '#']).next().unwrap_or(specifier),
+    ))
 }
 
 /// Extract all import/export specifier strings from source text.

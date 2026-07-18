@@ -2,6 +2,7 @@ import type { RuvyxaConfig } from './types.js'
 
 export type {
   BuiltinMiddlewareConfig,
+  CachedStaticParams,
   CorsConfig,
   GetStaticParams,
   ImageConfig,
@@ -19,6 +20,10 @@ export type {
   RuvyxaConfig,
   RuvyxaPlugin,
   StaticParamsContext,
+  StaticParamSegment,
+  StaticParamsCacheDuration,
+  StaticParamsResult,
+  StaticParamsValues,
   TransformResult,
 } from './types.js'
 

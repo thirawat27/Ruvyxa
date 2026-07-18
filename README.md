@@ -70,6 +70,9 @@
   boundaries and `onShellReady` streaming.
 - **Incremental Static Regeneration (ISR)** — stale-while-revalidate with configurable TTL.
 - **`getStaticParams`** — generate static paths at build time for dynamic SSG routes.
+- **Simple SSG parameters** — export `staticParams` directly for known values, or return scalar
+  values from `getStaticParams` when a route has one dynamic segment. Parameter discovery supports
+  opt-in, dependency-aware persistent caching.
 - **CDN-ready code splitting** — route-level, shared, or vendor chunk splitting via `build.split`
   with tree-shaking applied per-split.
 
@@ -99,11 +102,14 @@
 - **Dependency-driven CSS imports** — application modules import `.css` from anywhere; no separate
   import manifest required.
 - **CSS entries for globals** — unimported global stylesheets via `css.entries` in config.
+- **SCSS/Sass built in** — import `.scss` and `.sass` files directly, including partials referenced
+  with Sass `@use`, `@forward`, or `@import`.
+- **CSS Modules** — `.module.css`, `.module.scss`, and `.module.sass` imports expose deterministic,
+  project-scoped class maps to React components while emitting the matching collected CSS.
 - **CSS-in-JS compatible** — React style objects and `<style>` elements work natively.
 - **CSS caching & minification** — production builds minify collected styles with cached results.
-- **Tailwind CSS auto-detection** — detects `@import "tailwindcss"` in stylesheets, invokes
-  `@tailwindcss/cli` with `--minify` in production. SCSS/SASS/LESS imports produce clear
-  diagnostics.
+- **Tailwind CSS auto-detection** — detects `@import "tailwindcss"` in stylesheets and invokes
+  `@tailwindcss/cli` with `--minify` in production. LESS imports produce a clear diagnostic.
 
 ### Data loading & cache
 
@@ -174,8 +180,8 @@
 
 ### Scaffold & adapters
 
-- **Clean starter** — `npm create ruvyxa@latest` scaffolds a minimal app from `templates/minimal/`
-  with `app/`, `public/`, `ruvyxa.config.ts`, and `tsconfig.json`.
+- **Four starters** — `npm create ruvyxa@latest` defaults to the focused `minimal` app, with `blog`,
+  `crud`, and `api-backend` available through `--template`.
 - **Six deployment adapters** — `@ruvyxa/adapter-node`, `adapter-vercel`, `adapter-cloudflare`,
   `adapter-netlify`, `adapter-bun`, and `adapter-static` for typed, serializable output metadata.
 
@@ -188,6 +194,14 @@ npm create ruvyxa@latest my-app
 cd my-app
 npm install
 npx ruvyxa dev
+```
+
+Choose a focused starter when you want more than the minimal route:
+
+```bash
+npm create ruvyxa@latest my-blog -- --template blog
+npm create ruvyxa@latest my-admin -- --template crud
+npm create ruvyxa@latest my-api -- --template api-backend
 ```
 
 Open [http://localhost:3000](http://localhost:3000).
@@ -467,12 +481,16 @@ export default config({
 | Strategy | Export                    | Behavior                                     |
 | -------- | ------------------------- | -------------------------------------------- |
 | SSR      | default                   | Rendered per request (default)               |
-| SSG      | (via config or route)     | Pre-rendered at build time, served as HTML   |
+| SSG      | `staticParams` / config   | Pre-rendered at build time, served as HTML   |
 | ISR      | `export const revalidate` | Stale-while-revalidate with configurable TTL |
 | CSR      | `'use client'` directive  | Minimal shell, full render in browser        |
 | PPR      | `export const ppr = true` | Static shell + streamed dynamic slots        |
 
-Routes with `getStaticParams` export generate static paths at build time.
+Dynamic routes can export a `staticParams` array for known values or use `getStaticParams(context)`
+for asynchronous discovery. `getStaticParams` may return `{ params, cache: '10m' }` to persist the
+result until its TTL expires; changes to the route or imported dependencies invalidate it early. See
+the [rendering guide](docs/guides/en/rendering-strategies.md) for scalar shorthand, context, and
+cache examples.
 
 ---
 

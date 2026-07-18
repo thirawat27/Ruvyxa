@@ -36,6 +36,7 @@ pub mod output;
 pub mod plugin;
 pub mod resolver;
 pub mod sourcemap;
+pub mod style_module;
 pub mod types;
 
 use std::collections::BTreeSet;
@@ -379,6 +380,31 @@ mod tests {
                 ..Default::default()
             },
         }
+    }
+
+    #[test]
+    fn bundles_css_module_imports_as_deterministic_class_maps() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let app = root.join("app");
+        fs::create_dir_all(&app).unwrap();
+        let page = app.join("page.tsx");
+        fs::write(
+            &page,
+            "import styles from './card.module.css'; export default function Page() { return <main className={styles.card}>ok</main>; }",
+        )
+        .unwrap();
+        fs::write(app.join("card.module.css"), ".card { color: navy; }").unwrap();
+
+        let output = bundle(client_input(&root, &app, page, Vec::new(), "/")).unwrap();
+        let scoped = crate::style_module::scope_css_module(
+            ".card { color: navy; }",
+            &app.join("card.module.css"),
+            &root,
+        );
+
+        assert!(output.code.contains(&scoped.classes["card"]));
+        assert!(output.code.contains("const styles"));
     }
 
     #[test]

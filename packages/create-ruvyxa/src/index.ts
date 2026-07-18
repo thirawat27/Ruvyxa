@@ -6,6 +6,14 @@ import { fileURLToPath } from 'node:url'
 export { detectPackageManager } from './detect-pm.js'
 export type { PackageManager, PackageManagerInfo } from './detect-pm.js'
 
+export const STARTER_TEMPLATES = ['minimal', 'blog', 'crud', 'api-backend'] as const
+export type StarterTemplate = (typeof STARTER_TEMPLATES)[number]
+
+export interface CreateRuvyxaOptions {
+  /** Starter copied into the new project. @default "minimal" */
+  template?: StarterTemplate
+}
+
 /** Required files that must exist in the template for a valid scaffold. */
 const REQUIRED_TEMPLATE_FILES = [
   'AGENTS.md',
@@ -27,7 +35,7 @@ const MAX_DIR_NAME_LENGTH = 128
 const RESERVED_WINDOWS_NAMES = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i
 
 /**
- * Create a new Ruvyxa application from the minimal template.
+ * Create a new Ruvyxa application from a packaged starter template.
  *
  * Performs the following safety checks before scaffolding:
  * 1. Validates the target directory name for filesystem safety
@@ -39,7 +47,10 @@ const RESERVED_WINDOWS_NAMES = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i
  * @param targetDir - Path where the new project will be created
  * @throws Error with descriptive message on any validation failure
  */
-export async function createRuvyxaApp(targetDir: string): Promise<void> {
+export async function createRuvyxaApp(
+  targetDir: string,
+  options: CreateRuvyxaOptions = {},
+): Promise<void> {
   // --- Input Validation ---
   if (!targetDir || typeof targetDir !== 'string') {
     throw new Error('Project directory name is required.\n' + '  Usage: npx create-ruvyxa my-app')
@@ -60,6 +71,13 @@ export async function createRuvyxaApp(targetDir: string): Promise<void> {
   }
 
   const dirName = basename(trimmed)
+  const template = options.template ?? 'minimal'
+  if (!STARTER_TEMPLATES.includes(template)) {
+    throw new Error(
+      `Unknown starter template "${String(template)}".\n` +
+        `  Choose one of: ${STARTER_TEMPLATES.join(', ')}`,
+    )
+  }
   if (INVALID_DIR_CHARS.test(dirName)) {
     throw new Error(
       `Invalid project name "${dirName}". Directory names cannot contain: < > : " | ? *\n` +
@@ -132,8 +150,8 @@ export async function createRuvyxaApp(targetDir: string): Promise<void> {
 
   // --- Locate Template ---
   const here = dirname(fileURLToPath(import.meta.url))
-  const packagedTemplateDir = resolve(here, '../template/minimal')
-  const monorepoTemplateDir = resolve(here, '../../../templates/minimal')
+  const packagedTemplateDir = resolve(here, `../template/${template}`)
+  const monorepoTemplateDir = resolve(here, `../../../templates/${template}`)
   const templateDir = existsSync(packagedTemplateDir) ? packagedTemplateDir : monorepoTemplateDir
 
   if (!existsSync(templateDir)) {

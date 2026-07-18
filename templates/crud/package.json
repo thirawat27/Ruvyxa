@@ -1,0 +1,27 @@
+{
+  "name": "my-ruvyxa-crud",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "ruvyxa dev",
+    "build": "ruvyxa build",
+    "start": "ruvyxa start",
+    "typecheck": "tsc --noEmit",
+    "check": "ruvyxa check"
+  },
+  "dependencies": {
+    "@ruvyxa/react": "^1.0.15",
+    "ruvyxa": "^1.0.15",
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "typescript": "^7.0.2"
+  },
+  "engines": {
+    "node": ">=22.12.0"
+  }
+}

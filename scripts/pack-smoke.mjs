@@ -85,14 +85,16 @@ for (const file of readdirSync(destination).filter((name) => name.endsWith('.tgz
   }
 
   if (packageJson.name === 'create-ruvyxa') {
-    assert(
-      listing.includes('package/template/minimal/package.json'),
-      'create-ruvyxa package missing template',
-    )
-    assert(
-      listing.includes('package/template/minimal/gitignore'),
-      'create-ruvyxa package missing scaffold ignore template',
-    )
+    for (const template of ['minimal', 'blog', 'crud', 'api-backend']) {
+      assert(
+        listing.includes(`package/template/${template}/package.json`),
+        `create-ruvyxa package missing ${template} template`,
+      )
+      assert(
+        listing.includes(`package/template/${template}/gitignore`),
+        `create-ruvyxa package missing ${template} scaffold ignore template`,
+      )
+    }
   }
 }
 
@@ -140,55 +142,72 @@ execFileSync('node', [`${extracted}/package/bin/ruvyxa.js`, '--help'], {
 })
 mkdirSync(`${extracted}/create-ruvyxa`)
 execSync(`tar -xzf ${destination}/${createRuvyxaTgz} -C ${extracted}/create-ruvyxa`)
-execFileSync(
-  'node',
-  [`${extracted}/create-ruvyxa/package/bin/create-ruvyxa.js`, `${extracted}/scaffolded-app`],
-  {
-    stdio: 'inherit',
-    shell: process.platform === 'win32',
-  },
-)
-assert(existsSync(`${extracted}/scaffolded-app/.gitignore`), 'scaffolded app missing .gitignore')
-assert(
-  !existsSync(`${extracted}/scaffolded-app/app/css.d.ts`),
-  'scaffolded app should use the framework-owned CSS declaration',
-)
-
-// Verify the scaffolded template can install and type-check.
-// Install freshly packed packages, not registry releases, so unpublished versions are covered.
-const scaffoldPackageJsonPath = `${extracted}/scaffolded-app/package.json`
-const scaffoldPackageJson = JSON.parse(readFileSync(scaffoldPackageJsonPath, 'utf8'))
+const starters = ['minimal', 'blog', 'crud', 'api-backend']
 const scaffoldTarball = (file) => `file:../../${destination}/${file}`
 const workspaceTarball = (file) => `file:../${destination}/${file}`
-scaffoldPackageJson.dependencies.ruvyxa = scaffoldTarball(ruvyxaTgz)
-scaffoldPackageJson.dependencies['@ruvyxa/react'] = scaffoldTarball(reactTgz)
-writeFileSync(scaffoldPackageJsonPath, JSON.stringify(scaffoldPackageJson, null, 2) + '\n')
-writeFileSync(
-  `${extracted}/scaffolded-app/app/framework-type-entries.ts`,
-  ["import 'ruvyxa'", "import 'ruvyxa/config'", "import 'ruvyxa/server'", ''].join('\n'),
-)
+
+// Verify every packaged starter can scaffold, install, and type-check against the freshly packed
+// unpublished packages. A single temporary workspace keeps this release gate reasonably fast.
+for (const starter of starters) {
+  const appDir = `${extracted}/scaffolded-${starter}`
+  const createArgs = [`${extracted}/create-ruvyxa/package/bin/create-ruvyxa.js`, appDir]
+  if (starter !== 'minimal') createArgs.push('--template', starter)
+  execFileSync('node', createArgs, {
+    stdio: 'inherit',
+    shell: process.platform === 'win32',
+  })
+  assert(existsSync(`${appDir}/.gitignore`), `${starter} scaffold missing .gitignore`)
+  assert(
+    !existsSync(`${appDir}/app/css.d.ts`),
+    `${starter} scaffold should use the framework-owned CSS declaration`,
+  )
+
+  const packageJsonPath = `${appDir}/package.json`
+  const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf8'))
+  packageJson.dependencies.ruvyxa = scaffoldTarball(ruvyxaTgz)
+  packageJson.dependencies['@ruvyxa/react'] = scaffoldTarball(reactTgz)
+  writeFileSync(packageJsonPath, JSON.stringify(packageJson, null, 2) + '\n')
+  writeFileSync(`${appDir}/app/type-check.module.scss`, '.typeCheck {}\n')
+  writeFileSync(
+    `${appDir}/app/framework-type-entries.ts`,
+    [
+      "import 'ruvyxa'",
+      "import 'ruvyxa/config'",
+      "import 'ruvyxa/server'",
+      "import styles from './type-check.module.scss'",
+      'const moduleClass: string = styles.typeCheck',
+      'void moduleClass',
+      '',
+    ].join('\n'),
+  )
+}
+
 writeFileSync(
   `${extracted}/pnpm-workspace.yaml`,
   [
     'packages:',
-    "  - 'scaffolded-app'",
+    "  - 'scaffolded-*'",
     'overrides:',
     `  '@ruvyxa/core': ${JSON.stringify(workspaceTarball(coreTgz))}`,
     `  '${currentPlatformPackage}': ${JSON.stringify(workspaceTarball(currentPlatformTgz))}`,
+    'allowBuilds:',
+    "  '@parcel/watcher': false",
     '',
   ].join('\n'),
 )
 
 execFileSync('pnpm', ['install', '--no-lockfile'], {
-  cwd: `${extracted}/scaffolded-app`,
+  cwd: extracted,
   stdio: 'inherit',
   shell: process.platform === 'win32',
 })
-execFileSync('pnpm', ['run', 'typecheck'], {
-  cwd: `${extracted}/scaffolded-app`,
-  stdio: 'inherit',
-  shell: process.platform === 'win32',
-})
+for (const starter of starters) {
+  execFileSync('pnpm', ['run', 'typecheck'], {
+    cwd: `${extracted}/scaffolded-${starter}`,
+    stdio: 'inherit',
+    shell: process.platform === 'win32',
+  })
+}
 
 await rmWithRetry(extracted)
 

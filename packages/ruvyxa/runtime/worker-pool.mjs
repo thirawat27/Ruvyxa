@@ -22,7 +22,7 @@
 import { createHash } from 'node:crypto'
 import { once } from 'node:events'
 import { existsSync } from 'node:fs'
-import { mkdir, readFile } from 'node:fs/promises'
+import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -105,6 +105,7 @@ class LRUCache {
 const bundleCache = new LRUCache(MAX_BUNDLE_CACHE_ENTRIES)
 // Cache key -> normalized absolute project files used to build that bundle.
 const bundleInputs = new Map()
+const bundleFingerprints = new Map()
 const buildLocks = new Map()
 
 // Performance: Module import cache — avoids re-parsing JS on every request.
@@ -472,13 +473,13 @@ async function handleSsg(request) {
 // Keep this in the persistent worker so build-time dynamic SSG routes reuse the
 // same dependency checks, compiler cache, and module cache as page rendering.
 async function handleStaticParams(request) {
-  const { projectRoot, pageFile } = request
+  const { projectRoot, pageFile, routePath = '', segments = [], routes = [] } = request
   const resolvedRoot = path.resolve(projectRoot || process.cwd())
   ensureReactDeps(resolvedRoot)
 
   const cacheDir = path.join(resolvedRoot, '.ruvyxa', 'cache', 'ssg')
   await ensureDir(cacheDir)
-  const moduleCode = `export { getStaticParams } from ${JSON.stringify(toImportPath(pageFile))}`
+  const moduleCode = `export { getStaticParams, staticParams } from ${JSON.stringify(toImportPath(pageFile))}`
   const hash = createHash('sha256')
     .update(moduleCode)
     .update(pageFile)
@@ -486,11 +487,21 @@ async function handleStaticParams(request) {
     .digest('hex')
     .slice(0, 16)
   const outfile = path.join(cacheDir, `${hash}.mjs`)
+  const paramsCacheFile = path.join(cacheDir, `${hash}.params.json`)
   const cacheKey = `ssg-params:${pageFile}:${hash}`
+  const contextHash = createHash('sha256')
+    .update(JSON.stringify({ routePath, segments, routes }))
+    .digest('hex')
 
-  const { freshBuild } = await withBuildLock(cacheKey, async () => {
+  const { freshBuild, dependencyHash } = await withBuildLock(cacheKey, async () => {
     const cached = bundleCache.get(cacheKey)
-    if (cached) return { outfile: cached, freshBuild: false }
+    if (cached) {
+      return {
+        outfile: cached,
+        freshBuild: false,
+        dependencyHash: bundleFingerprints.get(cacheKey),
+      }
+    }
 
     const bundle = await compileBundleWithMetadata({
       projectRoot: resolvedRoot,
@@ -501,15 +512,119 @@ async function handleStaticParams(request) {
       external: ['react', 'react-dom/server', 'node:stream'],
       aliases: runtimeAliases(runtimeDir),
     })
-    cacheBundle(cacheKey, outfile, resolvedRoot, bundle.inputs)
-    return { outfile, freshBuild: true }
+    cacheBundle(cacheKey, outfile, resolvedRoot, bundle.inputs, bundle.dependencyHash)
+    return { outfile, freshBuild: true, dependencyHash: bundle.dependencyHash }
   })
 
-  const mod = await importModule(outfile, freshBuild)
-  if (typeof mod.getStaticParams !== 'function') return { ok: true, params: [] }
+  const cachedParams = await readStaticParamsCache(paramsCacheFile, dependencyHash, contextHash)
+  if (cachedParams) return { ok: true, params: cachedParams, cached: true }
 
-  const params = await mod.getStaticParams({ routes: [] })
-  return { ok: true, params: Array.isArray(params) ? params : [] }
+  const mod = await importModule(outfile, freshBuild)
+  const context = {
+    routes,
+    route: { path: routePath, segments },
+  }
+  const result =
+    typeof mod.getStaticParams === 'function'
+      ? await mod.getStaticParams(context)
+      : mod.staticParams
+  const normalized = normalizeStaticParams(result, segments)
+
+  if (normalized.cacheSeconds !== null) {
+    await writeStaticParamsCache(paramsCacheFile, {
+      version: 1,
+      dependencyHash,
+      contextHash,
+      expiresAt: Date.now() + normalized.cacheSeconds * 1000,
+      params: normalized.params,
+    })
+  }
+
+  return { ok: true, params: normalized.params, cached: false }
+}
+
+function normalizeStaticParams(result, segments) {
+  let values = result
+  let cacheSeconds = null
+  if (result && typeof result === 'object' && !Array.isArray(result) && 'params' in result) {
+    values = result.params
+    cacheSeconds = parseStaticParamsCacheDuration(result.cache)
+  }
+  if (values === undefined) return { params: [], cacheSeconds }
+  if (!Array.isArray(values)) {
+    throw new Error('RUV1510 static params must be an array or an object with a params array')
+  }
+
+  const params = values.map((value, index) => {
+    if (typeof value === 'string' || typeof value === 'number') {
+      if (segments.length !== 1) {
+        throw new Error(
+          `RUV1511 static params shorthand at index ${index} requires exactly one dynamic route segment`,
+        )
+      }
+      const segment = segments[0]
+      const normalized = String(value)
+      return { [segment.name]: segment.catchAll ? [normalized] : normalized }
+    }
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      throw new Error(`RUV1512 static params entry at index ${index} must be an object or scalar`)
+    }
+    return value
+  })
+  return { params, cacheSeconds }
+}
+
+function parseStaticParamsCacheDuration(value) {
+  if (value === undefined || value === null || value === false) return null
+  let seconds
+  if (typeof value === 'number') {
+    seconds = value
+  } else if (typeof value === 'string') {
+    const match = /^(\d+)(s|m|h|d)$/.exec(value.trim())
+    if (!match) {
+      throw new Error('RUV1513 static params cache must use seconds or a duration like 10m')
+    }
+    const multipliers = { s: 1, m: 60, h: 3600, d: 86400 }
+    seconds = Number(match[1]) * multipliers[match[2]]
+  } else {
+    throw new Error('RUV1513 static params cache must be a positive number or duration string')
+  }
+  if (!Number.isSafeInteger(seconds) || seconds <= 0 || seconds > 31_536_000) {
+    throw new Error('RUV1513 static params cache must be between 1 second and 365 days')
+  }
+  return seconds
+}
+
+async function readStaticParamsCache(file, dependencyHash, contextHash) {
+  if (!dependencyHash) return null
+  try {
+    const cached = JSON.parse(await readFile(file, 'utf8'))
+    if (
+      cached.version === 1 &&
+      cached.dependencyHash === dependencyHash &&
+      cached.contextHash === contextHash &&
+      Number.isSafeInteger(cached.expiresAt) &&
+      cached.expiresAt > Date.now() &&
+      Array.isArray(cached.params)
+    ) {
+      return cached.params
+    }
+  } catch {
+    // Missing, expired, or malformed cache entries are rebuilt below.
+  }
+  return null
+}
+
+async function writeStaticParamsCache(file, value) {
+  const temporary = `${file}.${process.pid}.${Date.now()}.tmp`
+  await writeFile(temporary, `${JSON.stringify(value)}\n`)
+  try {
+    await rename(temporary, file)
+  } catch (error) {
+    if (error?.code !== 'EEXIST' && error?.code !== 'EPERM') throw error
+    await rm(file, { force: true })
+    await rename(temporary, file)
+  }
 }
 
 // --- API Handler ---
@@ -652,6 +767,7 @@ function invalidateBundleCache(paths) {
     const invalidated = bundleCache.size
     bundleCache.clear()
     bundleInputs.clear()
+    bundleFingerprints.clear()
     moduleCache.clear()
     buildLocks.clear()
     return { invalidated }
@@ -681,21 +797,24 @@ function normalizeAbsolutePath(file) {
   return path.resolve(file).replaceAll('\\', '/')
 }
 
-function cacheBundle(cacheKey, outfile, projectRoot, inputs) {
+function cacheBundle(cacheKey, outfile, projectRoot, inputs, dependencyHash) {
   const evicted = bundleCache.set(cacheKey, outfile)
   if (evicted) {
     bundleInputs.delete(evicted.key)
+    bundleFingerprints.delete(evicted.key)
     if (evicted.value) moduleCache.delete(evicted.value)
   }
   bundleInputs.set(
     cacheKey,
     new Set((inputs ?? []).map((input) => normalizeAbsolutePath(path.join(projectRoot, input)))),
   )
+  if (dependencyHash) bundleFingerprints.set(cacheKey, dependencyHash)
 }
 
 function deleteBundleCacheEntry(cacheKey) {
   const outfile = bundleCache.delete(cacheKey)
   bundleInputs.delete(cacheKey)
+  bundleFingerprints.delete(cacheKey)
   buildLocks.delete(cacheKey)
   if (outfile) moduleCache.delete(outfile)
 }

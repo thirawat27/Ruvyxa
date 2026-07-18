@@ -119,13 +119,23 @@ test('resolves static params and isolates build-time page module state', async (
   const projectRoot = await mkdtemp(path.join(repoRoot, 'examples/demo/.worker-pool-test-'))
   const appDir = path.join(projectRoot, 'app/products/[id]')
   const pageFile = path.join(appDir, 'page.tsx')
+  const paramsFile = path.join(appDir, 'params.ts')
   await mkdir(appDir, { recursive: true })
   await writeFile(path.join(projectRoot, 'package.json'), '{"type":"module"}\n')
+  await writeFile(paramsFile, "export const suffix = 'first'\n")
   await writeFile(
     pageFile,
     `import React from 'react'
+import { suffix } from './params'
 let renders = 0
-export function getStaticParams() { return [{ id: 'one' }, { id: 'two' }] }
+let discoveries = 0
+export function getStaticParams({ routes, route }) {
+  if (routes.length !== 2 || route.path !== '/products/[id]' || route.segments[0].name !== 'id') {
+    throw new Error('static params context mismatch')
+  }
+  discoveries += 1
+  return { params: ['one-' + suffix + '-' + discoveries, 'two-' + suffix + '-' + discoveries], cache: '1s' }
+}
 export default function Page({ params }) {
   renders += 1
   return React.createElement('main', null, params.id + ':' + renders)
@@ -167,11 +177,59 @@ export default function Page({ params }) {
     await rm(projectRoot, { recursive: true, force: true })
   })
 
-  const staticParams = await request({ type: 'staticParams', projectRoot, pageFile })
+  const staticParamsRequest = {
+    type: 'staticParams',
+    projectRoot,
+    pageFile,
+    routePath: '/products/[id]',
+    segments: [{ name: 'id', catchAll: false, optional: false }],
+    routes: [
+      { id: 'home', path: '/' },
+      { id: 'products', path: '/products/[id]' },
+    ],
+  }
+  const staticParams = await request(staticParamsRequest)
   assert.equal(staticParams.ok, true, staticParams.message)
-  assert.deepEqual(staticParams.params, [{ id: 'one' }, { id: 'two' }])
+  assert.deepEqual(staticParams.params, [{ id: 'one-first-1' }, { id: 'two-first-1' }])
+  assert.equal(staticParams.cached, false)
 
-  for (const id of ['one', 'two']) {
+  const cachedParams = await request(staticParamsRequest)
+  assert.equal(cachedParams.ok, true, cachedParams.message)
+  assert.deepEqual(cachedParams.params, staticParams.params)
+  assert.equal(cachedParams.cached, true)
+
+  await new Promise((resolve) => setTimeout(resolve, 1_100))
+  const expiredParams = await request(staticParamsRequest)
+  assert.equal(expiredParams.ok, true, expiredParams.message)
+  assert.deepEqual(expiredParams.params, [{ id: 'one-first-2' }, { id: 'two-first-2' }])
+  assert.equal(expiredParams.cached, false)
+
+  await writeFile(paramsFile, "export const suffix = 'second'\n")
+  const invalidation = await request({ type: 'invalidate', paths: [paramsFile] })
+  assert.equal(invalidation.ok, true)
+  assert.equal(invalidation.invalidated, 1)
+  const refreshedParams = await request(staticParamsRequest)
+  assert.equal(refreshedParams.ok, true, refreshedParams.message)
+  assert.deepEqual(refreshedParams.params, [{ id: 'one-second-1' }, { id: 'two-second-1' }])
+  assert.equal(refreshedParams.cached, false)
+
+  await writeFile(
+    pageFile,
+    `import React from 'react'
+export const staticParams = [3, 4]
+export default function Page({ params }) {
+  return React.createElement('main', null, params.id + ':1')
+}
+`,
+  )
+  const pageInvalidation = await request({ type: 'invalidate', paths: [pageFile] })
+  assert.equal(pageInvalidation.ok, true)
+  assert.equal(pageInvalidation.invalidated, 1)
+  const declaredParams = await request(staticParamsRequest)
+  assert.equal(declaredParams.ok, true, declaredParams.message)
+  assert.deepEqual(declaredParams.params, [{ id: '3' }, { id: '4' }])
+
+  for (const { id } of declaredParams.params) {
     const render = await request({
       type: 'ssg',
       projectRoot,

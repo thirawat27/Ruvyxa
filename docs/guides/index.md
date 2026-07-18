@@ -20,11 +20,12 @@ validates the application graph, builds production output, and checks developmen
 | 5. Data Loading & Cache             | [EN](en/data-loading-and-cache.md)   | [TH](th/data-loading-and-cache.md)   |
 | 6. Server Actions                   | [EN](en/server-actions.md)           | [TH](th/server-actions.md)           |
 | 7. Rendering Strategies             | [EN](en/rendering-strategies.md)     | [TH](th/rendering-strategies.md)     |
-| 8. Markdown, MDX, Images & Metadata | [EN](en/markdown-mdx-images.md)      | [TH](th/markdown-mdx-images.md)      |
-| 9. Environment Variables            | [EN](en/environment-variables.md)    | [TH](th/environment-variables.md)    |
-| 10. Configuration Reference         | [EN](en/configuration.md)            | [TH](th/configuration.md)            |
-| 11. CLI Commands                    | [EN](en/cli-commands.md)             | [TH](th/cli-commands.md)             |
-| 12. Deployment                      | [EN](en/deployment.md)               | [TH](th/deployment.md)               |
+| 8. Styling, SCSS & CSS Modules      | [EN](en/styling.md)                  | [TH](th/styling.md)                  |
+| 9. Markdown, MDX, Images & Metadata | [EN](en/markdown-mdx-images.md)      | [TH](th/markdown-mdx-images.md)      |
+| 10. Environment Variables           | [EN](en/environment-variables.md)    | [TH](th/environment-variables.md)    |
+| 11. Configuration Reference         | [EN](en/configuration.md)            | [TH](th/configuration.md)            |
+| 12. CLI Commands                    | [EN](en/cli-commands.md)             | [TH](th/cli-commands.md)             |
+| 13. Deployment                      | [EN](en/deployment.md)               | [TH](th/deployment.md)               |
 
 ---
 
@@ -45,6 +46,8 @@ Then explore by topic:
 - **Handle mutations**: [Server Actions](en/server-actions.md) — validated mutations, form
   integration
 - **Create endpoints**: [API Routes](en/api-routes.md) — HTTP method handlers
+- **Style components**: [Styling, SCSS & CSS Modules](en/styling.md) — global styles, Sass, locally
+  scoped class maps, and HMR
 - **Style content**: [Markdown, MDX, Images & Metadata](en/markdown-mdx-images.md) — content routes,
   images, SEO
 - **Manage secrets**: [Environment Variables](en/environment-variables.md) — public vs private,

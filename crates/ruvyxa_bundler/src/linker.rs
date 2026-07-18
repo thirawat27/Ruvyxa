@@ -1108,12 +1108,13 @@ pub(crate) fn find_dep_for_specifier<'a>(
     deps: &'a [PathBuf],
 ) -> Option<&'a PathBuf> {
     let normalized = specifier.replace('\\', "/");
+    let direct_suffix = normalized.strip_prefix("./").unwrap_or(&normalized);
 
     deps.iter().find(|dep| {
         let dep_str = dep.display().to_string().replace('\\', "/");
 
         // Direct path match.
-        if dep_str.ends_with(&normalized) {
+        if dep_str.ends_with(direct_suffix) {
             return true;
         }
 

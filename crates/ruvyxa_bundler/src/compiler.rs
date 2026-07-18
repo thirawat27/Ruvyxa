@@ -95,6 +95,25 @@ fn compile_module(
         .and_then(|e| e.to_str())
         .unwrap_or("");
 
+    if crate::style_module::is_css_module_path(&module.path) {
+        let css_module = crate::style_module::compile_css_module(&module.path, &input.project_root)
+            .map_err(|error| {
+                BundleError::Compiler(format!("{}: {error}", module.path.display()))
+            })?;
+        let js = crate::style_module::css_module_javascript(&css_module)
+            .map_err(|error| BundleError::Compiler(error.to_string()))?;
+        return Ok(CompiledModuleOutput {
+            module: CompiledModule {
+                path: module.path.clone(),
+                js,
+                deps: module.deps.clone(),
+                is_external: false,
+                cache_hit: false,
+            },
+            plugin_source_map: None,
+        });
+    }
+
     let content_source = if matches!(ext, "md" | "mdx") {
         crate::content::compile_content_module(&module.source, &module.path)
             .map_err(BundleError::Compiler)?

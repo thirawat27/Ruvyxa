@@ -1,0 +1,159 @@
+* {
+  box-sizing: border-box;
+}
+
+:root {
+  color-scheme: dark;
+  font-family: 'SFMono-Regular', Consolas, 'Liberation Mono', Menlo, monospace;
+  --bg: #0a0a0a;
+  --fg: #e0e0e0;
+  --muted: #777777;
+  --border: #222222;
+  --card-bg: #111111;
+  --accent: #10b981;
+  --code-bg: #1a1a1a;
+  --radius: 6px;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+  background: var(--bg);
+  color: var(--fg);
+}
+
+body {
+  min-height: 100vh;
+  font-size: 14px;
+  line-height: 1.6;
+}
+
+a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+a:hover {
+  text-decoration: underline;
+}
+
+main {
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 48px 24px;
+}
+
+h1 {
+  font-size: 28px;
+  margin: 0 0 8px;
+  letter-spacing: -0.02em;
+}
+
+h2 {
+  font-size: 18px;
+  margin: 32px 0 12px;
+  color: var(--accent);
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 8px;
+}
+
+h3 {
+  font-size: 15px;
+  margin: 24px 0 8px;
+}
+
+p {
+  color: var(--muted);
+  margin: 0 0 16px;
+}
+
+code {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  font-size: 0.9em;
+  padding: 2px 6px;
+}
+
+pre {
+  background: var(--code-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  overflow-x: auto;
+  padding: 16px;
+  margin: 8px 0 16px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+pre code {
+  background: none;
+  border: none;
+  padding: 0;
+}
+
+.endpoint {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 20px;
+  margin-bottom: 16px;
+}
+
+.method {
+  display: inline-block;
+  font-weight: 700;
+  font-size: 12px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  margin-right: 8px;
+}
+
+.method.get {
+  background: #064e3b;
+  color: #6ee7b7;
+}
+
+.method.post {
+  background: #1e3a5f;
+  color: #93c5fd;
+}
+
+.method.put {
+  background: #713f12;
+  color: #fde047;
+}
+
+.method.delete {
+  background: #450a0a;
+  color: #fca5a5;
+}
+
+.path {
+  font-weight: 600;
+  font-size: 14px;
+}
+
+.desc {
+  color: var(--muted);
+  margin: 8px 0 0;
+  font-size: 13px;
+}
+
+.badge {
+  display: inline-block;
+  background: var(--accent);
+  color: var(--bg);
+  font-weight: 700;
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 4px;
+  margin-bottom: 16px;
+}
+
+@media (max-width: 640px) {
+  main {
+    padding: 32px 16px;
+  }
+}

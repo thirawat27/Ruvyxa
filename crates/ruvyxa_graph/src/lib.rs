@@ -79,7 +79,7 @@ pub struct RenderMeta {
     /// ISR revalidation interval in seconds (only meaningful for `Isr`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub revalidate: Option<u64>,
-    /// Whether the page exports `getStaticParams` for dynamic SSG routes.
+    /// Whether the page exports `getStaticParams` or `staticParams` for dynamic SSG routes.
     #[serde(default)]
     pub has_static_params: bool,
     /// Static paths discovered from `getStaticParams` at build time.
@@ -963,7 +963,7 @@ fn sibling_modules(route_dir: &Path, names: &[&str]) -> Vec<String> {
 /// 1. `"use client"` directive at top → CSR
 /// 2. `export const ppr = true` → PPR
 /// 3. `export const revalidate = <number>` → ISR with that interval
-/// 4. `export function getStaticParams` or `export async function getStaticParams` → SSG
+/// 4. `getStaticParams` or `staticParams` page export → SSG
 /// 5. Route has no dynamic segments and no data fetching → SSG candidate (static routes)
 /// 6. Default → SSR
 fn detect_render_strategy(
@@ -1002,7 +1002,7 @@ fn detect_render_strategy(
 
     // 3. Check for ISR: export const revalidate = <number>
     if let Some(seconds) = parse_export_const_number(&code, "revalidate") {
-        let has_static_params = has_export_function(&code, "getStaticParams");
+        let has_static_params = has_static_params_export(&code);
         return RenderMeta {
             strategy: RenderStrategy::Isr,
             revalidate: Some(seconds),
@@ -1011,8 +1011,8 @@ fn detect_render_strategy(
         };
     }
 
-    // 4. Check for SSG: export function getStaticParams / export async function getStaticParams
-    if has_export_function(&code, "getStaticParams") {
+    // 4. Check for dynamic SSG parameter exports.
+    if has_static_params_export(&code) {
         return RenderMeta {
             strategy: RenderStrategy::Ssg,
             has_static_params: true,
@@ -1140,12 +1140,21 @@ fn has_export_function(code: &str, name: &str) -> bool {
     for line in code.lines() {
         let trimmed = line.trim();
         for pattern in &patterns {
-            if trimmed.starts_with(pattern.as_str()) {
+            let Some(rest) = trimmed.strip_prefix(pattern.as_str()) else {
+                continue;
+            };
+            if rest.chars().next().is_none_or(|character| {
+                character.is_whitespace() || matches!(character, '(' | '<' | ':' | '=')
+            }) {
                 return true;
             }
         }
     }
     false
+}
+
+fn has_static_params_export(code: &str) -> bool {
+    has_export_function(code, "getStaticParams") || has_export_function(code, "staticParams")
 }
 
 fn detect_conflicts(routes: &[RouteEntry]) -> Result<()> {
@@ -1387,6 +1396,38 @@ mod tests {
 
         assert_eq!(route.render.strategy, RenderStrategy::Ssg);
         assert!(!route.render.has_static_params);
+    }
+
+    #[test]
+    fn classifies_static_params_shorthand_as_dynamic_ssg() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        fs::create_dir_all(app.join("articles/[slug]")).unwrap();
+        fs::write(
+            app.join("articles/[slug]/page.tsx"),
+            "export const staticParams = ['one', 'two']; export default function Page() {}",
+        )
+        .unwrap();
+
+        let manifest = discover_routes(DiscoverOptions::new(&app)).unwrap();
+        let route = manifest
+            .routes
+            .iter()
+            .find(|route| route.path == "/articles/[slug]")
+            .unwrap();
+
+        assert_eq!(route.render.strategy, RenderStrategy::Ssg);
+        assert!(route.render.has_static_params);
+    }
+
+    #[test]
+    fn does_not_treat_prefixed_static_params_names_as_exports() {
+        assert!(!has_static_params_export(
+            "export const staticParamsHelper = ['one'];"
+        ));
+        assert!(!has_static_params_export(
+            "export function getStaticParamsHelper() {}"
+        ));
     }
 
     #[test]

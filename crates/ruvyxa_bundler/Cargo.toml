@@ -12,6 +12,7 @@ ruvyxa_diagnostics = { path = "../ruvyxa_diagnostics" }
 anyhow = { workspace = true }
 blake3 = { workspace = true }
 dashmap = { workspace = true }
+grass = { workspace = true }
 memmap2 = { workspace = true }
 markdown = { workspace = true }
 oxc = { workspace = true }

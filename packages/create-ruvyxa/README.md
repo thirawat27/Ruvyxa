@@ -1,6 +1,6 @@
 # create-ruvyxa
 
-Create a clean Ruvyxa app with a minimal file-system route starter.
+Create a Ruvyxa app from a minimal or focused file-system route starter.
 
 ## Usage
 
@@ -10,6 +10,16 @@ cd my-app
 pnpm install
 pnpm dev
 ```
+
+Choose a starter with `--template` (or `-t` when invoking the binary directly):
+
+```bash
+npm create ruvyxa@latest my-blog -- --template blog
+npm create ruvyxa@latest my-admin -- --template crud
+npm create ruvyxa@latest my-api -- --template api-backend
+```
+
+Available starters are `minimal` (the default), `blog`, `crud`, and `api-backend`.
 
 The generated project starts with:
 
@@ -26,11 +36,10 @@ ruvyxa.config.ts
 tsconfig.json
 ```
 
-The starter stays intentionally small: one page, one layout, one global stylesheet, static assets,
-config, TypeScript settings, and agent instructions. Use the repository `examples/demo` when you
-need examples for API routes, dynamic routes, server actions, loaders, middleware, and production
-checks. Read the repository [User Guide](../../docs/user-guide.md) for the end-to-end app workflow
-and [Developer Guide](../../docs/developer-guide.md) for framework-contributor checks.
+The minimal starter stays intentionally small. Focused starters add a blog with static parameters, a
+CRUD flow with an API and validated action, or an API-only backend while keeping the same public
+framework conventions. Read the repository [User Guide](../../docs/guides/index.md) for the
+end-to-end app workflow and [Developer Guide](../../docs/developer-guide.md) for contributor checks.
 
 ## Project Names
 

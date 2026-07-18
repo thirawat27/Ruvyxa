@@ -120,6 +120,18 @@ export interface RenderConfig {
 export interface StaticParamsContext {
   /** All route entries discovered in the app. */
   routes: Array<{ path: string; id: string }>
+  /** The dynamic route currently requesting parameters. */
+  route: {
+    path: string
+    segments: StaticParamSegment[]
+  }
+}
+
+/** A dynamic segment included in the route being statically generated. */
+export interface StaticParamSegment {
+  name: string
+  catchAll: boolean
+  optional: boolean
 }
 
 /** A value captured from a Next-style dynamic route segment. */
@@ -127,6 +139,27 @@ export type RouteParamValue = string | string[] | undefined
 
 /** Parameter object shared by pages, layouts, and route handlers. */
 export type RouteParams = Record<string, RouteParamValue>
+
+/** Duration accepted by persistent SSG parameter discovery caching. */
+export type StaticParamsCacheDuration = number | `${number}${'s' | 'm' | 'h' | 'd'}`
+
+/**
+ * Static parameter values. A string shorthand is allowed for routes with one dynamic segment.
+ */
+export type StaticParamsValues<TParams extends RouteParams = RouteParams> = ReadonlyArray<
+  TParams | string | number
+>
+
+/** Opt-in cache metadata for parameter discovery results. */
+export interface CachedStaticParams<TParams extends RouteParams = RouteParams> {
+  params: StaticParamsValues<TParams>
+  /** Cache duration in seconds or a compact duration such as `"10m"`. */
+  cache: StaticParamsCacheDuration
+}
+
+/** Value accepted from `getStaticParams` or the `staticParams` page export. */
+export type StaticParamsResult<TParams extends RouteParams = RouteParams> =
+  StaticParamsValues<TParams> | CachedStaticParams<TParams>
 
 /**
  * Type for the `getStaticParams` page export used by SSG and ISR routes
@@ -142,7 +175,7 @@ export type RouteParams = Record<string, RouteParamValue>
  */
 export type GetStaticParams<TParams extends RouteParams = RouteParams> = (
   ctx: StaticParamsContext,
-) => TParams[] | Promise<TParams[]>
+) => StaticParamsResult<TParams> | Promise<StaticParamsResult<TParams>>
 
 /**
  * Props provided to a page component during rendering.

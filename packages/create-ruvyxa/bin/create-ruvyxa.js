@@ -1,7 +1,22 @@
 #!/usr/bin/env node
 import { createRuvyxaApp, detectPackageManager } from '../dist/index.js'
 
-const target = process.argv[2] ?? 'my-ruvyxa-app'
+const args = process.argv.slice(2)
+if (args.includes('--help') || args.includes('-h')) {
+  console.log('Usage: create-ruvyxa [directory] [--template minimal|blog|crud|api-backend]')
+  process.exit(0)
+}
+const templateArg = args.find((arg) => arg.startsWith('--template='))
+const templateIndex = args.findIndex((arg) => arg === '--template' || arg === '-t')
+const templateValue = templateIndex >= 0 ? args[templateIndex + 1] : undefined
+const template = templateArg?.slice('--template='.length) ?? templateValue
+const missingTemplate =
+  templateArg === '--template=' ||
+  (templateIndex >= 0 && (!templateValue || templateValue.startsWith('-')))
+const target =
+  args.find(
+    (arg, index) => !arg.startsWith('-') && index !== (templateIndex >= 0 ? templateIndex + 1 : -1),
+  ) ?? 'my-ruvyxa-app'
 const color = process.stdout.isTTY && !process.env.NO_COLOR
 const cyan = (value) => format(value, '36')
 const green = (value) => format(value, '32')
@@ -15,12 +30,18 @@ function format(value, code) {
 }
 
 try {
-  await createRuvyxaApp(target)
+  if (missingTemplate) {
+    throw new Error(
+      'Starter template name is required.\n' + '  Choose one of: minimal, blog, crud, api-backend',
+    )
+  }
+  await createRuvyxaApp(target, template ? { template } : undefined)
 
   const pm = detectPackageManager()
 
   console.log('')
   console.log(`  ${green('[ok]')} ${bold('Created')} ${cyan(target)}`)
+  console.log(`  ${gray('starter:')} ${template ?? 'minimal'}`)
   console.log('')
   console.log(`  ${bold('Project')}`)
   console.log(`    ${gray('app/')}page.tsx`)

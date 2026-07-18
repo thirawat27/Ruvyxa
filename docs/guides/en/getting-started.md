@@ -30,6 +30,21 @@ my-app/
 └── tsconfig.json
 ```
 
+The default starter is `minimal`. Version 1.0.15 also provides focused starters:
+
+```bash
+npm create ruvyxa@latest my-blog -- --template blog
+npm create ruvyxa@latest my-admin -- --template crud
+npm create ruvyxa@latest my-api -- --template api-backend
+```
+
+| Starter       | Includes                                                         |
+| ------------- | ---------------------------------------------------------------- |
+| `minimal`     | One page, root layout, global stylesheet, and framework config.  |
+| `blog`        | Post listing, dynamic post pages, and direct SSG parameters.     |
+| `crud`        | In-memory task API, loader, cache, and validated server action.  |
+| `api-backend` | Health and item REST endpoints with validation and error shapes. |
+
 ### Git Ignore
 
 The starter ignores `node_modules/`, `.ruvyxa/`, `dist/`, log files, and `.env` files:
@@ -107,3 +122,4 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
 - [Server & Client Components](server-client-components.md) — `'use client'`, `server-only`,
   boundary checks
 - [Configuration](configuration.md) — `ruvyxa.config.ts` full reference
+- [Styling](styling.md) — global CSS, SCSS/Sass, and CSS Modules

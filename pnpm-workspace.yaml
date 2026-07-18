@@ -2,3 +2,7 @@ packages:
   - 'packages/*'
   - 'packages/@ruvyxa/*'
   - 'examples/*'
+allowBuilds:
+  # Dart Sass uses this optional native watcher only for its CLI watch mode. Ruvyxa calls the
+  # compile API directly, so keep the install deterministic without executing its build script.
+  '@parcel/watcher': false

@@ -46,6 +46,41 @@ describe('createRuvyxaApp', () => {
     }
   })
 
+  for (const [template, expectedFile] of [
+    ['blog', 'app/blog/[slug]/page.tsx'],
+    ['crud', 'app/tasks/action.ts'],
+    ['api-backend', 'app/api/items/[id]/route.ts'],
+  ] as const) {
+    it(`creates the ${template} starter`, async () => {
+      const tempRoot = await mkdtemp(join(tmpdir(), 'ruvyxa-create-'))
+      const target = join(tempRoot, `${template}-app`)
+
+      try {
+        await createRuvyxaApp(target, { template })
+        const files = await listFiles(target)
+        assert.ok(files.includes(expectedFile))
+        assert.ok(files.includes('.gitignore'))
+        assert.equal((await readPackageJson(target)).name, `${template}-app`)
+      } finally {
+        await rm(tempRoot, { recursive: true, force: true })
+      }
+    })
+  }
+
+  it('rejects unknown starter templates before changing files', async () => {
+    const tempRoot = await mkdtemp(join(tmpdir(), 'ruvyxa-create-'))
+    const target = join(tempRoot, 'unknown-app')
+    try {
+      await assert.rejects(
+        createRuvyxaApp(target, { template: 'unknown' as never }),
+        /Choose one of: minimal, blog, crud, api-backend/,
+      )
+      await assert.rejects(readdir(target), /ENOENT/)
+    } finally {
+      await rm(tempRoot, { recursive: true, force: true })
+    }
+  })
+
   it('rejects Windows reserved project names', async () => {
     await assert.rejects(createRuvyxaApp('CON'), /reserved or unsafe/)
     await assert.rejects(createRuvyxaApp('lpt1.txt'), /reserved or unsafe/)

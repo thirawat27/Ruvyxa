@@ -10,6 +10,7 @@ import {
   clearCompilerCache,
   compilerCacheStats,
   compileBundle,
+  compileBundleWithMetadata,
   invalidateCompilerCache,
   toImportPath,
 } from '../../../packages/ruvyxa/runtime/compiler.mjs'
@@ -557,6 +558,42 @@ import Card from './Card.js'
 
       const output = await readFile(outfile, 'utf8')
       assert.doesNotMatch(output, /import "\.\/global\.css"/)
+    })
+  })
+
+  it('exports deterministic class maps for CSS and SCSS modules', async () => {
+    await withFixture(async ({ root, outDir }) => {
+      const pageFile = path.join(root, 'page.ts')
+      const outfile = path.join(outDir, 'style-modules.mjs')
+      await writeFile(path.join(root, 'card.module.css'), '.card { color: navy; }\n')
+      await writeFile(path.join(root, '_tokens.scss'), '$accent: rebeccapurple;\n')
+      await writeFile(
+        path.join(root, 'panel.module.scss'),
+        "@use './tokens' as t; .panel { color: t.$accent; }\n",
+      )
+      await writeFile(
+        pageFile,
+        `
+          import card from './card.module.css'
+          import panel from './panel.module.scss'
+          export const classes = [card.card, panel.panel]
+        `,
+      )
+
+      const result = await compileBundleWithMetadata({
+        projectRoot: root,
+        entrySource: `export { classes } from ${JSON.stringify(toImportPath(pageFile))}`,
+        sourcefile: 'ruvyxa:style-module-entry.ts',
+        outfile,
+        platform: 'node',
+      })
+      const mod = await import(`${pathToFileURL(outfile).href}?t=${Date.now()}`)
+
+      assert.equal(mod.classes[0], 'card_card__a0c386682b31a0c2')
+      assert.equal(mod.classes[1], 'panel_panel__9ffbc1bad8f2e789')
+      assert.ok(result.inputs.includes('card.module.css'))
+      assert.ok(result.inputs.includes('panel.module.scss'))
+      assert.ok(result.inputs.includes('_tokens.scss'))
     })
   })
 

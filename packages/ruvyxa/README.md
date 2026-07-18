@@ -14,8 +14,17 @@ Published installs include the TypeScript runtime files, a persistent Node worke
 CLI binary for the current platform. Rust and Cargo are only required when developing Ruvyxa from
 source.
 
-The package also provides the ambient `declare module '*.css'` contract used by Ruvyxa applications.
-Projects created with `create-ruvyxa` can import CSS without maintaining a local `css.d.ts` file.
+The package also provides ambient contracts for CSS, SCSS, Sass, and their `.module.*` variants. CSS
+Module imports expose a typed readonly class map; projects created with `create-ruvyxa` do not need
+a local `css.d.ts` file.
+
+```tsx
+import styles from './card.module.scss'
+
+export function Card() {
+  return <article className={styles.card}>Scoped card</article>
+}
+```
 
 ## CLI
 

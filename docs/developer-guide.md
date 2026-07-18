@@ -177,9 +177,10 @@ appropriate English guide if users need to act on it.
 
 ## 7. Templates and scaffold packaging
 
-The source starter is `templates/minimal/`. `packages/create-ruvyxa/scripts/prepare-template.mjs`
-copies it into the ignored package template before packing. Keep both observable starter behaviour
-and package tests aligned.
+The source starters are `templates/minimal/`, `templates/blog/`, `templates/crud/`, and
+`templates/api-backend/`. `packages/create-ruvyxa/scripts/prepare-template.mjs` copies all four into
+the ignored package template before packing. Keep observable starter behaviour, the CLI template
+list, and package tests aligned.
 
 npm omits nested `.gitignore` files from package tarballs. The prepare script therefore renames the
 packaged copy to `gitignore`; the scaffold restores it as `.gitignore` in the generated application.

@@ -170,6 +170,10 @@ pub enum WorkerRequest {
         project_root: String,
         #[serde(rename = "pageFile")]
         page_file: String,
+        #[serde(rename = "routePath")]
+        route_path: String,
+        segments: Vec<StaticParamSegment>,
+        routes: Vec<StaticParamsRoute>,
     },
 }
 
@@ -210,6 +214,23 @@ impl WorkerRequest {
 pub struct WarmupRoute {
     pub page_file: String,
     pub app_dir: String,
+}
+
+/// Route metadata passed to build-time parameter discovery.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StaticParamsRoute {
+    pub path: String,
+    pub id: String,
+}
+
+/// Dynamic segment metadata used to normalize the single-segment shorthand.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StaticParamSegment {
+    pub name: String,
+    pub catch_all: bool,
+    pub optional: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -1120,16 +1141,22 @@ impl NodeWorkerPool {
         self.send(request).await
     }
 
-    /// Resolve `getStaticParams` through the persistent worker cache.
+    /// Resolve dynamic SSG parameters through the persistent worker cache.
     pub async fn resolve_static_params(
         &self,
         project_root: &Path,
         page_file: &Path,
+        route_path: &str,
+        segments: &[StaticParamSegment],
+        routes: &[StaticParamsRoute],
     ) -> Result<WorkerResponse> {
         self.send(WorkerRequest::StaticParams {
             id: next_request_id(),
             project_root: project_root.display().to_string(),
             page_file: page_file.display().to_string(),
+            route_path: route_path.to_string(),
+            segments: segments.to_vec(),
+            routes: routes.to_vec(),
         })
         .await
     }

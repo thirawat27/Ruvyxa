@@ -30,6 +30,21 @@ my-app/
 └── tsconfig.json
 ```
 
+ค่าเริ่มต้นคือ starter แบบ `minimal` และในเวอร์ชัน 1.0.15 สามารถเลือกแบบอื่นได้ดังนี้:
+
+```bash
+npm create ruvyxa@latest my-blog -- --template blog
+npm create ruvyxa@latest my-admin -- --template crud
+npm create ruvyxa@latest my-api -- --template api-backend
+```
+
+| Starter       | สิ่งที่มีให้                                                      |
+| ------------- | ----------------------------------------------------------------- |
+| `minimal`     | หน้าแรก, root layout, global stylesheet และ config                |
+| `blog`        | รายการบทความ, dynamic post route และ SSG parameters แบบตรงไปตรงมา |
+| `crud`        | Task API ในหน่วยความจำ, loader, cache และ validated action        |
+| `api-backend` | REST endpoints สำหรับ health/items พร้อม validation และ errors    |
+
 ## โครงสร้างพื้นฐาน
 
 | ไฟล์/โฟลเดอร์           | หน้าที่                                                  |
@@ -78,3 +93,4 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
 - [Routing](routing.md) — file-system routes, dynamic segments
 - [Server & Client Components](server-client-components.md) — `'use client'`, `server-only`
 - [Configuration](configuration.md) — `ruvyxa.config.ts` ฉบับเต็ม
+- [Styling](styling.md) — global CSS, SCSS/Sass และ CSS Modules

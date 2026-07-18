@@ -3,7 +3,7 @@ import { existsSync, statSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import path from 'node:path'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const JS_EXTENSIONS = ['', '.ts', '.tsx', '.js', '.jsx', '.mts', '.mjs', '.md', '.mdx']
 const ASSET_EXTENSIONS = new Set(['.css', '.scss', '.sass', '.less'])
@@ -132,10 +132,15 @@ export function cacheFileName(parts, extension) {
 }
 
 function projectInputPaths(root, modules) {
-  return modules
-    .filter((module) => module.filePath && isWithinProject(root, module.filePath))
-    .map((module) => path.relative(root, module.filePath).replaceAll('\\', '/'))
-    .sort()
+  return [
+    ...new Set(
+      modules.flatMap((module) =>
+        [module.filePath, ...(module.assetInputs || [])]
+          .filter((file) => file && isWithinProject(root, file))
+          .map((file) => path.relative(root, file).replaceAll('\\', '/')),
+      ),
+    ),
+  ].sort()
 }
 
 async function fingerprintProjectInputs(root, modules) {
@@ -225,7 +230,10 @@ async function visitModule(context) {
 
   if (byKey.has(key)) return byKey.get(key)
 
-  const compiledSource = await compileContentSource(source, filePath)
+  const styleModule = isCssModuleFile(filePath)
+    ? await compileStyleModuleSource(source, filePath, root)
+    : null
+  const compiledSource = styleModule?.source ?? (await compileContentSource(source, filePath))
   const id = `__m${modules.length}`
   const module = {
     id,
@@ -234,6 +242,7 @@ async function visitModule(context) {
     source: compiledSource,
     baseDir,
     deps: new Map(),
+    assetInputs: styleModule?.inputs ?? [],
   }
   byKey.set(key, module)
   modules.push(module)
@@ -243,7 +252,7 @@ async function visitModule(context) {
   }
 
   for (const specifier of extractSpecifiers(compiledSource)) {
-    if (isAssetSpecifier(specifier)) continue
+    if (isAssetSpecifier(specifier) && !isCssModuleSpecifier(specifier)) continue
 
     const resolvedAlias = aliases[specifier]
     const resolved = resolvedAlias
@@ -795,6 +804,153 @@ function isWithinProject(root, file) {
 
 function isAssetSpecifier(specifier) {
   return ASSET_EXTENSIONS.has(path.extname(specifier).toLowerCase())
+}
+
+function isCssModuleSpecifier(specifier) {
+  return /\.module\.(css|scss|sass)(?:[?#].*)?$/i.test(specifier)
+}
+
+function isCssModuleFile(file) {
+  return typeof file === 'string' && isCssModuleSpecifier(file)
+}
+
+async function compileStyleModuleSource(source, file, root) {
+  const extension = path.extname(file).toLowerCase()
+  let css = source
+  let inputs = [path.resolve(file)]
+
+  if (extension === '.scss' || extension === '.sass') {
+    const sass = await import('sass')
+    const result = sass.compileString(source, {
+      url: pathToFileURL(file),
+      syntax: extension === '.sass' ? 'indented' : 'scss',
+      loadPaths: [root, path.join(root, 'node_modules')],
+      style: 'expanded',
+    })
+    css = result.css
+    inputs = result.loadedUrls
+      .filter((url) => url.protocol === 'file:')
+      .map((url) => fileURLToPath(url))
+  }
+
+  const classes = scopeCssModule(css, file, root)
+  return {
+    source: `export default ${JSON.stringify(classes)};`,
+    inputs,
+  }
+}
+
+function scopeCssModule(css, file, root) {
+  let output = ''
+  const classes = new Map()
+  const chars = [...css]
+  const blockAllowsRules = [true]
+  let prelude = ''
+  let index = 0
+  let quote = null
+  let inComment = false
+  let escaped = false
+
+  while (index < chars.length) {
+    const char = chars[index]
+    const next = chars[index + 1]
+
+    if (inComment) {
+      output += char
+      if (char === '*' && next === '/') {
+        output += '/'
+        index += 2
+        inComment = false
+      } else {
+        index += 1
+      }
+      continue
+    }
+
+    if (quote) {
+      output += char
+      if (escaped) escaped = false
+      else if (char === '\\') escaped = true
+      else if (char === quote) quote = null
+      index += 1
+      continue
+    }
+
+    if (char === '/' && next === '*') {
+      output += '/*'
+      index += 2
+      inComment = true
+      continue
+    }
+    if (char === '"' || char === "'") {
+      output += char
+      prelude += char
+      quote = char
+      index += 1
+      continue
+    }
+
+    const selectorContext = blockAllowsRules.at(-1) ?? true
+    if (selectorContext && char === '.' && next && /[A-Za-z_-]/.test(next)) {
+      let end = index + 1
+      while (end < chars.length && /[A-Za-z0-9_-]/.test(chars[end])) end += 1
+      const local = chars.slice(index + 1, end).join('')
+      const scoped = classes.get(local) ?? scopedClassName(file, root, local)
+      classes.set(local, scoped)
+      output += `.${scoped}`
+      prelude += `.${scoped}`
+      index = end
+      continue
+    }
+
+    output += char
+    if (char === '{') {
+      blockAllowsRules.push(isContainerAtRule(prelude))
+      prelude = ''
+    } else if (char === '}') {
+      if (blockAllowsRules.length > 1) blockAllowsRules.pop()
+      prelude = ''
+    } else if (char === ';') {
+      prelude = ''
+    } else {
+      prelude += char
+    }
+    index += 1
+  }
+
+  return Object.fromEntries(classes)
+}
+
+function scopedClassName(file, root, local) {
+  const relative = path.relative(root, file).replaceAll('\\', '/').toLowerCase()
+  const stem = path
+    .basename(file, path.extname(file))
+    .replace(/\.module$/i, '')
+    .replace(/[^A-Za-z0-9]/g, '_')
+  return `${stem}_${local}__${fnv1a64(`${relative}:${local}`)}`
+}
+
+function fnv1a64(value) {
+  let hash = 0xcbf29ce484222325n
+  for (const byte of Buffer.from(value)) {
+    hash ^= BigInt(byte)
+    hash = BigInt.asUintN(64, hash * 0x100000001b3n)
+  }
+  return hash.toString(16).padStart(16, '0')
+}
+
+function isContainerAtRule(prelude) {
+  const normalized = prelude.trimStart().toLowerCase()
+  return [
+    '@media',
+    '@supports',
+    '@layer',
+    '@container',
+    '@document',
+    '@scope',
+    '@keyframes',
+    '@-webkit-keyframes',
+  ].some((prefix) => normalized.startsWith(prefix))
 }
 
 async function readSourceFile(file) {

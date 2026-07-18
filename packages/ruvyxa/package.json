@@ -68,7 +68,8 @@
   "dependencies": {
     "@mdx-js/mdx": "^3.1.1",
     "@ruvyxa/core": "workspace:^",
-    "oxc-transform": "0.139.0"
+    "oxc-transform": "0.139.0",
+    "sass": "^1.101.0"
   },
   "optionalDependencies": {
     "@ruvyxa/cli-darwin-arm64": "workspace:^",

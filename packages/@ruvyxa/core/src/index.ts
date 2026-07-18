@@ -4,6 +4,7 @@ export type {
   AdapterOutput,
   BuildContext,
   BuiltinMiddlewareConfig,
+  CachedStaticParams,
   CorsConfig,
   GetStaticParams,
   ImageConfig,
@@ -21,6 +22,10 @@ export type {
   RuvyxaConfig,
   RuvyxaPlugin,
   StaticParamsContext,
+  StaticParamSegment,
+  StaticParamsCacheDuration,
+  StaticParamsResult,
+  StaticParamsValues,
   TransformResult,
 } from './types.js'
 export { clientBuildOutput, validateBuildContext } from './utils.js'

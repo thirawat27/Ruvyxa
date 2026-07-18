@@ -32,7 +32,7 @@ use tokio::sync::broadcast;
 use tracing::{info, warn};
 
 mod worker_pool;
-pub use worker_pool::NodeWorkerPool;
+pub use worker_pool::{NodeWorkerPool, StaticParamSegment, StaticParamsRoute};
 use worker_pool::{RenderApiRequest, WorkerApiResponse};
 
 mod router;

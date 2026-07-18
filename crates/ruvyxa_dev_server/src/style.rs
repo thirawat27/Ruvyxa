@@ -7,6 +7,9 @@ use std::process::Command;
 
 use ruvyxa_bundler::ast::parse_module;
 use ruvyxa_bundler::resolver::{TsConfigPaths, resolve_specifier};
+use ruvyxa_bundler::style_module::{
+    compile_sass_file, is_css_module_path, is_sass_path, scope_css_module,
+};
 use ruvyxa_diagnostics::{Diagnostic, Result, RuvyxaError};
 use walkdir::WalkDir;
 
@@ -43,7 +46,7 @@ pub fn collect_styles(root: &Path, app_dir: &Path, entries: &[PathBuf]) -> Resul
         let base_dir = script.parent().unwrap_or(&root);
         for import in parse_module(&source).imports {
             let specifier = strip_import_suffix(&import.specifier);
-            if is_css_specifier(specifier) {
+            if is_css_specifier(specifier) || is_sass_specifier(specifier) {
                 let resolved =
                     resolve_style_import(&root, base_dir, specifier).ok_or_else(|| {
                         Diagnostic::new("RUV1403", "Stylesheet import could not be resolved")
@@ -115,7 +118,9 @@ fn collect_explicit_entry(root: &Path, entry: &Path, styles: &mut Vec<PathBuf>) 
         let mut files = WalkDir::new(&entry)
             .into_iter()
             .filter_map(std::result::Result::ok)
-            .filter(|item| item.file_type().is_file() && has_extension(item.path(), &["css"]))
+            .filter(|item| {
+                item.file_type().is_file() && has_extension(item.path(), &["css", "scss", "sass"])
+            })
             .map(|item| item.into_path())
             .collect::<Vec<_>>();
         files.sort();
@@ -130,7 +135,7 @@ fn collect_explicit_entry(root: &Path, entry: &Path, styles: &mut Vec<PathBuf>) 
                 .into(),
         );
     }
-    if !has_extension(&entry, &["css"]) {
+    if !has_extension(&entry, &["css", "scss", "sass"]) {
         return Err(unsupported_preprocessor(
             &entry,
             entry.to_string_lossy().as_ref(),
@@ -160,6 +165,28 @@ fn append_style(
         return Ok(());
     }
 
+    let source = if is_sass_path(&file) {
+        for dependency in sass_dependency_paths(root, &file) {
+            if !files.contains(&dependency) {
+                files.push(dependency);
+            }
+        }
+        compile_sass_file(&file, root).map_err(|error| {
+            Diagnostic::new("RUV1402", "Sass compilation failed")
+                .explain(error)
+                .at_file(&file)
+                .suggest("Check Sass syntax and imported partial paths.")
+        })?
+    } else {
+        source
+    };
+
+    let source = if is_css_module_path(&file) {
+        scope_css_module(&source, &file, root).css
+    } else {
+        source
+    };
+
     let imports = css_imports(&source);
     for specifier in &imports {
         if is_remote_style(specifier) {
@@ -182,8 +209,83 @@ fn append_style(
 
     output.push_str(&remove_local_css_imports(&source, &imports));
     output.push('\n');
-    files.push(file);
+    if !files.contains(&file) {
+        files.push(file);
+    }
     Ok(())
+}
+
+fn sass_dependency_paths(root: &Path, entry: &Path) -> Vec<PathBuf> {
+    let mut pending = vec![canonical_or_original(entry.to_path_buf())];
+    let mut visited = BTreeSet::new();
+
+    while let Some(file) = pending.pop() {
+        if !visited.insert(file.clone()) {
+            continue;
+        }
+        let Ok(source) = fs::read_to_string(&file) else {
+            continue;
+        };
+        let base_dir = file.parent().unwrap_or(root);
+        for specifier in sass_imports(&source) {
+            if specifier.starts_with("sass:") || is_remote_style(&specifier) {
+                continue;
+            }
+            if let Some(dependency) = resolve_sass_import(root, base_dir, &specifier) {
+                pending.push(dependency);
+            }
+        }
+    }
+
+    visited.into_iter().collect()
+}
+
+fn sass_imports(source: &str) -> Vec<String> {
+    source
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim_start();
+            let rest = ["@use", "@forward", "@import"]
+                .iter()
+                .find_map(|directive| trimmed.strip_prefix(directive))?
+                .trim_start();
+            let quote = rest.chars().next()?;
+            if quote != '\'' && quote != '"' {
+                return None;
+            }
+            let end = rest[1..].find(quote)? + 1;
+            Some(rest[1..end].to_string())
+        })
+        .collect()
+}
+
+fn resolve_sass_import(root: &Path, base_dir: &Path, specifier: &str) -> Option<PathBuf> {
+    let base = if specifier.starts_with('.') {
+        base_dir.join(specifier)
+    } else if specifier.starts_with('/') {
+        root.join(specifier.trim_start_matches('/'))
+    } else {
+        root.join("node_modules").join(specifier)
+    };
+    let parent = base.parent().unwrap_or(base_dir);
+    let name = base.file_name()?.to_string_lossy();
+    let mut candidates = vec![base.clone()];
+    if base.extension().is_none() {
+        candidates.extend([
+            base.with_extension("scss"),
+            base.with_extension("sass"),
+            parent.join(format!("_{name}.scss")),
+            parent.join(format!("_{name}.sass")),
+            base.join("index.scss"),
+            base.join("_index.scss"),
+            base.join("index.sass"),
+            base.join("_index.sass"),
+        ]);
+    }
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.is_file())
+        .map(canonical_or_original)
 }
 
 fn resolve_script_import(
@@ -339,6 +441,15 @@ fn is_css_specifier(specifier: &str) -> bool {
     Path::new(specifier)
         .extension()
         .is_some_and(|extension| extension.eq_ignore_ascii_case("css"))
+}
+
+fn is_sass_specifier(specifier: &str) -> bool {
+    Path::new(specifier)
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| {
+            extension.eq_ignore_ascii_case("scss") || extension.eq_ignore_ascii_case("sass")
+        })
 }
 
 fn is_preprocessor_specifier(specifier: &str) -> bool {
@@ -654,5 +765,50 @@ mod tests {
         let collection = collect_styles(root, &app, &[]).unwrap();
 
         assert!(collection.css.contains(".theme { color: navy; }"));
+    }
+
+    #[test]
+    fn compiles_scss_and_scopes_css_module_selectors() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let app = root.join("app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(
+            app.join("page.tsx"),
+            "import styles from './card.module.scss'; export default styles.card",
+        )
+        .unwrap();
+        fs::write(app.join("_tokens.scss"), "$accent: rebeccapurple;").unwrap();
+        let module_path = app.join("card.module.scss");
+        fs::write(
+            &module_path,
+            "@use './tokens' as t; .card { color: t.$accent; .title { font-weight: 700; } }",
+        )
+        .unwrap();
+
+        let collection = collect_styles(root, &app, &[]).unwrap();
+        let expected = scope_css_module(
+            &compile_sass_file(&module_path, root).unwrap(),
+            &module_path,
+            root,
+        );
+
+        assert!(
+            collection
+                .css
+                .contains(&format!(".{}", expected.classes["card"]))
+        );
+        assert!(
+            collection
+                .css
+                .contains(&format!(".{}", expected.classes["title"]))
+        );
+        assert!(collection.css.contains("rebeccapurple"));
+        assert!(
+            collection
+                .files
+                .iter()
+                .any(|file| file.ends_with("_tokens.scss"))
+        );
     }
 }

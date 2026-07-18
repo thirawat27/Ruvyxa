@@ -1271,7 +1271,7 @@ async fn prerender_static_routes(
                     let paths_to_render = if route.render.has_static_params
                         && route_has_dynamic_segments(&route.path)
                     {
-                        resolve_static_params(&worker_pool, root, route).await?
+                        resolve_static_params(&worker_pool, root, route, manifest).await?
                     } else if !route_has_dynamic_segments(&route.path) {
                         // Pure static route — render the single path
                         vec![StaticRouteParams {
@@ -1455,9 +1455,19 @@ async fn resolve_static_params(
     worker_pool: &ruvyxa_dev_server::NodeWorkerPool,
     root: &Path,
     route: &RouteEntry,
+    manifest: &RouteManifest,
 ) -> anyhow::Result<Vec<StaticRouteParams>> {
+    let segments = static_param_segments(&route.path);
+    let routes = manifest
+        .routes
+        .iter()
+        .map(|entry| ruvyxa_dev_server::StaticParamsRoute {
+            path: entry.path.clone(),
+            id: entry.id.clone(),
+        })
+        .collect::<Vec<_>>();
     let result = worker_pool
-        .resolve_static_params(root, Path::new(&route.file))
+        .resolve_static_params(root, &route.file, &route.path, &segments, &routes)
         .await
         .map_err(|error| anyhow::anyhow!("getStaticParams failed for {}: {error}", route.path))?;
     if !result.ok {
@@ -1480,6 +1490,35 @@ async fn resolve_static_params(
                 path: static_route_path(&route.path, &params)?,
                 params,
             })
+        })
+        .collect()
+}
+
+fn static_param_segments(route_path: &str) -> Vec<ruvyxa_dev_server::StaticParamSegment> {
+    route_path
+        .split('/')
+        .filter_map(|segment| {
+            if segment.starts_with("[[...") && segment.ends_with("]]") {
+                Some(ruvyxa_dev_server::StaticParamSegment {
+                    name: segment[5..segment.len() - 2].to_string(),
+                    catch_all: true,
+                    optional: true,
+                })
+            } else if segment.starts_with("[...") && segment.ends_with(']') {
+                Some(ruvyxa_dev_server::StaticParamSegment {
+                    name: segment[4..segment.len() - 1].to_string(),
+                    catch_all: true,
+                    optional: false,
+                })
+            } else if segment.starts_with('[') && segment.ends_with(']') {
+                Some(ruvyxa_dev_server::StaticParamSegment {
+                    name: segment[1..segment.len() - 1].to_string(),
+                    catch_all: false,
+                    optional: false,
+                })
+            } else {
+                None
+            }
         })
         .collect()
 }
@@ -4919,6 +4958,18 @@ export default {
             static_route_path("/shop/[[...path]]", &params).unwrap(),
             "/shop"
         );
+    }
+
+    #[test]
+    fn static_param_segments_describe_scalar_and_catch_all_routes() {
+        let segments = static_param_segments("/[locale]/docs/[[...path]]");
+        assert_eq!(segments.len(), 2);
+        assert_eq!(segments[0].name, "locale");
+        assert!(!segments[0].catch_all);
+        assert!(!segments[0].optional);
+        assert_eq!(segments[1].name, "path");
+        assert!(segments[1].catch_all);
+        assert!(segments[1].optional);
     }
 
     fn os_args<const N: usize>(args: [&str; N]) -> Vec<OsString> {
