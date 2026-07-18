@@ -1,6 +1,32 @@
 # Changelog
 
-## v1.0.15 (2026-07-17)
+## v1.0.15 (2026-07-18)
+
+### Full-System Reliability Hardening
+
+- Hardened the API worker protocol so streamed responses require an explicit `api-end` terminal
+  frame; premature EOF, worker crashes, and stream errors now reach the HTTP consumer instead of
+  being reported as successful truncated responses.
+- Preserved binary request and response bodies, query strings, duplicate request headers, and
+  repeated `Set-Cookie` response headers across the Rust/Node worker boundary.
+- Centralized request-path canonicalization to decode valid URL segments consistently while
+  rejecting malformed escapes, encoded separators, traversal segments, and unsafe prerender paths.
+- Fixed runtime-directory resolution for installations whose paths contain spaces or other
+  URL-encoded characters by using filesystem-safe URL conversion throughout the Node runtime.
+- Made automatic JSX the consistent default across the Rust bundler, CLI, dev server, and Node
+  renderers; classic JSX remains available as an explicit opt-in.
+- Validated JSX runtime configuration at startup and linked the generated `react/jsx-runtime` helper
+  imports correctly in SSR, SSG, client, and worker bundles.
+- Extended package `exports` resolution with target-aware conditions, wildcard subpaths, array
+  fallbacks, explicit blocked entries, package-root containment checks, and safer filesystem
+  fallback behavior.
+- Preserved the server/client boundary and private environment-variable checks while improving
+  resolver and compiler cache invalidation behavior.
+- Corrected CORS ordinary `OPTIONS` handling, preservation of all `Vary` values, trusted-proxy
+  forwarding rules, loader request lifecycle handling, cache-duration validation, and related
+  middleware/runtime regressions.
+- Updated CLI/configuration documentation and the full-flow smoke script to match the maintained
+  `examples/demo` fixture and current JSX defaults.
 
 ### Client Bundling Reliability
 
@@ -24,6 +50,24 @@
   template during prepack.
 - Documented the client initialization root cause, applied repair, and regression evidence in the
   July reliability audit.
+
+### Stability and Compatibility Follow-up
+
+- Fixed Node worker environment parsing so values with trailing units or other extra characters,
+  such as `1234ms` and `64mb`, are rejected and safely fall back instead of being partially parsed.
+- Preserved conditional `package.json` `exports` key declaration order to match Node resolution
+  semantics without changing JSON ordering behavior elsewhere in the workspace.
+- Assigned the unique `RUV1804` diagnostic code to invalid JSX runtime configuration, keeping
+  `RUV1803` reserved for circular dependency diagnostics.
+- Added regression coverage for malformed worker configuration, invalid JSX runtime diagnostics,
+  conditional exports declaration order, early API-stream termination, encoded URL boundaries, and
+  cross-runtime JSX helper linking.
+- Revalidated the release surface: 325 Rust tests, workspace clippy with warnings denied, npm
+  build/check/test, demo parity for all 16 routes, package metadata validation, and packed-package
+  consumer type checks all pass on Windows x64.
+- No tracked critical files were deleted or missing, and no dependency was removed without direct
+  evidence of being orphaned; generated build, cache, and package-smoke outputs remain excluded from
+  the tracked release surface.
 
 ## v1.0.14 (2026-07-16)
 
