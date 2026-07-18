@@ -1,17 +1,22 @@
 # Rendering Strategies
 
-ลำดับการตรวจสอบ (rule แรกที่ match จะถูกใช้):
+Ruvyxa เลือก rendering strategy ให้แต่ละเพจ ลำดับการตรวจสอบมีความสำคัญ — **rule แรกที่ match
+จะถูกใช้**
 
-| ลำดับ | Declaration                           | Strategy |
-| ----- | ------------------------------------- | -------- |
-| 1     | `'use client'`                        | CSR      |
-| 2     | `export const ppr = true`             | PPR      |
-| 3     | `export const revalidate = 60`        | ISR      |
-| 4     | `getStaticParams` หรือ `staticParams` | SSG      |
-| 5     | Static route (no dynamic markers)     | SSG      |
-| 6     | Default                               | SSR      |
+## Detection Order
 
-## SSR (Default)
+| ลำดับ | Declaration                           | Strategy | การใช้งานที่เหมาะสม                           |
+| ----- | ------------------------------------- | -------- | --------------------------------------------- |
+| 1     | `'use client'`                        | CSR      | หน้าแบบ browser-only หรือ interactive สูง     |
+| 2     | `export const ppr = true`             | PPR      | Shell แบบ static + dynamic `Suspense` regions |
+| 3     | `export const revalidate = 60`        | ISR      | เนื้อหาที่ refresh หลังจากช่วงเวลาที่กำหนด    |
+| 4     | `getStaticParams` หรือ `staticParams` | SSG      | Dynamic paths ที่รู้ล่วงหน้า ณ build time     |
+| 5     | Static route (ไม่มี dynamic markers)  | SSG      | หน้า stable และ content                       |
+| 6     | Default                               | SSR      | ข้อมูล ณ เวลา request — default ที่ปลอดภัย    |
+
+## SSR — Server-Side Rendering (Default)
+
+Rendered ทุก request:
 
 ```tsx
 export default async function ProductPage() {
@@ -20,16 +25,24 @@ export default async function ProductPage() {
 }
 ```
 
-## SSG parameters แบบตรงไปตรงมา
+## SSG — Static Site Generation
 
-ถ้ารู้ค่าล่วงหน้าและ route มี dynamic segment เดียว ให้ export เป็น scalar array ได้ทันที:
+### Static pages
+
+Static routes ที่ไม่มี dynamic data markers และไม่มี `'use client'` จะถูก auto-detect เป็น SSG โดยจะ
+pre-render ตอน build และ serve เป็น static HTML
+
+### Direct parameters ด้วย `staticParams`
+
+ถ้ารู้ค่าล่วงหน้า export โดยไม่ต้องใช้ function ได้ รองรับ scalar shorthand เมื่อ route มี dynamic
+segment เดียว:
 
 ```tsx
 // app/articles/[slug]/page.tsx
 export const staticParams = ['getting-started', 'deployment']
 ```
 
-ถ้ามีหลาย dynamic segments ให้ใช้ object:
+Object สำหรับ routes ที่มีหลาย dynamic segments:
 
 ```tsx
 export const staticParams = [
@@ -38,44 +51,129 @@ export const staticParams = [
 ]
 ```
 
-## SSG + getStaticParams
+### Asynchronous parameters ด้วย `getStaticParams`
+
+สำหรับ dynamic routes ที่รู้ path ณ build time:
 
 ```tsx
+// app/articles/[slug]/page.tsx
+import type { GetStaticParams, PageProps } from 'ruvyxa/config'
+
 export const getStaticParams: GetStaticParams<{ slug: string }> = async ({ route, routes }) => {
-  console.log(`Generating ${route.path}; พบทั้งหมด ${routes.length} routes`)
+  console.log(`Generating ${route.path}; ${routes.length} routes discovered`)
   return ['getting-started', 'deployment']
+}
+
+export default function Article({ params }: PageProps<{ slug: string }>) {
+  return <article>{params.slug}</article>
 }
 ```
 
-context ประกอบด้วย route ปัจจุบัน, ข้อมูล dynamic segments และ routes ทั้งหมดที่ค้นพบ สำหรับ
-catch-all route ค่า scalar จะถูกแปลงเป็น string array ที่มีหนึ่งสมาชิก
+context ประกอบด้วย path ปัจจุบัน, ข้อมูล dynamic segments และทุก `{ path, id }` route entries
+ที่ค้นพบ ใช้ object entries เมื่อ route มีหลาย dynamic segments สำหรับ catch-all segment scalar
+shorthand จะกลายเป็น string array หนึ่งสมาชิก
 
-หากการค้นหา params มีต้นทุนสูง สามารถเปิด persistent cache แบบ TTL ได้:
+### Persistent parameter cache
 
-```tsx
-export const getStaticParams: GetStaticParams<{ slug: string }> = async () => ({
-  params: (await fetchPosts()).map((post) => post.slug),
-  cache: '10m',
-})
-```
-
-`cache` รับจำนวนวินาทีหรือ duration ที่ลงท้ายด้วย `s`, `m`, `h`, `d` ตั้งแต่ 1 วินาทีถึง 365 วัน
-cache จะหมดอายุเอง และ invalidate ก่อนเวลาเมื่อ page, imported dependency, route metadata หรือ route
-manifest เปลี่ยน หาก return array โดยตรงจะยังคงไม่ cache เช่นเดิม
-
-## ISR
+การค้นหา parameters ที่มีต้นทุนสูงสามารถเปิด persistent TTL cache ได้:
 
 ```tsx
-export const revalidate = 60
+export const getStaticParams: GetStaticParams<{ slug: string }> = async () => {
+  const posts = await fetchPosts()
+  return {
+    params: posts.map((post) => post.slug),
+    cache: '10m',
+  }
+}
 ```
 
-ระบบจะส่ง cached output เดิมระหว่าง regenerate และจะเริ่มงาน background หลังครบช่วงเวลาที่กำหนด โดย
-request พร้อมกันของ route เดียวกันจะใช้การ refresh เดียวร่วมกัน
+`cache` รับจำนวนวินาทีหรือ duration `s`, `m`, `h`, `d` ตั้งแต่ 1 วินาทีถึง 365 วัน รายการ parameters
+ที่ถูก cache จะถูกใช้ซ้ำจนกว่า TTL จะหมดอายุ การเปลี่ยนแปลงที่ page, dependency ใดๆ, route metadata
+หรือ route manifest จะ invalidate ก่อนเวลา หาก return array โดยตรงจะยังคงไม่ cache เช่นเดิม
 
-## PPR
+#### Constraints
+
+- Scalar entries ต้องมี dynamic segment เพียง segment เดียว มิฉะนั้นต้องเป็น object ที่มีค่าครบทุก
+  required dynamic segment
+- ค่าต้องไม่มี path traversal, query หรือ fragment characters (`..`, `/`, `\`, `?`, `#`)
+- ผลลัพธ์ที่ generate จะอยู่ภายใน `.ruvyxa/prerender`
+
+## ISR — Incremental Static Regeneration
+
+สำหรับข้อมูลที่อาจล้าสมัยแต่ไม่ต้อง render ทุก request:
+
+```tsx
+export const revalidate = 60 // seconds
+
+export default async function ProductPage() {
+  return <main>Product data refreshed after at most 60 seconds.</main>
+}
+```
+
+Cached output ยังใช้ได้ระหว่าง regenerate Ruvyxa จะเริ่มงาน background หลังจากครบช่วงเวลาที่กำหนด
+และรวม request พร้อมกันของ route เดียวกันเป็นการ refresh ครั้งเดียว
+
+## PPR — Partial Pre-rendering
+
+Static shell + dynamic `Suspense` regions:
 
 ```tsx
 export const ppr = true
+
+export default function PPRPage() {
+  return (
+    <main>
+      <h1>Static Shell</h1>
+      <Suspense fallback={<p>Loading…</p>}>
+        <DynamicContent />
+      </Suspense>
+    </main>
+  )
+}
 ```
 
-ตรวจสอบ strategy: `npx ruvyxa routes`
+เฉพาะ static shell เท่านั้นที่ pre-render; dynamic slots จะถูก stream ณ request time
+
+## CSR — Client-Side Rendering
+
+```tsx
+'use client'
+
+import { useState, useEffect } from 'react'
+
+export default function InteractiveDashboard() {
+  const [data, setData] = useState(null)
+  useEffect(() => {
+    fetch('/api/dashboard')
+      .then((r) => r.json())
+      .then(setData)
+  }, [])
+  // ...
+}
+```
+
+ณ build time HTML shell แบบ minimal จะถูก emit สำหรับ CSR routes
+
+## Pre-render Output
+
+SSG, ISR, PPR และ CSR routes จะถูก pre-render ณ build time:
+
+```text
+.ruvyxa/prerender/
+├── manifest.json          # route list พร้อม strategy และ revalidate
+├── index.html             # /
+├── about/index.html       # /about
+└── blog/
+    └── hello-world/
+        └── index.html     # /blog/hello-world
+```
+
+## Best Practices
+
+1. ให้ SSR เป็น default — เลือกใช้ strategy อื่นเมื่อมีเหตุผลชัดเจนเท่านั้น
+2. ใช้ explicit export (`ppr`, `revalidate`, `staticParams`, `getStaticParams`) สำหรับ routes ที่
+   deployment behaviour สำคัญ
+3. ตรวจสอบ strategy ที่ถูก detect ด้วย `npx ruvyxa routes`
+4. ตรวจสอบโครงสร้าง route ด้วย `npx ruvyxa analyze`
+5. Static parameters ควรอธิบาย paths ที่รู้แน่นอน ณ build time; cache เฉพาะงานค้นหาที่ผลลัพธ์
+   ปลอดภัยที่จะคงเดิมในช่วง TTL ที่เลือก

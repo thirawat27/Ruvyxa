@@ -45,7 +45,16 @@ npm create ruvyxa@latest my-api -- --template api-backend
 | `crud`        | Task API ในหน่วยความจำ, loader, cache และ validated action        |
 | `api-backend` | REST endpoints สำหรับ health/items พร้อม validation และ errors    |
 
+### Git Ignore
+
+Starter จะ ignore `node_modules/`, `.ruvyxa/`, `dist/`, log files และ `.env` files:
+
+- **ห้าม commit secrets** หรือค่า environment จริง
+- ใช้ `.env.example` เพื่อระบุชื่อตัวแปรที่จำเป็น โดยไม่มีค่าจริง
+
 ## โครงสร้างพื้นฐาน
+
+Ruvyxa ค้นพบ routes ภายใต้ `app/`:
 
 | ไฟล์/โฟลเดอร์           | หน้าที่                                                  |
 | ----------------------- | -------------------------------------------------------- |
@@ -56,6 +65,8 @@ npm create ruvyxa@latest my-api -- --template api-backend
 | `ruvyxa.config.ts`      | ตั้งค่า server, build, rendering, security, cache, style |
 
 ## Page แรก
+
+ทุก page file ต้อง default-export React component:
 
 ```tsx
 // app/products/page.tsx → /products
@@ -69,6 +80,8 @@ export default function ProductsPage() {
 ```
 
 ## Layout
+
+เก็บ layout concerns ใน `app/layout.tsx`:
 
 ```tsx
 // app/layout.tsx
@@ -88,9 +101,24 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
 }
 ```
 
+## Standard Scripts
+
+```json
+{
+  "scripts": {
+    "dev": "ruvyxa dev",
+    "build": "ruvyxa build",
+    "start": "ruvyxa start",
+    "typecheck": "tsc --noEmit",
+    "check": "ruvyxa check"
+  }
+}
+```
+
 ## ขั้นตอนต่อไป
 
-- [Routing](routing.md) — file-system routes, dynamic segments
-- [Server & Client Components](server-client-components.md) — `'use client'`, `server-only`
+- [Routing](routing.md) — file-system routes, dynamic segments, catch-all, route groups
+- [Server & Client Components](server-client-components.md) — `'use client'`, `server-only`,
+  boundary checks
 - [Configuration](configuration.md) — `ruvyxa.config.ts` ฉบับเต็ม
 - [Styling](styling.md) — global CSS, SCSS/Sass และ CSS Modules

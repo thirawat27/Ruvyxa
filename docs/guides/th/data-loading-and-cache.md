@@ -1,6 +1,8 @@
 # Data Loading & Cache
 
-## Loader
+## Loaders
+
+ใช้ `loader` เพื่อสร้างฟังก์ชันดึงข้อมูลฝั่ง server เรียกใช้จาก server page หรือ server-only module:
 
 ```ts
 // app/products/server.ts
@@ -14,7 +16,19 @@ export const getProducts = loader(async () => {
 })
 ```
 
-## โหลดข้อมูลฝั่ง Client ด้วย `useRuvyxaLoader`
+ใช้ใน page:
+
+```tsx
+// app/products/page.tsx
+import { getProducts } from './server'
+
+export default async function ProductsPage() {
+  const products = await getProducts()
+  return <pre>{JSON.stringify(products, null, 2)}</pre>
+}
+```
+
+## Client-Side Data Loading
 
 ใช้ `useRuvyxaLoader` จาก `@ruvyxa/react` เมื่อข้อมูลต้องโหลดในเบราว์เซอร์ เช่น ข้อมูลที่ขึ้นอยู่กับ
 ค่าจากฝั่ง client หรือข้อมูลที่ต้อง refresh โดยไม่เปลี่ยนหน้าเต็ม:
@@ -44,27 +58,43 @@ export function UserProfile({ userId }: { userId: string }) {
 }
 ```
 
-การทำงานหลัก:
+Hook ทำงานอัตโนมัติเมื่อ mount กำหนด `deps` เป็นค่าที่ควร trigger request ใหม่ และเรียก `refetch()`
+เพื่อโหลดซ้ำด้วยตนเอง ใช้ `enabled: false` เพื่อปิดการโหลด:
 
-- โหลดข้อมูลอัตโนมัติเมื่อ component เริ่มทำงาน
-- โหลดใหม่เมื่อค่าที่อยู่ใน `deps` เปลี่ยน
-- ใช้ `refetch()` เพื่อโหลดใหม่ด้วยตนเอง
-- ใช้ `{ enabled: false }` เพื่อปิดการโหลดอัตโนมัติ
-- คืนค่า `data`, `loading`, `error` และ `refetch`
-- ป้องกัน request เก่าทับข้อมูลใหม่ และไม่อัปเดต state หลัง component ถูกถอดออก
+```tsx
+const result = useRuvyxaLoader(loadPreview, { enabled: false })
+```
+
+ผลลัพธ์ประกอบด้วย:
+
+- `data`: ค่าสำเร็จล่าสุด หรือ `undefined` หากยังไม่มี
+- `loading`: กำลังมี request ทำงานอยู่หรือไม่
+- `error`: error จาก loader หาก request ล้มเหลว
+- `refetch`: เริ่ม request ใหม่เมื่อ hook enabled
+
+`useRuvyxaLoader` ยังละเลย request เก่าเมื่อ dependencies เปลี่ยน และหลีกเลี่ยงการอัปเดต state หลัง
+component unmount
 
 ## Cache API
+
+`cache(key)` สร้าง cache entry ในหน่วยความจำแบบมี TTL:
 
 ```ts
 import { cache } from 'ruvyxa/server'
 
+// Basic TTL cache
+const data = await cache('my-key')
+  .ttl('30s')
+  .get(() => fetchData())
+
+// พร้อม stale-while-revalidate
 const data = await cache('my-key')
   .ttl('5m')
   .swr('1m')
   .get(() => fetchData())
 ```
 
-### TTL Format
+### TTL Duration Format
 
 | Value | ความหมาย  |
 | ----- | --------- |
@@ -73,21 +103,60 @@ const data = await cache('my-key')
 | `1h`  | 1 ชั่วโมง |
 | `1d`  | 1 วัน     |
 
-## Invalidate
+### Cache Keys
+
+Keys ควรระบุ resource และ scope:
+
+```text
+product:123
+products:category:books
+user:456:sessions
+```
+
+## Cache Invalidation
+
+หลัง mutation เรียก `invalidateCache(key)` หรือใช้ `invalidate(key)` จาก action context:
 
 ```ts
 import { invalidateCache } from 'ruvyxa/server'
 
+// Invalidate เฉพาะ key
 invalidateCache('products:list')
-invalidateCache() // clear all
+
+// Invalidate ทั้งหมด
+invalidateCache()
 ```
 
-หรือผ่าน action:
+จาก action handler:
 
 ```ts
 .handler(async ({ input, invalidate }) => {
   invalidate('todos')
+  invalidate('user:123')
+  return result
 })
 ```
 
-ดูเพิ่มเติม: [Server Actions](server-actions.md)
+## Stale-While-Revalidate (SWR)
+
+SWR เพิ่มความเร็วสำหรับข้อมูลที่อาจเก่าเล็กน้อย:
+
+- เมื่อ TTL หมดอายุแต่ SWR ยังไม่หมด → serve ข้อมูลเก่า, refresh ใน background
+- เมื่อ SWR หมดอายุ → ดึงข้อมูลใหม่และ cache
+
+```ts
+const data = await cache('weather:current')
+  .ttl('10m') // เก็บไว้ 10 นาที
+  .swr('1h') // serve stale ได้นาน 1 ชั่วโมงระหว่าง revalidate
+  .get(() => fetchWeather())
+```
+
+## Best Practices
+
+1. วาง loaders ในไฟล์ `server.ts` ข้าง routes ที่ใช้
+2. ตั้ง TTL ตามความถี่ที่ข้อมูลเปลี่ยน — ข้อมูลที่เปลี่ยนเร็วต้องการ TTL สั้น
+3. ใช้ `swr()` สำหรับข้อมูลที่ทน stale ได้บ้าง
+4. invalidate cache ทุกครั้งหลัง mutation
+5. ใช้ cache key ที่สื่อความหมาย เช่น `user:email` ไม่ใช่ `key1`
+
+ดูเพิ่มเติม: [Server Actions](server-actions.md) สำหรับ mutations พร้อม cache invalidation

@@ -1,6 +1,9 @@
 # API Routes
 
-สร้าง `route.ts` และ export HTTP method handlers:
+## การสร้าง API Routes
+
+สร้าง `route.ts` และ export named HTTP method handlers แต่ละ handler รับ `Request` มาตรฐาน และคืน
+`Response` มาตรฐาน:
 
 ```ts
 // app/api/health/route.ts
@@ -12,35 +15,81 @@ export async function POST({ request }: { request: Request }) {
   const body = await request.json()
   return Response.json({ received: body }, { status: 201 })
 }
+
+export function PUT() {
+  return new Response('Method Not Allowed', { status: 405 })
+}
 ```
 
-Handler ได้รับ `{ request, params }`:
+Methods ที่รองรับ: `GET`, `POST`, `PUT`, `DELETE`, `PATCH`, `HEAD`, `OPTIONS`
 
-- `request` — Web API `Request` object
+แต่ละ handler ได้รับ `{ request, params }`:
+
+- `request` — Web API `Request` object มาตรฐาน
 - `params` — dynamic route parameters: `[id]` เป็น `string`, `[...slug]` เป็น `string[]`, และ
   `[[...slug]]` ที่ไม่มี segment เป็น `undefined`
 
 ## Response Types
 
+Handler ต้องคืน `Response` object (หรือ Promise ที่ resolve เป็น Response):
+
 ```ts
+// Plain text
 export function GET() {
   return new Response('Hello', { headers: { 'Content-Type': 'text/plain' } })
 }
 
+// JSON
 export function GET() {
   return Response.json({ data: [1, 2, 3] })
 }
 
+// Redirect
 export function GET() {
   return Response.redirect('/dashboard', 302)
+}
+
+// Error
+export function GET() {
+  return new Response('Not Found', { status: 404 })
+}
+```
+
+## Input Validation
+
+ตรวจสอบ input ทั้งหมดไว้ใกล้กับ handler:
+
+```ts
+export async function POST({ request }: { request: Request }) {
+  const body = await request.json()
+
+  if (!body.name || typeof body.name !== 'string') {
+    return Response.json({ error: 'name is required' }, { status: 400 })
+  }
+
+  return Response.json({ created: body.name }, { status: 201 })
 }
 ```
 
 ## Body Size Limits
 
-| Limit    | Default | Config              |
-| -------- | ------- | ------------------- |
-| API body | 10 MiB  | `security.apiLimit` |
+| Limit       | Default | Config Key             |
+| ----------- | ------- | ---------------------- |
+| API body    | 10 MiB  | `security.apiLimit`    |
+| Action body | 1 MiB   | `security.actionLimit` |
+
+เปลี่ยนค่าเฉพาะเมื่อ endpoint ต้องการ และกำหนด upper bound ที่สมเหตุสมผล:
+
+```ts
+// ruvyxa.config.ts
+import { config } from 'ruvyxa/config'
+
+export default config({
+  security: {
+    apiLimit: 20 * 1024 * 1024,
+  },
+})
+```
 
 ## Streaming Responses
 
@@ -71,12 +120,26 @@ Worker IPC ใช้ frame ขนาดไม่เกิน 64 KiB และจ
 `RUVYXA_WORKER_TIMEOUT_MS` โดย Rust และ Node จะใช้ค่าที่ normalize แล้วค่าเดียวกัน
 ทั้งหมดนี้ทำงานอัตโนมัติ โดย handler ยังใช้ Web API `Response` ตามปกติ
 
-## Unsupported Methods → 405
+## Unsupported Methods
 
-Handler ที่ไม่รองรับ method จะตอบ 405 โดยอัตโนมัติ
+เมื่อ handler ไม่ได้ export method นั้น server จะตอบ `405 Method Not Allowed`:
+
+```json
+{
+  "ok": true,
+  "status": 405,
+  "headers": { "content-type": "text/plain; charset=utf-8" },
+  "body": "Method DELETE is not allowed"
+}
+```
+
+## Middleware & Security Headers
+
+API routes ได้รับ security headers, rate limiting และ middleware ที่ตั้งค่าใน `ruvyxa.config.ts`
+โดยอัตโนมัติ
 
 Ruvyxa ส่ง query string, bytes ของ request body และ header ที่ซ้ำกันไปยัง `Request` โดยไม่แปลง
 ข้อมูล binary เป็นข้อความ ส่วน response จะคง header ซ้ำ เช่น `Set-Cookie` หลายค่าไว้ครบถ้วน และส่ง
 binary response body แบบ streaming
 
-ดูเพิ่มเติม: [Configuration](configuration.md)
+ดูเพิ่มเติม: [Configuration](configuration.md) สำหรับการตั้งค่า security และ middleware
