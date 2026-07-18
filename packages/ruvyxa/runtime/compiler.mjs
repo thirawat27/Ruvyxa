@@ -989,8 +989,13 @@ async function compileContentSource(source, filePath) {
   const cached = compilerCache.content.get(cacheKey)
   if (cached) return cached
 
-  const { frontmatter, body } = splitContentFrontmatter(source)
-  const { compile } = await import('@mdx-js/mdx')
+  const { frontmatterSource, body } = splitContentFrontmatter(source)
+  const [frontmatter, { compile }, { default: remarkGfm }] = await Promise.all([
+    parseContentFrontmatter(frontmatterSource, filePath),
+    import('@mdx-js/mdx'),
+    import('remark-gfm'),
+  ])
+  const headings = []
   let compiled
   try {
     compiled = String(
@@ -999,6 +1004,7 @@ async function compileContentSource(source, filePath) {
         jsx: false,
         outputFormat: 'program',
         development: false,
+        remarkPlugins: [remarkGfm, createContentMetadataPlugin(headings)],
       }),
     )
   } catch (error) {
@@ -1006,7 +1012,6 @@ async function compileContentSource(source, filePath) {
     throw new Error(`RUV1311 ${filePath}: ${detail}`)
   }
 
-  const headings = collectContentHeadings(body)
   const prefix = [
     contentExport(compiled, 'frontmatter', JSON.stringify(frontmatter)),
     contentExport(compiled, 'meta', 'frontmatter'),
@@ -1036,7 +1041,7 @@ function contentExport(compiled, name, value) {
 function splitContentFrontmatter(source) {
   const normalized = source.replace(/^\uFEFF/, '')
   if (!normalized.startsWith('---\n') && !normalized.startsWith('---\r\n')) {
-    return { frontmatter: {}, body: normalized }
+    return { frontmatterSource: null, body: normalized }
   }
 
   const lines = normalized.split(/\r?\n/)
@@ -1045,52 +1050,118 @@ function splitContentFrontmatter(source) {
     throw new Error("RUV1312 frontmatter starts with '---' but has no closing delimiter")
   }
   return {
-    frontmatter: parseContentFrontmatter(lines.slice(1, end)),
+    // YAML block-scalar chomping depends on the final line ending before the delimiter.
+    frontmatterSource: `${lines.slice(1, end).join('\n')}\n`,
     body: lines.slice(end + 1).join('\n'),
   }
 }
 
-function parseContentFrontmatter(lines) {
-  const output = {}
-  for (const line of lines) {
-    const match = line.match(/^\s*([^:#][^:]*):\s*(.*?)\s*$/)
-    if (!match) continue
-    output[match[1].trim()] = parseContentFrontmatterValue(match[2])
+async function parseContentFrontmatter(source, filePath) {
+  if (source === null || source.trim() === '') return {}
+
+  const { isMap, isScalar, isSeq, parseDocument } = await import('yaml')
+  let document
+  try {
+    document = parseDocument(source, { schema: 'core' })
+    if (document.errors.length > 0) throw document.errors[0]
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    throw new Error(`RUV1312 ${filePath}: invalid YAML frontmatter: ${detail}`)
   }
-  return output
+
+  let value
+  try {
+    assertJsonCompatibleYamlKeys(document.contents, { isMap, isScalar, isSeq })
+    value = document.toJS({ maxAliasCount: 100 })
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    throw new Error(
+      `RUV1312 ${filePath}: frontmatter must contain JSON-compatible values: ${detail}`,
+    )
+  }
+
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`RUV1312 ${filePath}: frontmatter must be a YAML mapping`)
+  }
+
+  try {
+    assertJsonCompatibleFrontmatter(value, new WeakSet())
+    return JSON.parse(JSON.stringify(value))
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    throw new Error(
+      `RUV1312 ${filePath}: frontmatter must contain JSON-compatible values: ${detail}`,
+    )
+  }
 }
 
-function parseContentFrontmatterValue(value) {
-  if (
-    (value.startsWith('"') && value.endsWith('"')) ||
-    (value.startsWith("'") && value.endsWith("'"))
-  ) {
-    return value.slice(1, -1)
+function assertJsonCompatibleYamlKeys(node, yaml) {
+  if (yaml.isMap(node)) {
+    for (const pair of node.items) {
+      if (!yaml.isScalar(pair.key) || typeof pair.key.value !== 'string') {
+        throw new TypeError('YAML mapping keys must be strings')
+      }
+      assertJsonCompatibleYamlKeys(pair.value, yaml)
+    }
+    return
   }
-  if (/^(true|false)$/i.test(value)) return value.toLowerCase() === 'true'
-  if (/^(null|~)$/i.test(value)) return null
-  if (/^-?\d+(\.\d+)?$/.test(value)) return Number(value)
-  if (value.startsWith('[') && value.endsWith(']')) {
-    return value
-      .slice(1, -1)
-      .split(',')
-      .map((item) => parseContentFrontmatterValue(item.trim()))
-      .filter((item) => item !== '')
+  if (yaml.isSeq(node)) {
+    for (const child of node.items) assertJsonCompatibleYamlKeys(child, yaml)
   }
-  return value
 }
 
-function collectContentHeadings(source) {
-  return source.split(/\r?\n/).flatMap((line) => {
-    const match = line.match(/^(#{1,6})\s+(.+?)\s*#*$/)
-    if (!match) return []
-    const text = match[2].replace(/[*_`~{}<>]/g, '').trim()
-    const slug = text
+function assertJsonCompatibleFrontmatter(value, ancestors) {
+  if (typeof value === 'number' && !Number.isFinite(value)) {
+    throw new TypeError('non-finite numbers are not supported')
+  }
+  if (value === null || typeof value !== 'object') return
+  if (ancestors.has(value)) throw new TypeError('cyclic YAML aliases are not supported')
+
+  ancestors.add(value)
+  for (const child of Array.isArray(value) ? value : Object.values(value)) {
+    assertJsonCompatibleFrontmatter(child, ancestors)
+  }
+  ancestors.delete(value)
+}
+
+function createContentMetadataPlugin(headings) {
+  return function contentMetadataPlugin() {
+    return (tree) => {
+      const slugCounts = new Map()
+      collectContentHeadingNodes(tree, headings, slugCounts)
+    }
+  }
+}
+
+function collectContentHeadingNodes(node, headings, slugCounts) {
+  if (node?.type === 'heading') {
+    const text = contentPlainText(node.children ?? [])
+    const baseSlug = text
       .toLocaleLowerCase()
       .replace(/[^\p{Letter}\p{Number}]+/gu, '-')
       .replace(/^-|-$/g, '')
-    return [{ depth: match[1].length, slug, text }]
-  })
+    const occurrence = slugCounts.get(baseSlug) ?? 0
+    const slug = occurrence === 0 ? baseSlug : `${baseSlug}-${occurrence}`
+    slugCounts.set(baseSlug, occurrence + 1)
+    headings.push({ depth: node.depth, slug, text })
+    node.data = {
+      ...node.data,
+      hProperties: { ...node.data?.hProperties, id: slug },
+    }
+  }
+
+  for (const child of node?.children ?? []) {
+    collectContentHeadingNodes(child, headings, slugCounts)
+  }
+}
+
+function contentPlainText(nodes) {
+  return nodes
+    .map((node) => {
+      if (node.type === 'text' || node.type === 'inlineCode') return node.value
+      return contentPlainText(node.children ?? [])
+    })
+    .join('')
 }
 
 async function writeIfChanged(file, contents) {

@@ -18,12 +18,44 @@ This page can contain **Markdown** and <strong>JSX</strong>.
 
 ความสามารถที่รองรับ:
 
-- **Frontmatter** — เข้าถึงผ่าน `frontmatter` object
-- **Markdown** — GFM (GitHub Flavored Markdown)
-- **JSX** — ฝัง React components (`.mdx` เท่านั้น)
-- **Expressions** — `{variable}` และ `{expression}`
-- **Heading exports** — headings ถูก export สำหรับสร้าง table-of-contents
+- **YAML frontmatter** — รองรับ nested objects, arrays, quoted values และ block scalars ผ่าน
+  `frontmatter` object; `meta` จะอ้างถึง object เดียวกันหากไฟล์ไม่ได้ export ค่าเอง
+- **GFM** — tables พร้อม alignment, task lists, strikethrough, autolink literals, references และ
+  footnotes ใช้ได้ทั้ง Markdown และ MDX
+- **JSX** — ฝัง React components, member components เช่น `<Card.Header>`, fragments และ prop spreads
+  ได้ใน `.mdx`
+- **Expressions และ ESM** — `{variable}`, `{expression}`, multiline `import` และ multiline `export`
+  ถูก parse เป็น JavaScript/TypeScript โดยตรง ไม่ตัดสินจากบรรทัดแบบเดิม
+- **Heading exports** — headings ถูก export สำหรับสร้าง table-of-contents; heading ที่ชื่อซ้ำจะได้
+  suffix `-1`, `-2` ต่อเนื่องและตรงกับ ID ที่ render
+- **Component overrides** — generated MDX page รับ `components` prop เพื่อแทน element อย่าง `h1`,
+  `a`, `table` และ `code`
 - **SSG** — pre-rendered ณ build time
+
+```mdx
+---
+title: Content guide
+author:
+  name: Ada
+tags: [mdx, gfm]
+summary: |
+  Nested YAML และ multiline values จะถูกเก็บครบ
+---
+
+import { Callout } from './Callout'
+
+export const status = {
+  stable: true,
+}
+
+## {frontmatter.title}
+
+<Callout {...status}>Ready</Callout>
+```
+
+YAML ที่ผิดรูป, frontmatter ที่ไม่ปิด, MDX ESM ที่ไม่ถูกต้อง และ generated JavaScript ที่ compile
+ไม่ได้จะหยุด build พร้อม diagnostic ส่วน Markdown รองรับ raw HTML จึงควรใช้กับเนื้อหาที่ผู้เขียน
+ควบคุมได้; หากรับเนื้อหาจากภายนอกควร sanitize ก่อนเข้าสู่ build
 
 ## Images
 

@@ -80,17 +80,17 @@ silently changing deployment behaviour.
 
 ### `build`
 
-| Field       | Type      | Default          | Options                                                                                                                                                |
-| ----------- | --------- | ---------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `minify`    | `boolean` | `true`           | Oxc-powered JavaScript minification                                                                                                                    |
-| `map`       | `boolean` | `false`          | Emit source maps                                                                                                                                       |
-| `treeShake` | `boolean` | `true`           | Linker-aware tree shaking                                                                                                                              |
-| `split`     | `string`  | `"route"`        | `"single"`, `"route"`, `"manual"`                                                                                                                      |
-| `workers`   | `number`  | CPU count (auto) | Bounded bundle and prerender concurrency. Example `workers: 4` is an explicit override; prerendering remains capped to avoid excessive Node processes. |
-| `jsx`       | `string`  | `"automatic"`    | JSX runtime mode; use `"classic"` only for code that provides a React global/import                                                                    |
-| `target`    | `string`  | `"es2022"`       | `"es2018"`, `"es2019"`, `"es2020"`, `"es2022"`, `"esnext"`                                                                                             |
-| `manifest`  | `boolean` | `false`          | Emit chunk manifest                                                                                                                                    |
-| `warm`      | `boolean` | `true`           | Pre-bundle dependencies                                                                                                                                |
+| Field       | Type      | Default          | Options                                                                                                                                                                                        |
+| ----------- | --------- | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `minify`    | `boolean` | `true`           | Oxc-powered JavaScript minification                                                                                                                                                            |
+| `map`       | `boolean` | `false`          | Emit source maps                                                                                                                                                                               |
+| `treeShake` | `boolean` | `true`           | Linker-aware tree shaking                                                                                                                                                                      |
+| `split`     | `string`  | `"route"`        | `"single"`, `"route"`, `"manual"`                                                                                                                                                              |
+| `workers`   | `number`  | CPU count (auto) | Bounded concurrency for initial and shared-route bundle passes plus prerendering. Example `workers: 4` is an explicit override; prerendering remains capped to avoid excessive Node processes. |
+| `jsx`       | `string`  | `"automatic"`    | JSX runtime mode; use `"classic"` only for code that provides a React global/import                                                                                                            |
+| `target`    | `string`  | `"es2022"`       | `"es2018"`, `"es2019"`, `"es2020"`, `"es2022"`, `"esnext"`                                                                                                                                     |
+| `manifest`  | `boolean` | `false`          | Emit chunk manifest                                                                                                                                                                            |
+| `warm`      | `boolean` | `true`           | Pre-bundle dependencies                                                                                                                                                                        |
 
 ### `plugins`
 

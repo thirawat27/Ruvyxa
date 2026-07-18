@@ -95,3 +95,68 @@ support; naming is normalized to `blog`, `crud`, and `api-backend`.
 | Polish   | Complete | Format, lint, audit, and diff checks passed                    |
 | Document | Complete | EN/TH guides, READMEs, and release notes updated               |
 | Ship     | Complete | Release validation, demo parity, and pack smoke passed         |
+
+## Task Breakdown — Build Performance and MDX Completeness (2026-07-18)
+
+### Architecture focus
+
+- **Pass:** Focus — `ruvyxa build` crosses CLI orchestration, persistent caches, the native bundler,
+  content compilation, prerender consumers, and user documentation.
+- **Reuse:** Shared `BundleContext`, deterministic route indices, persistent client artifacts,
+  markdown-rs AST, Oxc parser, existing Rust tests and demo parity suite.
+- **Preserve:** CLI/config/package contracts, route order, shared chunk semantics, content exports,
+  server/client validation, package-manager-neutral templates.
+- **Breaking changes:** None intended; richer frontmatter and MDX behavior is additive.
+
+### Layer 1 — Large-project build path
+
+- [x] 🔴 Memoize dependency content fingerprints once per build instead of reading and hashing the
+      same shared files for every route artifact. Done when cache validation remains content-correct
+      and a regression proves shared dependencies are fingerprinted once.
+- [x] 🟡 Parallelize shared-route rebuilds with bounded existing `build.workers` concurrency and
+      deterministic result ordering. Done when shared chunk output remains identical and tests cover
+      multiple worker chunks.
+
+### Layer 2 — MDX and frontmatter
+
+- [x] 🔴 Replace line-based MDX ESM extraction with parser-aware multiline handling and combine MDX
+      constructs with GFM. Done when multiline imports/exports, tables, task lists, strikethrough,
+      autolinks, JSX member components, spreads, and expressions compile.
+- [x] 🟡 Parse frontmatter as YAML with nested maps, arrays, quoted values, and block scalars while
+      keeping the exported JSON-compatible object. Done when malformed YAML reports `RUV1312` and
+      complex frontmatter has regression coverage.
+- [x] 🟡 Correct semantic rendering for table headers/alignment, references, footnotes, duplicate
+      heading slugs, and MDX component overrides. Done when generated React module assertions cover
+      each contract.
+- [x] 🔴 Align the packaged Node compiler with the native content contract. Done when Node SSR/SSG
+      regressions cover nested YAML, GFM/footnotes, Unicode headings, duplicate IDs, and malformed
+      frontmatter.
+
+### Layer 3 — Documentation and verification
+
+- [x] 🟢 Update EN/TH content docs and architecture note for actual shipped behavior.
+- [x] 🔴 Run focused Rust tests, formatter/clippy, demo check/parity, relevant pnpm checks, and
+      inspect the final diff. Done when no introduced failures remain.
+
+### Risks and decisions
+
+| Risk                                             | Likelihood | Impact | Mitigation                                                                   |
+| ------------------------------------------------ | ---------- | ------ | ---------------------------------------------------------------------------- |
+| Fingerprint memo hides an in-build file mutation | Low        | High   | Build uses one input snapshot; cache is build-scoped and discarded afterward |
+| Parallel rebuild changes route order             | Low        | High   | Carry original indices and sort before emission                              |
+| YAML values are not JSON-compatible              | Low        | Medium | Parse to JSON values natively; validate Node values before serialization     |
+| MDX parser accepts incomplete JavaScript         | Medium     | High   | Use Oxc-backed ESM/expression parse callbacks and compiler regressions       |
+
+**Parallelizable:** Discovery and docs were independent, but implementation remains sequential
+because the CLI and content contract share the same verification workspace and no sub-agent was
+requested.
+
+**Open questions:** None identified.
+
+### Completion signals
+
+- Rust workspace: 330 tests passed; `cargo clippy --workspace --locked -- -D warnings` passed.
+- Node workspace: 90 tests passed; recursive build/check and demo parity for 16 routes passed.
+- Delivery: formatting, production dependency audit, release metadata validation, and npm pack smoke
+  passed; benchmark/package/demo output was removed while the reusable ignored demo cache was
+  preserved.

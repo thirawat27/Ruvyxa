@@ -83,6 +83,100 @@ import Card from './Card.js'
     })
   })
 
+  it('keeps nested YAML, GFM, footnotes, and heading slugs aligned in the Node compiler', async () => {
+    await withFixture(async ({ root, outDir }) => {
+      const pageFile = path.join(root, 'parity.mdx')
+      const outfile = path.join(outDir, 'content-parity.mjs')
+      await writeFile(
+        pageFile,
+        `---
+title: "Ruvyxa: Content"
+author:
+  name: Ada
+tags:
+  - rust
+  - mdx
+summary: |
+  First line.
+  Second line.
+---
+# Repeat
+# Repeat
+## ภาษาไทย
+
+| Left | Right |
+| :--- | ----: |
+| one | two |
+
+- [x] ~~shipped~~
+
+A note[^1]
+
+[^1]: Footnote body.
+`,
+      )
+
+      await compileBundle({
+        projectRoot: root,
+        entrySource: `export { default, frontmatter, headings } from ${JSON.stringify(toImportPath(pageFile))}`,
+        sourcefile: 'ruvyxa:content-parity-entry.ts',
+        outfile,
+        platform: 'node',
+        external: ['react', 'react/jsx-runtime'],
+      })
+
+      const output = await readFile(outfile, 'utf8')
+      const mod = await import(pathToFileURL(outfile).href + `?t=${Date.now()}`)
+      assert.deepEqual(mod.frontmatter, {
+        title: 'Ruvyxa: Content',
+        author: { name: 'Ada' },
+        tags: ['rust', 'mdx'],
+        summary: 'First line.\nSecond line.\n',
+      })
+      assert.deepEqual(mod.headings, [
+        { depth: 1, slug: 'repeat', text: 'Repeat' },
+        { depth: 1, slug: 'repeat-1', text: 'Repeat' },
+        { depth: 2, slug: 'ภาษาไทย', text: 'ภาษาไทย' },
+      ])
+      assert.match(output, /id:\s*"repeat-1"/)
+      assert.match(output, /contains-task-list/)
+      assert.match(output, /task-list-item/)
+      assert.match(output, /data-footnotes/)
+      assert.match(output, /textAlign/)
+    })
+  })
+
+  it('rejects invalid and non-mapping YAML frontmatter in the Node compiler', async () => {
+    await withFixture(async ({ root, outDir }) => {
+      const pageFile = path.join(root, 'invalid.md')
+      const outfile = path.join(outDir, 'invalid-content.mjs')
+      const compile = () =>
+        compileBundle({
+          projectRoot: root,
+          entrySource: `export { default } from ${JSON.stringify(toImportPath(pageFile))}`,
+          sourcefile: 'ruvyxa:invalid-content-entry.ts',
+          outfile,
+          platform: 'node',
+          external: ['react', 'react/jsx-runtime'],
+        })
+
+      await writeFile(pageFile, '---\nauthor: [broken\n---\n# Page\n')
+      await assert.rejects(compile(), /RUV1312 .*invalid YAML frontmatter/)
+
+      clearCompilerCache()
+      await writeFile(pageFile, '---\nhello\n---\n# Page\n')
+      await assert.rejects(compile(), /RUV1312 .*frontmatter must be a YAML mapping/)
+
+      clearCompilerCache()
+      await writeFile(pageFile, '---\nvalue: .inf\n---\n# Page\n')
+      await assert.rejects(compile(), /RUV1312 .*JSON-compatible values/)
+
+      clearCompilerCache()
+      await writeFile(pageFile, '---\n1: numeric key\n---\n# Page\n')
+      await assert.rejects(compile(), /RUV1312 .*YAML mapping keys must be strings/)
+    })
+  })
+
   it('resolves local dynamic imports without an external bundler', async () => {
     await withFixture(async ({ root, outDir }) => {
       await writeFile(path.join(root, 'lazy.ts'), 'export const value = 42\n')

@@ -5,7 +5,7 @@ use std::io::{BufRead, BufReader, IsTerminal, Write};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command as ProcessCommand, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 use std::time::{Duration, Instant};
 
@@ -1785,6 +1785,40 @@ struct CachedClientArtifact {
     bundle: ClientBundle,
 }
 
+/// One production build observes a stable content snapshot. Sharing these
+/// fingerprints prevents common layouts and dependencies from being read and
+/// hashed once per route while retaining content-based cache invalidation.
+#[derive(Default)]
+struct ArtifactFingerprintCache {
+    entries: Mutex<BTreeMap<PathBuf, Arc<OnceLock<Option<String>>>>>,
+}
+
+impl ArtifactFingerprintCache {
+    fn fingerprint(&self, path: &Path) -> Option<String> {
+        let cell = {
+            let mut entries = self.entries.lock().ok()?;
+            entries
+                .entry(path.to_path_buf())
+                .or_insert_with(|| Arc::new(OnceLock::new()))
+                .clone()
+        };
+        cell.get_or_init(|| {
+            fs::read(path)
+                .ok()
+                .map(|source| content_hash_bytes(&source))
+        })
+        .clone()
+    }
+
+    #[cfg(test)]
+    fn entry_count(&self) -> usize {
+        self.entries
+            .lock()
+            .map(|entries| entries.len())
+            .unwrap_or(0)
+    }
+}
+
 struct SharedRouteChunk {
     file_name: String,
     code: String,
@@ -2055,57 +2089,25 @@ fn emit_client_bundles(
         .cloned()
         .collect::<Vec<_>>();
     let parallelism = build_parallelism(build.parallelism, page_routes.len());
-    let chunk_size = page_routes.len().max(1).div_ceil(parallelism);
     let artifact_cache_dir = cache.directory.to_path_buf();
     let artifact_dependency_hash = cache.dependency_hash.to_string();
-    let mut bundles = Vec::new();
-
-    std::thread::scope(|scope| -> anyhow::Result<()> {
-        let mut handles = Vec::new();
-
-        for (chunk_index, chunk) in page_routes.chunks(chunk_size).enumerate() {
-            let routes = chunk.to_vec();
-            let offset = chunk_index * chunk_size;
-            let bundle_context = bundle_context.clone();
-            let artifact_cache_dir = artifact_cache_dir.clone();
-            let artifact_dependency_hash = artifact_dependency_hash.clone();
-
-            handles.push(
-                scope.spawn(move || -> anyhow::Result<Vec<(usize, ClientBundle)>> {
-                    routes
-                        .iter()
-                        .enumerate()
-                        .map(|(index, route)| {
-                            bundle_client_route(
-                                root,
-                                app_dir,
-                                route,
-                                build,
-                                &bundle_context,
-                                &BTreeSet::new(),
-                                None,
-                                &artifact_cache_dir,
-                                &artifact_dependency_hash,
-                                "base",
-                            )
-                            .map(|bundle| (offset + index, bundle))
-                        })
-                        .collect()
-                }),
-            );
-        }
-
-        for handle in handles {
-            let mut next = handle
-                .join()
-                .map_err(|_| anyhow::anyhow!("client bundler worker panicked"))??;
-            bundles.append(&mut next);
-        }
-
-        Ok(())
+    let artifact_fingerprints = ArtifactFingerprintCache::default();
+    let empty_shared_modules = BTreeSet::new();
+    let mut bundles = bundle_routes_parallel(&page_routes, parallelism, |route| {
+        bundle_client_route(
+            root,
+            app_dir,
+            route,
+            build,
+            &bundle_context,
+            &empty_shared_modules,
+            None,
+            &artifact_cache_dir,
+            &artifact_dependency_hash,
+            "base",
+            &artifact_fingerprints,
+        )
     })?;
-
-    bundles.sort_by_key(|(index, _)| *index);
 
     let shared_route_chunks = if parse_split_strategy(build.split_strategy.as_deref())?
         == ruvyxa_bundler::SplitStrategy::Route
@@ -2139,8 +2141,7 @@ fn emit_client_bundles(
                 .iter()
                 .map(|(_, bundle)| (bundle.path.clone(), bundle.module_paths.clone()))
                 .collect::<BTreeMap<_, _>>();
-            let mut rebuilt = Vec::with_capacity(page_routes.len());
-            for (index, route) in page_routes.iter().enumerate() {
+            bundles = bundle_routes_parallel(&page_routes, parallelism, |route| {
                 let route_modules = original_modules
                     .get(&route.path)
                     .cloned()
@@ -2151,23 +2152,20 @@ fn emit_client_bundles(
                     .collect::<BTreeSet<_>>();
                 let shared_file =
                     (!route_shared_modules.is_empty()).then_some(shared_chunk.file_name.as_str());
-                rebuilt.push((
-                    index,
-                    bundle_client_route(
-                        root,
-                        app_dir,
-                        route,
-                        build,
-                        &bundle_context,
-                        &route_shared_modules,
-                        shared_file,
-                        &artifact_cache_dir,
-                        &artifact_dependency_hash,
-                        &shared_chunk.file_name,
-                    )?,
-                ));
-            }
-            bundles = rebuilt;
+                bundle_client_route(
+                    root,
+                    app_dir,
+                    route,
+                    build,
+                    &bundle_context,
+                    &route_shared_modules,
+                    shared_file,
+                    &artifact_cache_dir,
+                    &artifact_dependency_hash,
+                    &shared_chunk.file_name,
+                    &artifact_fingerprints,
+                )
+            })?;
             vec![shared_chunk]
         }
     } else {
@@ -2306,6 +2304,49 @@ fn emit_client_bundles(
     }))
 }
 
+fn bundle_routes_parallel<F>(
+    routes: &[RouteEntry],
+    parallelism: usize,
+    bundle_route: F,
+) -> anyhow::Result<Vec<(usize, ClientBundle)>>
+where
+    F: Fn(&RouteEntry) -> anyhow::Result<ClientBundle> + Sync,
+{
+    if routes.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let chunk_size = routes.len().div_ceil(parallelism.max(1));
+    let mut bundles = std::thread::scope(|scope| -> anyhow::Result<Vec<_>> {
+        let mut handles = Vec::new();
+        for (chunk_index, chunk) in routes.chunks(chunk_size).enumerate() {
+            let bundle_route = &bundle_route;
+            handles.push(scope.spawn(move || {
+                let offset = chunk_index * chunk_size;
+                chunk
+                    .iter()
+                    .enumerate()
+                    .map(|(index, route)| {
+                        bundle_route(route).map(|bundle| (offset + index, bundle))
+                    })
+                    .collect::<anyhow::Result<Vec<_>>>()
+            }));
+        }
+
+        let mut bundles = Vec::with_capacity(routes.len());
+        for handle in handles {
+            bundles.extend(
+                handle
+                    .join()
+                    .map_err(|_| anyhow::anyhow!("client bundler worker panicked"))??,
+            );
+        }
+        Ok(bundles)
+    })?;
+    bundles.sort_by_key(|(index, _)| *index);
+    Ok(bundles)
+}
+
 /// Summarize first-load bundle offenders without turning a build observation
 /// into a new failing production contract.
 fn bundle_budget_report(routes: &[serde_json::Value]) -> serde_json::Value {
@@ -2386,10 +2427,15 @@ fn bundle_client_route(
     cache_dir: &Path,
     dependency_hash: &str,
     cache_variant: &str,
+    artifact_fingerprints: &ArtifactFingerprintCache,
 ) -> anyhow::Result<ClientBundle> {
-    if let Some(bundle) =
-        load_client_artifact(cache_dir, dependency_hash, &route.path, cache_variant)
-    {
+    if let Some(bundle) = load_client_artifact(
+        cache_dir,
+        dependency_hash,
+        &route.path,
+        cache_variant,
+        artifact_fingerprints,
+    ) {
         return Ok(bundle);
     }
     use ruvyxa_bundler::{BundleInput, BundleOptions, BundleTarget};
@@ -2485,6 +2531,7 @@ fn bundle_client_route(
         &route.path,
         cache_variant,
         &bundle,
+        artifact_fingerprints,
     );
     Ok(bundle)
 }
@@ -2634,7 +2681,11 @@ fn parse_split_strategy(value: Option<&str>) -> anyhow::Result<ruvyxa_bundler::S
 }
 
 fn content_hash(input: &str) -> String {
-    blake3::hash(input.as_bytes()).to_hex().to_string()
+    content_hash_bytes(input.as_bytes())
+}
+
+fn content_hash_bytes(input: &[u8]) -> String {
+    blake3::hash(input).to_hex().to_string()
 }
 
 fn client_artifact_cache_file(cache_dir: &Path, route_path: &str, variant: &str) -> PathBuf {
@@ -2647,6 +2698,7 @@ fn load_client_artifact(
     dependency_hash: &str,
     route_path: &str,
     variant: &str,
+    fingerprints: &ArtifactFingerprintCache,
 ) -> Option<ClientBundle> {
     let source =
         fs::read_to_string(client_artifact_cache_file(cache_dir, route_path, variant)).ok()?;
@@ -2657,13 +2709,10 @@ fn load_client_artifact(
     {
         return None;
     }
-    let valid = artifact.files.iter().all(|(path, expected)| {
-        fs::read(path)
-            .ok()
-            .map(|source| content_hash(&String::from_utf8_lossy(&source)))
-            .as_deref()
-            == Some(expected.as_str())
-    });
+    let valid = artifact
+        .files
+        .iter()
+        .all(|(path, expected)| fingerprints.fingerprint(path).as_deref() == Some(expected));
     valid.then_some(ClientBundle {
         artifact_cache_hit: true,
         ..artifact.bundle
@@ -2676,17 +2725,15 @@ fn store_client_artifact(
     route_path: &str,
     variant: &str,
     bundle: &ClientBundle,
+    fingerprints: &ArtifactFingerprintCache,
 ) {
     let files = bundle
         .module_paths
         .iter()
         .filter_map(|path| {
-            fs::read(path).ok().map(|source| {
-                (
-                    path.clone(),
-                    content_hash(&String::from_utf8_lossy(&source)),
-                )
-            })
+            fingerprints
+                .fingerprint(path)
+                .map(|fingerprint| (path.clone(), fingerprint))
         })
         .collect::<BTreeMap<_, _>>();
     if files.is_empty() {
@@ -4061,6 +4108,24 @@ mod tests {
     }
 
     #[test]
+    fn artifact_fingerprints_are_shared_by_canonical_file_path() {
+        let temp = tempfile::tempdir().unwrap();
+        let shared = temp.path().join("shared.ts");
+        fs::write(&shared, b"export const value = '\xF0\x9F\x9A\x80';").unwrap();
+        let cache = ArtifactFingerprintCache::default();
+
+        let first = cache.fingerprint(&shared).unwrap();
+        let second = cache.fingerprint(&shared).unwrap();
+
+        assert_eq!(
+            first,
+            content_hash_bytes(b"export const value = '\xF0\x9F\x9A\x80';")
+        );
+        assert_eq!(second, first);
+        assert_eq!(cache.entry_count(), 1);
+    }
+
+    #[test]
     fn dev_config_respects_overlay_and_trace_flags() {
         let args = ServerArgs {
             root: PathBuf::from("."),
@@ -4376,6 +4441,7 @@ mod tests {
             minify: Some(false),
             split_strategy: Some("route".to_string()),
             emit_chunk_manifest: Some(true),
+            parallelism: Some(2),
             ..BuildConfigOptions::default()
         };
 
@@ -4406,6 +4472,19 @@ mod tests {
             assert!(route_code.starts_with("import \"./shared."), "{route_code}");
             assert!(!route_code.contains("const label = "), "{route_code}");
         }
+        let expected_order = manifest
+            .routes
+            .iter()
+            .filter(|route| route.kind == ruvyxa_graph::RouteKind::Page)
+            .map(|route| route.path.as_str())
+            .collect::<Vec<_>>();
+        let actual_order = client_manifest["routes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|route| route["path"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(actual_order, expected_order);
         let shared_file = client_manifest["sharedRouteChunks"][0]["file"]
             .as_str()
             .unwrap();

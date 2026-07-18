@@ -501,6 +501,32 @@ mod tests {
     }
 
     #[test]
+    fn bundles_mdx_multiline_imports_and_gfm_through_native_pipeline() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        let app = root.join("app");
+        fs::create_dir_all(&app).unwrap();
+        let page = app.join("page.mdx");
+        fs::write(
+            &page,
+            "import {\n  Card\n} from './Card'\n\n# Rich docs\n\n| Feature | Ready |\n| :-- | --: |\n| MDX | yes |\n\n<Card>Bundled</Card>",
+        )
+        .unwrap();
+        fs::write(
+            app.join("Card.tsx"),
+            "export function Card({ children }) { return <section data-card>{children}</section>; }",
+        )
+        .unwrap();
+
+        let output = bundle(client_input(&root, &app, page, vec![], "/docs")).unwrap();
+
+        assert!(output.code.contains("data-card"));
+        assert!(output.code.contains("Rich docs"));
+        assert!(output.code.contains("textAlign"));
+        assert!(output.code.contains("Bundled"));
+    }
+
+    #[test]
     fn bundle_manifest_records_dynamic_import_split_points() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();

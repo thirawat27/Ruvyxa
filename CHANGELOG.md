@@ -1,5 +1,28 @@
 # Changelog
 
+## v1.0.16 (2026-07-18)
+
+### Large-Build and Content Compiler Follow-up
+
+- Parallelized both initial and shared-route client bundle passes while retaining deterministic
+  manifest/output order and the existing `build.workers` bound.
+- Replaced per-route dependency re-reading during warm artifact validation with one build-scoped,
+  content-based fingerprint snapshot, preventing shared layouts and packages from being hashed
+  repeatedly across large route sets.
+- Replaced line-based MDX ESM extraction with markdown-rs MDX boundaries backed by Oxc syntax
+  feedback, including multiline imports and exports.
+- Combined MDX with GFM tables, task lists, strikethrough, autolink literals, references, and
+  footnotes; added semantic table headings/alignment, reference resolution, stable duplicate heading
+  slugs, JSX member/spread support, comments, and Markdown element component overrides.
+- Upgraded frontmatter from a scalar line parser to locked `serde_yaml_ng` parsing for nested maps,
+  arrays, quoted values, and block scalars, with actionable `RUV1312` failures for malformed or
+  non-mapping documents.
+- Aligned the packaged Node content compiler with the native contract using locked `yaml` and
+  `remark-gfm` dependencies; Node SSR/SSG now preserves nested frontmatter, renders the documented
+  GFM surface, and derives stable heading exports and rendered IDs from the same MDX AST.
+- Added focused cache/concurrency regressions plus native MDX unit, full-bundler integration, and
+  Node runtime parity coverage.
+
 ## v1.0.15 (2026-07-18)
 
 ### Full-System Reliability Hardening

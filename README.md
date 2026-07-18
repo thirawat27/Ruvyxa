@@ -37,8 +37,9 @@
   prod, TTL 5 min dev / 30 min prod), invalidated automatically on file change. Configurable via
   `RUVYXA_RENDER_CACHE_SIZE` (`0` disables it; environment values are capped at 16,384). Backed by
   `RwLock` for concurrent readers.
-- **Parallel production bundling** — page client bundles emitted concurrently via scoped threads,
-  written back in deterministic route order.
+- **Parallel production bundling** — initial and shared-route client bundle passes run with bounded
+  concurrency, then emit in deterministic route order. Warm-build artifact validation fingerprints
+  each shared dependency once per build instead of once per route.
 - **Async I/O** — file serving uses `tokio::fs` to avoid blocking the async runtime under concurrent
   load.
 - **Incremental bundler cache** — blake3+mtime fingerprinting recompiles only changed modules across
@@ -91,9 +92,9 @@
 
 ### Content & images
 
-- **Built-in content routes** — `page.md` and `page.mdx` support frontmatter, heading exports, GFM
-  (GitHub Flavored Markdown), JSX components, expressions, and SSG. Same dev/prod pipeline as TSX
-  routes.
+- **Built-in content routes** — `page.md` and `page.mdx` support nested YAML frontmatter, stable
+  heading exports, GFM tables/tasks/references/footnotes, multiline ESM, JSX member components,
+  expressions, component overrides, and SSG. Same dev/prod pipeline as TSX routes.
 - **Fast WebP image pipeline** — production builds replace copied PNG/JPEG assets with cached,
   parallel-encoded WebP output for low CLS.
 

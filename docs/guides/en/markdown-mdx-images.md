@@ -18,12 +18,44 @@ This page can contain **Markdown** and <strong>JSX</strong>.
 
 Supported features:
 
-- **Frontmatter** — access via the `frontmatter` object
-- **Markdown** — GFM (GitHub Flavored Markdown)
-- **JSX** — embed React components (`.mdx` only)
-- **Expressions** — `{variable}` and `{expression}`
-- **Heading exports** — headings are exported for table-of-contents generation
+- **YAML frontmatter** — nested objects, arrays, quoted values, and block scalars are available via
+  the `frontmatter` object; `meta` aliases the same object unless the file exports its own value
+- **GFM** — tables with alignment, task lists, strikethrough, autolink literals, references, and
+  footnotes work in both Markdown and MDX
+- **JSX** — embed React components, member components such as `<Card.Header>`, fragments, and prop
+  spreads (`.mdx` only)
+- **Expressions and ESM** — `{variable}`, `{expression}`, multiline `import`, and multiline `export`
+  blocks are parsed as JavaScript/TypeScript rather than line-based text
+- **Heading exports** — headings are exported for table-of-contents generation; duplicate headings
+  receive stable `-1`, `-2`, and later suffixes that match their rendered IDs
+- **Component overrides** — the generated MDX page accepts a `components` prop for replacing
+  Markdown elements such as `h1`, `a`, `table`, and `code`
 - **SSG** — pre-rendered at build time
+
+```mdx
+---
+title: Content guide
+author:
+  name: Ada
+tags: [mdx, gfm]
+summary: |
+  Nested YAML and multiline values are preserved.
+---
+
+import { Callout } from './Callout'
+
+export const status = {
+  stable: true,
+}
+
+## {frontmatter.title}
+
+<Callout {...status}>Ready</Callout>
+```
+
+Malformed YAML, unclosed frontmatter, invalid MDX ESM, and invalid generated JavaScript stop the
+build with a content/compiler diagnostic. Markdown files can contain raw HTML and therefore should
+be author-controlled; sanitize untrusted external content before it enters the build.
 
 ## Images
 
