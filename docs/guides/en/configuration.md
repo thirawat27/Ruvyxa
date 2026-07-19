@@ -20,6 +20,7 @@ export default config({
     target: 'es2022',
     manifest: false,
     warm: true,
+    prerenderCache: true,
   },
   plugins: [],
   middleware: {
@@ -80,17 +81,18 @@ silently changing deployment behaviour.
 
 ### `build`
 
-| Field       | Type      | Default          | Options                                                                                                                                                                                  |
-| ----------- | --------- | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `minify`    | `boolean` | `true`           | Oxc-powered JavaScript minification                                                                                                                                                      |
-| `map`       | `boolean` | `false`          | Emit source maps                                                                                                                                                                         |
-| `treeShake` | `boolean` | `true`           | Linker-aware tree shaking                                                                                                                                                                |
-| `split`     | `string`  | `"route"`        | `"single"`, `"route"`, `"manual"`                                                                                                                                                        |
-| `workers`   | `number`  | CPU count (auto) | Bounded concurrency for route preparation/final emission plus prerendering. Example `workers: 4` is an explicit override; prerendering remains capped to avoid excessive Node processes. |
-| `jsx`       | `string`  | `"automatic"`    | JSX runtime mode; use `"classic"` only for code that provides a React global/import                                                                                                      |
-| `target`    | `string`  | `"es2022"`       | `"es2018"`, `"es2019"`, `"es2020"`, `"es2022"`, `"esnext"`                                                                                                                               |
-| `manifest`  | `boolean` | `false`          | Emit chunk manifest                                                                                                                                                                      |
-| `warm`      | `boolean` | `true`           | Pre-bundle dependencies                                                                                                                                                                  |
+| Field            | Type      | Default          | Options                                                                                                                                                                                  |
+| ---------------- | --------- | ---------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `minify`         | `boolean` | `true`           | Oxc-powered JavaScript minification                                                                                                                                                      |
+| `map`            | `boolean` | `false`          | Emit source maps                                                                                                                                                                         |
+| `treeShake`      | `boolean` | `true`           | Linker-aware tree shaking                                                                                                                                                                |
+| `split`          | `string`  | `"route"`        | `"single"`, `"route"`, `"manual"`                                                                                                                                                        |
+| `workers`        | `number`  | CPU count (auto) | Bounded concurrency for route preparation/final emission plus prerendering. Example `workers: 4` is an explicit override; prerendering remains capped to avoid excessive Node processes. |
+| `jsx`            | `string`  | `"automatic"`    | JSX runtime mode; use `"classic"` only for code that provides a React global/import                                                                                                      |
+| `target`         | `string`  | `"es2022"`       | `"es2018"`, `"es2019"`, `"es2020"`, `"es2022"`, `"esnext"`                                                                                                                               |
+| `manifest`       | `boolean` | `false`          | Emit chunk manifest                                                                                                                                                                      |
+| `warm`           | `boolean` | `true`           | Pre-bundle dependencies                                                                                                                                                                  |
+| `prerenderCache` | `boolean` | `true`           | Reuse final SSG/ISR/PPR HTML only when config, environment, assets, styles, and every source fingerprint match; disable for intentionally non-deterministic pages.                       |
 
 ### `plugins`
 
@@ -103,9 +105,15 @@ plugins: [
     enforce: 'pre', // optional: 'pre' | 'post'
     resolveId: true, // intercept module resolution
     transform: true, // transform source code
+    parallel: true, // opt in only for deterministic, process-local-state-free hooks
   },
 ]
 ```
+
+JavaScript build plugins run through persistent Node workers. Hooks remain serialized by default so
+existing stateful plugins keep their behavior. A bounded pool (up to eight workers, also limited by
+`build.workers`) is used only when every plugin with a `resolveId` or `transform` hook sets
+`parallel: true`; each worker is an isolated process, so mutable module state is not shared.
 
 ### `middleware`
 

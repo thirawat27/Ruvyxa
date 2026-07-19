@@ -99,14 +99,30 @@ The small warm-prerender movement is treated as worker/OS noise; no prerender sp
 that sample. The structural gains matter more on large projects because repeated work was removed
 from route/module loops.
 
+### Incremental hardening benchmark (2026-07-19)
+
+On the same `examples/demo` fixture after the plugin/content/style hardening, a clean production
+build measured 6076.5 ms total (732.0 ms client, 1359.3 ms prerender). A subsequent build with the
+fingerprint-validated prerender artifacts measured 811.8 ms total (22.0–25.3 ms client and 214.7 ms
+prerender), with 13 of 14 routes served from the artifact cache; the remaining CSR shell is
+generated directly. These timings exclude Cargo compilation and vary with the local OS/Node process
+scheduler.
+
 ## Assumptions, debt, and residual risks
 
 - **Assumption:** project source does not intentionally mutate during one production build. This
   matches the existing staged-output snapshot model.
-- **Architecture debt:** JS config plugins remain serialized through the Node worker mutex. The
-  plugin-free fast path deliberately does not cache stateful resolve hooks.
-- **Architecture debt:** warm prerender still evaluates every prerenderable route; incremental HTML
-  reuse would require a separate output-dependency contract and is outside this pass.
+- **Resolved in this pass:** JS config plugins remain serialized by default, while an explicit
+  `parallel: true` capability on every active hook enables a bounded pool of isolated persistent
+  Node workers. This keeps stateful-plugin behavior unchanged and makes plugin-heavy builds scale
+  without sharing mutable process state.
+- **Resolved in this pass:** warm prerender now reuses final HTML artifacts only after validating
+  the config/render context, environment, styles, client assets, Node renderer dependency hash, and
+  all source fingerprints returned by the worker. `build.prerenderCache: false` is the escape hatch
+  for intentionally non-deterministic pages.
+- **Residual risk:** dynamic data fetched from external systems is not observable by the source
+  fingerprint contract; such routes must opt out of `prerenderCache` when that data is part of the
+  build result.
 - **Residual risk:** bounded FIFO caches can evict hot entries on projects larger than their limits;
   this affects performance only, not correctness.
 - **Open questions:** None identified.
@@ -118,5 +134,6 @@ from route/module loops.
 - **Scope alignment:** Only production build/content compilation paths and their documentation
   changed. Public CLI, config, manifest, route, plugin, boundary, source-map, and output contracts
   remain intact.
-- **Handoff readiness:** The remaining plugin serialization and incremental prerender opportunities
-  are isolated follow-ups, not correctness blockers for this delivery.
+- **Handoff readiness:** Plugin concurrency and incremental prerender invalidation are now explicit
+  contracts. Follow-up work should focus on richer external-data dependency declarations rather than
+  weakening the safe defaults.

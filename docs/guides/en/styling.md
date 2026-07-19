@@ -58,8 +58,11 @@ project-relative file path and original class. The emitted CSS uses the same nam
 collisions across components while keeping builds reproducible. Production minification and dev HMR
 use the same module mapping.
 
-CSS Modules scope local class selectors. CSS Modules extensions such as `composes` and
-`:global(...)` are not part of the public contract.
+CSS Modules scope local class selectors. Plain CSS nesting is scoped in the same way as top-level
+selectors. `:global(.name)` intentionally leaves that selector global, while local
+`composes: other;` adds the composed class to the exported map and removes the declaration from
+emitted CSS. Cross-file composition (`composes: other from './other.module.css'`) is not supported
+by the built-in transformer and should be replaced with an explicit class composition in code.
 
 ## TypeScript
 

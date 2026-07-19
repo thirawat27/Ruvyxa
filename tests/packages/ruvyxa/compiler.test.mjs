@@ -103,6 +103,8 @@ summary: |
 # Repeat
 # Repeat
 ## ภาษาไทย
+## 🚀
+## ✨
 
 | Left | Right |
 | :--- | ----: |
@@ -137,12 +139,47 @@ A note[^1]
         { depth: 1, slug: 'repeat', text: 'Repeat' },
         { depth: 1, slug: 'repeat-1', text: 'Repeat' },
         { depth: 2, slug: 'ภาษาไทย', text: 'ภาษาไทย' },
+        { depth: 2, slug: 'section', text: '🚀' },
+        { depth: 2, slug: 'section-1', text: '✨' },
       ])
       assert.match(output, /id:\s*"repeat-1"/)
       assert.match(output, /contains-task-list/)
       assert.match(output, /task-list-item/)
       assert.match(output, /data-footnotes/)
       assert.match(output, /textAlign/)
+    })
+  })
+
+  it('preserves MDX metadata exported through aliases, functions, and classes', async () => {
+    await withFixture(async ({ root, outDir }) => {
+      const pageFile = path.join(root, 'metadata-exports.mdx')
+      const outfile = path.join(outDir, 'metadata-exports.mjs')
+      await writeFile(
+        pageFile,
+        `export const customHeadings = [{ depth: 1, slug: 'custom', text: 'Custom' }]
+export { customHeadings as headings }
+export function meta() { return 'custom-meta' }
+export async function frontmatter() { return {} }
+export class contentFormat {}
+
+# Generated heading
+`,
+      )
+
+      await compileBundle({
+        projectRoot: root,
+        entrySource: `export { headings, meta, frontmatter, contentFormat } from ${JSON.stringify(toImportPath(pageFile))}`,
+        sourcefile: 'ruvyxa:metadata-exports-entry.ts',
+        outfile,
+        platform: 'node',
+        external: ['react', 'react/jsx-runtime'],
+      })
+
+      const mod = await import(pathToFileURL(outfile).href + `?t=${Date.now()}`)
+      assert.deepEqual(mod.headings, [{ depth: 1, slug: 'custom', text: 'Custom' }])
+      assert.equal(mod.meta(), 'custom-meta')
+      assert.equal(typeof mod.frontmatter, 'function')
+      assert.equal(typeof mod.contentFormat, 'function')
     })
   })
 
@@ -732,7 +769,16 @@ A note[^1]
     await withFixture(async ({ root, outDir }) => {
       const pageFile = path.join(root, 'page.ts')
       const outfile = path.join(outDir, 'style-modules.mjs')
-      await writeFile(path.join(root, 'card.module.css'), '.card { color: navy; }\n')
+      await writeFile(
+        path.join(root, 'card.module.css'),
+        `.base { color: navy; }
+.card {
+  composes: base;
+  & .title { color: white; }
+  :global(.theme-dark) .icon { color: black; }
+}
+`,
+      )
       await writeFile(path.join(root, '_tokens.scss'), '$accent: rebeccapurple;\n')
       await writeFile(
         path.join(root, 'panel.module.scss'),
@@ -743,7 +789,7 @@ A note[^1]
         `
           import card from './card.module.css'
           import panel from './panel.module.scss'
-          export const classes = [card.card, panel.panel]
+          export const classes = [card.card, card.base, card.title, card.icon, card['theme-dark'], panel.panel]
         `,
       )
 
@@ -756,11 +802,37 @@ A note[^1]
       })
       const mod = await import(`${pathToFileURL(outfile).href}?t=${Date.now()}`)
 
-      assert.equal(mod.classes[0], 'card_card__a0c386682b31a0c2')
-      assert.equal(mod.classes[1], 'panel_panel__9ffbc1bad8f2e789')
+      assert.deepEqual(mod.classes[0].split(' '), ['card_card__a0c386682b31a0c2', mod.classes[1]])
+      assert.match(mod.classes[2], /^card_title__/)
+      assert.match(mod.classes[3], /^card_icon__/)
+      assert.equal(mod.classes[4], undefined)
+      assert.equal(mod.classes[5], 'panel_panel__9ffbc1bad8f2e789')
       assert.ok(result.inputs.includes('card.module.css'))
       assert.ok(result.inputs.includes('panel.module.scss'))
       assert.ok(result.inputs.includes('_tokens.scss'))
+    })
+  })
+
+  it('reports stable Sass diagnostics for invalid modules', async () => {
+    await withFixture(async ({ root, outDir }) => {
+      const pageFile = path.join(root, 'invalid-style.ts')
+      const outfile = path.join(outDir, 'invalid-style.mjs')
+      await writeFile(path.join(root, 'broken.module.scss'), '.broken { color: $missing; }\n')
+      await writeFile(
+        pageFile,
+        "import broken from './broken.module.scss'; export default broken\n",
+      )
+
+      await assert.rejects(
+        compileBundle({
+          projectRoot: root,
+          entrySource: `export { default } from ${JSON.stringify(toImportPath(pageFile))}`,
+          sourcefile: 'ruvyxa:invalid-style-entry.ts',
+          outfile,
+          platform: 'node',
+        }),
+        /RUV1402 Sass compilation failed/,
+      )
     })
   })
 
@@ -813,6 +885,7 @@ A note[^1]
             plugins: [
               {
                 name: "replace-label",
+                parallel: true,
                 transform(code, id, ctx) {
                   if (ctx.environment !== "client" || !id.endsWith("page.tsx")) return null
                   return { code: code.replace("Original", "Transformed") }
@@ -828,6 +901,7 @@ A note[^1]
       assert.deepEqual(config.config.css.entries, ['styles/global.css'])
       assert.equal(config.config.plugins[0].name, 'replace-label')
       assert.equal(config.config.plugins[0].transform, true)
+      assert.equal(config.config.plugins[0].parallel, true)
 
       const transformed = await runJson(pluginRunner, [root, 'transform'], {
         code: await readFile(pageFile, 'utf8'),
@@ -938,6 +1012,7 @@ A note[^1]
       await writeFile(
         path.join(root, 'ruvyxa.config.ts'),
         `export default {
+          build: { prerenderCache: false },
           render: { strategy: 'isr', revalidate: 90 },
           middleware: { builtin: { timing: false, headers: { 'X-Frame-Options': 'DENY' } } }
         }`,
@@ -948,6 +1023,7 @@ A note[^1]
         strategy: 'isr',
         revalidate: 90,
       })
+      assert.deepEqual(config.config.build, { prerenderCache: false })
       assert.deepEqual(config.config.middleware, {
         builtin: { timing: false, headers: { 'X-Frame-Options': 'DENY' } },
       })

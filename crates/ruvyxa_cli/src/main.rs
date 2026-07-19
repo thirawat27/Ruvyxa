@@ -5,6 +5,7 @@ use std::io::{BufRead, BufReader, IsTerminal, Write};
 use std::net::IpAddr;
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, ChildStdout, Command as ProcessCommand, Stdio};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::SystemTime;
 use std::time::{Duration, Instant};
@@ -210,6 +211,8 @@ struct BuildConfigOptions {
     emit_chunk_manifest: Option<bool>,
     #[serde(rename = "warm")]
     prebundle_dependencies: Option<bool>,
+    #[serde(rename = "prerenderCache")]
+    prerender_cache: Option<bool>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -273,6 +276,7 @@ struct BuildPluginConfig {
     enforce: Option<String>,
     resolve_id: bool,
     transform: bool,
+    parallel: bool,
 }
 
 struct NativeBuildCache<'a> {
@@ -865,6 +869,10 @@ async fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Resul
         &client_dir,
         &style_collection.css,
         &config.build,
+        NativeBuildCache {
+            dependency_hash: &config.config_dependency_hash,
+            directory: &build_cache_dir(&args.root, &config.cache),
+        },
     )
     .await?;
     let prerender_duration = phase_started.elapsed();
@@ -908,6 +916,7 @@ async fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Resul
             "target": config.build.es_target.as_deref().unwrap_or("es2022"),
             "manifest": config.build.emit_chunk_manifest.unwrap_or(false),
             "warm": config.build.prebundle_dependencies.unwrap_or(true),
+            "prerenderCache": config.build.prerender_cache.unwrap_or(true),
             "workers": client_manifest.get("parallelism").cloned().unwrap_or(serde_json::Value::Null)
         },
         "render": {
@@ -916,6 +925,7 @@ async fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Resul
                 "path": p.path,
                 "strategy": format!("{:?}", p.strategy).to_lowercase(),
                 "revalidate": p.revalidate,
+                "cacheHit": p.artifact_cache_hit,
             })).collect::<Vec<_>>()
         },
         "timing": {
@@ -1174,6 +1184,7 @@ fn route_render_symbol(strategy: RenderStrategy) -> &'static str {
 const BUILD_OUTPUT_DIRS: [&str; 4] = ["server", "client", "assets", "prerender"];
 const BUILD_OUTPUT_FILES: [&str; 2] = ["manifest.json", "build.json"];
 const MAX_PRERENDER_PARALLELISM: usize = 2;
+const MAX_JS_PLUGIN_WORKERS: usize = 8;
 const WINDOWS_RENAME_RETRY_COUNT: usize = 5;
 
 /// A route that was pre-rendered at build time.
@@ -1183,6 +1194,16 @@ struct PrerenderedRoute {
     strategy: RenderStrategy,
     revalidate: Option<u64>,
     html_file: PathBuf,
+    artifact_cache_hit: bool,
+}
+
+#[derive(Clone)]
+struct PrerenderArtifactCache {
+    directory: PathBuf,
+    dependency_hash: String,
+    render_context_hash: String,
+    fingerprints: Arc<ArtifactFingerprintCache>,
+    enabled: bool,
 }
 
 #[derive(Debug, Clone)]
@@ -1214,6 +1235,7 @@ struct PrerenderJob {
 /// - CSR routes: emits a minimal shell HTML (no server rendering)
 ///
 /// Returns a list of all pre-rendered routes with their metadata.
+#[allow(clippy::too_many_arguments)]
 async fn prerender_static_routes(
     root: &Path,
     app_dir: &Path,
@@ -1222,6 +1244,7 @@ async fn prerender_static_routes(
     client_dir: &Path,
     styles: &str,
     build: &BuildConfigOptions,
+    cache: NativeBuildCache<'_>,
 ) -> anyhow::Result<Vec<PrerenderedRoute>> {
     use ruvyxa_graph::RouteKind;
 
@@ -1258,6 +1281,15 @@ async fn prerender_static_routes(
             ruvyxa_bundler::JsxRuntime::Automatic => "automatic".to_string(),
         },
     );
+    let render_context_hash =
+        prerender_context_hash(root, styles, &client_assets, build, &worker_env);
+    let artifact_cache = PrerenderArtifactCache {
+        directory: cache.directory.to_path_buf(),
+        dependency_hash: cache.dependency_hash.to_string(),
+        render_context_hash,
+        fingerprints: Arc::new(ArtifactFingerprintCache::default()),
+        enabled: build.prerender_cache.unwrap_or(true),
+    };
     let worker_pool = std::sync::Arc::new(
         ruvyxa_dev_server::NodeWorkerPool::start_with_size(root, worker_env, Some(parallelism))
             .await
@@ -1334,6 +1366,7 @@ async fn prerender_static_routes(
                 let prerender_dir = prerender_dir.to_path_buf();
                 let client_assets = client_assets.clone();
                 let styles = shared_styles.clone();
+                let artifact_cache = artifact_cache.clone();
                 pending.spawn(async move {
                     render_prerender_job(
                         &worker_pool,
@@ -1343,6 +1376,7 @@ async fn prerender_static_routes(
                         &client_assets,
                         &styles,
                         &job,
+                        &artifact_cache,
                     )
                     .await
                     .map(|route| (index, route))
@@ -1371,6 +1405,7 @@ async fn prerender_static_routes(
                 "strategy": format!("{:?}", p.strategy).to_lowercase(),
                 "revalidate": p.revalidate,
                 "htmlFile": p.html_file.file_name().and_then(|n| n.to_str()).unwrap_or_default(),
+                "cacheHit": p.artifact_cache_hit,
             })).collect::<Vec<_>>()
         });
         fs::write(
@@ -1390,6 +1425,7 @@ async fn prerender_static_routes(
     prerendered
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn render_prerender_job(
     worker_pool: &ruvyxa_dev_server::NodeWorkerPool,
     root: &Path,
@@ -1398,52 +1434,81 @@ async fn render_prerender_job(
     client_assets: &BTreeMap<String, PrerenderClientAssets>,
     styles: &str,
     job: &PrerenderJob,
+    artifact_cache: &PrerenderArtifactCache,
 ) -> anyhow::Result<PrerenderedRoute> {
     let html_path = prerender_html_path(prerender_dir, &job.render_path);
     if let Some(parent) = html_path.parent() {
         fs::create_dir_all(parent)?;
     }
 
+    let mut artifact_cache_hit = false;
     let html = match &job.kind {
         PrerenderJobKind::Csr => csr_shell_html(&job.route_path, client_assets, styles),
         PrerenderJobKind::Render { route_file, mode } => {
-            let result = worker_pool
-                .render_ssg_isolated(
-                    root,
-                    app_dir,
-                    Path::new(route_file),
+            if artifact_cache.enabled
+                && let Some(html) = load_prerender_artifact(artifact_cache, job)
+            {
+                artifact_cache_hit = true;
+                html
+            } else {
+                let result = worker_pool
+                    .render_ssg_isolated(
+                        root,
+                        app_dir,
+                        Path::new(route_file),
+                        &job.render_path,
+                        &job.params,
+                        mode,
+                    )
+                    .await
+                    .map_err(|error| {
+                        anyhow::anyhow!("Pre-rendering failed for {}: {error}", job.render_path)
+                    })?;
+                if !result.ok {
+                    let message = result
+                        .message
+                        .unwrap_or_else(|| "unknown error".to_string());
+                    let code = result.code.unwrap_or_default();
+                    anyhow::bail!(
+                        "Pre-rendering failed for {}: {code} {message}",
+                        job.render_path
+                    );
+                }
+                let dependency_hash = result
+                    .dependency_hash
+                    .unwrap_or_else(|| "worker-legacy-renderer".to_string());
+                let inputs = result.inputs.unwrap_or_default();
+                let html = result.html.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Pre-rendering failed for {}: worker completed without HTML",
+                        job.render_path
+                    )
+                })?;
+                let html = inject_prerender_styles(&html, styles);
+                let html = inject_prerender_client_assets(
+                    &html,
+                    client_assets,
+                    &job.route_path,
                     &job.render_path,
                     &job.params,
-                    mode,
-                )
-                .await
-                .map_err(|error| {
-                    anyhow::anyhow!("Pre-rendering failed for {}: {error}", job.render_path)
-                })?;
-            if !result.ok {
-                let message = result
-                    .message
-                    .unwrap_or_else(|| "unknown error".to_string());
-                let code = result.code.unwrap_or_default();
-                anyhow::bail!(
-                    "Pre-rendering failed for {}: {code} {message}",
-                    job.render_path
                 );
+                if artifact_cache.enabled {
+                    let mut stable_inputs = stable_prerender_inputs(root, app_dir, &inputs);
+                    stable_inputs.extend(stable_prerender_inputs(
+                        root,
+                        app_dir,
+                        std::slice::from_ref(route_file),
+                    ));
+                    store_prerender_artifact(
+                        artifact_cache,
+                        job,
+                        &dependency_hash,
+                        &stable_inputs,
+                        &html,
+                    );
+                }
+                html
             }
-            let html = result.html.ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Pre-rendering failed for {}: worker completed without HTML",
-                    job.render_path
-                )
-            })?;
-            let html = inject_prerender_styles(&html, styles);
-            inject_prerender_client_assets(
-                &html,
-                client_assets,
-                &job.route_path,
-                &job.render_path,
-                &job.params,
-            )
         }
     };
 
@@ -1453,7 +1518,26 @@ async fn render_prerender_job(
         strategy: job.strategy,
         revalidate: job.revalidate,
         html_file: html_path,
+        artifact_cache_hit,
     })
+}
+
+fn stable_prerender_inputs(root: &Path, app_dir: &Path, inputs: &[PathBuf]) -> Vec<PathBuf> {
+    let staging_root = app_dir.parent().and_then(Path::parent);
+    inputs
+        .iter()
+        .map(|input| {
+            let input = input.canonicalize().unwrap_or_else(|_| input.clone());
+            staging_root
+                .and_then(|staging_root| {
+                    input.strip_prefix(staging_root).ok().map(|relative| {
+                        let relative = relative.strip_prefix("server").unwrap_or(relative);
+                        root.join(relative)
+                    })
+                })
+                .unwrap_or(input)
+        })
+        .collect()
 }
 
 /// Resolve static params for a dynamic SSG route by calling getStaticParams
@@ -1687,7 +1771,7 @@ fn inject_prerender_styles(html: &str, styles: &str) -> String {
     format!("<!doctype html><html><head>{style_tag}</head><body>{html}</body></html>")
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 struct PrerenderClientAssets {
     src: String,
     preloads: Vec<String>,
@@ -1818,6 +1902,16 @@ struct CachedSharedRouteArtifact {
     modules: Vec<PathBuf>,
 }
 
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct CachedPrerenderArtifact {
+    version: u8,
+    dependency_hash: String,
+    render_context_hash: String,
+    renderer_dependency_hash: String,
+    files: BTreeMap<PathBuf, String>,
+    html: String,
+}
+
 #[derive(Clone)]
 struct ClientRoutePlan {
     path: String,
@@ -1869,7 +1963,8 @@ struct SharedRouteChunk {
 #[derive(Clone)]
 struct JsConfigPluginBridge {
     project_root: PathBuf,
-    worker: Arc<Mutex<JsPluginWorker>>,
+    workers: Arc<Vec<Mutex<JsPluginWorker>>>,
+    next_worker: Arc<AtomicUsize>,
     has_resolve_id: bool,
     has_transform: bool,
 }
@@ -1968,7 +2063,8 @@ impl JsConfigPluginBridge {
         mut payload: serde_json::Value,
     ) -> ruvyxa_bundler::Result<Option<serde_json::Value>> {
         payload["hook"] = serde_json::Value::String(hook.to_string());
-        let mut worker = self.worker.lock().map_err(|_| {
+        let worker_index = self.next_worker.fetch_add(1, Ordering::Relaxed) % self.workers.len();
+        let mut worker = self.workers[worker_index].lock().map_err(|_| {
             ruvyxa_bundler::BundleError::Compiler("JS plugin worker lock was poisoned".into())
         })?;
         let result = worker.call(&payload)?;
@@ -2076,6 +2172,7 @@ fn bundle_context_for_build(
     plugins: &[BuildPluginConfig],
     config_dependency_hash: &str,
     cache_dir: &Path,
+    parallelism: usize,
 ) -> anyhow::Result<ruvyxa_bundler::BundleContext> {
     let compile_cache = ruvyxa_bundler::cache::CompileCache::at_dir_with_namespace(
         cache_dir,
@@ -2095,10 +2192,14 @@ fn bundle_context_for_build(
     let runner = find_runtime_script(root, "plugin-runner.mjs")
         .ok_or_else(|| anyhow::anyhow!("RUV1701 JS plugin runner not found"))?;
     let project_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let worker = JsPluginWorker::spawn(&runner, &project_root)?;
+    let worker_count = plugin_worker_count(plugins, parallelism);
+    let workers = (0..worker_count)
+        .map(|_| JsPluginWorker::spawn(&runner, &project_root).map(Mutex::new))
+        .collect::<ruvyxa_bundler::Result<Vec<_>>>()?;
     let bridge = JsConfigPluginBridge {
         project_root,
-        worker: Arc::new(Mutex::new(worker)),
+        workers: Arc::new(workers),
+        next_worker: Arc::new(AtomicUsize::new(0)),
         has_resolve_id,
         has_transform,
     };
@@ -2120,8 +2221,6 @@ fn emit_client_bundles(
     plugins: &[BuildPluginConfig],
     cache: NativeBuildCache<'_>,
 ) -> anyhow::Result<serde_json::Value> {
-    let bundle_context =
-        bundle_context_for_build(root, plugins, cache.dependency_hash, cache.directory)?;
     let page_routes = manifest
         .routes
         .iter()
@@ -2129,6 +2228,13 @@ fn emit_client_bundles(
         .cloned()
         .collect::<Vec<_>>();
     let parallelism = build_parallelism(build.parallelism, page_routes.len());
+    let bundle_context = bundle_context_for_build(
+        root,
+        plugins,
+        cache.dependency_hash,
+        cache.directory,
+        parallelism,
+    )?;
     let artifact_cache_dir = cache.directory.to_path_buf();
     let artifact_dependency_hash = cache.dependency_hash.to_string();
     let artifact_fingerprints = ArtifactFingerprintCache::default();
@@ -2498,6 +2604,18 @@ fn build_parallelism(configured: Option<usize>, work_items: usize) -> usize {
     configured.unwrap_or(available).clamp(1, work_items.max(1))
 }
 
+fn plugin_worker_count(plugins: &[BuildPluginConfig], parallelism: usize) -> usize {
+    let mut active_plugins = plugins
+        .iter()
+        .filter(|plugin| plugin.resolve_id || plugin.transform)
+        .peekable();
+    if active_plugins.peek().is_none() || !active_plugins.all(|plugin| plugin.parallel) {
+        return 1;
+    }
+
+    parallelism.clamp(1, MAX_JS_PLUGIN_WORKERS)
+}
+
 fn prerender_parallelism(configured: Option<usize>, work_items: usize) -> usize {
     let default = std::thread::available_parallelism()
         .map(usize::from)
@@ -2518,7 +2636,8 @@ fn build_plugin_manifest(plugins: &[BuildPluginConfig]) -> serde_json::Value {
                     "name": plugin.name,
                     "enforce": plugin.enforce,
                     "resolveId": plugin.resolve_id,
-                    "transform": plugin.transform
+                    "transform": plugin.transform,
+                    "parallel": plugin.parallel
                 })
             })
             .collect(),
@@ -2905,6 +3024,109 @@ fn shared_route_artifact_cache_file(
     cache_dir
         .join("shared-route-artifacts")
         .join(format!("{}.json", content_hash(&key_source)))
+}
+
+fn prerender_artifact_cache_file(cache_dir: &Path, job: &PrerenderJob) -> PathBuf {
+    let kind = match &job.kind {
+        PrerenderJobKind::Csr => "csr",
+        PrerenderJobKind::Render { mode, .. } => mode,
+    };
+    let key = serde_json::json!({
+        "routePath": job.route_path,
+        "renderPath": job.render_path,
+        "params": job.params,
+        "strategy": format!("{:?}", job.strategy),
+        "revalidate": job.revalidate,
+        "kind": kind,
+    });
+    cache_dir
+        .join("prerender-routes")
+        .join(format!("{}.json", content_hash(&key.to_string())))
+}
+
+fn prerender_context_hash(
+    root: &Path,
+    styles: &str,
+    client_assets: &BTreeMap<String, PrerenderClientAssets>,
+    build: &BuildConfigOptions,
+    project_env: &BTreeMap<String, String>,
+) -> String {
+    let process_env = std::env::vars().collect::<BTreeMap<_, _>>();
+    let context = serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "styles": content_hash(styles),
+        "clientAssets": client_assets,
+        "jsx": build.jsx_runtime.as_deref().unwrap_or("automatic"),
+        "target": build.es_target.as_deref().unwrap_or("es2022"),
+        "workerRuntime": runtime_script_hash(root, "worker-pool.mjs"),
+        "compilerRuntime": runtime_script_hash(root, "compiler.mjs"),
+        "projectEnv": project_env,
+        "processEnv": process_env,
+    });
+    content_hash(&context.to_string())
+}
+
+fn runtime_script_hash(root: &Path, name: &str) -> String {
+    find_runtime_script(root, name)
+        .and_then(|path| fs::read(path).ok())
+        .map(|source| content_hash_bytes(&source))
+        .unwrap_or_default()
+}
+
+fn load_prerender_artifact(cache: &PrerenderArtifactCache, job: &PrerenderJob) -> Option<String> {
+    let cache_file = prerender_artifact_cache_file(&cache.directory, job);
+    let source = fs::read_to_string(&cache_file).ok()?;
+    let artifact: CachedPrerenderArtifact = serde_json::from_str(&source).ok()?;
+    if artifact.version != 1
+        || artifact.dependency_hash != cache.dependency_hash
+        || artifact.render_context_hash != cache.render_context_hash
+        || artifact.renderer_dependency_hash.is_empty()
+        || artifact.files.is_empty()
+    {
+        return None;
+    }
+    let valid = artifact
+        .files
+        .iter()
+        .all(|(path, expected)| cache.fingerprints.fingerprint(path).as_deref() == Some(expected));
+    valid.then_some(artifact.html)
+}
+
+fn store_prerender_artifact(
+    cache: &PrerenderArtifactCache,
+    job: &PrerenderJob,
+    renderer_dependency_hash: &str,
+    inputs: &[PathBuf],
+    html: &str,
+) {
+    if renderer_dependency_hash.is_empty() {
+        return;
+    }
+    let files = inputs
+        .iter()
+        .map(|path| path.canonicalize().unwrap_or_else(|_| path.clone()))
+        .filter_map(|path| {
+            cache
+                .fingerprints
+                .fingerprint(&path)
+                .map(|fingerprint| (path, fingerprint))
+        })
+        .collect::<BTreeMap<_, _>>();
+    if files.is_empty() {
+        return;
+    }
+    let artifact = CachedPrerenderArtifact {
+        version: 1,
+        dependency_hash: cache.dependency_hash.clone(),
+        render_context_hash: cache.render_context_hash.clone(),
+        renderer_dependency_hash: renderer_dependency_hash.to_string(),
+        files,
+        html: html.to_string(),
+    };
+    let Ok(source) = serde_json::to_vec(&artifact) else {
+        return;
+    };
+    write_client_cache_file(prerender_artifact_cache_file(&cache.directory, job), source);
 }
 
 fn load_shared_route_artifact(
@@ -4429,6 +4651,26 @@ mod tests {
     }
 
     #[test]
+    fn plugin_workers_require_unanimous_parallel_opt_in() {
+        let plugin = |name: &str, parallel: bool| BuildPluginConfig {
+            name: name.to_string(),
+            transform: true,
+            parallel,
+            ..BuildPluginConfig::default()
+        };
+
+        assert_eq!(plugin_worker_count(&[plugin("safe", true)], 6), 6);
+        assert_eq!(
+            plugin_worker_count(&[plugin("safe", true), plugin("stateful", false)], 6),
+            1
+        );
+        assert_eq!(
+            plugin_worker_count(&[plugin("safe", true)], usize::MAX),
+            MAX_JS_PLUGIN_WORKERS
+        );
+    }
+
+    #[test]
     fn caps_default_prerender_parallelism_to_limit_and_available_work() {
         assert_eq!(prerender_parallelism(None, 1), 1);
         assert!(prerender_parallelism(None, 10) <= MAX_PRERENDER_PARALLELISM);
@@ -4467,6 +4709,50 @@ mod tests {
         );
         assert_eq!(second, first);
         assert_eq!(cache.entry_count(), 1);
+    }
+
+    #[test]
+    fn prerender_artifact_cache_reuses_and_invalidates_dependency_content() {
+        let temp = tempfile::tempdir().unwrap();
+        let source = temp.path().join("page.tsx");
+        fs::write(&source, "export default () => 'first'").unwrap();
+        let job = PrerenderJob {
+            route_path: "/cached".to_string(),
+            render_path: "/cached".to_string(),
+            params: RouteParams::new(),
+            strategy: RenderStrategy::Ssg,
+            revalidate: None,
+            kind: PrerenderJobKind::Render {
+                route_file: source.clone(),
+                mode: "full",
+            },
+        };
+        let cache = PrerenderArtifactCache {
+            directory: temp.path().join("cache"),
+            dependency_hash: "config-v1".to_string(),
+            render_context_hash: "context-v1".to_string(),
+            fingerprints: Arc::new(ArtifactFingerprintCache::default()),
+            enabled: true,
+        };
+
+        store_prerender_artifact(
+            &cache,
+            &job,
+            "renderer-v1",
+            std::slice::from_ref(&source),
+            "<main>first</main>",
+        );
+        assert_eq!(
+            load_prerender_artifact(&cache, &job).as_deref(),
+            Some("<main>first</main>")
+        );
+
+        fs::write(&source, "export default () => 'second'").unwrap();
+        let next_build_cache = PrerenderArtifactCache {
+            fingerprints: Arc::new(ArtifactFingerprintCache::default()),
+            ..cache
+        };
+        assert!(load_prerender_artifact(&next_build_cache, &job).is_none());
     }
 
     #[test]
@@ -4632,11 +4918,13 @@ mod tests {
             "treeShake": false,
             "manifest": true,
             "warm": false
+            ,"prerenderCache": false
         }))
         .unwrap();
         assert_eq!(config.tree_shaking, Some(false));
         assert_eq!(config.emit_chunk_manifest, Some(true));
         assert_eq!(config.prebundle_dependencies, Some(false));
+        assert_eq!(config.prerender_cache, Some(false));
     }
 
     #[test]
@@ -4647,7 +4935,8 @@ mod tests {
                     "name": "banner",
                     "enforce": "pre",
                     "resolveId": true,
-                    "transform": true
+                    "transform": true,
+                    "parallel": true
                 }
             ]
         }))
@@ -4658,10 +4947,12 @@ mod tests {
         assert_eq!(config.plugins[0].enforce.as_deref(), Some("pre"));
         assert!(config.plugins[0].resolve_id);
         assert!(config.plugins[0].transform);
+        assert!(config.plugins[0].parallel);
 
         let manifest = build_plugin_manifest(&config.plugins);
         assert_eq!(manifest[0]["name"], "banner");
         assert_eq!(manifest[0]["resolveId"], true);
+        assert_eq!(manifest[0]["parallel"], true);
     }
 
     #[test]
@@ -4734,6 +5025,7 @@ mod tests {
             es_target: Some("es2022".to_string()),
             emit_chunk_manifest: Some(true),
             prebundle_dependencies: Some(true),
+            prerender_cache: Some(true),
         };
 
         let client_manifest = emit_client_bundles(
@@ -5217,10 +5509,12 @@ export default {
         .unwrap();
 
         let runner = find_runtime_script(root, "plugin-runner.mjs").unwrap();
-        let worker = JsPluginWorker::spawn(&runner, root).unwrap();
         let bridge = JsConfigPluginBridge {
             project_root: root.to_path_buf(),
-            worker: Arc::new(Mutex::new(worker)),
+            workers: Arc::new(vec![Mutex::new(
+                JsPluginWorker::spawn(&runner, root).unwrap(),
+            )]),
+            next_worker: Arc::new(AtomicUsize::new(0)),
             has_resolve_id: false,
             has_transform: true,
         };
@@ -5250,6 +5544,61 @@ export default {
         assert!(first.code.contains("pluginCall = 1"));
         assert!(second.code.contains("pluginCall = 2"));
         assert!(second.map.unwrap().contains("counter-input.ts"));
+    }
+
+    #[test]
+    fn js_config_plugin_bridge_distributes_parallel_safe_hooks() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        std::fs::write(
+            root.join("ruvyxa.config.mjs"),
+            r#"
+export default {
+  plugins: [{
+    name: "worker-id",
+    parallel: true,
+    transform(code) {
+      return { code: `${code}\nexport const pluginPid = ${process.pid}` }
+    },
+  }],
+}
+"#,
+        )
+        .unwrap();
+
+        let runner = find_runtime_script(root, "plugin-runner.mjs").unwrap();
+        let workers = (0..2)
+            .map(|_| Mutex::new(JsPluginWorker::spawn(&runner, root).unwrap()))
+            .collect();
+        let bridge = JsConfigPluginBridge {
+            project_root: root.to_path_buf(),
+            workers: Arc::new(workers),
+            next_worker: Arc::new(AtomicUsize::new(0)),
+            has_resolve_id: false,
+            has_transform: true,
+        };
+        let context = ruvyxa_bundler::plugin::PluginContext {
+            project_root: root.to_path_buf(),
+            importer: None,
+            target: ruvyxa_bundler::BundleTarget::Client,
+        };
+        let transform = |id| {
+            ruvyxa_bundler::plugin::RuvyxaBundlerPlugin::transform(
+                &bridge,
+                "export const value = 1",
+                &root.join(id),
+                &context,
+            )
+            .unwrap()
+            .unwrap()
+            .code
+        };
+
+        let first = transform("first.ts");
+        let second = transform("second.ts");
+        let first_pid = first.rsplit("pluginPid = ").next().unwrap();
+        let second_pid = second.rsplit("pluginPid = ").next().unwrap();
+        assert_ne!(first_pid, second_pid, "hooks should use isolated workers");
     }
 
     #[test]

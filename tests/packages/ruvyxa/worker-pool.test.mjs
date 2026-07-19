@@ -240,6 +240,8 @@ export default function Page({ params }) {
   })
   assert.equal(automaticRender.ok, true, automaticRender.message)
   assert.match(automaticRender.html, /one-first-1:1/)
+  assert.match(automaticRender.dependencyHash, /^[a-f0-9]{64}$/)
+  assert.ok(automaticRender.inputs.some((input) => path.resolve(input) === path.resolve(pageFile)))
 
   const cachedParams = await request(staticParamsRequest)
   assert.equal(cachedParams.ok, true, cachedParams.message)

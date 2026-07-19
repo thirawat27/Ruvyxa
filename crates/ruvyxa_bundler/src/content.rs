@@ -197,19 +197,124 @@ fn module_source(
 }
 
 fn content_export(esm: &str, name: &str, value: &str) -> String {
-    let declarations = [
-        format!("export const {name}"),
-        format!("export let {name}"),
-        format!("export var {name}"),
-    ];
-    if declarations
-        .iter()
-        .any(|declaration| esm.contains(declaration))
-    {
+    if has_named_export(esm, name) {
         String::new()
     } else {
         format!("export const {name} = {value};\n")
     }
+}
+
+fn has_named_export(source: &str, name: &str) -> bool {
+    let tokens = javascript_tokens(source);
+    for (index, token) in tokens.iter().enumerate() {
+        if token != "export" {
+            continue;
+        }
+        let mut cursor = index + 1;
+        if tokens.get(cursor).is_some_and(|token| token == "async") {
+            cursor += 1;
+        }
+        match tokens.get(cursor).map(String::as_str) {
+            Some("const" | "let" | "var") => {
+                if tokens.get(cursor + 1).is_some_and(|token| token == name) {
+                    return true;
+                }
+            }
+            Some("function" | "class") => {
+                cursor += 1;
+                if tokens.get(cursor).is_some_and(|token| token == "*") {
+                    cursor += 1;
+                }
+                if tokens.get(cursor).is_some_and(|token| token == name) {
+                    return true;
+                }
+            }
+            Some("{") => {
+                cursor += 1;
+                let mut specifier = Vec::new();
+                while let Some(token) = tokens.get(cursor) {
+                    if token == "," || token == "}" {
+                        let exported = specifier
+                            .iter()
+                            .position(|token| *token == "as")
+                            .and_then(|as_index| specifier.get(as_index + 1))
+                            .or_else(|| specifier.first());
+                        if exported.is_some_and(|token| *token == name) {
+                            return true;
+                        }
+                        specifier.clear();
+                        if token == "}" {
+                            break;
+                        }
+                    } else if token != "type" {
+                        specifier.push(token);
+                    }
+                    cursor += 1;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn javascript_tokens(source: &str) -> Vec<String> {
+    let characters = source.chars().collect::<Vec<_>>();
+    let mut tokens = Vec::new();
+    let mut index = 0;
+    while index < characters.len() {
+        let character = characters[index];
+        if character.is_whitespace() {
+            index += 1;
+            continue;
+        }
+        if character == '/' && characters.get(index + 1) == Some(&'/') {
+            index += 2;
+            while index < characters.len() && characters[index] != '\n' {
+                index += 1;
+            }
+            continue;
+        }
+        if character == '/' && characters.get(index + 1) == Some(&'*') {
+            index += 2;
+            while index + 1 < characters.len()
+                && !(characters[index] == '*' && characters[index + 1] == '/')
+            {
+                index += 1;
+            }
+            index = (index + 2).min(characters.len());
+            continue;
+        }
+        if matches!(character, '\'' | '"' | '`') {
+            let quote = character;
+            index += 1;
+            while index < characters.len() {
+                if characters[index] == '\\' {
+                    index = (index + 2).min(characters.len());
+                } else if characters[index] == quote {
+                    index += 1;
+                    break;
+                } else {
+                    index += 1;
+                }
+            }
+            continue;
+        }
+        if character.is_alphanumeric() || matches!(character, '_' | '$') {
+            let start = index;
+            index += 1;
+            while index < characters.len()
+                && (characters[index].is_alphanumeric() || matches!(characters[index], '_' | '$'))
+            {
+                index += 1;
+            }
+            tokens.push(characters[start..index].iter().collect());
+            continue;
+        }
+        tokens.push(character.to_string());
+        index += 1;
+    }
+    tokens
 }
 
 fn split_frontmatter(source: &str) -> Result<(Option<String>, String), String> {
@@ -829,7 +934,11 @@ fn slugify(value: &str) -> String {
             separator = true;
         }
     }
-    output
+    if output.is_empty() {
+        "section".to_string()
+    } else {
+        output
+    }
 }
 
 fn js_string(value: &str) -> String {
@@ -882,6 +991,36 @@ mod tests {
         assert!(module.contains("(name)"));
         assert!(module.contains("components[\"strong\"] || \"strong\""));
         assert!(module.contains("RuvyxaContentPage({ components = {} } = {})"));
+    }
+
+    #[test]
+    fn uses_stable_fallback_slugs_for_symbol_only_headings() {
+        let module = compile_content_module("# 🚀\n# ✨", Path::new("page.mdx")).unwrap();
+        assert!(module.contains("\"slug\":\"section\""), "{module}");
+        assert!(module.contains("\"slug\":\"section-1\""), "{module}");
+        assert!(module.contains("id: \"section\""), "{module}");
+        assert!(module.contains("id: \"section-1\""), "{module}");
+    }
+
+    #[test]
+    fn recognizes_all_supported_named_export_forms() {
+        assert!(has_named_export(
+            "const custom = []; export { custom as headings }",
+            "headings"
+        ));
+        assert!(has_named_export("export function meta() {}", "meta"));
+        assert!(has_named_export(
+            "export async function frontmatter() {}",
+            "frontmatter"
+        ));
+        assert!(has_named_export(
+            "export class contentFormat {}",
+            "contentFormat"
+        ));
+        assert!(!has_named_export(
+            "// export const headings = []\nconst text = 'export class meta {}'",
+            "headings"
+        ));
     }
 
     #[test]

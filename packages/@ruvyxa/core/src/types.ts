@@ -25,6 +25,8 @@ export interface RuvyxaConfig {
     manifest?: boolean
     /** Precompile dev route modules and load their dependencies in background workers. */
     warm?: boolean
+    /** Reuse fingerprint-validated final prerender HTML between production builds. @default true */
+    prerenderCache?: boolean
   }
   render?: RenderConfig
   debug?: {
@@ -249,6 +251,11 @@ export interface PluginContext {
 export interface RuvyxaPlugin {
   name: string
   enforce?: 'pre' | 'post'
+  /**
+   * Allow build hooks to run in multiple isolated Node workers. Enable only when every hook is
+   * deterministic and does not depend on process-local mutable state. @default false
+   */
+  parallel?: boolean
   resolveId?(id: string): string | null | Promise<string | null>
   transform?(
     code: string,

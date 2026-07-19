@@ -94,6 +94,7 @@ async function sanitizeConfig(config) {
     'target',
     'manifest',
     'warm',
+    'prerenderCache',
   ])
   assertKnownKeys(config.debug, 'config.debug', ['overlay', 'traces'])
   assertKnownKeys(config.image, 'config.image', ['optimize', 'quality', 'lossless', 'workers'])
@@ -176,6 +177,7 @@ async function sanitizeConfig(config) {
       target: stringValue(config.build?.target),
       manifest: booleanValue(config.build?.manifest),
       warm: booleanValue(config.build?.warm),
+      prerenderCache: booleanValue(config.build?.prerenderCache),
     }),
     render: objectValue(config.render, {
       strategy: stringValue(config.render?.strategy),
@@ -235,6 +237,7 @@ function assertConfigValueShape(config) {
       target: 'string',
       manifest: 'boolean',
       warm: 'boolean',
+      prerenderCache: 'boolean',
     },
     render: { strategy: 'string', revalidate: 'number' },
     debug: { overlay: 'boolean', traces: 'boolean' },
@@ -365,6 +368,7 @@ function pluginDescriptors(value) {
       enforce: stringValue(plugin.enforce),
       resolveId: typeof plugin.resolveId === 'function',
       transform: typeof plugin.transform === 'function',
+      parallel: plugin.parallel === true,
     }))
 
   return plugins.length > 0 ? plugins : undefined

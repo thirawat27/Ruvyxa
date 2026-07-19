@@ -241,22 +241,62 @@ fn sass_dependency_paths(root: &Path, entry: &Path) -> Vec<PathBuf> {
 }
 
 fn sass_imports(source: &str) -> Vec<String> {
-    source
-        .lines()
-        .filter_map(|line| {
-            let trimmed = line.trim_start();
-            let rest = ["@use", "@forward", "@import"]
-                .iter()
-                .find_map(|directive| trimmed.strip_prefix(directive))?
-                .trim_start();
-            let quote = rest.chars().next()?;
-            if quote != '\'' && quote != '"' {
-                return None;
+    let characters = source.chars().collect::<Vec<_>>();
+    let mut imports = Vec::new();
+    let mut index = 0;
+    while index < characters.len() {
+        if characters[index] == '/' && characters.get(index + 1) == Some(&'/') {
+            index += 2;
+            while index < characters.len() && characters[index] != '\n' {
+                index += 1;
             }
-            let end = rest[1..].find(quote)? + 1;
-            Some(rest[1..end].to_string())
-        })
-        .collect()
+            continue;
+        }
+        if characters[index] == '/' && characters.get(index + 1) == Some(&'*') {
+            index += 2;
+            while index + 1 < characters.len()
+                && !(characters[index] == '*' && characters[index + 1] == '/')
+            {
+                index += 1;
+            }
+            index = (index + 2).min(characters.len());
+            continue;
+        }
+        let directive = ["@forward", "@import", "@use"]
+            .into_iter()
+            .find(|directive| {
+                let expected = directive.chars().collect::<Vec<_>>();
+                characters[index..].starts_with(&expected)
+                    && characters
+                        .get(index + expected.len())
+                        .is_none_or(|character| character.is_whitespace())
+            });
+        let Some(directive) = directive else {
+            index += 1;
+            continue;
+        };
+        index += directive.len();
+        while index < characters.len() && characters[index] != ';' {
+            if matches!(characters[index], '\'' | '"') {
+                let quote = characters[index];
+                index += 1;
+                let start = index;
+                while index < characters.len() && characters[index] != quote {
+                    if characters[index] == '\\' {
+                        index = (index + 2).min(characters.len());
+                    } else {
+                        index += 1;
+                    }
+                }
+                if index <= characters.len() {
+                    imports.push(characters[start..index].iter().collect());
+                }
+            }
+            index += 1;
+        }
+        index += usize::from(index < characters.len());
+    }
+    imports
 }
 
 fn resolve_sass_import(root: &Path, base_dir: &Path, specifier: &str) -> Option<PathBuf> {

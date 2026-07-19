@@ -177,6 +177,8 @@ import type { PluginContext, RuvyxaPlugin, TransformResult } from '@ruvyxa/core'
 export function bannerPlugin(): RuvyxaPlugin {
   return {
     name: 'banner',
+    // Set only when this hook is deterministic and has no process-local mutable state.
+    parallel: true,
     transform(code: string, id: string, ctx: PluginContext): TransformResult | null {
       if (ctx.environment !== 'client' || !id.endsWith('.tsx')) {
         return null
@@ -189,5 +191,9 @@ export function bannerPlugin(): RuvyxaPlugin {
   }
 }
 ```
+
+`parallel` is opt-in. Stateful plugins stay on one persistent worker; a bounded isolated worker pool
+is enabled only when every active build plugin opts in. `build.workers` limits the pool (with a
+framework safety cap), so plugin code must not rely on shared module state between calls.
 
 This package is published as ESM with generated TypeScript declarations.

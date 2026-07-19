@@ -53,8 +53,10 @@ export function Card() {
 deterministic CSS ที่ส่งออกใช้ชื่อเดียวกัน จึงไม่ชนกันข้าม component และผล build ทำซ้ำได้ ทั้ง
 production minification และ dev HMR ใช้ mapping เดียวกัน
 
-CSS Modules รับประกัน local class selectors ส่วน `composes` และ `:global(...)` ยังไม่ใช่ public
-contract
+CSS Modules จะ scope local class selectors รวมถึง nested CSS ด้วย `:global(.name)` จะคง selector
+นั้นเป็น global ส่วน `composes: other;` แบบ local จะเพิ่ม class ที่ compose ลงใน class map และเอา
+declaration ออกจาก CSS ที่ส่งออก การ compose ข้ามไฟล์ (`composes: other from './other.module.css'`)
+ยังไม่รองรับใน built-in transformer ให้ compose class ใน code แทน
 
 TypeScript declarations มาจาก package `ruvyxa` โดยตรง จึงไม่ต้องสร้าง `css.d.ts` ในแอป ส่วน LESS
 ยังไม่อยู่ใน built-in pipeline และจะแสดง diagnostic หาก import โดยไม่มี transform plugin

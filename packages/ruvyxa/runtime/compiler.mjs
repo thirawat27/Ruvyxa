@@ -837,17 +837,27 @@ async function compileStyleModuleSource(source, file, root) {
   let inputs = [path.resolve(file)]
 
   if (extension === '.scss' || extension === '.sass') {
-    const sass = await import('sass')
-    const result = sass.compileString(source, {
-      url: pathToFileURL(file),
-      syntax: extension === '.sass' ? 'indented' : 'scss',
-      loadPaths: [root, path.join(root, 'node_modules')],
-      style: 'expanded',
-    })
-    css = result.css
-    inputs = result.loadedUrls
-      .filter((url) => url.protocol === 'file:')
-      .map((url) => fileURLToPath(url))
+    try {
+      const sass = await import('sass')
+      const result = sass.compileString(source, {
+        url: pathToFileURL(file),
+        syntax: extension === '.sass' ? 'indented' : 'scss',
+        loadPaths: [root, path.join(root, 'node_modules')],
+        style: 'expanded',
+      })
+      css = result.css
+      inputs = [
+        ...new Set([
+          path.resolve(file),
+          ...result.loadedUrls
+            .filter((url) => url.protocol === 'file:')
+            .map((url) => fileURLToPath(url)),
+        ]),
+      ]
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error)
+      throw new Error(`RUV1402 Sass compilation failed for ${file}: ${detail}`)
+    }
   }
 
   const classes = scopeCssModule(css, file, root)
@@ -860,9 +870,12 @@ async function compileStyleModuleSource(source, file, root) {
 function scopeCssModule(css, file, root) {
   let output = ''
   const classes = new Map()
+  const scopedNames = new Map()
   const chars = [...css]
   const blockAllowsRules = [true]
+  const ruleLocalClasses = [[]]
   let prelude = ''
+  let preludeLocals = []
   let index = 0
   let quote = null
   let inComment = false
@@ -907,28 +920,69 @@ function scopeCssModule(css, file, root) {
       continue
     }
 
-    const selectorContext = blockAllowsRules.at(-1) ?? true
+    const selectorContext =
+      (blockAllowsRules.at(-1) ?? true) || statementOpensNestedRule(chars, index)
+    if (selectorContext && chars.slice(index, index + 8).join('') === ':global(') {
+      const global = globalSelectorContents(chars, index + 8)
+      if (global) {
+        output += global.content
+        prelude += global.content
+        index = global.end
+        continue
+      }
+    }
     if (selectorContext && char === '.' && next && /[A-Za-z_-]/.test(next)) {
       let end = index + 1
       while (end < chars.length && /[A-Za-z0-9_-]/.test(chars[end])) end += 1
       const local = chars.slice(index + 1, end).join('')
-      const scoped = classes.get(local) ?? scopedClassName(file, root, local)
-      classes.set(local, scoped)
+      const scoped = scopedNames.get(local) ?? scopedClassName(file, root, local)
+      scopedNames.set(local, scoped)
+      if (!classes.has(local)) classes.set(local, scoped)
       output += `.${scoped}`
       prelude += `.${scoped}`
+      if (!preludeLocals.includes(local)) preludeLocals.push(local)
       index = end
       continue
     }
 
+    if (!selectorContext && prelude.trim() === '') {
+      const composition = localComposition(chars, index)
+      const owners = [...ruleLocalClasses].reverse().find((items) => items.length > 0)
+      if (composition && owners) {
+        const composed = composition.names.map((local) => {
+          const scoped = scopedNames.get(local) ?? scopedClassName(file, root, local)
+          scopedNames.set(local, scoped)
+          if (!classes.has(local)) classes.set(local, scoped)
+          return scoped
+        })
+        for (const owner of owners) {
+          const ownerScoped = scopedNames.get(owner) ?? scopedClassName(file, root, owner)
+          scopedNames.set(owner, ownerScoped)
+          const exported = (classes.get(owner) ?? ownerScoped).split(/\s+/)
+          for (const scoped of composed) if (!exported.includes(scoped)) exported.push(scoped)
+          classes.set(owner, exported.join(' '))
+        }
+        index = composition.end
+        prelude = ''
+        continue
+      }
+    }
+
     output += char
     if (char === '{') {
-      blockAllowsRules.push(isContainerAtRule(prelude))
+      const container = isContainerAtRule(prelude)
+      blockAllowsRules.push(container)
+      ruleLocalClasses.push(container ? [] : preludeLocals)
+      preludeLocals = []
       prelude = ''
     } else if (char === '}') {
       if (blockAllowsRules.length > 1) blockAllowsRules.pop()
+      if (ruleLocalClasses.length > 1) ruleLocalClasses.pop()
       prelude = ''
+      preludeLocals = []
     } else if (char === ';') {
       prelude = ''
+      preludeLocals = []
     } else {
       prelude += char
     }
@@ -936,6 +990,60 @@ function scopeCssModule(css, file, root) {
   }
 
   return Object.fromEntries(classes)
+}
+
+function statementOpensNestedRule(chars, start) {
+  let quote = null
+  let escaped = false
+  for (let index = start; index < chars.length; index += 1) {
+    const character = chars[index]
+    if (quote) {
+      if (escaped) escaped = false
+      else if (character === '\\') escaped = true
+      else if (character === quote) quote = null
+    } else if (character === '"' || character === "'") quote = character
+    else if (character === '{') return true
+    else if (character === ';' || character === '}') return false
+  }
+  return false
+}
+
+function globalSelectorContents(chars, contentStart) {
+  let depth = 1
+  let content = ''
+  for (let index = contentStart; index < chars.length; index += 1) {
+    if (chars[index] === '(') {
+      depth += 1
+      content += '('
+    } else if (chars[index] === ')') {
+      depth -= 1
+      if (depth === 0) return { content, end: index + 1 }
+      content += ')'
+    } else content += chars[index]
+  }
+  return null
+}
+
+function localComposition(chars, start) {
+  const keyword = 'composes'
+  if (chars.slice(start, start + keyword.length).join('') !== keyword) return null
+  let index = start + keyword.length
+  if (chars[index] && /[A-Za-z0-9_-]/.test(chars[index])) return null
+  while (chars[index] && /\s/u.test(chars[index])) index += 1
+  if (chars[index] !== ':') return null
+  index += 1
+  const valueStart = index
+  while (index < chars.length && chars[index] !== ';') index += 1
+  if (chars[index] !== ';') return null
+  const names = chars.slice(valueStart, index).join('').trim().split(/\s+/)
+  if (
+    names.length === 0 ||
+    names.includes('from') ||
+    names.some((name) => !/^[A-Za-z0-9_-]+$/.test(name))
+  ) {
+    return null
+  }
+  return { end: index + 1, names }
 }
 
 function scopedClassName(file, root, local) {
@@ -1039,8 +1147,86 @@ function setBoundedCacheEntry(cache, key, value) {
 }
 
 function contentExport(compiled, name, value) {
-  const declaration = new RegExp(`\\bexport\\s+(?:const|let|var)\\s+${name}\\b`)
-  return declaration.test(compiled) ? '' : `export const ${name} = ${value};`
+  return hasNamedExport(compiled, name) ? '' : `export const ${name} = ${value};`
+}
+
+function hasNamedExport(source, name) {
+  const tokens = javascriptTokens(source)
+  for (let index = 0; index < tokens.length; index += 1) {
+    if (tokens[index] !== 'export') continue
+    let cursor = index + 1
+    if (tokens[cursor] === 'async') cursor += 1
+    if (['const', 'let', 'var'].includes(tokens[cursor]) && tokens[cursor + 1] === name) return true
+    if (['function', 'class'].includes(tokens[cursor])) {
+      cursor += 1
+      if (tokens[cursor] === '*') cursor += 1
+      if (tokens[cursor] === name) return true
+    }
+    if (tokens[cursor] === '{') {
+      cursor += 1
+      let specifier = []
+      while (cursor < tokens.length) {
+        const token = tokens[cursor]
+        if (token === ',' || token === '}') {
+          const asIndex = specifier.indexOf('as')
+          const exported = asIndex >= 0 ? specifier[asIndex + 1] : specifier[0]
+          if (exported === name) return true
+          specifier = []
+          if (token === '}') break
+        } else if (token !== 'type') {
+          specifier.push(token)
+        }
+        cursor += 1
+      }
+    }
+  }
+  return false
+}
+
+function javascriptTokens(source) {
+  const tokens = []
+  let index = 0
+  while (index < source.length) {
+    const character = source[index]
+    if (/\s/u.test(character)) {
+      index += 1
+      continue
+    }
+    if (character === '/' && source[index + 1] === '/') {
+      index += 2
+      while (index < source.length && source[index] !== '\n') index += 1
+      continue
+    }
+    if (character === '/' && source[index + 1] === '*') {
+      index += 2
+      while (index + 1 < source.length && !(source[index] === '*' && source[index + 1] === '/'))
+        index += 1
+      index = Math.min(index + 2, source.length)
+      continue
+    }
+    if (character === "'" || character === '"' || character === '`') {
+      const quote = character
+      index += 1
+      while (index < source.length) {
+        if (source[index] === '\\') index += 2
+        else if (source[index] === quote) {
+          index += 1
+          break
+        } else index += 1
+      }
+      continue
+    }
+    if (/[\p{Letter}\p{Number}_$]/u.test(character)) {
+      const start = index
+      index += 1
+      while (index < source.length && /[\p{Letter}\p{Number}_$]/u.test(source[index])) index += 1
+      tokens.push(source.slice(start, index))
+      continue
+    }
+    tokens.push(character)
+    index += 1
+  }
+  return tokens
 }
 
 function splitContentFrontmatter(source) {
@@ -1141,10 +1327,11 @@ function createContentMetadataPlugin(headings) {
 function collectContentHeadingNodes(node, headings, slugCounts) {
   if (node?.type === 'heading') {
     const text = contentPlainText(node.children ?? [])
-    const baseSlug = text
-      .toLocaleLowerCase()
-      .replace(/[^\p{Letter}\p{Number}]+/gu, '-')
-      .replace(/^-|-$/g, '')
+    const baseSlug =
+      text
+        .toLocaleLowerCase()
+        .replace(/[^\p{Letter}\p{Number}]+/gu, '-')
+        .replace(/^-|-$/g, '') || 'section'
     const occurrence = slugCounts.get(baseSlug) ?? 0
     const slug = occurrence === 0 ? baseSlug : `${baseSlug}-${occurrence}`
     slugCounts.set(baseSlug, occurrence + 1)

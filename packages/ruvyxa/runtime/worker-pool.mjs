@@ -457,7 +457,7 @@ async function handleSsg(request) {
   ensureReactDeps(resolvedRoot)
 
   const layouts = collectLayouts(appDir, path.dirname(pageFile))
-  const { outfile, freshBuild } = await bundleSsgModule(
+  const { outfile, freshBuild, dependencyHash, inputs } = await bundleSsgModule(
     resolvedRoot,
     pageFile,
     layouts,
@@ -466,7 +466,7 @@ async function handleSsg(request) {
   const mod = await importModule(outfile, freshBuild || fresh)
   const html = await mod.render({ path: requestPath, params: params || {} })
 
-  return { ok: true, html }
+  return { ok: true, html, dependencyHash, inputs }
 }
 
 // --- Static parameter discovery ---
@@ -908,7 +908,7 @@ export async function render(ctx) {
   const cached = bundleCache.get(cacheKey)
   if (cached) return { outfile: cached, freshBuild: false }
 
-  const result = await withBuildLock(cacheKey, async () => {
+  return withBuildLock(cacheKey, async () => {
     const rechecked = bundleCache.get(cacheKey)
     if (rechecked) return { outfile: rechecked, freshBuild: false }
 
@@ -925,8 +925,6 @@ export async function render(ctx) {
     cacheBundle(cacheKey, outfile, projectRoot, bundle.inputs)
     return { outfile, freshBuild: true }
   })
-
-  return result
 }
 
 async function bundleApiModule(projectRoot, routeFile) {
@@ -1113,11 +1111,25 @@ export async function render(ctx) {
 
   const cacheKey = `ssg:${pageFile}:${hash}`
   const cached = bundleCache.get(cacheKey)
-  if (cached) return { outfile: cached, freshBuild: false }
+  if (cached) {
+    return {
+      outfile: cached,
+      freshBuild: false,
+      dependencyHash: bundleFingerprints.get(cacheKey),
+      inputs: [...(bundleInputs.get(cacheKey) ?? [])],
+    }
+  }
 
   return withBuildLock(cacheKey, async () => {
     const rechecked = bundleCache.get(cacheKey)
-    if (rechecked) return { outfile: rechecked, freshBuild: false }
+    if (rechecked) {
+      return {
+        outfile: rechecked,
+        freshBuild: false,
+        dependencyHash: bundleFingerprints.get(cacheKey),
+        inputs: [...(bundleInputs.get(cacheKey) ?? [])],
+      }
+    }
 
     const bundle = await compileBundleWithMetadata({
       projectRoot,
@@ -1129,8 +1141,13 @@ export async function render(ctx) {
       aliases: runtimeAliases(runtimeDir),
     })
 
-    cacheBundle(cacheKey, outfile, projectRoot, bundle.inputs)
-    return { outfile, freshBuild: true }
+    cacheBundle(cacheKey, outfile, projectRoot, bundle.inputs, bundle.dependencyHash)
+    return {
+      outfile,
+      freshBuild: true,
+      dependencyHash: bundle.dependencyHash,
+      inputs: [...(bundleInputs.get(cacheKey) ?? [])],
+    }
   })
 }
 

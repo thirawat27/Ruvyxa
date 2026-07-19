@@ -42,7 +42,8 @@ pub fn compile_sass_file(path: &Path, project_root: &Path) -> Result<String, Str
 /// Compile and scope a CSS Module from disk.
 pub fn compile_css_module(path: &Path, project_root: &Path) -> Result<CssModule, String> {
     let css = if is_sass_path(path) {
-        compile_sass_file(path, project_root)?
+        compile_sass_file(path, project_root)
+            .map_err(|error| format!("RUV1402 Sass compilation failed: {error}"))?
     } else {
         std::fs::read_to_string(path).map_err(|error| error.to_string())?
     };
@@ -56,13 +57,16 @@ pub fn compile_css_module(path: &Path, project_root: &Path) -> Result<CssModule,
 pub fn scope_css_module(css: &str, path: &Path, project_root: &Path) -> CssModule {
     let mut output = String::with_capacity(css.len());
     let mut classes = BTreeMap::new();
+    let mut scoped_names = BTreeMap::new();
     let chars = css.chars().collect::<Vec<_>>();
     let mut index = 0;
     let mut quote = None;
     let mut in_comment = false;
     let mut escape = false;
     let mut block_allows_rules = vec![true];
+    let mut rule_local_classes = vec![Vec::<String>::new()];
     let mut prelude = String::new();
+    let mut prelude_locals = Vec::<String>::new();
 
     while index < chars.len() {
         let ch = chars[index];
@@ -107,37 +111,106 @@ pub fn scope_css_module(css: &str, path: &Path, project_root: &Path) -> CssModul
             continue;
         }
 
-        let selector_context = block_allows_rules.last().copied().unwrap_or(true);
+        let selector_context = block_allows_rules.last().copied().unwrap_or(true)
+            || statement_opens_nested_rule(&chars, index);
+        if selector_context
+            && chars[index..].starts_with(&[':', 'g', 'l', 'o', 'b', 'a', 'l', '('])
+            && let Some((global, end)) = global_selector_contents(&chars, index + 8)
+        {
+            output.push_str(&global);
+            prelude.push_str(&global);
+            index = end;
+            continue;
+        }
         if selector_context && ch == '.' && next.is_some_and(is_class_start) {
             let mut end = index + 1;
             while end < chars.len() && is_class_continue(chars[end]) {
                 end += 1;
             }
             let local = chars[index + 1..end].iter().collect::<String>();
-            let scoped = classes
+            let scoped = scoped_names
                 .entry(local.clone())
                 .or_insert_with(|| scoped_class_name(path, project_root, &local));
+            classes
+                .entry(local.clone())
+                .or_insert_with(|| scoped.clone());
             output.push('.');
             output.push_str(scoped);
             prelude.push('.');
             prelude.push_str(scoped);
+            if !prelude_locals.contains(&local) {
+                prelude_locals.push(local);
+            }
             index = end;
+            continue;
+        }
+
+        if !selector_context
+            && prelude.trim().is_empty()
+            && let Some((end, composed)) = local_composition(&chars, index)
+            && let Some(owners) = rule_local_classes
+                .iter()
+                .rev()
+                .find(|owners| !owners.is_empty())
+                .cloned()
+        {
+            let composed = composed
+                .iter()
+                .map(|local| {
+                    let scoped = scoped_names
+                        .entry(local.clone())
+                        .or_insert_with(|| scoped_class_name(path, project_root, local))
+                        .clone();
+                    classes
+                        .entry(local.clone())
+                        .or_insert_with(|| scoped.clone());
+                    scoped
+                })
+                .collect::<Vec<_>>();
+            for owner in owners {
+                let owner_scoped = scoped_names
+                    .entry(owner.clone())
+                    .or_insert_with(|| scoped_class_name(path, project_root, &owner))
+                    .clone();
+                let exported = classes.entry(owner).or_insert(owner_scoped);
+                for scoped in &composed {
+                    if !exported.split_whitespace().any(|class| class == scoped) {
+                        exported.push(' ');
+                        exported.push_str(scoped);
+                    }
+                }
+            }
+            index = end;
+            prelude.clear();
             continue;
         }
 
         output.push(ch);
         match ch {
             '{' => {
-                block_allows_rules.push(is_container_at_rule(&prelude));
+                let container = is_container_at_rule(&prelude);
+                block_allows_rules.push(container);
+                rule_local_classes.push(if container {
+                    Vec::new()
+                } else {
+                    std::mem::take(&mut prelude_locals)
+                });
                 prelude.clear();
             }
             '}' => {
                 if block_allows_rules.len() > 1 {
                     block_allows_rules.pop();
                 }
+                if rule_local_classes.len() > 1 {
+                    rule_local_classes.pop();
+                }
                 prelude.clear();
+                prelude_locals.clear();
             }
-            ';' => prelude.clear(),
+            ';' => {
+                prelude.clear();
+                prelude_locals.clear();
+            }
             _ => prelude.push(ch),
         }
         index += 1;
@@ -147,6 +220,98 @@ pub fn scope_css_module(css: &str, path: &Path, project_root: &Path) -> CssModul
         css: output,
         classes,
     }
+}
+
+fn statement_opens_nested_rule(chars: &[char], start: usize) -> bool {
+    let mut quote = None;
+    let mut escape = false;
+    let mut index = start;
+    while index < chars.len() {
+        let character = chars[index];
+        if let Some(active_quote) = quote {
+            if escape {
+                escape = false;
+            } else if character == '\\' {
+                escape = true;
+            } else if character == active_quote {
+                quote = None;
+            }
+        } else if matches!(character, '\'' | '"') {
+            quote = Some(character);
+        } else if character == '{' {
+            return true;
+        } else if matches!(character, ';' | '}') {
+            return false;
+        }
+        index += 1;
+    }
+    false
+}
+
+fn global_selector_contents(chars: &[char], content_start: usize) -> Option<(String, usize)> {
+    let mut depth = 1usize;
+    let mut index = content_start;
+    let mut content = String::new();
+    while index < chars.len() {
+        match chars[index] {
+            '(' => {
+                depth += 1;
+                content.push('(');
+            }
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((content, index + 1));
+                }
+                content.push(')');
+            }
+            character => content.push(character),
+        }
+        index += 1;
+    }
+    None
+}
+
+fn local_composition(chars: &[char], start: usize) -> Option<(usize, Vec<String>)> {
+    const KEYWORD: [char; 8] = ['c', 'o', 'm', 'p', 'o', 's', 'e', 's'];
+    if !chars[start..].starts_with(&KEYWORD) {
+        return None;
+    }
+    let mut index = start + KEYWORD.len();
+    if chars
+        .get(index)
+        .is_some_and(|character| is_class_continue(*character))
+    {
+        return None;
+    }
+    while chars
+        .get(index)
+        .is_some_and(|character| character.is_whitespace())
+    {
+        index += 1;
+    }
+    if chars.get(index) != Some(&':') {
+        return None;
+    }
+    index += 1;
+    let value_start = index;
+    while chars.get(index).is_some_and(|character| *character != ';') {
+        index += 1;
+    }
+    if chars.get(index) != Some(&';') {
+        return None;
+    }
+    let value = chars[value_start..index].iter().collect::<String>();
+    let names = value.split_whitespace().collect::<Vec<_>>();
+    if names.is_empty()
+        || names.contains(&"from")
+        || names
+            .iter()
+            .any(|name| !name.chars().all(is_class_continue))
+    {
+        return None;
+    }
+    Some((index + 1, names.into_iter().map(str::to_string).collect()))
 }
 
 /// Serialize a CSS Module as an ESM default export for the linker.
@@ -267,5 +432,40 @@ mod tests {
         let root = Path::new("/project");
         let output = scope_css_module(".card {}", &root.join("styles/card.module.css"), root);
         assert_eq!(output.classes["card"], "card_card__feff5ad3a1e67b7b");
+    }
+
+    #[test]
+    fn supports_nested_global_and_local_composition_contracts() {
+        let root = Path::new("/project");
+        let path = root.join("styles/card.module.css");
+        let output = scope_css_module(
+            r#"
+.base { color: navy; }
+.card {
+  composes: base;
+  & .title { color: white; }
+  :global(.theme-dark) .icon { color: black; }
+}
+"#,
+            &path,
+            root,
+        );
+
+        let card_classes = output.classes["card"]
+            .split_whitespace()
+            .collect::<Vec<_>>();
+        assert_eq!(card_classes.len(), 2);
+        assert_eq!(card_classes[1], output.classes["base"]);
+        assert!(output.classes.contains_key("title"));
+        assert!(output.classes.contains_key("icon"));
+        assert!(!output.classes.contains_key("theme-dark"));
+        assert!(output.css.contains(".theme-dark"));
+        assert!(!output.css.contains(":global("));
+        assert!(!output.css.contains("composes:"));
+        assert!(
+            output
+                .css
+                .contains(&format!(".{}", output.classes["title"]))
+        );
     }
 }

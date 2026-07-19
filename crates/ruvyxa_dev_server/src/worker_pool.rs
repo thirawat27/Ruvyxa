@@ -257,6 +257,10 @@ pub struct WorkerResponse {
     pub warmed: Option<usize>,
     pub module_cache_size: Option<usize>,
     pub params: Option<Vec<RouteParams>>,
+    /// Content hash of the compiled SSG dependency graph.
+    pub dependency_hash: Option<String>,
+    /// Absolute source files used by the SSG bundle.
+    pub inputs: Option<Vec<PathBuf>>,
 }
 
 impl WorkerResponse {

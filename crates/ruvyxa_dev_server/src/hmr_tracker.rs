@@ -158,7 +158,7 @@ impl HmrTracker {
         // Determine event type based on file extensions.
         let all_css = changed_paths
             .iter()
-            .all(|p| extension_is(p, "css") || extension_is(p, "scss"));
+            .all(|p| extension_is(p, "css") || extension_is(p, "scss") || extension_is(p, "sass"));
         let has_layout_change = changed_paths.iter().any(|p| is_layout_file(p));
 
         let event_type = if all_css {
@@ -265,6 +265,17 @@ mod tests {
         tracker.register_route("/", &[PathBuf::from("/app/page.tsx"), css.clone()]);
 
         let update = tracker.compute_update(&[css]);
+        assert_eq!(update.event_type, HmrEventType::CssUpdate);
+        assert!(!update.full_reload);
+    }
+
+    #[test]
+    fn indented_sass_change_uses_css_update() {
+        let tracker = HmrTracker::new();
+        let sass = PathBuf::from("/app/theme.sass");
+        tracker.register_route("/", &[PathBuf::from("/app/page.tsx"), sass.clone()]);
+
+        let update = tracker.compute_update(&[sass]);
         assert_eq!(update.event_type, HmrEventType::CssUpdate);
         assert!(!update.full_reload);
     }
