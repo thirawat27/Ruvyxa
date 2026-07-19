@@ -2861,6 +2861,7 @@ name = "ruvyxa_middleware"
 version = "1.0.15"
 dependencies = [
  "axum",
+ "futures-core",
  "ruvyxa_diagnostics",
  "serde",
  "serde_json",

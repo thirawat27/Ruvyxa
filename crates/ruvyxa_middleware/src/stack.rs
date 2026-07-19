@@ -3,14 +3,38 @@
 //! Compiles a `MiddlewareConfig` into an axum-compatible layer stack
 //! that can be applied to a Router.
 
-use axum::Router;
-use tower_http::compression::CompressionLayer;
+use axum::{Router, body::HttpBody};
+use tower_http::compression::{
+    CompressionLayer,
+    predicate::{DefaultPredicate, Predicate},
+};
 use tracing::{info, warn};
 
 use crate::builtin::{
     CorsLayer, CustomHeadersLayer, RateLimitLayerWithKey, RequestLoggingLayer, TimingLayer,
 };
 use crate::config::MiddlewareConfig;
+
+/// Compress only response bodies whose complete size is already known.
+///
+/// Axum bodies backed by a live stream have no exact size hint. Running those
+/// bodies through the asynchronous compression adapter can terminate the
+/// encoded body before the HTTP/1 chunked response is finalized, which clients
+/// report as an incomplete chunked encoding. Buffered responses keep the normal
+/// tower-http content-type and minimum-size compression rules.
+#[derive(Clone, Default)]
+struct CompleteBodyCompressionPredicate {
+    default: DefaultPredicate,
+}
+
+impl Predicate for CompleteBodyCompressionPredicate {
+    fn should_compress<B>(&self, response: &axum::http::Response<B>) -> bool
+    where
+        B: HttpBody,
+    {
+        response.body().size_hint().exact().is_some() && self.default.should_compress(response)
+    }
+}
 
 /// A compiled middleware stack ready to be applied to an axum Router.
 #[derive(Default)]
@@ -102,8 +126,12 @@ impl MiddlewareStack {
             );
         }
 
-        // Compression is always applied (outermost)
-        app = app.layer(CompressionLayer::new());
+        // Compression is always applied to complete, sized bodies (outermost).
+        // Unknown-size bodies are live streams and must reach HTTP framing
+        // without an asynchronous compression adapter in between.
+        app = app.layer(
+            CompressionLayer::new().compress_when(CompleteBodyCompressionPredicate::default()),
+        );
 
         info!(
             builtin_layers = self.count_builtin_layers(),
@@ -252,6 +280,38 @@ impl MiddlewareStack {
 mod tests {
     use super::*;
     use crate::config::{LayerConfig, RateLimitConfig};
+    use axum::{
+        body::{Body, Bytes, to_bytes},
+        http::{Request, Response, header},
+        routing::get,
+    };
+    use futures_core::Stream;
+    use std::{
+        convert::Infallible,
+        pin::Pin,
+        task::{Context, Poll},
+    };
+    use tower::ServiceExt;
+
+    struct OneChunk(Option<Bytes>);
+
+    impl Stream for OneChunk {
+        type Item = Result<Bytes, Infallible>;
+
+        fn poll_next(mut self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+            Poll::Ready(self.0.take().map(Ok))
+        }
+    }
+
+    async fn streamed_response() -> Response<Body> {
+        Response::new(Body::from_stream(OneChunk(Some(Bytes::from_static(
+            b"streamed response that is deliberately larger than thirty-two bytes",
+        )))))
+    }
+
+    async fn buffered_response() -> &'static str {
+        "buffered response that is deliberately larger than thirty-two bytes"
+    }
 
     #[test]
     fn rejects_unsupported_custom_layers_before_server_startup() {
@@ -327,5 +387,55 @@ mod tests {
             max_age: 60,
         });
         assert!(MiddlewareStack::new(config).validate().is_err());
+    }
+
+    #[tokio::test]
+    async fn leaves_unknown_size_streams_uncompressed_and_complete() {
+        let app = MiddlewareStack::new(MiddlewareConfig::default())
+            .apply(Router::new().route("/stream", get(streamed_response)));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/stream")
+                    .header(header::ACCEPT_ENCODING, "gzip, br")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert!(response.headers().get(header::CONTENT_ENCODING).is_none());
+        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(
+            body,
+            &b"streamed response that is deliberately larger than thirty-two bytes"[..]
+        );
+    }
+
+    #[tokio::test]
+    async fn still_compresses_complete_sized_responses() {
+        let app = MiddlewareStack::new(MiddlewareConfig::default())
+            .apply(Router::new().route("/buffered", get(buffered_response)));
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/buffered")
+                    .header(header::ACCEPT_ENCODING, "gzip")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        assert_eq!(
+            response.headers().get(header::CONTENT_ENCODING).unwrap(),
+            "gzip"
+        );
+        assert!(
+            !to_bytes(response.into_body(), usize::MAX)
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 }

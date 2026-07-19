@@ -114,8 +114,11 @@ export function GET() {
 }
 ```
 
-Worker IPC uses bounded 64 KiB frames and a bounded per-response queue. A stalled producer or
-consumer fails that response stream instead of allowing its pending memory to grow without a bound.
+Worker IPC uses bounded 64 KiB frames and a bounded per-response queue. A slow consumer applies
+backpressure to the worker instead of truncating an already-started HTTP response; a producer that
+stalls beyond the idle timeout still fails that response instead of allowing pending memory to grow
+without a bound. Automatic gzip and Brotli compression is skipped for live streams whose final size
+is not yet known; buffered responses with a complete size continue to use HTTP compression normally.
 The interactive default is 30 seconds between worker response events and can be changed with
 `RUVYXA_WORKER_TIMEOUT_MS`. Rust and Node use the same normalized value. This is automatic; route
 handlers do not need a Ruvyxa-specific response type.

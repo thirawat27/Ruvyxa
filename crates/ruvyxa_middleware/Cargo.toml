@@ -24,4 +24,5 @@ default = ["wasm-plugins"]
 wasm-plugins = ["dep:wasmtime", "dep:wasmtime-wasi"]
 
 [dev-dependencies]
+futures-core.workspace = true
 tempfile.workspace = true

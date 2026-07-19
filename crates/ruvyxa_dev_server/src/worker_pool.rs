@@ -52,6 +52,8 @@ const WORKER_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_s
 
 /// Maximum number of decoded response frames waiting for one HTTP consumer.
 /// At 64 KiB per frame this bounds queued raw body data to roughly 1 MiB.
+/// The bounded channel applies backpressure to the Node worker instead of
+/// failing an already-started HTTP response with an incomplete chunked body.
 const MAX_PENDING_RESPONSE_FRAMES: usize = 16;
 
 static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
@@ -283,7 +285,7 @@ impl WorkerResponse {
 
 #[derive(Clone)]
 struct PendingResponse {
-    sender: mpsc::UnboundedSender<WorkerResponse>,
+    sender: mpsc::Sender<WorkerResponse>,
     queued: Arc<AtomicUsize>,
     /// Set after an API response has started streaming. A worker exit must be
     /// delivered to these consumers as a body error rather than a clean EOF.
@@ -294,7 +296,7 @@ type PendingResponses = Arc<Mutex<BTreeMap<String, PendingResponse>>>;
 
 struct ResponseChannel {
     id: String,
-    receiver: mpsc::UnboundedReceiver<WorkerResponse>,
+    receiver: mpsc::Receiver<WorkerResponse>,
     queued: Arc<AtomicUsize>,
     streaming: Arc<AtomicBool>,
 }
@@ -306,7 +308,7 @@ pub(crate) struct WorkerApiResponse {
 
 struct WorkerBodyStream {
     id: String,
-    receiver: mpsc::UnboundedReceiver<WorkerResponse>,
+    receiver: mpsc::Receiver<WorkerResponse>,
     queued: Arc<AtomicUsize>,
     pending: PendingResponses,
     idle_timeout: std::time::Duration,
@@ -487,9 +489,8 @@ impl Worker {
                             id,
                             "Node worker stdin closed before completing API response stream",
                         );
-                        if pending_response.sender.send(error).is_ok() {
-                            pending_response.queued.fetch_add(1, Ordering::AcqRel);
-                        }
+                        pending_response.queued.fetch_add(1, Ordering::AcqRel);
+                        let _ = pending_response.sender.send(error).await;
                     }
                     break;
                 }
@@ -532,24 +533,8 @@ impl Worker {
                     continue;
                 };
 
-                let queued = pending_response.queued.fetch_add(1, Ordering::AcqRel) + 1;
-                if queued > MAX_PENDING_RESPONSE_FRAMES {
-                    pending_response.queued.fetch_sub(1, Ordering::AcqRel);
-                    reader_pending.lock().await.remove(&id);
-                    let overflow = WorkerResponse::stream_error(
-                        id,
-                        format!(
-                            "API response stream exceeded the {}-frame consumer queue",
-                            MAX_PENDING_RESPONSE_FRAMES
-                        ),
-                    );
-                    if pending_response.sender.send(overflow).is_ok() {
-                        pending_response.queued.fetch_add(1, Ordering::AcqRel);
-                    }
-                    continue;
-                }
-
-                if pending_response.sender.send(response).is_err() {
+                pending_response.queued.fetch_add(1, Ordering::AcqRel);
+                if pending_response.sender.send(response).await.is_err() {
                     pending_response.queued.fetch_sub(1, Ordering::AcqRel);
                     reader_pending.lock().await.remove(&id);
                 }
@@ -569,9 +554,8 @@ impl Worker {
                     id,
                     "Node worker exited before completing API response stream",
                 );
-                if pending_response.sender.send(error).is_ok() {
-                    pending_response.queued.fetch_add(1, Ordering::AcqRel);
-                }
+                pending_response.queued.fetch_add(1, Ordering::AcqRel);
+                let _ = pending_response.sender.send(error).await;
             }
             debug!("worker stdout reader exited");
         });
@@ -703,7 +687,7 @@ impl Worker {
             .ok_or_else(|| RuvyxaError::Message("Worker process is shutting down".to_string()))?;
 
         let id = request.id().to_string();
-        let (sender, receiver) = mpsc::unbounded_channel();
+        let (sender, receiver) = mpsc::channel(MAX_PENDING_RESPONSE_FRAMES);
         let queued = Arc::new(AtomicUsize::new(0));
         let streaming = Arc::new(AtomicBool::new(false));
         self.pending.lock().await.insert(
@@ -1345,7 +1329,7 @@ mod tests {
 
     #[tokio::test]
     async fn api_body_stream_decodes_binary_frames_without_text_conversion() {
-        let (sender, receiver) = mpsc::unbounded_channel();
+        let (sender, receiver) = mpsc::channel(2);
         let queued = Arc::new(AtomicUsize::new(2));
         sender
             .send(WorkerResponse {
@@ -1355,6 +1339,7 @@ mod tests {
                 body_base64: Some("AP+ADQo=".to_string()),
                 ..WorkerResponse::default()
             })
+            .await
             .unwrap();
         sender
             .send(WorkerResponse {
@@ -1363,6 +1348,7 @@ mod tests {
                 frame: Some("api-end".to_string()),
                 ..WorkerResponse::default()
             })
+            .await
             .unwrap();
         drop(sender);
 
@@ -1383,7 +1369,7 @@ mod tests {
 
     #[tokio::test]
     async fn api_body_stream_rejects_eof_before_api_end() {
-        let (sender, receiver) = mpsc::unbounded_channel();
+        let (sender, receiver) = mpsc::channel(1);
         sender
             .send(WorkerResponse {
                 id: "stream".to_string(),
@@ -1392,6 +1378,7 @@ mod tests {
                 body_base64: Some("AA==".to_string()),
                 ..WorkerResponse::default()
             })
+            .await
             .unwrap();
         drop(sender);
 
@@ -1412,13 +1399,14 @@ mod tests {
 
     #[tokio::test]
     async fn api_body_stream_propagates_worker_errors() {
-        let (sender, receiver) = mpsc::unbounded_channel();
+        let (sender, receiver) = mpsc::channel(1);
         let queued = Arc::new(AtomicUsize::new(1));
         sender
             .send(WorkerResponse::stream_error(
                 "stream".to_string(),
                 "route stream failed",
             ))
+            .await
             .unwrap();
         drop(sender);
 
@@ -1439,7 +1427,7 @@ mod tests {
 
     #[tokio::test]
     async fn api_body_stream_times_out_when_worker_stalls() {
-        let (_sender, receiver) = mpsc::unbounded_channel::<WorkerResponse>();
+        let (_sender, receiver) = mpsc::channel::<WorkerResponse>(1);
         let body = Body::from_stream(WorkerBodyStream::new(
             ResponseChannel {
                 id: "stream".to_string(),
@@ -1492,7 +1480,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn api_response_queue_fails_instead_of_growing_without_bound() {
+    async fn api_response_queue_applies_backpressure_without_truncating_body() {
         let temp = tempfile::tempdir().unwrap();
         let worker_script = temp.path().join("worker.mjs");
         std::fs::write(
@@ -1522,11 +1510,11 @@ mod tests {
             .unwrap();
 
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-        let error = axum::body::to_bytes(response.body.unwrap(), 1024)
+        let body = axum::body::to_bytes(response.body.unwrap(), 1024)
             .await
-            .unwrap_err();
+            .unwrap();
 
-        assert!(error.to_string().contains("consumer queue"));
+        assert_eq!(body.len(), 17);
         worker.shutdown().await;
     }
 
