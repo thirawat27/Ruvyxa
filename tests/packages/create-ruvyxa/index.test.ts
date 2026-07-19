@@ -1,10 +1,88 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 
-import { createRuvyxaApp } from '../../../packages/create-ruvyxa/dist/index.js'
+import {
+  createRuvyxaApp,
+  detectPackageManager,
+} from '../../../packages/create-ruvyxa/dist/index.js'
+
+describe('detectPackageManager', () => {
+  it("recognizes Bun's text lockfile", async () => {
+    const root = await mkdtemp(join(tmpdir(), 'ruvyxa-bun-lock-'))
+    try {
+      await writeFile(join(root, 'bun.lock'), '{}')
+      assert.deepEqual(detectPackageManager(root, {}), {
+        name: 'bun',
+        install: 'bun install',
+        dev: 'bun dev',
+        exec: 'bunx',
+        lockfile: 'bun.lock',
+      })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('uses the closest packageManager declaration when lockfiles conflict', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'ruvyxa-package-manager-'))
+    try {
+      await writeFile(join(root, 'package.json'), JSON.stringify({ packageManager: 'yarn@4.7.0' }))
+      await writeFile(join(root, 'pnpm-lock.yaml'), 'lockfileVersion: 9')
+      await writeFile(join(root, 'package-lock.json'), '{}')
+
+      assert.equal(detectPackageManager(root, {}).name, 'yarn')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('uses the newest local lockfile when no explicit manager is declared', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'ruvyxa-lockfile-recency-'))
+    try {
+      const pnpmLock = join(root, 'pnpm-lock.yaml')
+      const npmLock = join(root, 'package-lock.json')
+      await writeFile(pnpmLock, 'lockfileVersion: 9')
+      await writeFile(npmLock, '{}')
+      const now = new Date()
+      await utimes(pnpmLock, new Date(now.getTime() - 10_000), new Date(now.getTime() - 10_000))
+      await utimes(npmLock, now, now)
+
+      assert.equal(detectPackageManager(root, {}).name, 'npm')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('uses the nearest project instead of a parent workspace lockfile', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'ruvyxa-nested-package-manager-'))
+    const app = join(root, 'apps', 'web')
+    try {
+      await mkdir(app, { recursive: true })
+      await writeFile(join(root, 'pnpm-lock.yaml'), 'lockfileVersion: 9')
+      await writeFile(join(app, 'package-lock.json'), '{}')
+
+      assert.equal(detectPackageManager(app, {}).name, 'npm')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('prefers the invoking package manager over stale project evidence', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'ruvyxa-invoking-package-manager-'))
+    try {
+      await writeFile(join(root, 'bun.lock'), '{}')
+      assert.equal(
+        detectPackageManager(root, { npm_config_user_agent: 'pnpm/10.0.0' }).name,
+        'pnpm',
+      )
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+})
 
 describe('createRuvyxaApp', () => {
   it('creates the minimal file-system starter shape', async () => {

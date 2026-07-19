@@ -31,8 +31,8 @@
   Oxc-backed minification, and source map generation in one self-contained binary.
 - **Radix-trie routing** — O(path-depth) route resolution regardless of the number of registered
   routes. Duplicate and ambiguous routes are rejected at graph validation time.
-- **Persistent Node worker pool** — eliminates 100–500 ms per-request subprocess overhead for SSR.
-  Shared across requests with layout nesting and route-level hydration bundles.
+- **Persistent JavaScript worker pool** — eliminates 100–500 ms per-request subprocess overhead for
+  SSR. Shared across requests with layout nesting and route-level hydration bundles.
 - **LRU render cache** — SSR pages and client bundles cached in-memory (capacity 1024 dev / 512
   prod, TTL 5 min dev / 30 min prod), invalidated automatically on file change. Configurable via
   `RUVYXA_RENDER_CACHE_SIZE` (`0` disables it; environment values are capped at 16,384). Backed by
@@ -212,7 +212,9 @@ npm create ruvyxa@latest my-api -- --template api-backend
 
 Open [http://localhost:3000](http://localhost:3000).
 
-`pnpm`, `yarn`, and `bun` work too. The generated app keeps the first screen focused:
+`pnpm`, `yarn`, and `bun` work too. Ruvyxa uses Node for JavaScript execution by default; set
+`runtime: 'bun'` and run with `RUVYXA_RUNTIME=bun` when Bun should execute SSR, API routes, actions,
+and build plugins. The generated app keeps the first screen focused:
 
 ```text
 my-app/
@@ -546,7 +548,7 @@ cache examples.
 
 **Performance features:**
 
-- Persistent Node worker pool (eliminates 100-500ms/request subprocess overhead)
+- Persistent JavaScript worker pool (eliminates 100-500ms/request subprocess overhead)
 - Radix-trie route matching (O(depth) instead of O(n))
 - LRU render cache with TTL (sub-ms repeated page loads)
 - Bounded, binary-safe API response streaming across worker IPC

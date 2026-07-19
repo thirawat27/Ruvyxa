@@ -1030,6 +1030,15 @@ export class contentFormat {}
     })
   })
 
+  it('serializes the selected JavaScript runtime for the CLI', async () => {
+    await withFixture(async ({ root }) => {
+      await writeFile(path.join(root, 'ruvyxa.config.ts'), `export default { runtime: 'bun' }`)
+
+      const config = await runJson(configRenderer, [root], {})
+      assert.equal(config.config.runtime, 'bun')
+    })
+  })
+
   it('executes adapters and serializes their deployment metadata', async () => {
     await withFixture(async ({ root }) => {
       await writeFile(

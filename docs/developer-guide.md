@@ -40,7 +40,7 @@ npm package: ruvyxa
        ├─ crates/ruvyxa_cli          commands, config loading, build orchestration
        ├─ crates/ruvyxa_graph        route discovery, render detection, validation
        ├─ crates/ruvyxa_bundler      TS/JSX/MDX compilation, Oxc transforms, resolution, linking, maps, minification
-       ├─ crates/ruvyxa_dev_server   Axum server, HMR, router, cache, Node worker pool, CSS minification
+       ├─ crates/ruvyxa_dev_server   Axum server, HMR, router, cache, Node/Bun worker pool, CSS minification
        ├─ crates/ruvyxa_middleware   Tower middleware and Wasm plugin support
        └─ crates/ruvyxa_diagnostics  structured RUV#### diagnostics
 

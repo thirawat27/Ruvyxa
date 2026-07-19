@@ -26,6 +26,7 @@ import {
   collectLayouts,
   compileBundle,
   runtimeAliases,
+  serverPlatform,
   toImportPath,
 } from './compiler.mjs'
 
@@ -79,7 +80,7 @@ async function resolveStaticParams() {
     entrySource: moduleCode,
     sourcefile: 'ruvyxa:ssg-params-entry.ts',
     outfile,
-    platform: 'node',
+    platform: serverPlatform(),
     external: ['react', 'react/jsx-runtime', 'react-dom/server', 'node:stream'],
     aliases: runtimeAliases(runtimeDir),
   })
@@ -118,7 +119,7 @@ async function renderPage(renderPath, renderMode, params) {
     // (Suspense boundaries will show their fallback content)
     moduleCode = `
 import React from "react"
-import { renderToPipeableStream } from "react-dom/server"
+import * as ReactDomServer from "react-dom/server"
 import { Writable } from "node:stream"
 ${imports.join('\n')}
 
@@ -126,6 +127,10 @@ export async function render(ctx) {
   let tree = React.createElement(Page, { params: ctx.params ?? {}, requestPath: ctx.path })
   for (const Layout of [${wrappers.join(', ')}].reverse()) {
     tree = React.createElement(Layout, null, tree)
+  }
+
+  if (typeof ReactDomServer.renderToPipeableStream !== "function") {
+    return "<!doctype html>" + ReactDomServer.renderToString(tree)
   }
 
   return new Promise((resolve, reject) => {
@@ -137,7 +142,7 @@ export async function render(ctx) {
       },
     })
 
-    const { pipe } = renderToPipeableStream(tree, {
+    const { pipe } = ReactDomServer.renderToPipeableStream(tree, {
       onShellReady() {
         // PPR: resolve as soon as the shell is ready (Suspense fallbacks rendered)
         pipe(writable)
@@ -161,7 +166,7 @@ export async function render(ctx) {
     // Full SSG mode: wait for all content to render
     moduleCode = `
 import React from "react"
-import { renderToPipeableStream } from "react-dom/server"
+import * as ReactDomServer from "react-dom/server"
 import { Writable } from "node:stream"
 ${imports.join('\n')}
 
@@ -169,6 +174,10 @@ export async function render(ctx) {
   let tree = React.createElement(Page, { params: ctx.params ?? {}, requestPath: ctx.path })
   for (const Layout of [${wrappers.join(', ')}].reverse()) {
     tree = React.createElement(Layout, null, tree)
+  }
+
+  if (typeof ReactDomServer.renderToPipeableStream !== "function") {
+    return "<!doctype html>" + ReactDomServer.renderToString(tree)
   }
 
   return new Promise((resolve, reject) => {
@@ -180,7 +189,7 @@ export async function render(ctx) {
       },
     })
 
-    const { pipe } = renderToPipeableStream(tree, {
+    const { pipe } = ReactDomServer.renderToPipeableStream(tree, {
       onAllReady() {
         pipe(writable)
         writable.on("finish", () => {
@@ -207,7 +216,7 @@ export async function render(ctx) {
     entrySource: moduleCode,
     sourcefile: 'ruvyxa:ssg-entry.tsx',
     outfile,
-    platform: 'node',
+    platform: serverPlatform(),
     external: ['react', 'react/jsx-runtime', 'react-dom/server', 'node:stream'],
     aliases: runtimeAliases(runtimeDir),
   })

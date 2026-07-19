@@ -2,7 +2,13 @@
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-import { cacheFileName, compileBundle, runtimeAliases, toImportPath } from './compiler.mjs'
+import {
+  cacheFileName,
+  compileBundle,
+  runtimeAliases,
+  serverPlatform,
+  toImportPath,
+} from './compiler.mjs'
 
 const [
   projectRootArg,
@@ -74,7 +80,7 @@ async function bundleApiModule(projectRoot, routeFile) {
     entrySource: moduleCode,
     sourcefile: 'ruvyxa:api-entry.ts',
     outfile,
-    platform: 'node',
+    platform: serverPlatform(),
     aliases: runtimeAliases(path.dirname(fileURLToPath(import.meta.url))),
   })
 

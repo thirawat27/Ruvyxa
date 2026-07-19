@@ -75,6 +75,11 @@ export async function compileBundle(options) {
   return (await compileBundleWithMetadata(options)).outfile
 }
 
+/** Return the active server runtime without changing browser bundle semantics. */
+export function serverPlatform() {
+  return process.env.RUVYXA_RUNTIME === 'bun' ? 'bun' : 'node'
+}
+
 /** Compile a bundle and return a stable fingerprint of its project-local inputs. */
 export async function compileBundleWithMetadata({
   projectRoot,

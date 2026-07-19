@@ -33,6 +33,7 @@ import {
   compileBundleWithMetadata,
   invalidateCompilerCache,
   runtimeAliases,
+  serverPlatform,
   toImportPath,
 } from './compiler.mjs'
 
@@ -508,7 +509,7 @@ async function handleStaticParams(request) {
       entrySource: moduleCode,
       sourcefile: 'ruvyxa:ssg-params-entry.ts',
       outfile,
-      platform: 'node',
+      platform: serverPlatform(),
       external: ['react', 'react/jsx-runtime', 'react-dom/server', 'node:stream'],
       aliases: runtimeAliases(runtimeDir),
     })
@@ -863,7 +864,7 @@ async function bundleSsrModule(projectRoot, pageFile, layouts) {
 
   const moduleCode = `
 import React from "react"
-import { renderToPipeableStream } from "react-dom/server"
+import * as ReactDomServer from "react-dom/server"
 import { Writable } from "node:stream"
 ${imports.join('\n')}
 
@@ -871,6 +872,10 @@ export async function render(ctx) {
   let tree = React.createElement(Page, { params: ctx.params ?? {}, requestPath: ctx.path })
   for (const Layout of [${wrappers.join(', ')}].reverse()) {
     tree = React.createElement(Layout, null, tree)
+  }
+
+  if (typeof ReactDomServer.renderToPipeableStream !== "function") {
+    return "<!doctype html>" + ReactDomServer.renderToString(tree)
   }
 
   return new Promise((resolve, reject) => {
@@ -882,7 +887,7 @@ export async function render(ctx) {
       },
     })
 
-    const { pipe } = renderToPipeableStream(tree, {
+    const { pipe } = ReactDomServer.renderToPipeableStream(tree, {
       onAllReady() {
         pipe(writable)
         writable.on("finish", () => {
@@ -917,7 +922,7 @@ export async function render(ctx) {
       entrySource: moduleCode,
       sourcefile: 'ruvyxa:ssr-entry.tsx',
       outfile,
-      platform: 'node',
+      platform: serverPlatform(),
       external: ['react', 'react/jsx-runtime', 'react-dom/server', 'node:stream'],
       aliases: runtimeAliases(runtimeDir),
     })
@@ -948,7 +953,7 @@ async function bundleApiModule(projectRoot, routeFile) {
       entrySource: moduleCode,
       sourcefile: 'ruvyxa:api-entry.ts',
       outfile,
-      platform: 'node',
+      platform: serverPlatform(),
       aliases: runtimeAliases(runtimeDir),
     })
 
@@ -978,7 +983,7 @@ async function bundleActionModule(projectRoot, actionFile) {
       entrySource: moduleCode,
       sourcefile: 'ruvyxa:action-entry.ts',
       outfile,
-      platform: 'node',
+      platform: serverPlatform(),
       aliases: runtimeAliases(runtimeDir),
     })
 
@@ -1063,7 +1068,7 @@ async function bundleSsgModule(projectRoot, pageFile, layouts, mode) {
 
   const moduleCode = `
 import React from "react"
-import { renderToPipeableStream } from "react-dom/server"
+import * as ReactDomServer from "react-dom/server"
 import { Writable } from "node:stream"
 ${imports.join('\n')}
 
@@ -1071,6 +1076,10 @@ export async function render(ctx) {
   let tree = React.createElement(Page, { params: ctx.params ?? {}, requestPath: ctx.path })
   for (const Layout of [${wrappers.join(', ')}].reverse()) {
     tree = React.createElement(Layout, null, tree)
+  }
+
+  if (typeof ReactDomServer.renderToPipeableStream !== "function") {
+    return "<!doctype html>" + ReactDomServer.renderToString(tree)
   }
 
   return new Promise((resolve, reject) => {
@@ -1082,7 +1091,7 @@ export async function render(ctx) {
       },
     })
 
-    const { pipe } = renderToPipeableStream(tree, {
+    const { pipe } = ReactDomServer.renderToPipeableStream(tree, {
       ${readyEvent}() {
         pipe(writable)
         writable.on("finish", () => {
@@ -1136,7 +1145,7 @@ export async function render(ctx) {
       entrySource: moduleCode,
       sourcefile: 'ruvyxa:ssg-entry.tsx',
       outfile,
-      platform: 'node',
+      platform: serverPlatform(),
       external: ['react', 'react/jsx-runtime', 'react-dom/server', 'node:stream'],
       aliases: runtimeAliases(runtimeDir),
     })

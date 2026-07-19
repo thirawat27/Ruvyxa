@@ -2,8 +2,9 @@
 
 **File**: `crates/ruvyxa_dev_server/src/worker_pool.rs` (1680 lines)
 
-Persistent Node.js worker processes communicating via newline-delimited JSON (NDJSON) over
-stdin/stdout. Eliminates per-request Node process spawn overhead (~100-500ms).
+Persistent Node.js or Bun worker processes communicating via newline-delimited JSON (NDJSON) over
+stdin/stdout. Eliminates per-request JavaScript process spawn overhead (~100-500ms). The public Rust
+type remains `NodeWorkerPool` for backwards compatibility.
 
 ---
 
@@ -20,7 +21,7 @@ stdin/stdout. Eliminates per-request Node process spawn overhead (~100-500ms).
         ▼                  ▼                  ▼
   ┌──────────┐      ┌──────────┐      ┌──────────┐
   │ Worker 0 │      │ Worker 1 │      │ Worker 2 │
-  │  Node    │      │  Node    │      │  Node    │
+  │ Node/Bun │      │ Node/Bun │      │ Node/Bun │
   │ subproc  │      │ subproc  │      │ subproc  │
   └──────────┘      └──────────┘      └──────────┘
        │                  │                  │
@@ -52,6 +53,7 @@ pub struct NodeWorkerPool {
     workers: StdRwLock<Vec<Arc<Worker>>>,
     worker_script: PathBuf,              // packages/ruvyxa/runtime/worker-pool.mjs
     env: BTreeMap<String, String>,
+    runtime: JavaScriptRuntime,           // node (default) or bun
     next_worker: AtomicU64,               // round-robin counter
     response_timeout: Duration,           // configurable via RUVYXA_WORKER_TIMEOUT_MS
 }
@@ -143,7 +145,7 @@ Returns first that exists.
 async fn spawn(worker_script: &Path, env: &BTreeMap<String, String>) -> Result<Self>
 ```
 
-1. **Spawn Node process**:
+1. **Spawn the selected Node or Bun process**:
 
    ```rust
    let mut cmd = Command::new("node");

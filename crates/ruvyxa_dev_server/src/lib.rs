@@ -66,6 +66,70 @@ const MAX_TRACKED_ACTION_RATE_LIMIT_KEYS: usize = 10_000;
 const PORT_FALLBACK_SCAN_LIMIT: u16 = 100;
 const SERVER_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
 
+/// JavaScript runtime used for Ruvyxa's config, render, and plugin processes.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum JavaScriptRuntime {
+    #[default]
+    Node,
+    Bun,
+}
+
+impl JavaScriptRuntime {
+    #[must_use]
+    pub const fn command(self) -> &'static str {
+        match self {
+            Self::Node => "node",
+            Self::Bun => "bun",
+        }
+    }
+
+    /// Executable used to launch the runtime process.
+    ///
+    /// Windows package-manager shims commonly expose Bun as `bun.cmd` instead
+    /// of `bun.exe`. Launching the shim through `cmd.exe` can corrupt JSON
+    /// arguments, so resolve the Bun package executable behind the shim first.
+    #[must_use]
+    pub fn executable(self) -> std::path::PathBuf {
+        match self {
+            Self::Node => std::path::PathBuf::from(self.command()),
+            Self::Bun => {
+                #[cfg(windows)]
+                if let Some(executable) = bun_executable_from_path() {
+                    return executable;
+                }
+                std::path::PathBuf::from(self.command())
+            }
+        }
+    }
+
+    #[must_use]
+    pub fn is_available(self) -> bool {
+        std::process::Command::new(self.executable())
+            .arg("--version")
+            .output()
+            .is_ok_and(|output| output.status.success())
+    }
+}
+
+#[cfg(windows)]
+fn bun_executable_from_path() -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for directory in std::env::split_paths(&path) {
+        let direct = directory.join("bun.exe");
+        if direct.is_file() {
+            return Some(direct);
+        }
+        if directory.join("bun.cmd").is_file() {
+            let package_executable = directory.join("node_modules/bun/bin/bun.exe");
+            if package_executable.is_file() {
+                return Some(package_executable);
+            }
+        }
+    }
+    None
+}
+
 #[derive(Debug, Clone)]
 pub struct ServerConfig {
     pub root: PathBuf,
@@ -83,7 +147,9 @@ pub struct ServerConfig {
     pub style_entries: Vec<PathBuf>,
     /// Precompile route modules and load their dependencies in dev workers.
     pub prebundle_dependencies: bool,
-    /// JSX transform runtime passed to every Node renderer and worker.
+    /// JavaScript runtime used by every renderer and worker.
+    pub runtime: JavaScriptRuntime,
+    /// JSX transform runtime passed to every JavaScript renderer and worker.
     pub jsx_runtime: JsxRuntime,
     /// Render actionable source-aware error overlays in development.
     pub error_overlay: bool,
@@ -165,6 +231,7 @@ impl ServerConfig {
             cache_css: true,
             style_entries: Vec::new(),
             prebundle_dependencies: true,
+            runtime: JavaScriptRuntime::Node,
             jsx_runtime: JsxRuntime::Automatic,
             error_overlay: true,
             debug_traces: false,
@@ -198,6 +265,7 @@ impl ServerConfig {
             cache_css: true,
             style_entries: Vec::new(),
             prebundle_dependencies: false,
+            runtime: JavaScriptRuntime::Node,
             jsx_runtime: JsxRuntime::Automatic,
             error_overlay: false,
             debug_traces: false,
@@ -395,8 +463,12 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
     let runtime_cache = Arc::new(RuntimeCache::with_manifest(manifest.clone()));
 
     let env = runtime_env(&config)?;
-    let worker_pool = Arc::new(NodeWorkerPool::start(&config.root, env).await?);
-    info!("Node worker pool ready");
+    let worker_pool =
+        Arc::new(NodeWorkerPool::start_with_runtime(&config.root, env, config.runtime).await?);
+    info!(
+        runtime = config.runtime.command(),
+        "JavaScript worker pool ready"
+    );
 
     let warmup_routes = dependency_warmup_routes(&config, &manifest);
     if !warmup_routes.is_empty() {
@@ -2803,7 +2875,7 @@ fn render_react_page(
             .suggest("Run pnpm install from the monorepo root, or install the ruvyxa package in the app.")
     })?;
 
-    let output = node_command(config)?
+    let output = javascript_command(config)?
         .arg(&renderer)
         .arg(&config.root)
         .arg(&config.app_dir)
@@ -2815,7 +2887,7 @@ fn render_react_page(
         )
         .output()
         .map_err(|source| RuvyxaError::Io {
-            message: "Failed to start Node for React SSR".to_string(),
+            message: format!("Failed to start {} for React SSR", config.runtime.command()),
             source,
         })?;
 
@@ -2884,8 +2956,8 @@ fn find_runtime_script(root: &Path, file_name: &str) -> Option<PathBuf> {
     None
 }
 
-fn node_command(config: &ServerConfig) -> Result<Command> {
-    let mut command = Command::new("node");
+fn javascript_command(config: &ServerConfig) -> Result<Command> {
+    let mut command = Command::new(config.runtime.executable());
     command.envs(runtime_env(config)?);
     Ok(command)
 }
@@ -2895,6 +2967,10 @@ fn runtime_env(config: &ServerConfig) -> Result<BTreeMap<String, String>> {
     env.insert(
         "RUVYXA_JSX_RUNTIME".to_string(),
         jsx_runtime_name(config.jsx_runtime).to_string(),
+    );
+    env.insert(
+        "RUVYXA_RUNTIME".to_string(),
+        config.runtime.command().to_string(),
     );
     Ok(env)
 }
@@ -2906,7 +2982,7 @@ fn jsx_runtime_name(runtime: JsxRuntime) -> &'static str {
     }
 }
 
-/// Load project environment values for Node runtime processes.
+/// Load project environment values for JavaScript runtime processes.
 pub fn project_env(root: &Path) -> Result<BTreeMap<String, String>> {
     let mut values = BTreeMap::new();
 
@@ -2977,7 +3053,7 @@ fn render_api(
             .suggest("Run pnpm install from the monorepo root, or install the ruvyxa package in the app.")
     })?;
 
-    let output = node_command(config)?
+    let output = javascript_command(config)?
         .arg(&renderer)
         .arg(&config.root)
         .arg(&route.file)
@@ -2989,7 +3065,10 @@ fn render_api(
         )
         .output()
         .map_err(|source| RuvyxaError::Io {
-            message: "Failed to start Node for API route rendering".to_string(),
+            message: format!(
+                "Failed to start {} for API route rendering",
+                config.runtime.command()
+            ),
             source,
         })?;
 
@@ -4334,6 +4413,22 @@ mod tests {
                 .map(String::as_str),
             Some("classic")
         );
+    }
+
+    #[test]
+    fn runtime_env_exposes_the_configured_javascript_runtime() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut config = ServerConfig::dev(temp.path(), "localhost", 3000);
+        config.runtime = JavaScriptRuntime::Bun;
+
+        assert_eq!(
+            runtime_env(&config)
+                .unwrap()
+                .get("RUVYXA_RUNTIME")
+                .map(String::as_str),
+            Some("bun")
+        );
+        assert_eq!(config.runtime.command(), "bun");
     }
 
     #[test]

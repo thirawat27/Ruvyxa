@@ -1,7 +1,8 @@
 export interface RuvyxaConfig {
   appDir?: string
   outDir?: string
-  runtime?: 'node' | 'edge' | 'static'
+  /** Runtime used for config, SSR, rendering, and JavaScript plugins. @default 'node' */
+  runtime?: 'node' | 'bun' | 'edge' | 'static'
   react?: boolean
   typescript?: {
     strict?: boolean
@@ -252,7 +253,7 @@ export interface RuvyxaPlugin {
   name: string
   enforce?: 'pre' | 'post'
   /**
-   * Allow build hooks to run in multiple isolated Node workers. Enable only when every hook is
+   * Allow build hooks to run in multiple isolated JavaScript workers. Enable only when every hook is
    * deterministic and does not depend on process-local mutable state. @default false
    */
   parallel?: boolean
@@ -281,6 +282,8 @@ export interface AdapterOutput {
   /** Chunk graph consumed by deployment tooling when `build.manifest` is enabled. */
   chunkManifest?: string
   platform?: 'node' | 'vercel' | 'cloudflare' | 'netlify' | 'bun' | 'static'
+  /** Runtime expected by the deployment entrypoint. */
+  runtime?: 'node' | 'bun'
   configFiles?: string[]
   functionsDir?: string
 }

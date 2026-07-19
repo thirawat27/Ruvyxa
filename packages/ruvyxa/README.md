@@ -10,9 +10,9 @@ Node.js 22.12 or later is required by the native Oxc transformer.
 npm install ruvyxa react react-dom
 ```
 
-Published installs include the TypeScript runtime files, a persistent Node worker pool, and a native
-CLI binary for the current platform. Rust and Cargo are only required when developing Ruvyxa from
-source.
+Published installs include the TypeScript runtime files, a persistent JavaScript worker pool, and a
+native CLI binary for the current platform. Rust and Cargo are only required when developing Ruvyxa
+from source.
 
 The package also provides ambient contracts for CSS, SCSS, Sass, and their `.module.*` variants. CSS
 Module imports expose a typed readonly class map; projects created with `create-ruvyxa` do not need
@@ -146,7 +146,7 @@ export default config({
 ## Runtime Architecture
 
 The `ruvyxa` package includes a persistent Node render worker pool (`runtime/worker-pool.mjs`) that
-keeps Node processes alive between requests, plus a persistent build-plugin worker
+keeps JavaScript runtime processes alive between requests, plus a persistent build-plugin worker
 (`runtime/plugin-runner.mjs`) that reuses loaded config hooks across modules. This removes repeated
 process startup and config compilation overhead. Plugin transform source maps are forwarded into
 generated client maps.

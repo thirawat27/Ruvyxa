@@ -3,7 +3,13 @@ import path from 'node:path'
 import { createInterface } from 'node:readline'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
-import { cacheFileName, compileBundle, runtimeAliases, toImportPath } from './compiler.mjs'
+import {
+  cacheFileName,
+  compileBundle,
+  runtimeAliases,
+  serverPlatform,
+  toImportPath,
+} from './compiler.mjs'
 
 const [projectRootArg, mode] = process.argv.slice(2)
 
@@ -85,7 +91,7 @@ async function loadConfig(root) {
     entrySource: moduleCode,
     sourcefile: 'ruvyxa:plugin-config-entry.ts',
     outfile,
-    platform: 'node',
+    platform: serverPlatform(),
     aliases: runtimeAliases(runtimeDir),
   })
 

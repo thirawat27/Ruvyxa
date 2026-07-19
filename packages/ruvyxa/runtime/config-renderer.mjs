@@ -6,6 +6,7 @@ import {
   cacheFileName,
   compileBundleWithMetadata,
   runtimeAliases,
+  serverPlatform,
   toImportPath,
 } from './compiler.mjs'
 
@@ -38,7 +39,7 @@ try {
     entrySource: moduleCode,
     sourcefile: 'ruvyxa:config-entry.ts',
     outfile,
-    platform: 'node',
+    platform: serverPlatform(),
     aliases: runtimeAliases(runtimeDir),
   })
 

@@ -15,9 +15,9 @@ use chrono::Local;
 use clap::builder::styling::{AnsiColor, Effects, Styles};
 use clap::{Parser, Subcommand, ValueEnum};
 use ruvyxa_dev_server::{
-    MAX_ACTION_BODY_LIMIT_BYTES, MAX_ACTION_RATE_LIMIT_REQUESTS, MAX_ACTION_RATE_LIMIT_WINDOW_SECS,
-    MAX_API_BODY_LIMIT_BYTES, MAX_PLUGIN_RESPONSE_BODY_LIMIT_BYTES, ServerConfig, render_request,
-    serve,
+    JavaScriptRuntime, MAX_ACTION_BODY_LIMIT_BYTES, MAX_ACTION_RATE_LIMIT_REQUESTS,
+    MAX_ACTION_RATE_LIMIT_WINDOW_SECS, MAX_API_BODY_LIMIT_BYTES,
+    MAX_PLUGIN_RESPONSE_BODY_LIMIT_BYTES, ServerConfig, render_request, serve,
 };
 use ruvyxa_diagnostics::Diagnostic;
 use ruvyxa_graph::{
@@ -117,6 +117,7 @@ struct BuildArgs {
 #[serde(rename_all = "lowercase")]
 enum BuildTarget {
     Node,
+    Bun,
     Edge,
     Static,
 }
@@ -177,6 +178,8 @@ struct ProjectConfig {
     adapter_options: Option<serde_json::Value>,
     #[serde(skip)]
     config_dependency_hash: String,
+    #[serde(skip)]
+    javascript_runtime_override: Option<JavaScriptRuntime>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -300,6 +303,16 @@ struct ConfigRendererOutput {
 impl ProjectConfig {
     fn build_target(&self, cli_target: Option<BuildTarget>) -> BuildTarget {
         cli_target.or(self.runtime).unwrap_or(BuildTarget::Node)
+    }
+
+    fn javascript_runtime(&self) -> JavaScriptRuntime {
+        self.javascript_runtime_override.unwrap_or_else(|| {
+            if self.runtime == Some(BuildTarget::Bun) {
+                JavaScriptRuntime::Bun
+            } else {
+                JavaScriptRuntime::Node
+            }
+        })
     }
 
     fn app_dir(&self) -> &str {
@@ -601,6 +614,7 @@ fn dev_server_config(args: &ServerArgs, config: &ProjectConfig) -> anyhow::Resul
     server.cache_css = config.cache.css.unwrap_or(true);
     server.style_entries = config.style_entries(&args.root);
     server.prebundle_dependencies = config.build.prebundle_dependencies.unwrap_or(true);
+    server.runtime = config.javascript_runtime();
     server.jsx_runtime = parse_jsx_runtime(config.build.jsx_runtime.as_deref())?;
     server.error_overlay = config.debug.overlay.unwrap_or(true);
     server.debug_traces = config.debug.traces.unwrap_or(false);
@@ -668,6 +682,7 @@ fn production_server_config(
     server.cache_route_manifest = config.cache.route_manifest.unwrap_or(true);
     server.cache_css = config.cache.css.unwrap_or(true);
     server.style_entries = config.style_entries(&out_dir.join("server"));
+    server.runtime = config.javascript_runtime();
     server.jsx_runtime = parse_jsx_runtime(config.build.jsx_runtime.as_deref())?;
     server.action_body_limit_bytes = config
         .security
@@ -714,43 +729,99 @@ fn production_server_config(
 }
 
 fn load_project_config(root: &Path) -> anyhow::Result<ProjectConfig> {
+    let runtime_override = runtime_override()?;
+    let bootstrap_runtime = runtime_override.unwrap_or_else(default_javascript_runtime);
     let Some(renderer) = find_runtime_script(root, "config-renderer.mjs") else {
-        let config = ProjectConfig {
+        let mut config = ProjectConfig {
             config_dependency_hash: "no-config".to_string(),
             ..ProjectConfig::default()
         };
+        config.javascript_runtime_override = Some(bootstrap_runtime);
         config.validate_paths()?;
         return Ok(config);
     };
 
-    let output = ProcessCommand::new("node")
-        .arg(&renderer)
+    let mut result = run_config_renderer(root, &renderer, bootstrap_runtime)?;
+    if !result.ok {
+        anyhow::bail!(
+            "config load failed: {} {}",
+            result.code.unwrap_or_else(|| "RUV1600".to_string()),
+            result
+                .message
+                .or(result.stack)
+                .unwrap_or_else(|| "unknown config error".to_string())
+        )
+    }
+
+    let mut config = result.config.take().unwrap_or_default();
+    let selected_runtime = runtime_override.unwrap_or_else(|| config.javascript_runtime());
+    if selected_runtime != bootstrap_runtime {
+        result = run_config_renderer(root, &renderer, selected_runtime)?;
+        if !result.ok {
+            anyhow::bail!(
+                "config load failed: {} {}",
+                result.code.unwrap_or_else(|| "RUV1600".to_string()),
+                result
+                    .message
+                    .or(result.stack)
+                    .unwrap_or_else(|| "unknown config error".to_string())
+            )
+        }
+        config = result.config.take().unwrap_or_default();
+    }
+    config.javascript_runtime_override = runtime_override;
+    let dependency_hash = required_config_dependency_hash(&result)?;
+    config.config_dependency_hash = dependency_hash;
+    config.validate_paths()?;
+    Ok(config)
+}
+
+fn run_config_renderer(
+    root: &Path,
+    renderer: &Path,
+    runtime: JavaScriptRuntime,
+) -> anyhow::Result<ConfigRendererOutput> {
+    let output = ProcessCommand::new(runtime.executable())
+        .arg(renderer)
         .arg(root)
+        .env("RUVYXA_RUNTIME", runtime.command())
         .output()
-        .with_context(|| format!("failed to load config for {}", root.display()))?;
-    let result = parse_config_renderer_output(
+        .with_context(|| {
+            format!(
+                "failed to load config with {} for {}",
+                runtime.command(),
+                root.display()
+            )
+        })?;
+    parse_config_renderer_output(
         root,
         &output.stdout,
         &output.stderr,
         &output.status.to_string(),
-    )?;
-
-    if output.status.success() && result.ok {
-        let dependency_hash = required_config_dependency_hash(&result)?;
-        let mut config = result.config.unwrap_or_default();
-        config.config_dependency_hash = dependency_hash;
-        config.validate_paths()?;
-        return Ok(config);
-    }
-
-    anyhow::bail!(
-        "config load failed: {} {}",
-        result.code.unwrap_or_else(|| "RUV1600".to_string()),
-        result
-            .message
-            .or(result.stack)
-            .unwrap_or_else(|| "unknown config error".to_string())
     )
+}
+
+fn runtime_override() -> anyhow::Result<Option<JavaScriptRuntime>> {
+    let Ok(value) = std::env::var("RUVYXA_RUNTIME") else {
+        return Ok(None);
+    };
+    match value.trim().to_ascii_lowercase().as_str() {
+        "node" => Ok(Some(JavaScriptRuntime::Node)),
+        "bun" => Ok(Some(JavaScriptRuntime::Bun)),
+        _ => anyhow::bail!("RUVYXA_RUNTIME must be either 'node' or 'bun'"),
+    }
+}
+
+fn default_javascript_runtime() -> JavaScriptRuntime {
+    if std::env::var("npm_config_user_agent")
+        .ok()
+        .is_some_and(|value| value.starts_with("bun/"))
+        || (!JavaScriptRuntime::Node.is_available() && JavaScriptRuntime::Bun.is_available())
+    {
+        JavaScriptRuntime::Bun
+    } else {
+        JavaScriptRuntime::Node
+    }
 }
 
 fn required_config_dependency_hash(result: &ConfigRendererOutput) -> anyhow::Result<String> {
@@ -870,7 +941,7 @@ async fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Resul
     let preparation_duration = phase_started.elapsed();
 
     let phase_started = Instant::now();
-    let client_manifest = emit_client_bundles(
+    let client_manifest = emit_client_bundles_with_runtime(
         &args.root,
         &app_dir,
         &manifest,
@@ -881,6 +952,7 @@ async fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Resul
             dependency_hash: &config.config_dependency_hash,
             directory: &build_cache_dir(&args.root, &config.cache),
         },
+        config.javascript_runtime(),
     )?;
     fs::write(
         client_dir.join("manifest.json"),
@@ -903,6 +975,7 @@ async fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Resul
             dependency_hash: &config.config_dependency_hash,
             directory: &build_cache_dir(&args.root, &config.cache),
         },
+        config.javascript_runtime(),
     )
     .await?;
     let prerender_duration = phase_started.elapsed();
@@ -1275,6 +1348,7 @@ async fn prerender_static_routes(
     styles: &str,
     build: &BuildConfigOptions,
     cache: RuvyxaBuildCache<'_>,
+    runtime: JavaScriptRuntime,
 ) -> anyhow::Result<Vec<PrerenderedRoute>> {
     use ruvyxa_graph::RouteKind;
 
@@ -1311,6 +1385,7 @@ async fn prerender_static_routes(
             ruvyxa_bundler::JsxRuntime::Automatic => "automatic".to_string(),
         },
     );
+    worker_env.insert("RUVYXA_RUNTIME".to_string(), runtime.command().to_string());
     let render_context_hash =
         prerender_context_hash(root, styles, &client_assets, build, &worker_env);
     let artifact_cache = PrerenderArtifactCache {
@@ -1328,7 +1403,7 @@ async fn prerender_static_routes(
         .iter()
         .any(|route| route.render.has_static_params && route_has_dynamic_segments(&route.path));
     let mut worker_pool = if needs_static_params_worker {
-        Some(start_prerender_worker_pool(root, &worker_env, parallelism).await?)
+        Some(start_prerender_worker_pool(root, &worker_env, parallelism, runtime).await?)
     } else {
         None
     };
@@ -1400,7 +1475,8 @@ async fn prerender_static_routes(
             }
         });
         if needs_render_worker && worker_pool.is_none() {
-            worker_pool = Some(start_prerender_worker_pool(root, &worker_env, parallelism).await?);
+            worker_pool =
+                Some(start_prerender_worker_pool(root, &worker_env, parallelism, runtime).await?);
         }
 
         let parallelism = prerender_parallelism(build.parallelism, jobs.len());
@@ -1484,12 +1560,14 @@ async fn start_prerender_worker_pool(
     root: &Path,
     worker_env: &BTreeMap<String, String>,
     parallelism: usize,
+    runtime: JavaScriptRuntime,
 ) -> anyhow::Result<std::sync::Arc<ruvyxa_dev_server::NodeWorkerPool>> {
     Ok(std::sync::Arc::new(
-        ruvyxa_dev_server::NodeWorkerPool::start_with_size(
+        ruvyxa_dev_server::NodeWorkerPool::start_with_size_and_runtime(
             root,
             worker_env.clone(),
             Some(parallelism),
+            runtime,
         )
         .await
         .map_err(|error| anyhow::anyhow!(error.to_string()))?,
@@ -2176,14 +2254,19 @@ impl JsConfigPluginBridge {
 }
 
 impl JsPluginWorker {
-    fn spawn(runner: &Path, project_root: &Path) -> ruvyxa_bundler::Result<Self> {
-        let mut child = ProcessCommand::new("node")
+    fn spawn(
+        runner: &Path,
+        project_root: &Path,
+        runtime: JavaScriptRuntime,
+    ) -> ruvyxa_bundler::Result<Self> {
+        let mut child = ProcessCommand::new(runtime.executable())
             .arg(runner)
             .arg(project_root)
             .arg("--persistent")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
+            .env("RUVYXA_RUNTIME", runtime.command())
             .spawn()
             .map_err(|err| {
                 ruvyxa_bundler::BundleError::Compiler(format!(
@@ -2264,6 +2347,7 @@ fn bundle_context_for_build(
     config_dependency_hash: &str,
     cache_dir: &Path,
     parallelism: usize,
+    runtime: JavaScriptRuntime,
 ) -> anyhow::Result<ruvyxa_bundler::BundleContext> {
     let compile_cache = ruvyxa_bundler::cache::CompileCache::at_dir_with_namespace(
         cache_dir,
@@ -2285,7 +2369,7 @@ fn bundle_context_for_build(
     let project_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let worker_count = plugin_worker_count(plugins, parallelism);
     let workers = (0..worker_count)
-        .map(|_| JsPluginWorker::spawn(&runner, &project_root).map(Mutex::new))
+        .map(|_| JsPluginWorker::spawn(&runner, &project_root, runtime).map(Mutex::new))
         .collect::<ruvyxa_bundler::Result<Vec<_>>>()?;
     let bridge = JsConfigPluginBridge {
         project_root,
@@ -2303,6 +2387,7 @@ fn bundle_context_for_build(
     ))
 }
 
+#[cfg(test)]
 fn emit_client_bundles(
     root: &Path,
     app_dir: &Path,
@@ -2311,6 +2396,29 @@ fn emit_client_bundles(
     build: &BuildConfigOptions,
     plugins: &[BuildPluginConfig],
     cache: RuvyxaBuildCache<'_>,
+) -> anyhow::Result<serde_json::Value> {
+    emit_client_bundles_with_runtime(
+        root,
+        app_dir,
+        manifest,
+        client_dir,
+        build,
+        plugins,
+        cache,
+        JavaScriptRuntime::Node,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_client_bundles_with_runtime(
+    root: &Path,
+    app_dir: &Path,
+    manifest: &RouteManifest,
+    client_dir: &Path,
+    build: &BuildConfigOptions,
+    plugins: &[BuildPluginConfig],
+    cache: RuvyxaBuildCache<'_>,
+    runtime: JavaScriptRuntime,
 ) -> anyhow::Result<serde_json::Value> {
     let page_routes = manifest
         .routes
@@ -2325,6 +2433,7 @@ fn emit_client_bundles(
         cache.dependency_hash,
         cache.directory,
         parallelism,
+        runtime,
     )?;
     let artifact_cache_dir = cache.directory.to_path_buf();
     let artifact_dependency_hash = cache.dependency_hash.to_string();
@@ -3896,7 +4005,7 @@ async fn bench(args: BenchArgs) -> anyhow::Result<()> {
         build_with_output(
             BuildArgs {
                 root: root.clone(),
-                target: Some(BuildTarget::Node),
+                target: None,
             },
             false,
         )
@@ -3987,7 +4096,7 @@ async fn test_parity(args: ProjectArgs) -> anyhow::Result<()> {
     println!();
     build(BuildArgs {
         root: args.root.clone(),
-        target: Some(BuildTarget::Node),
+        target: None,
     })
     .await?;
 
@@ -4547,7 +4656,8 @@ fn detect_package_manager(root: &Path) -> String {
         "npm".to_string()
     } else if find_upwards(root, "yarn.lock").is_some() {
         "yarn".to_string()
-    } else if find_upwards(root, "bun.lockb").is_some() {
+    } else if find_upwards(root, "bun.lock").is_some() || find_upwards(root, "bun.lockb").is_some()
+    {
         "bun".to_string()
     } else {
         "unknown".to_string()
@@ -5662,7 +5772,7 @@ export default {
         let bridge = JsConfigPluginBridge {
             project_root: root.to_path_buf(),
             workers: Arc::new(vec![Mutex::new(
-                JsPluginWorker::spawn(&runner, root).unwrap(),
+                JsPluginWorker::spawn(&runner, root, JavaScriptRuntime::Node).unwrap(),
             )]),
             next_worker: Arc::new(AtomicUsize::new(0)),
             has_resolve_id: false,
@@ -5718,7 +5828,9 @@ export default {
 
         let runner = find_runtime_script(root, "plugin-runner.mjs").unwrap();
         let workers = (0..2)
-            .map(|_| Mutex::new(JsPluginWorker::spawn(&runner, root).unwrap()))
+            .map(|_| {
+                Mutex::new(JsPluginWorker::spawn(&runner, root, JavaScriptRuntime::Node).unwrap())
+            })
             .collect();
         let bridge = JsConfigPluginBridge {
             project_root: root.to_path_buf(),
@@ -5888,6 +6000,7 @@ export default {
         };
 
         assert_eq!(config.build_target(None), BuildTarget::Static);
+        assert_eq!(config.javascript_runtime(), JavaScriptRuntime::Node);
         assert_eq!(
             config.build_target(Some(BuildTarget::Edge)),
             BuildTarget::Edge
@@ -5896,6 +6009,17 @@ export default {
             ProjectConfig::default().build_target(None),
             BuildTarget::Node
         );
+    }
+
+    #[test]
+    fn parses_bun_runtime_as_build_and_javascript_runtime() {
+        let config: ProjectConfig = serde_json::from_value(serde_json::json!({
+            "runtime": "bun"
+        }))
+        .unwrap();
+
+        assert_eq!(config.build_target(None), BuildTarget::Bun);
+        assert_eq!(config.javascript_runtime(), JavaScriptRuntime::Bun);
     }
 
     #[test]

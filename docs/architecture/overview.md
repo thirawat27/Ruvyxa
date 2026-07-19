@@ -42,16 +42,16 @@ ruvyxa_diagnostics     (foundation: serde + thiserror only)
 
 ## Key Design Decisions
 
-| Decision                               | Rationale                                                                                                                                |
-| -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| **Rust core, Node renderers**          | Rust: fast startup, compile-time safety, single binary. Node: React ecosystem. Workers eliminate per-request process spawn (~100-500ms). |
-| **Oxc for TS/JSX** (not Babel/SWC/TSC) | 10-100x faster. Single binary. No Node dep for bundling.                                                                                 |
-| **Persistent Node worker pool**        | Pool: 2-8 workers (default CPU count). NDJSON over stdin/stdout.                                                                         |
-| **Radix trie router**                  | O(path_depth) vs O(n) linear scan. Recompiled on manifest change.                                                                        |
-| **Content-hashed assets**              | Blake3 fingerprints → immutable caching (max-age=31536000).                                                                              |
-| **Staging + atomic commit**            | Build writes to staging dir → atomic rename. No corrupt output.                                                                          |
-| **Deterministic CSS scoping**          | fnv1a_64(project_relative_path + class_name) — reproducible builds.                                                                      |
-| **Strict config**                      | `deny_unknown_fields` — typos fail fast instead of silent defaults.                                                                      |
+| Decision                               | Rationale                                                                                                                                                                                                          |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| **Rust core, Node/Bun renderers**      | Rust: fast startup, compile-time safety, single binary. Node is the default JavaScript runtime; Bun is selectable for config, rendering, and JS plugins. Workers eliminate per-request process spawn (~100-500ms). |
+| **Oxc for TS/JSX** (not Babel/SWC/TSC) | 10-100x faster. Single binary. No Node dep for bundling.                                                                                                                                                           |
+| **Persistent JavaScript worker pool**  | Node or Bun pool: 2-8 workers (default CPU count). NDJSON over stdin/stdout.                                                                                                                                       |
+| **Radix trie router**                  | O(path_depth) vs O(n) linear scan. Recompiled on manifest change.                                                                                                                                                  |
+| **Content-hashed assets**              | Blake3 fingerprints → immutable caching (max-age=31536000).                                                                                                                                                        |
+| **Staging + atomic commit**            | Build writes to staging dir → atomic rename. No corrupt output.                                                                                                                                                    |
+| **Deterministic CSS scoping**          | fnv1a_64(project_relative_path + class_name) — reproducible builds.                                                                                                                                                |
+| **Strict config**                      | `deny_unknown_fields` — typos fail fast instead of silent defaults.                                                                                                                                                |
 
 ## Rendering Strategies
 
@@ -113,7 +113,7 @@ Two enforcement levels: graph-level (source scan in `ruvyxa_graph::validate_app`
 - [Dev Server](dev-server.md) — `ruvyxa_dev_server` Axum server, router, render cache, HMR, styles
 - [CLI & Build Pipeline](cli.md) — `ruvyxa_cli` commands, config, build orchestration
 - [Middleware & Wasm Plugins](middleware.md) — `ruvyxa_middleware` stack + plugin runtime
-- [Worker Pool](worker-pool.md) — Node worker pool protocol, streaming, failure recovery
+- [Worker Pool](worker-pool.md) — Node/Bun worker pool protocol, streaming, failure recovery
 - [Diagnostic Codes](diagnostics.md) — RUV#### error catalog
 - [Concurrency Model](concurrency.md) — locks, parallelism, performance characteristics
 - [Wire Protocols](protocols.md) — NDJSON, WebSocket HMR, Wasm ABI

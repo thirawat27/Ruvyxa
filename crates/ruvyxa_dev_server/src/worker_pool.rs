@@ -1,7 +1,7 @@
-//! Persistent Node.js worker pool for eliminating subprocess spawn overhead.
+//! Persistent JavaScript worker pool for eliminating subprocess spawn overhead.
 //!
-//! Instead of spawning a new `node` process for every SSR/API/action/client render,
-//! this module maintains a pool of long-lived Node processes that communicate
+//! Instead of spawning a new JavaScript process for every SSR/API/action/client render,
+//! this module maintains a pool of long-lived Node or Bun processes that communicate
 //! via newline-delimited JSON over stdin/stdout.
 //!
 //! Performance impact: eliminates ~100-500ms of per-request overhead from process
@@ -27,6 +27,8 @@ use tracing::{debug, error, warn};
 
 use ruvyxa_diagnostics::{Diagnostic, Result, RuvyxaError};
 use ruvyxa_graph::RouteParams;
+
+use crate::JavaScriptRuntime;
 
 /// Number of worker processes to maintain in the pool.
 /// Defaults to the number of available CPU cores (clamped to 2..8) for optimal
@@ -444,8 +446,9 @@ impl Worker {
     async fn spawn(
         worker_script: &Path,
         env: &BTreeMap<String, String>,
+        runtime: JavaScriptRuntime,
     ) -> std::result::Result<Self, RuvyxaError> {
-        let mut child = Command::new("node")
+        let mut child = Command::new(runtime.executable())
             .arg(worker_script)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
@@ -454,7 +457,7 @@ impl Worker {
             .kill_on_drop(true)
             .spawn()
             .map_err(|source| RuvyxaError::Io {
-                message: "Failed to spawn Node worker process".to_string(),
+                message: format!("Failed to spawn {} worker process", runtime.command()),
                 source,
             })?;
 
@@ -727,6 +730,7 @@ pub struct NodeWorkerPool {
     workers: StdRwLock<Vec<Arc<Worker>>>,
     worker_script: PathBuf,
     env: BTreeMap<String, String>,
+    runtime: JavaScriptRuntime,
     next_worker: AtomicU64,
     response_timeout: std::time::Duration,
 }
@@ -742,9 +746,17 @@ pub(crate) struct RenderApiRequest<'a> {
 }
 
 impl NodeWorkerPool {
-    pub async fn start(root: &Path, mut env: BTreeMap<String, String>) -> Result<Self> {
+    pub async fn start(root: &Path, env: BTreeMap<String, String>) -> Result<Self> {
+        Self::start_with_runtime(root, env, JavaScriptRuntime::Node).await
+    }
+
+    pub async fn start_with_runtime(
+        root: &Path,
+        mut env: BTreeMap<String, String>,
+        runtime: JavaScriptRuntime,
+    ) -> Result<Self> {
         let response_timeout = configure_worker_timeout(&mut env, DEFAULT_WORKER_TIMEOUT_MS);
-        Self::start_with_timeout(root, env, None, response_timeout).await
+        Self::start_with_timeout(root, env, runtime, None, response_timeout).await
     }
 
     /// Start a pool with an optional bounded worker count.
@@ -753,16 +765,26 @@ impl NodeWorkerPool {
     /// beyond its already configured render concurrency.
     pub async fn start_with_size(
         root: &Path,
-        mut env: BTreeMap<String, String>,
+        env: BTreeMap<String, String>,
         worker_count: Option<usize>,
     ) -> Result<Self> {
+        Self::start_with_size_and_runtime(root, env, worker_count, JavaScriptRuntime::Node).await
+    }
+
+    pub async fn start_with_size_and_runtime(
+        root: &Path,
+        mut env: BTreeMap<String, String>,
+        worker_count: Option<usize>,
+        runtime: JavaScriptRuntime,
+    ) -> Result<Self> {
         let response_timeout = configure_worker_timeout(&mut env, BUILD_WORKER_TIMEOUT_MS);
-        Self::start_with_timeout(root, env, worker_count, response_timeout).await
+        Self::start_with_timeout(root, env, runtime, worker_count, response_timeout).await
     }
 
     async fn start_with_timeout(
         root: &Path,
         env: BTreeMap<String, String>,
+        runtime: JavaScriptRuntime,
         worker_count: Option<usize>,
         response_timeout: std::time::Duration,
     ) -> Result<Self> {
@@ -794,7 +816,9 @@ impl NodeWorkerPool {
 
         let mut workers = Vec::with_capacity(pool_size);
         for _ in 0..pool_size {
-            workers.push(Arc::new(Worker::spawn(&worker_script, &env).await?));
+            workers.push(Arc::new(
+                Worker::spawn(&worker_script, &env, runtime).await?,
+            ));
         }
 
         // Health check: ping first worker to verify it's alive
@@ -803,7 +827,11 @@ impl NodeWorkerPool {
         };
         match workers[0].send(&ping, response_timeout).await {
             Ok(response) if response.ok => {
-                debug!(pool_size, "Node worker pool started successfully");
+                debug!(
+                    pool_size,
+                    runtime = runtime.command(),
+                    "JavaScript worker pool started successfully"
+                );
             }
             Ok(response) => {
                 error!(message = ?response.message, "Worker pool health check failed");
@@ -822,6 +850,7 @@ impl NodeWorkerPool {
             workers: StdRwLock::new(workers),
             worker_script,
             env,
+            runtime,
             next_worker: AtomicU64::new(0),
             response_timeout,
         })
@@ -878,7 +907,7 @@ impl NodeWorkerPool {
         index: usize,
         failed: &Arc<Worker>,
     ) -> Option<Arc<Worker>> {
-        let replacement = match Worker::spawn(&self.worker_script, &self.env).await {
+        let replacement = match Worker::spawn(&self.worker_script, &self.env, self.runtime).await {
             Ok(worker) => Arc::new(worker),
             Err(error) => {
                 warn!(%error, failed_worker = index, "failed to replace Node worker");
@@ -1452,7 +1481,7 @@ mod tests {
             "import { createInterface } from 'node:readline'; createInterface({ input: process.stdin }).on('line', (line) => { const { id } = JSON.parse(line); process.stdout.write(JSON.stringify({ id, ok: true, status: 200, body: 'legacy' }) + '\\n'); });",
         )
         .unwrap();
-        let worker = Worker::spawn(&worker_script, &BTreeMap::new())
+        let worker = Worker::spawn(&worker_script, &BTreeMap::new(), JavaScriptRuntime::Node)
             .await
             .unwrap();
         let request = WorkerRequest::Api {
@@ -1488,7 +1517,7 @@ mod tests {
             "import { createInterface } from 'node:readline'; createInterface({ input: process.stdin }).on('line', (line) => { const { id } = JSON.parse(line); const write = (value) => process.stdout.write(JSON.stringify({ id, ...value }) + '\\n'); write({ frame: 'api-start', ok: true, status: 200 }); for (let index = 0; index < 17; index++) write({ frame: 'api-chunk', ok: true, bodyBase64: 'AA==' }); write({ frame: 'api-end', ok: true }); });",
         )
         .unwrap();
-        let worker = Worker::spawn(&worker_script, &BTreeMap::new())
+        let worker = Worker::spawn(&worker_script, &BTreeMap::new(), JavaScriptRuntime::Node)
             .await
             .unwrap();
         let request = WorkerRequest::Api {
@@ -1527,7 +1556,7 @@ mod tests {
             "import { createInterface } from 'node:readline'; createInterface({ input: process.stdin }).on('line', (line) => { const { id } = JSON.parse(line); const write = (value, done) => process.stdout.write(JSON.stringify({ id, ...value }) + '\\n', done); write({ frame: 'api-start', ok: true, status: 200 }); write({ frame: 'api-chunk', ok: true, bodyBase64: 'AA==' }, () => process.exit(0)); });",
         )
         .unwrap();
-        let worker = Worker::spawn(&worker_script, &BTreeMap::new())
+        let worker = Worker::spawn(&worker_script, &BTreeMap::new(), JavaScriptRuntime::Node)
             .await
             .unwrap();
         let request = WorkerRequest::Api {
@@ -1570,13 +1599,14 @@ mod tests {
         )
         .unwrap();
 
-        let worker = Worker::spawn(&worker_script, &BTreeMap::new())
+        let worker = Worker::spawn(&worker_script, &BTreeMap::new(), JavaScriptRuntime::Node)
             .await
             .unwrap();
         let pool = NodeWorkerPool {
             workers: StdRwLock::new(vec![Arc::new(worker)]),
             worker_script,
             env: BTreeMap::new(),
+            runtime: JavaScriptRuntime::Node,
             next_worker: AtomicU64::new(0),
             response_timeout: std::time::Duration::from_millis(DEFAULT_WORKER_TIMEOUT_MS),
         };
@@ -1604,7 +1634,7 @@ mod tests {
         )
         .unwrap();
 
-        let worker = Worker::spawn(&worker_script, &BTreeMap::new())
+        let worker = Worker::spawn(&worker_script, &BTreeMap::new(), JavaScriptRuntime::Node)
             .await
             .unwrap();
         let request = WorkerRequest::Ping {
@@ -1641,7 +1671,7 @@ mod tests {
         .unwrap();
 
         let failed_worker = Arc::new(
-            Worker::spawn(&worker_script, &BTreeMap::new())
+            Worker::spawn(&worker_script, &BTreeMap::new(), JavaScriptRuntime::Node)
                 .await
                 .unwrap(),
         );
@@ -1649,6 +1679,7 @@ mod tests {
             workers: StdRwLock::new(vec![failed_worker.clone()]),
             worker_script,
             env: BTreeMap::new(),
+            runtime: JavaScriptRuntime::Node,
             next_worker: AtomicU64::new(0),
             response_timeout: std::time::Duration::from_millis(DEFAULT_WORKER_TIMEOUT_MS),
         };

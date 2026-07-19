@@ -8,6 +8,7 @@ import {
   collectLayouts,
   compileBundle,
   runtimeAliases,
+  serverPlatform,
   toImportPath,
 } from './compiler.mjs'
 
@@ -68,7 +69,7 @@ export async function render(ctx) {
     entrySource: moduleCode,
     sourcefile: 'ruvyxa:ssr-entry.tsx',
     outfile,
-    platform: 'node',
+    platform: serverPlatform(),
     external: ['react', 'react/jsx-runtime', 'react-dom/server'],
     aliases: runtimeAliases(path.dirname(fileURLToPath(import.meta.url))),
   })

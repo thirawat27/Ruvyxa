@@ -63,18 +63,18 @@ Raised by `ruvyxa_dev_server`.
 
 ### SSR Errors
 
-| Code        | Title                  | Condition                                          | Fix                                                               |
-| ----------- | ---------------------- | -------------------------------------------------- | ----------------------------------------------------------------- |
-| **RUV1100** | React SSR failed       | `renderToString()` threw in Node worker            | Check component for errors, missing imports, invalid JSX          |
-| **RUV1102** | SSR renderer not found | `runtime/ssr-renderer.mjs` missing in Node workers | Reinstall `ruvyxa` package or verify runtime scripts are included |
+| Code        | Title                  | Condition                                                | Fix                                                               |
+| ----------- | ---------------------- | -------------------------------------------------------- | ----------------------------------------------------------------- |
+| **RUV1100** | React SSR failed       | `renderToString()` threw in a JavaScript worker          | Check component for errors, missing imports, invalid JSX          |
+| **RUV1102** | SSR renderer not found | `runtime/ssr-renderer.mjs` missing in JavaScript workers | Reinstall `ruvyxa` package or verify runtime scripts are included |
 
 ### API Errors
 
-| Code        | Title                      | Condition                                          | Fix                                                                   |
-| ----------- | -------------------------- | -------------------------------------------------- | --------------------------------------------------------------------- |
-| **RUV1200** | API route execution failed | API handler threw uncaught error in Node worker    | Check API route for errors, verify request shape matches expectations |
-| **RUV1201** | No available server port   | Could not bind to port after 100 fallback attempts | Free a port in range or change configured port                        |
-| **RUV1202** | API renderer not found     | `runtime/api-renderer.mjs` missing                 | Reinstall `ruvyxa`                                                    |
+| Code        | Title                      | Condition                                               | Fix                                                                   |
+| ----------- | -------------------------- | ------------------------------------------------------- | --------------------------------------------------------------------- |
+| **RUV1200** | API route execution failed | API handler threw uncaught error in a JavaScript worker | Check API route for errors, verify request shape matches expectations |
+| **RUV1201** | No available server port   | Could not bind to port after 100 fallback attempts      | Free a port in range or change configured port                        |
+| **RUV1202** | API renderer not found     | `runtime/api-renderer.mjs` missing                      | Reinstall `ruvyxa`                                                    |
 
 ### Client Bundle Errors
 

@@ -43,6 +43,7 @@ export function bunAdapter(options: BunAdapterOptions = {}): Adapter {
         name: 'bun',
         target: 'node',
         platform: 'bun',
+        runtime: 'bun',
         entry: options.entry ?? `${ctx.outDir}/server/app`,
         assetsDir: `${ctx.outDir}/assets`,
         ...clientBuildOutput(ctx),
