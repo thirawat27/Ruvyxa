@@ -1,6 +1,6 @@
 [package]
 name = "ruvyxa_dev_server"
-version = "1.0.15"
+version = "1.0.16"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true

@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.0.16 (2026-07-18)
+## v1.0.16 (2026-07-19)
 
 ### Large-Build and Content Compiler Follow-up
 
