@@ -48,7 +48,7 @@
 //! - No filesystem or network access (those requested permissions are rejected)
 //! - No environment variable access unless explicitly granted
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use ruvyxa_diagnostics::{Diagnostic, Result, RuvyxaError};
@@ -92,6 +92,50 @@ pub struct PluginResult {
     pub response: Option<PluginResponse>,
 }
 
+/// Static ABI information reported by the plugin debug command.
+#[derive(Debug, Clone, Serialize)]
+pub struct PluginModuleInfo {
+    pub exports: Vec<String>,
+    pub has_memory: bool,
+    pub has_request_handler: bool,
+    pub has_response_handler: bool,
+    pub has_allocator: bool,
+}
+
+/// Compile a Wasm plugin and report the exports required by Ruvyxa's raw ABI.
+pub fn inspect_wasm_plugin(path: &Path) -> Result<PluginModuleInfo> {
+    if path.extension().and_then(|extension| extension.to_str()) != Some("wasm") {
+        return Err(Diagnostic::new("RUV2100", "Invalid Wasm plugin file")
+            .explain(format!(
+                "{} does not have a .wasm extension.",
+                path.display()
+            ))
+            .suggest("Build the plugin with cargo and pass its generated .wasm file.")
+            .into());
+    }
+    let wasm = std::fs::read(path).map_err(|source| RuvyxaError::Io {
+        message: format!("Failed to read Wasm plugin {}", path.display()),
+        source,
+    })?;
+    let engine = plugin_engine()?;
+    let module = Module::new(&engine, wasm).map_err(|error| {
+        Diagnostic::new("RUV2100", "Wasm plugin load error")
+            .explain(format!("Failed to compile {}: {error}", path.display()))
+    })?;
+    let exports = module
+        .exports()
+        .map(|export| export.name().to_string())
+        .collect::<Vec<_>>();
+
+    Ok(PluginModuleInfo {
+        has_memory: exports.iter().any(|export| export == "memory"),
+        has_request_handler: exports.iter().any(|export| export == "on_request"),
+        has_response_handler: exports.iter().any(|export| export == "on_response"),
+        has_allocator: exports.iter().any(|export| export == "ruvyxa_alloc"),
+        exports,
+    })
+}
+
 impl Default for PluginResult {
     fn default() -> Self {
         Self {
@@ -123,6 +167,14 @@ pub struct WasmPluginRuntime {
     plugins: Arc<RwLock<Vec<LoadedPlugin>>>,
 }
 
+fn plugin_engine() -> Result<Engine> {
+    let mut engine_config = Config::new();
+    engine_config.consume_fuel(true);
+    engine_config.wasm_component_model(false);
+    Engine::new(&engine_config)
+        .map_err(|error| RuvyxaError::Message(format!("Failed to create Wasmtime engine: {error}")))
+}
+
 impl WasmPluginRuntime {
     /// Create a new plugin runtime and load all configured plugins.
     pub async fn new(project_root: &Path, configs: &[PluginConfig]) -> Result<Self> {
@@ -132,18 +184,13 @@ impl WasmPluginRuntime {
                 message: format!("Failed to resolve project root {}", project_root.display()),
                 source,
             })?;
-        let mut engine_config = Config::new();
-        engine_config.consume_fuel(true);
-        engine_config.wasm_component_model(false);
-
-        let engine = Engine::new(&engine_config).map_err(|error| {
-            RuvyxaError::Message(format!("Failed to create Wasmtime engine: {error}"))
-        })?;
+        let engine = plugin_engine()?;
 
         let mut plugins = Vec::new();
 
         for plugin_config in configs {
-            let configured_path = Path::new(&plugin_config.path);
+            let configured_path = configured_plugin_path(plugin_config)?;
+            let configured_path = Path::new(&configured_path);
             let is_relative_safe = configured_path.is_relative()
                 && configured_path.components().all(|component| {
                     matches!(
@@ -469,7 +516,7 @@ impl WasmPluginRuntime {
             .map_err(|_| format!("Plugin does not export function '{func_name}'"))?;
 
         let input_bytes = input.as_bytes();
-        let input_ptr = 0i32;
+        let input_ptr = Self::allocate_input_buffer(store, instance, &memory, input_bytes.len())?;
         memory
             .write(&mut *store, input_ptr as usize, input_bytes)
             .map_err(|e| format!("Failed to write to plugin memory: {e}"))?;
@@ -485,6 +532,44 @@ impl WasmPluginRuntime {
         } else {
             Ok(result_str)
         }
+    }
+
+    /// Prefer the optional allocator exported by new plugin scaffolds. Legacy
+    /// modules retain the original offset-zero ABI for backward compatibility.
+    fn allocate_input_buffer(
+        store: &mut Store<PluginStore>,
+        instance: &Instance,
+        memory: &Memory,
+        input_len: usize,
+    ) -> std::result::Result<i32, String> {
+        let Some(_) = instance.get_func(&mut *store, "ruvyxa_alloc") else {
+            return Ok(0);
+        };
+        let reservation_bytes = input_len
+            .checked_add(MAX_PLUGIN_RESULT_BYTES + 1)
+            .ok_or_else(|| "Plugin input reservation exceeds the host limit".to_string())?;
+        let reservation = i32::try_from(reservation_bytes)
+            .map_err(|_| "Plugin input reservation exceeds the Wasm ABI limit".to_string())?;
+        let allocator = instance
+            .get_typed_func::<i32, i32>(&mut *store, "ruvyxa_alloc")
+            .map_err(|_| {
+                "Plugin export 'ruvyxa_alloc' must have signature (i32) -> i32".to_string()
+            })?;
+        let pointer = allocator
+            .call(&mut *store, reservation)
+            .map_err(|error| format!("Plugin allocator trapped: {error}"))?;
+        let start = usize::try_from(pointer)
+            .map_err(|_| "Plugin allocator returned a negative pointer".to_string())?;
+        let end = start
+            .checked_add(reservation_bytes)
+            .ok_or_else(|| "Plugin allocator pointer overflowed".to_string())?;
+        if end > memory.data_size(&*store) {
+            return Err(format!(
+                "Plugin allocator returned {pointer}, but its {reservation_bytes} byte reservation exceeds {} byte memory",
+                memory.data_size(&*store)
+            ));
+        }
+        Ok(pointer)
     }
 
     /// Read the legacy pointer-based result ABI without assuming a fixed result
@@ -540,6 +625,32 @@ impl WasmPluginRuntime {
     }
 }
 
+fn configured_plugin_path(plugin_config: &PluginConfig) -> Result<PathBuf> {
+    if let Some(path) = &plugin_config.path {
+        return Ok(path.clone());
+    }
+
+    let name = plugin_config.name.trim();
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        || name.starts_with('-')
+        || name.ends_with('-')
+    {
+        return Err(Diagnostic::new("RUV2101", "Invalid Wasm plugin name")
+            .explain(
+                "A plugin without `path` must use lowercase letters, digits, and single hyphens in `name`.",
+            )
+            .suggest("Use a name such as `auth-guard`, or provide an explicit project-relative .wasm path.")
+            .into());
+    }
+
+    Ok(PathBuf::from(name)
+        .join("target/wasm32-unknown-unknown/release")
+        .join(format!("{}.wasm", name.replace('-', "_"))))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -570,7 +681,9 @@ mod tests {
                     i32.const 8192))"#
         );
         let module = Module::new(&engine, wasm).unwrap();
-        let mut store = WasmPluginRuntime::create_store(&engine, &test_permissions()).unwrap();
+        let mut permissions = test_permissions();
+        permissions.max_memory_bytes = 2 * 1024 * 1024;
+        let mut store = WasmPluginRuntime::create_store(&engine, &permissions).unwrap();
         let instance = WasmPluginRuntime::instantiate(&engine, &mut store, &module).unwrap();
 
         let actual =
@@ -588,7 +701,9 @@ mod tests {
             (func (export "on_request") (param i32 i32) (result i32)
                 i32.const 8192))"#;
         let module = Module::new(&engine, wasm).unwrap();
-        let mut store = WasmPluginRuntime::create_store(&engine, &test_permissions()).unwrap();
+        let mut permissions = test_permissions();
+        permissions.max_memory_bytes = 2 * 1024 * 1024;
+        let mut store = WasmPluginRuntime::create_store(&engine, &permissions).unwrap();
         let instance = WasmPluginRuntime::instantiate(&engine, &mut store, &module).unwrap();
         let memory = instance.get_memory(&mut store, "memory").unwrap();
         let result_start = 8192;
@@ -602,5 +717,84 @@ mod tests {
                 .unwrap_err();
 
         assert!(error.contains("not NUL-terminated"));
+    }
+
+    #[test]
+    fn inspects_required_plugin_exports_without_executing_the_module() {
+        let temp = tempfile::tempdir().unwrap();
+        let plugin = temp.path().join("plugin.wasm");
+        std::fs::write(
+            &plugin,
+            r#"(module
+                (memory (export "memory") 1)
+                (func (export "on_request") (param i32 i32) (result i32) i32.const 0)
+                (func (export "ruvyxa_alloc") (param i32) (result i32) i32.const 0)
+            )"#,
+        )
+        .unwrap();
+
+        let info = inspect_wasm_plugin(&plugin).unwrap();
+
+        assert!(info.has_memory);
+        assert!(info.has_request_handler);
+        assert!(!info.has_response_handler);
+        assert!(info.has_allocator);
+        assert!(info.exports.iter().any(|export| export == "memory"));
+    }
+
+    #[test]
+    fn resolves_an_implicit_plugin_path_from_its_name() {
+        let plugin = PluginConfig {
+            name: "auth-guard".to_string(),
+            path: None,
+            phase: PluginPhase::Request,
+            routes: None,
+            config: serde_json::Value::Null,
+            permissions: PluginPermissions::default(),
+        };
+
+        assert_eq!(
+            configured_plugin_path(&plugin).unwrap(),
+            PathBuf::from("auth-guard/target/wasm32-unknown-unknown/release/auth_guard.wasm")
+        );
+    }
+
+    #[test]
+    fn rejects_an_unsafe_implicit_plugin_name() {
+        let plugin = PluginConfig {
+            name: "../escape".to_string(),
+            path: None,
+            phase: PluginPhase::Request,
+            routes: None,
+            config: serde_json::Value::Null,
+            permissions: PluginPermissions::default(),
+        };
+
+        assert!(configured_plugin_path(&plugin).is_err());
+    }
+
+    #[test]
+    fn uses_the_optional_allocator_without_overwriting_plugin_static_data() {
+        let engine = Engine::default();
+        let module = Module::new(
+            &engine,
+            r#"(module
+                (memory (export "memory") 18)
+                (data (i32.const 0) "{\"action\":\"continue\"}\00")
+                (func (export "ruvyxa_alloc") (param i32) (result i32) i32.const 65536)
+                (func (export "on_request") (param i32 i32) (result i32) i32.const 0)
+            )"#,
+        )
+        .unwrap();
+        let mut permissions = test_permissions();
+        permissions.max_memory_bytes = 2 * 1024 * 1024;
+        let mut store = WasmPluginRuntime::create_store(&engine, &permissions).unwrap();
+        let instance = WasmPluginRuntime::instantiate(&engine, &mut store, &module).unwrap();
+
+        let result =
+            WasmPluginRuntime::call_plugin_func(&mut store, &instance, "on_request", "{}", "{}")
+                .unwrap();
+
+        assert_eq!(result, r#"{"action":"continue"}"#);
     }
 }

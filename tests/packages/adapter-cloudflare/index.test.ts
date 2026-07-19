@@ -8,6 +8,14 @@ describe('cloudflareAdapter', () => {
     const output = await cloudflareAdapter().build({ root: '.', outDir: '.ruvyxa' })
 
     assert.deepEqual(
+      output.artifacts?.map(({ kind, path }) => ({ kind, path })),
+      [
+        { kind: 'static-site', path: 'deploy/cloudflare/assets' },
+        { kind: 'file', path: 'deploy/cloudflare/wrangler.jsonc' },
+      ],
+    )
+
+    assert.deepEqual(
       {
         name: output.name,
         target: output.target,

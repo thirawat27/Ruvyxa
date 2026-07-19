@@ -46,6 +46,19 @@ export function nodeAdapter(options: NodeAdapterOptions = {}): Adapter {
         entry: options.entry ?? `${ctx.outDir}/server/app`,
         assetsDir: `${ctx.outDir}/assets`,
         ...clientBuildOutput(ctx),
+        artifacts: [
+          {
+            kind: 'file',
+            path: 'deploy/node/start.mjs',
+            contents: `import { spawn } from 'node:child_process'\n\nconst child = spawn('npx', ['--no-install', 'ruvyxa', 'start'], { cwd: process.cwd(), stdio: 'inherit' })\nchild.on('exit', (code, signal) => process.exitCode = code ?? (signal ? 1 : 0))\n`,
+          },
+          {
+            kind: 'file',
+            path: 'deploy/node/README.md',
+            contents:
+              '# Ruvyxa Node deployment\\n\\nRun `node .ruvyxa/deploy/node/start.mjs` from the application root after installing production dependencies.\\n',
+          },
+        ],
       }
     },
   }

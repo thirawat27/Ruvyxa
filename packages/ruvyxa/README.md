@@ -129,7 +129,6 @@ export default config({
     plugins: [
       {
         name: 'auth-guard',
-        path: 'plugins/auth.wasm',
         phase: 'request',
         routes: ['/api/*'],
         allow: {

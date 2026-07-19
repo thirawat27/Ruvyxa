@@ -1,6 +1,6 @@
 # Deployment
 
-## Vercel
+## Adapter Deployment Artifacts
 
 ### Setup
 
@@ -17,28 +17,28 @@ Use the standard npm scripts:
 }
 ```
 
-Configure Vercel:
+Select an adapter in `ruvyxa.config.ts`. Its post-build lifecycle runs while the build is still in
+the staging directory, so a failed adapter cannot replace a previously successful `.ruvyxa/` build.
 
-- **Build Command**: `npm run build`
-- **Output Directory**: `.ruvyxa`
-- **Framework Preset**: _None_ — Ruvyxa handles everything through `npm run build`
-
-### Adapter
+### Vercel static output
 
 ```ts
 // ruvyxa.config.ts
 import { config } from 'ruvyxa/config'
-import { adapter } from '@ruvyxa/adapter-vercel'
+import { vercelAdapter } from '@ruvyxa/adapter-vercel'
 
 export default config({
-  adapter: adapter(),
-  adapterOptions: {
-    regions: ['iad1'],
-  },
+  adapter: vercelAdapter(),
 })
 ```
 
-Adapters write metadata to `.ruvyxa/build.json` for deployment tooling.
+Build with `npm run build`, then deploy `.ruvyxa/deploy/vercel/`. The generated directory contains
+`.vercel/output/static` and `.vercel/output/config.json` using Vercel's static Build Output layout.
+Use Vercel's “Other” preset and set the deploy root to that generated directory.
+
+Vercel, Netlify, and Cloudflare adapters currently emit deployable **static** output only. They
+accept SSG and CSR page routes; API, SSR, ISR, and PPR routes fail with `RUV2202` rather than
+shipping a deployment without a request handler.
 
 ### Permission Denied Error
 
@@ -78,7 +78,8 @@ Pin Node 22 for reproducible CI builds:
 
 ### Build Artifacts
 
-After `npm run build`, deploy the entire `.ruvyxa/` directory:
+After `npm run build`, the normal runtime output remains in `.ruvyxa/` and an adapter may add a
+deployment directory:
 
 ```text
 .ruvyxa/
@@ -87,8 +88,11 @@ After `npm run build`, deploy the entire `.ruvyxa/` directory:
 ├── assets/         # Static assets + WebP images
 ├── prerender/      # Pre-rendered HTML pages
 ├── manifest.json   # Route manifest
-└── build.json      # Build metadata
+├── build.json      # Build metadata
+└── deploy/         # Adapter-specific artifacts, when configured
 ```
+
+For a static adapter, use its generated publish directory instead of deploying all of `.ruvyxa/`.
 
 ---
 
@@ -96,33 +100,35 @@ After `npm run build`, deploy the entire `.ruvyxa/` directory:
 
 ### Available
 
-| Adapter                      | Target             |
-| ---------------------------- | ------------------ |
-| `@ruvyxa/adapter-node`       | Node.js server     |
-| `@ruvyxa/adapter-vercel`     | Vercel serverless  |
-| `@ruvyxa/adapter-cloudflare` | Cloudflare Workers |
-| `@ruvyxa/adapter-netlify`    | Netlify Functions  |
-| `@ruvyxa/adapter-bun`        | Bun runtime        |
-| `@ruvyxa/adapter-static`     | Static hosting     |
+| Adapter                      | Target                                         |
+| ---------------------------- | ---------------------------------------------- |
+| `@ruvyxa/adapter-node`       | Node launcher: `.ruvyxa/deploy/node/start.mjs` |
+| `@ruvyxa/adapter-bun`        | Bun launcher: `.ruvyxa/deploy/bun/start.mjs`   |
+| `@ruvyxa/adapter-static`     | Static files: `.ruvyxa/static/`                |
+| `@ruvyxa/adapter-cloudflare` | Cloudflare Pages: `.ruvyxa/deploy/cloudflare/` |
+| `@ruvyxa/adapter-netlify`    | Netlify static: `.ruvyxa/deploy/netlify/`      |
+| `@ruvyxa/adapter-vercel`     | Vercel static: `.ruvyxa/deploy/vercel/`        |
 
 ### Usage
 
 ```ts
 // ruvyxa.config.ts
 import { config } from 'ruvyxa/config'
-import { adapter } from '@ruvyxa/adapter-node'
+import { nodeAdapter } from '@ruvyxa/adapter-node'
 
 export default config({
-  adapter: adapter(),
+  adapter: nodeAdapter(),
 })
 ```
 
 ### Important
 
-- An adapter's `build()` function is executed while Ruvyxa loads configuration.
-- Serializable `AdapterOutput` and `adapterOptions` are written to `.ruvyxa/build.json`.
-- An adapter declaration alone does **not** create or publish platform functions.
-- Always verify platform output, routing, and the serving model for your deployment.
+- An adapter's `build()` function runs both during configuration loading and during the post-build
+  artifact step.
+- The post-build step may create only files inside `.ruvyxa/`; its result is recorded as
+  `adapterArtifacts` in `.ruvyxa/build.json`.
+- Static adapters deliberately reject dynamic request handling until a platform request handler
+  exists. This is a safety boundary, not a fallback.
 
 ---
 
@@ -140,19 +146,20 @@ npm install @ruvyxa/adapter-node
 ```
 
 ```ts
-import { adapter } from '@ruvyxa/adapter-node'
+import { nodeAdapter } from '@ruvyxa/adapter-node'
 
 export default config({
-  adapter: adapter(),
+  adapter: nodeAdapter(),
 })
 ```
 
 ## Static Hosting
 
 ```bash
-npm run build -- --target static
-# or set runtime: 'static' in config
-# deploy .ruvyxa/ to your static host (S3, Cloudflare Pages, Netlify, etc.)
+npm install @ruvyxa/adapter-static
+# configure staticAdapter(), then:
+npm run build
+# deploy .ruvyxa/static/ to your static host
 ```
 
 ---

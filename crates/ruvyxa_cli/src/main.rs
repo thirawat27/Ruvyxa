@@ -24,6 +24,7 @@ use ruvyxa_graph::{
     DiscoverOptions, RenderStrategy, RouteEntry, RouteManifest, RouteParams, discover_routes,
     validate_app, write_manifest,
 };
+use ruvyxa_middleware::inspect_wasm_plugin;
 use tracing::info;
 use walkdir::WalkDir;
 
@@ -84,6 +85,8 @@ enum Command {
         about = "Compare dev/prod routes and smoke-render page routes"
     )]
     TestParity(ProjectArgs),
+    #[command(about = "Create and inspect WebAssembly middleware plugins")]
+    Plugin(PluginArgs),
 }
 
 #[derive(Debug, Clone, Parser)]
@@ -140,6 +143,38 @@ struct BenchArgs {
 
     #[arg(long)]
     json: bool,
+}
+
+#[derive(Debug, Parser)]
+struct PluginArgs {
+    #[command(subcommand)]
+    command: PluginCommand,
+}
+
+#[derive(Debug, Subcommand)]
+enum PluginCommand {
+    #[command(about = "Create a Rust Wasm middleware plugin starter")]
+    New(PluginNewArgs),
+    #[command(about = "Inspect a compiled Wasm plugin and verify its Ruvyxa ABI")]
+    Debug(PluginDebugArgs),
+}
+
+#[derive(Debug, Parser)]
+struct PluginNewArgs {
+    name: String,
+
+    #[arg(long, default_value = ".")]
+    root: PathBuf,
+}
+
+#[derive(Debug, Parser)]
+struct PluginDebugArgs {
+    /// Plugin name (for example `auth-guard`) or an explicit .wasm path.
+    plugin_or_wasm: PathBuf,
+
+    /// Project root used when resolving a plugin name.
+    #[arg(long, default_value = ".")]
+    root: PathBuf,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -298,6 +333,23 @@ struct ConfigRendererOutput {
     message: Option<String>,
     stack: Option<String>,
     dependency_hash: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct AdapterRunnerOutput {
+    ok: bool,
+    result: Option<Vec<AdapterArtifactReport>>,
+    code: Option<String>,
+    message: Option<String>,
+    stack: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AdapterArtifactReport {
+    kind: String,
+    path: String,
 }
 
 impl ProjectConfig {
@@ -484,10 +536,179 @@ async fn main() -> anyhow::Result<()> {
         Command::Trace(args) => trace(args).context("trace failed")?,
         Command::Bench(args) => bench(args).await.context("benchmark failed")?,
         Command::TestParity(args) => test_parity(args).await.context("parity test failed")?,
+        Command::Plugin(args) => plugin(args).context("plugin command failed")?,
     }
 
     Ok(())
 }
+
+fn plugin(args: PluginArgs) -> anyhow::Result<()> {
+    match args.command {
+        PluginCommand::New(args) => scaffold_wasm_plugin(args),
+        PluginCommand::Debug(args) => debug_wasm_plugin(args),
+    }
+}
+
+fn scaffold_wasm_plugin(args: PluginNewArgs) -> anyhow::Result<()> {
+    let plugin_name = normalize_plugin_name(&args.name)?;
+    let plugin_dir = args.root.join(&plugin_name);
+    if plugin_dir.exists() {
+        anyhow::bail!(
+            "plugin directory already exists: {}; choose a different name or remove it first",
+            plugin_dir.display()
+        );
+    }
+
+    fs::create_dir_all(plugin_dir.join("src"))?;
+    fs::create_dir_all(plugin_dir.join(".cargo"))?;
+    let crate_name = plugin_name.replace('-', "_");
+    fs::write(
+        plugin_dir.join("Cargo.toml"),
+        format!(
+            "[package]\nname = \"{plugin_name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n\n[profile.release]\nopt-level = \"z\"\nlto = true\ncodegen-units = 1\npanic = \"abort\"\n\n[package.metadata.ruvyxa]\ncrate = \"{crate_name}\"\n"
+        ),
+    )?;
+    fs::write(
+        plugin_dir.join(".cargo").join("config.toml"),
+        "[target.wasm32-unknown-unknown]\nrustflags = [\"-C\", \"link-arg=--export-memory\", \"-C\", \"link-arg=--initial-memory=18874368\"]\n",
+    )?;
+    fs::write(plugin_dir.join("src").join("lib.rs"), WASM_PLUGIN_TEMPLATE)?;
+    fs::write(
+        plugin_dir.join("README.md"),
+        format!(
+            "# {plugin_name}\n\nA Ruvyxa Wasm middleware plugin starter.\n\n```bash\nrustup target add wasm32-unknown-unknown\ncargo build --target wasm32-unknown-unknown --release\nruvyxa plugin debug {plugin_name} --root ..\n```\n\nAdd the generated module to `ruvyxa.config.ts`:\n\n```ts\nmiddleware: {{\n  plugins: [{{\n    name: '{plugin_name}',\n    phase: 'request',\n  }}],\n}}\n```\n\nThe starter exports both `on_request` and `on_response` and returns `continue`.\n"
+        ),
+    )?;
+
+    print_tui_header("Plugin");
+    print_field("status", ok_text("created"));
+    print_field("plugin", accent(&plugin_name));
+    print_field("path", path_text(&plugin_dir));
+    print_field(
+        "next",
+        "cargo build --target wasm32-unknown-unknown --release".to_string(),
+    );
+    Ok(())
+}
+
+fn debug_wasm_plugin(args: PluginDebugArgs) -> anyhow::Result<()> {
+    let plugin_path = resolve_plugin_debug_path(&args)?;
+    let info =
+        inspect_wasm_plugin(&plugin_path).map_err(|error| anyhow::anyhow!(error.to_string()))?;
+    if !info.has_memory || (!info.has_request_handler && !info.has_response_handler) {
+        anyhow::bail!(
+            "RUV2100 incompatible Wasm plugin: export `memory` and at least one of `on_request` or `on_response`"
+        );
+    }
+
+    print_tui_header("Plugin Debug");
+    print_field("path", path_text(&plugin_path));
+    print_field("memory", ok_text(info.has_memory.to_string()));
+    print_field("on_request", ok_text(info.has_request_handler.to_string()));
+    print_field(
+        "on_response",
+        ok_text(info.has_response_handler.to_string()),
+    );
+    print_field(
+        "allocator",
+        if info.has_allocator {
+            ok_text("ruvyxa_alloc")
+        } else {
+            accent("legacy offset 0")
+        },
+    );
+    print_field("exports", info.exports.join(", "));
+    Ok(())
+}
+
+fn resolve_plugin_debug_path(args: &PluginDebugArgs) -> anyhow::Result<PathBuf> {
+    if args
+        .plugin_or_wasm
+        .extension()
+        .is_some_and(|extension| extension == "wasm")
+    {
+        return Ok(args.plugin_or_wasm.clone());
+    }
+
+    let plugin_name = normalize_plugin_name(&args.plugin_or_wasm.to_string_lossy())?;
+    let crate_name = plugin_name.replace('-', "_");
+    let path = args
+        .root
+        .join(&plugin_name)
+        .join("target/wasm32-unknown-unknown/release")
+        .join(format!("{crate_name}.wasm"));
+    if !path.is_file() {
+        anyhow::bail!(
+            "compiled Wasm plugin not found: {}\nrun `cargo build --target wasm32-unknown-unknown --release` in {} or pass an explicit .wasm path",
+            path.display(),
+            plugin_name,
+        );
+    }
+    Ok(path)
+}
+
+fn normalize_plugin_name(value: &str) -> anyhow::Result<String> {
+    let value = value.trim();
+    if value.is_empty()
+        || !value
+            .bytes()
+            .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        || value.starts_with('-')
+        || value.ends_with('-')
+    {
+        anyhow::bail!(
+            "plugin name must use lowercase letters, digits, and single hyphens (for example `request-logger`)"
+        );
+    }
+    Ok(value.to_string())
+}
+
+const WASM_PLUGIN_TEMPLATE: &str = r#"#![no_std]
+
+use core::panic::PanicInfo;
+
+const CONTINUE: &[u8] = b"{\"action\":\"continue\"}\0";
+const BUFFER_OFFSET: usize = 64 * 1024;
+const BUFFER_CAPACITY: usize = 16 * 1024 * 1024;
+
+#[panic_handler]
+fn panic(_: &PanicInfo<'_>) -> ! {
+    loop {}
+}
+
+/// Called before Ruvyxa dispatches a request.
+#[unsafe(no_mangle)]
+pub extern "C" fn on_request(input_ptr: i32, _input_len: i32) -> i32 {
+    continue_result(input_ptr)
+}
+
+/// Called after Ruvyxa receives a route response.
+#[unsafe(no_mangle)]
+pub extern "C" fn on_response(input_ptr: i32, _input_len: i32) -> i32 {
+    continue_result(input_ptr)
+}
+
+/// Reserve one request-local buffer. Ruvyxa creates a new Wasm store per call.
+#[unsafe(no_mangle)]
+pub extern "C" fn ruvyxa_alloc(bytes: i32) -> i32 {
+    if bytes < 0 || bytes as usize > BUFFER_CAPACITY {
+        -1
+    } else {
+        BUFFER_OFFSET as i32
+    }
+}
+
+fn continue_result(input_ptr: i32) -> i32 {
+    if input_ptr < 0 {
+        return -1;
+    }
+    // The allocator reserves room for the request and the host's bounded result.
+    unsafe {
+        core::ptr::copy_nonoverlapping(CONTINUE.as_ptr(), input_ptr as *mut u8, CONTINUE.len());
+    }
+    input_ptr
+}
+"#;
 
 fn normalized_cli_args(args: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
     let mut args = args.into_iter().collect::<Vec<_>>();
@@ -592,6 +813,7 @@ fn canonical_command_name(command: &str) -> Option<&'static str> {
         "bench" => Some("bench"),
         "test:parity" => Some("test:parity"),
         "parity" => Some("parity"),
+        "plugin" => Some("plugin"),
         "help" => Some("help"),
         _ => None,
     }
@@ -800,6 +1022,53 @@ fn run_config_renderer(
         &output.stderr,
         &output.status.to_string(),
     )
+}
+
+fn run_adapter_runner(
+    root: &Path,
+    staging_dir: &Path,
+    runtime: JavaScriptRuntime,
+) -> anyhow::Result<Vec<AdapterArtifactReport>> {
+    let runner = find_runtime_script(root, "adapter-runner.mjs").ok_or_else(|| {
+        anyhow::anyhow!(
+            "adapter build hook requires runtime/adapter-runner.mjs; reinstall the ruvyxa package"
+        )
+    })?;
+    let output = ProcessCommand::new(runtime.executable())
+        .arg(runner)
+        .arg(root)
+        .arg(staging_dir)
+        .env("RUVYXA_RUNTIME", runtime.command())
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to run adapter build hook with {} for {}",
+                runtime.command(),
+                root.display()
+            )
+        })?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let result: AdapterRunnerOutput = serde_json::from_str(&stdout).with_context(|| {
+        format!(
+            "adapter runner returned invalid output for {}\nstatus: {}\nstdout:\n{}\nstderr:\n{}",
+            root.display(),
+            output.status,
+            diagnostic_stream(&stdout),
+            diagnostic_stream(&stderr),
+        )
+    })?;
+    if !result.ok {
+        anyhow::bail!(
+            "adapter build hook failed: {} {}",
+            result.code.unwrap_or_else(|| "RUV2200".to_string()),
+            result
+                .message
+                .or(result.stack)
+                .unwrap_or_else(|| "unknown adapter error".to_string())
+        );
+    }
+    Ok(result.result.unwrap_or_default())
 }
 
 fn runtime_override() -> anyhow::Result<Option<JavaScriptRuntime>> {
@@ -1032,6 +1301,10 @@ async fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Resul
             "prerenderMs": duration_ms(prerender_duration)
         }
     });
+    if config.adapter.is_some() {
+        let artifacts = run_adapter_runner(&args.root, &staging_dir, config.javascript_runtime())?;
+        build_info["adapterArtifacts"] = serde_json::to_value(artifacts)?;
+    }
     fs::write(
         staging_dir.join("build.json"),
         serde_json::to_string_pretty(&build_info)?,
@@ -4774,6 +5047,114 @@ mod tests {
     use super::*;
 
     #[test]
+    fn plugin_new_scaffolds_a_buildable_raw_abi_starter() {
+        let temp = tempfile::tempdir().unwrap();
+
+        scaffold_wasm_plugin(PluginNewArgs {
+            name: "request-logger".to_string(),
+            root: temp.path().to_path_buf(),
+        })
+        .unwrap();
+
+        let plugin = temp.path().join("request-logger");
+        let source = fs::read_to_string(plugin.join("src/lib.rs")).unwrap();
+        assert!(plugin.join("Cargo.toml").is_file());
+        assert!(plugin.join(".cargo/config.toml").is_file());
+        assert!(source.contains("fn on_request"));
+        assert!(source.contains("fn on_response"));
+        assert!(
+            fs::read_to_string(plugin.join(".cargo/config.toml"))
+                .unwrap()
+                .contains("--export-memory")
+        );
+        assert!(
+            fs::read_to_string(plugin.join("README.md"))
+                .unwrap()
+                .contains("ruvyxa plugin debug")
+        );
+    }
+
+    #[test]
+    fn plugin_new_rejects_unsafe_names() {
+        let temp = tempfile::tempdir().unwrap();
+        let error = scaffold_wasm_plugin(PluginNewArgs {
+            name: "../escape".to_string(),
+            root: temp.path().to_path_buf(),
+        })
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("plugin name must use lowercase"));
+        assert!(!temp.path().join("escape").exists());
+    }
+
+    #[test]
+    fn plugin_debug_resolves_a_short_plugin_name_to_its_release_module() {
+        let temp = tempfile::tempdir().unwrap();
+        let wasm = temp
+            .path()
+            .join("auth-guard/target/wasm32-unknown-unknown/release/auth_guard.wasm");
+        fs::create_dir_all(wasm.parent().unwrap()).unwrap();
+        fs::write(&wasm, []).unwrap();
+
+        let resolved = resolve_plugin_debug_path(&PluginDebugArgs {
+            plugin_or_wasm: PathBuf::from("auth-guard"),
+            root: temp.path().to_path_buf(),
+        })
+        .unwrap();
+
+        assert_eq!(resolved, wasm);
+    }
+
+    #[test]
+    fn plugin_debug_keeps_an_explicit_wasm_path() {
+        let path = PathBuf::from("custom/plugin.wasm");
+
+        let resolved = resolve_plugin_debug_path(&PluginDebugArgs {
+            plugin_or_wasm: path.clone(),
+            root: PathBuf::from("."),
+        })
+        .unwrap();
+
+        assert_eq!(resolved, path);
+    }
+
+    #[test]
+    fn adapter_runner_materializes_declared_artifacts_in_staging() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let staging = root.join(".ruvyxa-build-staging");
+        fs::create_dir_all(&staging).unwrap();
+        fs::write(
+            root.join("ruvyxa.config.mjs"),
+            r#"
+export default {
+  adapter: {
+    build() {
+      return {
+        artifacts: [
+          { kind: 'file', path: 'deploy/health.txt', contents: 'ready\\n' }
+        ]
+      }
+    }
+  }
+}
+"#,
+        )
+        .unwrap();
+
+        let artifacts = run_adapter_runner(root, &staging, JavaScriptRuntime::Node).unwrap();
+
+        assert_eq!(artifacts.len(), 1);
+        assert_eq!(artifacts[0].kind, "file");
+        assert_eq!(artifacts[0].path, "deploy/health.txt");
+        assert_eq!(
+            fs::read_to_string(staging.join("deploy/health.txt")).unwrap(),
+            "ready\\n"
+        );
+    }
+
+    #[test]
     fn config_renderer_invalid_output_reports_empty_stdout_and_stderr() {
         let error = parse_config_renderer_output(
             Path::new("."),
@@ -5869,6 +6250,7 @@ export default {
         assert!(help.contains("dev          Run the development server with hot reload"));
         assert!(help.contains("build        Build the application for production output"));
         assert!(help.contains("check        Run app-level production readiness checks"));
+        assert!(help.contains("plugin       Create and inspect WebAssembly middleware plugins"));
         assert!(help.contains("test:parity  Compare dev/prod routes and smoke-render page routes"));
     }
 

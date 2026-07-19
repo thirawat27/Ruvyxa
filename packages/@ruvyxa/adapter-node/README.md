@@ -1,6 +1,6 @@
 # @ruvyxa/adapter-node
 
-Node.js deployment adapter metadata for Ruvyxa production builds.
+Node.js deployment adapter for Ruvyxa production builds.
 
 ## Install
 
@@ -19,7 +19,7 @@ export default config({
 })
 ```
 
-## Output Metadata
+## Deployment Artifact
 
 ```json
 {
@@ -33,4 +33,6 @@ export default config({
 }
 ```
 
+`ruvyxa build` creates `.ruvyxa/deploy/node/start.mjs`. Start it from the project root with
+`node .ruvyxa/deploy/node/start.mjs`; it launches `ruvyxa start` using the installed project CLI.
 Use this adapter for self-hosted Node, Docker, PM2, and other Node-compatible runtimes.

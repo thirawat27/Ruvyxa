@@ -5,7 +5,7 @@ import { clientBuildOutput, validateBuildContext } from '@ruvyxa/core'
  * Options for the static site adapter.
  */
 export interface StaticAdapterOptions {
-  /** Custom output directory for the static site. Defaults to `${outDir}/static`. */
+  /** Directory under Ruvyxa's build output. Defaults to `static`. */
   outputDir?: string
 }
 
@@ -22,7 +22,7 @@ export interface StaticAdapterOptions {
  * import { staticAdapter } from "@ruvyxa/adapter-static"
  *
  * export default config({
- *   adapter: staticAdapter({ outputDir: "./public" })
+ *   adapter: staticAdapter({ outputDir: "public" })
  * })
  * ```
  */
@@ -37,6 +37,8 @@ export function staticAdapter(options: StaticAdapterOptions = {}): Adapter {
     throw new Error(`[RUV2001] staticAdapter: "outputDir" must not be an empty string`)
   }
 
+  const outputDir = normalizeOutputDir(options.outputDir)
+
   return {
     name: 'static',
     target: 'static',
@@ -46,12 +48,37 @@ export function staticAdapter(options: StaticAdapterOptions = {}): Adapter {
         name: 'static',
         target: 'static',
         platform: 'static',
-        entry: options.outputDir ?? `${ctx.outDir}/static`,
+        entry: `${ctx.outDir}/${outputDir}`,
         assetsDir: `${ctx.outDir}/assets`,
         ...clientBuildOutput(ctx),
+        artifacts: [{ kind: 'static-site', path: outputDir }],
       }
     },
   }
+}
+
+function normalizeOutputDir(value: string | undefined): string {
+  const normalized = (value ?? 'static').trim().replaceAll('\\', '/')
+  const segments = normalized.split('/')
+  if (
+    normalized.startsWith('/') ||
+    /^[A-Za-z]:/.test(normalized) ||
+    segments.some((segment) => segment === '' || segment === '.' || segment === '..')
+  ) {
+    throw new Error(
+      '[RUV2001] staticAdapter: "outputDir" must be a non-empty relative directory inside the build output',
+    )
+  }
+  if (
+    ['assets', 'build.json', 'cache', 'client', 'manifest.json', 'prerender', 'server'].includes(
+      segments[0],
+    )
+  ) {
+    throw new Error(
+      '[RUV2001] staticAdapter: "outputDir" overlaps protected build output; use a directory such as static or deploy/public',
+    )
+  }
+  return normalized
 }
 
 export default staticAdapter

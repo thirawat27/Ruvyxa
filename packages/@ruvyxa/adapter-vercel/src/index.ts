@@ -2,7 +2,7 @@ import type { Adapter, AdapterOutput, BuildContext } from '@ruvyxa/core'
 import { clientBuildOutput, validateBuildContext } from '@ruvyxa/core'
 
 /**
- * Options for the Vercel adapter.
+ * Options for Vercel metadata compatibility.
  */
 export interface VercelAdapterOptions {
   /** Custom functions output directory. Defaults to `${outDir}/functions`. */
@@ -10,11 +10,10 @@ export interface VercelAdapterOptions {
 }
 
 /**
- * Create a Vercel deployment adapter for Ruvyxa.
+ * Create a Vercel static deployment adapter for Ruvyxa.
  *
- * Produces serverless function bundles and static assets compatible
- * with Vercel's build output API. Generates a `vercel.json` config
- * reference for routing.
+ * Produces static assets compatible with Vercel's Build Output API. Dynamic
+ * serverless function output is rejected until a Vercel request handler exists.
  *
  * @example
  * ```ts
@@ -52,6 +51,14 @@ export function vercelAdapter(options: VercelAdapterOptions = {}): Adapter {
         ...clientBuildOutput(ctx),
         functionsDir,
         configFiles: ['vercel.json'],
+        artifacts: [
+          { kind: 'static-site', path: 'deploy/vercel/.vercel/output/static' },
+          {
+            kind: 'file',
+            path: 'deploy/vercel/.vercel/output/config.json',
+            contents: '{\n  "version": 3\n}\n',
+          },
+        ],
       }
     },
   }

@@ -2,7 +2,7 @@ import type { Adapter, AdapterOutput, BuildContext } from '@ruvyxa/core'
 import { clientBuildOutput, validateBuildContext } from '@ruvyxa/core'
 
 /**
- * Options for the Cloudflare Workers adapter.
+ * Options for the Cloudflare static deployment adapter.
  */
 export interface CloudflareAdapterOptions {
   /** Custom worker entry point path. Defaults to `${outDir}/server/app`. */
@@ -10,10 +10,10 @@ export interface CloudflareAdapterOptions {
 }
 
 /**
- * Create a Cloudflare Workers deployment adapter for Ruvyxa.
+ * Create a Cloudflare Pages static deployment adapter for Ruvyxa.
  *
- * Produces an edge-compatible worker bundle and static assets ready for
- * deployment via `wrangler`. Generates a `wrangler.toml` config reference.
+ * Produces static assets ready for deployment via `wrangler` and generates a
+ * `wrangler.jsonc` config reference. Dynamic routes are rejected at build time.
  *
  * @example
  * ```ts
@@ -48,7 +48,15 @@ export function cloudflareAdapter(options: CloudflareAdapterOptions = {}): Adapt
         entry: options.workerEntry ?? `${ctx.outDir}/server/app`,
         assetsDir: `${ctx.outDir}/assets`,
         ...clientBuildOutput(ctx),
-        configFiles: ['wrangler.toml'],
+        configFiles: ['wrangler.jsonc'],
+        artifacts: [
+          { kind: 'static-site', path: 'deploy/cloudflare/assets' },
+          {
+            kind: 'file',
+            path: 'deploy/cloudflare/wrangler.jsonc',
+            contents: '{\n  "name": "ruvyxa-app",\n  "assets": { "directory": "./assets" }\n}\n',
+          },
+        ],
       }
     },
   }

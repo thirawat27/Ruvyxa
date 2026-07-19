@@ -47,6 +47,19 @@ export function bunAdapter(options: BunAdapterOptions = {}): Adapter {
         entry: options.entry ?? `${ctx.outDir}/server/app`,
         assetsDir: `${ctx.outDir}/assets`,
         ...clientBuildOutput(ctx),
+        artifacts: [
+          {
+            kind: 'file',
+            path: 'deploy/bun/start.mjs',
+            contents: `const child = Bun.spawn(['bunx', '--no-install', 'ruvyxa', 'start'], { cwd: process.cwd(), stdin: 'inherit', stdout: 'inherit', stderr: 'inherit' })\nprocess.exitCode = await child.exited\n`,
+          },
+          {
+            kind: 'file',
+            path: 'deploy/bun/README.md',
+            contents:
+              '# Ruvyxa Bun deployment\\n\\nRun `bun .ruvyxa/deploy/bun/start.mjs` from the application root after installing production dependencies.\\n',
+          },
+        ],
       }
     },
   }

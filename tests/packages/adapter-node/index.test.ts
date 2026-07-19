@@ -7,10 +7,11 @@ describe('nodeAdapter', () => {
   it('returns node deployment output', async () => {
     const adapter = nodeAdapter()
     const output = await adapter.build({ root: '.', outDir: '.ruvyxa' })
+    const { artifacts, ...deployment } = output
 
     assert.equal(adapter.name, 'node')
     assert.equal(adapter.target, 'node')
-    assert.deepEqual(output, {
+    assert.deepEqual(deployment, {
       name: 'node',
       target: 'node',
       platform: 'node',
@@ -19,5 +20,12 @@ describe('nodeAdapter', () => {
       clientDir: '.ruvyxa/client',
       chunkManifest: '.ruvyxa/client/chunk-manifest.json',
     })
+    assert.deepEqual(
+      artifacts?.map(({ kind, path }) => ({ kind, path })),
+      [
+        { kind: 'file', path: 'deploy/node/start.mjs' },
+        { kind: 'file', path: 'deploy/node/README.md' },
+      ],
+    )
   })
 })

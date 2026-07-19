@@ -8,6 +8,14 @@ describe('vercelAdapter', () => {
     const output = await vercelAdapter().build({ root: '.', outDir: '.ruvyxa' })
 
     assert.deepEqual(
+      output.artifacts?.map(({ kind, path }) => ({ kind, path })),
+      [
+        { kind: 'static-site', path: 'deploy/vercel/.vercel/output/static' },
+        { kind: 'file', path: 'deploy/vercel/.vercel/output/config.json' },
+      ],
+    )
+
+    assert.deepEqual(
       {
         name: output.name,
         target: output.target,

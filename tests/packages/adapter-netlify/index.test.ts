@@ -8,6 +8,14 @@ describe('netlifyAdapter', () => {
     const output = await netlifyAdapter().build({ root: '.', outDir: '.ruvyxa' })
 
     assert.deepEqual(
+      output.artifacts?.map(({ kind, path }) => ({ kind, path })),
+      [
+        { kind: 'static-site', path: 'deploy/netlify/publish' },
+        { kind: 'file', path: 'deploy/netlify/netlify.toml' },
+      ],
+    )
+
+    assert.deepEqual(
       {
         name: output.name,
         target: output.target,

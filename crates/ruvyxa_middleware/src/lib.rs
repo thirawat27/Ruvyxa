@@ -32,4 +32,7 @@ pub use config::MiddlewareConfig;
 pub use stack::MiddlewareStack;
 
 #[cfg(feature = "wasm-plugins")]
-pub use wasm::{PluginRequest, PluginResponse, PluginResult, WasmPluginRuntime};
+pub use wasm::{
+    PluginModuleInfo, PluginRequest, PluginResponse, PluginResult, WasmPluginRuntime,
+    inspect_wasm_plugin,
+};

@@ -1,6 +1,6 @@
 # @ruvyxa/adapter-bun
 
-Bun runtime adapter metadata for Ruvyxa production builds.
+Bun runtime adapter for Ruvyxa production builds.
 
 ## Install
 
@@ -19,7 +19,7 @@ export default config({
 })
 ```
 
-## Output Metadata
+## Deployment Artifact
 
 ```json
 {
@@ -33,4 +33,5 @@ export default config({
 }
 ```
 
-Use this adapter for Bun-compatible hosting targets that run the production server output.
+`ruvyxa build` creates `.ruvyxa/deploy/bun/start.mjs`. Start it from the project root with
+`bun .ruvyxa/deploy/bun/start.mjs`; it launches `ruvyxa start` through Bun.

@@ -1,6 +1,6 @@
 # @ruvyxa/adapter-netlify
 
-Netlify functions deployment adapter metadata for Ruvyxa production builds.
+Netlify static deployment adapter for Ruvyxa production builds.
 
 ## Install
 
@@ -19,7 +19,7 @@ export default config({
 })
 ```
 
-## Output Metadata
+## Deployment Artifact
 
 ```json
 {
@@ -35,4 +35,8 @@ export default config({
 }
 ```
 
-Use this adapter when preparing function and static asset output for Netlify.
+`ruvyxa build` creates `.ruvyxa/deploy/netlify/` with `publish/` and `netlify.toml`. Deploy that
+directory on Netlify.
+
+This adapter safely supports static SSG/CSR output only. It rejects API, SSR, ISR, and PPR routes
+with `RUV2202`; no Netlify Function handler is generated.

@@ -2,7 +2,7 @@ import type { Adapter, AdapterOutput, BuildContext } from '@ruvyxa/core'
 import { clientBuildOutput, validateBuildContext } from '@ruvyxa/core'
 
 /**
- * Options for the Netlify adapter.
+ * Options for Netlify metadata compatibility.
  */
 export interface NetlifyAdapterOptions {
   /** Custom Netlify functions directory. Defaults to `${outDir}/netlify/functions`. */
@@ -10,10 +10,10 @@ export interface NetlifyAdapterOptions {
 }
 
 /**
- * Create a Netlify deployment adapter for Ruvyxa.
+ * Create a Netlify static deployment adapter for Ruvyxa.
  *
- * Produces serverless function bundles and static assets for Netlify
- * deployment. Generates a `netlify.toml` config reference for routing.
+ * Produces static assets and a `netlify.toml` config reference. Dynamic
+ * serverless function output is rejected until a Netlify request handler exists.
  *
  * @example
  * ```ts
@@ -51,6 +51,14 @@ export function netlifyAdapter(options: NetlifyAdapterOptions = {}): Adapter {
         ...clientBuildOutput(ctx),
         functionsDir,
         configFiles: ['netlify.toml'],
+        artifacts: [
+          { kind: 'static-site', path: 'deploy/netlify/publish' },
+          {
+            kind: 'file',
+            path: 'deploy/netlify/netlify.toml',
+            contents: '[build]\n  publish = "publish"\n',
+          },
+        ],
       }
     },
   }

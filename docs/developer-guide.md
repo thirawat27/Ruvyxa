@@ -48,7 +48,7 @@ packages/
   ├─ ruvyxa                    CLI launcher, runtime bridge, public re-exports
   ├─ @ruvyxa/core              config and server APIs, types, adapter contracts
   ├─ @ruvyxa/react             Image, Seo, hydration, loaders, error boundaries
-  ├─ @ruvyxa/adapter-*         deployment metadata packages
+  ├─ @ruvyxa/adapter-*         deployment adapter packages
   ├─ @ruvyxa/cli-*             platform-specific native binaries (darwin-arm64, linux-arm64, linux-x64, win32-arm64, win32-x64)
   └─ create-ruvyxa             scaffold command and minimal template packaging
 ```
@@ -249,9 +249,10 @@ Document only what source code and tests support.
   explicit route exports for important deployment behaviour.
 - Configuration paths are restricted to the project root to prevent traversal. External styles or
   assets need a project-local import/copy strategy.
-- Adapter packages return typed output metadata. The config renderer executes `adapter.build()` and
-  the CLI persists serializable output plus `adapterOptions` in `build.json`; this does not itself
-  create or publish platform deployment files.
+- Adapter packages return typed output metadata and declarative build artifacts. The config renderer
+  executes `adapter.build()` and the CLI re-runs it after building to materialize artifacts within
+  staging before it commits `build.json`. Static adapters intentionally do not create serverless or
+  edge request handlers.
 - `check` is an application-readiness signal, not a browser E2E suite, load test, or security audit.
   Add verification in the layer changed by a feature.
 

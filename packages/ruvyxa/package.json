@@ -15,6 +15,7 @@
     "types",
     "native-bin",
     "runtime/action-renderer.mjs",
+    "runtime/adapter-runner.mjs",
     "runtime/api-renderer.mjs",
     "runtime/client-renderer.mjs",
     "runtime/compiler.mjs",

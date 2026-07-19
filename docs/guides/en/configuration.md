@@ -147,10 +147,9 @@ middleware: {
 ```ts
 middleware: {
   plugins: [
-    {
-      name: 'auth-guard',
-      path: 'plugins/auth-guard.wasm',
-      phase: 'request',             // 'request' | 'response'
+      {
+        name: 'auth-guard',
+        phase: 'request',             // 'request' | 'response'
       routes: ['/api/*'],           // scope to specific routes
       config: { apiKeyHeader: 'X-Api-Key' },
       allow: {
@@ -216,17 +215,18 @@ exact IP in `trustedProxyIps`; private network ranges are not trusted implicitly
 
 ```ts
 import { config } from 'ruvyxa/config'
-import { adapter } from '@ruvyxa/adapter-vercel'
+import { vercelAdapter } from '@ruvyxa/adapter-vercel'
 
 export default config({
-  adapter: adapter(),
-  adapterOptions: { regions: ['iad1'] },
+  adapter: vercelAdapter(),
 })
 ```
 
-An adapter's `build()` function is executed while Ruvyxa loads configuration. Output and
-`adapterOptions` are written to `.ruvyxa/build.json`. An adapter declaration alone does not create
-or publish platform functions — verify platform output and routing yourself.
+An adapter's `build()` function is evaluated while configuration is loaded and again after the
+production build to materialize its declared artifacts inside `.ruvyxa/`. The result is written as
+`adapterArtifacts` in `.ruvyxa/build.json`. Node and Bun adapters create launchers; static,
+Cloudflare, Netlify, and Vercel adapters create static publish directories and reject API, SSR, ISR,
+and PPR routes with `RUV2202`.
 
 ### `runtime`
 

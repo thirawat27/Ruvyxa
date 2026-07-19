@@ -8,6 +8,14 @@ describe('bunAdapter', () => {
     const output = await bunAdapter().build({ root: '.', outDir: '.ruvyxa' })
 
     assert.deepEqual(
+      output.artifacts?.map(({ kind, path }) => ({ kind, path })),
+      [
+        { kind: 'file', path: 'deploy/bun/start.mjs' },
+        { kind: 'file', path: 'deploy/bun/README.md' },
+      ],
+    )
+
+    assert.deepEqual(
       {
         name: output.name,
         target: output.target,

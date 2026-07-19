@@ -223,7 +223,11 @@ export interface LayerConfig {
 
 export interface MiddlewarePluginConfig {
   name: string
-  path: string
+  /**
+   * Optional project-relative Wasm module. When omitted, Ruvyxa resolves the
+   * standard output from `<name>/target/wasm32-unknown-unknown/release/`.
+   */
+  path?: string
   phase?: 'request' | 'response'
   routes?: string[]
   config?: unknown
@@ -286,6 +290,21 @@ export interface AdapterOutput {
   runtime?: 'node' | 'bun'
   configFiles?: string[]
   functionsDir?: string
+  /**
+   * Declarative post-build artifacts materialized by the Ruvyxa CLI inside the
+   * atomic build staging directory. Paths must be relative to the build output.
+   */
+  artifacts?: AdapterArtifact[]
+}
+
+/** A post-build file or static deployment bundle requested by an adapter. */
+export interface AdapterArtifact {
+  /** Write a UTF-8 file or assemble a static-only publish directory. */
+  kind: 'file' | 'static-site'
+  /** Destination relative to the Ruvyxa output directory. */
+  path: string
+  /** Required UTF-8 contents for `file` artifacts. */
+  contents?: string
 }
 
 export interface Adapter {

@@ -26,6 +26,7 @@ validates the application graph, builds production output, and checks developmen
 | 11. Configuration Reference         | [EN](en/configuration.md)            | [TH](th/configuration.md)            |
 | 12. CLI Commands                    | [EN](en/cli-commands.md)             | [TH](th/cli-commands.md)             |
 | 13. Deployment                      | [EN](en/deployment.md)               | [TH](th/deployment.md)               |
+| 14. Wasm Middleware Plugins         | [EN](en/wasm-plugins.md)             | [TH](th/wasm-plugins.md)             |
 
 ---
 
@@ -54,6 +55,8 @@ Then explore by topic:
   boundary safety
 - **Secure & tune**: [Configuration](en/configuration.md) — full `ruvyxa.config.ts` reference
 - **Ship**: [Deployment](en/deployment.md) — Vercel, adapters, CI, production checklist
+- **Extend safely**: [Wasm Middleware Plugins](en/wasm-plugins.md) — scaffold, build, and inspect
+  plugins
 
 ### For Framework Contributors
 

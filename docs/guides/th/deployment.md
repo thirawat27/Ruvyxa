@@ -1,6 +1,6 @@
 # Deployment
 
-## Vercel
+## Deployment Artifacts จาก Adapter
 
 ### Setup
 
@@ -17,28 +17,26 @@
 }
 ```
 
-ตั้งค่า Vercel:
+Adapter จะสร้าง artifact หลัง build แต่ก่อน commit output จึงหาก adapter ล้มเหลว `.ruvyxa/` ชุดเดิม
+จะไม่ถูกแทนที่
 
-- **Build Command**: `npm run build`
-- **Output Directory**: `.ruvyxa`
-- **Framework Preset**: _None_ — Ruvyxa จัดการทุกอย่างผ่าน `npm run build`
-
-### Adapter
+### Vercel static output
 
 ```ts
 // ruvyxa.config.ts
 import { config } from 'ruvyxa/config'
-import { adapter } from '@ruvyxa/adapter-vercel'
+import { vercelAdapter } from '@ruvyxa/adapter-vercel'
 
 export default config({
-  adapter: adapter(),
-  adapterOptions: {
-    regions: ['iad1'],
-  },
+  adapter: vercelAdapter(),
 })
 ```
 
-Adapters เขียน metadata ลง `.ruvyxa/build.json` สำหรับ deployment tooling
+หลัง `npm run build` ให้ deploy `.ruvyxa/deploy/vercel/` ซึ่งมี Vercel static Build Output
+(`.vercel/output/static` และ `config.json`) แล้วเลือก preset แบบ Other
+
+Adapter ของ Vercel, Netlify และ Cloudflare รองรับ static SSG/CSR เท่านั้นในปัจจุบัน API, SSR, ISR
+และ PPR จะทำให้ build จบด้วย `RUV2202` แทนที่จะ deploy output ที่ไม่มี request handler
 
 ### Permission Denied Error
 
@@ -77,7 +75,7 @@ node_modules/.bin/ruvyxa: Permission denied
 
 ### Build Artifacts
 
-หลังจาก `npm run build` ให้ deploy ทั้งไดเรกทอรี `.ruvyxa/`:
+หลัง `npm run build` จะได้ output หลักใน `.ruvyxa/` และ adapter อาจสร้างไดเรกทอรี deploy เพิ่ม:
 
 ```text
 .ruvyxa/
@@ -95,33 +93,32 @@ node_modules/.bin/ruvyxa: Permission denied
 
 ### ที่มีให้
 
-| Adapter                      | เป้าหมาย           |
-| ---------------------------- | ------------------ |
-| `@ruvyxa/adapter-node`       | Node.js server     |
-| `@ruvyxa/adapter-vercel`     | Vercel serverless  |
-| `@ruvyxa/adapter-cloudflare` | Cloudflare Workers |
-| `@ruvyxa/adapter-netlify`    | Netlify Functions  |
-| `@ruvyxa/adapter-bun`        | Bun runtime        |
-| `@ruvyxa/adapter-static`     | Static hosting     |
+| Adapter                      | เป้าหมาย                                       |
+| ---------------------------- | ---------------------------------------------- |
+| `@ruvyxa/adapter-node`       | Node launcher: `.ruvyxa/deploy/node/start.mjs` |
+| `@ruvyxa/adapter-bun`        | Bun launcher: `.ruvyxa/deploy/bun/start.mjs`   |
+| `@ruvyxa/adapter-static`     | Static files: `.ruvyxa/static/`                |
+| `@ruvyxa/adapter-cloudflare` | Cloudflare Pages: `.ruvyxa/deploy/cloudflare/` |
+| `@ruvyxa/adapter-netlify`    | Netlify static: `.ruvyxa/deploy/netlify/`      |
+| `@ruvyxa/adapter-vercel`     | Vercel static: `.ruvyxa/deploy/vercel/`        |
 
 ### วิธีใช้
 
 ```ts
 // ruvyxa.config.ts
 import { config } from 'ruvyxa/config'
-import { adapter } from '@ruvyxa/adapter-node'
+import { nodeAdapter } from '@ruvyxa/adapter-node'
 
 export default config({
-  adapter: adapter(),
+  adapter: nodeAdapter(),
 })
 ```
 
 ### ข้อสำคัญ
 
-- ฟังก์ชัน `build()` ของ adapter ทำงานขณะ Ruvyxa โหลด configuration
-- `AdapterOutput` และ `adapterOptions` ที่ serialize ได้จะถูกเขียนลง `.ruvyxa/build.json`
-- การประกาศ adapter เพียงอย่างเดียว**ไม่ได้**สร้างหรือ publish platform functions
-- ตรวจสอบ platform output, routing และ serving model ของ deployment เสมอ
+- ฟังก์ชัน `build()` ของ adapter ทำงานตอนโหลด configuration และตอนสร้าง artifact หลัง build
+- artifact ต้องอยู่ภายใน `.ruvyxa/` และจะถูกบันทึกใน `adapterArtifacts` ของ `build.json`
+- static adapter จะปฏิเสธ route ที่ต้องมี dynamic request handler โดยเจตนา
 
 ---
 
@@ -139,19 +136,20 @@ npm install @ruvyxa/adapter-node
 ```
 
 ```ts
-import { adapter } from '@ruvyxa/adapter-node'
+import { nodeAdapter } from '@ruvyxa/adapter-node'
 
 export default config({
-  adapter: adapter(),
+  adapter: nodeAdapter(),
 })
 ```
 
 ## Static Hosting
 
 ```bash
-npm run build -- --target static
-# หรือตั้งค่า runtime: 'static' ใน config
-# deploy .ruvyxa/ ไปยัง static host (S3, Cloudflare Pages, Netlify, ฯลฯ)
+npm install @ruvyxa/adapter-static
+# ตั้งค่า staticAdapter() แล้วรัน:
+npm run build
+# deploy .ruvyxa/static/ ไป static host
 ```
 
 ---

@@ -124,8 +124,12 @@ pub struct PluginConfig {
     /// Plugin name (used for logging and diagnostics).
     pub name: String,
 
-    /// Path to the `.wasm` module (relative to project root).
-    pub path: PathBuf,
+    /// Optional path to the `.wasm` module (relative to project root).
+    ///
+    /// When omitted, Ruvyxa uses the standard plugin scaffold output:
+    /// `<name>/target/wasm32-unknown-unknown/release/<name>.wasm`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
 
     /// Execution phase: "request" (before handler) or "response" (after handler).
     #[serde(default = "default_phase")]

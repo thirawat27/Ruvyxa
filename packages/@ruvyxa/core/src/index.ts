@@ -1,6 +1,7 @@
 export { config } from './config.js'
 export type {
   Adapter,
+  AdapterArtifact,
   AdapterOutput,
   BuildContext,
   BuiltinMiddlewareConfig,

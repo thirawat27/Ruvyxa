@@ -1,6 +1,6 @@
 # @ruvyxa/adapter-vercel
 
-Vercel serverless deployment adapter metadata for Ruvyxa production builds.
+Vercel static deployment adapter for Ruvyxa production builds.
 
 ## Install
 
@@ -19,7 +19,7 @@ export default config({
 })
 ```
 
-## Output Metadata
+## Deployment Artifact
 
 ```json
 {
@@ -35,4 +35,8 @@ export default config({
 }
 ```
 
-Use this adapter when preparing Ruvyxa output for Vercel-style function and asset layouts.
+`ruvyxa build` creates `.ruvyxa/deploy/vercel/.vercel/output/`, using Vercel's static Build Output
+layout. Deploy `.ruvyxa/deploy/vercel/`.
+
+This adapter safely supports static SSG/CSR output only. It rejects API, SSR, ISR, and PPR routes
+with `RUV2202`; no Vercel serverless function handler is generated.

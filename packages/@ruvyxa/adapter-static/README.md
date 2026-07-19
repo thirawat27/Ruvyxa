@@ -1,6 +1,6 @@
 # @ruvyxa/adapter-static
 
-Static output adapter metadata for Ruvyxa production builds.
+Static output adapter for Ruvyxa production builds.
 
 ## Install
 
@@ -19,7 +19,7 @@ export default config({
 })
 ```
 
-## Output Metadata
+## Deployment Artifact
 
 ```json
 {
@@ -33,5 +33,8 @@ export default config({
 }
 ```
 
-Use this adapter for static-only sites. Runtime APIs such as API routes and server actions require a
-server target.
+`ruvyxa build` copies publishable files to `.ruvyxa/static/`. Configure `outputDir` to choose a
+different directory **inside** `.ruvyxa`, for example `staticAdapter({ outputDir: 'public' })`.
+
+Only SSG and CSR page routes are supported. API routes and server-rendered, ISR, or PPR routes fail
+the build with `RUV2202`, rather than producing an incomplete deployment.
