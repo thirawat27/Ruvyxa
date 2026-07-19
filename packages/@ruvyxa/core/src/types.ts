@@ -1,7 +1,7 @@
 export interface RuvyxaConfig {
   appDir?: string
   outDir?: string
-  /** Runtime used for config, SSR, rendering, and JavaScript plugins. @default 'node' */
+  /** Runtime used for config, rendering, and plugins. @default 'node' */
   runtime?: 'node' | 'bun' | 'edge' | 'static'
   react?: boolean
   typescript?: {
@@ -41,7 +41,7 @@ export interface RuvyxaConfig {
     /** Maximum API route request payload size in bytes. @default 10485760 */
     apiLimit?: number
     /**
-     * Maximum response size buffered by a response-phase Wasm plugin in bytes.
+     * Maximum response size buffered by TypeScript response middleware in bytes.
      * @default 33554432
      * @maximum 268435456
      */
@@ -190,8 +190,6 @@ export interface PageProps<TParams extends RouteParams = RouteParams> {
 
 export interface MiddlewareConfig {
   builtin?: BuiltinMiddlewareConfig
-  layers?: LayerConfig[]
-  plugins?: MiddlewarePluginConfig[]
 }
 
 export interface BuiltinMiddlewareConfig {
@@ -216,57 +214,86 @@ export interface RateLimitConfig {
   key?: string
 }
 
-export interface LayerConfig {
-  kind: string
-  options?: unknown
-}
-
-export interface MiddlewarePluginConfig {
-  name: string
-  /**
-   * Optional project-relative Wasm module. When omitted, Ruvyxa resolves the
-   * standard output from `<name>/target/wasm32-unknown-unknown/release/`.
-   */
-  path?: string
-  phase?: 'request' | 'response'
-  routes?: string[]
-  config?: unknown
-  allow?: PluginPermissions
-}
-
-export interface PluginPermissions {
-  env?: string[]
-  /** Reserved: non-empty values are rejected until filesystem permissions are implemented. */
-  read?: string[]
-  /** Reserved: non-empty values are rejected until network permissions are implemented. */
-  net?: string[]
-  timeout?: number
-  memory?: number
-}
-
 export interface TransformResult {
   code: string
   map?: unknown
 }
 
-export interface PluginContext {
+export type PluginEnvironment = 'client' | 'server'
+
+export interface PluginTransformContext {
+  /** Absolute application root. */
+  root: string
   environment: 'client' | 'server' | 'edge' | 'worker' | 'shared'
 }
 
+export interface PluginMiddlewareContext {
+  /** Name of the plugin that registered this middleware. */
+  plugin: string
+  /** Absolute application root. */
+  root: string
+}
+
+export type PluginRequestResult = Request | Response | void
+
+export type PluginRequestMiddleware = (
+  request: Request,
+  context: PluginMiddlewareContext,
+) => PluginRequestResult | Promise<PluginRequestResult>
+
+export type PluginResponseMiddleware = (
+  request: Request,
+  response: Response,
+  context: PluginMiddlewareContext,
+) => Response | void | Promise<Response | void>
+
+/** Request/response middleware registered by a plugin. */
+export interface PluginMiddleware {
+  /** Exact paths or prefix patterns ending in `*`. Omit to match every application route. */
+  routes?: string[]
+  onRequest?: PluginRequestMiddleware
+  onResponse?: PluginResponseMiddleware
+}
+
+export type PluginResolveIdHook = (
+  id: string,
+  importer: string | undefined,
+  context: PluginTransformContext,
+) => string | null | void | Promise<string | null | void>
+
+export type PluginTransformHook = (
+  code: string,
+  id: string,
+  context: PluginTransformContext,
+) => string | TransformResult | null | void | Promise<string | TransformResult | null | void>
+
+export interface PluginBuildContext {
+  /** Absolute application root. */
+  root: string
+  /** Absolute build output directory. */
+  outDir: string
+  /** Parsed application build manifest. */
+  manifest: Readonly<Record<string, unknown>>
+}
+
+export type PluginBuildCompleteHook = (context: PluginBuildContext) => void | Promise<void>
+
+/** Registration surface available while a plugin is set up. */
+export interface PluginSetupContext {
+  /** Add request and/or response middleware to Ruvyxa's ordered middleware pipeline. */
+  addMiddleware(middleware: PluginMiddleware | PluginRequestMiddleware): void
+  /** Resolve an import before Ruvyxa's native resolver. */
+  resolveId(hook: PluginResolveIdHook): void
+  /** Transform application source before Ruvyxa compiles TypeScript and JSX. */
+  transform(hook: PluginTransformHook): void
+  /** Run after the complete production output has been written. */
+  onBuildComplete(hook: PluginBuildCompleteHook): void
+}
+
+/** A Ruvyxa plugin configured in `ruvyxa.config.ts`. */
 export interface RuvyxaPlugin {
   name: string
-  enforce?: 'pre' | 'post'
-  /**
-   * Allow build hooks to run in multiple isolated JavaScript workers. Enable only when every hook is
-   * deterministic and does not depend on process-local mutable state. @default false
-   */
-  parallel?: boolean
-  resolveId?(id: string): string | null | Promise<string | null>
-  transform?(
-    code: string,
-    id: string,
-    ctx: PluginContext,
-  ): TransformResult | null | Promise<TransformResult | null>
+  setup(context: PluginSetupContext): void | Promise<void>
 }
 
 export interface BuildContext {

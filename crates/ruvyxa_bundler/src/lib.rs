@@ -29,11 +29,11 @@ pub mod chunking;
 pub mod compiler;
 pub mod content;
 pub mod context;
+pub mod hooks;
 pub mod incremental;
 pub mod linker;
 pub mod minifier;
 pub mod output;
-pub mod plugin;
 pub mod resolver;
 pub mod sourcemap;
 pub mod style_module;
@@ -48,7 +48,7 @@ use crate::chunking::{
     build_dynamic_output_chunks, dynamic_import_chunks, plan_dynamic_chunk_files,
     static_entry_modules,
 };
-use crate::plugin::PluginPipeline;
+use crate::hooks::BuildHookPipeline;
 use crate::resolver::ResolveGraphCache;
 pub use context::BundleContext;
 pub use types::*;
@@ -62,7 +62,7 @@ pub use types::*;
 pub struct PreparedBundle {
     input: BundleInput,
     compiled: Vec<compiler::CompiledModule>,
-    plugin_source_maps: BTreeMap<PathBuf, String>,
+    hook_source_maps: BTreeMap<PathBuf, String>,
     diagnostics: Vec<ruvyxa_diagnostics::Diagnostic>,
     dynamic_import_files: BTreeMap<PathBuf, String>,
     static_modules: Vec<compiler::CompiledModule>,
@@ -127,7 +127,7 @@ pub fn bundle_with_shared_modules(
         input,
         context.compile_cache(),
         context.graph_cache(),
-        context.plugins(),
+        context.build_hooks(),
     )?;
     bundle_prepared(&prepared, shared_modules)
 }
@@ -138,7 +138,7 @@ pub fn prepare_bundle(input: BundleInput, context: &BundleContext) -> Result<Pre
         input,
         context.compile_cache(),
         context.graph_cache(),
-        context.plugins(),
+        context.build_hooks(),
     )
 }
 
@@ -189,20 +189,20 @@ pub fn bundle_shared_route_modules(
         target: BundleTarget::Client,
         options,
     };
-    let graph = resolver::resolve_graph_with_plugins(
+    let graph = resolver::resolve_graph_with_hooks(
         &entry_source,
         &entry_label,
         &input.project_root,
         &input.app_dir,
         context.graph_cache(),
-        context.plugins(),
+        context.build_hooks(),
         input.target,
     )?;
-    let (compiled, _) = compiler::compile_graph_with_pipeline_and_maps(
+    let (compiled, _) = compiler::compile_graph_with_hooks_and_maps(
         &graph,
         &input,
         context.compile_cache(),
-        context.plugins(),
+        context.build_hooks(),
     )?;
     let mut diagnostics = Vec::new();
     boundary::check(&compiled, &input, &mut diagnostics)?;
@@ -291,7 +291,7 @@ fn prepare_bundle_with_parts(
     input: BundleInput,
     compile_cache: &CompileCache,
     graph_cache: &ResolveGraphCache,
-    plugins: &PluginPipeline,
+    build_hooks: &BuildHookPipeline,
 ) -> Result<PreparedBundle> {
     let started = Instant::now();
 
@@ -299,19 +299,19 @@ fn prepare_bundle_with_parts(
     let (entry_source, entry_label) = output::build_entry_source(&input);
 
     // 2. Resolve the full dependency graph from the entry.
-    let graph = resolver::resolve_graph_with_plugins(
+    let graph = resolver::resolve_graph_with_hooks(
         &entry_source,
         &entry_label,
         &input.project_root,
         &input.app_dir,
         graph_cache,
-        plugins,
+        build_hooks,
         input.target,
     )?;
 
     // 3. Compile each module (strip TS types, transform JSX).
-    let (compiled, plugin_source_maps) =
-        compiler::compile_graph_with_pipeline_and_maps(&graph, &input, compile_cache, plugins)?;
+    let (compiled, hook_source_maps) =
+        compiler::compile_graph_with_hooks_and_maps(&graph, &input, compile_cache, build_hooks)?;
 
     // 4. Enforce server/client boundaries.
     let mut diagnostics = Vec::new();
@@ -339,7 +339,7 @@ fn prepare_bundle_with_parts(
     Ok(PreparedBundle {
         input,
         compiled,
-        plugin_source_maps,
+        hook_source_maps,
         diagnostics,
         dynamic_import_files,
         static_modules,
@@ -355,7 +355,7 @@ fn emit_prepared_bundle(
     let started = Instant::now();
     let input = &prepared.input;
     let compiled = &prepared.compiled;
-    let plugin_source_maps = &prepared.plugin_source_maps;
+    let hook_source_maps = &prepared.hook_source_maps;
     let dynamic_import_files = &prepared.dynamic_import_files;
     let static_modules = &prepared.static_modules;
     let split_dynamic_imports =
@@ -421,11 +421,11 @@ fn emit_prepared_bundle(
             }
             let source_idx = builder.add_source(&module.path, Some(&module.js));
             let line_count = module.js.lines().count() as u32;
-            let imported_plugin_map = plugin_source_maps
+            let imported_hook_map = hook_source_maps
                 .get(&module.path)
                 .map(String::as_str)
                 .is_some_and(|map| builder.add_source_map(map, current_line));
-            if !imported_plugin_map {
+            if !imported_hook_map {
                 builder.add_identity_mappings(source_idx, &module.js, current_line);
             }
             current_line += line_count + 5;

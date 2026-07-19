@@ -96,24 +96,8 @@ silently changing deployment behaviour.
 
 ### `plugins`
 
-Build-time plugins for resolve and transform hooks:
-
-```ts
-plugins: [
-  {
-    name: 'my-plugin',
-    enforce: 'pre', // optional: 'pre' | 'post'
-    resolveId: true, // intercept module resolution
-    transform: true, // transform source code
-    parallel: true, // opt in only for deterministic, process-local-state-free hooks
-  },
-]
-```
-
-JavaScript build plugins run through persistent Node or Bun workers. Hooks remain serialized by
-default so existing stateful plugins keep their behavior. A bounded pool (up to eight workers, also
-limited by `build.workers`) is used only when every plugin with a `resolveId` or `transform` hook
-sets `parallel: true`; each worker is an isolated process, so mutable module state is not shared.
+Plugins are registered with `definePlugin` and can participate in middleware and build lifecycle
+hooks from the same setup function:
 
 ### `middleware`
 
@@ -142,25 +126,9 @@ middleware: {
 }
 ```
 
-#### Wasm Plugins
-
-```ts
-middleware: {
-  plugins: [
-      {
-        name: 'auth-guard',
-        phase: 'request',             // 'request' | 'response'
-      routes: ['/api/*'],           // scope to specific routes
-      config: { apiKeyHeader: 'X-Api-Key' },
-      allow: {
-        env: ['AUTH_SECRET'],       // explicit environment access
-        timeout: 5000,              // fuel-based execution timeout (ms)
-        memory: 67108864,           // 64 MiB memory limit
-      },
-    },
-  ],
-}
-```
+`addMiddleware` accepts `onRequest` and `onResponse` callbacks using Fetch `Request` and `Response`
+objects. `resolveId`, `transform`, and `onBuildComplete` are available beside middleware. All hooks
+run in registration order through the persistent plugin runtime.
 
 ### `render`
 
@@ -199,7 +167,7 @@ middleware: {
 | ----------------- | ----------------- | -------------------------- | -------------------------------------------------------------------------- |
 | `actionLimit`     | `number`          | `1048576` (1 MiB)          | Body size limit for actions                                                |
 | `apiLimit`        | `number`          | `10485760` (10 MiB)        | Body size limit for API routes                                             |
-| `pluginLimit`     | `number`          | `33554432` (32 MiB)        | Max buffered response for Wasm plugins                                     |
+| `pluginLimit`     | `number`          | `33554432` (32 MiB)        | Max buffered response for plugin response middleware                       |
 | `actionRateLimit` | `{ max, window }` | `{ max: 600, window: 60 }` | Rate limit per client-action per window                                    |
 | `sameOrigin`      | `boolean`         | `true`                     | Same-origin validation for actions                                         |
 | `fetchMeta`       | `boolean`         | `true`                     | Fetch Metadata protection                                                  |
@@ -237,8 +205,8 @@ export default config({
 ```
 
 `runtime` selects the JavaScript runtime that executes Ruvyxa configuration, SSR, static rendering,
-API routes, actions, and JavaScript build plugins. It does not change the Rust HTTP server. When
-omitted, Ruvyxa prefers Node and automatically falls back to Bun if Node is unavailable.
+API routes, actions, and plugins. It does not change the Rust HTTP server. When omitted, Ruvyxa
+prefers Node and automatically falls back to Bun if Node is unavailable.
 
 Set `RUVYXA_RUNTIME=bun` in the app command when Bun must be used from the first configuration load,
 for example `RUVYXA_RUNTIME=bun bunx ruvyxa dev`. This bootstrap override takes precedence over

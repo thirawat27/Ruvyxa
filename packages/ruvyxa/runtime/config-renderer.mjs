@@ -115,7 +115,7 @@ async function sanitizeConfig(config) {
   ])
   assertKnownKeys(config.cache, 'config.cache', ['routes', 'css', 'dir'])
   assertKnownKeys(config.render, 'config.render', ['strategy', 'revalidate'])
-  assertKnownKeys(config.middleware, 'config.middleware', ['builtin', 'layers', 'plugins'])
+  assertKnownKeys(config.middleware, 'config.middleware', ['builtin'])
   assertKnownKeys(config.middleware?.builtin, 'config.middleware.builtin', [
     'cors',
     'timing',
@@ -135,25 +135,6 @@ async function sanitizeConfig(config) {
     'window',
     'key',
   ])
-  if (Array.isArray(config.middleware?.plugins)) {
-    for (const [index, plugin] of config.middleware.plugins.entries()) {
-      assertKnownKeys(plugin, `config.middleware.plugins[${index}]`, [
-        'name',
-        'path',
-        'phase',
-        'routes',
-        'config',
-        'allow',
-      ])
-      assertKnownKeys(plugin?.allow, `config.middleware.plugins[${index}].allow`, [
-        'env',
-        'read',
-        'net',
-        'timeout',
-        'memory',
-      ])
-    }
-  }
   assertConfigValueShape(config)
 
   return {
@@ -362,15 +343,24 @@ function safeJsonValue(value) {
 
 function pluginDescriptors(value) {
   if (!Array.isArray(value)) return undefined
-  const plugins = value
-    .filter((plugin) => plugin && typeof plugin === 'object' && typeof plugin.name === 'string')
-    .map((plugin) => ({
-      name: plugin.name,
-      enforce: stringValue(plugin.enforce),
-      resolveId: typeof plugin.resolveId === 'function',
-      transform: typeof plugin.transform === 'function',
-      parallel: plugin.parallel === true,
-    }))
+  const names = new Set()
+  const plugins = value.map((plugin, index) => {
+    if (!isObject(plugin)) {
+      throw new Error(`RUV1602 config.plugins[${index}] must be an object.`)
+    }
+    if (typeof plugin.name !== 'string' || plugin.name.trim() === '') {
+      throw new Error(`RUV1602 config.plugins[${index}].name must be a non-empty string.`)
+    }
+    if (typeof plugin.setup !== 'function') {
+      throw new Error(`RUV1602 plugin "${plugin.name}" must provide setup(context).`)
+    }
+    const name = plugin.name.trim()
+    if (names.has(name)) {
+      throw new Error(`RUV1602 duplicate plugin name: ${name}`)
+    }
+    names.add(name)
+    return { name }
+  })
 
   return plugins.length > 0 ? plugins : undefined
 }

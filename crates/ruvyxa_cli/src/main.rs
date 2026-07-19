@@ -24,7 +24,6 @@ use ruvyxa_graph::{
     DiscoverOptions, RenderStrategy, RouteEntry, RouteManifest, RouteParams, discover_routes,
     validate_app, write_manifest,
 };
-use ruvyxa_middleware::inspect_wasm_plugin;
 use tracing::info;
 use walkdir::WalkDir;
 
@@ -85,7 +84,7 @@ enum Command {
         about = "Compare dev/prod routes and smoke-render page routes"
     )]
     TestParity(ProjectArgs),
-    #[command(about = "Create and inspect WebAssembly middleware plugins")]
+    #[command(about = "Create a TypeScript plugin starter")]
     Plugin(PluginArgs),
 }
 
@@ -153,26 +152,14 @@ struct PluginArgs {
 
 #[derive(Debug, Subcommand)]
 enum PluginCommand {
-    #[command(about = "Create a Rust Wasm middleware plugin starter")]
+    #[command(about = "Create a TypeScript plugin starter")]
     New(PluginNewArgs),
-    #[command(about = "Inspect a compiled Wasm plugin and verify its Ruvyxa ABI")]
-    Debug(PluginDebugArgs),
 }
 
 #[derive(Debug, Parser)]
 struct PluginNewArgs {
     name: String,
 
-    #[arg(long, default_value = ".")]
-    root: PathBuf,
-}
-
-#[derive(Debug, Parser)]
-struct PluginDebugArgs {
-    /// Plugin name (for example `auth-guard`) or an explicit .wasm path.
-    plugin_or_wasm: PathBuf,
-
-    /// Project root used when resolving a plugin name.
     #[arg(long, default_value = ".")]
     root: PathBuf,
 }
@@ -313,10 +300,6 @@ struct CacheConfigOptions {
 #[serde(rename_all = "camelCase")]
 struct BuildPluginConfig {
     name: String,
-    enforce: Option<String>,
-    resolve_id: bool,
-    transform: bool,
-    parallel: bool,
 }
 
 struct RuvyxaBuildCache<'a> {
@@ -544,107 +527,35 @@ async fn main() -> anyhow::Result<()> {
 
 fn plugin(args: PluginArgs) -> anyhow::Result<()> {
     match args.command {
-        PluginCommand::New(args) => scaffold_wasm_plugin(args),
-        PluginCommand::Debug(args) => debug_wasm_plugin(args),
+        PluginCommand::New(args) => scaffold_typescript_plugin(args),
     }
 }
 
-fn scaffold_wasm_plugin(args: PluginNewArgs) -> anyhow::Result<()> {
+fn scaffold_typescript_plugin(args: PluginNewArgs) -> anyhow::Result<()> {
     let plugin_name = normalize_plugin_name(&args.name)?;
-    let plugin_dir = args.root.join(&plugin_name);
-    if plugin_dir.exists() {
+    let plugin_dir = args.root.join("plugins");
+    let plugin_file = plugin_dir.join(format!("{plugin_name}.ts"));
+    if plugin_file.exists() {
         anyhow::bail!(
-            "plugin directory already exists: {}; choose a different name or remove it first",
-            plugin_dir.display()
+            "plugin file already exists: {}; choose a different name or remove it first",
+            plugin_file.display()
         );
     }
 
-    fs::create_dir_all(plugin_dir.join("src"))?;
-    fs::create_dir_all(plugin_dir.join(".cargo"))?;
-    let crate_name = plugin_name.replace('-', "_");
+    fs::create_dir_all(&plugin_dir)?;
     fs::write(
-        plugin_dir.join("Cargo.toml"),
+        &plugin_file,
         format!(
-            "[package]\nname = \"{plugin_name}\"\nversion = \"0.1.0\"\nedition = \"2024\"\n\n[lib]\ncrate-type = [\"cdylib\"]\n\n[profile.release]\nopt-level = \"z\"\nlto = true\ncodegen-units = 1\npanic = \"abort\"\n\n[package.metadata.ruvyxa]\ncrate = \"{crate_name}\"\n"
-        ),
-    )?;
-    fs::write(
-        plugin_dir.join(".cargo").join("config.toml"),
-        "[target.wasm32-unknown-unknown]\nrustflags = [\"-C\", \"link-arg=--export-memory\", \"-C\", \"link-arg=--initial-memory=18874368\"]\n",
-    )?;
-    fs::write(plugin_dir.join("src").join("lib.rs"), WASM_PLUGIN_TEMPLATE)?;
-    fs::write(
-        plugin_dir.join("README.md"),
-        format!(
-            "# {plugin_name}\n\nA Ruvyxa Wasm middleware plugin starter.\n\n```bash\nrustup target add wasm32-unknown-unknown\ncargo build --target wasm32-unknown-unknown --release\nruvyxa plugin debug {plugin_name} --root ..\n```\n\nAdd the generated module to `ruvyxa.config.ts`:\n\n```ts\nmiddleware: {{\n  plugins: [{{\n    name: '{plugin_name}',\n    phase: 'request',\n  }}],\n}}\n```\n\nThe starter exports both `on_request` and `on_response` and returns `continue`.\n"
+            "import {{ definePlugin }} from 'ruvyxa/config'\n\nexport default definePlugin({{\n  name: '{plugin_name}',\n  setup({{ addMiddleware }}) {{\n    addMiddleware({{\n      routes: ['/api/*'],\n      onRequest(request) {{\n        const headers = new Headers(request.headers)\n        headers.set('x-{plugin_name}', 'true')\n        return new Request(request, {{ headers }})\n      }},\n    }})\n  }},\n}})\n"
         ),
     )?;
 
     print_tui_header("Plugin");
     print_field("status", ok_text("created"));
     print_field("plugin", accent(&plugin_name));
-    print_field("path", path_text(&plugin_dir));
-    print_field(
-        "next",
-        "cargo build --target wasm32-unknown-unknown --release".to_string(),
-    );
+    print_field("path", path_text(&plugin_file));
+    print_field("next", "import it from ruvyxa.config.ts".to_string());
     Ok(())
-}
-
-fn debug_wasm_plugin(args: PluginDebugArgs) -> anyhow::Result<()> {
-    let plugin_path = resolve_plugin_debug_path(&args)?;
-    let info =
-        inspect_wasm_plugin(&plugin_path).map_err(|error| anyhow::anyhow!(error.to_string()))?;
-    if !info.has_memory || (!info.has_request_handler && !info.has_response_handler) {
-        anyhow::bail!(
-            "RUV2100 incompatible Wasm plugin: export `memory` and at least one of `on_request` or `on_response`"
-        );
-    }
-
-    print_tui_header("Plugin Debug");
-    print_field("path", path_text(&plugin_path));
-    print_field("memory", ok_text(info.has_memory.to_string()));
-    print_field("on_request", ok_text(info.has_request_handler.to_string()));
-    print_field(
-        "on_response",
-        ok_text(info.has_response_handler.to_string()),
-    );
-    print_field(
-        "allocator",
-        if info.has_allocator {
-            ok_text("ruvyxa_alloc")
-        } else {
-            accent("legacy offset 0")
-        },
-    );
-    print_field("exports", info.exports.join(", "));
-    Ok(())
-}
-
-fn resolve_plugin_debug_path(args: &PluginDebugArgs) -> anyhow::Result<PathBuf> {
-    if args
-        .plugin_or_wasm
-        .extension()
-        .is_some_and(|extension| extension == "wasm")
-    {
-        return Ok(args.plugin_or_wasm.clone());
-    }
-
-    let plugin_name = normalize_plugin_name(&args.plugin_or_wasm.to_string_lossy())?;
-    let crate_name = plugin_name.replace('-', "_");
-    let path = args
-        .root
-        .join(&plugin_name)
-        .join("target/wasm32-unknown-unknown/release")
-        .join(format!("{crate_name}.wasm"));
-    if !path.is_file() {
-        anyhow::bail!(
-            "compiled Wasm plugin not found: {}\nrun `cargo build --target wasm32-unknown-unknown --release` in {} or pass an explicit .wasm path",
-            path.display(),
-            plugin_name,
-        );
-    }
-    Ok(path)
 }
 
 fn normalize_plugin_name(value: &str) -> anyhow::Result<String> {
@@ -662,53 +573,6 @@ fn normalize_plugin_name(value: &str) -> anyhow::Result<String> {
     }
     Ok(value.to_string())
 }
-
-const WASM_PLUGIN_TEMPLATE: &str = r#"#![no_std]
-
-use core::panic::PanicInfo;
-
-const CONTINUE: &[u8] = b"{\"action\":\"continue\"}\0";
-const BUFFER_OFFSET: usize = 64 * 1024;
-const BUFFER_CAPACITY: usize = 16 * 1024 * 1024;
-
-#[panic_handler]
-fn panic(_: &PanicInfo<'_>) -> ! {
-    loop {}
-}
-
-/// Called before Ruvyxa dispatches a request.
-#[unsafe(no_mangle)]
-pub extern "C" fn on_request(input_ptr: i32, _input_len: i32) -> i32 {
-    continue_result(input_ptr)
-}
-
-/// Called after Ruvyxa receives a route response.
-#[unsafe(no_mangle)]
-pub extern "C" fn on_response(input_ptr: i32, _input_len: i32) -> i32 {
-    continue_result(input_ptr)
-}
-
-/// Reserve one request-local buffer. Ruvyxa creates a new Wasm store per call.
-#[unsafe(no_mangle)]
-pub extern "C" fn ruvyxa_alloc(bytes: i32) -> i32 {
-    if bytes < 0 || bytes as usize > BUFFER_CAPACITY {
-        -1
-    } else {
-        BUFFER_OFFSET as i32
-    }
-}
-
-fn continue_result(input_ptr: i32) -> i32 {
-    if input_ptr < 0 {
-        return -1;
-    }
-    // The allocator reserves room for the request and the host's bounded result.
-    unsafe {
-        core::ptr::copy_nonoverlapping(CONTINUE.as_ptr(), input_ptr as *mut u8, CONTINUE.len());
-    }
-    input_ptr
-}
-"#;
 
 fn normalized_cli_args(args: impl IntoIterator<Item = OsString>) -> Vec<OsString> {
     let mut args = args.into_iter().collect::<Vec<_>>();
@@ -880,6 +744,7 @@ fn dev_server_config(args: &ServerArgs, config: &ProjectConfig) -> anyhow::Resul
         .security_headers
         .unwrap_or(server.security_headers);
     server.middleware = config.middleware.clone();
+    server.plugins_enabled = !config.plugins.is_empty();
     server.default_render_strategy = config.rendering.default_strategy;
     server.default_revalidate = config.rendering.default_revalidate;
     Ok(server)
@@ -946,6 +811,7 @@ fn production_server_config(
         .security_headers
         .unwrap_or(server.security_headers);
     server.middleware = config.middleware.clone();
+    server.plugins_enabled = !config.plugins.is_empty();
     server.default_render_strategy = config.rendering.default_strategy;
     server.default_revalidate = config.rendering.default_revalidate;
     Ok(server)
@@ -1312,6 +1178,13 @@ async fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Resul
 
     commit_staged_build_outputs(&staging_dir, &out_dir)
         .with_context(|| format!("failed to commit build output into {}", out_dir.display()))?;
+    run_plugin_build_complete(
+        &args.root,
+        &out_dir,
+        &build_info,
+        &config.plugins,
+        config.javascript_runtime(),
+    )?;
     build_info["timing"]["totalMs"] = serde_json::json!(duration_ms(started.elapsed()));
     fs::write(
         out_dir.join("build.json"),
@@ -1553,7 +1426,6 @@ fn route_render_symbol(strategy: RenderStrategy) -> &'static str {
 const BUILD_OUTPUT_DIRS: [&str; 4] = ["server", "client", "assets", "prerender"];
 const BUILD_OUTPUT_FILES: [&str; 2] = ["manifest.json", "build.json"];
 const MAX_PRERENDER_PARALLELISM: usize = 2;
-const MAX_JS_PLUGIN_WORKERS: usize = 8;
 const WINDOWS_RENAME_RETRY_COUNT: usize = 5;
 
 /// A route that was pre-rendered at build time.
@@ -2396,15 +2268,13 @@ struct SharedRouteChunk {
 }
 
 #[derive(Clone)]
-struct JsConfigPluginBridge {
+struct TypeScriptPluginBridge {
     project_root: PathBuf,
-    workers: Arc<Vec<Mutex<JsPluginWorker>>>,
+    workers: Arc<Vec<Mutex<TypeScriptPluginWorker>>>,
     next_worker: Arc<AtomicUsize>,
-    has_resolve_id: bool,
-    has_transform: bool,
 }
 
-struct JsPluginWorker {
+struct TypeScriptPluginWorker {
     child: Child,
     stdin: ChildStdin,
     stdout: BufReader<ChildStdout>,
@@ -2412,7 +2282,7 @@ struct JsPluginWorker {
 
 #[derive(Debug, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct PluginRunnerOutput {
+struct PluginRuntimeOutput {
     ok: bool,
     result: Option<serde_json::Value>,
     code: Option<String>,
@@ -2420,21 +2290,17 @@ struct PluginRunnerOutput {
     stack: Option<String>,
 }
 
-impl ruvyxa_bundler::plugin::RuvyxaBundlerPlugin for JsConfigPluginBridge {
-    fn name(&self) -> &str {
-        "ruvyxa-config-js-plugins"
+impl ruvyxa_bundler::hooks::BuildHooks for TypeScriptPluginBridge {
+    fn host_name(&self) -> &str {
+        "ruvyxa-typescript-plugin-host"
     }
 
     fn resolve_id(
         &self,
         specifier: &str,
         importer: Option<&Path>,
-        ctx: &ruvyxa_bundler::plugin::PluginContext,
+        ctx: &ruvyxa_bundler::hooks::BuildHookContext,
     ) -> ruvyxa_bundler::Result<Option<PathBuf>> {
-        if !self.has_resolve_id {
-            return Ok(None);
-        }
-
         let payload = serde_json::json!({
             "id": specifier,
             "importer": importer.map(|path| path.display().to_string()),
@@ -2461,12 +2327,8 @@ impl ruvyxa_bundler::plugin::RuvyxaBundlerPlugin for JsConfigPluginBridge {
         &self,
         code: &str,
         id: &Path,
-        ctx: &ruvyxa_bundler::plugin::PluginContext,
-    ) -> ruvyxa_bundler::Result<Option<ruvyxa_bundler::plugin::TransformResult>> {
-        if !self.has_transform {
-            return Ok(None);
-        }
-
+        ctx: &ruvyxa_bundler::hooks::BuildHookContext,
+    ) -> ruvyxa_bundler::Result<Option<ruvyxa_bundler::hooks::TransformOutput>> {
         let payload = serde_json::json!({
             "code": code,
             "id": id.display().to_string(),
@@ -2484,14 +2346,14 @@ impl ruvyxa_bundler::plugin::RuvyxaBundlerPlugin for JsConfigPluginBridge {
             .and_then(|value| value.as_str())
             .map(str::to_string);
 
-        Ok(Some(ruvyxa_bundler::plugin::TransformResult {
+        Ok(Some(ruvyxa_bundler::hooks::TransformOutput {
             code: code.to_string(),
             map,
         }))
     }
 }
 
-impl JsConfigPluginBridge {
+impl TypeScriptPluginBridge {
     fn call_runner(
         &self,
         hook: &str,
@@ -2500,7 +2362,9 @@ impl JsConfigPluginBridge {
         payload["hook"] = serde_json::Value::String(hook.to_string());
         let worker_index = self.next_worker.fetch_add(1, Ordering::Relaxed) % self.workers.len();
         let mut worker = self.workers[worker_index].lock().map_err(|_| {
-            ruvyxa_bundler::BundleError::Compiler("JS plugin worker lock was poisoned".into())
+            ruvyxa_bundler::BundleError::Compiler(
+                "TypeScript plugin worker lock was poisoned".into(),
+            )
         })?;
         let result = worker.call(&payload)?;
 
@@ -2514,12 +2378,12 @@ impl JsConfigPluginBridge {
             result
                 .message
                 .or(result.stack)
-                .unwrap_or_else(|| "JS plugin hook failed".to_string())
+                .unwrap_or_else(|| "TypeScript plugin hook failed".to_string())
         )))
     }
 }
 
-impl JsPluginWorker {
+impl TypeScriptPluginWorker {
     fn spawn(
         runner: &Path,
         project_root: &Path,
@@ -2536,14 +2400,18 @@ impl JsPluginWorker {
             .spawn()
             .map_err(|err| {
                 ruvyxa_bundler::BundleError::Compiler(format!(
-                    "failed to start persistent JS plugin worker: {err}"
+                    "failed to start persistent TypeScript plugin worker: {err}"
                 ))
             })?;
         let stdin = child.stdin.take().ok_or_else(|| {
-            ruvyxa_bundler::BundleError::Compiler("failed to open JS plugin worker stdin".into())
+            ruvyxa_bundler::BundleError::Compiler(
+                "failed to open TypeScript plugin worker stdin".into(),
+            )
         })?;
         let stdout = child.stdout.take().ok_or_else(|| {
-            ruvyxa_bundler::BundleError::Compiler("failed to open JS plugin worker stdout".into())
+            ruvyxa_bundler::BundleError::Compiler(
+                "failed to open TypeScript plugin worker stdout".into(),
+            )
         })?;
 
         Ok(Self {
@@ -2553,22 +2421,22 @@ impl JsPluginWorker {
         })
     }
 
-    fn call(&mut self, payload: &serde_json::Value) -> ruvyxa_bundler::Result<PluginRunnerOutput> {
+    fn call(&mut self, payload: &serde_json::Value) -> ruvyxa_bundler::Result<PluginRuntimeOutput> {
         writeln!(self.stdin, "{payload}").map_err(|err| {
             ruvyxa_bundler::BundleError::Compiler(format!(
-                "failed to send JS plugin worker payload: {err}"
+                "failed to send TypeScript plugin worker payload: {err}"
             ))
         })?;
         self.stdin.flush().map_err(|err| {
             ruvyxa_bundler::BundleError::Compiler(format!(
-                "failed to flush JS plugin worker payload: {err}"
+                "failed to flush TypeScript plugin worker payload: {err}"
             ))
         })?;
 
         let mut stdout = String::new();
         let bytes_read = self.stdout.read_line(&mut stdout).map_err(|err| {
             ruvyxa_bundler::BundleError::Compiler(format!(
-                "failed to read JS plugin worker response: {err}"
+                "failed to read TypeScript plugin worker response: {err}"
             ))
         })?;
         if bytes_read == 0 {
@@ -2580,20 +2448,20 @@ impl JsPluginWorker {
                 .map(|status| status.to_string())
                 .unwrap_or_else(|| "unknown".to_string());
             return Err(ruvyxa_bundler::BundleError::Compiler(format!(
-                "JS plugin worker exited before responding (status: {status})"
+                "TypeScript plugin worker exited before responding (status: {status})"
             )));
         }
 
         serde_json::from_str(stdout.trim()).map_err(|err| {
             ruvyxa_bundler::BundleError::Compiler(format!(
-                "JS plugin worker returned invalid output: {err}; stdout: {}",
+                "TypeScript plugin worker returned invalid output: {err}; stdout: {}",
                 stdout.trim()
             ))
         })
     }
 }
 
-impl Drop for JsPluginWorker {
+impl Drop for TypeScriptPluginWorker {
     fn drop(&mut self) {
         let _ = self.child.kill();
         let _ = self.child.wait();
@@ -2612,7 +2480,7 @@ fn bundle_context_for_build(
     plugins: &[BuildPluginConfig],
     config_dependency_hash: &str,
     cache_dir: &Path,
-    parallelism: usize,
+    _parallelism: usize,
     runtime: JavaScriptRuntime,
 ) -> anyhow::Result<ruvyxa_bundler::BundleContext> {
     let compile_cache = ruvyxa_bundler::cache::CompileCache::at_dir_with_namespace(
@@ -2620,9 +2488,7 @@ fn bundle_context_for_build(
         true,
         config_dependency_hash,
     );
-    let has_resolve_id = plugins.iter().any(|plugin| plugin.resolve_id);
-    let has_transform = plugins.iter().any(|plugin| plugin.transform);
-    if !has_resolve_id && !has_transform {
+    if plugins.is_empty() {
         return Ok(ruvyxa_bundler::BundleContext::with_all_caches(
             compile_cache,
             ruvyxa_bundler::resolver::ResolveGraphCache::for_build(),
@@ -2630,27 +2496,62 @@ fn bundle_context_for_build(
         ));
     }
 
-    let runner = find_runtime_script(root, "plugin-runner.mjs")
-        .ok_or_else(|| anyhow::anyhow!("RUV1701 JS plugin runner not found"))?;
+    let runner = find_runtime_script(root, "plugin-runtime.mjs")
+        .ok_or_else(|| anyhow::anyhow!("RUV1701 TypeScript plugin runtime not found"))?;
     let project_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let worker_count = plugin_worker_count(plugins, parallelism);
-    let workers = (0..worker_count)
-        .map(|_| JsPluginWorker::spawn(&runner, &project_root, runtime).map(Mutex::new))
-        .collect::<ruvyxa_bundler::Result<Vec<_>>>()?;
-    let bridge = JsConfigPluginBridge {
+    let workers = std::iter::once(
+        TypeScriptPluginWorker::spawn(&runner, &project_root, runtime).map(Mutex::new),
+    )
+    .collect::<ruvyxa_bundler::Result<Vec<_>>>()?;
+    let bridge = TypeScriptPluginBridge {
         project_root,
         workers: Arc::new(workers),
         next_worker: Arc::new(AtomicUsize::new(0)),
-        has_resolve_id,
-        has_transform,
     };
 
-    Ok(ruvyxa_bundler::BundleContext::with_plugins(
+    Ok(ruvyxa_bundler::BundleContext::with_build_hooks(
         compile_cache,
         ruvyxa_bundler::resolver::ResolveGraphCache::for_build(),
         ruvyxa_bundler::incremental::IncrementalGraphCache::new(root, true),
-        ruvyxa_bundler::plugin::PluginPipeline::new(vec![Arc::new(bridge)]),
+        ruvyxa_bundler::hooks::BuildHookPipeline::new(vec![Arc::new(bridge)]),
     ))
+}
+
+fn run_plugin_build_complete(
+    root: &Path,
+    out_dir: &Path,
+    manifest: &serde_json::Value,
+    plugins: &[BuildPluginConfig],
+    runtime: JavaScriptRuntime,
+) -> anyhow::Result<()> {
+    if plugins.is_empty() {
+        return Ok(());
+    }
+    let runner = find_runtime_script(root, "plugin-runtime.mjs")
+        .ok_or_else(|| anyhow::anyhow!("RUV1701 TypeScript plugin runtime not found"))?;
+    let project_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let mut worker = TypeScriptPluginWorker::spawn(&runner, &project_root, runtime)
+        .map_err(|error| anyhow::anyhow!("failed to start TypeScript plugin runtime: {error}"))?;
+    let result = worker
+        .call(&serde_json::json!({
+            "hook": "buildComplete",
+            "outDir": out_dir,
+            "manifest": manifest,
+        }))
+        .map_err(|error| {
+            anyhow::anyhow!("TypeScript plugin build-complete hook failed: {error}")
+        })?;
+    if !result.ok {
+        anyhow::bail!(
+            "{} {}",
+            result.code.unwrap_or_else(|| "RUV1700".to_string()),
+            result
+                .message
+                .or(result.stack)
+                .unwrap_or_else(|| "TypeScript plugin build-complete hook failed".to_string())
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -2767,7 +2668,7 @@ fn emit_client_bundles_with_runtime(
                     .filter_map(|(_, plan)| plan.prepared.as_deref())
                     .collect::<Vec<_>>();
                 let output = if prepared_routes.len() == plans.len()
-                    && bundle_context.plugins().plugin_count() == 0
+                    && bundle_context.build_hooks().host_count() == 0
                 {
                     ruvyxa_bundler::bundle_shared_prepared_route_modules(
                         &prepared_routes,
@@ -3070,18 +2971,6 @@ fn build_parallelism(configured: Option<usize>, work_items: usize) -> usize {
     configured.unwrap_or(available).clamp(1, work_items.max(1))
 }
 
-fn plugin_worker_count(plugins: &[BuildPluginConfig], parallelism: usize) -> usize {
-    let mut active_plugins = plugins
-        .iter()
-        .filter(|plugin| plugin.resolve_id || plugin.transform)
-        .peekable();
-    if active_plugins.peek().is_none() || !active_plugins.all(|plugin| plugin.parallel) {
-        return 1;
-    }
-
-    parallelism.clamp(1, MAX_JS_PLUGIN_WORKERS)
-}
-
 fn prerender_parallelism(configured: Option<usize>, work_items: usize) -> usize {
     let default = std::thread::available_parallelism()
         .map(usize::from)
@@ -3097,15 +2986,7 @@ fn build_plugin_manifest(plugins: &[BuildPluginConfig]) -> serde_json::Value {
     serde_json::Value::Array(
         plugins
             .iter()
-            .map(|plugin| {
-                serde_json::json!({
-                    "name": plugin.name,
-                    "enforce": plugin.enforce,
-                    "resolveId": plugin.resolve_id,
-                    "transform": plugin.transform,
-                    "parallel": plugin.parallel
-                })
-            })
+            .map(|plugin| serde_json::json!({ "name": plugin.name }))
             .collect(),
     )
 }
@@ -5047,37 +4928,25 @@ mod tests {
     use super::*;
 
     #[test]
-    fn plugin_new_scaffolds_a_buildable_raw_abi_starter() {
+    fn plugin_new_scaffolds_a_typescript_starter() {
         let temp = tempfile::tempdir().unwrap();
 
-        scaffold_wasm_plugin(PluginNewArgs {
+        scaffold_typescript_plugin(PluginNewArgs {
             name: "request-logger".to_string(),
             root: temp.path().to_path_buf(),
         })
         .unwrap();
 
-        let plugin = temp.path().join("request-logger");
-        let source = fs::read_to_string(plugin.join("src/lib.rs")).unwrap();
-        assert!(plugin.join("Cargo.toml").is_file());
-        assert!(plugin.join(".cargo/config.toml").is_file());
-        assert!(source.contains("fn on_request"));
-        assert!(source.contains("fn on_response"));
-        assert!(
-            fs::read_to_string(plugin.join(".cargo/config.toml"))
-                .unwrap()
-                .contains("--export-memory")
-        );
-        assert!(
-            fs::read_to_string(plugin.join("README.md"))
-                .unwrap()
-                .contains("ruvyxa plugin debug")
-        );
+        let plugin = temp.path().join("plugins/request-logger.ts");
+        let source = fs::read_to_string(&plugin).unwrap();
+        assert!(source.contains("definePlugin"));
+        assert!(source.contains("addMiddleware"));
     }
 
     #[test]
     fn plugin_new_rejects_unsafe_names() {
         let temp = tempfile::tempdir().unwrap();
-        let error = scaffold_wasm_plugin(PluginNewArgs {
+        let error = scaffold_typescript_plugin(PluginNewArgs {
             name: "../escape".to_string(),
             root: temp.path().to_path_buf(),
         })
@@ -5086,37 +4955,6 @@ mod tests {
 
         assert!(error.contains("plugin name must use lowercase"));
         assert!(!temp.path().join("escape").exists());
-    }
-
-    #[test]
-    fn plugin_debug_resolves_a_short_plugin_name_to_its_release_module() {
-        let temp = tempfile::tempdir().unwrap();
-        let wasm = temp
-            .path()
-            .join("auth-guard/target/wasm32-unknown-unknown/release/auth_guard.wasm");
-        fs::create_dir_all(wasm.parent().unwrap()).unwrap();
-        fs::write(&wasm, []).unwrap();
-
-        let resolved = resolve_plugin_debug_path(&PluginDebugArgs {
-            plugin_or_wasm: PathBuf::from("auth-guard"),
-            root: temp.path().to_path_buf(),
-        })
-        .unwrap();
-
-        assert_eq!(resolved, wasm);
-    }
-
-    #[test]
-    fn plugin_debug_keeps_an_explicit_wasm_path() {
-        let path = PathBuf::from("custom/plugin.wasm");
-
-        let resolved = resolve_plugin_debug_path(&PluginDebugArgs {
-            plugin_or_wasm: path.clone(),
-            root: PathBuf::from("."),
-        })
-        .unwrap();
-
-        assert_eq!(resolved, path);
     }
 
     #[test]
@@ -5241,26 +5079,6 @@ export default {
         assert_eq!(build_parallelism(Some(3), 1), 1);
         assert_eq!(build_parallelism(Some(3), 5), 3);
         assert_eq!(build_parallelism(Some(usize::MAX), 2), 2);
-    }
-
-    #[test]
-    fn plugin_workers_require_unanimous_parallel_opt_in() {
-        let plugin = |name: &str, parallel: bool| BuildPluginConfig {
-            name: name.to_string(),
-            transform: true,
-            parallel,
-            ..BuildPluginConfig::default()
-        };
-
-        assert_eq!(plugin_worker_count(&[plugin("safe", true)], 6), 6);
-        assert_eq!(
-            plugin_worker_count(&[plugin("safe", true), plugin("stateful", false)], 6),
-            1
-        );
-        assert_eq!(
-            plugin_worker_count(&[plugin("safe", true)], usize::MAX),
-            MAX_JS_PLUGIN_WORKERS
-        );
     }
 
     #[test]
@@ -5566,11 +5384,7 @@ export default {
         let config: ProjectConfig = serde_json::from_value(json!({
             "plugins": [
                 {
-                    "name": "banner",
-                    "enforce": "pre",
-                    "resolveId": true,
-                    "transform": true,
-                    "parallel": true
+                    "name": "banner"
                 }
             ]
         }))
@@ -5578,15 +5392,10 @@ export default {
 
         assert_eq!(config.plugins.len(), 1);
         assert_eq!(config.plugins[0].name, "banner");
-        assert_eq!(config.plugins[0].enforce.as_deref(), Some("pre"));
-        assert!(config.plugins[0].resolve_id);
-        assert!(config.plugins[0].transform);
-        assert!(config.plugins[0].parallel);
 
         let manifest = build_plugin_manifest(&config.plugins);
         assert_eq!(manifest[0]["name"], "banner");
-        assert_eq!(manifest[0]["resolveId"], true);
-        assert_eq!(manifest[0]["parallel"], true);
+        assert_eq!(manifest[0].as_object().unwrap().len(), 1);
     }
 
     #[test]
@@ -5959,7 +5768,7 @@ export default {
         std::fs::write(
             root.join("ruvyxa.config.ts"),
             r#"
-import { config } from "ruvyxa/config"
+import { config, definePlugin } from "ruvyxa/config"
 
 export default config({
   build: {
@@ -5967,10 +5776,10 @@ export default config({
     map: true,
     manifest: true,
   },
-  plugins: [
-    {
-      name: "replace-before",
-      transform(code, id, ctx) {
+  plugins: [definePlugin({
+    name: "replace-before",
+    setup({ transform }) {
+      transform((code, id, ctx) => {
         if (ctx.environment !== "client" || !id.endsWith("page.tsx")) return null
         return {
           code: code.replace("Before", "After"),
@@ -5982,9 +5791,9 @@ export default config({
             mappings: "AAAA",
           },
         }
-      },
+      })
     },
-  ],
+  })],
 })
 "#,
         )
@@ -6052,13 +5861,16 @@ export default { build: { minify: false }, plugins: [plugin] }
             std::fs::write(
                 &plugin_file,
                 format!(
-                    r#"export const plugin = {{
+                    r#"import {{ definePlugin }} from "ruvyxa/config"
+export const plugin = definePlugin({{
   name: "replace-label",
-  transform(code, id) {{
-    if (!id.endsWith("page.tsx")) return null
+  setup({{ transform }}) {{
+    transform((code, id) => {{
+      if (!id.endsWith("page.tsx")) return null
     return {{ code: code.replace("Before", "{replacement}") }}
+    }})
   }}
-}}
+}})
 "#
                 ),
             )
@@ -6113,52 +5925,53 @@ export default { build: { minify: false }, plugins: [plugin] }
     }
 
     #[test]
-    fn js_config_plugin_bridge_reuses_worker_state() {
+    fn typescript_plugin_bridge_reuses_worker_state() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
         std::fs::write(
             root.join("ruvyxa.config.mjs"),
             r#"
+import { definePlugin } from "ruvyxa/config"
 let calls = 0
 export default {
-  plugins: [{
+  plugins: [definePlugin({
     name: "counter",
-    transform(code) {
-      calls += 1
-      return {
-        code: `${code}\nexport const pluginCall = ${calls}`,
-        map: {
-          version: 3,
-          sources: ["counter-input.ts"],
-          sourcesContent: [code],
-          names: [],
-          mappings: "AAAA",
-        },
-      }
+    setup({ transform }) {
+      transform((code) => {
+        calls += 1
+        return {
+          code: `${code}\nexport const pluginCall = ${calls}`,
+          map: {
+            version: 3,
+            sources: ["counter-input.ts"],
+            sourcesContent: [code],
+            names: [],
+            mappings: "AAAA",
+          },
+        }
+      })
     },
-  }],
+  })],
 }
 "#,
         )
         .unwrap();
 
-        let runner = find_runtime_script(root, "plugin-runner.mjs").unwrap();
-        let bridge = JsConfigPluginBridge {
+        let runner = find_runtime_script(root, "plugin-runtime.mjs").unwrap();
+        let bridge = TypeScriptPluginBridge {
             project_root: root.to_path_buf(),
             workers: Arc::new(vec![Mutex::new(
-                JsPluginWorker::spawn(&runner, root, JavaScriptRuntime::Node).unwrap(),
+                TypeScriptPluginWorker::spawn(&runner, root, JavaScriptRuntime::Node).unwrap(),
             )]),
             next_worker: Arc::new(AtomicUsize::new(0)),
-            has_resolve_id: false,
-            has_transform: true,
         };
-        let context = ruvyxa_bundler::plugin::PluginContext {
+        let context = ruvyxa_bundler::hooks::BuildHookContext {
             project_root: root.to_path_buf(),
             importer: None,
             target: ruvyxa_bundler::BundleTarget::Client,
         };
 
-        let first = ruvyxa_bundler::plugin::RuvyxaBundlerPlugin::transform(
+        let first = ruvyxa_bundler::hooks::BuildHooks::transform(
             &bridge,
             "export const value = 1",
             &root.join("first.ts"),
@@ -6166,7 +5979,7 @@ export default {
         )
         .unwrap()
         .unwrap();
-        let second = ruvyxa_bundler::plugin::RuvyxaBundlerPlugin::transform(
+        let second = ruvyxa_bundler::hooks::BuildHooks::transform(
             &bridge,
             "export const value = 2",
             &root.join("second.ts"),
@@ -6181,60 +5994,44 @@ export default {
     }
 
     #[test]
-    fn js_config_plugin_bridge_distributes_parallel_safe_hooks() {
+    fn typescript_plugin_build_complete_runs_after_output_commit() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path();
+        let out_dir = root.join(".ruvyxa");
+        std::fs::create_dir_all(&out_dir).unwrap();
         std::fs::write(
             root.join("ruvyxa.config.mjs"),
             r#"
+import { definePlugin } from "ruvyxa/config"
 export default {
-  plugins: [{
-    name: "worker-id",
-    parallel: true,
-    transform(code) {
-      return { code: `${code}\nexport const pluginPid = ${process.pid}` }
+  plugins: [definePlugin({
+    name: "complete",
+    setup({ onBuildComplete }) {
+      onBuildComplete(async ({ outDir, manifest }) => {
+        await import("node:fs/promises").then(({ writeFile }) =>
+          writeFile(`${outDir}/plugin-complete.json`, JSON.stringify(manifest)))
+      })
     },
-  }],
+  })],
 }
 "#,
         )
         .unwrap();
+        let plugins = vec![BuildPluginConfig {
+            name: "complete".to_string(),
+        }];
 
-        let runner = find_runtime_script(root, "plugin-runner.mjs").unwrap();
-        let workers = (0..2)
-            .map(|_| {
-                Mutex::new(JsPluginWorker::spawn(&runner, root, JavaScriptRuntime::Node).unwrap())
-            })
-            .collect();
-        let bridge = JsConfigPluginBridge {
-            project_root: root.to_path_buf(),
-            workers: Arc::new(workers),
-            next_worker: Arc::new(AtomicUsize::new(0)),
-            has_resolve_id: false,
-            has_transform: true,
-        };
-        let context = ruvyxa_bundler::plugin::PluginContext {
-            project_root: root.to_path_buf(),
-            importer: None,
-            target: ruvyxa_bundler::BundleTarget::Client,
-        };
-        let transform = |id| {
-            ruvyxa_bundler::plugin::RuvyxaBundlerPlugin::transform(
-                &bridge,
-                "export const value = 1",
-                &root.join(id),
-                &context,
-            )
-            .unwrap()
-            .unwrap()
-            .code
-        };
+        run_plugin_build_complete(
+            root,
+            &out_dir,
+            &serde_json::json!({ "routes": 1 }),
+            &plugins,
+            JavaScriptRuntime::Node,
+        )
+        .unwrap();
 
-        let first = transform("first.ts");
-        let second = transform("second.ts");
-        let first_pid = first.rsplit("pluginPid = ").next().unwrap();
-        let second_pid = second.rsplit("pluginPid = ").next().unwrap();
-        assert_ne!(first_pid, second_pid, "hooks should use isolated workers");
+        let marker = std::fs::read_to_string(out_dir.join("plugin-complete.json")).unwrap();
+        assert!(marker.contains("\"routes\":1"));
     }
 
     #[test]
@@ -6250,7 +6047,7 @@ export default {
         assert!(help.contains("dev          Run the development server with hot reload"));
         assert!(help.contains("build        Build the application for production output"));
         assert!(help.contains("check        Run app-level production readiness checks"));
-        assert!(help.contains("plugin       Create and inspect WebAssembly middleware plugins"));
+        assert!(help.contains("plugin       Create a TypeScript plugin starter"));
         assert!(help.contains("test:parity  Compare dev/prod routes and smoke-render page routes"));
     }
 

@@ -13,7 +13,7 @@ use axum::Router;
 use axum::body::{Body, Bytes, to_bytes};
 use axum::extract::ws::{Message, WebSocketUpgrade};
 use axum::extract::{DefaultBodyLimit, Query, State};
-use axum::http::{HeaderMap, HeaderName, HeaderValue, Request, StatusCode, header};
+use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, Request, StatusCode, header};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use chrono::Local;
@@ -25,7 +25,8 @@ use ruvyxa_graph::{
     discover_routes,
 };
 use ruvyxa_middleware::{
-    MiddlewareConfig, MiddlewareStack, PluginRequest, PluginResponse, WasmPluginRuntime,
+    MiddlewareConfig, MiddlewareRequestResult, MiddlewareStack, PluginHost, PluginHttpRequest,
+    PluginHttpResponse,
 };
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
@@ -54,9 +55,9 @@ const MAX_API_BODY_BYTES: usize = 10 * 1024 * 1024;
 pub const MAX_ACTION_BODY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
 /// Absolute upper bound for API payload buffering, regardless of project config.
 pub const MAX_API_BODY_LIMIT_BYTES: usize = 256 * 1024 * 1024;
-/// Default maximum response size buffered for a response-phase Wasm plugin.
+/// Default maximum response size buffered for a TypeScript response middleware.
 pub const DEFAULT_PLUGIN_RESPONSE_BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
-/// Largest response size a project may configure for response-phase Wasm plugins.
+/// Largest response size a project may configure for TypeScript response middleware.
 pub const MAX_PLUGIN_RESPONSE_BODY_LIMIT_BYTES: usize = 256 * 1024 * 1024;
 const ACTION_RATE_LIMIT_MAX: usize = 600;
 const ACTION_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
@@ -181,7 +182,7 @@ pub struct ServerConfig {
     pub action_body_limit_bytes: usize,
     /// Maximum accepted API route request payload size.
     pub api_body_limit_bytes: usize,
-    /// Maximum response size buffered for response-phase Wasm plugins.
+    /// Maximum response size buffered for TypeScript response middleware.
     pub plugin_response_body_limit_bytes: usize,
     /// Maximum action requests per client/action in the configured window.
     pub action_rate_limit_max: usize,
@@ -196,6 +197,8 @@ pub struct ServerConfig {
     /// Apply Ruvyxa's default security response headers.
     pub security_headers: bool,
     pub middleware: MiddlewareConfig,
+    /// Start the TypeScript plugin host for this server.
+    pub plugins_enabled: bool,
     pub default_render_strategy: Option<RenderStrategy>,
     pub default_revalidate: Option<u64>,
 }
@@ -267,6 +270,7 @@ impl ServerConfig {
             trusted_proxy_ips: Vec::new(),
             security_headers: true,
             middleware: MiddlewareConfig::default(),
+            plugins_enabled: false,
             default_render_strategy: None,
             default_revalidate: None,
         }
@@ -301,6 +305,7 @@ impl ServerConfig {
             trusted_proxy_ips: Vec::new(),
             security_headers: true,
             middleware: MiddlewareConfig::default(),
+            plugins_enabled: false,
             default_render_strategy: None,
             default_revalidate: None,
         }
@@ -317,7 +322,7 @@ struct AppState {
     render_cache: Arc<RenderCache>,
     isr_revalidating: Arc<tokio::sync::Mutex<HashSet<String>>>,
     hmr_tracker: Arc<HmrTracker>,
-    plugin_runtime: Option<Arc<WasmPluginRuntime>>,
+    plugin_runtime: Option<Arc<PluginHost>>,
 }
 
 #[derive(Default)]
@@ -514,11 +519,14 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
     hmr_tracker.populate_from_manifest(&manifest.routes);
     let middleware_stack = MiddlewareStack::new(config.middleware.clone());
     middleware_stack.validate().map_err(RuvyxaError::Message)?;
-    let plugin_runtime = if config.middleware.plugins.is_empty() {
+    let plugin_runtime = if !config.plugins_enabled {
         None
     } else {
+        let runtime_script = find_runtime_script(&config.root, "plugin-runtime.mjs")
+            .ok_or_else(|| RuvyxaError::Message("RUV1701 plugin-runtime.mjs not found".into()))?;
+        let executable = config.runtime.executable();
         Some(Arc::new(
-            WasmPluginRuntime::new(&config.root, &config.middleware.plugins).await?,
+            PluginHost::start(&config.root, &runtime_script, &executable).await?,
         ))
     };
     let state = AppState {
@@ -1079,13 +1087,6 @@ fn middleware_summary(config: &MiddlewareConfig) -> String {
     if !config.builtin.headers.is_empty() {
         enabled.push("headers");
     }
-    if !config.layers.is_empty() {
-        enabled.push("layers");
-    }
-    if !config.plugins.is_empty() {
-        enabled.push("plugins");
-    }
-
     if enabled.is_empty() {
         "none".to_string()
     } else {
@@ -1344,35 +1345,49 @@ async fn handle_request(
         None
     };
 
-    let mut plugin_request = PluginRequest {
+    let plugin_request = PluginHttpRequest {
         method: method.clone(),
-        path: request_path.clone(),
+        path: request_target.clone(),
         headers: headers_to_plugin_pairs(&headers),
-        body: request_body.clone(),
+        body_base64: request_body.as_deref().map(encode_plugin_body),
     };
-    match apply_request_plugins(&state, &mut plugin_request).await {
-        Ok(Some(response)) => return response,
-        Ok(None) => {
-            let path_was_modified = plugin_request.path != request_path;
-            method = plugin_request.method.clone();
-            request_path = plugin_request.path.clone();
-            if path_was_modified {
-                // Middleware plugins operate on a path, not a URI target. Once a
-                // plugin supplies a replacement path, retaining the old query
-                // string would attach it to the wrong resource.
-                request_target = request_path.clone();
-            }
-            headers = plugin_headers(&plugin_request.headers);
-            request_body = plugin_request.body.clone();
-        }
+    let (short_circuit, plugin_request) = match apply_request_plugins(&state, plugin_request).await
+    {
+        Ok(result) => result,
         Err(error) => {
-            error!(%error, path = %request_path, "middleware request plugin failed");
+            error!(%error, path = %request_path, "TypeScript request middleware failed");
             let message = public_internal_error(&state.config, &error);
             return with_security_headers(
                 (StatusCode::INTERNAL_SERVER_ERROR, message).into_response(),
             );
         }
+    };
+    if let Some(response) = short_circuit {
+        return response;
     }
+    let (next_method, next_target) =
+        match split_plugin_target(&plugin_request.method, &plugin_request.path) {
+            Ok(value) => value,
+            Err(error) => {
+                return with_security_headers(
+                    (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+                );
+            }
+        };
+    method = next_method;
+    request_target = next_target.clone();
+    request_path = next_target
+        .split_once('?')
+        .map_or_else(|| next_target.clone(), |(path, _)| path.to_string());
+    headers = plugin_headers(&plugin_request.headers);
+    request_body = match decode_plugin_body(plugin_request.body_base64.as_deref()) {
+        Ok(value) => value,
+        Err(error) => {
+            return with_security_headers(
+                (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+            );
+        }
+    };
 
     let render_result = render_request_pooled(
         &state,
@@ -1406,7 +1421,7 @@ async fn handle_request(
     let response = match apply_response_plugins(&state, &plugin_request, response).await {
         Ok(response) => response,
         Err(error) => {
-            error!(%error, path = %request_path, "middleware response plugin failed");
+            error!(%error, path = %request_path, "TypeScript response middleware failed");
             with_security_headers(
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
@@ -1427,68 +1442,40 @@ async fn handle_request(
 
 async fn apply_request_plugins(
     state: &AppState,
-    request: &mut PluginRequest,
-) -> Result<Option<Response>> {
+    request: PluginHttpRequest,
+) -> Result<(Option<Response>, PluginHttpRequest)> {
     let Some(runtime) = &state.plugin_runtime else {
-        return Ok(None);
+        return Ok((None, request));
     };
-    let Some(result) = runtime.execute_request_plugins(request).await? else {
-        return Ok(None);
-    };
-    match result.action.as_str() {
-        "respond" => Ok(Some(plugin_response_into_response(
-            result.response.ok_or_else(|| {
-                RuvyxaError::Message("Plugin returned respond without a response".to_string())
-            })?,
-        )?)),
-        "modify-request" => {
-            let replacement = result.request.ok_or_else(|| {
-                RuvyxaError::Message("Plugin returned modify-request without a request".to_string())
-            })?;
-            *request = replacement;
-            Ok(None)
+    match runtime.execute_request(&request).await? {
+        MiddlewareRequestResult::Response { response } => {
+            Ok((Some(plugin_response_into_response(response)?), request))
         }
-        action => Err(RuvyxaError::Message(format!(
-            "Plugin returned unsupported request-phase action '{action}'"
-        ))),
+        MiddlewareRequestResult::Request { request } => Ok((None, request)),
     }
 }
 
 async fn apply_response_plugins(
     state: &AppState,
-    request: &PluginRequest,
+    request: &PluginHttpRequest,
     response: Response,
 ) -> Result<Response> {
     let Some(runtime) = &state.plugin_runtime else {
         return Ok(response);
     };
+    if runtime.descriptor().middleware.response == 0 {
+        return Ok(response);
+    }
     let (parts, body) = response.into_parts();
     let body =
         read_plugin_response_body(body, state.config.plugin_response_body_limit_bytes).await?;
-    let plugin_response = PluginResponse {
+    let plugin_response = PluginHttpResponse {
         status: parts.status.as_u16(),
         headers: headers_to_plugin_pairs(&parts.headers),
-        body: Some(body.to_vec()),
+        body_base64: Some(encode_plugin_body(&body)),
     };
-    let original = plugin_response.clone();
-    let Some(result) = runtime
-        .execute_response_plugins(request, &plugin_response)
-        .await?
-    else {
-        return plugin_response_into_response(original);
-    };
-    match result.action.as_str() {
-        "respond" | "modify-response" => {
-            plugin_response_into_response(result.response.ok_or_else(|| {
-                RuvyxaError::Message(
-                    "Plugin returned a response action without a response".to_string(),
-                )
-            })?)
-        }
-        action => Err(RuvyxaError::Message(format!(
-            "Plugin returned unsupported response-phase action '{action}'"
-        ))),
-    }
+    let result = runtime.execute_response(request, &plugin_response).await?;
+    plugin_response_into_response(result)
 }
 
 async fn read_plugin_response_body(body: Body, limit_bytes: usize) -> Result<Bytes> {
@@ -1499,11 +1486,12 @@ async fn read_plugin_response_body(body: Body, limit_bytes: usize) -> Result<Byt
     })
 }
 
-fn plugin_response_into_response(response: PluginResponse) -> Result<Response> {
+fn plugin_response_into_response(response: PluginHttpResponse) -> Result<Response> {
     let status = StatusCode::from_u16(response.status).map_err(|error| {
         RuvyxaError::Message(format!("Plugin returned invalid status: {error}"))
     })?;
-    let mut output = (status, response.body.unwrap_or_default()).into_response();
+    let body = decode_plugin_body(response.body_base64.as_deref())?.unwrap_or_default();
+    let mut output = (status, body).into_response();
     for (name, value) in response.headers {
         let name = HeaderName::from_bytes(name.as_bytes()).map_err(|error| {
             RuvyxaError::Message(format!("Plugin returned invalid header name: {error}"))
@@ -1528,16 +1516,47 @@ fn headers_to_plugin_pairs(headers: &HeaderMap) -> Vec<(String, String)> {
         .collect()
 }
 
-fn plugin_headers(headers: &[(String, String)]) -> HeaderMap {
-    headers
-        .iter()
-        .filter_map(|(name, value)| {
-            Some((
-                HeaderName::from_bytes(name.as_bytes()).ok()?,
-                HeaderValue::from_str(value).ok()?,
-            ))
+fn encode_plugin_body(body: &[u8]) -> String {
+    use base64::Engine;
+    base64::engine::general_purpose::STANDARD.encode(body)
+}
+
+fn decode_plugin_body(value: Option<&str>) -> Result<Option<Vec<u8>>> {
+    use base64::Engine;
+    value
+        .map(|value| {
+            base64::engine::general_purpose::STANDARD
+                .decode(value)
+                .map_err(|error| {
+                    RuvyxaError::Message(format!("RUV1701 invalid plugin body: {error}"))
+                })
         })
-        .collect()
+        .transpose()
+}
+
+fn split_plugin_target(method: &str, target: &str) -> Result<(String, String)> {
+    let method = method.parse::<Method>().map_err(|error| {
+        RuvyxaError::Message(format!("RUV1701 plugin returned invalid method: {error}"))
+    })?;
+    if !target.starts_with('/') {
+        return Err(RuvyxaError::Message(
+            "RUV1701 plugin returned a path that does not start with '/'.".to_string(),
+        ));
+    }
+    Ok((method.to_string(), target.to_string()))
+}
+
+fn plugin_headers(headers: &[(String, String)]) -> HeaderMap {
+    let mut output = HeaderMap::new();
+    for (name, value) in headers {
+        if let (Ok(name), Ok(value)) = (
+            HeaderName::from_bytes(name.as_bytes()),
+            HeaderValue::from_str(value),
+        ) {
+            output.append(name, value);
+        }
+    }
+    output
 }
 
 fn request_method_allows_body(method: &str) -> bool {
@@ -4367,10 +4386,10 @@ mod tests {
 
     #[test]
     fn plugin_responses_reject_invalid_headers() {
-        let response = PluginResponse {
+        let response = PluginHttpResponse {
             status: 200,
             headers: vec![("bad header".to_string(), "value".to_string())],
-            body: Some(b"body".to_vec()),
+            body_base64: Some(encode_plugin_body(b"body")),
         };
         assert!(plugin_response_into_response(response).is_err());
     }

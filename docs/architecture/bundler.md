@@ -103,7 +103,7 @@ pub enum BundleError {
 
 ```
 1. build_entry_source(input)                  → virtual entry (entry_source, entry_label)
-2. resolve_graph_with_plugins(entry, ...)     → Vec<ResolvedModule>
+2. resolve_graph_with_hooks(entry, ...)       → Vec<ResolvedModule>
 3. compile_graph_with_pipeline_and_maps(...)  → (Vec<CompiledModule>, BTreeMap<PathBuf, String>)
 4. boundary::check(modules, input, &mut diag) → diagnostics appended
 5. plan_dynamic_chunk_files(...)              → BTreeMap<PathBuf, String>  (client + chunk_manifest only)
@@ -804,22 +804,22 @@ static CONTENT_MODULE_CACHE: OnceLock<Mutex<ContentModuleCache>>;
 
 ## 11. Plugin System (`plugin.rs` — 221 lines)
 
-### `RuvyxaBundlerPlugin` trait
+### `BuildHooks` trait
 
 ```rust
-pub trait RuvyxaBundlerPlugin: Send + Sync {
+pub trait BuildHooks: Send + Sync {
     fn name(&self) -> &str;
 
     fn resolve_id(
-        &self, specifier: &str, importer: Option<&Path>, ctx: &PluginContext
+        &self, specifier: &str, importer: Option<&Path>, ctx: &BuildHookContext
     ) -> Result<Option<PathBuf>>;  // default: Ok(None)
 
     fn transform(
-        &self, code: &str, id: &Path, ctx: &PluginContext
+        &self, code: &str, id: &Path, ctx: &BuildHookContext
     ) -> Result<Option<TransformResult>>;  // default: Ok(None)
 }
 
-pub struct PluginContext {
+pub struct BuildHookContext {
     pub project_root: PathBuf,
     pub importer: Option<PathBuf>,
     pub target: BundleTarget,
@@ -831,11 +831,11 @@ pub struct TransformResult {
 }
 ```
 
-### `PluginPipeline`
+### `BuildHookPipeline`
 
 ```rust
-pub struct PluginPipeline {
-    plugins: Arc<Vec<Arc<dyn RuvyxaBundlerPlugin>>>,
+pub struct BuildHookPipeline {
+    hosts: Arc<Vec<Arc<dyn BuildHooks>>>,
 }
 ```
 
@@ -853,11 +853,12 @@ pub struct BundleContext {
     compile_cache: CompileCache,
     graph_cache: ResolveGraphCache,
     incremental: IncrementalGraphCache,
-    plugins: PluginPipeline,
+    build_hooks: BuildHookPipeline,
 }
 ```
 
-Constructors: `new(project_root)`, `with_caches(...)`, `with_all_caches(...)`, `with_plugins(...)`.
+Constructors: `new(project_root)`, `with_caches(...)`, `with_all_caches(...)`, and
+`with_build_hooks(...)`.
 
 ### `IncrementalGraphCache` (`incremental.rs`)
 

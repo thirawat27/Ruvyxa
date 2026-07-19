@@ -15,7 +15,7 @@ ecosystem access.
 │ruvyxa_   │ruvyxa_   │ruvyxa_dev_   │ruvyxa_    │ruvyxa_  │
 │graph     │bundler   │server        │middleware │diag-    │
 │(route    │(TS/JSX   │(Axum + HMR + │(Tower     │nostics  │
-│disc+val) │comp+link)│router+cache) │+Wasm)     │(RUV####)│
+│disc+val) │comp+link)│router+cache) │+TS host)  │(RUV####)│
 └─────────┴──────────┴──────────────┴───────────┴─────────┘
        │         │              │           │
        └─────────┴──────────────┴───────────┘
@@ -34,8 +34,7 @@ ruvyxa_diagnostics     (foundation: serde + thiserror only)
     ↑
     ├── ruvyxa_graph   (depends: diagnostics)
     ├── ruvyxa_bundler (depends: diagnostics, oxc, grass, dashmap, rayon, memmap2, blake3)
-    ├── ruvyxa_middleware (depends: diagnostics, axum, tower, wasmtime*)
-    │                    (* feat-gated "wasm-plugins", default on)
+    ├── ruvyxa_middleware (depends: diagnostics, axum, tower, Node/Bun bridge)
     └── ruvyxa_dev_server (depends: diagnostics, bundler, graph, middleware, axum, notify, tokio)
          │
          └── ruvyxa_cli (depends: ALL crates, binary entry via clap)
@@ -113,9 +112,10 @@ Two enforcement levels: graph-level (source scan in `ruvyxa_graph::validate_app`
 - [Compilation Pipeline](bundler.md) — `ruvyxa_bundler` resolver, compiler, linker, minifier
 - [Dev Server](dev-server.md) — `ruvyxa_dev_server` Axum server, router, render cache, HMR, styles
 - [CLI & Build Pipeline](cli.md) — `ruvyxa_cli` commands, config, build orchestration
-- [Middleware & Wasm Plugins](middleware.md) — `ruvyxa_middleware` stack + plugin runtime
+- [Middleware](middleware.md) — built-in Tower stack and plugin bridge
+- [Plugins](plugins.md) — unified setup registry and lifecycle
 - [Worker Pool](worker-pool.md) — Node/Bun worker pool protocol, streaming, failure recovery
 - [Diagnostic Codes](diagnostics.md) — RUV#### error catalog
 - [Concurrency Model](concurrency.md) — locks, parallelism, performance characteristics
-- [Wire Protocols](protocols.md) — NDJSON, WebSocket HMR, Wasm ABI
-- [Security Model](security.md) — env isolation, rate limiting, plugin sandbox
+- [Wire Protocols](protocols.md) — NDJSON, WebSocket HMR, and Fetch payloads
+- [Security Model](security.md) — env isolation, rate limiting, and plugin boundaries

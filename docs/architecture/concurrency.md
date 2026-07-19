@@ -30,7 +30,7 @@ How Ruvyxa uses threads, locks, channels, and parallelism across the Rust layer.
 | **ISR revalidating set**           | `tokio::sync::Mutex<HashSet<String>>`            | tokio       | Async lock, coalesce concurrent revalidations        |
 | **Action rate limiter**            | `Arc<Mutex<ActionRateLimiter>>`                  | std::sync   | Single writer, fast section                          |
 | **Content module cache**           | `OnceLock<Mutex<HashMap<...>>>`                  | std::sync   | Global shared, lazy init                             |
-| **WasmPluginRuntime.plugins**      | `Arc<RwLock<Vec<LoadedPlugin>>>`                 | std::sync   | Read during execution, write on reload               |
+| **PluginHost.worker**              | `tokio::sync::Mutex<PluginWorker>`               | tokio       | Serialize calls to the persistent plugin runtime     |
 
 ---
 
@@ -146,6 +146,5 @@ Same as dev minus HMR + error overlay overhead. Cache TTL is higher (1800s vs 30
 | Source file cache                | ~size of file (mmap for >64KB)               |
 | Compile cache (disk)             | ~500KB-2MB per key (blake3-keyed JS on disk) |
 | Worker process (Node)            | ~50-150MB per worker                         |
-| Wasm plugin store                | Up to `max_memory_bytes` (default 64MB)      |
 
 Total per-dev-session: ~200-500MB (4 workers + compile cache + render cache + source cache).

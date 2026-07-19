@@ -68,7 +68,7 @@ import {
 import type {
   Adapter,
   BuildContext,
-  PluginContext,
+  PluginSetupContext,
   RuvyxaConfig,
   RuvyxaPlugin,
   TransformResult,
@@ -126,29 +126,41 @@ export default config({
         credentials: true,
       },
     },
-    plugins: [
-      {
-        name: 'auth-guard',
-        phase: 'request',
-        routes: ['/api/*'],
-        allow: {
-          env: ['AUTH_SECRET'],
-          timeout: 5000,
-          memory: 67108864,
-        },
-      },
-    ],
   },
+})
+```
+
+Register application middleware in the same config with `definePlugin`:
+
+```ts
+import { config, definePlugin } from 'ruvyxa/config'
+
+export default config({
+  plugins: [
+    definePlugin({
+      name: 'auth-guard',
+      setup({ addMiddleware }) {
+        addMiddleware({
+          routes: ['/api/*'],
+          onRequest(request) {
+            return request.headers.get('authorization')
+              ? undefined
+              : new Response('Unauthorized', { status: 401 })
+          },
+        })
+      },
+    }),
+  ],
 })
 ```
 
 ## Runtime Architecture
 
 The `ruvyxa` package includes a persistent Node/Bun render worker pool (`runtime/worker-pool.mjs`)
-that keeps JavaScript runtime processes alive between requests, plus a persistent build-plugin
-worker (`runtime/plugin-runner.mjs`) that reuses loaded config hooks across modules. This removes
-repeated process startup and config compilation overhead. Plugin transform source maps are forwarded
-into generated client maps.
+and one persistent plugin runtime (`runtime/plugin-runtime.mjs`). The runtime loads
+`ruvyxa.config.ts` once, registers middleware and build hooks, and serves validated NDJSON calls
+from the Rust server and bundler. Plugin transform source maps are forwarded into generated client
+maps.
 
 The runtime files included in this package:
 
@@ -161,7 +173,7 @@ The runtime files included in this package:
 | `runtime/api-renderer.mjs`    | API route execution                                        |
 | `runtime/action-renderer.mjs` | Server action execution                                    |
 | `runtime/config-renderer.mjs` | Config file loading                                        |
-| `runtime/plugin-runner.mjs`   | Persistent config-plugin hook worker                       |
+| `runtime/plugin-runtime.mjs`  | Persistent plugin registry and hook worker                 |
 | `runtime/ssg-renderer.mjs`    | Build-time SSG/ISR/PPR pre-rendering                       |
 
 ## Ruvyxa CLI

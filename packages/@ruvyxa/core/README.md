@@ -29,7 +29,8 @@ import type {
   Adapter,
   AdapterOutput,
   BuildContext,
-  PluginContext,
+  PluginSetupContext,
+  PluginMiddlewareContext,
   RuvyxaConfig,
   RuvyxaPlugin,
   TransformResult,
@@ -167,33 +168,35 @@ export function customAdapter(): Adapter {
 
 ## Plugin Contract
 
-Custom build plugins use the exported `RuvyxaPlugin`, `PluginContext`, and `TransformResult` types.
-During `ruvyxa build`, `resolveId` and `transform` hooks from `ruvyxa.config.ts` are bridged into
-the Ruvyxa Bundler pipeline:
+Plugins are ordinary TypeScript modules. `definePlugin` validates the public shape and the `setup`
+function registers hooks against the same middleware and build lifecycle used by the framework:
 
 ```ts
-import type { PluginContext, RuvyxaPlugin, TransformResult } from '@ruvyxa/core'
+import { definePlugin } from '@ruvyxa/core/config'
+import type { RuvyxaPlugin } from '@ruvyxa/core'
 
 export function bannerPlugin(): RuvyxaPlugin {
-  return {
+  return definePlugin({
     name: 'banner',
-    // Set only when this hook is deterministic and has no process-local mutable state.
-    parallel: true,
-    transform(code: string, id: string, ctx: PluginContext): TransformResult | null {
-      if (ctx.environment !== 'client' || !id.endsWith('.tsx')) {
-        return null
-      }
-
-      return {
-        code: `/* client bundle */\n${code}`,
-      }
+    setup({ transform, addMiddleware }) {
+      transform((code, id, ctx) => {
+        if (ctx.environment !== 'client' || !id.endsWith('.tsx')) return null
+        return { code: `/* client bundle */\n${code}` }
+      })
+      addMiddleware({
+        routes: ['/api/*'],
+        onRequest(request: Request, _context: PluginMiddlewareContext) {
+          return request
+        },
+      })
     },
-  }
+  })
 }
 ```
 
-`parallel` is opt-in. Stateful plugins stay on one persistent worker; a bounded isolated worker pool
-is enabled only when every active build plugin opts in. `build.workers` limits the pool (with a
-framework safety cap), so plugin code must not rely on shared module state between calls.
+Request middleware returns `undefined` to continue, a `Request` to replace the request, or a
+`Response` to short-circuit. Response middleware receives cloned Fetch objects and returns a new
+`Response` when it needs to replace the output. Build hooks (`resolveId`, `transform`, and
+`onBuildComplete`) run in registration order in one persistent runtime.
 
 This package is published as ESM with generated TypeScript declarations.

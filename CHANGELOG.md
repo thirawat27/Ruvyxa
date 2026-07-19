@@ -2,6 +2,43 @@
 
 ## v1.0.16 (2026-07-19)
 
+### Plugin System Overhaul
+
+- Replaced the split legacy plugin model with one TypeScript-native `definePlugin({ name, setup })`
+  registry loaded from `ruvyxa.config.ts`.
+- Added the typed setup API for `addMiddleware`, `resolveId`, `transform`, and `onBuildComplete`,
+  with shared plugin state and deterministic registration order across server and build phases.
+- Added Fetch-native request and response middleware using standard `Request` and `Response` values;
+  `undefined` continues, a returned `Request` replaces the request, and a returned `Response`
+  short-circuits or replaces the response.
+- Added route-scoped middleware matching with exact, wildcard, and prefix patterns, plus plugin
+  context metadata containing the plugin name and project root.
+- Added the persistent `runtime/plugin-runtime.mjs` Node/Bun registry process. It validates plugin
+  setup, serializes hook results through NDJSON, redirects diagnostic logging to stderr, and keeps
+  module-level state alive across calls.
+- Added lossless request/response transport for binary bodies, query strings, duplicate headers, and
+  repeated `Set-Cookie` values using ordered header pairs and base64 bodies.
+- Added bounded response buffering through `security.pluginLimit` and Rust-side validation before
+  converting plugin output into Axum responses.
+- Added post-commit build completion execution so plugins can write deployment metadata and other
+  artifacts after the production output is available.
+- Replaced the public Rust bundler plugin trait with the internal `BuildHookPipeline` boundary and
+  aligned resolver, compiler, source-map, and cache integration with the TypeScript host.
+- Added the Rust `PluginHost` middleware bridge with process lifecycle management, descriptor
+  validation, serialized hook errors, stderr forwarding, and graceful child cleanup.
+- Removed Wasmtime, the raw Wasm ABI, Wasm plugin configuration, custom middleware layers, legacy
+  plugin metadata (`enforce`, `parallel`, and hook flags), and the old `plugin-runner.mjs` worker.
+- Removed the `plugin debug` CLI command and changed `plugin new` to scaffold a TypeScript file at
+  `plugins/<name>.ts` using the new setup API.
+- Updated package exports, runtime file manifests, keyword metadata, templates, configuration
+  validation, README files, architecture references, English guides, and Thai guides for the new
+  plugin lifecycle.
+- Added focused coverage for plugin validation, persistent transform state, Fetch middleware, binary
+  response preservation, repeated cookies, build completion, imported-plugin cache invalidation, CLI
+  scaffolding, and Rust host protocol decoding.
+- Removed orphaned Wasmtime dependencies from the workspace lockfile and verified packed npm output
+  includes `runtime/plugin-runtime.mjs` without legacy runtime files.
+
 ### Large-Build and Content Compiler Follow-up
 
 - Split route bundling into reusable prepare/emit stages so cold route-split builds resolve,

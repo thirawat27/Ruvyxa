@@ -18,7 +18,7 @@ import {
 const workspaceRoot = path.resolve(fileURLToPath(new URL('../../..', import.meta.url)))
 const exampleRoot = path.join(workspaceRoot, 'examples/demo')
 const configRenderer = path.join(workspaceRoot, 'packages/ruvyxa/runtime/config-renderer.mjs')
-const pluginRunner = path.join(workspaceRoot, 'packages/ruvyxa/runtime/plugin-runner.mjs')
+const pluginRuntime = path.join(workspaceRoot, 'packages/ruvyxa/runtime/plugin-runtime.mjs')
 
 describe('runtime compiler', () => {
   it('resolves runtime aliases when the runtime path contains spaces', async () => {
@@ -871,26 +871,27 @@ export class contentFormat {}
     })
   })
 
-  it('loads config plugin metadata and executes transform hooks', async () => {
+  it('loads TypeScript plugin metadata and executes registered transform hooks', async () => {
     await withFixture(async ({ root }) => {
       const pageFile = path.join(root, 'page.tsx')
       await writeFile(pageFile, 'export const label = "Original"\n')
       await writeFile(
         path.join(root, 'ruvyxa.config.ts'),
         `
-          import { config } from "ruvyxa/config"
+          import { config, definePlugin } from "ruvyxa/config"
 
           export default config({
             css: { entries: ["styles/global.css"] },
             plugins: [
-              {
+              definePlugin({
                 name: "replace-label",
-                parallel: true,
-                transform(code, id, ctx) {
-                  if (ctx.environment !== "client" || !id.endsWith("page.tsx")) return null
-                  return { code: code.replace("Original", "Transformed") }
+                setup({ transform }) {
+                  transform((code, id, ctx) => {
+                    if (ctx.environment !== "client" || !id.endsWith("page.tsx")) return null
+                    return { code: code.replace("Original", "Transformed") }
+                  })
                 },
-              },
+              }),
             ],
           })
         `,
@@ -900,10 +901,8 @@ export class contentFormat {}
       assert.equal(config.ok, true)
       assert.deepEqual(config.config.css.entries, ['styles/global.css'])
       assert.equal(config.config.plugins[0].name, 'replace-label')
-      assert.equal(config.config.plugins[0].transform, true)
-      assert.equal(config.config.plugins[0].parallel, true)
 
-      const transformed = await runJson(pluginRunner, [root, 'transform'], {
+      const transformed = await runJson(pluginRuntime, [root, 'transform'], {
         code: await readFile(pageFile, 'utf8'),
         id: pageFile,
         environment: 'client',
@@ -911,6 +910,90 @@ export class contentFormat {}
 
       assert.equal(transformed.ok, true)
       assert.match(transformed.result.code, /Transformed/)
+    })
+  })
+
+  it('runs Fetch-native middleware and build-complete hooks from one plugin registry', async () => {
+    await withFixture(async ({ root }) => {
+      await writeFile(
+        path.join(root, 'ruvyxa.config.ts'),
+        `
+          import { writeFile } from "node:fs/promises"
+          import { definePlugin } from "ruvyxa/config"
+
+          export default {
+            plugins: [definePlugin({
+              name: "native-hooks",
+              setup({ addMiddleware, onBuildComplete }) {
+                addMiddleware({
+                  routes: ["/api/*"],
+                  onRequest(request, { plugin }) {
+                    const headers = new Headers(request.headers)
+                    headers.set("x-plugin", plugin)
+                    return new Request(request, { headers })
+                  },
+                  onResponse(_request, response) {
+                    const headers = new Headers(response.headers)
+                    headers.set("x-after", "yes")
+                    return new Response(response.body, { status: response.status, headers })
+                  },
+                })
+                onBuildComplete(({ outDir, manifest }) =>
+                  writeFile(outDir + "/plugin-complete.json", JSON.stringify(manifest))
+                )
+              },
+            })],
+          }
+        `,
+      )
+
+      const described = await runJson(pluginRuntime, [root, 'describe'], {})
+      assert.deepEqual(described.result, {
+        plugins: ['native-hooks'],
+        middleware: { request: 1, response: 1 },
+        resolveId: 0,
+        transform: 0,
+        buildComplete: 1,
+      })
+
+      const request = await runJson(pluginRuntime, [root, 'middlewareRequest'], {
+        request: { method: 'GET', path: '/api/users?active=1', headers: [] },
+      })
+      assert.equal(request.result.kind, 'request')
+      assert.deepEqual(request.result.request.headers, [['x-plugin', 'native-hooks']])
+      assert.equal(request.result.request.path, '/api/users?active=1')
+
+      const response = await runJson(pluginRuntime, [root, 'middlewareResponse'], {
+        request: request.result.request,
+        response: {
+          status: 200,
+          headers: [
+            ['content-type', 'application/octet-stream'],
+            ['set-cookie', 'a=1; Path=/'],
+            ['set-cookie', 'b=2; Path=/'],
+          ],
+          bodyBase64: Buffer.from([0, 255, 1]).toString('base64'),
+        },
+      })
+      assert.equal(response.result.response.bodyBase64, Buffer.from([0, 255, 1]).toString('base64'))
+      assert.equal(response.result.response.headers.find(([name]) => name === 'x-after')[1], 'yes')
+      assert.deepEqual(
+        response.result.response.headers.filter(([name]) => name === 'set-cookie'),
+        [
+          ['set-cookie', 'a=1; Path=/'],
+          ['set-cookie', 'b=2; Path=/'],
+        ],
+      )
+
+      const outDir = path.join(root, 'dist')
+      await mkdir(outDir)
+      const manifest = { routes: [{ path: '/' }] }
+      const complete = await runJson(pluginRuntime, [root, 'buildComplete'], { outDir, manifest })
+      assert.equal(complete.ok, true)
+      assert.deepEqual(
+        JSON.parse(await readFile(path.join(outDir, 'plugin-complete.json'), 'utf8')),
+        manifest,
+      )
     })
   })
 
@@ -926,13 +1009,13 @@ export class contentFormat {}
       )
       await writeFile(
         pluginFile,
-        `export const plugin = { name: "label", transform(code) { return code + "\\n// one" } }\n`,
+        `export const plugin = { name: "label", setup({ transform }) { transform(code => code + "\\n// one") } }\n`,
       )
 
       const first = await runJson(configRenderer, [root], {})
       await writeFile(
         pluginFile,
-        `export const plugin = { name: "label", transform(code) { return code + "\\n// two" } }\n`,
+        `export const plugin = { name: "label", setup({ transform }) { transform(code => code + "\\n// two") } }\n`,
       )
       const second = await runJson(configRenderer, [root], {})
 

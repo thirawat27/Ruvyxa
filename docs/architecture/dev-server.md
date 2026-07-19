@@ -55,7 +55,7 @@ struct AppState {
     render_cache: Arc<RenderCache>,
     isr_revalidating: Arc<tokio::sync::Mutex<HashSet<String>>>,
     hmr_tracker: Arc<HmrTracker>,
-    plugin_runtime: Option<Arc<WasmPluginRuntime>>,
+    plugin_runtime: Option<Arc<PluginHost>>,
 }
 
 struct RuntimeCache {
@@ -142,8 +142,8 @@ hmr_tracker.populate_from_manifest(&manifest.routes);
 let middleware_stack = MiddlewareStack::new(config.middleware.clone());
 middleware_stack.validate()?;
 
-let plugin_runtime = if !config.middleware.plugins.is_empty() {
-    Some(Arc::new(WasmPluginRuntime::new(&config.root, &config.middleware.plugins)?))
+let plugin_runtime = if !config.plugins.is_empty() {
+    Some(Arc::new(PluginHost::start(&config.root, runtime_script, runtime_executable)?))
 } else {
     None
 };
@@ -223,15 +223,13 @@ if request.method() != Method::GET && request.method() != Method::HEAD {
 }
 ```
 
-### 3. Request-phase Wasm plugins
+### 3. Request middleware
 
 ```rust
-if let Some(runtime) = &state.plugin_runtime {
-    if let Some(result) = runtime.execute_request_plugins(&req_parts).await {
-        if result.action == "respond" {
-            return result.response.into();  // Short-circuit
-        }
-        // Apply modifications to request parts
+if let Some(host) = &state.plugin_runtime {
+    match host.execute_request(plugin_request).await? {
+        MiddlewareRequestResult::Response(response) => return response.into_response(),
+        MiddlewareRequestResult::Request(replacement) => apply_request(replacement),
     }
 }
 ```
@@ -294,13 +292,12 @@ Algorithm (all tag searches case-insensitive):
 **Client hydration**: Injects `__RUVYXA_ROUTE_PARAMS__`, `__RUVYXA_REQUEST_PATH__`, preload hints,
 `<script type="module" src="/__ruvyxa/client?path=...">`.
 
-### 6. Response-phase plugins
+### 6. Response middleware
 
 ```rust
-if let Some(runtime) = &state.plugin_runtime {
-    if let Some(result) = runtime.execute_response_plugins(&req, &resp).await {
-        if result.action == "respond" { return result.response.into(); }
-        // Apply modifications
+if let Some(host) = &state.plugin_runtime {
+    if let Some(replacement) = host.execute_response(plugin_request, plugin_response).await? {
+        return replacement.into_response();
     }
 }
 ```

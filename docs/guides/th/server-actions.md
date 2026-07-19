@@ -120,9 +120,9 @@ export default config({
 
 Proxy ต้องเขียนทับ forwarded headers ที่ผู้ใช้ส่งมา ไม่ใช่ส่งผ่านต่อโดยตรง
 
-## Response-Phase Wasm Plugin Limits
+## Response Middleware Limits
 
-Wasm plugin ที่ทำงานใน response phase ต้อง buffer response ทั้งหมด:
+Plugin response middleware ต้อง buffer response ทั้งหมด:
 
 | Config        | Default | Max     |
 | ------------- | ------- | ------- |

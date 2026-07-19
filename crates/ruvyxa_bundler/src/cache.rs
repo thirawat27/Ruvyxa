@@ -36,7 +36,7 @@ const MEMORY_CACHE_LIMIT: usize = 512;
 const COMPILER_VERSION: &str = concat!(
     "ruvyxa_bundler:",
     env!("CARGO_PKG_VERSION"),
-    ":ast-plugin-pipeline"
+    ":ast-build-hooks"
 );
 
 /// Atomic counter for unique temp file names.
@@ -60,7 +60,7 @@ pub struct CompileCache {
     cache_dir: PathBuf,
     /// Whether caching is enabled.
     enabled: bool,
-    /// Build-input namespace used to invalidate artifacts when config or plugin
+    /// Build-input namespace used to invalidate artifacts when config or build-hook
     /// dependencies change without changing a source module.
     namespace: String,
     /// Process-local hot cache shared by cloned cache handles.

@@ -1,7 +1,7 @@
 //! # Ruvyxa Middleware
 //!
 //! A composable middleware system built on Tower's `Service` and `Layer` traits,
-//! with an optional WebAssembly plugin runtime powered by Wasmtime.
+//! with TypeScript plugin middleware executed by Ruvyxa's selected JavaScript runtime.
 //!
 //! ## Architecture
 //!
@@ -9,30 +9,24 @@
 //!   custom headers — all configurable via `ruvyxa.config.ts`.
 //! - **Tower Layer stack**: Middleware is applied as standard Tower layers, composable
 //!   with any axum/tower ecosystem middleware.
-//! - **Wasm Plugin Runtime** (feature `wasm-plugins`): Load `.wasm` modules as
-//!   sandboxed plugins that can intercept requests/responses. Provides maximum
-//!   security isolation: filesystem and network permissions are rejected until
-//!   the runtime supports them, while environment access is explicit.
+//! - **TypeScript plugin host**: The native server validates and applies request/response
+//!   results from the unified Node/Bun plugin registry.
 //!
 //! ## Diagnostic Codes
 //!
 //! - `RUV2000`: Middleware configuration error
 //! - `RUV2001`: Middleware execution failed
-//! - `RUV2100`: Wasm plugin load error
-//! - `RUV2101`: Wasm plugin execution error
+//! - `RUV1700`: TypeScript plugin execution failed
+//! - `RUV1701`: TypeScript plugin protocol error
 
 pub mod builtin;
 pub mod config;
+pub mod plugin_host;
 pub mod stack;
 
-#[cfg(feature = "wasm-plugins")]
-pub mod wasm;
-
 pub use config::MiddlewareConfig;
-pub use stack::MiddlewareStack;
-
-#[cfg(feature = "wasm-plugins")]
-pub use wasm::{
-    PluginModuleInfo, PluginRequest, PluginResponse, PluginResult, WasmPluginRuntime,
-    inspect_wasm_plugin,
+pub use plugin_host::{
+    MiddlewareRequestResult, PluginHost, PluginHttpRequest, PluginHttpResponse,
+    PluginRegistryDescriptor,
 };
+pub use stack::MiddlewareStack;

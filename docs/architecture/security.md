@@ -288,25 +288,12 @@ let wasi = WasiCtxBuilder::new()
 store.data_mut().wasi = wasi;
 ```
 
-### Plugin path validation
+### Plugin boundary
 
-```rust
-fn validate_plugin_path(project_root: &Path, plugin_path: &Path) -> Result<PathBuf> {
-    // Must be relative
-    if plugin_path.is_absolute() { bail!("absolute path not allowed"); }
-    // No parent traversal
-    if plugin_path.components().any(|c| c == Component::ParentDir) {
-        bail!("'..' not allowed in plugin path");
-    }
-    // Must be .wasm extension
-    if plugin_path.extension() != Some("wasm") {
-        bail!("plugin must be .wasm file");
-    }
-    // Resolve inside project root
-    let full = project_root.join(plugin_path);
-    full.canonicalize().ok()
-}
-```
+Plugins are loaded by the project config compiler in the Node/Bun process. Rust never evaluates
+plugin source; it receives only validated descriptors and hook results over the persistent NDJSON
+bridge. Request and response bodies are bounded by the configured API and `security.pluginLimit`
+limits, and private environment values remain server-side.
 
 ---
 

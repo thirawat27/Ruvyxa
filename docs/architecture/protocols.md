@@ -335,136 +335,44 @@ Browser: receives message, dispatches to appropriate handler
 
 ---
 
-## 3. Plugin Wasm ABI
+## ## 3. Plugin Protocol
 
-### Transport
+Plugins communicate with Rust through the persistent `runtime/plugin-runtime.mjs` process using
+newline-delimited JSON (NDJSON). The same registry serves build hooks and HTTP middleware.
 
-- **Medium**: Wasmtime function call (in-process, sandboxed)
-- **Direction**: Host → Plugin (call), Plugin → Host (return pointer)
-- **Memory**: Plugin exports `memory: Memory`, host reads/writes via
-  `memory.read()`/`memory.write()`
-
-### Exports required
-
-| Export        | Type     | Signature                                               |
-| ------------- | -------- | ------------------------------------------------------- |
-| `memory`      | `Memory` | —                                                       |
-| `on_request`  | `Func`   | `fn(input_ptr: i32, input_len: i32) -> result_ptr: i32` |
-| `on_response` | `Func`   | `fn(input_ptr: i32, input_len: i32) -> result_ptr: i32` |
-
-### Call protocol
-
-1. Host serializes input as UTF-8 JSON.
-2. Host writes serialized bytes into plugin `memory` at offset 0:
-   `memory.write(store, 0, input_bytes)`.
-3. Host calls exported function:
-   `func.call(store, &[Val::I32(0), Val::I32(input_bytes.len())], &mut [Val::I32(0)])`.
-4. Function returns `result_ptr: i32` (offset in memory where result is written).
-5. Host reads from `result_ptr` as NUL-terminated UTF-8 bytes: read 4KB chunks up to 1MB, stop at
-   NUL or 1MB boundary.
-6. Host parses result as JSON → `PluginResult`.
-
-### Input JSON (to plugin)
-
-**on_request**:
+### Build hooks
 
 ```json
-{
-  "request": {
-    "method": "GET",
-    "path": "/about",
-    "headers": [
-      ["accept", "text/html"],
-      ["x-custom", "value"]
-    ],
-    "body": null
-  },
-  "config": {
-    "plugin_specific": "configuration"
-  }
-}
+{ "hook": "transform", "code": "...", "id": "/app/page.tsx", "environment": "client" }
 ```
 
-**on_response**:
+The runtime returns `{ "ok": true, "result": { "code": "...", "map": "..." } }`, or a structured
+error containing a Ruvyxa diagnostic code, message, and stack.
+
+### HTTP middleware
+
+Request calls use ordered header pairs and optional base64 bodies:
 
 ```json
 {
-  "request": {
-    "method": "GET",
-    "path": "/about",
-    "headers": [["accept", "text/html"]],
-    "body": null
-  },
-  "response": {
-    "status": 200,
-    "headers": [["content-type", "text/html"]],
-    "body": [60,33,68,79,...]
-  },
-  "config": {}
-}
-```
-
-- `request.body` / `response.body`: JSON array of bytes (`Option<Vec<u8>>` → `null` or
-  `[0, 1, 2, ...]`)
-
-### Result JSON (from plugin)
-
-```json
-{
-  "action": "continue",
-  "request": null,
-  "response": null
-}
-```
-
-| Action              | Meaning                             | request field | response field |
-| ------------------- | ----------------------------------- | ------------- | -------------- |
-| `"continue"`        | Pass through unchanged              | ignored       | ignored        |
-| `"respond"`         | Short-circuit, return this response | ignored       | **required**   |
-| `"modify-request"`  | Update request before processing    | **required**  | ignored        |
-| `"modify-response"` | Update response before sending      | ignored       | **required**   |
-
-#### respond example
-
-```json
-{
-  "action": "respond",
-  "response": {
-    "status": 301,
-    "headers": [["location", "/new-url"]],
-    "body": []
-  }
-}
-```
-
-#### modify-request example
-
-```json
-{
-  "action": "modify-request",
+  "hook": "middlewareRequest",
   "request": {
     "method": "POST",
-    "path": "/api/transform",
-    "headers": [["x-added", "from-plugin"]],
-    "body": [104, 101, 108, 108, 111]
+    "path": "/api/items?draft=1",
+    "headers": [["content-type", "application/octet-stream"]],
+    "bodyBase64": "AAE="
   }
 }
 ```
 
-### Sandbox limits
+A request hook returns either a replacement request or a response short-circuit. Response hooks
+receive the request and current response and return a replacement response. Rust validates methods,
+paths, headers, status codes, and body limits before converting values to Axum types.
 
-| Limit            | Default                             | Enforced by                                        |
-| ---------------- | ----------------------------------- | -------------------------------------------------- |
-| Memory           | 64 MB                               | `StoreLimitsBuilder::memory_size()`                |
-| CPU time         | `timeout_ms * 1,000,000` fuel units | `Engine::consume_fuel(true)` + `Store::set_fuel()` |
-| Result size      | 1 MB                                | `read_nul_terminated_result()` hard cap            |
-| File system      | None                                | Permissions rejected at validation                 |
-| Network          | None                                | Permissions rejected at validation                 |
-| Environment vars | Only configured list                | `WasiCtxBuilder::env()` whitelist                  |
+### Lifecycle
 
-### Error results
-
-If plugin traps, fuel exhausts, returns invalid pointer, or produces invalid JSON:
-
-- Returns `RUV2101` diagnostic
-- Plugin not reloaded (needs manual fix + rebuild)
+1. The CLI or dev server starts the runtime and sends `describe`.
+2. The runtime loads `ruvyxa.config.ts`, validates plugin names, and executes each `setup` once.
+3. Rust sends serialized hook calls over the persistent process.
+4. The runtime returns one JSON response per input line; diagnostics go to stderr.
+5. The process is terminated with the owning build or server lifecycle.

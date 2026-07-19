@@ -1,21 +1,21 @@
 //! Shared bundler execution context.
 
 use crate::cache::CompileCache;
+use crate::hooks::BuildHookPipeline;
 use crate::incremental::IncrementalGraphCache;
-use crate::plugin::PluginPipeline;
 use crate::resolver::ResolveGraphCache;
 
 /// Shared state for a batch of bundle jobs.
 ///
 /// Production builds should keep one context for the whole route batch so
 /// parallel workers reuse compiled transforms, resolved specifiers, source
-/// reads, incremental state, and Ruvyxa Bundler plugin hooks.
+/// reads, incremental state, and TypeScript build hooks.
 #[derive(Debug, Clone)]
 pub struct BundleContext {
     compile_cache: CompileCache,
     graph_cache: ResolveGraphCache,
     incremental: IncrementalGraphCache,
-    plugins: PluginPipeline,
+    build_hooks: BuildHookPipeline,
 }
 
 impl BundleContext {
@@ -26,7 +26,7 @@ impl BundleContext {
             compile_cache: CompileCache::new(root, true),
             graph_cache: ResolveGraphCache::new(),
             incremental: IncrementalGraphCache::new(root, true),
-            plugins: PluginPipeline::empty(),
+            build_hooks: BuildHookPipeline::empty(),
         }
     }
 
@@ -36,7 +36,7 @@ impl BundleContext {
             compile_cache,
             graph_cache,
             incremental: IncrementalGraphCache::disabled(),
-            plugins: PluginPipeline::empty(),
+            build_hooks: BuildHookPipeline::empty(),
         }
     }
 
@@ -50,22 +50,22 @@ impl BundleContext {
             compile_cache,
             graph_cache,
             incremental,
-            plugins: PluginPipeline::empty(),
+            build_hooks: BuildHookPipeline::empty(),
         }
     }
 
-    /// Create a context with explicit caches and a Ruvyxa Bundler plugin pipeline.
-    pub fn with_plugins(
+    /// Create a context with explicit caches and a TypeScript build-hook host.
+    pub fn with_build_hooks(
         compile_cache: CompileCache,
         graph_cache: ResolveGraphCache,
         incremental: IncrementalGraphCache,
-        plugins: PluginPipeline,
+        build_hooks: BuildHookPipeline,
     ) -> Self {
         Self {
             compile_cache,
             graph_cache,
             incremental,
-            plugins,
+            build_hooks,
         }
     }
 
@@ -81,8 +81,8 @@ impl BundleContext {
         &self.incremental
     }
 
-    pub fn plugins(&self) -> &PluginPipeline {
-        &self.plugins
+    pub fn build_hooks(&self) -> &BuildHookPipeline {
+        &self.build_hooks
     }
 
     pub fn incremental_mut(&mut self) -> &mut IncrementalGraphCache {

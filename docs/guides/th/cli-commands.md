@@ -1,22 +1,21 @@
 # CLI Commands
 
-| คำสั่ง                           | หน้าที่                                                 |
-| -------------------------------- | ------------------------------------------------------- |
-| `npx ruvyxa dev`                 | Dev server + HMR + file watching                        |
-| `npx ruvyxa build`               | Production build → `.ruvyxa/`                           |
-| `npx ruvyxa check`               | Typecheck + build + parity + smoke render               |
-| `npx ruvyxa start`               | Serve production build                                  |
-| `npx ruvyxa preview`             | Preview production build (alias `start`)                |
-| `npx ruvyxa routes`              | พิมพ์ตาราง routes + rendering strategy                  |
-| `npx ruvyxa analyze`             | ตรวจสอบ routes, imports, server/client boundaries       |
-| `npx ruvyxa doctor`              | ตรวจสอบ project setup, tools, dependencies, environment |
-| `npx ruvyxa trace /blog/[slug]`  | ดูรายละเอียด manifest ของหนึ่ง route                    |
-| `npx ruvyxa bench`               | Benchmark route discovery, analysis + production build  |
-| `npx ruvyxa test:parity`         | เปรียบเทียบ dev/prod routes + smoke-render page routes  |
-| `npx ruvyxa parity`              | Alias `test:parity`                                     |
-| `npx ruvyxa clean`               | ลบ `.ruvyxa/` build output                              |
-| `npx ruvyxa plugin new <name>`   | สร้าง Wasm middleware plugin starter                    |
-| `npx ruvyxa plugin debug <wasm>` | ตรวจและดู ABI ของ Wasm plugin ที่ build แล้ว            |
+| คำสั่ง                          | หน้าที่                                                 |
+| ------------------------------- | ------------------------------------------------------- |
+| `npx ruvyxa dev`                | Dev server + HMR + file watching                        |
+| `npx ruvyxa build`              | Production build → `.ruvyxa/`                           |
+| `npx ruvyxa check`              | Typecheck + build + parity + smoke render               |
+| `npx ruvyxa start`              | Serve production build                                  |
+| `npx ruvyxa preview`            | Preview production build (alias `start`)                |
+| `npx ruvyxa routes`             | พิมพ์ตาราง routes + rendering strategy                  |
+| `npx ruvyxa analyze`            | ตรวจสอบ routes, imports, server/client boundaries       |
+| `npx ruvyxa doctor`             | ตรวจสอบ project setup, tools, dependencies, environment |
+| `npx ruvyxa trace /blog/[slug]` | ดูรายละเอียด manifest ของหนึ่ง route                    |
+| `npx ruvyxa bench`              | Benchmark route discovery, analysis + production build  |
+| `npx ruvyxa test:parity`        | เปรียบเทียบ dev/prod routes + smoke-render page routes  |
+| `npx ruvyxa parity`             | Alias `test:parity`                                     |
+| `npx ruvyxa clean`              | ลบ `.ruvyxa/` build output                              |
+| `npx ruvyxa plugin new <name>`  | สร้าง plugin starter                                    |
 
 ## คำอธิบายแต่ละคำสั่ง
 
@@ -107,8 +106,8 @@ npx ruvyxa plugin debug request-logger
 ```
 
 `plugin new` สร้าง Rust `cdylib` starter ใน `<name>/` ที่ตำแหน่งปัจจุบัน; `plugin debug` ตรวจ raw
-ABI ด้วย Wasmtime engine เดียวกับ production และรายงาน memory, hook และ allocator ดู workflow
-เต็มได้ที่ [Wasm Middleware Plugins](wasm-plugins.md)
+สร้างไฟล์ TypeScript ใน `plugins/` ให้นำเข้าใน `ruvyxa.config.ts` แล้วลงทะเบียนด้วย `definePlugin`
+ดู workflow เต็มได้ที่ [Plugins](plugins.md)
 
 ## Options
 

@@ -57,8 +57,6 @@ impl MiddlewareStack {
     /// 4. Timing (X-Response-Time header)
     /// 5. Request Logging
     /// 6. Custom Headers
-    /// 7. Custom layers (validated and applied if supported)
-    /// 8. Wasm Plugin layers (if any, via the wasm runtime)
     pub fn apply<S: Clone + Send + Sync + 'static>(&self, router: Router<S>) -> Router<S> {
         let mut app = router;
 
@@ -66,25 +64,6 @@ impl MiddlewareStack {
         // in dev mode but should be addressed.
         if let Err(reason) = self.validate() {
             warn!(%reason, "middleware configuration issue detected");
-        }
-
-        // Warn about plugins that need the wasm runtime
-        if !self.config.plugins.is_empty() {
-            #[cfg(not(feature = "wasm-plugins"))]
-            {
-                warn!(
-                    plugins = self.config.plugins.len(),
-                    "wasm plugins configured but the 'wasm-plugins' feature is not enabled; \
-                     plugins will not be applied"
-                );
-            }
-            #[cfg(feature = "wasm-plugins")]
-            {
-                info!(
-                    plugins = self.config.plugins.len(),
-                    "wasm plugins configured — they will be applied by the plugin runtime"
-                );
-            }
         }
 
         // Apply custom headers if any
@@ -135,8 +114,6 @@ impl MiddlewareStack {
 
         info!(
             builtin_layers = self.count_builtin_layers(),
-            custom_layers = self.config.layers.len(),
-            plugins = self.config.plugins.len(),
             "middleware stack applied"
         );
 
@@ -145,20 +122,8 @@ impl MiddlewareStack {
 
     /// Validate the middleware configuration before applying it.
     ///
-    /// Returns an error if unsupported features are configured that would create
-    /// a false sense of security (e.g. plugins configured without the wasm feature,
-    /// or custom layers that are not recognized).
+    /// Returns an error when builtin middleware values are invalid.
     pub fn validate(&self) -> std::result::Result<(), String> {
-        // Reject custom layers — none are currently supported
-        if !self.config.layers.is_empty() {
-            let kinds: Vec<&str> = self.config.layers.iter().map(|l| l.kind.as_str()).collect();
-            return Err(format!(
-                "Custom middleware layers are not yet supported. \
-                 Remove or comment out these layers from your config: {:?}",
-                kinds,
-            ));
-        }
-
         for (name, value) in &self.config.builtin.headers {
             if axum::http::HeaderName::from_bytes(name.as_bytes()).is_err()
                 || axum::http::HeaderValue::from_str(value).is_err()
@@ -213,46 +178,7 @@ impl MiddlewareStack {
             }
         }
 
-        // Reject plugins when wasm feature is disabled
-        #[cfg(not(feature = "wasm-plugins"))]
-        if !self.config.plugins.is_empty() {
-            return Err(format!(
-                "{} wasm plugin(s) configured but the 'wasm-plugins' feature is not enabled. \
-                 Either enable the feature or remove plugin config to avoid false security.",
-                self.config.plugins.len(),
-            ));
-        }
-
-        // Validate plugin permissions are within supported bounds
-        #[cfg(feature = "wasm-plugins")]
-        for plugin in &self.config.plugins {
-            if plugin.permissions.timeout_ms == 0 {
-                return Err(format!(
-                    "Plugin '{}' has timeout_ms set to 0, which would block indefinitely. \
-                     Set a positive timeout value.",
-                    plugin.name,
-                ));
-            }
-            if plugin.permissions.max_memory_bytes == 0 {
-                return Err(format!(
-                    "Plugin '{}' has max memory set to 0. Set a positive memory limit.",
-                    plugin.name,
-                ));
-            }
-            if !plugin.permissions.fs_read.is_empty() || !plugin.permissions.net.is_empty() {
-                return Err(format!(
-                    "Plugin '{}' requests filesystem or network permissions, which this runtime does not expose yet.",
-                    plugin.name
-                ));
-            }
-        }
-
         Ok(())
-    }
-
-    /// Access the plugin configs for initializing the wasm runtime externally.
-    pub fn plugin_configs(&self) -> &[crate::config::PluginConfig] {
-        &self.config.plugins
     }
 
     fn count_builtin_layers(&self) -> usize {
@@ -279,7 +205,7 @@ impl MiddlewareStack {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::{LayerConfig, RateLimitConfig};
+    use crate::config::RateLimitConfig;
     use axum::{
         body::{Body, Bytes, to_bytes},
         http::{Request, Response, header},
@@ -311,17 +237,6 @@ mod tests {
 
     async fn buffered_response() -> &'static str {
         "buffered response that is deliberately larger than thirty-two bytes"
-    }
-
-    #[test]
-    fn rejects_unsupported_custom_layers_before_server_startup() {
-        let mut config = MiddlewareConfig::default();
-        config.layers.push(LayerConfig {
-            kind: "auth".to_string(),
-            options: serde_json::Value::Null,
-        });
-
-        assert!(MiddlewareStack::new(config).validate().is_err());
     }
 
     #[test]

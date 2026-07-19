@@ -45,7 +45,7 @@ use rayon::prelude::*;
 use serde::de::{MapAccess, SeqAccess, Visitor};
 use serde::{Deserialize, Deserializer};
 
-use crate::plugin::{PluginContext, PluginPipeline};
+use crate::hooks::{BuildHookContext, BuildHookPipeline};
 use crate::{BundleError, BundleTarget, Result};
 use crate::{ast, minifier};
 
@@ -116,7 +116,7 @@ pub struct ResolveGraphCache {
     sources: Arc<DashMap<PathBuf, CachedSource>>,
     /// Parsed tsconfig/jsconfig cache, keyed by canonical project root.
     tsconfigs: Arc<DashMap<PathBuf, CachedTsConfig>>,
-    /// Fully resolved dependency lists for plugin-free source snapshots.
+    /// Fully resolved dependency lists for build-hook-free source snapshots.
     dependencies: Arc<DashMap<DependencyCacheKey, Arc<[PathBuf]>>>,
     /// Production builds operate on one immutable input snapshot and can skip
     /// repeated metadata checks after the first source read.
@@ -810,25 +810,25 @@ pub fn resolve_graph_with_cache(
     app_dir: &Path,
     cache: &ResolveGraphCache,
 ) -> Result<Vec<ResolvedModule>> {
-    resolve_graph_with_plugins(
+    resolve_graph_with_hooks(
         entry_source,
         entry_label,
         project_root,
         app_dir,
         cache,
-        &PluginPipeline::empty(),
+        &BuildHookPipeline::empty(),
         BundleTarget::Client,
     )
 }
 
-/// Walk the import graph using a shared resolver/source cache and plugin hooks.
-pub fn resolve_graph_with_plugins(
+/// Walk the import graph using a shared resolver/source cache and TypeScript build hooks.
+pub fn resolve_graph_with_hooks(
     entry_source: &str,
     entry_label: &str,
     project_root: &Path,
     _app_dir: &Path,
     cache: &ResolveGraphCache,
-    plugins: &PluginPipeline,
+    build_hooks: &BuildHookPipeline,
     target: BundleTarget,
 ) -> Result<Vec<ResolvedModule>> {
     let project_root = project_root
@@ -852,7 +852,7 @@ pub fn resolve_graph_with_plugins(
         &project_root,
         &tsconfig,
         cache,
-        plugins,
+        build_hooks,
         target,
     )?;
 
@@ -916,7 +916,7 @@ pub fn resolve_graph_with_plugins(
                         &project_root,
                         &tsconfig,
                         cache,
-                        plugins,
+                        build_hooks,
                         target,
                     )?
                 };
@@ -968,10 +968,10 @@ fn collect_deps_cached(
     project_root: &Path,
     tsconfig: &TsConfigPaths,
     cache: &ResolveGraphCache,
-    plugins: &PluginPipeline,
+    build_hooks: &BuildHookPipeline,
     target: BundleTarget,
 ) -> Result<Vec<PathBuf>> {
-    if plugins.plugin_count() == 0 {
+    if build_hooks.host_count() == 0 {
         let key = DependencyCacheKey {
             base_dir: Arc::from(base_dir.to_string_lossy().as_ref()),
             source_hash: *blake3::hash(source.as_bytes()).as_bytes(),
@@ -989,7 +989,7 @@ fn collect_deps_cached(
             project_root,
             tsconfig,
             cache,
-            plugins,
+            build_hooks,
             target,
         )?;
         cache
@@ -1004,7 +1004,7 @@ fn collect_deps_cached(
         project_root,
         tsconfig,
         cache,
-        plugins,
+        build_hooks,
         target,
     )
 }
@@ -1016,7 +1016,7 @@ fn collect_deps_uncached(
     project_root: &Path,
     tsconfig: &TsConfigPaths,
     cache: &ResolveGraphCache,
-    plugins: &PluginPipeline,
+    build_hooks: &BuildHookPipeline,
     target: BundleTarget,
 ) -> Result<Vec<PathBuf>> {
     let specifiers = extract_specifiers(source);
@@ -1028,14 +1028,14 @@ fn collect_deps_uncached(
             continue;
         }
 
-        let plugin_ctx = PluginContext {
+        let hook_context = BuildHookContext {
             project_root: project_root.to_path_buf(),
             importer: Some(base_dir.to_path_buf()),
             target,
         };
-        let plugin_resolved = plugins.resolve_id(&specifier, Some(base_dir), &plugin_ctx)?;
+        let hook_resolved = build_hooks.resolve_id(&specifier, Some(base_dir), &hook_context)?;
 
-        let resolved = if let Some(path) = plugin_resolved {
+        let resolved = if let Some(path) = hook_resolved {
             Some(path)
         } else if specifier.starts_with('.') {
             // Relative import: check resolution cache first (lock-free DashMap read).
@@ -1308,7 +1308,7 @@ mod tests {
             &root,
             &tsconfig,
             &ResolveGraphCache::new(),
-            &PluginPipeline::empty(),
+            &BuildHookPipeline::empty(),
             BundleTarget::Client,
         )
         .unwrap();
@@ -1331,7 +1331,7 @@ mod tests {
             temp.path(),
             &tsconfig,
             &ResolveGraphCache::new(),
-            &PluginPipeline::empty(),
+            &BuildHookPipeline::empty(),
             BundleTarget::Client,
         )
         .unwrap();

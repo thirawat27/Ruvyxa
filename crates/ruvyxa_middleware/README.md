@@ -1,55 +1,16 @@
 # ruvyxa_middleware
 
-Tower-based middleware system and Wasmtime WASI plugin runtime for the Ruvyxa framework.
+Ruvyxa's Tower-based middleware stack and plugin bridge.
 
-## Overview
+Built-in middleware remains native Rust and can be configured through
+`config.middleware.builtin`. Plugins are application code loaded from
+`ruvyxa.config.ts`; their `setup` function registers request/response middleware
+and build hooks. The Rust server forwards validated Fetch-style request and
+response payloads to the persistent Node/Bun runtime.
 
-This crate provides:
+The bridge is deliberately small: callbacks stay in JavaScript, while Rust
+owns routing, limits, ordering, process lifetime, and conversion to Axum
+responses. Response middleware is bounded by `security.pluginLimit`.
 
-- **Built-in middleware** — composable Tower layers for CORS, rate-limiting, request timing, logging, and custom response headers.
-- **Middleware stack builder** — compiles `MiddlewareConfig` into axum-compatible layer stacks.
-- **Wasm plugin runtime** — sandboxed WebAssembly request/response plugin execution via Wasmtime.
-
-## Built-in Middleware
-
-| Middleware | Description |
-|---|---|
-| `TimingLayer` | Adds `X-Response-Time` header to all responses |
-| `RequestLoggingLayer` | Structured logging: method, path, status, duration |
-| `CorsLayer` | Configurable CORS with preflight handling |
-| `CustomHeadersLayer` | Arbitrary response headers from config |
-
-Gzip and Brotli compression is handled by tower-http at the server layer, not by this crate.
-All layers implement `tower::Layer` and can be composed with any axum/tower middleware.
-
-## Wasm Plugin Security Model
-
-Each plugin runs in an isolated Wasmtime `Store`:
-
-- **Fuel-based execution limits** — prevents infinite loops
-- **Memory bounds** — configurable max memory (default 64MB)
-- **No filesystem or network access** — non-empty `allow.read` and `allow.net` values are rejected
-  until the runtime supports those capabilities
-- **No environment access** unless explicitly granted via `allow.env`
-
-## Plugin Phases
-
-- `request` — intercepts before the route handler; can short-circuit with a direct response
-- `response` — intercepts after the route handler; can modify the response
-
-## Diagnostic Codes
-
-| Code | Meaning |
-|------|---------|
-| `RUV2000` | Middleware configuration error |
-| `RUV2001` | Middleware execution failed |
-| `RUV2100` | Wasm plugin load error |
-| `RUV2101` | Wasm plugin execution error |
-
-## Feature Flags
-
-- `wasm-plugins` (default) — enables `wasmtime` and `wasmtime-wasi` dependencies for the Wasm plugin runtime. Disable to reduce binary size if you only need built-in middleware.
-
-## License
-
-Apache 2.0
+Plugin failures are reported as normal Ruvyxa diagnostics. There is no separate
+feature flag or custom middleware-layer ABI.

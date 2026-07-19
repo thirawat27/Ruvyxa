@@ -2,24 +2,23 @@
 
 ## Quick Reference
 
-| Command                          | Purpose                                                            |
-| -------------------------------- | ------------------------------------------------------------------ |
-| `npm run dev`                    | Development server with hot reload and route watching              |
-| `npm run build`                  | Build the application for production output                        |
-| `npm run start`                  | Serve an existing production build                                 |
-| `npm run typecheck`              | Run `tsc --noEmit`                                                 |
-| `npm run check`                  | Run app-level production readiness checks                          |
-| `npx ruvyxa preview`             | Preview an existing production build locally                       |
-| `npx ruvyxa routes`              | Print routes and their discovered render strategy                  |
-| `npx ruvyxa analyze`             | Validate routes, imports, and server/client boundaries             |
-| `npx ruvyxa doctor`              | Inspect project setup, tools, dependencies, and diagnostics        |
-| `npx ruvyxa trace /blog/[slug]`  | Inspect one route manifest entry                                   |
-| `npx ruvyxa bench`               | Benchmark route discovery, analysis, and production build          |
-| `npx ruvyxa test:parity`         | Compare development and production routes, then smoke render pages |
-| `npx ruvyxa parity`              | Alias for `test:parity`                                            |
-| `npx ruvyxa clean`               | Remove generated `.ruvyxa/` output                                 |
-| `npx ruvyxa plugin new <name>`   | Create a Wasm middleware plugin starter                            |
-| `npx ruvyxa plugin debug <wasm>` | Validate and inspect a compiled Wasm plugin                        |
+| Command                         | Purpose                                                            |
+| ------------------------------- | ------------------------------------------------------------------ |
+| `npm run dev`                   | Development server with hot reload and route watching              |
+| `npm run build`                 | Build the application for production output                        |
+| `npm run start`                 | Serve an existing production build                                 |
+| `npm run typecheck`             | Run `tsc --noEmit`                                                 |
+| `npm run check`                 | Run app-level production readiness checks                          |
+| `npx ruvyxa preview`            | Preview an existing production build locally                       |
+| `npx ruvyxa routes`             | Print routes and their discovered render strategy                  |
+| `npx ruvyxa analyze`            | Validate routes, imports, and server/client boundaries             |
+| `npx ruvyxa doctor`             | Inspect project setup, tools, dependencies, and diagnostics        |
+| `npx ruvyxa trace /blog/[slug]` | Inspect one route manifest entry                                   |
+| `npx ruvyxa bench`              | Benchmark route discovery, analysis, and production build          |
+| `npx ruvyxa test:parity`        | Compare development and production routes, then smoke render pages |
+| `npx ruvyxa parity`             | Alias for `test:parity`                                            |
+| `npx ruvyxa clean`              | Remove generated `.ruvyxa/` output                                 |
+| `npx ruvyxa plugin new <name>`  | Create a plugin starter                                            |
 
 ## Common Options
 
@@ -200,17 +199,15 @@ npx ruvyxa clean
 
 Removes the `.ruvyxa/` output directory entirely.
 
-### `plugin new` / `plugin debug`
+### `plugin new`
 
 ```bash
 npx ruvyxa plugin new request-logger
-npx ruvyxa plugin debug request-logger
 ```
 
-`plugin new` creates a buildable Rust `cdylib` starter in `<name>/` under the current directory.
-`plugin debug` checks the exported raw ABI with the production Wasmtime engine and reports memory,
-hooks, and the optional allocator. See [Wasm Middleware Plugins](wasm-plugins.md) for the full
-workflow.
+`plugin new` creates `plugins/request-logger.ts` under the current project. Import the exported
+plugin from `ruvyxa.config.ts` and register it in `config({ plugins: [...] })`. See
+[Plugins](plugins.md) for the complete workflow.
 
 ---
 

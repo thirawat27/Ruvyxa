@@ -49,8 +49,8 @@
   load.
 - **Incremental bundler cache** — blake3+mtime fingerprinting recompiles only changed modules across
   dev restarts. Shared compile cache at `.ruvyxa/cache/bundler/` survives clean builds.
-- **Ruvyxa Bundler plugin pipeline** — `RuvyxaBundlerPlugin` hooks for `resolve_id()` and
-  `transform()`, plus JS config plugins bridged via persistent Node subprocess. AST-based
+- **plugin pipeline** — one `definePlugin({ setup })` registry provides `resolveId`, `transform`,
+  middleware, and build-complete hooks through a persistent Node/Bun subprocess. AST-based
   import/export extraction and CommonJS detection for npm dependencies.
 - **Gzip + Brotli compression** — all responses compressed automatically via tower-http middleware.
 - **ETag / 304 support** — static assets include BLAKE3-256-based ETags for efficient browser
@@ -163,11 +163,8 @@
 
 - **Tower-based middleware** — composable CORS, timing, logging, rate limiting, and custom headers
   via `ruvyxa.config.ts`. Route-scoped middleware targets specific path patterns.
-- **Wasm plugin runtime** — sandboxed WebAssembly request/response plugins powered by Wasmtime with
-  fuel-based execution limits, explicit environment access (`allow.env`), and memory bounds.
-  Optional via the `wasm-plugins` feature.
-- **Route-scoped plugins** — plugins can target specific patterns (`/api/*`) with per-plugin
-  configuration and timeout/memory allowances.
+- **Plugin middleware** — application modules register route-scoped Fetch `Request`/`Response` hooks
+  alongside build transforms and completion callbacks.
 
 ### CLI & diagnostics
 
@@ -343,57 +340,31 @@ Metadata guards, per-client/action rate limiting (600 req/min), module isolation
 Ruvyxa ships a tower-based middleware system configurable via `ruvyxa.config.ts`:
 
 ```ts
-import { config } from 'ruvyxa/config'
+import { config, definePlugin } from 'ruvyxa/config'
 
 export default config({
-  middleware: {
-    builtin: {
-      timing: true,
-      log: true,
-      cors: {
-        origins: ['https://myapp.com'],
-        methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-        credentials: true,
-        maxAge: 86400,
+  middleware: { builtin: { timing: true, log: true } },
+  plugins: [
+    definePlugin({
+      name: 'auth-guard',
+      setup({ addMiddleware }) {
+        addMiddleware({
+          routes: ['/api/*'],
+          onRequest(request) {
+            return request.headers.has('authorization')
+              ? undefined
+              : new Response('Unauthorized', { status: 401 })
+          },
+        })
       },
-      rate: {
-        max: 100,
-        window: 60,
-        key: 'ip',
-      },
-      headers: {
-        'X-Powered-By': 'Ruvyxa',
-      },
-    },
-    plugins: [
-      {
-        name: 'auth-guard',
-        path: 'plugins/auth-guard.wasm',
-        phase: 'request',
-        routes: ['/api/*'],
-        config: { apiKeyHeader: 'X-Api-Key' },
-        allow: {
-          env: ['AUTH_SECRET'],
-          timeout: 5000,
-          memory: 67108864,
-        },
-      },
-    ],
-  },
+    }),
+  ],
 })
 ```
 
-All middleware is applied as standard Tower layers, compatible with any axum/tower ecosystem
-middleware. The `wasm-plugins` feature is optional (requires `wasmtime` / `wasmtime-wasi`).
-
-**Security model for Wasm plugins:**
-
-- Each plugin runs in its own Wasmtime `Store` with fuel-based execution limits
-- Environment access is limited to the explicit `allow.env` list
-- Filesystem and network permissions are not available yet; non-empty `allow.read` or `allow.net`
-  are rejected at startup rather than silently ignored
-- Memory-bounded execution prevents resource exhaustion
-- Request and response phase plugins run in the server request lifecycle
+Built-in middleware stays native Tower code. Plugin middleware uses Fetch primitives in the
+persistent plugin runtime; Rust validates the bridge and enforces `security.pluginLimit` for
+response buffering.
 
 ---
 
@@ -465,20 +436,6 @@ export default config({
         credentials: true,
       },
     },
-    plugins: [
-      {
-        name: 'auth-guard',
-        path: 'plugins/auth.wasm',
-        phase: 'request',
-        routes: ['/api/*'],
-        config: {},
-        allow: {
-          env: ['AUTH_SECRET'],
-          timeout: 5000,
-          memory: 67108864,
-        },
-      },
-    ],
   },
 })
 ```
@@ -540,7 +497,7 @@ cache examples.
 │                     │ orchestration, production output       │
 │ ruvyxa_dev_server   │ axum server, websocket HMR, worker     │
 │                     │ pool, radix router, render cache, HMR  │
-│ ruvyxa_middleware    │ tower layers, wasmtime wasm plugins   │
+│ ruvyxa_middleware    │ Tower layers + plugin bridge│
 │ ruvyxa_graph        │ route discovery, import graph, render  │
 │                     │ strategy detection, validation          │
 │ ruvyxa_diagnostics  │ structured errors with RUV#### codes   │

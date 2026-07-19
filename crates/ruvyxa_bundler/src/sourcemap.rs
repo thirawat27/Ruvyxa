@@ -149,7 +149,7 @@ impl SourceMapBuilder {
     /// Import mappings from a Source Map v3 document at a generated-line offset.
     ///
     /// Returns `false` for malformed or empty maps so callers can retain their
-    /// existing identity-mapping fallback without breaking older plugins.
+    /// existing identity-mapping fallback when a transform does not provide a map.
     pub fn add_source_map(&mut self, json: &str, gen_line_offset: u32) -> bool {
         let mut candidate = self.clone();
         if !candidate.add_source_map_inner(json, gen_line_offset) {

@@ -307,10 +307,6 @@ pub struct CacheConfigOptions {
 #[serde(rename_all = "camelCase")]
 pub struct BuildPluginConfig {
     pub name: String,
-    pub enforce: Option<String>,
-    pub resolve_id: bool,     // serde: resolveId
-    pub transform: bool,
-    pub parallel: bool,
 }
 ```
 
@@ -407,7 +403,8 @@ fn emit_client_bundles(
 
 1. Filter page routes only.
 2. Determine parallelism: `config.build.parallelism.unwrap_or_else(num_cpus::get)`.
-3. Build `BundleContext` (with caches). If plugins configured, create `JsConfigPluginBridge`.
+3. Build `BundleContext` (with caches). If plugins are configured, create the ordered plugin hook
+   host.
 4. Split strategy:
    - **Route** (default): prepare all routes in parallel → detect shared modules across >=2 routes →
      emit `shared.js` → emit per-route bundles importing shared registry.
@@ -588,31 +585,32 @@ for entry in entries {
 
 ---
 
-## JS Config Plugin Bridge (`JsConfigPluginBridge`)
+## Plugin Build Hook Bridge
 
 Bridges Rust bundler plugin system to JS plugins configured in `ruvyxa.config.ts`:
 
 ```rust
-struct JsConfigPluginBridge {
+struct PluginBuildHookHost {
     workers: Vec<Arc<JsPluginWorker>>,
     next_worker: AtomicU64,
     plugins: Vec<BuildPluginConfig>,
 }
 
-struct JsPluginWorker {
-    child: Mutex<Option<Child>>,  // Node.js subprocess running plugin-runner.mjs
+struct PluginWorker {
+    child: Mutex<Option<Child>>,  // Node/Bun subprocess running plugin-runtime.mjs
     stdin: StdMutex<mpsc::Sender<String>>,
     // NDJSON communication
 }
 ```
 
-**`resolve_id`**: sends `{ type: "resolveId", specifier, importer }` to JS plugin → returns
-`{ resolved: path }`.
+**`resolveId`**: sends the module specifier, importer, and environment to the plugin runtime and
+returns a resolved path or no result.
 
-**`transform`**: sends `{ type: "transform", code, id }` to JS plugin → returns `{ code, map }`.
+**`transform`**: sends source code, module id, and environment to the plugin runtime and returns
+transformed code plus an optional source map.
 
-Workers spawned only when config has plugins with `resolve_id: true` or `transform: true`.
-Round-robin distribution across workers.
+One persistent runtime owns the setup registry, so closures and module-level plugin state are shared
+across build calls. `onBuildComplete` runs after the committed production output.
 
 ---
 

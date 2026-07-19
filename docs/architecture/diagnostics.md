@@ -110,12 +110,12 @@ Raised by `ruvyxa_dev_server`.
 
 Raised by `ruvyxa_middleware`.
 
-| Code        | Title                       | Condition                                                                                               | Fix                                                                             |
-| ----------- | --------------------------- | ------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------- |
-| **RUV2000** | Middleware config error     | Invalid middleware configuration (bad header name, incompatible CORS settings, negative rate limit)     | Fix the config value per validation error message                               |
-| **RUV2001** | Middleware execution failed | Tower middleware layer panicked or returned error                                                       | Check custom middleware implementation, verify dependencies                     |
-| **RUV2100** | Wasm plugin load error      | Wasm file not found, not valid wasm, or missing required exports (`memory`, `on_request`/`on_response`) | Verify `.wasm` file path, rebuild with correct exports                          |
-| **RUV2101** | Wasm plugin execution error | Plugin trap, fuel exhausted (timeout), memory out of bounds, invalid result format                      | Check plugin logic, increase timeout or memory limit, verify result JSON format |
+| Code        | Title                       | Condition                                                                                           | Fix                                                                                 |
+| ----------- | --------------------------- | --------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------- |
+| **RUV2000** | Middleware config error     | Invalid middleware configuration (bad header name, incompatible CORS settings, negative rate limit) | Fix the config value per validation error message                                   |
+| **RUV2001** | Middleware execution failed | Tower middleware layer panicked or returned error                                                   | Check custom middleware implementation, verify dependencies                         |
+| **RUV2100** | Plugin runtime error        | Plugin runtime could not start or returned invalid protocol data                                    | Check the Node/Bun runtime and plugin setup                                         |
+| **RUV2101** | Plugin hook error           | Plugin callback threw or returned an unsupported value                                              | Check the named hook and return `undefined`, `Request`, or `Response` as documented |
 
 ---
 
@@ -131,7 +131,7 @@ Raised by `ruvyxa_middleware`.
 | RUV15xx | `ruvyxa_dev_server` | SSG/ISR/Actions/PPR           |
 | RUV16xx | `ruvyxa_dev_server` | Config validation             |
 | RUV20xx | `ruvyxa_middleware` | Middleware config & execution |
-| RUV21xx | `ruvyxa_middleware` | Wasm plugins                  |
+| RUV21xx | `ruvyxa_middleware` | Plugin bridge                 |
 
 ---
 

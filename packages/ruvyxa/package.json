@@ -20,7 +20,7 @@
     "runtime/client-renderer.mjs",
     "runtime/compiler.mjs",
     "runtime/config-renderer.mjs",
-    "runtime/plugin-runner.mjs",
+    "runtime/plugin-runtime.mjs",
     "runtime/ssg-renderer.mjs",
     "runtime/ssr-renderer.mjs",
     "runtime/worker-pool.mjs",
@@ -35,7 +35,7 @@
     "ssr",
     "fullstack",
     "middleware",
-    "wasm"
+    "typescript-plugin"
   ],
   "repository": {
     "type": "git",

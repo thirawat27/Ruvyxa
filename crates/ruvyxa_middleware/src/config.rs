@@ -4,7 +4,6 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
-use std::path::PathBuf;
 
 /// Top-level middleware configuration block.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -13,14 +12,6 @@ pub struct MiddlewareConfig {
     /// Built-in middleware to enable.
     #[serde(default)]
     pub builtin: BuiltinMiddlewareConfig,
-
-    /// Custom middleware layers (order matters — applied top to bottom).
-    #[serde(default)]
-    pub layers: Vec<LayerConfig>,
-
-    /// Wasm plugin configuration.
-    #[serde(default)]
-    pub plugins: Vec<PluginConfig>,
 }
 
 /// Built-in middleware toggles and config.
@@ -105,89 +96,6 @@ pub struct RateLimitConfig {
     pub key_by: String,
 }
 
-/// Custom Tower layer configuration (for advanced users).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct LayerConfig {
-    /// Layer type identifier.
-    pub kind: String,
-
-    /// Arbitrary JSON options for the layer.
-    #[serde(default)]
-    pub options: serde_json::Value,
-}
-
-/// Wasm plugin configuration.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PluginConfig {
-    /// Plugin name (used for logging and diagnostics).
-    pub name: String,
-
-    /// Optional path to the `.wasm` module (relative to project root).
-    ///
-    /// When omitted, Ruvyxa uses the standard plugin scaffold output:
-    /// `<name>/target/wasm32-unknown-unknown/release/<name>.wasm`.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<PathBuf>,
-
-    /// Execution phase: "request" (before handler) or "response" (after handler).
-    #[serde(default = "default_phase")]
-    pub phase: PluginPhase,
-
-    /// Route pattern filter (only apply to matching routes).
-    #[serde(default)]
-    pub routes: Option<Vec<String>>,
-
-    /// Plugin-specific configuration passed as JSON to the wasm module.
-    #[serde(default)]
-    pub config: serde_json::Value,
-
-    /// WASI permissions granted to the plugin.
-    #[serde(default)]
-    #[serde(rename = "allow")]
-    pub permissions: PluginPermissions,
-}
-
-/// When a plugin executes in the request lifecycle.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum PluginPhase {
-    /// Execute before the route handler.
-    #[default]
-    Request,
-    /// Execute after the route handler (can modify response).
-    Response,
-}
-
-/// WASI permissions for sandboxed plugin execution.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct PluginPermissions {
-    /// Allow environment variable access (specific vars only).
-    #[serde(default)]
-    pub env: Vec<String>,
-
-    /// Reserved for filesystem read access. Unsupported values are rejected at startup.
-    #[serde(default)]
-    #[serde(rename = "read")]
-    pub fs_read: Vec<PathBuf>,
-
-    /// Reserved for network access. Unsupported values are rejected at startup.
-    #[serde(default)]
-    pub net: Vec<String>,
-
-    /// Maximum execution time in milliseconds.
-    #[serde(default = "default_timeout_ms")]
-    #[serde(rename = "timeout")]
-    pub timeout_ms: u64,
-
-    /// Maximum memory usage in bytes.
-    #[serde(default = "default_max_memory")]
-    #[serde(rename = "memory")]
-    pub max_memory_bytes: u64,
-}
-
 fn default_true() -> bool {
     true
 }
@@ -208,16 +116,4 @@ fn default_cors_max_age() -> u64 {
 
 fn default_rate_key() -> String {
     "ip".to_string()
-}
-
-fn default_phase() -> PluginPhase {
-    PluginPhase::Request
-}
-
-fn default_timeout_ms() -> u64 {
-    5000
-}
-
-fn default_max_memory() -> u64 {
-    64 * 1024 * 1024 // 64MB
 }

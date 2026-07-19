@@ -1,6 +1,6 @@
 //! TypeScript and JSX compilation for the Ruvyxa Bundler.
 //!
-//! Ruvyxa owns module resolution, plugin execution, caching, boundary checks,
+//! Ruvyxa owns module resolution, TypeScript build hooks, caching, boundary checks,
 //! and linking. Oxc owns parsing, TypeScript stripping, JSX lowering, and
 //! code generation for each source module.
 
@@ -17,7 +17,7 @@ use rayon::prelude::*;
 
 use crate::ast;
 use crate::cache::{CacheLookup, CompileCache};
-use crate::plugin::{PluginContext, PluginPipeline};
+use crate::hooks::{BuildHookContext, BuildHookPipeline};
 use crate::resolver::ResolvedModule;
 use crate::{BundleError, BundleInput, JsxRuntime, Result};
 
@@ -38,7 +38,7 @@ pub struct CompiledModule {
 
 struct CompiledModuleOutput {
     module: CompiledModule,
-    plugin_source_map: Option<String>,
+    hook_source_map: Option<String>,
 }
 
 /// Compile every module in the resolved graph, using the provided cache.
@@ -47,35 +47,35 @@ pub fn compile_graph_with_cache(
     input: &BundleInput,
     cache: &CompileCache,
 ) -> Result<Vec<CompiledModule>> {
-    compile_graph_with_pipeline(graph, input, cache, &PluginPipeline::empty())
+    compile_graph_with_hooks(graph, input, cache, &BuildHookPipeline::empty())
 }
 
-/// Compile every module using the provided cache and Ruvyxa Bundler plugin pipeline.
-pub fn compile_graph_with_pipeline(
+/// Compile every module using the provided cache and TypeScript build hooks.
+pub fn compile_graph_with_hooks(
     graph: &[ResolvedModule],
     input: &BundleInput,
     cache: &CompileCache,
-    plugins: &PluginPipeline,
+    build_hooks: &BuildHookPipeline,
 ) -> Result<Vec<CompiledModule>> {
-    Ok(compile_graph_with_pipeline_and_maps(graph, input, cache, plugins)?.0)
+    Ok(compile_graph_with_hooks_and_maps(graph, input, cache, build_hooks)?.0)
 }
 
-pub(crate) fn compile_graph_with_pipeline_and_maps(
+pub(crate) fn compile_graph_with_hooks_and_maps(
     graph: &[ResolvedModule],
     input: &BundleInput,
     cache: &CompileCache,
-    plugins: &PluginPipeline,
+    build_hooks: &BuildHookPipeline,
 ) -> Result<(Vec<CompiledModule>, BTreeMap<PathBuf, String>)> {
     let results: Vec<Result<CompiledModuleOutput>> = graph
         .par_iter()
-        .map(|module| compile_module(module, input, cache, plugins))
+        .map(|module| compile_module(module, input, cache, build_hooks))
         .collect();
 
     let mut modules = Vec::with_capacity(results.len());
     let mut source_maps = BTreeMap::new();
     for output in results {
         let output = output?;
-        if let Some(source_map) = output.plugin_source_map {
+        if let Some(source_map) = output.hook_source_map {
             source_maps.insert(output.module.path.clone(), source_map);
         }
         modules.push(output.module);
@@ -87,7 +87,7 @@ fn compile_module(
     module: &ResolvedModule,
     input: &BundleInput,
     cache: &CompileCache,
-    plugins: &PluginPipeline,
+    build_hooks: &BuildHookPipeline,
 ) -> Result<CompiledModuleOutput> {
     let ext = module
         .path
@@ -110,7 +110,7 @@ fn compile_module(
                 is_external: false,
                 cache_hit: false,
             },
-            plugin_source_map: None,
+            hook_source_map: None,
         });
     }
 
@@ -121,16 +121,17 @@ fn compile_module(
         module.source.clone()
     };
 
-    let plugin_ctx = PluginContext {
+    let hook_context = BuildHookContext {
         project_root: input.project_root.clone(),
         importer: Some(module.path.clone()),
         target: input.target,
     };
-    let plugin_output = plugins.transform_with_map(&content_source, &module.path, &plugin_ctx)?;
-    let source = plugin_output.code;
-    let plugin_source_map = plugin_output.map;
+    let hook_output =
+        build_hooks.transform_with_map(&content_source, &module.path, &hook_context)?;
+    let source = hook_output.code;
+    let hook_source_map = hook_output.map;
 
-    // Virtual entries and plain JavaScript pass through after plugin transforms.
+    // Virtual entries and plain JavaScript pass through after registered transforms.
     if matches!(ext, "js" | "mjs" | "cjs") || module.path.to_string_lossy().contains("ruvyxa:") {
         return Ok(CompiledModuleOutput {
             module: CompiledModule {
@@ -140,7 +141,7 @@ fn compile_module(
                 is_external: module.is_external,
                 cache_hit: false,
             },
-            plugin_source_map,
+            hook_source_map,
         });
     }
 
@@ -157,7 +158,7 @@ fn compile_module(
                 is_external: module.is_external,
                 cache_hit: true,
             },
-            plugin_source_map,
+            hook_source_map,
         }),
         CacheLookup::Miss(key) => {
             let js = transform_with_options(&source, has_jsx, jsx_runtime).map_err(|msg| {
@@ -174,7 +175,7 @@ fn compile_module(
                     is_external: module.is_external,
                     cache_hit: false,
                 },
-                plugin_source_map,
+                hook_source_map,
             })
         }
     }

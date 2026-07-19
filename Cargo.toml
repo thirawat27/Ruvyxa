@@ -44,5 +44,3 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 walkdir = "2.5"
 webp = { version = "0.3.1", default-features = false }
-wasmtime = "46.0.1"
-wasmtime-wasi = "46.0.1"

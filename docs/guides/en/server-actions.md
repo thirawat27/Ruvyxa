@@ -122,9 +122,9 @@ export default config({
 The proxy must overwrite forwarded headers from the incoming request rather than pass client-sent
 values through.
 
-## Response-Phase Wasm Plugin Limits
+## Response Middleware Limits
 
-Wasm plugins running in the response phase must buffer the complete response:
+TypeScript response middleware buffers the complete response:
 
 | Config        | Default | Max     |
 | ------------- | ------- | ------- |
