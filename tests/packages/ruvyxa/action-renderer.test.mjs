@@ -55,6 +55,28 @@ describe('action renderer', () => {
       )
     })
   })
+
+  it('forwards request headers and preserves repeated response headers', async () => {
+    await withFixture(async ({ actionFile }) => {
+      const result = await runRenderer(
+        actionFile,
+        'inspectRequest',
+        '{}',
+        'application/json',
+        JSON.stringify({ authorization: 'Bearer test-token' }),
+      )
+
+      assert.equal(result.ok, true)
+      assert.equal(result.body, 'Bearer test-token')
+      assert.deepEqual(
+        result.headerPairs.filter(([name]) => name === 'set-cookie'),
+        [
+          ['set-cookie', 'a=1; Path=/'],
+          ['set-cookie', 'b=2; Path=/'],
+        ],
+      )
+    })
+  })
 })
 
 async function withFixture(run) {
@@ -78,6 +100,13 @@ async function withFixture(run) {
           invalidate("todos")
           return { title: input.title, completed: false }
         })
+
+      export const inspectRequest = action.handler(async ({ request }) => {
+        const headers = new Headers()
+        headers.append('set-cookie', 'a=1; Path=/')
+        headers.append('set-cookie', 'b=2; Path=/')
+        return new Response(request.headers.get('authorization') || '', { headers })
+      })
     `,
   )
 
@@ -88,10 +117,16 @@ async function withFixture(run) {
   }
 }
 
-async function runRenderer(actionFile, actionName, payload, contentType = 'application/json') {
+async function runRenderer(
+  actionFile,
+  actionName,
+  payload,
+  contentType = 'application/json',
+  headersJson = '{}',
+) {
   const { stdout } = await execFileAsync(
     'node',
-    [renderer, exampleRoot, actionFile, actionName, payload, '/todos', contentType],
+    [renderer, exampleRoot, actionFile, actionName, payload, '/todos', contentType, headersJson],
     {
       cwd: workspaceRoot,
       maxBuffer: 10 * 1024 * 1024,

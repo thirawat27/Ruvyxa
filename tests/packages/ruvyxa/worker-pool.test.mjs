@@ -151,6 +151,75 @@ test('invalidates a cached route bundle when an imported utility changes', async
   assert.deepEqual(JSON.parse(second.body), { value: 'second' })
 })
 
+test('forwards action request headers and preserves repeated response headers', async (t) => {
+  const projectRoot = await mkdtemp(path.join(repoRoot, '.worker-pool-action-test-'))
+  const actionFile = path.join(projectRoot, 'app/account/action.ts')
+  await mkdir(path.dirname(actionFile), { recursive: true })
+  await writeFile(
+    actionFile,
+    `import { action } from 'ruvyxa/server'
+export const inspect = action.handler(async ({ request }) => {
+  const headers = new Headers()
+  headers.append('set-cookie', 'a=1; Path=/')
+  headers.append('set-cookie', 'b=2; Path=/')
+  return new Response(request.headers.get('authorization') || '', { headers })
+})
+`,
+  )
+
+  const worker = spawn(process.execPath, [workerScript], {
+    cwd: repoRoot,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  })
+  const lines = createInterface({ input: worker.stdout })
+  const responsePromise = new Promise((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('worker action timed out')), 10_000)
+    lines.once('line', (line) => {
+      clearTimeout(timer)
+      resolve(JSON.parse(line))
+    })
+  })
+  t.after(async () => {
+    lines.close()
+    worker.stdin.end()
+    await Promise.race([
+      new Promise((resolve) => worker.once('exit', resolve)),
+      new Promise((resolve) => setTimeout(resolve, 2_000)),
+    ])
+    if (worker.exitCode === null) worker.kill()
+    await rm(projectRoot, { recursive: true, force: true })
+  })
+
+  worker.stdin.write(
+    `${JSON.stringify({
+      id: 'action',
+      type: 'action',
+      projectRoot,
+      actionFile,
+      actionName: 'inspect',
+      payloadJson: '{}',
+      contentType: 'application/json',
+      requestPath: '/account',
+      headerPairs: [
+        ['authorization', 'Bearer worker-token'],
+        ['cookie', 'a=1'],
+        ['cookie', 'b=2'],
+      ],
+    })}\n`,
+  )
+
+  const response = await responsePromise
+  assert.equal(response.ok, true, response.message)
+  assert.equal(response.body, 'Bearer worker-token')
+  assert.deepEqual(
+    response.headerPairs.filter(([name]) => name === 'set-cookie'),
+    [
+      ['set-cookie', 'a=1; Path=/'],
+      ['set-cookie', 'b=2; Path=/'],
+    ],
+  )
+})
+
 test('resolves static params and isolates build-time page module state', async (t) => {
   const projectRoot = await mkdtemp(path.join(repoRoot, 'examples/demo/.worker-pool-test-'))
   const appDir = path.join(projectRoot, 'app/products/[id]')

@@ -705,7 +705,16 @@ function responseHeaderPairs(response) {
 
 // --- Action Handler ---
 async function handleAction(request) {
-  const { projectRoot, actionFile, actionName, payloadJson, contentType, requestPath } = request
+  const {
+    projectRoot,
+    actionFile,
+    actionName,
+    payloadJson,
+    contentType,
+    requestPath,
+    headers: requestHeaders = {},
+    headerPairs,
+  } = request
 
   const resolvedRoot = path.resolve(projectRoot || process.cwd())
   const { outfile, freshBuild } = await bundleActionModule(resolvedRoot, actionFile)
@@ -727,7 +736,14 @@ async function handleAction(request) {
   const invalidated = []
   const req = new Request(`http://localhost${requestPath}`, {
     method: 'POST',
-    headers: { 'content-type': contentType || 'application/json' },
+    // headerPairs preserves duplicate cookies and is the canonical protocol
+    // representation. Keep the legacy map fallback for older Rust callers.
+    headers: Array.isArray(headerPairs)
+      ? headerPairs
+      : {
+          ...requestHeaders,
+          'content-type': requestHeaders['content-type'] || contentType || 'application/json',
+        },
     body: contentType === 'application/x-www-form-urlencoded' ? payloadJson : JSON.stringify(input),
   })
   const result = await action(input, {
@@ -738,9 +754,10 @@ async function handleAction(request) {
   })
   const response = normalizeActionResult(result, invalidated)
   const body = await response.text()
-  const headers = Object.fromEntries(response.headers.entries())
+  const headerPairsResult = responseHeaderPairs(response)
+  const headers = Object.fromEntries(headerPairsResult)
 
-  return { ok: true, status: response.status, headers, body }
+  return { ok: true, status: response.status, headers, headerPairs: headerPairsResult, body }
 }
 
 // --- Client Bundle Handler ---

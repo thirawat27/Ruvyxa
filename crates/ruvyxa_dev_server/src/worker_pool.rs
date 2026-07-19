@@ -125,6 +125,11 @@ pub enum WorkerRequest {
         content_type: String,
         #[serde(rename = "requestPath")]
         request_path: String,
+        /// Ordered request header values so action handlers can observe the
+        /// same cookies, authorization, and tracing headers as the endpoint.
+        /// This additive field is ignored by older worker scripts.
+        #[serde(rename = "headerPairs")]
+        header_pairs: Vec<(String, String)>,
     },
     #[serde(rename = "client")]
     Client {
@@ -745,6 +750,16 @@ pub(crate) struct RenderApiRequest<'a> {
     pub params: &'a RouteParams,
 }
 
+pub(crate) struct RenderActionRequest<'a> {
+    pub project_root: &'a Path,
+    pub action_file: &'a Path,
+    pub action_name: &'a str,
+    pub payload_json: &'a str,
+    pub content_type: &'a str,
+    pub request_path: &'a str,
+    pub headers: &'a [(String, String)],
+}
+
 impl NodeWorkerPool {
     pub async fn start(root: &Path, env: BTreeMap<String, String>) -> Result<Self> {
         Self::start_with_runtime(root, env, JavaScriptRuntime::detect()).await
@@ -1114,23 +1129,19 @@ impl NodeWorkerPool {
         response
     }
 
-    pub async fn render_action(
+    pub(crate) async fn render_action(
         &self,
-        project_root: &Path,
-        action_file: &Path,
-        action_name: &str,
-        payload_json: &str,
-        content_type: &str,
-        request_path: &str,
+        action: RenderActionRequest<'_>,
     ) -> Result<WorkerResponse> {
         let request = WorkerRequest::Action {
             id: next_request_id(),
-            project_root: project_root.display().to_string(),
-            action_file: action_file.display().to_string(),
-            action_name: action_name.to_string(),
-            payload_json: payload_json.to_string(),
-            content_type: content_type.to_string(),
-            request_path: request_path.to_string(),
+            project_root: action.project_root.display().to_string(),
+            action_file: action.action_file.display().to_string(),
+            action_name: action.action_name.to_string(),
+            payload_json: action.payload_json.to_string(),
+            content_type: action.content_type.to_string(),
+            request_path: action.request_path.to_string(),
+            header_pairs: action.headers.to_vec(),
         };
         self.send(request).await
     }
@@ -1355,6 +1366,38 @@ mod tests {
         );
         assert_eq!(value["bodyBase64"], "AP+ADQo=");
         assert_eq!(value["streamResponse"], true);
+    }
+
+    #[test]
+    fn action_worker_request_serializes_lossless_request_header_pairs() {
+        let request = WorkerRequest::Action {
+            id: "action".to_string(),
+            project_root: "/project".to_string(),
+            action_file: "/project/app/action.ts".to_string(),
+            action_name: "inspect".to_string(),
+            payload_json: "{}".to_string(),
+            content_type: "application/json".to_string(),
+            request_path: "/account".to_string(),
+            header_pairs: vec![
+                ("authorization".to_string(), "Bearer token".to_string()),
+                ("cookie".to_string(), "a=1".to_string()),
+                ("cookie".to_string(), "b=2".to_string()),
+            ],
+        };
+
+        let value = serde_json::to_value(request).unwrap();
+        assert_eq!(
+            value["headerPairs"][0],
+            serde_json::json!(["authorization", "Bearer token"])
+        );
+        assert_eq!(
+            value["headerPairs"][1],
+            serde_json::json!(["cookie", "a=1"])
+        );
+        assert_eq!(
+            value["headerPairs"][2],
+            serde_json::json!(["cookie", "b=2"])
+        );
     }
 
     #[tokio::test]

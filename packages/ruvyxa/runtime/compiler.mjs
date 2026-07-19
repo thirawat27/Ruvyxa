@@ -1451,19 +1451,107 @@ function checkClientBoundary(root, filePath, source) {
 
 function privateEnvReads(source) {
   const names = []
-  const codeOnly = maskNonCode(source)
-  for (const match of codeOnly.matchAll(/\bprocess\.env\.([A-Z_][A-Z0-9_]*)/g)) {
-    const name = match[1]
-    if (name !== 'NODE_ENV' && !name.startsWith('RUVYXA_PUBLIC_')) names.push(name)
-  }
-  for (const match of codeOnly.matchAll(/\bprocess\.env\s*\[/g)) {
-    const value = source.slice(match.index + match[0].length)
-    const literal = /^(['"])([A-Z_][A-Z0-9_]*)\1\s*\]/.exec(value)
-    if (!literal) continue
-    const name = literal[2]
-    if (name !== 'NODE_ENV' && !name.startsWith('RUVYXA_PUBLIC_')) names.push(name)
-  }
+  scanPrivateEnvReads(source, 0, 0, names)
   return names
+}
+
+// Keep the runtime scanner structurally aligned with the Rust boundary scanner.
+// A template literal is not wholly non-code: `${...}` contains executable code
+// and must still be checked for private environment reads.
+function scanPrivateEnvReads(source, start, templateExpressionDepth, names) {
+  let index = start
+  while (index < source.length) {
+    const char = source[index]
+    const next = source[index + 1]
+
+    if (char === '"' || char === "'") {
+      index = readStringEnd(source, index, char)
+      continue
+    }
+    if (char === '`') {
+      index = scanTemplateForPrivateEnv(source, index, names)
+      continue
+    }
+    if (char === '/' && next === '/') {
+      const end = source.indexOf('\n', index + 2)
+      index = end === -1 ? source.length : end
+      continue
+    }
+    if (char === '/' && next === '*') {
+      const end = source.indexOf('*/', index + 2)
+      index = end === -1 ? source.length : end + 2
+      continue
+    }
+    if (templateExpressionDepth > 0 && char === '{') {
+      templateExpressionDepth += 1
+      index += 1
+      continue
+    }
+    if (templateExpressionDepth > 0 && char === '}') {
+      templateExpressionDepth -= 1
+      index += 1
+      if (templateExpressionDepth === 0) return index
+      continue
+    }
+
+    if (source.startsWith('process.env', index) && isEnvReadBoundary(source, index)) {
+      const parsed = parsePrivateEnvName(source, index + 'process.env'.length)
+      if (parsed && parsed.name !== 'NODE_ENV' && !parsed.name.startsWith('RUVYXA_PUBLIC_')) {
+        names.push(parsed.name)
+      }
+      index = parsed?.end ?? index + 'process.env'.length
+      continue
+    }
+    index += 1
+  }
+  return index
+}
+
+function scanTemplateForPrivateEnv(source, start, names) {
+  let index = start + 1
+  while (index < source.length) {
+    const char = source[index]
+    if (char === '\\') {
+      index = Math.min(index + 2, source.length)
+      continue
+    }
+    if (char === '`') return index + 1
+    if (char === '$' && source[index + 1] === '{') {
+      index = scanPrivateEnvReads(source, index + 2, 1, names)
+      continue
+    }
+    index += 1
+  }
+  return index
+}
+
+function isEnvReadBoundary(source, index) {
+  const previous = source[index - 1]
+  return !previous || (!/[A-Za-z0-9_$]/.test(previous) && previous !== '.')
+}
+
+function parsePrivateEnvName(source, start) {
+  let index = start
+  while (/\s/.test(source[index] ?? '')) index += 1
+  if (source[index] === '.') {
+    index += 1
+    const match = /^[A-Z_][A-Z0-9_]*/.exec(source.slice(index))
+    if (!match) return null
+    return { name: match[0], end: index + match[0].length }
+  }
+  if (source[index] !== '[') return null
+  index += 1
+  while (/\s/.test(source[index] ?? '')) index += 1
+  const quote = source[index]
+  if (quote !== '"' && quote !== "'") return null
+  index += 1
+  const match = /^[A-Z_][A-Z0-9_]*/.exec(source.slice(index))
+  if (!match) return null
+  index += match[0].length
+  if (source[index] !== quote) return null
+  index += 1
+  while (/\s/.test(source[index] ?? '')) index += 1
+  return source[index] === ']' ? { name: match[0], end: index + 1 } : null
 }
 
 function maskNonCode(source, options = {}) {

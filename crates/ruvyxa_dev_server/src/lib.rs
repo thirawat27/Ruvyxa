@@ -35,7 +35,7 @@ use tracing::{error, info, warn};
 
 mod worker_pool;
 pub use worker_pool::{NodeWorkerPool, StaticParamSegment, StaticParamsRoute};
-use worker_pool::{RenderApiRequest, WorkerApiResponse};
+use worker_pool::{RenderActionRequest, RenderApiRequest, WorkerApiResponse};
 
 mod router;
 pub use router::RadixRouter;
@@ -1249,26 +1249,32 @@ async fn action_endpoint(
         );
     }
 
-    let response =
-        match render_server_action_pooled(&state, &query.path, &query.name, &payload, content_type)
-            .await
-        {
-            Ok(response) => response,
-            Err(error) => {
-                error!(
-                    %error,
-                    path = %query.path,
-                    action = %query.name,
-                    "server action request failed"
-                );
-                let message = public_internal_error(&state.config, &error);
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("console.error({message:?});"),
-                )
-                    .into_response()
-            }
-        };
+    let response = match render_server_action_pooled(
+        &state,
+        &query.path,
+        &query.name,
+        &payload,
+        content_type,
+        &headers,
+    )
+    .await
+    {
+        Ok(response) => response,
+        Err(error) => {
+            error!(
+                %error,
+                path = %query.path,
+                action = %query.name,
+                "server action request failed"
+            );
+            let message = public_internal_error(&state.config, &error);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("console.error({message:?});"),
+            )
+                .into_response()
+        }
+    };
     with_security_headers(response)
 }
 
@@ -2430,6 +2436,7 @@ async fn render_server_action_pooled(
     action_name: &str,
     payload_json: &str,
     content_type: &str,
+    request_headers: &HeaderMap,
 ) -> Result<Response> {
     let (manifest, router) = state.runtime_cache.router(&state.config).await?;
     let Some(route_match) = router.find(&manifest, request_path) else {
@@ -2457,14 +2464,15 @@ async fn render_server_action_pooled(
 
     let response = state
         .worker_pool
-        .render_action(
-            &state.config.root,
-            &action_file,
+        .render_action(RenderActionRequest {
+            project_root: &state.config.root,
+            action_file: &action_file,
             action_name,
             payload_json,
             content_type,
             request_path,
-        )
+            headers: &worker_request_headers(request_headers),
+        })
         .await?;
 
     if !response.ok {
@@ -2489,7 +2497,11 @@ async fn render_server_action_pooled(
     let status = StatusCode::from_u16(response.status.unwrap_or(200)).unwrap_or(StatusCode::OK);
     let mut http_response = (status, response.body.unwrap_or_default()).into_response();
 
-    if let Some(headers) = response.headers {
+    if let Some(headers) = response.header_pairs.or_else(|| {
+        response
+            .headers
+            .map(|headers| headers.into_iter().collect::<Vec<_>>())
+    }) {
         for (key, value) in headers {
             let Ok(name) = HeaderName::from_bytes(key.as_bytes()) else {
                 continue;
@@ -2497,7 +2509,7 @@ async fn render_server_action_pooled(
             let Ok(value) = HeaderValue::from_str(&value) else {
                 continue;
             };
-            http_response.headers_mut().insert(name, value);
+            http_response.headers_mut().append(name, value);
         }
     }
 

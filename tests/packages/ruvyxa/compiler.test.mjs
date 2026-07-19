@@ -730,6 +730,24 @@ export class contentFormat {}
     })
   })
 
+  it('rejects private environment reads inside template expressions in client bundles', async () => {
+    await withFixture(async ({ root, outDir }) => {
+      const pageFile = path.join(root, 'page.ts')
+      await writeFile(pageFile, 'export default `${process.env.DATABASE_URL}`\n')
+
+      await assert.rejects(
+        compileBundle({
+          projectRoot: root,
+          entrySource: `export { default } from ${JSON.stringify(toImportPath(pageFile))}`,
+          sourcefile: 'ruvyxa:template-env-entry.ts',
+          outfile: path.join(outDir, 'template-env.mjs'),
+          platform: 'browser',
+        }),
+        /RUV1008: Private environment variable DATABASE_URL used in client bundle/,
+      )
+    })
+  })
+
   it('drops side-effect asset imports from wrapped modules', async () => {
     await withFixture(async ({ root, outDir }) => {
       const pageFile = path.join(root, 'page.tsx')

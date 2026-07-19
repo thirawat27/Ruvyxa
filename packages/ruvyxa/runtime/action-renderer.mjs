@@ -17,6 +17,7 @@ const [
   payloadJson = '{}',
   requestPath = '/',
   contentType = 'application/json',
+  headersJson = '{}',
 ] = process.argv.slice(2)
 
 if (!projectRootArg || !actionFileArg || !actionName) {
@@ -47,9 +48,10 @@ try {
 
   const input = parsePayload(payloadJson, contentType)
   const invalidated = []
+  const requestHeaders = parseHeaders(headersJson, contentType)
   const request = new Request(`http://localhost${requestPath}`, {
     method: 'POST',
-    headers: { 'content-type': contentType },
+    headers: requestHeaders,
     body: contentType === 'application/x-www-form-urlencoded' ? payloadJson : JSON.stringify(input),
   })
   const result = await action(input, {
@@ -60,18 +62,43 @@ try {
   })
   const response = normalizeActionResult(result, invalidated)
   const body = await response.text()
-  const headers = Object.fromEntries(response.headers.entries())
+  const headerPairs = responseHeaderPairs(response)
+  const headers = Object.fromEntries(headerPairs)
 
   process.stdout.write(
     JSON.stringify({
       ok: true,
       status: response.status,
       headers,
+      headerPairs,
       body,
     }),
   )
 } catch (error) {
   fail('RUV1500', error instanceof Error ? error.message : String(error), error?.stack)
+}
+
+function parseHeaders(headersJson, contentType) {
+  let parsed = {}
+  try {
+    parsed = JSON.parse(headersJson || '{}')
+  } catch {
+    throw new Error('Action request headers must be valid JSON')
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new Error('Action request headers must be an object or header pairs')
+  }
+  if (Array.isArray(parsed)) return parsed
+  return { ...parsed, 'content-type': parsed['content-type'] || contentType }
+}
+
+function responseHeaderPairs(response) {
+  const pairs = []
+  for (const [name, value] of response.headers.entries()) {
+    if (name !== 'set-cookie') pairs.push([name, value])
+  }
+  for (const value of response.headers.getSetCookie()) pairs.push(['set-cookie', value])
+  return pairs
 }
 
 async function bundleActionModule(projectRoot, actionFile) {
