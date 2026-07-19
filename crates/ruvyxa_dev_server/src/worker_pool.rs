@@ -117,6 +117,8 @@ pub enum WorkerRequest {
         action_name: String,
         #[serde(rename = "payloadJson")]
         payload_json: String,
+        #[serde(rename = "contentType")]
+        content_type: String,
         #[serde(rename = "requestPath")]
         request_path: String,
     },
@@ -585,11 +587,7 @@ impl Worker {
     /// Close the worker input, then force-stop it if graceful shutdown takes too long.
     async fn shutdown(&self) {
         self.alive.store(false, Ordering::Release);
-        let sender = self
-            .stdin_tx
-            .lock()
-            .expect("worker stdin mutex poisoned")
-            .take();
+        let sender = self.stdin_tx.lock().ok().and_then(|mut guard| guard.take());
         drop(sender);
         self.pending.lock().await.clear();
 
@@ -700,7 +698,7 @@ impl Worker {
         let stdin_tx = self
             .stdin_tx
             .lock()
-            .expect("worker stdin mutex poisoned")
+            .map_err(|_| RuvyxaError::Message("Worker input lock poisoned".to_string()))?
             .clone()
             .ok_or_else(|| RuvyxaError::Message("Worker process is shutting down".to_string()))?;
 
@@ -847,11 +845,10 @@ impl NodeWorkerPool {
 
     /// Stop every owned Node worker before the server releases its process resources.
     pub async fn shutdown(&self) {
-        let workers = self
-            .workers
-            .read()
-            .expect("worker pool lock poisoned")
-            .clone();
+        let Ok(workers) = self.workers.read().map(|workers| workers.clone()) else {
+            warn!("worker pool lock poisoned during shutdown");
+            return;
+        };
         for worker in workers {
             worker.shutdown().await;
         }
@@ -877,7 +874,10 @@ impl NodeWorkerPool {
     }
 
     fn select_worker(&self) -> Result<(usize, Arc<Worker>)> {
-        let workers = self.workers.read().expect("worker pool lock poisoned");
+        let workers = self
+            .workers
+            .read()
+            .map_err(|_| RuvyxaError::Message("Worker pool lock poisoned".to_string()))?;
         if workers.is_empty() {
             return Err(RuvyxaError::Message(
                 "Worker pool has no workers".to_string(),
@@ -903,7 +903,13 @@ impl NodeWorkerPool {
         };
 
         let active = {
-            let mut workers = self.workers.write().expect("worker pool lock poisoned");
+            let Ok(mut workers) = self.workers.write() else {
+                warn!(
+                    failed_worker = index,
+                    "worker pool lock poisoned during replacement"
+                );
+                return None;
+            };
             if workers
                 .get(index)
                 .is_some_and(|worker| Arc::ptr_eq(worker, failed))
@@ -929,11 +935,10 @@ impl NodeWorkerPool {
     /// Sends the invalidation request to all workers in parallel rather than
     /// sequentially, reducing latency from `n * RTT` to `max(RTT)`.
     pub async fn invalidate(&self, paths: Vec<String>) {
-        let workers = self
-            .workers
-            .read()
-            .expect("worker pool lock poisoned")
-            .clone();
+        let Ok(workers) = self.workers.read().map(|workers| workers.clone()) else {
+            warn!("worker pool lock poisoned during invalidation");
+            return;
+        };
         // Build one request per worker (each needs its own unique id).
         let requests: Vec<WorkerRequest> = (0..workers.len())
             .map(|_| WorkerRequest::Invalidate {
@@ -946,11 +951,10 @@ impl NodeWorkerPool {
         // so we collect futures and poll them all.
         let mut set = tokio::task::JoinSet::new();
         for (i, request) in requests.into_iter().enumerate() {
-            let stdin_tx = workers[i]
-                .stdin_tx
-                .lock()
-                .expect("worker stdin mutex poisoned")
-                .clone();
+            let Ok(stdin_tx) = workers[i].stdin_tx.lock().map(|guard| guard.clone()) else {
+                warn!(worker = i, "worker stdin lock poisoned during invalidation");
+                continue;
+            };
             set.spawn(async move {
                 let line = serde_json::to_string(&request).unwrap_or_default() + "\n";
                 if let Some(stdin_tx) = stdin_tx {
@@ -971,7 +975,10 @@ impl NodeWorkerPool {
         &self,
         paths: Vec<String>,
     ) -> std::result::Result<usize, String> {
-        let workers = self.workers.read().expect("worker pool lock poisoned");
+        let workers = self
+            .workers
+            .read()
+            .map_err(|_| "worker pool lock poisoned".to_string())?;
         let mut queued = 0;
         for (worker_index, worker) in workers.iter().enumerate() {
             let request = WorkerRequest::Invalidate {
@@ -983,7 +990,7 @@ impl NodeWorkerPool {
             worker
                 .stdin_tx
                 .lock()
-                .expect("worker stdin mutex poisoned")
+                .map_err(|_| format!("worker {worker_index} stdin lock poisoned"))?
                 .as_ref()
                 .ok_or_else(|| format!("worker {worker_index} is shutting down"))?
                 .try_send(format!("{line}\n"))
@@ -1000,11 +1007,10 @@ impl NodeWorkerPool {
     /// This eliminates the cold-start penalty for the first request to each route.
     /// Warm every worker because Node's ESM cache is process-local.
     pub async fn warmup(&self, project_root: &str, routes: Vec<WarmupRoute>) -> usize {
-        let workers = self
-            .workers
-            .read()
-            .expect("worker pool lock poisoned")
-            .clone();
+        let Ok(workers) = self.workers.read().map(|workers| workers.clone()) else {
+            warn!("worker pool lock poisoned during warmup");
+            return 0;
+        };
         if routes.is_empty() || workers.is_empty() {
             return 0;
         }
@@ -1100,6 +1106,7 @@ impl NodeWorkerPool {
         action_file: &Path,
         action_name: &str,
         payload_json: &str,
+        content_type: &str,
         request_path: &str,
     ) -> Result<WorkerResponse> {
         let request = WorkerRequest::Action {
@@ -1108,6 +1115,7 @@ impl NodeWorkerPool {
             action_file: action_file.display().to_string(),
             action_name: action_name.to_string(),
             payload_json: payload_json.to_string(),
+            content_type: content_type.to_string(),
             request_path: request_path.to_string(),
         };
         self.send(request).await

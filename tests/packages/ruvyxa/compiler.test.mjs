@@ -1007,7 +1007,7 @@ export class contentFormat {}
     })
   })
 
-  it('forwards render and middleware configuration to the native CLI', async () => {
+  it('forwards render and middleware configuration to the Ruvyxa CLI', async () => {
     await withFixture(async ({ root }) => {
       await writeFile(
         path.join(root, 'ruvyxa.config.ts'),

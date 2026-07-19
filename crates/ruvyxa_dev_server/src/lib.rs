@@ -30,7 +30,7 @@ use ruvyxa_middleware::{
 use serde::{Deserialize, Serialize};
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
-use tracing::{info, warn};
+use tracing::{error, info, warn};
 
 mod worker_pool;
 pub use worker_pool::{NodeWorkerPool, StaticParamSegment, StaticParamsRoute};
@@ -50,12 +50,18 @@ pub use style::{StyleCollection, collect_styles, minify_css};
 
 const MAX_ACTION_BODY_BYTES: usize = 1024 * 1024;
 const MAX_API_BODY_BYTES: usize = 10 * 1024 * 1024;
+/// Absolute upper bound for action payload buffering, regardless of project config.
+pub const MAX_ACTION_BODY_LIMIT_BYTES: usize = 16 * 1024 * 1024;
+/// Absolute upper bound for API payload buffering, regardless of project config.
+pub const MAX_API_BODY_LIMIT_BYTES: usize = 256 * 1024 * 1024;
 /// Default maximum response size buffered for a response-phase Wasm plugin.
 pub const DEFAULT_PLUGIN_RESPONSE_BODY_LIMIT_BYTES: usize = 32 * 1024 * 1024;
 /// Largest response size a project may configure for response-phase Wasm plugins.
 pub const MAX_PLUGIN_RESPONSE_BODY_LIMIT_BYTES: usize = 256 * 1024 * 1024;
 const ACTION_RATE_LIMIT_MAX: usize = 600;
 const ACTION_RATE_LIMIT_WINDOW: Duration = Duration::from_secs(60);
+pub const MAX_ACTION_RATE_LIMIT_REQUESTS: usize = 10_000;
+pub const MAX_ACTION_RATE_LIMIT_WINDOW_SECS: u64 = 86_400;
 const MAX_TRACKED_ACTION_RATE_LIMIT_KEYS: usize = 10_000;
 const PORT_FALLBACK_SCAN_LIMIT: u16 = 100;
 const SERVER_SHUTDOWN_GRACE: Duration = Duration::from_secs(5);
@@ -107,6 +113,43 @@ pub struct ServerConfig {
 }
 
 impl ServerConfig {
+    fn validate_limits(&self) -> Result<()> {
+        if self.action_body_limit_bytes == 0
+            || self.action_body_limit_bytes > MAX_ACTION_BODY_LIMIT_BYTES
+        {
+            return Err(RuvyxaError::Message(format!(
+                "security.actionLimit must be between 1 and {MAX_ACTION_BODY_LIMIT_BYTES} bytes"
+            )));
+        }
+        if self.api_body_limit_bytes == 0 || self.api_body_limit_bytes > MAX_API_BODY_LIMIT_BYTES {
+            return Err(RuvyxaError::Message(format!(
+                "security.apiLimit must be between 1 and {MAX_API_BODY_LIMIT_BYTES} bytes"
+            )));
+        }
+        if self.action_rate_limit_max == 0
+            || self.action_rate_limit_max > MAX_ACTION_RATE_LIMIT_REQUESTS
+        {
+            return Err(RuvyxaError::Message(format!(
+                "security.actionRateLimit.max must be between 1 and {MAX_ACTION_RATE_LIMIT_REQUESTS}"
+            )));
+        }
+        if self.action_rate_limit_window.is_zero()
+            || self.action_rate_limit_window.as_secs() > MAX_ACTION_RATE_LIMIT_WINDOW_SECS
+        {
+            return Err(RuvyxaError::Message(format!(
+                "security.actionRateLimit.window must be between 1 and {MAX_ACTION_RATE_LIMIT_WINDOW_SECS} seconds"
+            )));
+        }
+        if self.plugin_response_body_limit_bytes == 0
+            || self.plugin_response_body_limit_bytes > MAX_PLUGIN_RESPONSE_BODY_LIMIT_BYTES
+        {
+            return Err(RuvyxaError::Message(format!(
+                "security.pluginLimit must be between 1 and {MAX_PLUGIN_RESPONSE_BODY_LIMIT_BYTES} bytes"
+            )));
+        }
+        Ok(())
+    }
+
     pub fn dev(root: impl Into<PathBuf>, host: impl Into<String>, port: u16) -> Self {
         let root = root.into();
         Self {
@@ -343,6 +386,7 @@ fn discover_options(config: &ServerConfig) -> DiscoverOptions {
 }
 
 pub async fn serve(config: ServerConfig) -> Result<()> {
+    config.validate_limits()?;
     let startup_started = Instant::now();
     let manifest = discover_routes(discover_options(&config))?;
     info!(routes = manifest.routes.len(), "discovered routes");
@@ -482,8 +526,14 @@ async fn shutdown_signal() -> &'static str {
     {
         use tokio::signal::unix::{SignalKind, signal};
 
-        let mut terminate = signal(SignalKind::terminate())
-            .expect("failed to register SIGTERM handler for Ruvyxa server");
+        let mut terminate = match signal(SignalKind::terminate()) {
+            Ok(signal) => signal,
+            Err(error) => {
+                tracing::warn!(%error, "failed to register SIGTERM handler; falling back to Ctrl-C");
+                let _ = tokio::signal::ctrl_c().await;
+                return "CTRL_C";
+            }
+        };
         tokio::select! {
             _ = tokio::signal::ctrl_c() => "SIGINT",
             _ = terminate.recv() => "SIGTERM",
@@ -1050,11 +1100,15 @@ async fn client_bundle(
             );
             response
         }
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("console.error({:?});", error.to_string()),
-        )
-            .into_response(),
+        Err(error) => {
+            error!(%error, path = %query.path, "client bundle request failed");
+            let message = public_internal_error(&state.config, &error);
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("console.error({message:?});"),
+            )
+                .into_response()
+        }
     };
     with_security_headers(response)
 }
@@ -1070,12 +1124,23 @@ async fn action_endpoint(
         return with_security_headers(response);
     }
 
+    let (content_type, payload) = match validate_action_payload(&headers, &body) {
+        Ok(payload) => payload,
+        Err(response) => return with_security_headers(*response),
+    };
+
     let rate_key = action_rate_limit_key(peer, &headers, &query, &state.config);
     let retry_after = {
-        let mut limiter = state
-            .action_limiter
-            .lock()
-            .expect("action limiter mutex poisoned");
+        let Ok(mut limiter) = state.action_limiter.lock() else {
+            error!("action rate limiter mutex poisoned; rejecting request");
+            return with_security_headers(
+                (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "Service temporarily unavailable",
+                )
+                    .into_response(),
+            );
+        };
         (!limiter.allow(&rate_key)).then(|| limiter.retry_after_seconds(&rate_key))
     };
     if let Some(retry_after) = retry_after {
@@ -1089,21 +1154,26 @@ async fn action_endpoint(
         );
     }
 
-    let response = match render_server_action_pooled(
-        &state,
-        &query.path,
-        &query.name,
-        std::str::from_utf8(&body).unwrap_or("{}"),
-    )
-    .await
-    {
-        Ok(response) => response,
-        Err(error) => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            format!("console.error({:?});", error.to_string()),
-        )
-            .into_response(),
-    };
+    let response =
+        match render_server_action_pooled(&state, &query.path, &query.name, &payload, content_type)
+            .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                error!(
+                    %error,
+                    path = %query.path,
+                    action = %query.name,
+                    "server action request failed"
+                );
+                let message = public_internal_error(&state.config, &error);
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("console.error({message:?});"),
+                )
+                    .into_response()
+            }
+        };
     with_security_headers(response)
 }
 
@@ -1117,11 +1187,14 @@ async fn trace_endpoint(
     let response =
         match runtime_trace_cached(&state.config, &state.runtime_cache, &query.path).await {
             Ok(trace) => json_response(StatusCode::OK, &trace),
-            Err(error) => (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("console.error({:?});", error.to_string()),
-            )
-                .into_response(),
+            Err(error) => {
+                error!(%error, path = %query.path, "runtime trace request failed");
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("console.error({:?});", error.to_string()),
+                )
+                    .into_response()
+            }
         };
     with_security_headers(response)
 }
@@ -1199,12 +1272,10 @@ async fn handle_request(
             request_body = plugin_request.body.clone();
         }
         Err(error) => {
+            error!(%error, path = %request_path, "middleware request plugin failed");
+            let message = public_internal_error(&state.config, &error);
             return with_security_headers(
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("Middleware plugin request phase failed: {error}"),
-                )
-                    .into_response(),
+                (StatusCode::INTERNAL_SERVER_ERROR, message).into_response(),
             );
         }
     }
@@ -1221,6 +1292,7 @@ async fn handle_request(
     let response = match render_result {
         Ok(response) => response,
         Err(error) => {
+            error!(%error, path = %request_path, "request rendering failed");
             let is_dev = state.config.watch && state.config.error_overlay;
             match &error {
                 RuvyxaError::Diagnostic(diag) => {
@@ -1230,7 +1302,7 @@ async fn handle_request(
                     let body = if is_dev {
                         dev_error_overlay(&error.to_string(), None, None, None)
                     } else {
-                        plain_error_page(&error.to_string())
+                        plain_error_page("Internal server error")
                     };
                     html_response(StatusCode::INTERNAL_SERVER_ERROR, body)
                 }
@@ -1239,13 +1311,16 @@ async fn handle_request(
     };
     let response = match apply_response_plugins(&state, &plugin_request, response).await {
         Ok(response) => response,
-        Err(error) => with_security_headers(
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("Middleware plugin response phase failed: {error}"),
+        Err(error) => {
+            error!(%error, path = %request_path, "middleware response plugin failed");
+            with_security_headers(
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    public_internal_error(&state.config, &error),
+                )
+                    .into_response(),
             )
-                .into_response(),
-        ),
+        }
     };
     if state.config.watch && should_log_dev_request(&request_path) {
         println!(
@@ -1577,7 +1652,9 @@ fn serve_client_file_sync(client_dir: &Path, request_path: &str) -> Result<Optio
     {
         return Ok(None);
     }
-    let file = client_dir.join(file_name);
+    let Some(file) = contained_public_asset(client_dir, &client_dir.join(file_name)) else {
+        return Ok(None);
+    };
     if !file.is_file() {
         return Ok(None);
     }
@@ -1893,7 +1970,8 @@ fn serve_prerendered_html(prerender_dir: &Path, request_path: &str) -> Option<St
         prerender_dir.join(sanitized).join("index.html")
     };
 
-    fs::read_to_string(&html_path).ok()
+    let html_path = contained_public_asset(prerender_dir, &html_path)?;
+    fs::read_to_string(html_path).ok()
 }
 
 /// CSR: emit a minimal HTML shell with no server-rendered content.
@@ -2238,6 +2316,7 @@ async fn render_server_action_pooled(
     request_path: &str,
     action_name: &str,
     payload_json: &str,
+    content_type: &str,
 ) -> Result<Response> {
     let (manifest, router) = state.runtime_cache.router(&state.config).await?;
     let Some(route_match) = router.find(&manifest, request_path) else {
@@ -2270,6 +2349,7 @@ async fn render_server_action_pooled(
             &action_file,
             action_name,
             payload_json,
+            content_type,
             request_path,
         )
         .await?;
@@ -2368,8 +2448,7 @@ async fn serve_public_file(
     // Check If-None-Match for conditional response
     if let Some(headers) = request_headers
         && let Some(if_none_match) = headers.get(header::IF_NONE_MATCH)
-        && let Ok(client_etag) = if_none_match.to_str()
-        && client_etag.trim_matches('"') == etag.trim_matches('"')
+        && etag_matches(if_none_match, &etag)
     {
         let mut response = StatusCode::NOT_MODIFIED.into_response();
         if vary_accept {
@@ -2480,6 +2559,24 @@ fn compute_etag(bytes: &[u8]) -> String {
     format!("\"{}\"", &hash.to_hex()[..16])
 }
 
+fn etag_matches(value: &HeaderValue, etag: &str) -> bool {
+    let Ok(value) = value.to_str() else {
+        return false;
+    };
+    let target = etag.trim_matches('"');
+    value.split(',').any(|candidate| {
+        let candidate = candidate.trim();
+        if candidate == "*" {
+            return true;
+        }
+        candidate
+            .strip_prefix("W/")
+            .unwrap_or(candidate)
+            .trim_matches('"')
+            == target
+    })
+}
+
 async fn serve_client_file(
     client_dir: &Path,
     request_path: &str,
@@ -2497,7 +2594,9 @@ async fn serve_client_file(
         return Ok(None);
     }
 
-    let file = client_dir.join(file_name);
+    let Some(file) = contained_public_asset(client_dir, &client_dir.join(file_name)) else {
+        return Ok(None);
+    };
     match tokio::fs::metadata(&file).await {
         Ok(meta) if meta.is_file() => {}
         _ => return Ok(None),
@@ -2515,8 +2614,7 @@ async fn serve_client_file(
 
     if let Some(headers) = request_headers
         && let Some(if_none_match) = headers.get(header::IF_NONE_MATCH)
-        && let Ok(client_etag) = if_none_match.to_str()
-        && client_etag.trim_matches('"') == etag.trim_matches('"')
+        && etag_matches(if_none_match, &etag)
     {
         let mut response = StatusCode::NOT_MODIFIED.into_response();
         apply_security_headers(&mut response);
@@ -2543,6 +2641,12 @@ async fn serve_client_file(
 
 fn html_response(status: StatusCode, body: String) -> Response {
     let mut response = (status, Html(body)).into_response();
+    if status.is_client_error() || status.is_server_error() {
+        response.headers_mut().insert(
+            header::CACHE_CONTROL,
+            HeaderValue::from_static("no-store, max-age=0"),
+        );
+    }
     apply_security_headers(&mut response);
     response
 }
@@ -2584,6 +2688,18 @@ fn apply_security_headers(response: &mut Response) {
         HeaderName::from_static("cross-origin-opener-policy"),
         HeaderValue::from_static("same-origin"),
     );
+    headers.insert(
+        HeaderName::from_static("cross-origin-resource-policy"),
+        HeaderValue::from_static("same-origin"),
+    );
+    headers.insert(
+        HeaderName::from_static("x-frame-options"),
+        HeaderValue::from_static("DENY"),
+    );
+    headers.insert(
+        HeaderName::from_static("x-permitted-cross-domain-policies"),
+        HeaderValue::from_static("none"),
+    );
 }
 
 fn finalize_security_headers(mut response: Response, enabled: bool) -> Response {
@@ -2595,6 +2711,9 @@ fn finalize_security_headers(mut response: Response, enabled: bool) -> Response 
         headers.remove("referrer-policy");
         headers.remove("permissions-policy");
         headers.remove("cross-origin-opener-policy");
+        headers.remove("cross-origin-resource-policy");
+        headers.remove("x-frame-options");
+        headers.remove("x-permitted-cross-domain-policies");
     }
     response
 }
@@ -3246,23 +3365,66 @@ fn validate_action_request(
 }
 
 fn action_content_type_is_supported(headers: &HeaderMap) -> bool {
-    let Some(content_type) = headers
+    action_content_type(headers).is_some()
+}
+
+fn action_content_type(headers: &HeaderMap) -> Option<&'static str> {
+    let content_type = headers
         .get(header::CONTENT_TYPE)
         .and_then(|value| value.to_str().ok())
-    else {
-        return true;
+        .and_then(|value| value.split(';').next())?
+        .trim();
+
+    if content_type.eq_ignore_ascii_case("application/json") {
+        Some("application/json")
+    } else if content_type.eq_ignore_ascii_case("application/x-www-form-urlencoded") {
+        Some("application/x-www-form-urlencoded")
+    } else {
+        None
+    }
+}
+
+fn validate_action_payload(
+    headers: &HeaderMap,
+    body: &[u8],
+) -> std::result::Result<(&'static str, String), Box<Response>> {
+    let Some(content_type) = action_content_type(headers) else {
+        return Err(Box::new(
+            (
+                StatusCode::UNSUPPORTED_MEDIA_TYPE,
+                "Action payload must declare JSON or URL-encoded form data",
+            )
+                .into_response(),
+        ));
+    };
+    let payload = std::str::from_utf8(body).map_err(|_| {
+        Box::new(
+            (
+                StatusCode::BAD_REQUEST,
+                "Action payload must be valid UTF-8",
+            )
+                .into_response(),
+        )
+    })?;
+    let payload = if payload.is_empty() && content_type == "application/json" {
+        "{}".to_string()
+    } else {
+        payload.to_string()
     };
 
-    let content_type = content_type
-        .split(';')
-        .next()
-        .unwrap_or_default()
-        .trim()
-        .to_ascii_lowercase();
-    matches!(
-        content_type.as_str(),
-        "application/json" | "application/x-www-form-urlencoded"
-    )
+    if content_type == "application/json"
+        && let Err(error) = serde_json::from_str::<serde_json::Value>(&payload)
+    {
+        return Err(Box::new(
+            (
+                StatusCode::BAD_REQUEST,
+                format!("Action JSON payload is malformed: {error}"),
+            )
+                .into_response(),
+        ));
+    }
+
+    Ok((content_type, payload))
 }
 
 fn action_origin_is_cross_site(headers: &HeaderMap, config: &ServerConfig, peer: IpAddr) -> bool {
@@ -3270,7 +3432,13 @@ fn action_origin_is_cross_site(headers: &HeaderMap, config: &ServerConfig, peer:
         .get(header::ORIGIN)
         .and_then(|value| value.to_str().ok())
     else {
-        return false;
+        // Modern browsers send either Origin or Fetch Metadata. Fail closed
+        // when both are absent; otherwise a stripped-origin cross-site form can
+        // reach a mutation endpoint with no same-origin evidence.
+        return !headers
+            .get("sec-fetch-site")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.eq_ignore_ascii_case("same-origin"));
     };
     let Some(host) = headers
         .get(header::HOST)
@@ -3387,7 +3555,7 @@ fn extract_code_frame(file: &Path, line: Option<u32>) -> Option<String> {
 
 fn error_response(status: StatusCode, diagnostics: &Diagnostic, is_dev: bool) -> Response {
     if !is_dev {
-        return html_response(status, plain_error_page(&diagnostics.to_string()));
+        return html_response(status, plain_error_page("Internal server error"));
     }
     let code_frame = diagnostics
         .span
@@ -3395,6 +3563,14 @@ fn error_response(status: StatusCode, diagnostics: &Diagnostic, is_dev: bool) ->
         .and_then(|span| extract_code_frame(&span.file, span.line));
     let body = dev_diagnostic_overlay(diagnostics, code_frame.as_deref());
     html_response(status, body)
+}
+
+fn public_internal_error(config: &ServerConfig, error: &RuvyxaError) -> String {
+    if config.watch {
+        error.to_string()
+    } else {
+        "Internal server error".to_string()
+    }
 }
 
 fn error_page(message: &str, show_overlay: bool) -> String {
@@ -3779,6 +3955,32 @@ mod tests {
         assert!(!html.contains("<script>alert(1)</script>"));
     }
 
+    #[tokio::test]
+    async fn production_errors_do_not_expose_internal_details() {
+        let config = ServerConfig::production(".", "127.0.0.1", 3000);
+        let error =
+            RuvyxaError::Message("database password from C:\\secrets\\production.env".to_string());
+
+        assert_eq!(
+            public_internal_error(&config, &error),
+            "Internal server error"
+        );
+        assert_eq!(
+            public_internal_error(&ServerConfig::dev(".", "127.0.0.1", 3000), &error),
+            error.to_string()
+        );
+
+        let diagnostic = Diagnostic::new("RUV9999", "sensitive compiler detail")
+            .explain("private path C:\\workspace\\secret.ts");
+        let response = error_response(StatusCode::INTERNAL_SERVER_ERROR, &diagnostic, false);
+        assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+        let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
+        let body = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body.contains("Internal server error"));
+        assert!(!body.contains("sensitive compiler detail"));
+        assert!(!body.contains("secret.ts"));
+    }
+
     #[test]
     fn plain_error_page_uses_centered_404_state_and_logo() {
         let html = plain_error_page("Route not found");
@@ -3907,6 +4109,52 @@ mod tests {
                 "127.0.0.1:3000".parse().unwrap(),
             )
             .is_none()
+        );
+    }
+
+    #[test]
+    fn rejects_actions_without_same_origin_evidence() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("localhost:3000"));
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
+        let config = ServerConfig::dev(".", "localhost", 3000);
+        let peer = "127.0.0.1:3000".parse().unwrap();
+
+        assert!(validate_action_request(&headers, 2, &config, peer).is_some());
+
+        headers.insert("sec-fetch-site", HeaderValue::from_static("same-origin"));
+        assert!(validate_action_request(&headers, 2, &config, peer).is_none());
+    }
+
+    #[test]
+    fn rejects_missing_ambiguous_and_malformed_action_payloads() {
+        let headers = HeaderMap::new();
+        assert!(!action_content_type_is_supported(&headers));
+        assert!(validate_action_payload(&headers, b"{}").is_err());
+
+        let mut json_headers = HeaderMap::new();
+        json_headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json; charset=utf-8"),
+        );
+        assert!(validate_action_payload(&json_headers, b"title=form").is_err());
+        assert!(validate_action_payload(&json_headers, &[0xff, 0xfe]).is_err());
+        assert_eq!(
+            validate_action_payload(&json_headers, b"").unwrap(),
+            ("application/json", "{}".to_string())
+        );
+
+        let mut form_headers = HeaderMap::new();
+        form_headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/x-www-form-urlencoded"),
+        );
+        assert_eq!(
+            validate_action_payload(&form_headers, b"null").unwrap(),
+            ("application/x-www-form-urlencoded", "null".to_string())
         );
     }
 
@@ -4062,6 +4310,18 @@ mod tests {
     }
 
     #[test]
+    fn server_config_rejects_unbounded_security_limits() {
+        let mut config = ServerConfig::dev(".", "localhost", 3000);
+        config.action_body_limit_bytes = MAX_ACTION_BODY_LIMIT_BYTES + 1;
+        assert!(config.validate_limits().is_err());
+
+        config.action_body_limit_bytes = MAX_ACTION_BODY_BYTES;
+        config.action_rate_limit_window =
+            Duration::from_secs(MAX_ACTION_RATE_LIMIT_WINDOW_SECS + 1);
+        assert!(config.validate_limits().is_err());
+    }
+
+    #[test]
     fn runtime_env_uses_the_configured_jsx_runtime() {
         let temp = tempfile::tempdir().unwrap();
         let mut config = ServerConfig::dev(temp.path(), "localhost", 3000);
@@ -4080,6 +4340,10 @@ mod tests {
     fn action_security_options_control_request_validation() {
         let mut headers = HeaderMap::new();
         headers.insert(header::HOST, HeaderValue::from_static("localhost:3000"));
+        headers.insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json"),
+        );
         headers.insert(
             header::ORIGIN,
             HeaderValue::from_static("https://example.com"),
@@ -4218,6 +4482,14 @@ mod tests {
             response.headers().get("referrer-policy"),
             Some(&HeaderValue::from_static("strict-origin-when-cross-origin"))
         );
+        assert_eq!(
+            response.headers().get("x-frame-options"),
+            Some(&HeaderValue::from_static("DENY"))
+        );
+        assert_eq!(
+            response.headers().get("cross-origin-resource-policy"),
+            Some(&HeaderValue::from_static("same-origin"))
+        );
     }
 
     #[test]
@@ -4231,6 +4503,13 @@ mod tests {
                 .is_none()
         );
         assert!(response.headers().get("referrer-policy").is_none());
+        assert!(response.headers().get("x-frame-options").is_none());
+        assert!(
+            response
+                .headers()
+                .get("cross-origin-resource-policy")
+                .is_none()
+        );
     }
 
     #[test]

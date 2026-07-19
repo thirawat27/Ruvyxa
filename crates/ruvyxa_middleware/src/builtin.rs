@@ -6,6 +6,7 @@
 use std::collections::BTreeMap;
 use std::future::Future;
 use std::pin::Pin;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
@@ -18,6 +19,7 @@ use tracing::info;
 use crate::config::RateLimitConfig;
 
 const MAX_TRACKED_RATE_LIMIT_KEYS: usize = 10_000;
+static NEXT_REQUEST_ID: AtomicU64 = AtomicU64::new(1);
 
 // ─── Timing Layer ──────────────────────────────────────────────────────────────
 
@@ -107,20 +109,40 @@ where
     fn call(&mut self, request: Request<ReqBody>) -> Self::Future {
         let method = request.method().clone();
         let path = request.uri().path().to_string();
+        let request_id = request
+            .headers()
+            .get("x-request-id")
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| !value.is_empty() && value.len() <= 128)
+            .map(ToOwned::to_owned)
+            .unwrap_or_else(|| {
+                format!(
+                    "ruvyxa-{:x}",
+                    NEXT_REQUEST_ID.fetch_add(1, Ordering::Relaxed)
+                )
+            });
+        let mut request = request;
+        if let Ok(value) = HeaderValue::from_str(&request_id) {
+            request.headers_mut().insert("x-request-id", value);
+        }
         let mut inner = self.inner.clone();
 
         Box::pin(async move {
             let start = Instant::now();
-            let response = inner.call(request).await?;
+            let mut response = inner.call(request).await?;
             let elapsed = start.elapsed();
             let status = response.status().as_u16();
             info!(
+                request_id = %request_id,
                 method = %method,
                 path = %path,
                 status = status,
                 duration_ms = elapsed.as_millis() as u64,
                 "request"
             );
+            if let Ok(value) = HeaderValue::from_str(&request_id) {
+                response.headers_mut().insert("x-request-id", value);
+            }
             Ok(response)
         })
     }
@@ -423,7 +445,10 @@ impl RateLimitLayer {
     }
 
     fn allow(&self, key: &str) -> bool {
-        let mut state = self.state.lock().expect("rate limiter mutex poisoned");
+        let Ok(mut state) = self.state.lock() else {
+            tracing::error!("rate limiter mutex poisoned; rejecting request");
+            return false;
+        };
         let now = Instant::now();
         let expired_current_key = state
             .get(key)
@@ -462,7 +487,9 @@ impl RateLimitLayer {
     }
 
     fn retry_after_seconds(&self, key: &str) -> u64 {
-        let state = self.state.lock().expect("rate limiter mutex poisoned");
+        let Ok(state) = self.state.lock() else {
+            return 1;
+        };
         state
             .get(key)
             .map(|bucket| {

@@ -6,7 +6,7 @@ work in the repository.
 ## Repository Shape
 
 - `crates/` contains the Rust workspace.
-- `crates/ruvyxa_cli` owns the native CLI commands: `dev`, `build`, `check`, `start`, `preview`,
+- `crates/ruvyxa_cli` owns the Ruvyxa CLI commands: `dev`, `build`, `check`, `start`, `preview`,
   `routes`, `analyze`, `doctor`, `clean`, `trace`, `bench`, and `test:parity`.
 - `crates/ruvyxa_bundler` owns TypeScript/JSX compilation, module resolution, linking, minification,
   source maps, and server/client boundary checks.

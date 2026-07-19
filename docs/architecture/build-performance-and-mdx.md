@@ -2,9 +2,9 @@
 
 ## Pass and scope
 
-**Pass:** Full. The production build crosses CLI orchestration, the native resolver/compiler/linker,
-the persistent Node compiler workers, prerendering, and the on-disk artifact cache. A narrower pass
-would miss repeated work across those boundaries.
+**Pass:** Full. The production build crosses CLI orchestration, the Ruvyxa Bundler
+resolver/compiler/linker, the persistent Node compiler workers, prerendering, and the on-disk
+artifact cache. A narrower pass would miss repeated work across those boundaries.
 
 **Evidence checked:** workspace manifests and tooling, `ruvyxa_cli/src/main.rs`, bundler context,
 resolver/compiler/content/linker paths, the packaged Node compiler and tests, shared-route/cache
@@ -25,7 +25,7 @@ ruvyxa build
   -> prerender static routes through the bounded Node worker pool
 
 page.md/page.mdx
-  -> native path: YAML -> markdown-rs mdast -> generated React ESM
+  -> Ruvyxa Bundler path: YAML -> markdown-rs mdast -> generated React ESM
   -> Node SSR/SSG path: YAML -> @mdx-js/mdx + remark-gfm -> generated React ESM
   -> normal resolver/compiler/boundary/linker pipeline
 ```
@@ -34,14 +34,15 @@ page.md/page.mdx
 
 1. **High · Direct evidence · High confidence — route graphs were transformed and scanned more than
    once.** The Node compiler transformed source during graph discovery and again during rewriting,
-   while the native resolver repeatedly walked the same plugin-free dependency closure. Impact: CPU
-   and filesystem work grew with routes × shared modules. Correction: a bounded content-keyed Node
-   transform cache, reuse of the discovery transform, plugin-free dependency memoization, and a
-   production-only immutable source snapshot.
-2. **High · Direct evidence · High confidence — native Markdown/MDX could compile twice per route.**
-   Resolution compiled content to discover imports and the compiler compiled the same source again
-   for output. Impact: large content sites duplicated parsing and code generation. Correction: a
-   bounded successful-result cache keyed by extension and source content; errors remain uncached.
+   while the Ruvyxa Bundler resolver repeatedly walked the same plugin-free dependency closure.
+   Impact: CPU and filesystem work grew with routes × shared modules. Correction: a bounded
+   content-keyed Node transform cache, reuse of the discovery transform, plugin-free dependency
+   memoization, and a production-only immutable source snapshot.
+2. **High · Direct evidence · High confidence — the Ruvyxa Bundler Markdown/MDX path could compile
+   twice per route.** Resolution compiled content to discover imports and the compiler compiled the
+   same source again for output. Impact: large content sites duplicated parsing and code generation.
+   Correction: a bounded successful-result cache keyed by extension and source content; errors
+   remain uncached.
 3. **High · Direct evidence · High confidence — shared-route output was rebuilt despite available
    prepared graphs and valid warm inputs.** The legacy synthetic entry resolved and compiled shared
    dependencies again. Impact: cold builds discarded prepared compiler work and warm builds still
@@ -60,7 +61,7 @@ page.md/page.mdx
    gaps.** Line-based ESM extraction, scalar-only frontmatter, and incomplete GFM/table/heading
    rendering did not cover the documented surface. Correction: parser-backed MDX ESM boundaries, Oxc
    syntax feedback, combined GFM+MDX constructs, structured YAML, semantic tables/references, stable
-   duplicate heading slugs, JSX member/spread support, and Node/native parity tests.
+   duplicate heading slugs, JSX member/spread support, and Node/Ruvyxa Bundler parity tests.
 
 ## Implemented outcome
 
@@ -85,8 +86,8 @@ page.md/page.mdx
 - Prerender context hashing ignores shell/tooling session noise (`PATH`, Cargo/Rust, Codex,
   pnpm/npm, and prompt-session variables) while retaining project `.env` and stable application
   environment values. This prevents false cache misses between otherwise identical invocations.
-- Native and packaged Node MDX paths support structured frontmatter, GFM, semantic headings/tables,
-  and parser-backed ESM while retaining the existing generated-module contract.
+- Ruvyxa Bundler and packaged Node MDX paths support structured frontmatter, GFM, semantic
+  headings/tables, and parser-backed ESM while retaining the existing generated-module contract.
 
 ## Comparable benchmark
 

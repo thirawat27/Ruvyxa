@@ -15,7 +15,9 @@ use chrono::Local;
 use clap::builder::styling::{AnsiColor, Effects, Styles};
 use clap::{Parser, Subcommand, ValueEnum};
 use ruvyxa_dev_server::{
-    MAX_PLUGIN_RESPONSE_BODY_LIMIT_BYTES, ServerConfig, render_request, serve,
+    MAX_ACTION_BODY_LIMIT_BYTES, MAX_ACTION_RATE_LIMIT_REQUESTS, MAX_ACTION_RATE_LIMIT_WINDOW_SECS,
+    MAX_API_BODY_LIMIT_BYTES, MAX_PLUGIN_RESPONSE_BODY_LIMIT_BYTES, ServerConfig, render_request,
+    serve,
 };
 use ruvyxa_diagnostics::Diagnostic;
 use ruvyxa_graph::{
@@ -279,7 +281,7 @@ struct BuildPluginConfig {
     parallel: bool,
 }
 
-struct NativeBuildCache<'a> {
+struct RuvyxaBuildCache<'a> {
     dependency_hash: &'a str,
     directory: &'a Path,
 }
@@ -314,15 +316,28 @@ impl ProjectConfig {
         for entry in &self.css.entries {
             validate_project_relative_path("css.entries", entry)?;
         }
-        validate_positive_limit(
+        validate_bounded_limit(
             "security.actionLimit",
             self.security.action_body_limit_bytes,
+            MAX_ACTION_BODY_LIMIT_BYTES,
         )?;
-        validate_positive_limit("security.apiLimit", self.security.api_body_limit_bytes)?;
+        validate_bounded_limit(
+            "security.apiLimit",
+            self.security.api_body_limit_bytes,
+            MAX_API_BODY_LIMIT_BYTES,
+        )?;
         validate_plugin_response_limit(self.security.plugin_response_body_limit_bytes)?;
         if let Some(rate_limit) = &self.security.action_rate_limit {
-            validate_positive_limit("security.actionRateLimit.max", rate_limit.max)?;
-            validate_positive_limit("security.actionRateLimit.window", rate_limit.window)?;
+            validate_bounded_limit(
+                "security.actionRateLimit.max",
+                rate_limit.max,
+                MAX_ACTION_RATE_LIMIT_REQUESTS,
+            )?;
+            validate_bounded_limit(
+                "security.actionRateLimit.window",
+                rate_limit.window,
+                MAX_ACTION_RATE_LIMIT_WINDOW_SECS,
+            )?;
         }
         validate_trusted_proxy_ips(&self.security.trusted_proxy_ips)?;
         parse_jsx_runtime(self.build.jsx_runtime.as_deref())?;
@@ -352,6 +367,21 @@ where
 {
     if value.is_some_and(|value| value == T::from(0)) {
         anyhow::bail!("RUV1601 config field `{field}` must be greater than zero");
+    }
+    Ok(())
+}
+
+fn validate_bounded_limit<T>(field: &str, value: Option<T>, maximum: T) -> anyhow::Result<()>
+where
+    T: PartialOrd + PartialEq + From<u8> + std::fmt::Display + Copy,
+{
+    if let Some(value) = value {
+        if value == T::from(0) {
+            anyhow::bail!("RUV1601 config field `{field}` must be greater than zero");
+        }
+        if value > maximum {
+            anyhow::bail!("RUV1602 config field `{field}` must not exceed {maximum}");
+        }
     }
     Ok(())
 }
@@ -847,7 +877,7 @@ async fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Resul
         &client_dir,
         &config.build,
         &config.plugins,
-        NativeBuildCache {
+        RuvyxaBuildCache {
             dependency_hash: &config.config_dependency_hash,
             directory: &build_cache_dir(&args.root, &config.cache),
         },
@@ -869,7 +899,7 @@ async fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Resul
         &client_dir,
         &style_collection.css,
         &config.build,
-        NativeBuildCache {
+        RuvyxaBuildCache {
             dependency_hash: &config.config_dependency_hash,
             directory: &build_cache_dir(&args.root, &config.cache),
         },
@@ -1244,7 +1274,7 @@ async fn prerender_static_routes(
     client_dir: &Path,
     styles: &str,
     build: &BuildConfigOptions,
-    cache: NativeBuildCache<'_>,
+    cache: RuvyxaBuildCache<'_>,
 ) -> anyhow::Result<Vec<PrerenderedRoute>> {
     use ruvyxa_graph::RouteKind;
 
@@ -2276,7 +2306,7 @@ fn emit_client_bundles(
     client_dir: &Path,
     build: &BuildConfigOptions,
     plugins: &[BuildPluginConfig],
-    cache: NativeBuildCache<'_>,
+    cache: RuvyxaBuildCache<'_>,
 ) -> anyhow::Result<serde_json::Value> {
     let page_routes = manifest
         .routes
@@ -4958,6 +4988,24 @@ mod tests {
     }
 
     #[test]
+    fn rejects_security_limits_above_hard_ceiling() {
+        let config: ProjectConfig = serde_json::from_value(json!({
+            "security": {
+                "actionLimit": MAX_ACTION_BODY_LIMIT_BYTES + 1,
+                "apiLimit": MAX_API_BODY_LIMIT_BYTES + 1,
+                "actionRateLimit": {
+                    "max": MAX_ACTION_RATE_LIMIT_REQUESTS + 1,
+                    "window": MAX_ACTION_RATE_LIMIT_WINDOW_SECS + 1
+                }
+            }
+        }))
+        .unwrap();
+
+        let error = config.validate_paths().unwrap_err();
+        assert!(error.to_string().contains("security.actionLimit"));
+    }
+
+    #[test]
     fn rejects_invalid_trusted_proxy_ips() {
         let config: ProjectConfig = serde_json::from_value(json!({
             "security": { "trustedProxyIps": ["not-an-ip"] }
@@ -5133,7 +5181,7 @@ mod tests {
             &client_dir,
             &build,
             &[],
-            NativeBuildCache {
+            RuvyxaBuildCache {
                 dependency_hash: "no-config",
                 directory: &root.join(".ruvyxa/cache/bundler"),
             },
@@ -5186,7 +5234,7 @@ mod tests {
             &client_dir,
             &build,
             &[],
-            NativeBuildCache {
+            RuvyxaBuildCache {
                 dependency_hash: "no-config",
                 directory: &root.join(".ruvyxa/cache/bundler"),
             },
@@ -5263,7 +5311,7 @@ mod tests {
             &client_dir,
             &build,
             &[],
-            NativeBuildCache {
+            RuvyxaBuildCache {
                 dependency_hash: "no-config",
                 directory: &root.join(".ruvyxa/cache/bundler"),
             },
@@ -5285,7 +5333,7 @@ mod tests {
             &client_dir,
             &build,
             &[],
-            NativeBuildCache {
+            RuvyxaBuildCache {
                 dependency_hash: "no-config",
                 directory: &root.join(".ruvyxa/cache/bundler"),
             },
@@ -5341,7 +5389,7 @@ mod tests {
                 &client_dir,
                 &build,
                 &[],
-                NativeBuildCache {
+                RuvyxaBuildCache {
                     dependency_hash: "no-config",
                     directory: &cache_dir,
                 },
@@ -5463,7 +5511,7 @@ export default config({
             &client_dir,
             &config.build,
             &config.plugins,
-            NativeBuildCache {
+            RuvyxaBuildCache {
                 dependency_hash: &config.config_dependency_hash,
                 directory: &build_cache_dir(root, &config.cache),
             },
@@ -5540,7 +5588,7 @@ export default { build: { minify: false }, plugins: [plugin] }
             &client_dir,
             &first_config.build,
             &first_config.plugins,
-            NativeBuildCache {
+            RuvyxaBuildCache {
                 dependency_hash: &first_config.config_dependency_hash,
                 directory: &cache_dir,
             },
@@ -5562,7 +5610,7 @@ export default { build: { minify: false }, plugins: [plugin] }
             &client_dir,
             &second_config.build,
             &second_config.plugins,
-            NativeBuildCache {
+            RuvyxaBuildCache {
                 dependency_hash: &second_config.config_dependency_hash,
                 directory: &cache_dir,
             },

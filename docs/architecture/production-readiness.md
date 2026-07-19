@@ -3,7 +3,7 @@
 ## Scope
 
 - Project: Ruvyxa monorepo
-- Inspection date: 2026-07-13
+- Inspection date: 2026-07-19
 - Intake scope: improve production readiness, throughput, and quality across the framework.
 - Final documented scope: shared render cache, production pipeline, and release-quality gates.
 - Pass level: Full Mode
@@ -13,6 +13,33 @@
   note, crate manifests, runtime cache source, and workspace test suites.
 - Skipped areas: external deployment environment, CDN/WAF/TLS, secrets, production telemetry, and
   real production load; these are not present in the repository.
+
+## Full hardening follow-up (2026-07-19)
+
+The second audit covered the request/action boundary, Markdown rendering, CORS, Wasm loading,
+static-file containment, error responses, release scripts, middleware resilience, and dependency
+gates. No built-in authentication or database subsystem exists in this repository, so those controls
+remain application/deployment responsibilities.
+
+| Priority | Finding and root cause                                                                                                                                               | Correction                                                                                                                               | Status             |
+| -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | ------------------ |
+| Critical | No direct Critical finding was evidenced in the repository audit.                                                                                                    | Keep release gates and deployment controls below in force.                                                                               | Closed by evidence |
+| High     | Raw Markdown HTML was emitted with `dangerouslySetInnerHTML`, allowing stored/build-time XSS when content is untrusted.                                              | Render raw HTML as escaped text; MDX remains component-based and is still compiled separately.                                           | Fixed              |
+| High     | Actions accepted missing/ambiguous media types, invalid UTF-8, and malformed JSON through permissive fallback parsing; missing browser origin evidence was accepted. | Require JSON or form media types, validate UTF-8/JSON strictly, preserve form payloads, and fail closed on missing same-origin evidence. | Fixed              |
+| High     | Production error bodies and client overlays could expose internal paths/messages.                                                                                    | Log details server-side and return generic production error text; keep detail only in development.                                       | Fixed              |
+| High     | Credentialed CORS allowed `*`, reflecting arbitrary origins.                                                                                                         | Reject wildcard origins whenever credentials are enabled and validate methods/headers.                                                   | Fixed              |
+| High     | Wasm plugin paths were joined without canonical containment checks.                                                                                                  | Require safe project-relative `.wasm` paths and reject traversal/absolute/symlink escapes.                                               | Fixed              |
+| High     | Configurable body/rate limits could be set to unbounded values.                                                                                                      | Enforce hard upper bounds in CLI validation and server startup.                                                                          | Fixed              |
+| Medium   | Client/prerender symlinks could bypass path-segment checks.                                                                                                          | Canonicalize and require containment before reading files.                                                                               | Fixed              |
+| Medium   | Mutex poisoning and SIGTERM registration used panic paths in request/shutdown code.                                                                                  | Fail closed for poisoned limiters and gracefully fall back to Ctrl-C when signal registration fails.                                     | Fixed              |
+| Medium   | Request logs had no correlation identifier, making concurrent production failures difficult to trace.                                                                | Generate/propagate bounded `X-Request-ID` values and include them in structured request logs/responses.                                  | Fixed              |
+| Medium   | Release smoke/publish scripts interpolated paths/commands into shells.                                                                                               | Use argument-array process execution (`execFileSync`/`spawnSync`) with platform-specific binaries.                                       | Fixed              |
+| Medium   | Rust advisory scanning was not available locally and had no CI gate.                                                                                                 | Add scheduled/push/PR RustSec and npm audit workflow.                                                                                    | Fixed in CI        |
+| Low      | `If-None-Match` handling ignored weak, list, and wildcard tags.                                                                                                      | Match normalized ETags according to HTTP list semantics.                                                                                 | Fixed              |
+
+Direct fixes are covered by focused Rust/Node tests. The remaining unproved risks are deployment
+controls (TLS, CSP policy, CDN/WAF, secret rotation, auth/session policy, database authorization)
+and production-sized load/soak behavior.
 
 ## Confirmed facts
 
@@ -27,8 +54,8 @@
 - The render cache is shared by SSR and client bundle paths and stores an entry map plus FIFO queue.
   - Evidence: `crates/ruvyxa_dev_server/src/render_cache.rs`.
   - Evidence strength: Direct.
-- Baseline verification passed: 271 Rust tests and 60 package-test assertions.
-  - Evidence: local `cargo test --workspace --locked` and `pnpm -r test` runs on 2026-07-13.
+- Baseline and post-change verification passed: 351 Rust tests and the workspace package suites.
+  - Evidence: local `cargo test --workspace --locked` and `pnpm -r test` runs on 2026-07-19.
   - Evidence strength: Direct.
 
 ## System summary

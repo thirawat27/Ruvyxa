@@ -9,7 +9,7 @@ use crate::resolver::ResolveGraphCache;
 ///
 /// Production builds should keep one context for the whole route batch so
 /// parallel workers reuse compiled transforms, resolved specifiers, source
-/// reads, incremental state, and native plugin hooks.
+/// reads, incremental state, and Ruvyxa Bundler plugin hooks.
 #[derive(Debug, Clone)]
 pub struct BundleContext {
     compile_cache: CompileCache,
@@ -54,7 +54,7 @@ impl BundleContext {
         }
     }
 
-    /// Create a context with explicit caches and a native plugin pipeline.
+    /// Create a context with explicit caches and a Ruvyxa Bundler plugin pipeline.
     pub fn with_plugins(
         compile_cache: CompileCache,
         graph_cache: ResolveGraphCache,

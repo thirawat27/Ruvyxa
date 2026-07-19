@@ -27,7 +27,12 @@ describe('action renderer', () => {
 
   it('invokes exported server actions with form input', async () => {
     await withFixture(async ({ actionFile }) => {
-      const result = await runRenderer(actionFile, 'createTodo', 'title=Form+Todo')
+      const result = await runRenderer(
+        actionFile,
+        'createTodo',
+        'title=Form+Todo',
+        'application/x-www-form-urlencoded',
+      )
 
       assert.equal(result.ok, true)
       assert.equal(JSON.parse(result.body).data.title, 'Form Todo')
@@ -40,6 +45,14 @@ describe('action renderer', () => {
 
       assert.equal(result.ok, true)
       assert.equal(result.status, 404)
+    })
+  })
+
+  it('does not reinterpret malformed JSON as form input', async () => {
+    await withFixture(async ({ actionFile }) => {
+      await assert.rejects(
+        runRenderer(actionFile, 'createTodo', 'title=Wrong+Parser', 'application/json'),
+      )
     })
   })
 })
@@ -75,10 +88,10 @@ async function withFixture(run) {
   }
 }
 
-async function runRenderer(actionFile, actionName, payload) {
+async function runRenderer(actionFile, actionName, payload, contentType = 'application/json') {
   const { stdout } = await execFileAsync(
     'node',
-    [renderer, exampleRoot, actionFile, actionName, payload, '/todos'],
+    [renderer, exampleRoot, actionFile, actionName, payload, '/todos', contentType],
     {
       cwd: workspaceRoot,
       maxBuffer: 10 * 1024 * 1024,

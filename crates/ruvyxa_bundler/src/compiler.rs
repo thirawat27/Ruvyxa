@@ -50,7 +50,7 @@ pub fn compile_graph_with_cache(
     compile_graph_with_pipeline(graph, input, cache, &PluginPipeline::empty())
 }
 
-/// Compile every module using the provided cache and native plugin pipeline.
+/// Compile every module using the provided cache and Ruvyxa Bundler plugin pipeline.
 pub fn compile_graph_with_pipeline(
     graph: &[ResolvedModule],
     input: &BundleInput,

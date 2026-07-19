@@ -178,7 +178,7 @@
 - **`check`** — type checking, production build, dev/prod route parity, and page smoke rendering in
   one command.
 - **`analyze`** — structured JSON validation of routes, imports, and server/client boundaries.
-- **`doctor`** — project health check covering dependencies, environment, and native CLI status.
+- **`doctor`** — project health check covering dependencies, environment, and Ruvyxa CLI status.
 - **`bench`** — benchmark route discovery, analysis, validation, and production builds.
 - **`test:parity`** — compare dev/prod routes and smoke-render page routes.
 - **Structured diagnostics** — `RUV####` error codes with file locations and suggested fixes. Never
@@ -251,7 +251,7 @@ cargo run -p ruvyxa_cli -- dev --root examples/demo
 ```
 
 On Windows, use `setup.bat` instead of `./setup.sh`. The setup script installs locked dependencies,
-builds workspace packages, and compiles the native CLI.
+builds workspace packages, and compiles the Ruvyxa CLI.
 
 Build and test all packages:
 
@@ -511,7 +511,7 @@ cache examples.
 | `ruvyxa preview`      | Alias for `ruvyxa start` (preview production build locally)                        |
 | `ruvyxa routes`       | Print the discovered route table                                                   |
 | `ruvyxa analyze`      | Validate routes, imports, and server/client boundaries (structured JSON)           |
-| `ruvyxa doctor`       | Check project health, dependencies, environment, and native CLI status             |
+| `ruvyxa doctor`       | Check project health, dependencies, environment, and Ruvyxa CLI status             |
 | `ruvyxa trace <path>` | Print route matching details for a URL                                             |
 | `ruvyxa bench`        | Benchmark route discovery, analysis, validation, and production builds             |
 | `ruvyxa test:parity`  | Compare dev/prod routes and smoke-render page routes                               |
@@ -524,7 +524,7 @@ cache examples.
 ```text
 ┌─────────────────────────────────────────────────────────────┐
 │                     ruvyxa (npm package)                     │
-│  CLI launcher → native Rust binary (ruvyxa_cli)             │
+│  CLI launcher → Ruvyxa CLI Rust binary (ruvyxa_cli)         │
 │  Runtime: worker-pool.mjs (persistent Node IPC)             │
 └─────────────────┬───────────────────────────────────────────┘
                   │

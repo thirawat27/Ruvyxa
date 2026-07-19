@@ -32,7 +32,7 @@ On macOS or Linux, run:
 ./setup.sh
 ```
 
-Both scripts install the locked dependencies, build workspace packages, and compile the native CLI.
+Both scripts install the locked dependencies, build workspace packages, and compile the Ruvyxa CLI.
 
 `pnpm install`, which is run by both setup scripts, enables the repository pre-commit hook. It
 automatically formats staged files that Prettier supports and re-stages only those files. When Rust

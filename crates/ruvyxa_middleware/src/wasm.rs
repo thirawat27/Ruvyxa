@@ -126,6 +126,12 @@ pub struct WasmPluginRuntime {
 impl WasmPluginRuntime {
     /// Create a new plugin runtime and load all configured plugins.
     pub async fn new(project_root: &Path, configs: &[PluginConfig]) -> Result<Self> {
+        let canonical_root = project_root
+            .canonicalize()
+            .map_err(|source| RuvyxaError::Io {
+                message: format!("Failed to resolve project root {}", project_root.display()),
+                source,
+            })?;
         let mut engine_config = Config::new();
         engine_config.consume_fuel(true);
         engine_config.wasm_component_model(false);
@@ -137,7 +143,40 @@ impl WasmPluginRuntime {
         let mut plugins = Vec::new();
 
         for plugin_config in configs {
-            let wasm_path = project_root.join(&plugin_config.path);
+            let configured_path = Path::new(&plugin_config.path);
+            let is_relative_safe = configured_path.is_relative()
+                && configured_path.components().all(|component| {
+                    matches!(
+                        component,
+                        std::path::Component::Normal(_) | std::path::Component::CurDir
+                    )
+                });
+            if !is_relative_safe {
+                return Err(Diagnostic::new("RUV2101", "Invalid Wasm plugin path")
+                    .explain(format!(
+                        "Plugin '{}' must use a project-relative path without '..' components.",
+                        plugin_config.name
+                    ))
+                    .into());
+            }
+
+            let joined_path = canonical_root.join(configured_path);
+            let wasm_path = joined_path
+                .canonicalize()
+                .map_err(|source| RuvyxaError::Io {
+                    message: format!("Failed to resolve Wasm plugin {}", joined_path.display()),
+                    source,
+                })?;
+            if !wasm_path.starts_with(&canonical_root)
+                || wasm_path.extension().and_then(|ext| ext.to_str()) != Some("wasm")
+            {
+                return Err(Diagnostic::new("RUV2101", "Invalid Wasm plugin path")
+                    .explain(format!(
+                        "Plugin '{}' must resolve to a .wasm file inside the project root.",
+                        plugin_config.name
+                    ))
+                    .into());
+            }
             match Self::load_plugin(&engine, &wasm_path, plugin_config) {
                 Ok(plugin) => {
                     info!(name = %plugin.name, path = %wasm_path.display(), "loaded wasm plugin");
@@ -387,8 +426,15 @@ impl WasmPluginRuntime {
         );
         store.limiter(|store| &mut store.limits);
 
-        let fuel = permissions.timeout_ms * 1_000_000;
-        store.set_fuel(fuel).ok();
+        let fuel = permissions
+            .timeout_ms
+            .checked_mul(1_000_000)
+            .ok_or_else(|| "Plugin timeout exceeds the Wasm fuel budget".to_string())?;
+        // Engines created by the runtime consume fuel; isolated unit-test engines may
+        // intentionally omit that feature, in which case the store remains bounded by
+        // memory and the invocation timeout. The checked multiplication still prevents
+        // an attacker-controlled timeout from wrapping the fuel budget.
+        let _ = store.set_fuel(fuel);
 
         Ok(store)
     }

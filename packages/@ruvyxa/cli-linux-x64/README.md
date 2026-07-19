@@ -1,6 +1,6 @@
 # @ruvyxa/cli-linux-x64
 
-Prebuilt Ruvyxa native CLI binary for Linux x64.
+Prebuilt Ruvyxa CLI binary for Linux x64.
 
 This package is installed automatically as an optional dependency of `ruvyxa` on matching platforms.
 Application users should install `ruvyxa`, not this package directly.

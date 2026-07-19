@@ -704,7 +704,7 @@ function responseHeaderPairs(response) {
 
 // --- Action Handler ---
 async function handleAction(request) {
-  const { projectRoot, actionFile, actionName, payloadJson, requestPath } = request
+  const { projectRoot, actionFile, actionName, payloadJson, contentType, requestPath } = request
 
   const resolvedRoot = path.resolve(projectRoot || process.cwd())
   const { outfile, freshBuild } = await bundleActionModule(resolvedRoot, actionFile)
@@ -722,12 +722,12 @@ async function handleAction(request) {
     }
   }
 
-  const input = parsePayload(payloadJson)
+  const input = parsePayload(payloadJson, contentType)
   const invalidated = []
   const req = new Request(`http://localhost${requestPath}`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(input),
+    headers: { 'content-type': contentType || 'application/json' },
+    body: contentType === 'application/x-www-form-urlencoded' ? payloadJson : JSON.stringify(input),
   })
   const result = await action(input, {
     request: req,
@@ -1161,12 +1161,21 @@ function normalizeActionResult(result, invalidated) {
   return Response.json({ data: result, invalidated })
 }
 
-function parsePayload(payloadJson) {
+function parsePayload(payloadJson, contentType) {
+  // `contentType` is additive for compatibility with older Rust workers. New
+  // workers always send it, preventing content-type confusion between JSON
+  // and URL-encoded action inputs.
   let parsed
-  try {
+  if (contentType === 'application/json') {
     parsed = JSON.parse(payloadJson || '{}')
-  } catch {
-    parsed = Object.fromEntries(new URLSearchParams(payloadJson))
+  } else if (contentType === 'application/x-www-form-urlencoded') {
+    parsed = Object.fromEntries(new URLSearchParams(payloadJson || ''))
+  } else {
+    try {
+      parsed = JSON.parse(payloadJson || '{}')
+    } catch {
+      parsed = Object.fromEntries(new URLSearchParams(payloadJson))
+    }
   }
   if (parsed && typeof parsed === 'object' && 'input' in parsed) {
     return parsed.input

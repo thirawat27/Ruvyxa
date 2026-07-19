@@ -165,9 +165,9 @@ The runtime files included in this package:
 | `runtime/plugin-runner.mjs`   | Persistent config-plugin hook worker                   |
 | `runtime/ssg-renderer.mjs`    | Build-time SSG/ISR/PPR pre-rendering                   |
 
-## Native CLI
+## Ruvyxa CLI
 
-The `ruvyxa` npm package resolves the native CLI binary automatically for the current platform.
+The `ruvyxa` npm package resolves the Ruvyxa CLI binary automatically for the current platform.
 Resolution order:
 
 1. **Source checkout** — `target/debug/ruvyxa` or `target/release/ruvyxa` when working in the

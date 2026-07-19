@@ -158,7 +158,7 @@ Reports:
 - Project structure summary
 - Dependency status
 - Configuration validity
-- Native CLI status
+- Ruvyxa CLI status
 - Route count and strategy summary
 
 ### `trace`

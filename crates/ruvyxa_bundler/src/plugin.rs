@@ -1,6 +1,6 @@
 //! Ruvyxa Bundler plugin pipeline.
 //!
-//! Plugins are synchronous Rust hooks for the native pipeline. JavaScript config
+//! Plugins are synchronous Rust hooks for the Ruvyxa Bundler pipeline. JavaScript config
 //! plugin functions remain typed at the package layer, while Ruvyxa Bundler
 //! has a first-class pipeline that adapters or embedded callers can populate
 //! without forking resolver or compiler code.
@@ -34,7 +34,7 @@ impl TransformResult {
     }
 }
 
-/// Native plugin hook contract.
+/// Ruvyxa Bundler plugin hook contract.
 pub trait RuvyxaBundlerPlugin: Send + Sync {
     fn name(&self) -> &str;
 

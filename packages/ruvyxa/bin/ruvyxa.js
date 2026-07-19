@@ -15,7 +15,7 @@ const platformKey = currentPlatformKey()
 const binary = findBinary()
 
 if (!binary) {
-  console.error(`Ruvyxa native CLI binary was not found for ${platformKey}.`)
+  console.error(`Ruvyxa CLI binary was not found for ${platformKey}.`)
   if (optionalBinaryPackageName()) {
     console.error('Reinstall ruvyxa, or install the matching @ruvyxa/cli-* optional package.')
   } else {
@@ -33,7 +33,7 @@ const result = spawnSync(binary, process.argv.slice(2), {
 })
 
 if (result.error) {
-  console.error(`Failed to run Ruvyxa native CLI at ${binary}: ${result.error.message}`)
+  console.error(`Failed to run Ruvyxa CLI at ${binary}: ${result.error.message}`)
   process.exit(1)
 }
 

@@ -4,6 +4,8 @@ import { join } from 'node:path'
 import { spawnSync } from 'node:child_process'
 
 const args = process.argv.slice(2)
+const pnpmBin = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm'
+const npmBin = process.platform === 'win32' ? 'npm.cmd' : 'npm'
 const dryRun = args.includes('--dry-run')
 const packageNames = args.filter((arg) => arg !== '--dry-run')
 
@@ -46,7 +48,7 @@ for (const name of packageNames) {
   }
 
   const publish = spawnSync(
-    'pnpm',
+    pnpmBin,
     ['--filter', name, 'publish', '--access', 'public', '--no-git-checks'],
     {
       stdio: 'inherit',
@@ -63,9 +65,8 @@ async function npmPackageExists(name, version) {
   const spec = `${name}@${version}`
 
   for (let attempt = 1; attempt <= 3; attempt++) {
-    const view = spawnSync('npm', ['view', spec, 'version'], {
+    const view = spawnSync(npmBin, ['view', spec, 'version'], {
       encoding: 'utf8',
-      shell: process.platform === 'win32',
     })
 
     if (view.status === 0) return true

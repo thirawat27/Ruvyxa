@@ -2,7 +2,7 @@
 //!
 //! Ruvyxa Bundler TypeScript/JSX compiler and module bundler for the Ruvyxa framework.
 //!
-//! This crate provides Ruvyxa's native production bundling pipeline and
+//! This crate provides the Ruvyxa Bundler production pipeline and
 //! integrates directly with [`ruvyxa_diagnostics`]
 //! and the route graph from `ruvyxa_graph`.
 //!
@@ -629,7 +629,7 @@ mod tests {
     }
 
     #[test]
-    fn bundles_markdown_page_through_native_content_pipeline() {
+    fn bundles_markdown_page_through_ruvyxa_bundler_pipeline() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
         let app = root.join("app");
@@ -648,7 +648,7 @@ mod tests {
     }
 
     #[test]
-    fn bundles_mdx_multiline_imports_and_gfm_through_native_pipeline() {
+    fn bundles_mdx_multiline_imports_and_gfm_through_ruvyxa_bundler_pipeline() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
         let app = root.join("app");

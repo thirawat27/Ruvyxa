@@ -1,6 +1,6 @@
 # Ruvyxa Developer Guide
 
-This guide is for framework contributors: people changing the Rust workspace, native CLI, npm
+This guide is for framework contributors: people changing the Rust workspace, Ruvyxa CLI, npm
 packages, adapters, templates, runtime, or integration fixtures. Application authors should begin
 with the [User Guide](guides/index.md).
 
@@ -21,7 +21,7 @@ On macOS or Linux, run:
 ```
 
 The setup script installs the locked dependencies, builds all workspace packages, and compiles the
-native CLI. Then inspect the integration fixture:
+Ruvyxa CLI. Then inspect the integration fixture:
 
 ```bash
 cargo run -p ruvyxa_cli -- doctor --root examples/demo
@@ -36,7 +36,7 @@ server-only secrets at every layer.
 
 ```text
 npm package: ruvyxa
-  └─ bin/ruvyxa.js -> platform-specific native CLI
+  └─ bin/ruvyxa.js -> platform-specific Ruvyxa CLI binary
        ├─ crates/ruvyxa_cli          commands, config loading, build orchestration
        ├─ crates/ruvyxa_graph        route discovery, render detection, validation
        ├─ crates/ruvyxa_bundler      TS/JSX/MDX compilation, Oxc transforms, resolution, linking, maps, minification
@@ -59,7 +59,7 @@ in Ruvyxa while delegating source transformation and minification to Oxc.
 
 Framework contracts often span Rust and TypeScript. A change to configuration, runtime files,
 package exports, or starter behaviour must be checked in both places. Do not change a TypeScript
-type and assume the native CLI will accept it: `ruvyxa_cli` deserializes a strict runtime
+type and assume the Ruvyxa CLI will accept it: `ruvyxa_cli` deserializes a strict runtime
 configuration independently.
 
 ## 3. Working loop and verification
@@ -134,7 +134,7 @@ the change explicitly introduces a breaking release.
 
 ### Configuration
 
-`ruvyxa.config.ts` is a strict contract. The core package defines TypeScript types, while the native
+`ruvyxa.config.ts` is a strict contract. The core package defines TypeScript types, while the Ruvyxa
 CLI validates and deserializes the runtime representation. When adding a field:
 
 1. Add the type and documentation in `packages/@ruvyxa/core`.
@@ -218,9 +218,9 @@ The Git mode must begin with `100755`. Pack smoke checks the tar header, runs th
 launcher through Node, verifies the packed create command, and confirms that its generated
 application contains `.gitignore`.
 
-When changing launcher behaviour, native binary discovery, optional platform packages, or package
-`files` lists, always run `pnpm release:validate` and `pnpm pack:smoke`. Do not rely only on a
-workspace symlink: published package contents and permissions are the deployment contract.
+When changing launcher behaviour, Ruvyxa CLI binary discovery, optional platform packages, or
+package `files` lists, always run `pnpm release:validate` and `pnpm pack:smoke`. Do not rely only on
+a workspace symlink: published package contents and permissions are the deployment contract.
 
 ## 9. The demo as an integration system
 

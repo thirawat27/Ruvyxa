@@ -4,8 +4,14 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { cacheFileName, compileBundle, runtimeAliases, toImportPath } from './compiler.mjs'
 
-const [projectRootArg, actionFileArg, actionName = '', payloadJson = '{}', requestPath = '/'] =
-  process.argv.slice(2)
+const [
+  projectRootArg,
+  actionFileArg,
+  actionName = '',
+  payloadJson = '{}',
+  requestPath = '/',
+  contentType = 'application/json',
+] = process.argv.slice(2)
 
 if (!projectRootArg || !actionFileArg || !actionName) {
   fail('RUV1503', 'Action renderer requires projectRoot, actionFile, and actionName arguments.')
@@ -33,12 +39,12 @@ try {
     process.exit(0)
   }
 
-  const input = parsePayload(payloadJson)
+  const input = parsePayload(payloadJson, contentType)
   const invalidated = []
   const request = new Request(`http://localhost${requestPath}`, {
     method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify(input),
+    headers: { 'content-type': contentType },
+    body: contentType === 'application/x-www-form-urlencoded' ? payloadJson : JSON.stringify(input),
   })
   const result = await action(input, {
     request,
@@ -79,13 +85,11 @@ async function bundleActionModule(projectRoot, actionFile) {
   return outfile
 }
 
-function parsePayload(payloadJson) {
-  let parsed
-  try {
-    parsed = JSON.parse(payloadJson || '{}')
-  } catch {
-    parsed = Object.fromEntries(new URLSearchParams(payloadJson))
-  }
+function parsePayload(payloadJson, contentType) {
+  const parsed =
+    contentType === 'application/x-www-form-urlencoded'
+      ? Object.fromEntries(new URLSearchParams(payloadJson || ''))
+      : JSON.parse(payloadJson || '{}')
 
   if (parsed && typeof parsed === 'object' && 'input' in parsed) {
     return parsed.input

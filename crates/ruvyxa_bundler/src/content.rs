@@ -1,4 +1,4 @@
-//! Native Markdown and MDX-to-module compilation.
+//! Markdown and MDX-to-module compilation for the Ruvyxa Bundler.
 //!
 //! Content files are lowered to ordinary React modules before they enter the
 //! existing TypeScript/JSX compiler. This keeps resolution, boundary checks,
@@ -635,8 +635,12 @@ fn render_node(
             slugger,
             mdx,
         ),
+        // Markdown is content, not an executable trust boundary. Rendering raw
+        // HTML through `dangerouslySetInnerHTML` turns an otherwise static
+        // `.md` file into an XSS primitive when content comes from a CMS or
+        // another untrusted author. Pass it as text so React performs escaping.
         Node::Html(value) => format!(
-            "React.createElement(\"span\", {{ dangerouslySetInnerHTML: {{ __html: {} }} }})",
+            "React.createElement(\"span\", null, {})",
             js_string(&value.value)
         ),
         Node::MdxFlowExpression(value) => expression(&value.value),
@@ -961,8 +965,22 @@ mod tests {
     }
 
     #[test]
+    fn renders_raw_markdown_html_as_escaped_text() {
+        let module = compile_content_module(
+            "<script>globalThis.compromised = true</script>",
+            Path::new("page.md"),
+        )
+        .unwrap();
+
+        assert!(!module.contains("dangerouslySetInnerHTML"));
+        assert!(module.contains(
+            "React.createElement(\"span\", null, \"<script>globalThis.compromised = true</script>\")"
+        ));
+    }
+
+    #[test]
     fn caches_successful_content_compilation_by_format_and_source() {
-        let source = "# Native content cache 019f7516";
+        let source = "# Bundler content cache 019f7516";
         let first = compile_content_module(source, Path::new("first.md")).unwrap();
         let second = compile_content_module(source, Path::new("second.md")).unwrap();
         let markdown_key = content_cache_key("md", source);

@@ -139,6 +139,25 @@ impl MiddlewareStack {
             }
         }
 
+        if let Some(cors) = &self.config.builtin.cors {
+            if cors.credentials && cors.origins.iter().any(|origin| origin == "*") {
+                return Err(
+                    "CORS credentials cannot be enabled with the wildcard origin '*'; use an explicit origin allowlist"
+                        .to_string(),
+                );
+            }
+            for method in &cors.methods {
+                if axum::http::Method::from_bytes(method.as_bytes()).is_err() {
+                    return Err(format!("Invalid CORS method '{method}'"));
+                }
+            }
+            for allowed_header in &cors.headers {
+                if axum::http::HeaderName::from_bytes(allowed_header.as_bytes()).is_err() {
+                    return Err(format!("Invalid CORS header '{allowed_header}'"));
+                }
+            }
+        }
+
         if let Some(rate) = &self.config.builtin.rate_limit {
             if rate.max_requests == 0 {
                 return Err("Rate limit 'max' must be greater than 0".to_string());
@@ -285,5 +304,28 @@ mod tests {
 
             assert!(MiddlewareStack::new(config).validate().is_ok(), "{key_by}");
         }
+    }
+
+    #[test]
+    fn rejects_credentialed_wildcard_cors_and_invalid_allowlists() {
+        let mut config = MiddlewareConfig::default();
+        config.builtin.cors = Some(crate::config::CorsConfig {
+            origins: vec!["*".to_string()],
+            methods: vec!["POST".to_string()],
+            headers: Vec::new(),
+            credentials: true,
+            max_age: 60,
+        });
+        assert!(MiddlewareStack::new(config).validate().is_err());
+
+        let mut config = MiddlewareConfig::default();
+        config.builtin.cors = Some(crate::config::CorsConfig {
+            origins: vec!["https://app.example".to_string()],
+            methods: vec!["NOT A METHOD".to_string()],
+            headers: Vec::new(),
+            credentials: false,
+            max_age: 60,
+        });
+        assert!(MiddlewareStack::new(config).validate().is_err());
     }
 }

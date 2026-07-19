@@ -10,7 +10,7 @@ import {
 const ruvyxaPackage = readJson('../../../packages/ruvyxa/package.json')
 const windowsArmPackage = readJson('../../../packages/@ruvyxa/cli-win32-arm64/package.json')
 
-describe('native CLI platforms', () => {
+describe('Ruvyxa CLI platforms', () => {
   it('maps every supported platform to its optional binary package', () => {
     for (const platformKey of Object.keys(supportedPlatforms)) {
       assert.equal(nativeBinaryPackageName(platformKey), `@ruvyxa/cli-${platformKey}`)

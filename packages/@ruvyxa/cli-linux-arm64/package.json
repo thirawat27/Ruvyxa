@@ -1,7 +1,7 @@
 {
   "name": "@ruvyxa/cli-linux-arm64",
   "version": "1.0.15",
-  "description": "Prebuilt Ruvyxa native CLI binary for Linux arm64.",
+  "description": "Prebuilt Ruvyxa CLI binary for Linux arm64.",
   "license": "Apache-2.0",
   "type": "module",
   "os": ["linux"],

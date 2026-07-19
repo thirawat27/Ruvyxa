@@ -1,4 +1,4 @@
-name: CI
+name: Ruvyxa Framework CI
 
 on:
   push:
@@ -22,7 +22,7 @@ defaults:
 
 jobs:
   test:
-    name: Test (${{ matrix.os }})
+    name: Ruvyxa Framework Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
     strategy:
@@ -74,7 +74,7 @@ jobs:
         run: cargo test --workspace --locked
       - name: Lint Rust workspace
         run: cargo clippy --workspace --locked -- -D warnings
-      - name: Build packages
+      - name: Build Ruvyxa packages
         run: pnpm -r build
       - name: Check packages
         run: pnpm -r check

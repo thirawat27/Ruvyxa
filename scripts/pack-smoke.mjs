@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { execFileSync, execSync } from 'node:child_process'
+import { execFileSync } from 'node:child_process'
 import {
   copyFileSync,
   existsSync,
@@ -15,6 +15,7 @@ import { arch, platform } from 'node:process'
 import { setTimeout as sleep } from 'node:timers/promises'
 
 const destination = '.npm-pack'
+const pnpmBin = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm'
 const currentPlatformPackage = `@ruvyxa/cli-${platform}-${arch}`
 const packages = [
   '@ruvyxa/core',
@@ -40,8 +41,9 @@ for (const pkg of packages) {
     pkg.replaceAll('@', '').replaceAll('/', '-'),
   )
   mkdirSync(packageDestination, { recursive: true })
-  execFileSync('pnpm', ['--filter', pkg, 'pack', '--pack-destination', packageDestination], {
+  execFileSync(pnpmBin, ['--filter', pkg, 'pack', '--pack-destination', packageDestination], {
     stdio: 'inherit',
+    // Windows exposes pnpm through a .cmd shim; Node requires shell dispatch for that shim.
     shell: process.platform === 'win32',
   })
   const tarballs = readdirSync(packageDestination).filter((file) => file.endsWith('.tgz'))
@@ -50,10 +52,11 @@ for (const pkg of packages) {
 }
 
 for (const file of readdirSync(destination).filter((name) => name.endsWith('.tgz'))) {
-  const listing = execSync(`tar -tf ${destination}/${file}`).toString()
-  const verboseListing = execSync(`tar -tvf ${destination}/${file}`).toString()
+  const tarball = `${destination}/${file}`
+  const listing = execFileSync('tar', ['-tf', tarball]).toString()
+  const verboseListing = execFileSync('tar', ['-tvf', tarball]).toString()
   const packageJson = JSON.parse(
-    execSync(`tar -xOf ${destination}/${file} package/package.json`).toString(),
+    execFileSync('tar', ['-xOf', tarball, 'package/package.json']).toString(),
   )
   const serialized = JSON.stringify(packageJson)
 
@@ -135,13 +138,17 @@ const currentPlatformTgz = readdirSync(destination).find(
 if (!currentPlatformTgz)
   throw new Error(`${currentPlatformPackage} tarball not found in ` + destination)
 
-execSync(`tar -xzf ${destination}/${ruvyxaTgz} -C ${extracted}`)
+execFileSync('tar', ['-xzf', `${destination}/${ruvyxaTgz}`, '-C', extracted])
 execFileSync('node', [`${extracted}/package/bin/ruvyxa.js`, '--help'], {
   stdio: 'inherit',
-  shell: process.platform === 'win32',
 })
 mkdirSync(`${extracted}/create-ruvyxa`)
-execSync(`tar -xzf ${destination}/${createRuvyxaTgz} -C ${extracted}/create-ruvyxa`)
+execFileSync('tar', [
+  '-xzf',
+  `${destination}/${createRuvyxaTgz}`,
+  '-C',
+  `${extracted}/create-ruvyxa`,
+])
 const starters = ['minimal', 'blog', 'crud', 'api-backend']
 const scaffoldTarball = (file) => `file:../../${destination}/${file}`
 const workspaceTarball = (file) => `file:../${destination}/${file}`
@@ -154,7 +161,6 @@ for (const starter of starters) {
   if (starter !== 'minimal') createArgs.push('--template', starter)
   execFileSync('node', createArgs, {
     stdio: 'inherit',
-    shell: process.platform === 'win32',
   })
   assert(existsSync(`${appDir}/.gitignore`), `${starter} scaffold missing .gitignore`)
   assert(
@@ -196,13 +202,13 @@ writeFileSync(
   ].join('\n'),
 )
 
-execFileSync('pnpm', ['install', '--no-lockfile'], {
+execFileSync(pnpmBin, ['install', '--no-lockfile'], {
   cwd: extracted,
   stdio: 'inherit',
   shell: process.platform === 'win32',
 })
 for (const starter of starters) {
-  execFileSync('pnpm', ['run', 'typecheck'], {
+  execFileSync(pnpmBin, ['run', 'typecheck'], {
     cwd: `${extracted}/scaffolded-${starter}`,
     stdio: 'inherit',
     shell: process.platform === 'win32',
