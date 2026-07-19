@@ -4,7 +4,11 @@ import { chmodSync, existsSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-import { currentPlatformKey, nativeBinaryPackageName } from '../scripts/native-platform.mjs'
+import {
+  currentPlatformKey,
+  exitCodeForSpawnResult,
+  nativeBinaryPackageName,
+} from '../scripts/native-platform.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
 const packageRoot = resolve(here, '..')
@@ -37,7 +41,7 @@ if (result.error) {
   process.exit(1)
 }
 
-process.exit(result.status ?? 0)
+process.exit(exitCodeForSpawnResult(result))
 
 function findBinary() {
   const sourceBinary = findSourceBinary()

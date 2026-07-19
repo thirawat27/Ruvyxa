@@ -9,7 +9,6 @@ description = "Ruvyxa Bundler TypeScript/JSX compiler"
 
 [dependencies]
 ruvyxa_diagnostics = { path = "../ruvyxa_diagnostics" }
-anyhow = { workspace = true }
 blake3 = { workspace = true }
 dashmap = { workspace = true }
 grass = { workspace = true }
@@ -21,7 +20,6 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 serde_yaml_ng = { workspace = true }
 thiserror = { workspace = true }
-walkdir = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

@@ -1,9 +1,10 @@
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { readdirSync, readFileSync } from 'node:fs'
 import { describe, it } from 'node:test'
 
 import {
   nativeBinaryPackageName,
+  exitCodeForSpawnResult,
   supportedPlatforms,
 } from '../../../packages/ruvyxa/scripts/native-platform.mjs'
 
@@ -31,6 +32,29 @@ describe('Ruvyxa CLI platforms', () => {
 
   it('does not resolve an optional package for unsupported platforms', () => {
     assert.equal(nativeBinaryPackageName('freebsd-x64'), null)
+  })
+
+  it('preserves child exit status and fails when the child is terminated by a signal', () => {
+    assert.equal(exitCodeForSpawnResult({ status: 0, signal: null }), 0)
+    assert.equal(exitCodeForSpawnResult({ status: 42, signal: null }), 42)
+    assert.equal(exitCodeForSpawnResult({ status: null, signal: 'SIGTERM' }), 1)
+    assert.equal(exitCodeForSpawnResult({ status: null, signal: null }), 1)
+  })
+
+  it('keeps executable packages aligned with the framework Node requirement', () => {
+    const expectedEngine = ruvyxaPackage.engines.node
+    const packagePaths = [
+      '../../../packages/create-ruvyxa/package.json',
+      ...readdirSync(new URL('../../../packages/@ruvyxa/', import.meta.url), {
+        withFileTypes: true,
+      })
+        .filter((entry) => entry.isDirectory() && entry.name.startsWith('cli-'))
+        .map((entry) => `../../../packages/@ruvyxa/${entry.name}/package.json`),
+    ]
+
+    for (const packagePath of packagePaths) {
+      assert.equal(readJson(packagePath).engines.node, expectedEngine, packagePath)
+    }
   })
 
   it('does not publish an Intel macOS binary package', () => {

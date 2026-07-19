@@ -2774,7 +2774,6 @@ checksum = "b39cdef0fa800fc44525c84ccb54a029961a8215f9619753635a9c0d2538d46d"
 name = "ruvyxa_bundler"
 version = "1.0.15"
 dependencies = [
- "anyhow",
  "blake3",
  "dashmap",
  "grass",
@@ -2788,7 +2787,6 @@ dependencies = [
  "serde_yaml_ng",
  "tempfile",
  "thiserror 2.0.18",
- "walkdir",
 ]
 
 [[package]]
@@ -2835,7 +2833,6 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tokio",
- "tower-http",
  "tracing",
  "walkdir",
 ]

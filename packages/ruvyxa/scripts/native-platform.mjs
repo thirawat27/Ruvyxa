@@ -24,3 +24,9 @@ export function currentPlatform() {
 export function nativeBinaryPackageName(platformKey) {
   return supportedPlatforms[platformKey] ? `@ruvyxa/cli-${platformKey}` : null
 }
+
+/** Converts a completed native-process result into a safe CLI exit code. */
+export function exitCodeForSpawnResult({ status }) {
+  if (typeof status === 'number') return status
+  return 1
+}

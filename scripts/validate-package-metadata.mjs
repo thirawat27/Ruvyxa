@@ -5,6 +5,7 @@ import { join } from 'node:path'
 const rootPkg = JSON.parse(readFileSync('package.json', 'utf8'))
 const expectedVersion = rootPkg.version
 const expectedLicense = rootPkg.license
+const requiredRuntimeNodeEngine = rootPkg.engines?.node
 const repoUrl = 'git+https://github.com/thirawat27/ruvyxa.git'
 const packageDirs = [
   'packages/ruvyxa',
@@ -32,6 +33,16 @@ for (const dir of packageDirs) {
   )
   check(pkg.publishConfig?.access === 'public', `${pkg.name} must publish with public access`)
   check(Array.isArray(pkg.files) && pkg.files.length > 0, `${pkg.name} must declare package files`)
+  if (
+    pkg.name === 'ruvyxa' ||
+    pkg.name === 'create-ruvyxa' ||
+    pkg.name.startsWith('@ruvyxa/cli-')
+  ) {
+    check(
+      pkg.engines?.node === requiredRuntimeNodeEngine,
+      `${pkg.name} Node engine must match the framework requirement (${requiredRuntimeNodeEngine})`,
+    )
+  }
 }
 
 if (failures.length > 0) {
