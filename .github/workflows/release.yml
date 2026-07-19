@@ -1,4 +1,4 @@
-name: Release
+name: Ruvyxa Framework CD
 
 on:
   push:
@@ -86,7 +86,7 @@ jobs:
           pnpm pack:smoke
 
   publish-native:
-    name: Publish native CLI (${{ matrix.os }})
+    name: Publish Ruvyxa Framework CLI (${{ matrix.os }})
     needs: [resolve-version, verify-release]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60

@@ -1600,6 +1600,7 @@ async fn render_prerender_job(
 }
 
 fn stable_prerender_inputs(root: &Path, app_dir: &Path, inputs: &[PathBuf]) -> Vec<PathBuf> {
+    let project_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
     let staging_root = app_dir.parent().and_then(Path::parent);
     inputs
         .iter()
@@ -1615,6 +1616,9 @@ fn stable_prerender_inputs(root: &Path, app_dir: &Path, inputs: &[PathBuf]) -> V
                 root.join(input)
             };
             let input = input.canonicalize().unwrap_or(input);
+            if input.strip_prefix(&project_root).is_ok() {
+                return input;
+            }
             staging_root
                 .and_then(|staging_root| {
                     input.strip_prefix(staging_root).ok().map(|relative| {
