@@ -145,25 +145,25 @@ export default config({
 
 ## Runtime Architecture
 
-The `ruvyxa` package includes a persistent Node render worker pool (`runtime/worker-pool.mjs`) that
-keeps JavaScript runtime processes alive between requests, plus a persistent build-plugin worker
-(`runtime/plugin-runner.mjs`) that reuses loaded config hooks across modules. This removes repeated
-process startup and config compilation overhead. Plugin transform source maps are forwarded into
-generated client maps.
+The `ruvyxa` package includes a persistent Node/Bun render worker pool (`runtime/worker-pool.mjs`)
+that keeps JavaScript runtime processes alive between requests, plus a persistent build-plugin
+worker (`runtime/plugin-runner.mjs`) that reuses loaded config hooks across modules. This removes
+repeated process startup and config compilation overhead. Plugin transform source maps are forwarded
+into generated client maps.
 
 The runtime files included in this package:
 
-| File                          | Purpose                                                |
-| ----------------------------- | ------------------------------------------------------ |
-| `runtime/worker-pool.mjs`     | Persistent IPC worker for all rendering                |
-| `runtime/ssr-renderer.mjs`    | Server-side React rendering                            |
-| `runtime/client-renderer.mjs` | Client hydration bundle generation                     |
-| `runtime/compiler.mjs`        | Oxc-backed runtime compiler used by all Node renderers |
-| `runtime/api-renderer.mjs`    | API route execution                                    |
-| `runtime/action-renderer.mjs` | Server action execution                                |
-| `runtime/config-renderer.mjs` | Config file loading                                    |
-| `runtime/plugin-runner.mjs`   | Persistent config-plugin hook worker                   |
-| `runtime/ssg-renderer.mjs`    | Build-time SSG/ISR/PPR pre-rendering                   |
+| File                          | Purpose                                                    |
+| ----------------------------- | ---------------------------------------------------------- |
+| `runtime/worker-pool.mjs`     | Persistent IPC worker for all rendering                    |
+| `runtime/ssr-renderer.mjs`    | Server-side React rendering                                |
+| `runtime/client-renderer.mjs` | Client hydration bundle generation                         |
+| `runtime/compiler.mjs`        | Oxc-backed runtime compiler used by all Node/Bun renderers |
+| `runtime/api-renderer.mjs`    | API route execution                                        |
+| `runtime/action-renderer.mjs` | Server action execution                                    |
+| `runtime/config-renderer.mjs` | Config file loading                                        |
+| `runtime/plugin-runner.mjs`   | Persistent config-plugin hook worker                       |
+| `runtime/ssg-renderer.mjs`    | Build-time SSG/ISR/PPR pre-rendering                       |
 
 ## Ruvyxa CLI
 

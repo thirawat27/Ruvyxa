@@ -212,9 +212,10 @@ npm create ruvyxa@latest my-api -- --template api-backend
 
 Open [http://localhost:3000](http://localhost:3000).
 
-`pnpm`, `yarn`, and `bun` work too. Ruvyxa uses Node for JavaScript execution by default; set
-`runtime: 'bun'` and run with `RUVYXA_RUNTIME=bun` when Bun should execute SSR, API routes, actions,
-and build plugins. The generated app keeps the first screen focused:
+`pnpm`, `yarn`, and `bun` work too. When no runtime is configured, Ruvyxa uses Node when it is
+available and falls back to Bun automatically. Set `runtime: 'bun'` and run with
+`RUVYXA_RUNTIME=bun` when Bun should execute SSR, API routes, actions, and build plugins. The
+generated app keeps the first screen focused:
 
 ```text
 my-app/

@@ -53,7 +53,7 @@ pub struct NodeWorkerPool {
     workers: StdRwLock<Vec<Arc<Worker>>>,
     worker_script: PathBuf,              // packages/ruvyxa/runtime/worker-pool.mjs
     env: BTreeMap<String, String>,
-    runtime: JavaScriptRuntime,           // node (default) or bun
+    runtime: JavaScriptRuntime,           // node when available, otherwise bun if unspecified
     next_worker: AtomicU64,               // round-robin counter
     response_timeout: Duration,           // configurable via RUVYXA_WORKER_TIMEOUT_MS
 }
@@ -148,7 +148,7 @@ async fn spawn(worker_script: &Path, env: &BTreeMap<String, String>) -> Result<S
 1. **Spawn the selected Node or Bun process**:
 
    ```rust
-   let mut cmd = Command::new("node");
+   let mut cmd = Command::new(runtime.executable());
    cmd.arg(worker_script);
    cmd.stdin(Stdio::piped());
    cmd.stdout(Stdio::piped());

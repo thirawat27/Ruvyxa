@@ -16,11 +16,11 @@ All other vars   →  server-only, never compiled into client
 
 ### Enforcement layers
 
-| Layer        | When                                                     | Mechanism                                                                                                                              |
-| ------------ | -------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------- |
-| Graph-level  | `ruvyxa_graph::validate_app()` — after route discovery   | Source scan for `process.env.<NAME>` and `process.env['<NAME>']`. Rejects non-`RUVYXA_PUBLIC_*` in client-reachable modules → RUV1008. |
-| Bundle-level | `ruvyxa_bundler::boundary::check()` — during compilation | Same scan on compiled JS output. Second pass after transforms.                                                                         |
-| Runtime      | `ruvyxa.config.ts` eval                                  | Only `RUVYXA_PUBLIC_*` accessible via `defineConfig()` when config is evaluated by Node for client-visible values.                     |
+| Layer        | When                                                     | Mechanism                                                                                                                                   |
+| ------------ | -------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| Graph-level  | `ruvyxa_graph::validate_app()` — after route discovery   | Source scan for `process.env.<NAME>` and `process.env['<NAME>']`. Rejects non-`RUVYXA_PUBLIC_*` in client-reachable modules → RUV1008.      |
+| Bundle-level | `ruvyxa_bundler::boundary::check()` — during compilation | Same scan on compiled JS output. Second pass after transforms.                                                                              |
+| Runtime      | `ruvyxa.config.ts` eval                                  | Only `RUVYXA_PUBLIC_*` accessible via `defineConfig()` when config is evaluated by the selected Node/Bun runtime for client-visible values. |
 
 ### Implementation: `private_env_reads(source)`
 

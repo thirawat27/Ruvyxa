@@ -232,13 +232,13 @@ or publish platform functions — verify platform output and routing yourself.
 
 ```ts
 export default config({
-  runtime: 'bun', // 'node' (default) or 'bun'
+  runtime: 'bun', // 'node' or 'bun'; omitted means Node, then Bun if Node is unavailable
 })
 ```
 
 `runtime` selects the JavaScript runtime that executes Ruvyxa configuration, SSR, static rendering,
-API routes, actions, and JavaScript build plugins. It does not change the Rust HTTP server. Node is
-the default.
+API routes, actions, and JavaScript build plugins. It does not change the Rust HTTP server. When
+omitted, Ruvyxa prefers Node and automatically falls back to Bun if Node is unavailable.
 
 Set `RUVYXA_RUNTIME=bun` in the app command when Bun must be used from the first configuration load,
 for example `RUVYXA_RUNTIME=bun bunx ruvyxa dev`. This bootstrap override takes precedence over

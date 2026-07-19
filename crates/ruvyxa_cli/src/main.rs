@@ -306,13 +306,14 @@ impl ProjectConfig {
     }
 
     fn javascript_runtime(&self) -> JavaScriptRuntime {
-        self.javascript_runtime_override.unwrap_or_else(|| {
-            if self.runtime == Some(BuildTarget::Bun) {
-                JavaScriptRuntime::Bun
-            } else {
-                JavaScriptRuntime::Node
-            }
-        })
+        self.javascript_runtime_override
+            .unwrap_or_else(|| match self.runtime {
+                Some(BuildTarget::Bun) => JavaScriptRuntime::Bun,
+                Some(BuildTarget::Node | BuildTarget::Edge | BuildTarget::Static) => {
+                    JavaScriptRuntime::Node
+                }
+                None => JavaScriptRuntime::detect(),
+            })
     }
 
     fn app_dir(&self) -> &str {
@@ -813,15 +814,7 @@ fn runtime_override() -> anyhow::Result<Option<JavaScriptRuntime>> {
 }
 
 fn default_javascript_runtime() -> JavaScriptRuntime {
-    if std::env::var("npm_config_user_agent")
-        .ok()
-        .is_some_and(|value| value.starts_with("bun/"))
-        || (!JavaScriptRuntime::Node.is_available() && JavaScriptRuntime::Bun.is_available())
-    {
-        JavaScriptRuntime::Bun
-    } else {
-        JavaScriptRuntime::Node
-    }
+    JavaScriptRuntime::detect()
 }
 
 fn required_config_dependency_hash(result: &ConfigRendererOutput) -> anyhow::Result<String> {
@@ -6008,6 +6001,10 @@ export default {
         assert_eq!(
             ProjectConfig::default().build_target(None),
             BuildTarget::Node
+        );
+        assert_eq!(
+            ProjectConfig::default().javascript_runtime(),
+            JavaScriptRuntime::detect()
         );
     }
 

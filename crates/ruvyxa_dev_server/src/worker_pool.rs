@@ -747,7 +747,7 @@ pub(crate) struct RenderApiRequest<'a> {
 
 impl NodeWorkerPool {
     pub async fn start(root: &Path, env: BTreeMap<String, String>) -> Result<Self> {
-        Self::start_with_runtime(root, env, JavaScriptRuntime::Node).await
+        Self::start_with_runtime(root, env, JavaScriptRuntime::detect()).await
     }
 
     pub async fn start_with_runtime(
@@ -768,7 +768,8 @@ impl NodeWorkerPool {
         env: BTreeMap<String, String>,
         worker_count: Option<usize>,
     ) -> Result<Self> {
-        Self::start_with_size_and_runtime(root, env, worker_count, JavaScriptRuntime::Node).await
+        Self::start_with_size_and_runtime(root, env, worker_count, JavaScriptRuntime::detect())
+            .await
     }
 
     pub async fn start_with_size_and_runtime(

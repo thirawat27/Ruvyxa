@@ -110,6 +110,28 @@ impl JavaScriptRuntime {
             .output()
             .is_ok_and(|output| output.status.success())
     }
+
+    /// Select the default JavaScript runtime for an installation.
+    ///
+    /// Node remains the preferred runtime for compatibility. Bun is selected
+    /// only when Node is unavailable and Bun can be executed. If neither
+    /// runtime is installed, keep Node as the diagnostic target so the
+    /// resulting process error names the conventional runtime.
+    #[must_use]
+    pub fn detect() -> Self {
+        Self::from_availability(Self::Node.is_available(), Self::Bun.is_available())
+    }
+
+    #[must_use]
+    pub const fn from_availability(node_available: bool, bun_available: bool) -> Self {
+        if node_available {
+            Self::Node
+        } else if bun_available {
+            Self::Bun
+        } else {
+            Self::Node
+        }
+    }
 }
 
 #[cfg(windows)]
@@ -231,7 +253,7 @@ impl ServerConfig {
             cache_css: true,
             style_entries: Vec::new(),
             prebundle_dependencies: true,
-            runtime: JavaScriptRuntime::Node,
+            runtime: JavaScriptRuntime::detect(),
             jsx_runtime: JsxRuntime::Automatic,
             error_overlay: true,
             debug_traces: false,
@@ -265,7 +287,7 @@ impl ServerConfig {
             cache_css: true,
             style_entries: Vec::new(),
             prebundle_dependencies: false,
-            runtime: JavaScriptRuntime::Node,
+            runtime: JavaScriptRuntime::detect(),
             jsx_runtime: JsxRuntime::Automatic,
             error_overlay: false,
             debug_traces: false,
@@ -4429,6 +4451,26 @@ mod tests {
             Some("bun")
         );
         assert_eq!(config.runtime.command(), "bun");
+    }
+
+    #[test]
+    fn runtime_detection_prefers_node_then_falls_back_to_bun() {
+        assert_eq!(
+            JavaScriptRuntime::from_availability(true, true),
+            JavaScriptRuntime::Node
+        );
+        assert_eq!(
+            JavaScriptRuntime::from_availability(true, false),
+            JavaScriptRuntime::Node
+        );
+        assert_eq!(
+            JavaScriptRuntime::from_availability(false, true),
+            JavaScriptRuntime::Bun
+        );
+        assert_eq!(
+            JavaScriptRuntime::from_availability(false, false),
+            JavaScriptRuntime::Node
+        );
     }
 
     #[test]

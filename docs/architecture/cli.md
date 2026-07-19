@@ -3,8 +3,8 @@
 **Files**: `crates/ruvyxa_cli/src/main.rs` (6037 lines), `crates/ruvyxa_cli/src/image_optimizer.rs`
 (443 lines)
 
-Command dispatch via clap, config loading from `ruvyxa.config.ts` (evaluated by Node), build
-orchestration, and image optimization.
+Command dispatch via clap, config loading from `ruvyxa.config.ts` (evaluated by the selected
+Node/Bun runtime), build orchestration, and image optimization.
 
 ---
 
@@ -105,14 +105,14 @@ fn start(args: ServerArgs) -> Result<()> {
 
 ### Two-phase loading
 
-**Phase 1: Node.js evaluation**
+**Phase 1: Node/Bun evaluation**
 
 ```rust
 fn load_project_config(root: &Path) -> Result<ProjectConfig> {
     let renderer = find_runtime_script(root, "config-renderer.mjs")?;
     // If not found → return ProjectConfig::default() with hash "no-config"
 
-    let output = Command::new("node")
+    let output = Command::new(runtime.executable())
         .arg(&renderer)
         .arg(root)
         .output()?;

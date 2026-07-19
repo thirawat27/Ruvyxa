@@ -1,8 +1,9 @@
 # Ruvyxa System Overview
 
 **Design philosophy**: Rust handles everything before the render step (route discovery, bundling,
-resolution, minification, serving). Node.js handles rendering (React SSR, API execution, config
-evaluation). Hybrd architecture gives Rust's speed + type safety with Node's ecosystem access.
+resolution, minification, serving). Node.js or Bun handles rendering (React SSR, API execution,
+config evaluation). The hybrid architecture gives Rust's speed + type safety with JavaScript
+ecosystem access.
 
 ## High-Level Architecture
 
@@ -20,7 +21,7 @@ evaluation). Hybrd architecture gives Rust's speed + type safety with Node's eco
        └─────────┴──────────────┴───────────┘
                        │
              ┌─────────▼─────────┐
-             │  Node Workers      │
+             │ Node/Bun Workers  │
              │  (SSR, SSG, API,   │
              │   Action, Config)  │
              └───────────────────┘
@@ -42,16 +43,16 @@ ruvyxa_diagnostics     (foundation: serde + thiserror only)
 
 ## Key Design Decisions
 
-| Decision                               | Rationale                                                                                                                                                                                                          |
-| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **Rust core, Node/Bun renderers**      | Rust: fast startup, compile-time safety, single binary. Node is the default JavaScript runtime; Bun is selectable for config, rendering, and JS plugins. Workers eliminate per-request process spawn (~100-500ms). |
-| **Oxc for TS/JSX** (not Babel/SWC/TSC) | 10-100x faster. Single binary. No Node dep for bundling.                                                                                                                                                           |
-| **Persistent JavaScript worker pool**  | Node or Bun pool: 2-8 workers (default CPU count). NDJSON over stdin/stdout.                                                                                                                                       |
-| **Radix trie router**                  | O(path_depth) vs O(n) linear scan. Recompiled on manifest change.                                                                                                                                                  |
-| **Content-hashed assets**              | Blake3 fingerprints → immutable caching (max-age=31536000).                                                                                                                                                        |
-| **Staging + atomic commit**            | Build writes to staging dir → atomic rename. No corrupt output.                                                                                                                                                    |
-| **Deterministic CSS scoping**          | fnv1a_64(project_relative_path + class_name) — reproducible builds.                                                                                                                                                |
-| **Strict config**                      | `deny_unknown_fields` — typos fail fast instead of silent defaults.                                                                                                                                                |
+| Decision                               | Rationale                                                                                                                                                                                                              |
+| -------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Rust core, Node/Bun renderers**      | Rust: fast startup, compile-time safety, single binary. When runtime is omitted, Node is preferred and Bun is selected automatically if Node is unavailable. Workers eliminate per-request process spawn (~100-500ms). |
+| **Oxc for TS/JSX** (not Babel/SWC/TSC) | 10-100x faster. Single binary. No Node dep for bundling.                                                                                                                                                               |
+| **Persistent JavaScript worker pool**  | Node or Bun pool: 2-8 workers (default CPU count). NDJSON over stdin/stdout.                                                                                                                                           |
+| **Radix trie router**                  | O(path_depth) vs O(n) linear scan. Recompiled on manifest change.                                                                                                                                                      |
+| **Content-hashed assets**              | Blake3 fingerprints → immutable caching (max-age=31536000).                                                                                                                                                            |
+| **Staging + atomic commit**            | Build writes to staging dir → atomic rename. No corrupt output.                                                                                                                                                        |
+| **Deterministic CSS scoping**          | fnv1a_64(project_relative_path + class_name) — reproducible builds.                                                                                                                                                    |
+| **Strict config**                      | `deny_unknown_fields` — typos fail fast instead of silent defaults.                                                                                                                                                    |
 
 ## Rendering Strategies
 
