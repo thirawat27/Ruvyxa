@@ -52,6 +52,27 @@ if (failures.length > 0) {
 
 console.log(`Validated ${packageDirs.length} npm package manifests for ${expectedVersion}.`)
 
+const templateDirs = readdirSync('templates')
+  .map((name) => `templates/${name}`)
+  .filter((dir) => statSync(dir).isDirectory())
+
+for (const dir of templateDirs) {
+  const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))
+  for (const dependency of ['ruvyxa', '@ruvyxa/react']) {
+    check(
+      pkg.dependencies?.[dependency] === `^${expectedVersion}`,
+      `${dir} ${dependency} dependency must be ^${expectedVersion}`,
+    )
+  }
+}
+
+if (failures.length > 0) {
+  console.error(failures.map((failure) => `- ${failure}`).join('\n'))
+  process.exit(1)
+}
+
+console.log(`Validated ${templateDirs.length} starter template manifests for ${expectedVersion}.`)
+
 // Validate Rust crate versions match
 const crateDirs = readdirSync('crates')
   .map((name) => `crates/${name}`)

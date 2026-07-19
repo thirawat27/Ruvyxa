@@ -55,24 +55,30 @@ for (const dir of crateDirs) {
   }
 }
 
-// Update framework dependencies in the source starter template. The
-// create-ruvyxa package copies this directory during prepack.
-const templatePkg = 'templates/minimal/package.json'
-try {
-  const tmpl = JSON.parse(readFileSync(templatePkg, 'utf8'))
-  let changed = false
-  for (const dependency of ['ruvyxa', '@ruvyxa/react']) {
-    if (tmpl.dependencies?.[dependency] && tmpl.dependencies[dependency] !== `^${newVersion}`) {
-      tmpl.dependencies[dependency] = `^${newVersion}`
-      changed = true
+// Update framework dependencies in every source starter template. The
+// create-ruvyxa package copies these directories during prepack.
+const templateDirs = readdirSync('templates')
+  .map((name) => `templates/${name}`)
+  .filter((dir) => statSync(dir).isDirectory())
+
+for (const dir of templateDirs) {
+  const templatePkg = join(dir, 'package.json')
+  try {
+    const tmpl = JSON.parse(readFileSync(templatePkg, 'utf8'))
+    let changed = false
+    for (const dependency of ['ruvyxa', '@ruvyxa/react']) {
+      if (tmpl.dependencies?.[dependency] && tmpl.dependencies[dependency] !== `^${newVersion}`) {
+        tmpl.dependencies[dependency] = `^${newVersion}`
+        changed = true
+      }
     }
+    if (changed) {
+      writeFileSync(templatePkg, JSON.stringify(tmpl, null, 2) + '\n')
+      console.log(`${dir} framework deps → ^${newVersion}`)
+    }
+  } catch {
+    // Non-application template directories do not need a package manifest.
   }
-  if (changed) {
-    writeFileSync(templatePkg, JSON.stringify(tmpl, null, 2) + '\n')
-    console.log(`template framework deps → ^${newVersion}`)
-  }
-} catch {
-  // template may not exist in all contexts
 }
 
 // Regenerate Cargo.lock so --locked CI checks pass
