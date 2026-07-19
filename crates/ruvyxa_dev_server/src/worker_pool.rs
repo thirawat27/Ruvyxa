@@ -461,15 +461,34 @@ impl Worker {
         let pending: PendingResponses = Arc::new(Mutex::new(BTreeMap::new()));
         let alive = Arc::new(AtomicBool::new(true));
 
-        // Spawn stdin writer task
+        // Spawn stdin writer task. A broken pipe is a transport failure, not a
+        // recoverable queue stall: mark the worker dead and close pending
+        // non-stream requests so the pool can replace it immediately.
         let (stdin_tx, mut stdin_rx) = mpsc::channel::<String>(256);
+        let writer_pending = pending.clone();
+        let writer_alive = alive.clone();
         tokio::spawn(async move {
             let mut stdin = stdin;
             while let Some(line) = stdin_rx.recv().await {
-                if stdin.write_all(line.as_bytes()).await.is_err() {
-                    break;
-                }
-                if stdin.flush().await.is_err() {
+                if stdin.write_all(line.as_bytes()).await.is_err() || stdin.flush().await.is_err() {
+                    writer_alive.store(false, Ordering::Release);
+                    let pending = std::mem::take(&mut *writer_pending.lock().await);
+                    for (id, pending_response) in pending {
+                        if !pending_response.streaming.load(Ordering::Acquire) {
+                            // Dropping the sender makes the request receiver
+                            // fail immediately instead of waiting for a
+                            // response timeout. Stream consumers are handled
+                            // by the explicit api-error path below.
+                            continue;
+                        }
+                        let error = WorkerResponse::stream_error(
+                            id,
+                            "Node worker stdin closed before completing API response stream",
+                        );
+                        if pending_response.sender.send(error).is_ok() {
+                            pending_response.queued.fetch_add(1, Ordering::AcqRel);
+                        }
+                    }
                     break;
                 }
             }
@@ -990,21 +1009,32 @@ impl NodeWorkerPool {
             return 0;
         }
 
-        let mut warmed = 0;
+        let mut pending = tokio::task::JoinSet::new();
         for worker in &workers {
-            let request = WorkerRequest::Warmup {
-                id: next_request_id(),
-                project_root: project_root.to_string(),
-                routes: routes.clone(),
-            };
-            match worker.send(&request, self.response_timeout).await {
-                Ok(response) if response.ok => {
+            let worker = worker.clone();
+            let project_root = project_root.to_string();
+            let routes = routes.clone();
+            let response_timeout = self.response_timeout;
+            pending.spawn(async move {
+                let request = WorkerRequest::Warmup {
+                    id: next_request_id(),
+                    project_root,
+                    routes,
+                };
+                worker.send(&request, response_timeout).await
+            });
+        }
+
+        let mut warmed = 0;
+        while let Some(result) = pending.join_next().await {
+            match result {
+                Ok(Ok(response)) if response.ok => {
                     warmed += response.warmed.unwrap_or_default();
                 }
-                Ok(response) => {
+                Ok(Ok(response)) => {
                     debug!(message = ?response.message, "worker warmup returned non-ok");
                 }
-                Err(_) => {
+                Ok(Err(_)) | Err(_) => {
                     // Non-fatal: warmup is an optimization, not a requirement.
                 }
             }

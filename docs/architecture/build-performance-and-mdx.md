@@ -77,6 +77,14 @@ page.md/page.mdx
   process memory growth. Cache keys include every transform-affecting input used by those paths.
 - Prerender workers share immutable manifest/style state without changing HTML injection, CSR
   fallback, worker limits, or client-manifest schemas.
+- Warm prerender startup is now lazy: builds with only valid artifact-cache hits (or CSR-only
+  output) do not spawn or health-check Node workers. When rendering is required, worker warmup is
+  dispatched concurrently across the pool instead of multiplying startup latency by pool size.
+- Project-relative SSG input metadata is resolved against the project root before fingerprinting;
+  this keeps the artifact cache portable when the CLI is launched outside the project directory.
+- Prerender context hashing ignores shell/tooling session noise (`PATH`, Cargo/Rust, Codex,
+  pnpm/npm, and prompt-session variables) while retaining project `.env` and stable application
+  environment values. This prevents false cache misses between otherwise identical invocations.
 - Native and packaged Node MDX paths support structured frontmatter, GFM, semantic headings/tables,
   and parser-backed ESM while retaining the existing generated-module contract.
 
@@ -108,6 +116,15 @@ prerender), with 13 of 14 routes served from the artifact cache; the remaining C
 generated directly. These timings exclude Cargo compilation and vary with the local OS/Node process
 scheduler.
 
+### Reliability/performance follow-up benchmark (2026-07-19)
+
+After correcting project-relative worker input normalization and filtering volatile shell/tooling
+environment keys from the prerender context, two consecutive `examples/demo` builds measured 1830.0
+ms (cache population) and 443.2 ms (warm). The warm build completed prerendering in 160.1 ms with 13
+of 14 routes served from the validated artifact cache; no Node pool was started for those cache
+hits. The CSR shell remains direct output by design. These numbers exclude Cargo compilation and are
+Windows x64 observations, not a cross-platform guarantee.
+
 ## Assumptions, debt, and residual risks
 
 - **Assumption:** project source does not intentionally mutate during one production build. This
@@ -120,6 +137,9 @@ scheduler.
   the config/render context, environment, styles, client assets, Node renderer dependency hash, and
   all source fingerprints returned by the worker. `build.prerenderCache: false` is the escape hatch
   for intentionally non-deterministic pages.
+- **Resolved in follow-up:** worker startup is deferred until a static-parameter lookup or a real
+  artifact miss requires Node; relative worker input paths are rooted at the project; volatile shell
+  variables no longer invalidate otherwise identical artifacts.
 - **Residual risk:** dynamic data fetched from external systems is not observable by the source
   fingerprint contract; such routes must opt out of `prerenderCache` when that data is part of the
   build result.

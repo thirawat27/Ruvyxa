@@ -1290,11 +1290,18 @@ async fn prerender_static_routes(
         fingerprints: Arc::new(ArtifactFingerprintCache::default()),
         enabled: build.prerender_cache.unwrap_or(true),
     };
-    let worker_pool = std::sync::Arc::new(
-        ruvyxa_dev_server::NodeWorkerPool::start_with_size(root, worker_env, Some(parallelism))
-            .await
-            .map_err(|error| anyhow::anyhow!(error.to_string()))?,
-    );
+    // Do not pay Node process startup on a warm build whose static routes are
+    // all served from the validated artifact cache. Dynamic static-parameter
+    // discovery still needs a worker before jobs can be enumerated; ordinary
+    // static/CSR routes start one only when a render cache miss remains.
+    let needs_static_params_worker = routes_to_prerender
+        .iter()
+        .any(|route| route.render.has_static_params && route_has_dynamic_segments(&route.path));
+    let mut worker_pool = if needs_static_params_worker {
+        Some(start_prerender_worker_pool(root, &worker_env, parallelism).await?)
+    } else {
+        None
+    };
 
     let prerendered = async {
         let mut jobs = Vec::new();
@@ -1316,7 +1323,13 @@ async fn prerender_static_routes(
                     let paths_to_render = if route.render.has_static_params
                         && route_has_dynamic_segments(&route.path)
                     {
-                        resolve_static_params(&worker_pool, root, route, manifest).await?
+                        let worker_pool = worker_pool.as_deref().ok_or_else(|| {
+                            anyhow::anyhow!(
+                                "Static-parameter worker pool was not initialized for {}",
+                                route.path
+                            )
+                        })?;
+                        resolve_static_params(worker_pool, root, route, manifest).await?
                     } else if !route_has_dynamic_segments(&route.path) {
                         // Pure static route — render the single path
                         vec![StaticRouteParams {
@@ -1350,6 +1363,16 @@ async fn prerender_static_routes(
             }
         }
 
+        let needs_render_worker = jobs.iter().any(|job| match &job.kind {
+            PrerenderJobKind::Csr => false,
+            PrerenderJobKind::Render { .. } => {
+                !artifact_cache.enabled || load_prerender_artifact(&artifact_cache, job).is_none()
+            }
+        });
+        if needs_render_worker && worker_pool.is_none() {
+            worker_pool = Some(start_prerender_worker_pool(root, &worker_env, parallelism).await?);
+        }
+
         let parallelism = prerender_parallelism(build.parallelism, jobs.len());
         let mut pending = tokio::task::JoinSet::new();
         let mut jobs = jobs.into_iter().enumerate();
@@ -1369,7 +1392,7 @@ async fn prerender_static_routes(
                 let artifact_cache = artifact_cache.clone();
                 pending.spawn(async move {
                     render_prerender_job(
-                        &worker_pool,
+                        worker_pool.as_deref(),
                         &root,
                         &app_dir,
                         &prerender_dir,
@@ -1421,13 +1444,31 @@ async fn prerender_static_routes(
         Ok(prerendered)
     }
     .await;
-    worker_pool.shutdown().await;
+    if let Some(worker_pool) = worker_pool {
+        worker_pool.shutdown().await;
+    }
     prerendered
+}
+
+async fn start_prerender_worker_pool(
+    root: &Path,
+    worker_env: &BTreeMap<String, String>,
+    parallelism: usize,
+) -> anyhow::Result<std::sync::Arc<ruvyxa_dev_server::NodeWorkerPool>> {
+    Ok(std::sync::Arc::new(
+        ruvyxa_dev_server::NodeWorkerPool::start_with_size(
+            root,
+            worker_env.clone(),
+            Some(parallelism),
+        )
+        .await
+        .map_err(|error| anyhow::anyhow!(error.to_string()))?,
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn render_prerender_job(
-    worker_pool: &ruvyxa_dev_server::NodeWorkerPool,
+    worker_pool: Option<&ruvyxa_dev_server::NodeWorkerPool>,
     root: &Path,
     app_dir: &Path,
     prerender_dir: &Path,
@@ -1451,6 +1492,12 @@ async fn render_prerender_job(
                 artifact_cache_hit = true;
                 html
             } else {
+                let worker_pool = worker_pool.ok_or_else(|| {
+                    anyhow::anyhow!(
+                        "Pre-rendering worker pool was not initialized for cache miss {}",
+                        job.render_path
+                    )
+                })?;
                 let result = worker_pool
                     .render_ssg_isolated(
                         root,
@@ -1527,7 +1574,17 @@ fn stable_prerender_inputs(root: &Path, app_dir: &Path, inputs: &[PathBuf]) -> V
     inputs
         .iter()
         .map(|input| {
-            let input = input.canonicalize().unwrap_or_else(|_| input.clone());
+            // The Node worker reports project-relative paths so metadata stays
+            // portable across staging directories. Resolve those paths against
+            // the project root before touching the process CWD; otherwise a
+            // build launched outside the project silently fingerprints nothing
+            // and can never reuse prerender artifacts.
+            let input = if input.is_absolute() {
+                input.clone()
+            } else {
+                root.join(input)
+            };
+            let input = input.canonicalize().unwrap_or(input);
             staging_root
                 .and_then(|staging_root| {
                     input.strip_prefix(staging_root).ok().map(|relative| {
@@ -3051,7 +3108,7 @@ fn prerender_context_hash(
     build: &BuildConfigOptions,
     project_env: &BTreeMap<String, String>,
 ) -> String {
-    let process_env = std::env::vars().collect::<BTreeMap<_, _>>();
+    let process_env = stable_process_env();
     let context = serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
         "styles": content_hash(styles),
@@ -3064,6 +3121,24 @@ fn prerender_context_hash(
         "processEnv": process_env,
     });
     content_hash(&context.to_string())
+}
+
+fn stable_process_env() -> BTreeMap<String, String> {
+    std::env::vars()
+        .filter(|(key, _)| is_stable_process_env_key(key))
+        .collect()
+}
+
+fn is_stable_process_env_key(key: &str) -> bool {
+    let upper = key.to_ascii_uppercase();
+    !matches!(
+        upper.as_str(),
+        "PATH" | "PWD" | "OLDPWD" | "SHLVL" | "CARGO" | "_"
+    ) && ![
+        "CARGO_", "RUST", "RUSTUP_", "CODEX_", "POSH_", "NPM_", "PNPM_",
+    ]
+    .iter()
+    .any(|prefix| upper.starts_with(prefix))
 }
 
 fn runtime_script_hash(root: &Path, name: &str) -> String {
@@ -4694,6 +4769,16 @@ mod tests {
     }
 
     #[test]
+    fn stable_process_environment_excludes_tooling_session_noise() {
+        assert!(!is_stable_process_env_key("Path"));
+        assert!(!is_stable_process_env_key("POSH_SESSION_ID"));
+        assert!(!is_stable_process_env_key("CARGO_MANIFEST_DIR"));
+        assert!(!is_stable_process_env_key("CODEX_THREAD_ID"));
+        assert!(is_stable_process_env_key("NODE_ENV"));
+        assert!(is_stable_process_env_key("DATABASE_URL"));
+    }
+
+    #[test]
     fn artifact_fingerprints_are_shared_by_canonical_file_path() {
         let temp = tempfile::tempdir().unwrap();
         let shared = temp.path().join("shared.ts");
@@ -4709,6 +4794,19 @@ mod tests {
         );
         assert_eq!(second, first);
         assert_eq!(cache.entry_count(), 1);
+    }
+
+    #[test]
+    fn stable_prerender_inputs_resolve_project_relative_worker_paths() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        let page = app.join("page.tsx");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(&page, "export default 1").unwrap();
+
+        let inputs = stable_prerender_inputs(temp.path(), &app, &[PathBuf::from("app/page.tsx")]);
+
+        assert_eq!(inputs, vec![page.canonicalize().unwrap()]);
     }
 
     #[test]
