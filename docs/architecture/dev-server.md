@@ -17,7 +17,7 @@ pub struct ServerConfig {
     pub app_dir: PathBuf,                       // root/app (dev) or out_dir/server/app (prod)
     pub public_dir: PathBuf,                    // root/public (dev) or out_dir/assets (prod)
     pub client_dir: PathBuf,                    // root/.ruvyxa/client
-    pub prerender_dir: Option<PathBuf>,         // root/.ruvyxa/prerender
+    pub prerender_dir: PathBuf,                 // root/.ruvyxa/prerender
     pub host: String,                           // default "0.0.0.0"
     pub port: u16,                              // default 3000
     pub watch: bool,                            // true = dev mode
@@ -25,6 +25,7 @@ pub struct ServerConfig {
     pub cache_css: bool,
     pub style_entries: Vec<PathBuf>,            // additional CSS entry points
     pub prebundle_dependencies: bool,
+    pub runtime: JavaScriptRuntime,             // Node or Bun
     pub jsx_runtime: JsxRuntime,
     pub error_overlay: bool,                    // show diagnostic overlay in browser
     pub debug_traces: bool,
@@ -38,6 +39,7 @@ pub struct ServerConfig {
     pub trusted_proxy_ips: Vec<IpAddr>,
     pub security_headers: bool,
     pub middleware: MiddlewareConfig,
+    pub plugins_enabled: bool,
     pub default_render_strategy: Option<RenderStrategy>,
     pub default_revalidate: Option<u64>,
 }
@@ -106,13 +108,14 @@ let env = runtime_env(&config);
 let worker_pool = NodeWorkerPool::start(&config.root, env).await?;
 ```
 
-### 6. Pre-bundle warmup (dev only)
+### 6. Dependency warmup (dev only)
 
 ```rust
 if config.watch && config.prebundle_dependencies {
     let warmup_pool = worker_pool.clone();
+    let warmup_routes = dependency_warmup_routes(&config, &manifest);
     tokio::spawn(async move {
-        warmup_pool.warmup(warmup_root, warmup_routes).await;
+        warmup_pool.warmup(&warmup_root, warmup_routes).await;
     });
 }
 ```
@@ -551,15 +554,10 @@ Uses `notify::recommended_watcher()`. Watches project root.
 ### Event filter
 
 ```rust
-fn is_ignored(path: &Path) -> bool {
-    path_contains(path, ".git") ||
+fn ignored_watch_path(path: &Path) -> bool {
+    top_level_ignored(path) ||
     path_contains(path, ".ruvyxa") ||
-    path_contains(path, "target") ||
-    path_contains(path, "dist") ||
-    path_contains(path, ".npm-pack") ||
-    path_contains(path, ".npm-smoke") ||
-    path_contains(path, "node_modules") ||
-    path_starts_with(path, ".ruvyxa-")
+    path_contains(path, "node_modules")
 }
 ```
 

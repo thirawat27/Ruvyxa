@@ -1,4 +1,5 @@
 import { config, type RuvyxaConfig } from 'ruvyxa/config'
+import { demoPlugins } from './plugins'
 
 const settings: RuvyxaConfig = {
   appDir: 'app',
@@ -37,6 +38,8 @@ const settings: RuvyxaConfig = {
     lossless: false,
     workers: 0,
   },
+
+  plugins: demoPlugins,
 }
 
 export default config(settings)

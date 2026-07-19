@@ -1,6 +1,6 @@
 # Compilation Pipeline (`ruvyxa_bundler`)
 
-**Files**: `crates/ruvyxa_bundler/src/` (17 files, ~10,000 lines)
+**Files**: `crates/ruvyxa_bundler/src/` (17 files, ~10000 lines)
 
 The bundler transforms TypeScript/JSX/MD/MDX sources into optimized JavaScript bundles (client
 hydration or SSR). Pipeline: resolve → compile → boundary check → link → minify → output.
@@ -584,9 +584,9 @@ minify (no tree-shaking).
 
 ## 7. Output (`output.rs` — 112 lines)
 
-### `build_entry_source(input) → (String, String)`
+### `build_entry_source(input) → (String, String)` (`output.rs:32`)
 
-Generates virtual entry module. Returns `(source, label="ruvyxa:bundle-entry.tsx")`.
+Generates virtual entry module. Returns `(entry_source, entry_label="ruvyxa:bundle-entry.tsx")`.
 
 **Client entry**:
 

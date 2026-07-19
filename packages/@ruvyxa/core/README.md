@@ -168,8 +168,23 @@ export function customAdapter(): Adapter {
 
 ## Plugin Contract
 
-Plugins are ordinary TypeScript modules. `definePlugin` validates the public shape and the `setup`
-function registers hooks against the same middleware and build lifecycle used by the framework:
+Plugins are ordinary TypeScript modules. For middleware-only plugins, use the compact `plugin`
+helper:
+
+```ts
+import { plugin } from '@ruvyxa/core/config'
+
+export default plugin('auth', {
+  routes: ['/api/*'],
+  onRequest(request) {
+    return request.headers.has('authorization')
+      ? undefined
+      : new Response('Unauthorized', { status: 401 })
+  },
+})
+```
+
+Use `definePlugin` when one plugin also registers build hooks:
 
 ```ts
 import { definePlugin } from '@ruvyxa/core/config'

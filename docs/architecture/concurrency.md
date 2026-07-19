@@ -123,16 +123,16 @@ Same as dev minus HMR + error overlay overhead. Cache TTL is higher (1800s vs 30
 
 ## Performance tuning levers
 
-| Parameter                           | Where set          | Default             | Max               | Effect                                 |
-| ----------------------------------- | ------------------ | ------------------- | ----------------- | -------------------------------------- |
-| `build.workers`                     | `ruvyxa.config.ts` | CPU count           | 8                 | Parallel bundling & prerendering       |
-| `RUVYXA_RENDER_CACHE_SIZE`          | Env var            | 1024 dev / 512 prod | 16384             | More cache = fewer SSR renders         |
-| `RUVYXA_WORKER_TIMEOUT_MS`          | Env var            | 30000               | i32::MAX          | Timeout for stalled workers            |
-| `RUVYXA_JSX_RUNTIME`                | Env var (auto-set) | automatic           | automatic/classic | JSX transform runtime                  |
-| `security.action_rate_limit.max`    | Config             | varies              | —                 | Actions per window per key             |
-| `security.action_rate_limit.window` | Config             | varies              | —                 | Rate limit window seconds              |
-| `image.quality`                     | Config             | 82                  | 0-100             | WebP quality (lower = faster, smaller) |
-| `image.workers`                     | Config             | 0 (global)          | —                 | Dedicated image thread count           |
+| Parameter                         | Where set          | Default             | Max               | Effect                                 |
+| --------------------------------- | ------------------ | ------------------- | ----------------- | -------------------------------------- |
+| `build.workers`                   | `ruvyxa.config.ts` | CPU count           | —                 | Parallel bundling & prerendering       |
+| `RUVYXA_RENDER_CACHE_SIZE`        | Env var            | 1024 dev / 512 prod | 16384             | More cache = fewer SSR renders         |
+| `RUVYXA_WORKER_TIMEOUT_MS`        | Env var            | 30000               | i32::MAX          | Timeout for stalled workers            |
+| `RUVYXA_JSX_RUNTIME`              | Env var (auto-set) | automatic           | automatic/classic | JSX transform runtime                  |
+| `security.actionRateLimit.max`    | Config             | varies              | —                 | Actions per window per key             |
+| `security.actionRateLimit.window` | Config             | varies              | —                 | Rate limit window seconds              |
+| `image.quality`                   | Config             | 82                  | 0-100             | WebP quality (lower = faster, smaller) |
+| `image.parallelism`               | Config             | 0 (global)          | —                 | Dedicated image thread count           |
 
 ---
 

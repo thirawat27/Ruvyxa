@@ -130,12 +130,12 @@ pub async fn start(root: &Path, env: BTreeMap<String, String>) -> Result<Arc<Sel
 }
 ```
 
-### `find_worker_script(root) → PathBuf`
+### `find_worker_script(root) → Option<PathBuf>`
 
 Resolution order:
 
-1. `{root}/packages/ruvyxa/runtime/worker-pool.mjs` (monorepo dev)
-2. `{root}/node_modules/ruvyxa/runtime/worker-pool.mjs` (installed package)
+1. Walk up directories from current dir looking for `packages/ruvyxa/runtime/<script>` (monorepo)
+2. `{root}/node_modules/ruvyxa/runtime/<script>` (installed package)
 
 Returns first that exists.
 
@@ -281,7 +281,7 @@ pub enum WorkerRequest {
     Warmup {
         id: String,
         project_root: PathBuf,
-        routes: Vec<RouteWarmupEntry>,
+        routes: Vec<WarmupRoute>,
     },
     Ssg {
         id: String,

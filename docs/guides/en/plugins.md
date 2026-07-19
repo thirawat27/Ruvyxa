@@ -8,22 +8,17 @@ Create a starter:
 npx ruvyxa plugin new auth
 ```
 
-The command creates `plugins/auth.ts`:
+The command creates `plugins/auth/` with its own `package.json` and `src/index.ts`:
 
 ```ts
-import { definePlugin } from 'ruvyxa/config'
+import { plugin } from 'ruvyxa/config'
 
-export default definePlugin({
-  name: 'auth',
-  setup({ addMiddleware }) {
-    addMiddleware({
-      routes: ['/api/*'],
-      onRequest(request) {
-        return request.headers.has('authorization')
-          ? undefined
-          : new Response('Unauthorized', { status: 401 })
-      },
-    })
+export default plugin('auth', {
+  routes: ['/*'],
+  onRequest(request) {
+    const headers = new Headers(request.headers)
+    headers.set('x-auth', 'true')
+    return new Request(request, { headers })
   },
 })
 ```
@@ -37,6 +32,10 @@ import { config } from 'ruvyxa/config'
 export default config({ plugins: [auth] })
 ```
 
-Use `resolveId`, `transform`, and `onBuildComplete` in the same `setup` function. Middleware uses
-standard Fetch `Request` and `Response`; build hooks run in the persistent Node/Bun runtime. There
-there is no separate compiler, debug command, or custom middleware ABI.
+Use `plugin(name, middleware)` for request/response middleware. It accepts either a middleware
+object (with optional `routes`, `onRequest`, `onResponse`) or just a request handler function.
+Middleware uses standard Fetch `Request` and `Response`.
+
+For `resolveId`, `transform`, or `onBuildComplete`, use the advanced `definePlugin({ name, setup })`
+form. All hooks run in the persistent Node/Bun runtime; there is no separate compiler, debug
+command, or custom middleware ABI.

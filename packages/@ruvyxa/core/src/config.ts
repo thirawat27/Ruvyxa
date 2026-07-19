@@ -1,4 +1,9 @@
-import type { RuvyxaConfig, RuvyxaPlugin } from './types.js'
+import type {
+  PluginMiddleware,
+  PluginRequestMiddleware,
+  RuvyxaConfig,
+  RuvyxaPlugin,
+} from './types.js'
 
 export type {
   BuiltinMiddlewareConfig,
@@ -52,4 +57,17 @@ export function definePlugin(plugin: RuvyxaPlugin): RuvyxaPlugin {
     throw new TypeError(`Ruvyxa plugin "${plugin.name}" must provide setup(context).`)
   }
   return Object.freeze({ ...plugin, name: plugin.name.trim() })
+}
+
+/** Define a request/response middleware plugin without a setup wrapper. */
+export function plugin(
+  name: string,
+  middleware: PluginMiddleware | PluginRequestMiddleware,
+): RuvyxaPlugin {
+  return definePlugin({
+    name,
+    setup({ addMiddleware }) {
+      addMiddleware(middleware)
+    },
+  })
 }

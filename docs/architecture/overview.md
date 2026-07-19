@@ -30,11 +30,11 @@ ecosystem access.
 ## Crate Dependency Graph
 
 ```
-ruvyxa_diagnostics     (foundation: serde + thiserror only)
+ruvyxa_diagnostics       (foundation: serde + thiserror only)
     ↑
-    ├── ruvyxa_graph   (depends: diagnostics)
-    ├── ruvyxa_bundler (depends: diagnostics, oxc, grass, dashmap, rayon, memmap2, blake3)
-    ├── ruvyxa_middleware (depends: diagnostics, axum, tower, Node/Bun bridge)
+    ├── ruvyxa_graph     (depends: diagnostics)
+    ├── ruvyxa_bundler   (depends: diagnostics, oxc, grass, dashmap, rayon, memmap2, blake3)
+    ├── ruvyxa_middleware (depends: diagnostics)
     └── ruvyxa_dev_server (depends: diagnostics, bundler, graph, middleware, axum, notify, tokio)
          │
          └── ruvyxa_cli (depends: ALL crates, binary entry via clap)
@@ -97,14 +97,14 @@ Two enforcement levels: graph-level (source scan in `ruvyxa_graph::validate_app`
 
 ## NPM Packages
 
-| Package             | Role                                                               |
-| ------------------- | ------------------------------------------------------------------ |
-| `ruvyxa`            | CLI launcher + runtime bridge                                      |
-| `create-ruvyxa`     | Project scaffold                                                   |
-| `@ruvyxa/core`      | Core runtime utilities                                             |
-| `@ruvyxa/react`     | React integration                                                  |
-| `@ruvyxa/adapter-*` | Platform adapters (bun, cloudflare, netlify, node, static, vercel) |
-| `@ruvyxa/cli-*`     | Native binaries per platform                                       |
+| Package             | Role                                                                                        |
+| ------------------- | ------------------------------------------------------------------------------------------- |
+| `ruvyxa`            | CLI launcher + runtime bridge                                                               |
+| `create-ruvyxa`     | Project scaffold                                                                            |
+| `@ruvyxa/core`      | Core runtime utilities                                                                      |
+| `@ruvyxa/react`     | React components (Image, SEO, error boundaries, hydration, loaders)                         |
+| `@ruvyxa/adapter-*` | Platform adapters (bun, cloudflare, netlify, node, static, vercel)                          |
+| `@ruvyxa/cli-*`     | Native binaries per platform (darwin-arm64, linux-arm64, linux-x64, win32-arm64, win32-x64) |
 
 ## Detailed Architecture Docs
 

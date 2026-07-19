@@ -1,4 +1,4 @@
-export { config, definePlugin } from './config.js'
+export { config, definePlugin, plugin } from './config.js'
 export type {
   Adapter,
   AdapterArtifact,

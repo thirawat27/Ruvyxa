@@ -1,6 +1,6 @@
 # CLI & Build Pipeline (`ruvyxa_cli`)
 
-**Files**: `crates/ruvyxa_cli/src/main.rs` (6037 lines), `crates/ruvyxa_cli/src/image_optimizer.rs`
+**Files**: `crates/ruvyxa_cli/src/main.rs` (6338 lines), `crates/ruvyxa_cli/src/image_optimizer.rs`
 (443 lines)
 
 Command dispatch via clap, config loading from `ruvyxa.config.ts` (evaluated by the selected
@@ -30,13 +30,18 @@ pub enum Command {
     Trace(TraceArgs),             // <route> --root
     Bench(BenchArgs),             // --root, --samples (3), --json
     TestParity(ProjectArgs),      // --root  (alias: parity)
+    Plugin(PluginArgs),           // plugin new <name>
 }
 
-pub struct ProjectArgs { pub root: Option<PathBuf> }  // default "."
-pub struct ServerArgs { pub root: Option<PathBuf>, pub host: Option<String>, pub port: Option<u16> }
-pub struct BuildArgs { pub root: Option<PathBuf>, pub target: Option<BuildTarget> }
-pub struct TraceArgs { pub route: String, pub root: Option<PathBuf> }
-pub struct BenchArgs { pub root: Option<PathBuf>, pub samples: Option<usize>, pub json: bool }
+pub struct ProjectArgs { pub root: PathBuf }            // default "."
+pub struct ServerArgs { pub root: PathBuf, pub host: Option<String>, pub port: Option<u16> }
+pub struct BuildArgs { pub root: PathBuf, pub target: Option<BuildTarget> }
+pub struct TraceArgs { pub route: String, pub root: PathBuf }
+pub struct BenchArgs { pub root: PathBuf, pub samples: usize, pub json: bool }
+pub struct PluginArgs { pub command: PluginCommand }
+pub enum PluginCommand { New(PluginNewArgs) }
+pub struct PluginNewArgs { pub name: String, pub root: PathBuf }
+
 ```
 
 | Command       | What it does                              |
@@ -53,6 +58,7 @@ pub struct BenchArgs { pub root: Option<PathBuf>, pub samples: Option<usize>, pu
 | `trace`       | Inspect one route by path (JSON)          |
 | `bench`       | Benchmark (discovery, analysis, build)    |
 | `test:parity` | Dev/prod route comparison + smoke renders |
+| `plugin new`  | Create a publishable plugin package       |
 
 ---
 
@@ -217,6 +223,8 @@ pub struct ProjectConfig {
 
     #[serde(skip)]
     pub config_dependency_hash: String,
+    #[serde(skip)]
+    pub javascript_runtime_override: Option<JavaScriptRuntime>,
 }
 
 // Sub-config structs:
@@ -291,8 +299,8 @@ pub struct SecurityConfigOptions {
 }
 
 pub struct ActionRateLimitOptions {
-    pub max: usize,
-    pub window: u64,
+    pub max: Option<usize>,
+    pub window: Option<u64>,
 }
 
 pub struct CacheConfigOptions {
@@ -392,13 +400,15 @@ if produce_output {
 }
 ```
 
-**`emit_client_bundles` details**:
+**`emit_client_bundles_with_runtime` details**:
 
 ```rust
-fn emit_client_bundles(
-    manifest: &RouteManifest, config: &ProjectConfig,
-    root: &Path, app_dir: &Path, staging: &Path,
-) -> Result<ClientBundleManifest>
+fn emit_client_bundles_with_runtime(
+    root: &Path, app_dir: &Path,
+    manifest: &RouteManifest, client_dir: &Path,
+    build: &BuildConfigOptions, plugins: &[BuildPluginConfig],
+    cache: RuvyxaBuildCache<'_>, runtime: JavaScriptRuntime,
+) -> Result<serde_json::Value>
 ```
 
 1. Filter page routes only.
@@ -501,7 +511,7 @@ pub struct ImageOptimizationOptions {
     pub optimize: bool,        // default true
     pub quality: u8,           // default 82
     pub lossless: bool,        // default false
-    pub workers: usize,        // default 0 = rayon global default
+    pub parallelism: usize,    // default 0 = rayon global default
 }
 ```
 
@@ -587,30 +597,50 @@ for entry in entries {
 
 ## Plugin Build Hook Bridge
 
-Bridges Rust bundler plugin system to JS plugins configured in `ruvyxa.config.ts`:
+Bridges Rust bundler plugin system to JS plugins configured in `ruvyxa.config.ts`. The `BuildHooks`
+trait defines the internal boundary:
 
 ```rust
-struct PluginBuildHookHost {
-    workers: Vec<Arc<JsPluginWorker>>,
-    next_worker: AtomicU64,
-    plugins: Vec<BuildPluginConfig>,
+pub struct BuildHookContext {
+    pub project_root: PathBuf,
+    pub importer: Option<PathBuf>,
+    pub target: BundleTarget,
 }
 
-struct PluginWorker {
-    child: Mutex<Option<Child>>,  // Node/Bun subprocess running plugin-runtime.mjs
-    stdin: StdMutex<mpsc::Sender<String>>,
-    // NDJSON communication
+pub struct TransformOutput {
+    pub code: String,
+    pub map: Option<String>,
+}
+
+pub trait BuildHooks: Send + Sync {
+    fn host_name(&self) -> &str;
+
+    fn resolve_id(
+        &self, specifier: &str, importer: Option<&Path>,
+        context: &BuildHookContext,
+    ) -> Result<Option<PathBuf>>;  // default: Ok(None)
+
+    fn transform(
+        &self, code: &str, id: &Path,
+        context: &BuildHookContext,
+    ) -> Result<Option<TransformOutput>>;  // default: Ok(None)
 }
 ```
 
-**`resolveId`**: sends the module specifier, importer, and environment to the plugin runtime and
-returns a resolved path or no result.
+**`BuildHookPipeline`**: ordered host pipeline. Executes hooks in registration order.
 
-**`transform`**: sends source code, module id, and environment to the plugin runtime and returns
-transformed code plus an optional source map.
+```rust
+pub struct BuildHookPipeline {
+    hosts: Arc<Vec<Arc<dyn BuildHooks>>>,
+}
+```
 
-One persistent runtime owns the setup registry, so closures and module-level plugin state are shared
-across build calls. `onBuildComplete` runs after the committed production output.
+- `resolve_id`: iterates hosts, first `Some(path)` match wins.
+- `transform_with_map`: chains transforms — each host receives previous output; last non-None source
+  map is preserved.
+
+One persistent Node/Bun runtime owns the setup registry, so closures and module-level plugin state
+are shared across build calls. `onBuildComplete` runs after the committed production output.
 
 ---
 

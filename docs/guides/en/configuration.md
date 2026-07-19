@@ -86,18 +86,18 @@ silently changing deployment behaviour.
 | `minify`         | `boolean` | `true`           | Oxc-powered JavaScript minification                                                                                                                                                            |
 | `map`            | `boolean` | `false`          | Emit source maps                                                                                                                                                                               |
 | `treeShake`      | `boolean` | `true`           | Linker-aware tree shaking                                                                                                                                                                      |
-| `split`          | `string`  | `"route"`        | `"single"`, `"route"`, `"manual"`                                                                                                                                                              |
+| `split`          | `string`  | `"route"`        | `"single"`, `"route"` (`"manual"` is an alias for `"single"`)                                                                                                                                  |
 | `workers`        | `number`  | CPU count (auto) | Bounded concurrency for route preparation/final emission plus prerendering. Example `workers: 4` is an explicit override; prerendering remains capped to avoid excessive JavaScript processes. |
 | `jsx`            | `string`  | `"automatic"`    | JSX runtime mode; use `"classic"` only for code that provides a React global/import                                                                                                            |
 | `target`         | `string`  | `"es2022"`       | `"es2018"`, `"es2019"`, `"es2020"`, `"es2022"`, `"esnext"`                                                                                                                                     |
 | `manifest`       | `boolean` | `false`          | Emit chunk manifest                                                                                                                                                                            |
-| `warm`           | `boolean` | `true`           | Pre-bundle dependencies                                                                                                                                                                        |
+| `warm`           | `boolean` | `true`           | Pre-bundle dependencies in dev server (no effect during production build)                                                                                                                      |
 | `prerenderCache` | `boolean` | `true`           | Reuse final SSG/ISR/PPR HTML only when config, environment, assets, styles, and every source fingerprint match; disable for intentionally non-deterministic pages.                             |
 
 ### `plugins`
 
-Plugins are registered with `definePlugin` and can participate in middleware and build lifecycle
-hooks from the same setup function:
+For request/response middleware, use `plugin(name, middleware)`. Use `definePlugin({ name, setup })`
+when the same plugin also needs build lifecycle hooks.
 
 ### `middleware`
 

@@ -130,24 +130,19 @@ export default config({
 })
 ```
 
-Register application middleware in the same config with `definePlugin`:
+Register application middleware in the same config with `plugin`:
 
 ```ts
-import { config, definePlugin } from 'ruvyxa/config'
+import { config, plugin } from 'ruvyxa/config'
 
 export default config({
   plugins: [
-    definePlugin({
-      name: 'auth-guard',
-      setup({ addMiddleware }) {
-        addMiddleware({
-          routes: ['/api/*'],
-          onRequest(request) {
-            return request.headers.get('authorization')
-              ? undefined
-              : new Response('Unauthorized', { status: 401 })
-          },
-        })
+    plugin('auth-guard', {
+      routes: ['/api/*'],
+      onRequest(request) {
+        return request.headers.get('authorization')
+          ? undefined
+          : new Response('Unauthorized', { status: 401 })
       },
     }),
   ],

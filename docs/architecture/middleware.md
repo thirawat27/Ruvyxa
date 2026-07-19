@@ -21,7 +21,7 @@ export default config({
         addMiddleware({
           routes: ['/api/*'],
           onRequest(request, context) {
-            if (request.headers.has('authorization')) return undefined
+            if (request.headers.has('authorization')) return
             return new Response('Unauthorized', { status: 401 })
           },
           onResponse(request, response) {
@@ -43,7 +43,7 @@ replacement `Response`; `undefined` preserves the current response.
 ## Runtime boundary
 
 The Rust dev server owns the HTTP socket, route matching, request body limits, and Axum response.
-`PluginHost` starts `runtime/plugin-runtime.mjs` once per server and exchanges versioned NDJSON:
+`PluginHost` starts `runtime/plugin-runtime.mjs` once per server and exchanges NDJSON:
 
 ```text
 Rust request -> { hook: "middlewareRequest", method, path, headers, bodyBase64 }
@@ -52,9 +52,10 @@ Rust response -> { hook: "middlewareResponse", request: ..., response: ... }
 Node result  -> { response: ... }
 ```
 
-Headers are represented as ordered pairs so duplicate values survive the bridge. Bodies are base64
-encoded so binary uploads and responses are lossless. Rust validates every result before converting
-it to Axum types and enforces `security.pluginLimit` while buffering response hooks.
+Headers are passed as ordered pairs so duplicate values survive the bridge. Bodies are base64
+encoded for lossless binary transport. Rust validates every result before converting to Axum types
+and enforces `security.pluginLimit` when buffering response hooks. Connection middleware runs before
+request processing; response middleware runs before security headers are applied.
 
 ## Ordering and failures
 

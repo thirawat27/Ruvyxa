@@ -39,23 +39,23 @@ pub type Result<T> = std::result::Result<T, RuvyxaError>;
 
 Raised by `ruvyxa_graph`.
 
-| Code        | Title                   | Condition                                                                                  | Fix                                                                  |
-| ----------- | ----------------------- | ------------------------------------------------------------------------------------------ | -------------------------------------------------------------------- |
-| **RUV1001** | App directory not found | `app/` directory missing at project root                                                   | Create `app/` dir or set `appDir` in config to an existing directory |
-| **RUV1002** | Invalid route segment   | Dynamic segment syntax error: `[a b]`, `[]`, `[.name]`, brackets inside plain text segment | Use `[param]`, `[...rest]`, or `[[...rest]]`                         |
-| **RUV1003** | Conflicting route paths | Two routes map to same match shape (e.g. `/blog/[slug]` and `/blog/[id]` both → `/blog/:`) | Differentiate paths with unique static prefix segments               |
-| **RUV1004** | Missing default export  | Page component file has no `export default`                                                | Add `export default function Page() { ... }` to the page file        |
+| Code        | Title                       | Condition                                                                                  | Fix                                                                  |
+| ----------- | --------------------------- | ------------------------------------------------------------------------------------------ | -------------------------------------------------------------------- |
+| **RUV1001** | App directory was not found | `app/` directory missing at project root                                                   | Create `app/` dir or set `appDir` in config to an existing directory |
+| **RUV1002** | Invalid route segment       | Dynamic segment syntax error: `[a b]`, `[]`, `[.name]`, brackets inside plain text segment | Use `[param]`, `[...rest]`, or `[[...rest]]`                         |
+| **RUV1003** | Conflicting route paths     | Two routes map to same match shape (e.g. `/blog/[slug]` and `/blog/[id]` both → `/blog/:`) | Differentiate paths with unique static prefix segments               |
+| **RUV1004** | Missing default export      | Page component file has no `export default`                                                | Add `export default function Page() { ... }` to the page file        |
 
 ## Boundary Diagnostics (RUV1xxx)
 
 Raised by `ruvyxa_graph` and `ruvyxa_bundler`.
 
-| Code        | Title                            | Condition                                                                       | Fix                                                                                            |
-| ----------- | -------------------------------- | ------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
-| **RUV1007** | Server-only in client graph      | `import "server-only"` detected in client-reachable module                      | Move server logic to `server/` dir, `action.ts`, or remove server-only import from client code |
-| **RUV1008** | Private env var in client        | `process.env.VARIABLE` (not `RUVYXA_PUBLIC_*`) in client bundle                 | Rename to `RUVYXA_PUBLIC_VARIABLE` or move env read to server-only code                        |
-| **RUV1009** | Client-only in server graph      | `import "client-only"` in API/server module                                     | Remove client-only dependency from server-side code                                            |
-| **RUV1010** | Server directory in client graph | File under project-root `server/` directory imported by client-reachable module | Move importable logic out of `server/` dir, or keep imports server-side                        |
+| Code        | Title                                             | Condition                                                                       | Fix                                                                                            |
+| ----------- | ------------------------------------------------- | ------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------- |
+| **RUV1007** | Server-only module imported into client graph     | `import "server-only"` detected in client-reachable module                      | Move server logic to `server/` dir, `action.ts`, or remove server-only import from client code |
+| **RUV1008** | Private environment variable used in client graph | `process.env.VARIABLE` (not `RUVYXA_PUBLIC_*`) in client bundle                 | Rename to `RUVYXA_PUBLIC_VARIABLE` or move env read to server-only code                        |
+| **RUV1009** | Client-only module imported into server graph     | `import "client-only"` in API/server module                                     | Remove client-only dependency from server-side code                                            |
+| **RUV1010** | Server directory module reached by client graph   | File under project-root `server/` directory imported by client-reachable module | Move importable logic out of `server/` dir, or keep imports server-side                        |
 
 ## Server Runtime Diagnostics (RUV11xx–RUV16xx)
 
@@ -103,6 +103,7 @@ Raised by `ruvyxa_dev_server`.
 
 | Code        | Title                  | Condition               | Fix                                                 |
 | ----------- | ---------------------- | ----------------------- | --------------------------------------------------- |
+| **RUV1600** | Config load failed     | Config rendering error  | Check ruvyxa.config.ts syntax and runtime           |
 | **RUV1601** | Config value too small | Limit value ≤ 0         | Set positive value for body limit, rate limit, etc. |
 | **RUV1602** | Config value too large | Limit value exceeds MAX | Reduce value to within allowed bounds               |
 

@@ -133,13 +133,12 @@ Action endpoint validates:
 When `same_origin_actions: true`:
 
 ```rust
-fn validate_same_origin(config: &ServerConfig, headers: &HeaderMap) -> Result<()> {
-    let origin = headers.get("origin").ok_or(INVALID_ORIGIN)?;
-    let expected = format!("{}:{}", config.host, config.port);
-    if origin != expected {
-        return Err(FORBIDDEN);
-    }
-    Ok(())
+fn action_origin_is_cross_site(headers: &HeaderMap, config: &ServerConfig) -> bool {
+    let Some(origin) = headers.get("origin").and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+    let expected = format!("http://{}:{}", config.host, config.port);
+    origin != expected
 }
 ```
 
@@ -148,12 +147,11 @@ fn validate_same_origin(config: &ServerConfig, headers: &HeaderMap) -> Result<()
 When `fetch_metadata_actions: true`:
 
 ```rust
-fn validate_sec_fetch(headers: &HeaderMap) -> Result<()> {
-    let site = headers.get("sec-fetch-site").ok_or(FORBIDDEN)?;
-    if site != "same-origin" {
-        return Err(FORBIDDEN);
-    }
-    Ok(())
+fn action_fetch_site_is_cross_site(headers: &HeaderMap) -> bool {
+    let Some(site) = headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) else {
+        return false;
+    };
+    site != "same-origin"
 }
 ```
 
@@ -168,22 +166,22 @@ fn validate_sec_fetch(headers: &HeaderMap) -> Result<()> {
 | HTTP middleware | All requests (dev server) | `middleware.builtin.rate_limit` | `"ip"` or `"header:<name>"` |
 | Action-specific | POST `/__ruvyxa/action`   | `security.actionRateLimit`      | Complex: IP + header + path |
 
-### Token-bucket implementation
+### Sliding-window implementation (`ActionRateLimiter`)
 
 ```rust
-struct TokenBucket {
+struct ActionRateLimiter {
     hits: HashMap<String, Vec<Instant>>,   // sliding window
-    max_tokens: usize,
+    max_hits: usize,
     window: Duration,
     max_keys: usize,                        // 10,000
 }
 
-impl TokenBucket {
+impl ActionRateLimiter {
     fn allow(&mut self, key: &str) -> bool {
         let hits = self.hits.entry(key.to_string()).or_default();
         // Prune expired hits (older than window)
         hits.retain(|t| t.elapsed() < self.window);
-        if hits.len() >= self.max_tokens {
+        if hits.len() >= self.max_hits {
             return false;
         }
         hits.push(Instant::now());
@@ -209,7 +207,7 @@ Retry-After: <seconds>
 
 ## Security Headers
 
-Applied as Axum middleware on every response:
+Applied as Axum middleware on every response via `finalize_security_headers()`:
 
 | Header                   | Value                                      | Configurable?  |
 | ------------------------ | ------------------------------------------ | -------------- |
@@ -246,54 +244,31 @@ Also used for `X-Forwarded-Proto` (HTTPS detection).
 
 ---
 
-## Plugin Sandbox
+## Plugin Runtime
 
-### Capability deny-list (rejected at validation)
+Ruvyxa plugins are Node/Bun JavaScript modules, not WASM. They run in the same persistent JavaScript
+process as the config renderer. Rust never evaluates plugin source directly.
 
-| Capability       | Config field          | Status                                       |
-| ---------------- | --------------------- | -------------------------------------------- |
-| Filesystem read  | `permissions.fs_read` | **REJECTED** — returns validation error      |
-| Filesystem write | (no config)           | Not possible (no `preopens`)                 |
-| Network access   | `permissions.net`     | **REJECTED** — returns validation error      |
-| All env vars     | (no config)           | Not possible (only configured ones injected) |
+### Communication boundary
 
-### Capability allow-list
+1. Plugin setup runs in the config renderer process (`ruvyxa.config.ts` evaluation).
+2. Build hooks (`resolveId`, `transform`, `onBuildComplete`) and HTTP middleware hooks go through
+   the same persistent Node/Bun subprocess via NDJSON (newline-delimited JSON) over stdin/stdout.
+3. Request and response bodies crossing the bridge are base64-encoded.
+4. All payloads are bounded by `security.pluginLimit` (configurable) to prevent runaway memory.
 
-| Capability        | Config field                        | Default            |
-| ----------------- | ----------------------------------- | ------------------ |
-| Specific env vars | `permissions.env: Vec<String>`      | `[]` (no env vars) |
-| CPU time          | `permissions.timeout_ms: u64`       | `5000`             |
-| Maximum memory    | `permissions.max_memory_bytes: u64` | `67108864` (64MB)  |
-| Result size       | (hardcoded)                         | 1 MB               |
+### Security properties
 
-### Execution sandboxing
-
-```rust
-// Engine with fuel metering
-let engine = Engine::new(Config::new().consume_fuel(true))?;
-
-// Per-invocation store
-let mut store = Store::new(&engine, PluginStore { ... });
-
-// Memory limit
-store.limiter(|s| &mut s.limits).memory_size(max_memory_bytes);
-
-// Fuel budget (= CPU time budget)
-store.set_fuel(timeout_ms * 1_000_000)?;
-
-// WASI context with only allowed env vars
-let wasi = WasiCtxBuilder::new()
-    .env("ALLOWED_VAR", "value")  // only configured vars
-    .build();
-store.data_mut().wasi = wasi;
-```
-
-### Plugin boundary
-
-Plugins are loaded by the project config compiler in the Node/Bun process. Rust never evaluates
-plugin source; it receives only validated descriptors and hook results over the persistent NDJSON
-bridge. Request and response bodies are bounded by the configured API and `security.pluginLimit`
-limits, and private environment values remain server-side.
+| Property              | Enforcement                                        |
+| --------------------- | -------------------------------------------------- |
+| No plugin eval        | Rust never evaluates plugin source; only matches   |
+|                       | structured hook results from the bridge            |
+| Bounded bodies        | `plugin_response_body_limit_bytes` enforced on all |
+|                       | plugin middleware responses                        |
+| Private env isolation | The config process has access to env vars; Rust    |
+|                       | never forwards them to client bundles              |
+| Timeout control       | Worker pool timeout (`RUVYXA_WORKER_TIMEOUT_MS`)   |
+|                       | applies to plugin hooks as well                    |
 
 ---
 

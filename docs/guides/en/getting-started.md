@@ -24,6 +24,7 @@ my-app/
 │   ├── layout.tsx
 │   └── page.tsx
 ├── public/
+│   └── ruvyxa.png
 ├── .gitignore
 ├── package.json
 ├── ruvyxa.config.ts

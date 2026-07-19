@@ -363,11 +363,11 @@ pub fn read_manifest(manifest_file: &Path) -> Result<RouteManifest>
 
 | Code    | Condition                                               | Recommendation                                                                            |
 | ------- | ------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| RUV1001 | `app/` directory not found                              | Create `app/` or set `appDir` in config                                                   |
+| RUV1001 | App directory not found                                 | Create `app/` or set `appDir` in config                                                   |
 | RUV1002 | Invalid dynamic segment (`[a b]`, `[]`, error brackets) | Use `[param]`, `[...rest]`, `[[...opt]]`                                                  |
 | RUV1003 | Same match shape conflct                                | Rename one route segment; dynamic params at same level must use different static prefixes |
 | RUV1004 | Page missing `export default`                           | Add default export to page component                                                      |
-| RUV1007 | `server-only` in client graph                           | Move server logic to `server/` dir or `action.ts`                                         |
-| RUV1008 | Private env var in client bundle                        | Rename to `RUVYXA_PUBLIC_*` or move to server-only code                                   |
-| RUV1009 | `client-only` in server module                          | Remove client-only dependency from API/server code                                        |
-| RUV1010 | `server/` dir import in client graph                    | Do not import from `server/` in client-reachable code                                     |
+| RUV1007 | Server-only module imported into client graph           | Move server logic to `server/` dir or `action.ts`                                         |
+| RUV1008 | Private environment variable used in client graph       | Rename to `RUVYXA_PUBLIC_*` or move to server-only code                                   |
+| RUV1009 | Client-only module imported into server graph           | Remove client-only dependency from API/server code                                        |
+| RUV1010 | Server directory module reached by client graph         | Do not import from `server/` in client-reachable code                                     |

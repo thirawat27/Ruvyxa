@@ -84,7 +84,7 @@ enum Command {
         about = "Compare dev/prod routes and smoke-render page routes"
     )]
     TestParity(ProjectArgs),
-    #[command(about = "Create a TypeScript plugin starter")]
+    #[command(about = "Create a publishable plugin package")]
     Plugin(PluginArgs),
 }
 
@@ -152,7 +152,7 @@ struct PluginArgs {
 
 #[derive(Debug, Subcommand)]
 enum PluginCommand {
-    #[command(about = "Create a TypeScript plugin starter")]
+    #[command(about = "Create a publishable plugin package")]
     New(PluginNewArgs),
 }
 
@@ -527,34 +527,54 @@ async fn main() -> anyhow::Result<()> {
 
 fn plugin(args: PluginArgs) -> anyhow::Result<()> {
     match args.command {
-        PluginCommand::New(args) => scaffold_typescript_plugin(args),
+        PluginCommand::New(args) => scaffold_plugin(args),
     }
 }
 
-fn scaffold_typescript_plugin(args: PluginNewArgs) -> anyhow::Result<()> {
+fn scaffold_plugin(args: PluginNewArgs) -> anyhow::Result<()> {
     let plugin_name = normalize_plugin_name(&args.name)?;
-    let plugin_dir = args.root.join("plugins");
-    let plugin_file = plugin_dir.join(format!("{plugin_name}.ts"));
-    if plugin_file.exists() {
+    let package_dir = args.root.join("plugins").join(&plugin_name);
+    if package_dir.exists() {
         anyhow::bail!(
-            "plugin file already exists: {}; choose a different name or remove it first",
-            plugin_file.display()
+            "plugin package already exists: {}; choose a different name or remove it first",
+            package_dir.display()
         );
     }
 
-    fs::create_dir_all(&plugin_dir)?;
+    let src_dir = package_dir.join("src");
+    fs::create_dir_all(&src_dir)?;
     fs::write(
-        &plugin_file,
+        src_dir.join("index.ts"),
         format!(
-            "import {{ definePlugin }} from 'ruvyxa/config'\n\nexport default definePlugin({{\n  name: '{plugin_name}',\n  setup({{ addMiddleware }}) {{\n    addMiddleware({{\n      routes: ['/api/*'],\n      onRequest(request) {{\n        const headers = new Headers(request.headers)\n        headers.set('x-{plugin_name}', 'true')\n        return new Request(request, {{ headers }})\n      }},\n    }})\n  }},\n}})\n"
+            "import {{ plugin }} from 'ruvyxa/config'\n\nexport default plugin('{plugin_name}', {{\n  routes: ['/*'],\n  onRequest(request) {{\n    const headers = new Headers(request.headers)\n    headers.set('x-{plugin_name}', 'true')\n    return new Request(request, {{ headers }})\n  }},\n}})\n"
+        ),
+    )?;
+    fs::write(
+        package_dir.join("package.json"),
+        format!(
+            "{{\n  \"name\": \"ruvyxa-plugin-{plugin_name}\",\n  \"version\": \"0.1.0\",\n  \"description\": \"Ruvyxa plugin: {plugin_name}\",\n  \"type\": \"module\",\n  \"files\": [\"dist\", \"README.md\"],\n  \"main\": \"./dist/index.js\",\n  \"types\": \"./dist/index.d.ts\",\n  \"exports\": {{\n    \".\": {{\n      \"types\": \"./dist/index.d.ts\",\n      \"import\": \"./dist/index.js\"\n    }}\n  }},\n  \"scripts\": {{\n    \"build\": \"tsc\",\n    \"prepublishOnly\": \"pnpm build\"\n  }},\n  \"peerDependencies\": {{\n    \"ruvyxa\": \"^{version}\"\n  }},\n  \"devDependencies\": {{\n    \"ruvyxa\": \"^{version}\",\n    \"typescript\": \"^5.0.0\"\n  }}\n}}\n",
+            version = env!("CARGO_PKG_VERSION")
+        ),
+    )?;
+    fs::write(
+        package_dir.join("tsconfig.json"),
+        "{\n  \"compilerOptions\": {\n    \"target\": \"ES2022\",\n    \"module\": \"NodeNext\",\n    \"moduleResolution\": \"NodeNext\",\n    \"declaration\": true,\n    \"outDir\": \"dist\",\n    \"strict\": true,\n    \"skipLibCheck\": true\n  },\n  \"include\": [\"src\"]\n}\n",
+    )?;
+    fs::write(
+        package_dir.join("README.md"),
+        format!(
+            "# ruvyxa-plugin-{plugin_name}\n\nA Ruvyxa plugin package.\n\n## Development\n\n```bash\npnpm install\npnpm build\n``\n\n## Usage\n\n```ts\nimport {{ config }} from 'ruvyxa/config'\nimport {plugin_name} from 'ruvyxa-plugin-{plugin_name}'\n\nexport default config({{ plugins: [{plugin_name}] }})\n```\n\nPublish with `pnpm publish` after building.\n"
         ),
     )?;
 
     print_tui_header("Plugin");
     print_field("status", ok_text("created"));
     print_field("plugin", accent(&plugin_name));
-    print_field("path", path_text(&plugin_file));
-    print_field("next", "import it from ruvyxa.config.ts".to_string());
+    print_field("path", path_text(&package_dir));
+    print_field(
+        "next",
+        "cd into the package, install dependencies, and run pnpm build".to_string(),
+    );
     Ok(())
 }
 
@@ -4928,25 +4948,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn plugin_new_scaffolds_a_typescript_starter() {
+    fn plugin_new_scaffolds_a_plugin_starter() {
         let temp = tempfile::tempdir().unwrap();
 
-        scaffold_typescript_plugin(PluginNewArgs {
+        scaffold_plugin(PluginNewArgs {
             name: "request-logger".to_string(),
             root: temp.path().to_path_buf(),
         })
         .unwrap();
 
-        let plugin = temp.path().join("plugins/request-logger.ts");
-        let source = fs::read_to_string(&plugin).unwrap();
-        assert!(source.contains("definePlugin"));
-        assert!(source.contains("addMiddleware"));
+        let plugin_dir = temp.path().join("plugins/request-logger");
+        let source = fs::read_to_string(plugin_dir.join("src/index.ts")).unwrap();
+        assert!(source.contains("import { plugin }"));
+        assert!(source.contains("plugin('request-logger'"));
+        assert!(source.contains("onRequest"));
+        let package: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(plugin_dir.join("package.json")).unwrap())
+                .unwrap();
+        assert_eq!(package["name"], "ruvyxa-plugin-request-logger");
+        assert!(plugin_dir.join("tsconfig.json").exists());
+        assert!(plugin_dir.join("README.md").exists());
     }
 
     #[test]
     fn plugin_new_rejects_unsafe_names() {
         let temp = tempfile::tempdir().unwrap();
-        let error = scaffold_typescript_plugin(PluginNewArgs {
+        let error = scaffold_plugin(PluginNewArgs {
             name: "../escape".to_string(),
             root: temp.path().to_path_buf(),
         })
@@ -6047,7 +6074,7 @@ export default {
         assert!(help.contains("dev          Run the development server with hot reload"));
         assert!(help.contains("build        Build the application for production output"));
         assert!(help.contains("check        Run app-level production readiness checks"));
-        assert!(help.contains("plugin       Create a TypeScript plugin starter"));
+        assert!(help.contains("plugin       Create a publishable plugin package"));
         assert!(help.contains("test:parity  Compare dev/prod routes and smoke-render page routes"));
     }
 

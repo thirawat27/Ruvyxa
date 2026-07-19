@@ -22,14 +22,14 @@
 
 ## Common Options
 
-| Option      | Commands                  | Description                            |
-| ----------- | ------------------------- | -------------------------------------- |
-| `--root`    | All                       | Project root directory (default: `.`)  |
-| `--host`    | `dev`, `start`, `preview` | Bind host (overrides config)           |
-| `--port`    | `dev`, `start`, `preview` | Bind port (overrides config)           |
-| `--target`  | `build`                   | Build target: `node`, `edge`, `static` |
-| `--samples` | `bench`                   | Number of samples (default: 3)         |
-| `--json`    | `bench`                   | Output in JSON format                  |
+| Option      | Commands                  | Description                                   |
+| ----------- | ------------------------- | --------------------------------------------- |
+| `--root`    | All                       | Project root directory (default: `.`)         |
+| `--host`    | `dev`, `start`, `preview` | Bind host (overrides config)                  |
+| `--port`    | `dev`, `start`, `preview` | Bind port (overrides config)                  |
+| `--target`  | `build`                   | Build target: `node`, `bun`, `edge`, `static` |
+| `--samples` | `bench`                   | Number of samples (default: 3)                |
+| `--json`    | `bench`                   | Output in JSON format                         |
 
 ---
 
@@ -55,6 +55,7 @@ Starts the development server with:
 ```bash
 npx ruvyxa build
 npx ruvyxa build --target node     # default
+npx ruvyxa build --target bun      # bun runtime
 npx ruvyxa build --target static   # static output
 npx ruvyxa build --target edge     # edge runtime
 ```
@@ -73,7 +74,10 @@ Pipeline:
 
 ```text
 .ruvyxa/
-├── server/         # Production route source (copied from app/, components/, server/)
+├── server/
+│   ├── app/         # Production route source (copied from app/)
+│   ├── components/  # Copied from project components/
+│   └── server/      # Copied from project server/
 ├── client/         # BLAKE3-hashed client bundles + manifest.json
 ├── assets/         # Public assets + optimized WebP images
 ├── prerender/      # Pre-rendered HTML pages + manifest.json
@@ -97,10 +101,8 @@ npx ruvyxa check
 
 Runs in sequence:
 
-1. TypeScript type checking (`tsc --noEmit`)
-2. Production build
-3. Dev/prod route parity comparison
-4. Page smoke rendering (every page)
+1. TypeScript type checking (`tsc --noEmit`; skipped if no `tsconfig.json`)
+2. Parity check: builds production output, compares dev/prod routes, smoke-renders every page
 
 Use this as a deploy readiness signal.
 
@@ -136,13 +138,16 @@ Route                    Strategy
 npx ruvyxa analyze
 ```
 
-Validates:
+Validates per-route (page + imports + layouts):
 
-- Route duplicates and ambiguity
-- Invalid imports (`server-only` in client code, etc.)
-- Server/client boundary violations
-- Environment variable misuse
-- Configuration errors
+- Missing default export (page.tsx only)
+- `"server-only"` imports in client-reachable code
+- Private `process.env.*` access in client graph
+- `server/` dir imports in client graph
+- `"client-only"` imports in server code
+
+Route conflict detection runs during route discovery (before `analyze`). Config validation runs
+during config loading (before route discovery).
 
 Run after any change to routes, imports, configuration, or environment usage.
 
@@ -154,13 +159,13 @@ npx ruvyxa doctor
 
 Reports:
 
-- Node.js version and compatibility
+- Ruvyxa CLI version
+- Node.js, Rust (`rustc`, `cargo`), Bun, Deno versions
 - Package manager detection
-- Project structure summary
+- Project structure (package.json, tsconfig.json, config, app dir)
 - Dependency status
 - Configuration validity
-- Ruvyxa CLI status
-- Route count and strategy summary
+- Route count (total, page, API)
 
 ### `trace`
 
@@ -205,9 +210,10 @@ Removes the `.ruvyxa/` output directory entirely.
 npx ruvyxa plugin new request-logger
 ```
 
-`plugin new` creates `plugins/request-logger.ts` under the current project. Import the exported
-plugin from `ruvyxa.config.ts` and register it in `config({ plugins: [...] })`. See
-[Plugins](plugins.md) for the complete workflow.
+`plugin new` creates a publishable package under `plugins/request-logger/` with `src/index.ts`,
+`package.json`, `tsconfig.json`, and `README.md`. Build it with `pnpm build`, then publish it with
+`pnpm publish`. Import the package entry from `ruvyxa.config.ts` and register it in
+`config({ plugins: [...] })`. See [Plugins](plugins.md) for the complete workflow.
 
 ---
 

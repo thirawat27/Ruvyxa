@@ -4,11 +4,12 @@ import assert from 'node:assert/strict'
 import {
   config,
   definePlugin,
+  plugin,
   type RuvyxaConfig,
 } from '../../../packages/@ruvyxa/core/src/config.ts'
 
 describe('config API', () => {
-  it('accepts builtin middleware and TypeScript-native plugins', () => {
+  it('accepts builtin middleware and plugins', () => {
     const authPlugin = definePlugin({
       name: 'auth',
       setup({ addMiddleware, transform, onBuildComplete }) {
@@ -76,5 +77,40 @@ describe('config API', () => {
   it('rejects malformed plugin definitions at the application boundary', () => {
     assert.throws(() => definePlugin({ name: ' ', setup() {} }), /must have a non-empty name/)
     assert.throws(() => definePlugin({ name: 'broken' } as never), /must provide setup\(context\)/)
+  })
+
+  it('creates a middleware plugin without setup boilerplate', () => {
+    const auth = plugin('auth', {
+      routes: ['/api/*'],
+      onRequest: (request) =>
+        request.headers.has('authorization')
+          ? undefined
+          : new Response('Unauthorized', { status: 401 }),
+    })
+    let registered: unknown
+
+    auth.setup({
+      addMiddleware(value) {
+        registered = value
+      },
+      resolveId() {},
+      transform() {},
+      onBuildComplete() {},
+    })
+
+    assert.equal(auth.name, 'auth')
+    assert.deepEqual((registered as { routes?: string[] }).routes, ['/api/*'])
+    assert.equal(typeof (registered as { onRequest?: unknown }).onRequest, 'function')
+
+    const logger = plugin('logger', (request) => request)
+    logger.setup({
+      addMiddleware(value) {
+        registered = value
+      },
+      resolveId() {},
+      transform() {},
+      onBuildComplete() {},
+    })
+    assert.equal(typeof registered, 'function')
   })
 })

@@ -8,6 +8,8 @@
   registry loaded from `ruvyxa.config.ts`.
 - Added the typed setup API for `addMiddleware`, `resolveId`, `transform`, and `onBuildComplete`,
   with shared plugin state and deterministic registration order across server and build phases.
+- Added `plugin(name, middleware)` as the compact authoring path for request/response middleware;
+  `definePlugin({ name, setup })` remains available for plugins that also register build hooks.
 - Added Fetch-native request and response middleware using standard `Request` and `Response` values;
   `undefined` continues, a returned `Request` replaces the request, and a returned `Response`
   short-circuits or replaces the response.
@@ -28,8 +30,9 @@
   validation, serialized hook errors, stderr forwarding, and graceful child cleanup.
 - Removed Wasmtime, the raw Wasm ABI, Wasm plugin configuration, custom middleware layers, legacy
   plugin metadata (`enforce`, `parallel`, and hook flags), and the old `plugin-runner.mjs` worker.
-- Removed the `plugin debug` CLI command and changed `plugin new` to scaffold a TypeScript file at
-  `plugins/<name>.ts` using the new setup API.
+- Removed the `plugin debug` CLI command and changed `plugin new` to scaffold a publishable npm
+  package at `plugins/<name>/` with `src/index.ts`, package metadata, TypeScript build settings, and
+  usage documentation.
 - Updated package exports, runtime file manifests, keyword metadata, templates, configuration
   validation, README files, architecture references, English guides, and Thai guides for the new
   plugin lifecycle.

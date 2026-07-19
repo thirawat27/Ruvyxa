@@ -1,7 +1,9 @@
 # Plugin Architecture
 
-Ruvyxa plugins are application modules, not a second framework runtime. A plugin is a named object
-created with `definePlugin` and a `setup` function. Setup receives a capability context:
+Ruvyxa plugins are JavaScript application modules, not a separate framework runtime. They are
+defined in `ruvyxa.config.ts` via `definePlugin()` or the shorthand `plugin()`.
+
+Both are exported from `@ruvyxa/core` (`ruvyxa/config`):
 
 ```ts
 import { definePlugin } from 'ruvyxa/config'
@@ -14,6 +16,18 @@ export default definePlugin({
     transform((code, id, context) => ({ code }))
     onBuildComplete(({ root, outDir, manifest }) => {})
   },
+})
+```
+
+For simple middleware-only plugins:
+
+```ts
+import { plugin } from 'ruvyxa/config'
+
+export default plugin('auth', async (request, context) => {
+  if (!request.headers.has('authorization')) {
+    return new Response('Unauthorized', { status: 401 })
+  }
 })
 ```
 
@@ -38,24 +52,37 @@ closures behave like normal application code.
 
 ## Hook contracts
 
-- `addMiddleware`: optional `routes`, `onRequest(Request, context)`, and
-  `onResponse(Request, Response, context)` callbacks.
-- `resolveId`: returns a project-relative or absolute module path, or `undefined`.
-- `transform`: returns a string or `{ code, map }`, or `undefined` to continue.
-- `onBuildComplete`: runs after the production output is committed and receives
-  `{ root, outDir, manifest }`.
+### `addMiddleware(middleware)`
 
-All hooks execute in registration order. The build and server bridges use the same persistent
-runtime process, while a production build invokes the completion phase after output commit so a
-plugin can write deployment metadata without racing the bundler.
+- `middleware` is either a `PluginRequestMiddleware` function
+  `(Request, context) → Request | Response | void`
+- Or a `PluginMiddleware` object with optional fields:
+  - `routes?: string[]` — path patterns (exact or `*`-suffixed)
+  - `onRequest?: PluginRequestMiddleware`
+  - `onResponse?: PluginResponseMiddleware`
+
+### `resolveId(hook)`
+
+- `hook(id, importer, context) → string | null | void`
+- First return that is not `null`/`undefined` wins
+
+### `transform(hook)`
+
+- `hook(code, id, context) → string | { code, map } | null | void`
+- Chained: each host receives the previous output
+- Return `undefined`/`null` to skip
+
+### `onBuildComplete(hook)`
+
+- `hook(context) → void | Promise<void>`
+- Context: `{ root, outDir, manifest }`
+- Runs after production output is committed and adapter artifacts are written
 
 ## Design properties
 
-- **Native application ergonomics:** standard imports, closures, `Request`/`Response`, and ordinary
-  async functions.
-- **One public model:** no parallel legacy plugin metadata, custom Rust layer list, or
-  technology-specific permissions object.
-- **Safe boundary:** only descriptors, strings, JSON metadata, and base64 bodies cross the process
-  boundary; private environment values remain in the Node config process.
+- **Standard web platform:** `Request`, `Response`, `Headers`, async functions
+- **One public model:** no legacy plugin metadata or separate permissions object
+- **Safe boundary:** only descriptors, strings, JSON metadata, and base64 bodies cross process
+  boundary; private env values stay in Node config process
 - **Deterministic lifecycle:** setup once, ordered hooks, bounded response buffering, explicit
-  errors.
+  errors

@@ -8,26 +8,37 @@
 npx ruvyxa plugin new auth
 ```
 
-ตัวอย่าง `plugins/auth.ts`:
+คำสั่งจะสร้างแพ็กเกจ `plugins/auth/` พร้อม `package.json`, `tsconfig.json`, `README.md` และ
+`src/index.ts`:
 
 ```ts
-import { definePlugin } from 'ruvyxa/config'
+import { plugin } from 'ruvyxa/config'
 
-export default definePlugin({
-  name: 'auth',
-  setup({ addMiddleware }) {
-    addMiddleware({
-      routes: ['/api/*'],
-      onRequest(request) {
-        return request.headers.has('authorization')
-          ? undefined
-          : new Response('Unauthorized', { status: 401 })
-      },
-    })
+export default plugin('auth', {
+  routes: ['/*'],
+  onRequest(request) {
+    return request.headers.has('authorization')
+      ? undefined
+      : new Response('Unauthorized', { status: 401 })
   },
 })
 ```
 
-นำเข้าใน `ruvyxa.config.ts` แล้วใช้ `resolveId`, `transform` หรือ `onBuildComplete` ใน `setup`
-เดียวกันได้ Middleware ใช้ Fetch `Request` และ `Response` มาตรฐาน และทำงานใน Node/Bun runtime แบบ
-persistent ไม่มี ABI แยกหรือคำสั่ง debug แบบเดิม
+นำเข้า package ใน `ruvyxa.config.ts`:
+
+```ts
+import auth from './plugins/auth'
+import { config } from 'ruvyxa/config'
+
+export default config({ plugins: [auth] })
+```
+
+รัน `pnpm install` และ `pnpm build` ภายในโฟลเดอร์ plugin เพื่อสร้าง `dist/` แล้วใช้ `pnpm publish`
+เพื่อเผยแพร่เป็น npm library ได้
+
+ใช้ `plugin(name, middleware)` สำหรับ request/response middleware ซึ่งรับได้ทั้ง middleware object
+หรือ request handler function โดย Middleware ใช้ Fetch `Request` และ `Response` มาตรฐาน
+
+หากต้องใช้ `resolveId`, `transform` หรือ `onBuildComplete` ให้ใช้รูปแบบขั้นสูง
+`definePlugin({ name, setup })` ทุก hook ทำงานใน Node/Bun runtime แบบ persistent ไม่มี ABI แยกหรือ
+คำสั่ง debug แบบเดิม
