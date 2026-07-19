@@ -67,9 +67,14 @@ async function npmPackageExists(name, version) {
   for (let attempt = 1; attempt <= 3; attempt++) {
     const view = spawnSync(npmBin, ['view', spec, 'version'], {
       encoding: 'utf8',
+      shell: process.platform === 'win32',
     })
 
     if (view.status === 0) return true
+
+    if (view.error) {
+      console.warn(`npm view ${spec} could not run: ${view.error.message}`)
+    }
 
     const output = `${view.stdout ?? ''}\n${view.stderr ?? ''}`
     if (output.includes('E404') || output.includes('404 Not Found')) return false
