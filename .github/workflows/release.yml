@@ -1,4 +1,4 @@
-name: Ruvyxa Framework Release
+name: Release
 
 on:
   push:
@@ -49,7 +49,7 @@ jobs:
             exit 1
           fi
   verify-release:
-    name: Verify Ruvyxa release candidate
+    name: Verify release candidate
     needs: resolve-version
     runs-on: ubuntu-latest
     timeout-minutes: 60
@@ -85,8 +85,8 @@ jobs:
           pnpm release:validate
           pnpm pack:smoke
 
-  publish-ruvyxa-cli:
-    name: Publish Ruvyxa CLI (${{ matrix.os }})
+  publish-native:
+    name: Publish native CLI (${{ matrix.os }})
     needs: [resolve-version, verify-release]
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
@@ -146,8 +146,8 @@ jobs:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   publish-packages:
-    name: Publish Ruvyxa packages
-    needs: [resolve-version, verify-release, publish-ruvyxa-cli]
+    name: Publish JavaScript packages
+    needs: [resolve-version, verify-release, publish-native]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
