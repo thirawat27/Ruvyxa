@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.0.16 (2026-07-19)
+## v1.0.16 (2026-07-20)
 
 ### Plugin System Overhaul
 
@@ -79,6 +79,76 @@
   affected route artifacts, while plugin builds retain their existing hook pass.
 - Reduced the isolated 16-route demo benchmark from 13.61s to 4.02s cold and from 1.94s to a 1.62s
   warm median, with cold prerender down 89.2% and warm client bundling down 93.3%.
+
+### Build Output and Release Profile
+
+- Added progressive build phase reporting that displays real-time progress with per-phase durations
+  for route discovery, validation, asset preparation, client bundling, and prerendering, so
+  developers see timing as each stage completes rather than waiting for a single final summary.
+- Added release profile optimizations (`thin` LTO, single codegen unit, symbol stripping) to
+  `Cargo.toml` for smaller binaries, faster downloads, and improved runtime performance.
+- Refactored build summary output into incremental metrics with a route size table and consolidated
+  timing information for easier post-build inspection.
+- Enhanced plugin scaffolding output with a visual file tree and numbered next steps for faster
+  developer onboarding.
+
+### Server Actions and Streaming
+
+- Passed request headers through the server action rendering pipeline so Actions receive the
+  originating `HeaderMap` via the worker pool and action renderer.
+- Collected response headers from action handlers (`append`-style, multi-value) and propagated them
+  back through the render pipeline to the HTTP response.
+- Optimized the render cache recency tracking from O(n) linear queue scans to O(1) operations via a
+  hash-indexed doubly linked list, replacing `VecDeque` with explicit `RecencyLinks` and
+  `RecencyList`.
+- Switched the API response stream from unbounded MPSC channels to bounded channels with capacity
+  `MAX_PENDING_RESPONSE_FRAMES`, applying backpressure at the channel layer instead of manual queue
+  overflow detection.
+
+### Runtime Detection and Bun Support
+
+- Added Bun as a selectable JavaScript runtime alongside Node, with `RUVYXA_RUNTIME` environment
+  variable support for runtime override.
+- Implemented `JavaScriptRuntime::detect()` to automatically select Node or Bun based on
+  availability: Node is preferred, Bun is selected only when Node is unavailable and Bun can be
+  executed, and Node is kept as the diagnostic target when neither runtime is installed.
+- Extended `ServerConfig` and `ProjectConfig` with a `runtime` field (`"node"` or `"bun"`), and
+  updated the worker pool, config renderer, and dev server to initialize with the selected runtime.
+- Added the `@ruvyxa/adapter-bun` package for Bun-based deployment and launcher integration.
+- Documented runtime configuration, automatic detection, and Bun parity guidance in English guides,
+  Thai guides, README, and architecture references.
+
+### Documentation
+
+- Added comprehensive Thai CLI commands guide with structured sections, common options reference,
+  detailed pipeline descriptions, `.ruvyxa/` output structure, `build.json` timing metadata, and
+  command examples.
+- Added system architecture reference guide spanning Rust/Node.js architecture, crate dependency
+  maps, compilation pipeline stages, route graph algorithms, bundler resolution order, CSS Module
+  handling, middleware plugin lifecycle, dev server hot reload, wire protocol specifications, error
+  codes, and data flow diagrams.
+- Added detailed architecture module guides for the bundler, CLI, concurrency, dev server,
+  diagnostics, graph, middleware, protocols, security, and worker pool, with reference
+  implementations and code examples.
+- Removed archived architecture documentation (`build-performance-and-mdx.md`,
+  `bundler-modernization.md`, `production-readiness.md`) after their content was integrated into the
+  new architecture guides.
+
+### CI/CD, Tooling, and Cleanup
+
+- Rebranded CI/CD workflow and job names with consistent framework references and consolidated
+  security scanning into primary workflows, removing the redundant standalone `security.yml`.
+- Upgraded `pnpm/action-setup` from v4 to v5 and consolidated pnpm version management to the
+  repository `packageManager` field as the single source of truth.
+- Extended version-bump automation to iterate over all starter templates (`minimal`, `blog`, `crud`,
+  `api-backend`) and validate framework dependencies across every template.
+- Improved npm package existence check reliability with Windows shell compatibility and explicit
+  error handling for `npm view` failures.
+- Removed unused `anyhow` and `walkdir` dependencies from `ruvyxa_bundler`, `tower-http` from
+  `ruvyxa_dev_server`, and `base64` from `ruvyxa_middleware` to reduce build footprint and
+  transitive dependency counts.
+- Bumped all npm workspace packages and Rust crates to `1.0.16` and regenerated `Cargo.lock` with
+  synchronized dependency versions.
 
 ## v1.0.15 (2026-07-18)
 
@@ -1179,4 +1249,7 @@ The following commits occurred before the v1.0.0 tag and represent the initial p
 | `v1.0.10` | 2026-07-11 | Minor      |
 | `v1.0.11` | 2026-07-12 | Minor      |
 | `v1.0.12` | 2026-07-13 | Minor      |
-| `v1.0.13` | 2026-07-13 | Patch      |
+| `v1.0.13` | 2026-07-14 | Patch      |
+| `v1.0.14` | 2026-07-16 | Minor      |
+| `v1.0.15` | 2026-07-18 | Minor      |
+| `v1.0.16` | 2026-07-20 | Minor      |

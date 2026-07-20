@@ -206,7 +206,9 @@ npx ruvyxa plugin new request-logger
 ```
 
 สร้าง plugin package ที่ `plugins/request-logger/` พร้อม `src/index.ts`, `package.json`,
-`tsconfig.json`, `README.md` ดู workflow เต็มได้ที่ [Plugins](plugins.md)
+`tsconfig.json`, `README.md` build ด้วย `pnpm build` แล้ว publish ด้วย `pnpm publish` import package
+entry จาก `ruvyxa.config.ts` และลงทะเบียนใน `config({ plugins: [...] })` ดู workflow เต็มได้ที่
+[Plugins](plugins.md)
 
 ## Environment Variables
 

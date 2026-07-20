@@ -84,7 +84,8 @@ node_modules/.bin/ruvyxa: Permission denied
 ├── assets/         # Static assets + WebP images
 ├── prerender/      # Pre-rendered HTML pages
 ├── manifest.json   # Route manifest
-└── build.json      # Build metadata
+├── build.json      # Build metadata
+└── deploy/         # Adapter-specific artifacts, เมื่อตั้งค่าไว้
 ```
 
 ---

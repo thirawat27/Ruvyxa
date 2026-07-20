@@ -8,7 +8,8 @@ Create a starter:
 npx ruvyxa plugin new auth
 ```
 
-The command creates `plugins/auth/` with its own `package.json` and `src/index.ts`:
+The command creates `plugins/auth/` with `src/index.ts`, `package.json`, `tsconfig.json`, and
+`README.md`:
 
 ```ts
 import { plugin } from 'ruvyxa/config'
