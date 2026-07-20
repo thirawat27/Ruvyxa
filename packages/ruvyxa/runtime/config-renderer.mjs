@@ -115,7 +115,7 @@ async function sanitizeConfig(config) {
   ])
   assertKnownKeys(config.cache, 'config.cache', ['routes', 'css', 'dir'])
   assertKnownKeys(config.render, 'config.render', ['strategy', 'revalidate'])
-  assertKnownKeys(config.middleware, 'config.middleware', ['builtin'])
+  assertKnownKeys(config.middleware, 'config.middleware', ['builtin', 'workers'])
   assertKnownKeys(config.middleware?.builtin, 'config.middleware.builtin', [
     'cors',
     'timing',
@@ -235,7 +235,7 @@ function assertConfigValueShape(config) {
       headers: 'boolean',
     },
     cache: { routes: 'boolean', css: 'boolean', dir: 'string' },
-    middleware: 'object',
+    middleware: { workers: 'number' },
     adapter: 'object',
     adapterOptions: 'object',
     plugins: 'array',

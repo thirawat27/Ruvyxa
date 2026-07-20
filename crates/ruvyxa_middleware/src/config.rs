@@ -5,6 +5,9 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+/// Largest configurable TypeScript plugin middleware worker pool.
+pub const MAX_PLUGIN_MIDDLEWARE_WORKERS: usize = 8;
+
 /// Top-level middleware configuration block.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -12,6 +15,25 @@ pub struct MiddlewareConfig {
     /// Built-in middleware to enable.
     #[serde(default)]
     pub builtin: BuiltinMiddlewareConfig,
+
+    /// TypeScript plugin middleware worker processes. Workers do not share
+    /// module-level plugin state, so the default stays at one process.
+    #[serde(default)]
+    pub workers: Option<usize>,
+}
+
+impl MiddlewareConfig {
+    /// Validated plugin middleware pool size.
+    pub fn plugin_workers(&self) -> Result<usize, String> {
+        match self.workers {
+            None => Ok(1),
+            Some(workers) if (1..=MAX_PLUGIN_MIDDLEWARE_WORKERS).contains(&workers) => Ok(workers),
+            Some(workers) => Err(format!(
+                "RUV1602 config field `middleware.workers` must be between 1 and \
+                 {MAX_PLUGIN_MIDDLEWARE_WORKERS}, got {workers}"
+            )),
+        }
+    }
 }
 
 /// Built-in middleware toggles and config.
@@ -116,4 +138,26 @@ fn default_cors_max_age() -> u64 {
 
 fn default_rate_key() -> String {
     "ip".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn plugin_workers_defaults_to_one_and_rejects_out_of_range_values() {
+        let config = MiddlewareConfig::default();
+        assert_eq!(config.plugin_workers(), Ok(1));
+
+        let config: MiddlewareConfig =
+            serde_json::from_value(serde_json::json!({ "workers": 4 })).unwrap();
+        assert_eq!(config.plugin_workers(), Ok(4));
+
+        for workers in [0usize, MAX_PLUGIN_MIDDLEWARE_WORKERS + 1] {
+            let config: MiddlewareConfig =
+                serde_json::from_value(serde_json::json!({ "workers": workers })).unwrap();
+            let error = config.plugin_workers().unwrap_err();
+            assert!(error.contains("middleware.workers"), "{error}");
+        }
+    }
 }

@@ -42,6 +42,33 @@
 - Removed orphaned Wasmtime dependencies from the workspace lockfile and verified packed npm output
   includes `runtime/plugin-runtime.mjs` without legacy runtime files.
 
+### Built-in Plugins and Middleware Fast Path
+
+- Added the `ruvyxa/plugins` package entry with first-party plugins built on the public hook API:
+  `redirects` (declarative 307/308 redirects with wildcard remainders), `headers` (route-scoped
+  response headers), `sitemap` and `robots` (build-time `sitemap.xml`/`robots.txt` generation from
+  the route manifest into the served asset directory), and `alias` (exact import specifier
+  resolution ahead of the native resolver).
+- Added a native middleware fast path: the plugin registry now reports the union of middleware route
+  patterns per direction, and the Rust server skips the plugin stdio round-trip — including request
+  body base64 encoding and response buffering — for requests no middleware can match. Registries
+  without request middleware no longer pay any per-request plugin cost, and older runtimes that do
+  not report routes keep the previous match-all behavior.
+- Added automatic plugin host recovery: when the persistent TypeScript plugin process crashes or its
+  pipes break, the server restarts it once and retries the in-flight hook instead of failing every
+  subsequent request. Hook-level errors are never retried.
+- Added `bundleBudget` (fail the build when emitted client JavaScript exceeds per-chunk or total KiB
+  budgets) and `requireEnv` (fail the build when required environment variables are missing or
+  empty) to `ruvyxa/plugins`, and taught `sitemap` to read the committed route manifest when the
+  build summary omits the route list.
+- Added the opt-in `middleware.workers` setting (1-8, default 1): the server starts a pool of
+  identical plugin runtime processes dispatched round-robin for middleware-heavy workloads, each
+  with independent crash recovery. Module-level plugin state is per-process, so the default stays at
+  one worker.
+- Added the `ruvyxa/plugins` runtime alias so `ruvyxa.config.ts` can import built-in plugins inside
+  the workspace and from packed installs, and wired the demo app to `sitemap`, `bundleBudget`, and a
+  two-worker middleware pool as integration coverage.
+
 ### Large-Build and Content Compiler Follow-up
 
 - Split route bundling into reusable prepare/emit stages so cold route-split builds resolve,

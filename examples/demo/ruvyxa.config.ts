@@ -32,6 +32,10 @@ const settings: RuvyxaConfig = {
     overlay: true,
     traces: true,
   },
+
+  middleware: {
+    workers: 2,
+  },
   image: {
     optimize: true,
     quality: 82,

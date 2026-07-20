@@ -968,7 +968,12 @@ export class contentFormat {}
       const described = await runJson(pluginRuntime, [root, 'describe'], {})
       assert.deepEqual(described.result, {
         plugins: ['native-hooks'],
-        middleware: { request: 1, response: 1 },
+        middleware: {
+          request: 1,
+          response: 1,
+          requestRoutes: ['/api/*'],
+          responseRoutes: ['/api/*'],
+        },
         resolveId: 0,
         transform: 0,
         buildComplete: 1,

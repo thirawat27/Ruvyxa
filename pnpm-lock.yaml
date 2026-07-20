@@ -144,6 +144,10 @@ importers:
       yaml:
         specifier: ^2.9.0
         version: 2.9.0
+    devDependencies:
+      '@types/node':
+        specifier: ^26.1.1
+        version: 26.1.1
     optionalDependencies:
       '@ruvyxa/cli-darwin-arm64':
         specifier: workspace:^

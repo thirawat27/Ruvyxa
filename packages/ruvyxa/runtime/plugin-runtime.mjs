@@ -187,6 +187,8 @@ async function handleHook(registry, hook, payload) {
         middleware: {
           request: registry.middleware.filter((entry) => entry.onRequest).length,
           response: registry.middleware.filter((entry) => entry.onResponse).length,
+          requestRoutes: middlewareRouteUnion(registry.middleware, 'onRequest'),
+          responseRoutes: middlewareRouteUnion(registry.middleware, 'onResponse'),
         },
         resolveId: registry.resolveId.length,
         transform: registry.transform.length,
@@ -303,6 +305,21 @@ async function runBuildComplete(registry, payload) {
 
 function middlewareContext(registry, middleware) {
   return Object.freeze({ plugin: middleware.plugin, root: registry.root })
+}
+
+/**
+ * Union of route patterns for one middleware direction, used by the native
+ * server to skip the plugin round-trip for paths no middleware can match.
+ * `null` means at least one middleware matches every route.
+ */
+function middlewareRouteUnion(middleware, hookName) {
+  const patterns = new Set()
+  for (const entry of middleware) {
+    if (typeof entry[hookName] !== 'function') continue
+    if (!entry.routes || entry.routes.length === 0 || entry.routes.includes('*')) return null
+    for (const route of entry.routes) patterns.add(route)
+  }
+  return [...patterns]
 }
 
 function matchesRoutes(routes, pathname) {

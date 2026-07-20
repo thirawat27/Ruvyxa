@@ -525,9 +525,20 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
         let runtime_script = find_runtime_script(&config.root, "plugin-runtime.mjs")
             .ok_or_else(|| RuvyxaError::Message("RUV1701 plugin-runtime.mjs not found".into()))?;
         let executable = config.runtime.executable();
-        Some(Arc::new(
-            PluginHost::start(&config.root, &runtime_script, &executable).await?,
-        ))
+        let plugin_workers = config
+            .middleware
+            .plugin_workers()
+            .map_err(RuvyxaError::Message)?;
+        let host =
+            PluginHost::start_pool(&config.root, &runtime_script, &executable, plugin_workers)
+                .await?;
+        if host.pool_size() > 1 {
+            info!(
+                workers = host.pool_size(),
+                "TypeScript plugin middleware pool ready"
+            );
+        }
+        Some(Arc::new(host))
     };
     let state = AppState {
         config: config.clone(),
@@ -1358,28 +1369,50 @@ async fn handle_request(
         None
     };
 
-    let plugin_request = PluginHttpRequest {
-        method: method.clone(),
-        path: request_target.clone(),
-        headers: headers_to_plugin_pairs(&headers),
-        body_base64: request_body.as_deref().map(encode_plugin_body),
-    };
-    let (short_circuit, plugin_request) = match apply_request_plugins(&state, plugin_request).await
+    // The plugin round-trip serializes the request over stdio, so it only runs
+    // when the registry declared request middleware whose routes can match.
+    let mut plugin_request: Option<PluginHttpRequest> = None;
+    if state
+        .plugin_runtime
+        .as_deref()
+        .is_some_and(|runtime| runtime.wants_request(&request_path))
     {
-        Ok(result) => result,
-        Err(error) => {
-            error!(%error, path = %request_path, "TypeScript request middleware failed");
-            let message = public_internal_error(&state.config, &error);
-            return with_security_headers(
-                (StatusCode::INTERNAL_SERVER_ERROR, message).into_response(),
-            );
+        let initial_request = PluginHttpRequest {
+            method: method.clone(),
+            path: request_target.clone(),
+            headers: headers_to_plugin_pairs(&headers),
+            body_base64: request_body.as_deref().map(encode_plugin_body),
+        };
+        let (short_circuit, next_request) =
+            match apply_request_plugins(&state, initial_request).await {
+                Ok(result) => result,
+                Err(error) => {
+                    error!(%error, path = %request_path, "TypeScript request middleware failed");
+                    let message = public_internal_error(&state.config, &error);
+                    return with_security_headers(
+                        (StatusCode::INTERNAL_SERVER_ERROR, message).into_response(),
+                    );
+                }
+            };
+        if let Some(response) = short_circuit {
+            return response;
         }
-    };
-    if let Some(response) = short_circuit {
-        return response;
-    }
-    let (next_method, next_target) =
-        match split_plugin_target(&plugin_request.method, &plugin_request.path) {
+        let (next_method, next_target) =
+            match split_plugin_target(&next_request.method, &next_request.path) {
+                Ok(value) => value,
+                Err(error) => {
+                    return with_security_headers(
+                        (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
+                    );
+                }
+            };
+        method = next_method;
+        request_target = next_target.clone();
+        request_path = next_target
+            .split_once('?')
+            .map_or_else(|| next_target.clone(), |(path, _)| path.to_string());
+        headers = plugin_headers(&next_request.headers);
+        request_body = match decode_plugin_body(next_request.body_base64.as_deref()) {
             Ok(value) => value,
             Err(error) => {
                 return with_security_headers(
@@ -1387,20 +1420,8 @@ async fn handle_request(
                 );
             }
         };
-    method = next_method;
-    request_target = next_target.clone();
-    request_path = next_target
-        .split_once('?')
-        .map_or_else(|| next_target.clone(), |(path, _)| path.to_string());
-    headers = plugin_headers(&plugin_request.headers);
-    request_body = match decode_plugin_body(plugin_request.body_base64.as_deref()) {
-        Ok(value) => value,
-        Err(error) => {
-            return with_security_headers(
-                (StatusCode::BAD_REQUEST, error.to_string()).into_response(),
-            );
-        }
-    };
+        plugin_request = Some(next_request);
+    }
 
     let render_result = render_request_pooled(
         &state,
@@ -1431,18 +1452,35 @@ async fn handle_request(
             }
         }
     };
-    let response = match apply_response_plugins(&state, &plugin_request, response).await {
-        Ok(response) => response,
-        Err(error) => {
-            error!(%error, path = %request_path, "TypeScript response middleware failed");
-            with_security_headers(
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    public_internal_error(&state.config, &error),
+    // Response middleware is gated on the (possibly rewritten) final path so
+    // route-scoped plugins never force non-matching responses through the
+    // buffering base64 round-trip.
+    let response = if state
+        .plugin_runtime
+        .as_deref()
+        .is_some_and(|runtime| runtime.wants_response(&request_path))
+    {
+        let request_payload = plugin_request.unwrap_or_else(|| PluginHttpRequest {
+            method: method.clone(),
+            path: request_target.clone(),
+            headers: headers_to_plugin_pairs(&headers),
+            body_base64: request_body.as_deref().map(encode_plugin_body),
+        });
+        match apply_response_plugins(&state, &request_payload, response).await {
+            Ok(response) => response,
+            Err(error) => {
+                error!(%error, path = %request_path, "TypeScript response middleware failed");
+                with_security_headers(
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        public_internal_error(&state.config, &error),
+                    )
+                        .into_response(),
                 )
-                    .into_response(),
-            )
+            }
         }
+    } else {
+        response
     };
     if state.config.watch && should_log_dev_request(&request_path) {
         println!(

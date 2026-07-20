@@ -190,6 +190,13 @@ export interface PageProps<TParams extends RouteParams = RouteParams> {
 
 export interface MiddlewareConfig {
   builtin?: BuiltinMiddlewareConfig
+  /**
+   * TypeScript plugin middleware worker processes (1-8). Workers do not share
+   * module-level plugin state, so keep the default unless plugin middleware is
+   * stateless and a proven throughput bottleneck.
+   * @default 1
+   */
+  workers?: number
 }
 
 export interface BuiltinMiddlewareConfig {
