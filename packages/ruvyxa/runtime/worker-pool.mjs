@@ -126,10 +126,6 @@ const reactResolvedRoots = new Set()
 // actually renders; the second awaits the same Promise.
 const renderCoalesceMap = new Map()
 
-// Performance: Warm module queue — tracks modules to pre-import on idle.
-const warmupQueue = []
-let warmupTimer = null
-
 let activeRequests = 0
 let isShuttingDown = false
 let moduleImportVersion = 0

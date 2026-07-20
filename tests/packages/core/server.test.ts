@@ -7,6 +7,7 @@ import {
   cacheStats,
   invalidateCache,
   loader,
+  notFound,
   redirect,
 } from '../../../packages/@ruvyxa/core/src/server.ts'
 
@@ -37,6 +38,16 @@ describe('server API', () => {
 
   it('rejects non-3xx redirect status codes', () => {
     assert.throws(() => redirect('/login', 200), /redirect\(\) status must be 3xx/)
+  })
+
+  it('creates not-found responses with default and custom messages', async () => {
+    const fallback = notFound()
+    assert.equal(fallback.status, 404)
+    assert.equal(await fallback.text(), 'Not found')
+
+    const custom = notFound('Post missing')
+    assert.equal(custom.status, 404)
+    assert.equal(await custom.text(), 'Post missing')
   })
 })
 

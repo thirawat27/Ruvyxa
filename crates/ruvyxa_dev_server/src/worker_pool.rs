@@ -830,12 +830,27 @@ impl NodeWorkerPool {
                 .clamp(MIN_POOL_SIZE, MAX_POOL_SIZE),
         };
 
-        let mut workers = Vec::with_capacity(pool_size);
-        for _ in 0..pool_size {
-            workers.push(Arc::new(
-                Worker::spawn(&worker_script, &env, runtime).await?,
-            ));
+        // Spawn all worker processes concurrently; each spawn performs blocking
+        // process setup, so overlapping them shortens pool startup.
+        let mut spawns = tokio::task::JoinSet::new();
+        for index in 0..pool_size {
+            let worker_script = worker_script.clone();
+            let env = env.clone();
+            spawns
+                .spawn(async move { (index, Worker::spawn(&worker_script, &env, runtime).await) });
         }
+        let mut spawned = Vec::with_capacity(pool_size);
+        while let Some(joined) = spawns.join_next().await {
+            let (index, worker) = joined.map_err(|error| {
+                RuvyxaError::Message(format!("worker spawn task panicked: {error}"))
+            })?;
+            spawned.push((index, worker?));
+        }
+        spawned.sort_by_key(|(index, _)| *index);
+        let workers = spawned
+            .into_iter()
+            .map(|(_, worker)| Arc::new(worker))
+            .collect::<Vec<_>>();
 
         // Health check: ping first worker to verify it's alive
         let ping = WorkerRequest::Ping {

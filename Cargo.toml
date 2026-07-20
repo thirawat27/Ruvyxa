@@ -9,6 +9,14 @@ members = [
 ]
 resolver = "3"
 
+# Shipped as the npm-distributed native CLI binary: favor runtime speed and
+# download size over release compile time. panic stays "unwind" because the
+# dev server must survive per-request panics.
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = "symbols"
+
 [workspace.package]
 edition = "2024"
 license = "Apache-2.0"

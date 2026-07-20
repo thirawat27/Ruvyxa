@@ -570,10 +570,29 @@ fn scaffold_plugin(args: PluginNewArgs) -> anyhow::Result<()> {
     print_tui_header("Plugin");
     print_field("status", ok_text("created"));
     print_field("plugin", accent(&plugin_name));
+    print_field("package", accent(format!("ruvyxa-plugin-{plugin_name}")));
     print_field("path", path_text(&package_dir));
-    print_field(
-        "next",
-        "cd into the package, install dependencies, and run pnpm build".to_string(),
+    println!();
+    println!("  {}", path_text(&package_dir));
+    println!("  {} package.json", dim("├─"));
+    println!("  {} README.md", dim("├─"));
+    println!("  {} tsconfig.json", dim("├─"));
+    println!("  {} src", dim("└─"));
+    println!("     {} {}", dim("└─"), accent("index.ts"));
+    println!();
+    println!("  {}", label("next steps"));
+    println!(
+        "  {} {}",
+        dim("1."),
+        accent(format!("cd {}", package_dir.display()))
+    );
+    println!("  {} {}", dim("2."), accent("pnpm install"));
+    println!("  {} {}", dim("3."), accent("pnpm build"));
+    println!();
+    println!(
+        "  {} Plugin {} is ready to develop\n",
+        success(),
+        accent(&plugin_name)
     );
     Ok(())
 }
@@ -1048,13 +1067,33 @@ async fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Resul
     let app_dir = args.root.join(config.app_dir());
     let out_dir = args.root.join(config.out_dir());
 
+    if show_summary {
+        print_tui_header("Build");
+        print_field("target", accent(format!("{:?}", target).to_lowercase()));
+        print_field("profile", accent("production"));
+        print_field("root", path_text(&args.root));
+        print_field("app dir", path_text(&app_dir));
+        print_field("out dir", path_text(&out_dir));
+        println!();
+    }
+
     let phase_started = Instant::now();
     let manifest = discover_project_routes(&args.root, &config)?;
     let route_discovery_duration = phase_started.elapsed();
+    if show_summary {
+        print_build_phase(
+            "routes discovered",
+            format!("{} routes", manifest.routes.len()),
+            route_discovery_duration,
+        );
+    }
     let phase_started = Instant::now();
     let validation = validate_app(&args.root, &manifest)?;
     fail_on_diagnostics(&validation.diagnostics)?;
     let validation_duration = phase_started.elapsed();
+    if show_summary {
+        print_build_phase("validated", "ok".to_string(), validation_duration);
+    }
     let phase_started = Instant::now();
     let style_collection =
         ruvyxa_dev_server::collect_styles(&args.root, &app_dir, &config.style_entries(&args.root))?;
@@ -1087,6 +1126,21 @@ async fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Resul
     fs::create_dir_all(&client_dir)?;
     write_manifest(&manifest, &staging_dir.join("manifest.json"))?;
     let preparation_duration = phase_started.elapsed();
+    if show_summary {
+        let mut detail = format!("{asset_files} files");
+        if image_report.optimized_images > 0 {
+            detail.push_str(&format!(
+                " · {} optimized image{}",
+                image_report.optimized_images,
+                if image_report.optimized_images == 1 {
+                    ""
+                } else {
+                    "s"
+                }
+            ));
+        }
+        print_build_phase("assets prepared", detail, preparation_duration);
+    }
 
     let phase_started = Instant::now();
     let client_manifest = emit_client_bundles_with_runtime(
@@ -1107,6 +1161,18 @@ async fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Resul
         serde_json::to_string_pretty(&client_manifest)?,
     )?;
     let client_bundle_duration = phase_started.elapsed();
+    let client_bundles = client_manifest
+        .get("routes")
+        .and_then(|routes| routes.as_array())
+        .map(Vec::len)
+        .unwrap_or_default();
+    if show_summary {
+        print_build_phase(
+            "client bundles",
+            format!("{client_bundles} bundles"),
+            client_bundle_duration,
+        );
+    }
 
     // ─── SSG / ISR / PPR pre-rendering at build time ──────────────────────────
     let prerender_dir = staging_dir.join("prerender");
@@ -1124,9 +1190,21 @@ async fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Resul
             directory: &build_cache_dir(&args.root, &config.cache),
         },
         config.javascript_runtime(),
+        show_summary,
     )
     .await?;
     let prerender_duration = phase_started.elapsed();
+    if show_summary && !prerendered.is_empty() {
+        print_build_phase(
+            "prerendered",
+            format!(
+                "{} page{}",
+                prerendered.len(),
+                if prerendered.len() == 1 { "" } else { "s" }
+            ),
+            prerender_duration,
+        );
+    }
 
     let mut build_info = serde_json::json!({
         "framework": "Ruvyxa",
@@ -1218,64 +1296,39 @@ async fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Resul
         "build complete"
     );
     if show_summary {
-        let page_routes = manifest
-            .routes
-            .iter()
-            .filter(|route| route.kind == ruvyxa_graph::RouteKind::Page)
-            .count();
-        let api_routes = manifest.routes.len().saturating_sub(page_routes);
-        let client_bundles = client_manifest
-            .get("routes")
-            .and_then(|routes| routes.as_array())
-            .map(Vec::len)
-            .unwrap_or_default();
-        print_tui_header("Build");
-        print_field("status", ok_text("built"));
-        print_field("target", accent(format!("{:?}", target).to_lowercase()));
-        print_field("profile", accent("production"));
-        print_field("root", path_text(&args.root));
-        print_field("app dir", path_text(&app_dir));
-        print_field("out dir", path_text(&out_dir));
-        print_field("routes", accent(manifest.routes.len().to_string()));
-        print_field("pages", accent(page_routes.to_string()));
-        print_field("api", accent(api_routes.to_string()));
-        print_field("client bundles", accent(client_bundles.to_string()));
-        print_field("asset files", accent(asset_files.to_string()));
-        if image_report.optimized_images > 0 {
-            print_field(
-                "optimized images",
-                accent(image_report.optimized_images.to_string()),
-            );
-            print_field(
-                "image cache hits",
-                accent(image_report.cache_hits.to_string()),
-            );
-        }
-        if !prerendered.is_empty() {
-            print_field("prerendered", accent(prerendered.len().to_string()));
-        }
-        print_field("duration", accent(format_duration(started.elapsed())));
-        println!("  {} Built into {}\n", success(), path_text(&out_dir));
+        println!();
+        print_route_size_table(&manifest, &client_manifest);
+        println!(
+            "  {} Built into {} in {}\n",
+            success(),
+            path_text(&out_dir),
+            accent(format_duration(started.elapsed()))
+        );
     }
     Ok(())
 }
 
-#[allow(dead_code, clippy::too_many_arguments)]
-fn print_build_report(
-    manifest: &RouteManifest,
-    client_manifest: &serde_json::Value,
-    prerendered: &[PrerenderedRoute],
-    image_report: &image_optimizer::ImageOptimizationReport,
-    asset_files: usize,
-    target: BuildTarget,
-    out_dir: &Path,
-    duration: Duration,
-) {
+fn print_build_phase(name: &str, detail: String, duration: Duration) {
+    println!(
+        "  {} {}{} {} {}",
+        dim("◌"),
+        label(name),
+        spaces(18, name.len()),
+        accent(detail),
+        dim(format!("· {}", format_duration(duration)))
+    );
+}
+
+/// Per-route bundle size table shown after a successful build.
+fn print_route_size_table(manifest: &RouteManifest, client_manifest: &serde_json::Value) {
     let page_routes = manifest
         .routes
         .iter()
         .filter(|route| route.kind == ruvyxa_graph::RouteKind::Page)
         .collect::<Vec<_>>();
+    if page_routes.is_empty() {
+        return;
+    }
     let client_routes = client_manifest
         .get("routes")
         .and_then(serde_json::Value::as_array)
@@ -1287,111 +1340,77 @@ fn print_build_report(
         .map(Vec::as_slice)
         .unwrap_or_default();
 
-    println!("\n   {} Ruvyxa {}", accent("▲"), env!("CARGO_PKG_VERSION"));
-    println!("\n   Creating an optimized production build ...");
+    let route_width = page_routes
+        .iter()
+        .map(|route| route.path.len())
+        .max()
+        .unwrap_or(0)
+        .max("shared by all".len())
+        .max(24);
     println!(
-        " {} Compiled and validated {} routes",
-        success(),
-        manifest.routes.len()
-    );
-    println!(
-        " {} Generated {} pre-rendered page{}",
-        success(),
-        prerendered.len(),
-        if prerendered.len() == 1 { "" } else { "s" }
-    );
-    println!(
-        " {} Emitted {} client bundle{} and {} asset file{}",
-        success(),
-        client_routes.len(),
-        if client_routes.len() == 1 { "" } else { "s" },
-        asset_files,
-        if asset_files == 1 { "" } else { "s" }
-    );
-    if image_report.optimized_images > 0 {
-        println!(
-            " {} Optimized {} image{} ({} cache hit{})",
-            success(),
-            image_report.optimized_images,
-            if image_report.optimized_images == 1 {
-                ""
-            } else {
-                "s"
-            },
-            image_report.cache_hits,
-            if image_report.cache_hits == 1 {
-                ""
-            } else {
-                "s"
-            }
-        );
-    }
-
-    println!();
-    println!(
-        "Route (app){}Size{}First Load JS",
-        spaces(39, "Route (app)".len()),
-        spaces(16, "Size".len())
+        "      {}{} {}{} {}",
+        label("route"),
+        spaces(route_width, "route".len()),
+        label("size"),
+        spaces(9, "size".len()),
+        label("first load")
     );
     for (index, route) in page_routes.iter().enumerate() {
         let client_route = client_routes.iter().find(|entry| {
             entry.get("path").and_then(serde_json::Value::as_str) == Some(route.path.as_str())
         });
         let route_bytes = client_route.map(manifest_entry_bytes).unwrap_or_default();
-        let first_load_bytes = client_route.map(first_load_bytes).unwrap_or_default();
-        let branch = if index + 1 == page_routes.len() {
+        let first_load = client_route.map(first_load_bytes).unwrap_or_default();
+        let branch = if index + 1 == page_routes.len() && shared_chunks.is_empty() {
             "└"
         } else {
             "├"
         };
-        let symbol = route_render_symbol(route.render.strategy);
+        let size = format_bytes(route_bytes);
         println!(
-            "{branch} {symbol} {}{}{}{}{}",
+            "  {} {} {}{} {}{} {}",
+            dim(branch),
+            styled_render_symbol(route.render.strategy),
             route.path,
-            spaces(39, route.path.len()),
-            format_bytes(route_bytes),
-            spaces(16, format_bytes(route_bytes).len()),
-            format_bytes(first_load_bytes),
+            spaces(route_width, route.path.len()),
+            size,
+            spaces(9, size.len()),
+            accent(format_bytes(first_load))
         );
     }
-
     let shared_bytes = shared_chunks
         .iter()
         .map(manifest_entry_bytes)
         .sum::<usize>();
-    println!(
-        "+ First Load JS shared by all{}{}",
-        spaces(39, "First Load JS shared by all".len()),
-        format_bytes(shared_bytes)
-    );
-    for (index, chunk) in shared_chunks.iter().enumerate() {
-        let file = chunk
-            .get("file")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("shared chunk");
-        let branch = if index + 1 == shared_chunks.len() {
-            "└"
-        } else {
-            "├"
-        };
+    if shared_bytes > 0 {
         println!(
-            "  {branch} {file}{}{}",
-            spaces(47, file.len()),
-            format_bytes(manifest_entry_bytes(chunk))
+            "  {}   shared by all{}{}",
+            dim("└"),
+            spaces(route_width + 11, "shared by all".len()),
+            accent(format_bytes(shared_bytes))
         );
     }
+    println!("  {}", dim("○ csr · ● static · ◐ isr/ppr · ƒ dynamic"));
+    println!();
+}
 
-    println!("\n○  (CSR)      client-rendered");
-    println!("●  (Static)   pre-rendered at build time");
-    println!("◐  (ISR/PPR)  pre-rendered with revalidation or streamed slots");
-    println!("ƒ  (Dynamic)  server-rendered on demand");
-    println!(
-        "\n {} Built {} output for {} in {}\n",
-        success(),
-        path_text(out_dir),
-        accent(format!("{:?}", target).to_lowercase()),
-        accent(format_duration(duration))
-    );
+fn styled_render_symbol(strategy: RenderStrategy) -> String {
+    match strategy {
+        RenderStrategy::Csr => dim("○"),
+        RenderStrategy::Ssg => ok_text("●"),
+        RenderStrategy::Isr | RenderStrategy::Ppr => warn_text("◐"),
+        RenderStrategy::Ssr => accent("ƒ"),
+    }
+}
+
+fn styled_strategy_word(strategy: RenderStrategy) -> String {
+    match strategy {
+        RenderStrategy::Csr => dim("csr"),
+        RenderStrategy::Ssg => ok_text("ssg"),
+        RenderStrategy::Isr => warn_text("isr"),
+        RenderStrategy::Ppr => warn_text("ppr"),
+        RenderStrategy::Ssr => accent("ssr"),
+    }
 }
 
 fn manifest_entry_bytes(entry: &serde_json::Value) -> usize {
@@ -1434,18 +1453,12 @@ fn add_manifest_entry_bytes(
     }
 }
 
-fn route_render_symbol(strategy: RenderStrategy) -> &'static str {
-    match strategy {
-        RenderStrategy::Csr => "○",
-        RenderStrategy::Ssg => "●",
-        RenderStrategy::Isr | RenderStrategy::Ppr => "◐",
-        RenderStrategy::Ssr => "ƒ",
-    }
-}
-
 const BUILD_OUTPUT_DIRS: [&str; 4] = ["server", "client", "assets", "prerender"];
 const BUILD_OUTPUT_FILES: [&str; 2] = ["manifest.json", "build.json"];
-const MAX_PRERENDER_PARALLELISM: usize = 2;
+// Default cap balances Node process memory against prerender throughput; an
+// explicit `build.parallelism` config value may raise it up to the pool limit.
+const MAX_PRERENDER_PARALLELISM: usize = 4;
+const MAX_CONFIGURED_PRERENDER_PARALLELISM: usize = 8;
 const WINDOWS_RENAME_RETRY_COUNT: usize = 5;
 
 /// A route that was pre-rendered at build time.
@@ -1507,6 +1520,7 @@ async fn prerender_static_routes(
     build: &BuildConfigOptions,
     cache: RuvyxaBuildCache<'_>,
     runtime: JavaScriptRuntime,
+    show_progress: bool,
 ) -> anyhow::Result<Vec<PrerenderedRoute>> {
     use ruvyxa_graph::RouteKind;
 
@@ -1638,10 +1652,13 @@ async fn prerender_static_routes(
         }
 
         let parallelism = prerender_parallelism(build.parallelism, jobs.len());
+        let total_jobs = jobs.len();
+        let mut completed_jobs = 0usize;
         let mut pending = tokio::task::JoinSet::new();
         let mut jobs = jobs.into_iter().enumerate();
         let mut prerendered = Vec::new();
 
+        draw_progress_bar(show_progress, "prerender", completed_jobs, total_jobs);
         loop {
             while pending.len() < parallelism {
                 let Some((index, job)) = jobs.next() else {
@@ -1677,7 +1694,10 @@ async fn prerender_static_routes(
                 result
                     .map_err(|error| anyhow::anyhow!("pre-render worker panicked: {error}"))??,
             );
+            completed_jobs += 1;
+            draw_progress_bar(show_progress, "prerender", completed_jobs, total_jobs);
         }
+        clear_progress_bar(show_progress);
 
         prerendered.sort_by_key(|(index, _)| *index);
         let prerendered = prerendered
@@ -2997,8 +3017,8 @@ fn prerender_parallelism(configured: Option<usize>, work_items: usize) -> usize 
         .unwrap_or(1)
         .min(MAX_PRERENDER_PARALLELISM);
     configured
+        .map(|value| value.min(MAX_CONFIGURED_PRERENDER_PARALLELISM))
         .unwrap_or(default)
-        .min(MAX_PRERENDER_PARALLELISM)
         .clamp(1, work_items.max(1))
 }
 
@@ -3949,28 +3969,65 @@ fn print_routes(args: ProjectArgs) -> anyhow::Result<()> {
     print_field("pages", accent(page_routes.to_string()));
     print_field("api", accent(api_routes.to_string()));
     println!();
-    print_route_row(
-        "kind",
-        label("kind"),
-        "path",
-        label("path"),
-        "file",
-        label("file"),
-        label("id"),
+
+    // The route id duplicates the file path, so the table omits it to stay
+    // narrow enough for typical terminals.
+    let rows = manifest
+        .routes
+        .iter()
+        .map(|route| {
+            [
+                format!("{:?}", route.kind).to_lowercase(),
+                route.path.clone(),
+                display_path_relative(&args.root, &route.file),
+                match route.kind {
+                    ruvyxa_graph::RouteKind::Page => {
+                        format!("{:?}", route.render.strategy).to_lowercase()
+                    }
+                    _ => "-".to_string(),
+                },
+            ]
+        })
+        .collect::<Vec<_>>();
+    let headers = ["kind", "path", "file", "strategy"];
+    let widths = headers
+        .iter()
+        .enumerate()
+        .map(|(index, header)| {
+            rows.iter()
+                .map(|row| row[index].len())
+                .max()
+                .unwrap_or(0)
+                .max(header.len())
+        })
+        .collect::<Vec<_>>();
+
+    print_table_separator(&widths);
+    print_box_row(
+        headers,
+        [
+            label(headers[0]),
+            label(headers[1]),
+            label(headers[2]),
+            label(headers[3]),
+        ],
+        &widths,
+        headers.len(),
     );
-    for route in manifest.routes {
-        let kind = format!("{:?}", route.kind);
-        let file = display_path_relative(&args.root, &route.file);
-        print_route_row(
-            &kind,
-            accent(&kind),
-            &route.path,
-            route.path.clone(),
-            &file,
-            dim(&file),
-            dim(route.id),
+    print_table_separator(&widths);
+    for (row, route) in rows.iter().zip(manifest.routes.iter()) {
+        let strategy = match route.kind {
+            ruvyxa_graph::RouteKind::Page => styled_strategy_word(route.render.strategy),
+            _ => dim("-").to_string(),
+        };
+        print_box_row(
+            [&row[0], &row[1], &row[2], &row[3]],
+            [accent(&row[0]), row[1].clone(), dim(&row[2]), strategy],
+            &widths,
+            4,
         );
     }
+    print_table_separator(&widths);
     println!();
 
     Ok(())
@@ -3981,7 +4038,38 @@ fn analyze(args: ProjectArgs) -> anyhow::Result<()> {
     let manifest = discover_project_routes(&args.root, &config)?;
     let validation = validate_app(&args.root, &manifest)?;
 
-    println!("{}", serde_json::to_string_pretty(&validation)?);
+    // Keep the machine-readable JSON contract for pipes and scripts; render the
+    // house TUI only when a person is looking at a terminal.
+    if std::io::stdout().is_terminal() {
+        print_tui_header("Analyze");
+        print_field("root", path_text(&args.root));
+        print_field("routes", accent(validation.routes.to_string()));
+        print_field("pages", accent(validation.page_routes.to_string()));
+        print_field("api", accent(validation.api_routes.to_string()));
+        print_field(
+            "client modules",
+            accent(validation.client_modules.to_string()),
+        );
+        print_field(
+            "server modules",
+            accent(validation.server_modules.to_string()),
+        );
+        if validation.is_ok() {
+            print_field("diagnostics", ok_text("none"));
+            println!("\n  {} No issues found\n", success());
+        } else {
+            print_field(
+                "diagnostics",
+                warn_text(validation.diagnostics.len().to_string()),
+            );
+            println!();
+            for diagnostic in &validation.diagnostics {
+                eprintln!("{diagnostic}");
+            }
+        }
+    } else {
+        println!("{}", serde_json::to_string_pretty(&validation)?);
+    }
 
     if !validation.is_ok() {
         anyhow::bail!(
@@ -4553,29 +4641,41 @@ fn fail_on_diagnostics(diagnostics: &[Diagnostic]) -> anyhow::Result<()> {
 }
 
 fn print_field(name: &str, value: String) {
-    let padding = spaces(20, name.len());
+    let padding = spaces(22, name.len());
     println!("  {}{} {}", label(name), padding, value);
 }
 
-fn print_route_row(
-    kind: &str,
-    styled_kind: String,
-    path: &str,
-    styled_path: String,
-    file: &str,
-    styled_file: String,
-    id: String,
-) {
-    println!(
-        "  {}{} {}{} {}{} {}",
-        styled_kind,
-        spaces(10, kind.len()),
-        styled_path,
-        spaces(24, path.len()),
-        styled_file,
-        spaces(32, file.len()),
-        id
+const PROGRESS_BAR_WIDTH: usize = 26;
+
+/// Redraws an in-place progress bar on the current line. TTY-only: silent when
+/// stdout is not a terminal so CI logs and pipes stay clean.
+fn draw_progress_bar(enabled: bool, name: &str, done: usize, total: usize) {
+    use std::io::Write;
+    if !enabled || total == 0 || !std::io::stdout().is_terminal() {
+        return;
+    }
+    let filled = (PROGRESS_BAR_WIDTH * done.min(total)) / total;
+    print!(
+        "\r  {} {}{} {}{} {}/{} ",
+        dim("◌"),
+        label(name),
+        spaces(18, name.len()),
+        accent("█".repeat(filled)),
+        dim("░".repeat(PROGRESS_BAR_WIDTH - filled)),
+        done,
+        total
     );
+    let _ = std::io::stdout().flush();
+}
+
+/// Clears a bar drawn by `draw_progress_bar` so the phase line replaces it.
+fn clear_progress_bar(enabled: bool) {
+    use std::io::Write;
+    if !enabled || !std::io::stdout().is_terminal() {
+        return;
+    }
+    print!("\r{}\r", " ".repeat(60 + PROGRESS_BAR_WIDTH));
+    let _ = std::io::stdout().flush();
 }
 
 fn print_benchmark_table(
@@ -4628,6 +4728,7 @@ fn print_benchmark_table(
             label(headers[4]),
         ],
         &widths,
+        1,
     );
     print_table_separator(&widths);
 
@@ -4642,6 +4743,7 @@ fn print_benchmark_table(
                 ok_text(&row[4]),
             ],
             &widths,
+            1,
         );
     }
     print_table_separator(&widths);
@@ -4666,10 +4768,18 @@ fn print_table_separator(widths: &[usize]) {
     println!();
 }
 
-fn print_box_row<const N: usize>(raw: [&str; N], styled: [String; N], widths: &[usize]) {
+/// Prints one bordered table row. Columns whose index is at least
+/// `right_align_from` are right-aligned (numeric columns); earlier columns are
+/// left-aligned (text columns).
+fn print_box_row<const N: usize>(
+    raw: [&str; N],
+    styled: [String; N],
+    widths: &[usize],
+    right_align_from: usize,
+) {
     print!("  {}", dim("|"));
     for index in 0..N {
-        if index == 0 {
+        if index < right_align_from {
             print!(
                 " {}{} {}",
                 styled[index],
@@ -5113,7 +5223,13 @@ export default {
         assert_eq!(prerender_parallelism(None, 1), 1);
         assert!(prerender_parallelism(None, 10) <= MAX_PRERENDER_PARALLELISM);
         assert_eq!(prerender_parallelism(Some(3), 2), 2);
-        assert_eq!(prerender_parallelism(Some(3), 10), 2);
+        // An explicit configuration may exceed the default cap, up to the
+        // worker pool limit.
+        assert_eq!(prerender_parallelism(Some(3), 10), 3);
+        assert_eq!(
+            prerender_parallelism(Some(64), 32),
+            MAX_CONFIGURED_PRERENDER_PARALLELISM
+        );
     }
 
     #[test]
