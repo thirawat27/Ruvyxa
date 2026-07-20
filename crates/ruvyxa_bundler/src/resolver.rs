@@ -751,6 +751,7 @@ fn resolve_exports_value(
             let conditions: &[&str] = match target {
                 BundleTarget::Client => &["browser", "import", "module", "default", "require"],
                 BundleTarget::Ssr => &["node", "import", "module", "default", "require"],
+                BundleTarget::Edge => &["worker", "edge-light", "import", "module", "default"],
             };
             for (condition, value) in map {
                 if conditions.contains(&condition.as_str()) {
@@ -877,7 +878,7 @@ pub fn resolve_graph_with_hooks(
         let resolved_frontier: Vec<Result<(PathBuf, ResolvedModule)>> = frontier
             .par_iter()
             .map(|dep_path| {
-                let is_external = target == BundleTarget::Ssr
+                let is_external = matches!(target, BundleTarget::Ssr | BundleTarget::Edge)
                     && dep_path
                         .components()
                         .any(|c| c.as_os_str() == "node_modules");
@@ -976,6 +977,7 @@ fn collect_deps_cached(
             target: match target {
                 BundleTarget::Client => 0,
                 BundleTarget::Ssr => 1,
+                BundleTarget::Edge => 2,
             },
         };
         if let Some(dependencies) = cache.dependencies.get(&key) {

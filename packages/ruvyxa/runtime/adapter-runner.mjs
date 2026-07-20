@@ -32,6 +32,7 @@ const KNOWN_ADAPTER_NAMES = ['node', 'bun', 'static', 'vercel', 'netlify', 'clou
 const PROJECT_ARTIFACT_ALLOWLIST = [
   '.vercel/output',
   'netlify.toml',
+  'netlify/functions',
   'wrangler.jsonc',
   '_headers',
   '_redirects',
@@ -171,6 +172,20 @@ async function materializeArtifacts(output, buildDir) {
       )
       continue
     }
+    if (artifact.kind === 'function') {
+      if (typeof artifact.handlerSource !== 'string') {
+        throw new Error(
+          `RUV2200 function artifact ${artifact.path} must include handlerSource string.`,
+        )
+      }
+      await materializeFunction(buildDir, destination, artifact.handlerSource)
+      artifacts.push(
+        scope === 'project'
+          ? { kind: 'function', path: artifact.path, scope }
+          : { kind: 'function', path: artifact.path },
+      )
+      continue
+    }
     throw new Error(`RUV2200 unsupported adapter artifact kind: ${String(artifact.kind)}.`)
   }
   return artifacts
@@ -216,6 +231,41 @@ function artifactDestination(buildDir, artifactPath) {
     )
   }
   return destination
+}
+
+async function materializeFunction(buildDir, destination, handlerSource) {
+  const manifestPath = path.join(buildDir, 'manifest.json')
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+
+  await mkdir(destination, { recursive: true })
+
+  // Write the platform-specific handler entry point
+  await writeFile(path.join(destination, 'index.mjs'), handlerSource, 'utf8')
+
+  // Copy the generic serverless handler runtime
+  const serverlessHandlerSrc = path.join(runtimeDir, 'serverless-handler.mjs')
+  if (existsSync(serverlessHandlerSrc)) {
+    await cp(serverlessHandlerSrc, path.join(destination, 'serverless-handler.mjs'))
+  }
+
+  // Copy the server source directory (app modules needed for rendering)
+  const serverDir = path.join(buildDir, 'server')
+  if (existsSync(serverDir)) {
+    await cp(serverDir, path.join(destination, 'server'), { recursive: true })
+  }
+
+  // Copy pre-rendered pages for ISR/SSG fallback
+  const prerenderDir = path.join(buildDir, 'prerender')
+  if (existsSync(prerenderDir)) {
+    await cp(prerenderDir, path.join(destination, 'prerender'), { recursive: true })
+  }
+
+  // Write the route manifest so the handler can do request routing
+  await writeFile(
+    path.join(destination, 'manifest.json'),
+    JSON.stringify(manifest, null, 2),
+    'utf8',
+  )
 }
 
 async function materializeStaticSite(buildDir, destination) {

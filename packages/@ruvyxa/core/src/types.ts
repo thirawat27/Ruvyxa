@@ -326,8 +326,14 @@ export interface AdapterOutput {
 
 /** A post-build file or static deployment bundle requested by an adapter. */
 export interface AdapterArtifact {
-  /** Write a UTF-8 file or assemble a static-only publish directory. */
-  kind: 'file' | 'static-site'
+  /**
+   * - `'file'` — write a UTF-8 file.
+   * - `'static-site'` — assemble a static-only publish directory from
+   *   pre-rendered pages and client assets.
+   * - `'function'` — bundle a serverless/edge function from a handler entry
+   *   point and the pre-compiled server modules.
+   */
+  kind: 'file' | 'static-site' | 'function'
   /**
    * Destination relative to the Ruvyxa output directory (`scope: 'build'`,
    * the default) or the project root (`scope: 'project'`).
@@ -335,6 +341,12 @@ export interface AdapterArtifact {
   path: string
   /** Required UTF-8 contents for `file` artifacts. */
   contents?: string
+  /**
+   * Handler entry source code for `function` artifacts. This is the
+   * platform-specific wrapper that imports `serverless-handler.mjs` and
+   * adapts it to the platform's function signature.
+   */
+  handlerSource?: string
   /**
    * Where the artifact is materialized. Project-scope paths are restricted to
    * an allowlist of hosting-platform locations (for example `.vercel/output`
@@ -353,5 +365,15 @@ export interface AdapterArtifact {
 export interface Adapter {
   name: string
   target: 'node' | 'edge' | 'serverless' | 'static'
+  /**
+   * Rendering strategies and route kinds this adapter supports. When set, the
+   * adapter runner validates each route against this list and rejects
+   * unsupported strategies with a per-route error instead of the
+   * all-or-nothing RUV2202.
+   *
+   * Omit to support all strategies (full-featured adapters) or set to
+   * `['ssg', 'csr']` for static-only adapters.
+   */
+  supports?: Array<RenderStrategy | 'api'>
   build(ctx: BuildContext): AdapterOutput | Promise<AdapterOutput>
 }

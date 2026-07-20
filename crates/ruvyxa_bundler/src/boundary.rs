@@ -26,8 +26,8 @@ pub fn check(
     input: &BundleInput,
     out: &mut Vec<Diagnostic>,
 ) -> Result<()> {
-    if input.target == BundleTarget::Ssr {
-        // SSR bundles run on Node.js – enforce only the client-only rule.
+    if matches!(input.target, BundleTarget::Ssr | BundleTarget::Edge) {
+        // SSR/Edge bundles run on the server – enforce only the client-only rule.
         for module in modules {
             check_ssr_module(module, out)?;
         }

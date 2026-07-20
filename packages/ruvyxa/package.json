@@ -21,6 +21,7 @@
     "runtime/compiler.mjs",
     "runtime/config-renderer.mjs",
     "runtime/plugin-runtime.mjs",
+    "runtime/serverless-handler.mjs",
     "runtime/ssg-renderer.mjs",
     "runtime/ssr-renderer.mjs",
     "runtime/worker-pool.mjs",

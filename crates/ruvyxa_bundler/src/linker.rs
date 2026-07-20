@@ -189,7 +189,7 @@ fn link_inner(
         out.push_str("})();\n\n");
     }
 
-    if input.target == BundleTarget::Ssr {
+    if matches!(input.target, BundleTarget::Ssr | BundleTarget::Edge) {
         let entry_id = module_id(&PathBuf::from("ruvyxa:bundle-entry.tsx"));
         out.push_str("export const render = ");
         out.push_str(&entry_id);
@@ -318,7 +318,7 @@ pub(crate) fn link_parallel_with_dynamic_imports_and_shared_modules(
         out.push_str(segment);
     }
 
-    if input.target == BundleTarget::Ssr {
+    if matches!(input.target, BundleTarget::Ssr | BundleTarget::Edge) {
         let entry_id = module_id(&PathBuf::from("ruvyxa:bundle-entry.tsx"));
         out.push_str("export const render = ");
         out.push_str(&entry_id);

@@ -90,6 +90,22 @@ export async function render(ctx) {{
 "#
             )
         }
+        BundleTarget::Edge => {
+            format!(
+                r#"import React from "react";
+import {{ renderToString }} from "react-dom/server";
+import Page from "{page_path}";
+{layout_imports}
+export async function render(ctx) {{
+  let tree = React.createElement(Page, {{ params: ctx.params ?? {{}}, requestPath: ctx.path }});
+  for (const Layout of [{layout_wrappers}].reverse()) {{
+    tree = React.createElement(Layout, null, tree);
+  }}
+  return "<!doctype html>" + renderToString(tree);
+}}
+"#
+            )
+        }
     };
 
     (source, label)
@@ -103,7 +119,7 @@ pub fn wrap(linked: String, input: &BundleInput) -> String {
             // external package imports must remain top-level ESM imports.
             linked
         }
-        BundleTarget::Ssr => {
+        BundleTarget::Ssr | BundleTarget::Edge => {
             // The linker hoists external ESM imports and exposes the virtual
             // entry render function as a top-level ESM export.
             format!("// Ruvyxa SSR bundle\n{linked}")

@@ -2,26 +2,75 @@ import type { Adapter, AdapterArtifact, AdapterOutput, BuildContext } from '@ruv
 import { clientBuildOutput, validateBuildContext } from '@ruvyxa/core'
 
 /**
- * Options for the Cloudflare static deployment adapter.
+ * Options for the Cloudflare Workers deployment adapter.
  */
 export interface CloudflareAdapterOptions {
   /** Custom worker entry point path. Defaults to `${outDir}/server/app`. */
   workerEntry?: string
   /**
    * Also emit a `wrangler.jsonc` at the project root pointing at the
-   * generated static assets directory, so `wrangler deploy` works right
-   * after `ruvyxa build` with no dashboard configuration. An existing
+   * generated Worker script and static assets, so `wrangler deploy` works
+   * right after `ruvyxa build` with no dashboard configuration. An existing
    * project `wrangler.jsonc` is never overwritten.
    * @default true
    */
   projectConfig?: boolean
+  /**
+   * Cloudflare Workers compatibility date. This determines which runtime
+   * APIs are available. Defaults to the current date at build time.
+   */
+  compatibilityDate?: string
 }
 
 /**
- * Create a Cloudflare Pages static deployment adapter for Ruvyxa.
+ * Worker fetch handler source code.
  *
- * Produces static assets ready for deployment via `wrangler` and generates a
- * `wrangler.jsonc` config reference. Dynamic routes are rejected at build time.
+ * This is the platform-specific entry that wraps the generic Ruvyxa serverless
+ * handler into a Cloudflare Workers `fetch` event handler. It reads the route
+ * manifest and delegates to the serverless handler for SSR/API/ISR/PPR.
+ *
+ * Static assets (client bundles, pre-rendered pages for SSG/CSR) are served
+ * by Cloudflare's `assets` binding; the Worker only handles dynamic routes.
+ */
+function workerHandlerSource(): string {
+  return `import { createHandler } from './serverless-handler.mjs';
+import manifest from './manifest.json';
+
+const handler = createHandler({
+  routes: manifest.routes,
+  importPage: async (routeId) => {
+    const route = manifest.routes.find(r => r.id === routeId);
+    if (!route) throw new Error(\`Route \${routeId} not found in manifest\`);
+    return import(\`./server/app/\${route.file}\`);
+  },
+  importApi: async (routeId) => {
+    const route = manifest.routes.find(r => r.id === routeId);
+    if (!route) throw new Error(\`Route \${routeId} not found in manifest\`);
+    return import(\`./server/app/\${route.file}\`);
+  },
+  readPrerendered: (pathname) => {
+    // In Workers, pre-rendered pages are served as static assets.
+    // ISR revalidation requires KV or Durable Objects (not yet supported).
+    return null;
+  },
+  supportedStrategies: ['ssr', 'ssg', 'csr', 'api'],
+});
+
+export default {
+  async fetch(request, env, ctx) {
+    return handler(request);
+  },
+};
+`
+}
+
+/**
+ * Create a Cloudflare Workers deployment adapter for Ruvyxa.
+ *
+ * Produces a Worker fetch handler and static assets for deployment via
+ * `wrangler`. Supports SSR, API routes, SSG, and CSR. ISR and PPR are
+ * rejected with RUV2210 because they require persistent storage (KV/DO)
+ * which is not yet integrated.
  *
  * @example
  * ```ts
@@ -29,7 +78,7 @@ export interface CloudflareAdapterOptions {
  * import { cloudflareAdapter } from "@ruvyxa/adapter-cloudflare"
  *
  * export default config({
- *   adapter: cloudflareAdapter({ workerEntry: "./src/worker.ts" })
+ *   adapter: cloudflareAdapter()
  * })
  * ```
  */
@@ -47,8 +96,34 @@ export function cloudflareAdapter(options: CloudflareAdapterOptions = {}): Adapt
   return {
     name: 'cloudflare',
     target: 'edge',
+    supports: ['ssr', 'ssg', 'csr', 'api'],
     build(ctx: BuildContext): AdapterOutput {
       validateBuildContext(ctx, 'cloudflareAdapter')
+
+      const compatDate = options.compatibilityDate ?? new Date().toISOString().slice(0, 10)
+
+      const wranglerConfig = JSON.stringify(
+        {
+          name: 'ruvyxa-app',
+          main: './worker/index.mjs',
+          compatibility_date: compatDate,
+          assets: { directory: './assets' },
+        },
+        null,
+        2,
+      )
+
+      const projectWranglerConfig = JSON.stringify(
+        {
+          name: 'ruvyxa-app',
+          main: `${ctx.outDir}/deploy/cloudflare/worker/index.mjs`,
+          compatibility_date: compatDate,
+          assets: { directory: `${ctx.outDir}/deploy/cloudflare/assets` },
+        },
+        null,
+        2,
+      )
+
       return {
         name: 'cloudflare',
         target: 'edge',
@@ -58,11 +133,19 @@ export function cloudflareAdapter(options: CloudflareAdapterOptions = {}): Adapt
         ...clientBuildOutput(ctx),
         configFiles: ['wrangler.jsonc'],
         artifacts: [
+          // Static assets served by Cloudflare's asset binding
           { kind: 'static-site', path: 'deploy/cloudflare/assets' },
+          // Worker function bundle (SSR/API handler)
+          {
+            kind: 'function',
+            path: 'deploy/cloudflare/worker',
+            handlerSource: workerHandlerSource(),
+          },
+          // Wrangler config pointing at the Worker + assets
           {
             kind: 'file',
             path: 'deploy/cloudflare/wrangler.jsonc',
-            contents: '{\n  "name": "ruvyxa-app",\n  "assets": { "directory": "./assets" }\n}\n',
+            contents: wranglerConfig + '\n',
           },
           {
             // Workers static assets read _headers from the asset directory;
@@ -79,7 +162,7 @@ export function cloudflareAdapter(options: CloudflareAdapterOptions = {}): Adapt
                   path: 'wrangler.jsonc',
                   scope: 'project',
                   skipIfExists: true,
-                  contents: `{\n  "name": "ruvyxa-app",\n  "assets": { "directory": "${ctx.outDir}/deploy/cloudflare/assets" }\n}\n`,
+                  contents: projectWranglerConfig + '\n',
                 } satisfies AdapterArtifact,
               ]),
         ],

@@ -13,6 +13,9 @@ pub enum BundleTarget {
     Client,
     /// Node.js ESM module (SSR render entry).
     Ssr,
+    /// Edge runtime ESM module (Cloudflare Workers, Vercel Edge Functions).
+    /// Like SSR but restricts Node.js-specific APIs (fs, native modules).
+    Edge,
 }
 
 /// JSX transform runtime mode.

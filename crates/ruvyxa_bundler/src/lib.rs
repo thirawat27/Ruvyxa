@@ -408,7 +408,7 @@ fn emit_prepared_bundle(
 
         let wrapper_lines = match input.target {
             BundleTarget::Client => 2,
-            BundleTarget::Ssr => 3,
+            BundleTarget::Ssr | BundleTarget::Edge => 3,
         };
 
         let linker_header_lines: u32 = 3;

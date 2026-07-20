@@ -79,13 +79,28 @@ export default config({
 })
 ```
 
-`ruvyxa build` จะสร้าง `wrangler.jsonc` ที่ project root ให้ด้วย โดย `assets.directory` ชี้ไปที่
-static assets ที่ generate แล้ว ทำให้ `wrangler deploy` ใช้ได้ทันทีโดยไม่ต้องตั้งค่าใน dashboard
-ถ้ามี `wrangler.jsonc` อยู่แล้วจะ**ไม่ถูกเขียนทับ** ใส่
+`ruvyxa build` จะสร้าง `wrangler.jsonc` ที่ project root ให้ด้วย โดย `main` ชี้ไปที่ Worker script
+และ `assets.directory` ชี้ไปที่ static assets ที่ generate แล้ว ทำให้ `wrangler deploy`
+ใช้ได้ทันทีโดยไม่ต้องตั้งค่าใน dashboard ถ้ามี `wrangler.jsonc` อยู่แล้วจะ**ไม่ถูกเขียนทับ** ใส่
 `cloudflareAdapter({ projectConfig: false })` ถ้าไม่ต้องการให้ generate
 
-Adapter ของ Vercel, Netlify และ Cloudflare รองรับ static SSG/CSR เท่านั้นในปัจจุบัน API, SSR, ISR
-และ PPR จะทำให้ build จบด้วย `RUV2202` แทนที่จะ deploy output ที่ไม่มี request handler
+Adapter ของ Vercel, Netlify และ Cloudflare รองรับ **server rendering เต็มรูปแบบ** แล้ว:
+
+| Strategy | Vercel | Netlify | Cloudflare |
+| -------- | ------ | ------- | ---------- |
+| SSG      | ✓      | ✓       | ✓          |
+| CSR      | ✓      | ✓       | ✓          |
+| SSR      | ✓      | ✓       | ✓          |
+| API      | ✓      | ✓       | ✓          |
+| ISR      | ✓      | ✓       | ✗*         |
+| PPR      | ✓      | ✓       | ✗*         |
+
+\* Cloudflare Workers ไม่มี persistent storage สำหรับ ISR cache — route ที่ใช้ ISR/PPR จะถูก reject
+ด้วย `RUV2210` บน Cloudflare ใช้ KV หรือ Durable Objects binding เองถ้าต้องการ
+
+Deploy แบบ static-only (SSG/CSR ล้วนไม่มี API/SSR) ยังทำงานเหมือนเดิมทุกประการ Adapter จะ emit ทั้ง
+static assets และ serverless function; platform จะเสิร์ฟ static file ตรงๆ แล้ว forward request
+ที่ไม่ match ไปยัง function handler
 
 ### Permission Denied Error
 

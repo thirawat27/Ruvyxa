@@ -2658,6 +2658,7 @@ fn plugin_environment(target: ruvyxa_bundler::BundleTarget) -> &'static str {
     match target {
         ruvyxa_bundler::BundleTarget::Client => "client",
         ruvyxa_bundler::BundleTarget::Ssr => "server",
+        ruvyxa_bundler::BundleTarget::Edge => "edge",
     }
 }
 

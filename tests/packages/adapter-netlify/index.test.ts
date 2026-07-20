@@ -4,33 +4,67 @@ import assert from 'node:assert/strict'
 import { netlifyAdapter } from '../../../packages/@ruvyxa/adapter-netlify/src/index.ts'
 
 describe('netlifyAdapter', () => {
-  it('returns serverless deployment output', async () => {
+  it('returns serverless deployment output with function artifacts', async () => {
     const output = await netlifyAdapter().build({ root: '.', outDir: '.ruvyxa' })
 
     assert.deepEqual(
       output.artifacts?.map(({ kind, path, scope }) => ({ kind, path, scope })),
       [
         { kind: 'static-site', path: 'deploy/netlify/publish', scope: undefined },
+        { kind: 'function', path: 'deploy/netlify/functions/ruvyxa-handler', scope: undefined },
         { kind: 'file', path: 'deploy/netlify/netlify.toml', scope: undefined },
         { kind: 'file', path: 'netlify.toml', scope: 'project' },
       ],
     )
 
+    // Verify netlify.toml includes functions directory
     const toml = output.artifacts?.find(
       (artifact) => artifact.path === 'deploy/netlify/netlify.toml',
     )
+    assert.match(toml && 'contents' in toml ? String(toml.contents) : '', /functions = "functions"/)
     assert.match(
       toml && 'contents' in toml ? String(toml.contents) : '',
       /for = "\/client\/\*"[\s\S]*Cache-Control = "public, max-age=31536000, immutable"/,
     )
 
+    // Verify project-scope netlify.toml
     const projectToml = output.artifacts?.find((artifact) => artifact.path === 'netlify.toml')
     assert.equal(projectToml?.skipIfExists, true)
     assert.match(
       projectToml && 'contents' in projectToml ? String(projectToml.contents) : '',
       /publish = "\.ruvyxa\/deploy\/netlify\/publish"/,
     )
+    assert.match(
+      projectToml && 'contents' in projectToml ? String(projectToml.contents) : '',
+      /functions = "\.ruvyxa\/deploy\/netlify\/functions"/,
+    )
 
+    // Verify function artifact has handler source
+    const functionArtifact = output.artifacts?.find(
+      (artifact) =>
+        artifact.kind === 'function' && artifact.path === 'deploy/netlify/functions/ruvyxa-handler',
+    )
+    assert.ok(functionArtifact)
+    assert.ok('handlerSource' in functionArtifact!)
+    assert.match(String(functionArtifact!.handlerSource), /createHandler/)
+    assert.match(String(functionArtifact!.handlerSource), /export default/)
+    // Netlify Functions v2 config export
+    assert.match(String(functionArtifact!.handlerSource), /export const config/)
+    assert.match(String(functionArtifact!.handlerSource), /preferStatic: true/)
+
+    // Verify projectConfig: false
+    assert.deepEqual(
+      netlifyAdapter({ projectConfig: false })
+        .build({ root: '.', outDir: '.ruvyxa' })
+        .artifacts?.map(({ path }) => path),
+      [
+        'deploy/netlify/publish',
+        'deploy/netlify/functions/ruvyxa-handler',
+        'deploy/netlify/netlify.toml',
+      ],
+    )
+
+    // Verify adapter metadata
     assert.deepEqual(
       {
         name: output.name,
@@ -53,5 +87,10 @@ describe('netlifyAdapter', () => {
         functionsDir: '.ruvyxa/netlify/functions',
       },
     )
+  })
+
+  it('declares supported strategies', () => {
+    const adapter = netlifyAdapter()
+    assert.deepEqual(adapter.supports, ['ssr', 'ssg', 'csr', 'isr', 'ppr', 'api'])
   })
 })

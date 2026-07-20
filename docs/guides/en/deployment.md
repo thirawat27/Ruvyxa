@@ -87,9 +87,23 @@ generated static assets, so `wrangler deploy` works immediately with no dashboar
 existing project `wrangler.jsonc` is **never overwritten**. Pass
 `cloudflareAdapter({ projectConfig: false })` to skip generating it.
 
-Vercel, Netlify, and Cloudflare adapters currently emit deployable **static** output only. They
-accept SSG and CSR page routes; API, SSR, ISR, and PPR routes fail with `RUV2202` rather than
-shipping a deployment without a request handler.
+Vercel, Netlify, and Cloudflare adapters now support **full server rendering**:
+
+| Strategy | Vercel | Netlify | Cloudflare |
+| -------- | ------ | ------- | ---------- |
+| SSG      | Yes    | Yes     | Yes        |
+| CSR      | Yes    | Yes     | Yes        |
+| SSR      | Yes    | Yes     | Yes        |
+| API      | Yes    | Yes     | Yes        |
+| ISR      | Yes    | Yes     | No*        |
+| PPR      | Yes    | Yes     | No*        |
+
+\* Cloudflare Workers lack persistent server-side storage for ISR cache. ISR and PPR routes are
+rejected with `RUV2210` on Cloudflare. Use KV or Durable Objects bindings manually if needed.
+
+Static-only deployments (SSG/CSR pages without API or SSR routes) continue to work exactly as
+before. The adapters emit both static assets and a serverless function; platforms serve static files
+directly and forward unmatched requests to the function handler.
 
 ### Permission Denied Error
 
