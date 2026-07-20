@@ -690,7 +690,14 @@ async fn bind_listener(
                 }
                 return Ok((listener, bound_address));
             }
-            Err(error) if error.kind() == ErrorKind::AddrInUse => {
+            // AddrInUse: another process owns the port. PermissionDenied:
+            // Windows returns WSAEACCES (10013) for ports inside an excluded
+            // port range (Hyper-V/WinNAT reservations); both mean "this port
+            // is unavailable, try the next one" rather than a fatal failure.
+            Err(error)
+                if error.kind() == ErrorKind::AddrInUse
+                    || error.kind() == ErrorKind::PermissionDenied =>
+            {
                 if offset == 0 {
                     first_addr_in_use = Some(error);
                 }
