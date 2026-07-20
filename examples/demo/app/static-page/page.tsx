@@ -22,7 +22,8 @@ export default function StaticPage() {
         <h2>How it works</h2>
         <ul>
           <li>
-            At build time, Ruvyxa calls <code>ssg-renderer.mjs</code> to render this page
+            At build time, Ruvyxa renders this page through the persistent{' '}
+            <code>worker-pool.mjs</code> Node worker
           </li>
           <li>
             The output HTML is saved to <code>{'.ruvyxa/prerender/static-page/index.html'}</code>

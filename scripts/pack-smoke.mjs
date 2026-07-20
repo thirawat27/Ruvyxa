@@ -73,7 +73,7 @@ for (const file of readdirSync(destination).filter((name) => name.endsWith('.tgz
       listing.includes(`package/native-bin/${platform}-${arch}/${executable}`),
       'ruvyxa package missing native binary',
     )
-    for (const runtimeFile of ['ssg-renderer.mjs', 'worker-pool.mjs']) {
+    for (const runtimeFile of ['compiler.mjs', 'worker-pool.mjs']) {
       assert(
         listing.includes(`package/runtime/${runtimeFile}`),
         `ruvyxa package missing runtime/${runtimeFile}`,

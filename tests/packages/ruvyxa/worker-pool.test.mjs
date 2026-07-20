@@ -9,6 +9,47 @@ import test from 'node:test'
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..')
 const workerScript = path.join(repoRoot, 'packages/ruvyxa/runtime/worker-pool.mjs')
 
+/// Spawns one worker with a request/response helper and registers cleanup on `t`.
+function startWorker(t, cleanupDirs = []) {
+  const worker = spawn(process.execPath, [workerScript], {
+    cwd: repoRoot,
+    stdio: ['pipe', 'pipe', 'pipe'],
+  })
+  const lines = createInterface({ input: worker.stdout })
+  const pending = new Map()
+  lines.on('line', (line) => {
+    const response = JSON.parse(line)
+    pending.get(response.id)?.(response)
+    pending.delete(response.id)
+  })
+  let nextId = 1
+  const request = (payload) =>
+    new Promise((resolve, reject) => {
+      const id = String(nextId++)
+      const timer = setTimeout(() => reject(new Error(`worker request ${id} timed out`)), 10_000)
+      pending.set(id, (response) => {
+        clearTimeout(timer)
+        resolve(response)
+      })
+      worker.stdin.write(`${JSON.stringify({ id, ...payload })}\n`)
+    })
+
+  t.after(async () => {
+    lines.close()
+    worker.stdin.end()
+    await Promise.race([
+      new Promise((resolve) => worker.once('exit', resolve)),
+      new Promise((resolve) => setTimeout(resolve, 2_000)),
+    ])
+    if (worker.exitCode === null) worker.kill()
+    for (const dir of cleanupDirs) {
+      await rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 })
+    }
+  })
+
+  return { request }
+}
+
 test('uses safe worker defaults when numeric environment values are invalid', async (t) => {
   const worker = spawn(process.execPath, [workerScript], {
     cwd: repoRoot,
@@ -362,6 +403,124 @@ export default function Page({ params }) {
     assert.equal(render.ok, true)
     assert.match(render.html, new RegExp(`${id}:1`))
   }
+})
+
+test('parses action payloads by content type and rejects malformed JSON', async (t) => {
+  const projectRoot = await mkdtemp(path.join(repoRoot, '.worker-pool-action-payload-test-'))
+  const actionFile = path.join(projectRoot, 'app/todos/action.ts')
+  await mkdir(path.dirname(actionFile), { recursive: true })
+  await writeFile(
+    actionFile,
+    `import { action } from 'ruvyxa/server'
+export const createTodo = action
+  .input({
+    parse(value) {
+      return { title: String(value.title).trim() }
+    },
+  })
+  .handler(async ({ input, invalidate }) => {
+    invalidate('todos')
+    return { title: input.title, completed: false }
+  })
+`,
+  )
+  const { request } = startWorker(t, [projectRoot])
+
+  const base = {
+    type: 'action',
+    projectRoot,
+    actionFile,
+    actionName: 'createTodo',
+    requestPath: '/todos',
+    headerPairs: [],
+  }
+
+  const json = await request({
+    ...base,
+    payloadJson: JSON.stringify({ title: 'Test' }),
+    contentType: 'application/json',
+  })
+  assert.equal(json.ok, true, json.message)
+  assert.equal(json.status, 200)
+  assert.deepEqual(JSON.parse(json.body), {
+    data: { title: 'Test', completed: false },
+    invalidated: ['todos'],
+  })
+
+  const form = await request({
+    ...base,
+    payloadJson: 'title=Form+Todo',
+    contentType: 'application/x-www-form-urlencoded',
+  })
+  assert.equal(form.ok, true, form.message)
+  assert.equal(JSON.parse(form.body).data.title, 'Form Todo')
+
+  const missing = await request({
+    ...base,
+    actionName: 'missingAction',
+    payloadJson: '{}',
+    contentType: 'application/json',
+  })
+  assert.equal(missing.ok, true, missing.message)
+  assert.equal(missing.status, 404)
+
+  const malformed = await request({
+    ...base,
+    payloadJson: 'title=Wrong+Parser',
+    contentType: 'application/json',
+  })
+  assert.equal(malformed.ok, false, 'malformed JSON must not be reinterpreted as form input')
+})
+
+test('client bundles hydrate cleanly and enforce boundary diagnostics', async (t) => {
+  // React must resolve from the project root, so the fixture lives inside the
+  // demo app the same way real pages do.
+  const projectRoot = path.join(repoRoot, 'examples/demo')
+  const fixtureDir = await mkdtemp(path.join(projectRoot, '.worker-pool-client-test-'))
+  const appDir = path.join(fixtureDir, 'app')
+  const pageFile = path.join(appDir, 'page.tsx')
+  await mkdir(appDir, { recursive: true })
+  await writeFile(
+    path.join(appDir, 'layout.tsx'),
+    'export default function Layout({ children }) { return <html><body>{children}</body></html> }\n',
+  )
+  await writeFile(pageFile, 'export default function Page() { return <main>Hello</main> }\n')
+  const { request } = startWorker(t, [fixtureDir])
+
+  const base = { type: 'client', projectRoot, appDir, pageFile, requestPath: '/', params: {} }
+
+  const clean = await request(base)
+  assert.equal(clean.ok, true, clean.message)
+  assert.match(clean.script, /hydrateRoot/)
+  assert.match(clean.script, /__RUVYXA_HYDRATED/)
+  assert.doesNotMatch(clean.script, /from ["']react(?:-dom\/client)?["']/)
+
+  await writeFile(
+    pageFile,
+    'import "server-only"\nexport default function Page() { return <main /> }\n',
+  )
+  await request({ type: 'invalidate', paths: [pageFile] })
+  const serverOnly = await request(base)
+  assert.equal(serverOnly.ok, false)
+  assert.match(serverOnly.message, /RUV1007/)
+
+  await writeFile(
+    pageFile,
+    'export default function Page() { return <main>{process.env.DATABASE_URL}</main> }\n',
+  )
+  await request({ type: 'invalidate', paths: [pageFile] })
+  const privateEnv = await request(base)
+  assert.equal(privateEnv.ok, false)
+  assert.match(privateEnv.message, /RUV1008/)
+
+  await writeFile(
+    pageFile,
+    'export default function Page() { return <main>{process.env["DATABASE_URL"]}</main> }\n',
+  )
+  await request({ type: 'invalidate', paths: [pageFile] })
+  const bracketEnv = await request(base)
+  assert.equal(bracketEnv.ok, false)
+  assert.match(bracketEnv.message, /RUV1008/)
 })
 
 test('streams large binary API responses as bounded frames', async (t) => {

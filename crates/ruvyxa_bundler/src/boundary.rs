@@ -1,6 +1,6 @@
 //! Server/Client boundary enforcement.
 //!
-//! Mirrors the rules implemented in `client-renderer.mjs` and
+//! Mirrors the rules implemented in `compiler.mjs` (`checkClientBoundary`) and
 //! `ruvyxa_graph::validate_client_module`, but operates directly on the
 //! compiled module graph and emits structured [`Diagnostic`] values.
 //!
