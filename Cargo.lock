@@ -2118,7 +2118,6 @@ name = "ruvyxa_middleware"
 version = "1.0.16"
 dependencies = [
  "axum",
- "base64",
  "futures-core",
  "ruvyxa_diagnostics",
  "serde",
