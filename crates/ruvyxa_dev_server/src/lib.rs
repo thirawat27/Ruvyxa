@@ -455,15 +455,15 @@ impl RuntimeCache {
 }
 
 fn normalize_cache_path(path: &Path) -> PathBuf {
-    let absolute = path.canonicalize().unwrap_or_else(|_| {
-        if path.is_absolute() {
-            path.to_path_buf()
-        } else {
-            std::env::current_dir()
-                .map(|current_dir| current_dir.join(path))
-                .unwrap_or_else(|_| path.to_path_buf())
-        }
-    });
+    let absolute = if path.exists() {
+        ruvyxa_diagnostics::normalized_canonical_path(path)
+    } else if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|current_dir| current_dir.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
 
     #[cfg(windows)]
     {
@@ -1030,7 +1030,7 @@ fn watch_paths(config: &ServerConfig) -> Vec<PathBuf> {
 }
 
 fn ignored_watch_path(root: &Path, path: &Path) -> bool {
-    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let canonical_root = ruvyxa_diagnostics::normalized_canonical_path(root);
     let relative = if path.is_absolute() {
         path.strip_prefix(&canonical_root)
             .or_else(|_| path.strip_prefix(root))
@@ -2657,8 +2657,11 @@ fn resolve_public_asset(
 /// Canonicalize asset paths before serving them so public-directory symlinks
 /// cannot expose files outside the configured root.
 fn contained_public_asset(public_dir: &Path, candidate: &Path) -> Option<PathBuf> {
-    let public_root = public_dir.canonicalize().ok()?;
-    let candidate = candidate.canonicalize().ok()?;
+    if !public_dir.exists() || !candidate.exists() {
+        return None;
+    }
+    let public_root = ruvyxa_diagnostics::normalized_canonical_path(public_dir);
+    let candidate = ruvyxa_diagnostics::normalized_canonical_path(candidate);
     candidate.starts_with(&public_root).then_some(candidate)
 }
 

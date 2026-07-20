@@ -17,8 +17,23 @@ Use the standard npm scripts:
 }
 ```
 
-Select an adapter in `ruvyxa.config.ts`. Its post-build lifecycle runs while the build is still in
-the staging directory, so a failed adapter cannot replace a previously successful `.ruvyxa/` build.
+Select an adapter in `ruvyxa.config.ts`, or pass one on the command line without touching config:
+
+```bash
+ruvyxa build --adapter vercel
+```
+
+`--adapter` accepts `node`, `bun`, `static`, `vercel`, `netlify`, or `cloudflare`, resolves the
+matching `@ruvyxa/adapter-*` package from your project, and overrides `config.adapter` for that
+build. If the package is not installed the build fails with `RUV2203` and the exact install command.
+
+An adapter's post-build lifecycle runs while the build is still in the staging directory, so a
+failed adapter cannot replace a previously successful `.ruvyxa/` build. Generated deploy output
+lands in `.ruvyxa/deploy/<platform>/`.
+
+Static outputs for Vercel, Netlify, and Cloudflare ship immutable cache headers
+(`Cache-Control: public, max-age=31536000, immutable`) for the content-hashed `/client/*` bundles
+via `config.json` routes, `netlify.toml` headers, and an `_headers` file respectively.
 
 ### Vercel static output
 

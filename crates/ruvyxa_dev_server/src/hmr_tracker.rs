@@ -215,7 +215,7 @@ fn extension_is(path: &Path, expected: &str) -> bool {
 }
 
 fn normalize_source_path(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    ruvyxa_diagnostics::normalized_canonical_path(path)
 }
 
 fn is_layout_file(path: &Path) -> bool {
@@ -353,7 +353,8 @@ mod tests {
         let relative = page.strip_prefix(&current_dir).unwrap();
         let update = tracker.compute_update(&[relative.to_path_buf()]);
         assert_eq!(update.affected_routes, vec!["/"]);
-        let update = tracker.compute_update(&[page.canonicalize().unwrap()]);
+        let update =
+            tracker.compute_update(&[ruvyxa_diagnostics::normalized_canonical_path(&page)]);
         assert_eq!(update.affected_routes, vec!["/"]);
     }
 }

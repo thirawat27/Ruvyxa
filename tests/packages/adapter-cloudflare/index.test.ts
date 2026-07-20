@@ -12,7 +12,16 @@ describe('cloudflareAdapter', () => {
       [
         { kind: 'static-site', path: 'deploy/cloudflare/assets' },
         { kind: 'file', path: 'deploy/cloudflare/wrangler.jsonc' },
+        { kind: 'file', path: 'deploy/cloudflare/assets/_headers' },
       ],
+    )
+
+    const headersArtifact = output.artifacts?.find(
+      (artifact) => artifact.path === 'deploy/cloudflare/assets/_headers',
+    )
+    assert.match(
+      headersArtifact && 'contents' in headersArtifact ? String(headersArtifact.contents) : '',
+      /\/client\/\*\n {2}Cache-Control: public, max-age=31536000, immutable/,
     )
 
     assert.deepEqual(

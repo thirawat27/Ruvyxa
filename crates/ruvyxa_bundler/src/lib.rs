@@ -532,7 +532,7 @@ mod tests {
     #[test]
     fn bundles_css_module_imports_as_deterministic_class_maps() {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
+        let root = ruvyxa_diagnostics::normalized_canonical_path(temp.path());
         let app = root.join("app");
         fs::create_dir_all(&app).unwrap();
         let page = app.join("page.tsx");
@@ -557,7 +557,7 @@ mod tests {
     #[test]
     fn bundle_context_reuses_graph_cache_across_routes() {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
+        let root = ruvyxa_diagnostics::normalized_canonical_path(temp.path());
         let app = root.join("app");
         fs::create_dir_all(&app).unwrap();
 
@@ -607,7 +607,7 @@ mod tests {
     #[test]
     fn bundle_emits_chunk_manifest() {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
+        let root = ruvyxa_diagnostics::normalized_canonical_path(temp.path());
         let app = root.join("app");
         fs::create_dir_all(&app).unwrap();
 
@@ -631,7 +631,7 @@ mod tests {
     #[test]
     fn bundles_markdown_page_through_ruvyxa_bundler_pipeline() {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
+        let root = ruvyxa_diagnostics::normalized_canonical_path(temp.path());
         let app = root.join("app");
         fs::create_dir_all(&app).unwrap();
         let page = app.join("page.md");
@@ -650,7 +650,7 @@ mod tests {
     #[test]
     fn bundles_mdx_multiline_imports_and_gfm_through_ruvyxa_bundler_pipeline() {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
+        let root = ruvyxa_diagnostics::normalized_canonical_path(temp.path());
         let app = root.join("app");
         fs::create_dir_all(&app).unwrap();
         let page = app.join("page.mdx");
@@ -676,7 +676,7 @@ mod tests {
     #[test]
     fn bundle_manifest_records_dynamic_import_split_points() {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
+        let root = ruvyxa_diagnostics::normalized_canonical_path(temp.path());
         let app = root.join("app");
         fs::create_dir_all(&app).unwrap();
 
@@ -710,7 +710,7 @@ mod tests {
     #[test]
     fn prepared_bundle_emits_the_same_route_output_as_direct_bundling() {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
+        let root = ruvyxa_diagnostics::normalized_canonical_path(temp.path());
         let app = root.join("app");
         fs::create_dir_all(&app).unwrap();
 
@@ -757,7 +757,7 @@ mod tests {
     #[test]
     fn prepared_shared_registry_matches_the_legacy_synthetic_entry() {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
+        let root = ruvyxa_diagnostics::normalized_canonical_path(temp.path());
         let app = root.join("app");
         fs::create_dir_all(&app).unwrap();
         let shared = app.join("shared.ts");
@@ -818,7 +818,7 @@ mod tests {
     #[test]
     fn keeps_overlapping_dynamic_closures_in_the_entry_bundle() {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
+        let root = ruvyxa_diagnostics::normalized_canonical_path(temp.path());
         let app = root.join("app");
         fs::create_dir_all(&app).unwrap();
 
@@ -852,7 +852,7 @@ mod tests {
     #[test]
     fn bundle_skips_dynamic_chunks_without_manifest_output() {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
+        let root = ruvyxa_diagnostics::normalized_canonical_path(temp.path());
         let app = root.join("app");
         fs::create_dir_all(&app).unwrap();
 
@@ -876,7 +876,7 @@ mod tests {
     #[test]
     fn bundle_stats_includes_estimated_gz() {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
+        let root = ruvyxa_diagnostics::normalized_canonical_path(temp.path());
         let app = root.join("app");
         fs::create_dir_all(&app).unwrap();
 
@@ -899,7 +899,7 @@ mod tests {
     #[test]
     fn automatic_jsx_runtime_injects_import() {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
+        let root = ruvyxa_diagnostics::normalized_canonical_path(temp.path());
         let app = root.join("app");
         fs::create_dir_all(&app).unwrap();
 
@@ -927,7 +927,7 @@ mod tests {
     #[test]
     fn client_bundle_includes_commonjs_react_dependencies() {
         let temp = tempfile::tempdir().unwrap();
-        let root = temp.path().canonicalize().unwrap();
+        let root = ruvyxa_diagnostics::normalized_canonical_path(temp.path());
         let app = root.join("app");
         let react = root.join("node_modules/react");
         let react_dom = root.join("node_modules/react-dom");

@@ -32,6 +32,24 @@ importers:
         specifier: workspace:*
         version: link:../../packages/ruvyxa
     devDependencies:
+      '@ruvyxa/adapter-bun':
+        specifier: workspace:^
+        version: link:../../packages/@ruvyxa/adapter-bun
+      '@ruvyxa/adapter-cloudflare':
+        specifier: workspace:^
+        version: link:../../packages/@ruvyxa/adapter-cloudflare
+      '@ruvyxa/adapter-netlify':
+        specifier: workspace:^
+        version: link:../../packages/@ruvyxa/adapter-netlify
+      '@ruvyxa/adapter-node':
+        specifier: workspace:^
+        version: link:../../packages/@ruvyxa/adapter-node
+      '@ruvyxa/adapter-static':
+        specifier: workspace:^
+        version: link:../../packages/@ruvyxa/adapter-static
+      '@ruvyxa/adapter-vercel':
+        specifier: workspace:^
+        version: link:../../packages/@ruvyxa/adapter-vercel
       '@types/react':
         specifier: ^19.2.17
         version: 19.2.17

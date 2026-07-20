@@ -56,7 +56,23 @@ export function vercelAdapter(options: VercelAdapterOptions = {}): Adapter {
           {
             kind: 'file',
             path: 'deploy/vercel/.vercel/output/config.json',
-            contents: '{\n  "version": 3\n}\n',
+            // Hashed client bundles are immutable; unhashed assets keep
+            // Vercel's default caching.
+            contents: `${JSON.stringify(
+              {
+                version: 3,
+                routes: [
+                  {
+                    src: '^/client/(.*)$',
+                    headers: { 'cache-control': 'public, max-age=31536000, immutable' },
+                    continue: true,
+                  },
+                  { handle: 'filesystem' },
+                ],
+              },
+              null,
+              2,
+            )}\n`,
           },
         ],
       }

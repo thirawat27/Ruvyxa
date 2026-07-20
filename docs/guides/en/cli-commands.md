@@ -58,7 +58,13 @@ npx ruvyxa build --target node     # default
 npx ruvyxa build --target bun      # bun runtime
 npx ruvyxa build --target static   # static output
 npx ruvyxa build --target edge     # edge runtime
+npx ruvyxa build --adapter vercel  # run a deploy adapter without config changes
+npx ruvyxa build --runtime bun     # execute build workers with Bun
 ```
+
+`--runtime <node|bun>` is accepted by `dev`, `start`, `preview`, `build`, `check`, `routes`,
+`analyze`, `doctor`, `clean`, and `test:parity`. It overrides the `RUVYXA_RUNTIME` environment
+variable and `config.runtime`, so switching the JavaScript runtime never requires editing config.
 
 Pipeline:
 

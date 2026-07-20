@@ -135,3 +135,55 @@ impl From<std::io::Error> for RuvyxaError {
 }
 
 pub type Result<T> = std::result::Result<T, RuvyxaError>;
+
+/// Windows extended-length ("verbatim") path prefix that `canonicalize` adds.
+#[cfg(windows)]
+const WINDOWS_VERBATIM_PREFIX: &str = "\\\\?\\";
+#[cfg(windows)]
+const WINDOWS_VERBATIM_UNC_PREFIX: &str = "\\\\?\\UNC\\";
+
+/// Canonicalizes a path without a Windows verbatim (`\\?\`) prefix.
+///
+/// `std::fs::canonicalize` returns extended-length paths on Windows. Those
+/// leak into JavaScript runtime scripts where `pathToFileURL` under Bun
+/// rejects them, so every canonicalization that can reach a subprocess or a
+/// user-facing string goes through this helper. Falls back to the original
+/// path when canonicalization fails (for example, the path does not exist).
+#[must_use]
+pub fn normalized_canonical_path(path: &std::path::Path) -> std::path::PathBuf {
+    let canonical = match path.canonicalize() {
+        Ok(canonical) => canonical,
+        Err(_) => return path.to_path_buf(),
+    };
+    #[cfg(windows)]
+    {
+        let text = canonical.to_string_lossy();
+        if let Some(stripped) = text.strip_prefix(WINDOWS_VERBATIM_UNC_PREFIX) {
+            return std::path::PathBuf::from(format!("\\\\{stripped}"));
+        }
+        if let Some(stripped) = text.strip_prefix(WINDOWS_VERBATIM_PREFIX) {
+            return std::path::PathBuf::from(stripped);
+        }
+    }
+    canonical
+}
+
+#[cfg(test)]
+mod path_tests {
+    use super::normalized_canonical_path;
+
+    #[test]
+    fn normalized_canonical_path_has_no_verbatim_prefix() {
+        let current = std::env::current_dir().unwrap();
+        let normalized = normalized_canonical_path(&current);
+        #[cfg(windows)]
+        assert!(!normalized.to_string_lossy().starts_with("\\\\?\\"));
+        let _ = normalized;
+    }
+
+    #[test]
+    fn normalized_canonical_path_keeps_missing_paths_unchanged() {
+        let missing = std::path::Path::new("definitely-missing-ruvyxa-path");
+        assert_eq!(normalized_canonical_path(missing), missing.to_path_buf());
+    }
+}

@@ -831,9 +831,7 @@ pub fn resolve_graph_with_hooks(
     build_hooks: &BuildHookPipeline,
     target: BundleTarget,
 ) -> Result<Vec<ResolvedModule>> {
-    let project_root = project_root
-        .canonicalize()
-        .unwrap_or_else(|_| project_root.to_path_buf());
+    let project_root = ruvyxa_diagnostics::normalized_canonical_path(project_root);
     // A graph is resolved against a single configuration snapshot. Keeping it
     // local to this run avoids repeated I/O and parsing for every module.
     let tsconfig = cache.tsconfig_paths(&project_root);
@@ -1169,10 +1167,13 @@ fn resolve_file_candidate(joined: &Path) -> Option<PathBuf> {
         joined.join("index.mdx"),
     ];
 
-    candidates
-        .into_iter()
-        .find(|p| p.is_file())
-        .and_then(|p| p.canonicalize().ok().or(Some(p)))
+    candidates.into_iter().find(|p| p.is_file()).map(|p| {
+        if p.canonicalize().is_ok() {
+            ruvyxa_diagnostics::normalized_canonical_path(&p)
+        } else {
+            p
+        }
+    })
 }
 
 fn is_project_local(path: &Path, project_root: &Path) -> bool {
@@ -1300,7 +1301,7 @@ mod tests {
             "import Page from {};",
             serde_json::to_string(&import_path).unwrap()
         );
-        let root = temp.path().canonicalize().unwrap();
+        let root = ruvyxa_diagnostics::normalized_canonical_path(temp.path());
         let tsconfig = TsConfigPaths::load(&root);
         let deps = collect_deps_cached(
             &source,
@@ -1314,7 +1315,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(deps.len(), 1);
-        assert_eq!(deps[0], page.canonicalize().unwrap());
+        assert_eq!(
+            deps[0],
+            ruvyxa_diagnostics::normalized_canonical_path(&page)
+        );
     }
 
     #[test]
@@ -1353,7 +1357,7 @@ mod tests {
         fs::write(&page_a, "import { label } from \"./shared\";").unwrap();
         fs::write(&page_b, "import { label } from \"./shared\";").unwrap();
 
-        let root = temp.path().canonicalize().unwrap();
+        let root = ruvyxa_diagnostics::normalized_canonical_path(temp.path());
         let cache = ResolveGraphCache::new();
 
         resolve_graph_with_cache(
@@ -1440,7 +1444,7 @@ export default function Card() { return <div className={cn("card")} /> }"#,
         )
         .unwrap();
 
-        let root = temp.path().canonicalize().unwrap();
+        let root = ruvyxa_diagnostics::normalized_canonical_path(temp.path());
         let page_path = app.join("page.tsx");
         let import_path = page_path.display().to_string().replace('\\', "/");
         let entry_source = format!(
@@ -1457,7 +1461,8 @@ export default function Card() { return <div className={cn("card")} /> }"#,
         assert_eq!(result.len(), 5);
 
         // utils.ts should appear in deps of both Button and Card
-        let utils_path = components.join("utils.ts").canonicalize().unwrap();
+        let utils_path =
+            ruvyxa_diagnostics::normalized_canonical_path(&components.join("utils.ts"));
         let button_module = result
             .iter()
             .find(|m| {
@@ -1547,7 +1552,9 @@ export default function Card() { return <div className={cn("card")} /> }"#,
         let resolved = TsConfigPaths::load(root).resolve("@/Button");
         assert_eq!(
             resolved,
-            Some(components.join("Button.tsx").canonicalize().unwrap())
+            Some(ruvyxa_diagnostics::normalized_canonical_path(
+                &components.join("Button.tsx")
+            ))
         );
     }
 

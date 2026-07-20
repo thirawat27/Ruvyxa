@@ -92,6 +92,11 @@ enum Command {
 struct ProjectArgs {
     #[arg(long, default_value = ".")]
     root: PathBuf,
+
+    /// JavaScript runtime to use (node or bun); overrides RUVYXA_RUNTIME
+    /// and config.runtime.
+    #[arg(long, value_enum, ignore_case = true)]
+    runtime: Option<CliRuntime>,
 }
 
 #[derive(Debug, Parser)]
@@ -104,6 +109,11 @@ struct ServerArgs {
 
     #[arg(long)]
     port: Option<u16>,
+
+    /// JavaScript runtime to use (node or bun); overrides RUVYXA_RUNTIME
+    /// and config.runtime.
+    #[arg(long, value_enum, ignore_case = true)]
+    runtime: Option<CliRuntime>,
 }
 
 #[derive(Debug, Parser)]
@@ -113,6 +123,30 @@ struct BuildArgs {
 
     #[arg(long, value_enum, ignore_case = true)]
     target: Option<BuildTarget>,
+
+    /// Deploy adapter to run without editing ruvyxa.config
+    /// (node, bun, static, vercel, netlify, cloudflare).
+    #[arg(long, value_parser = parse_adapter_name)]
+    adapter: Option<String>,
+
+    /// JavaScript runtime to use (node or bun); overrides RUVYXA_RUNTIME
+    /// and config.runtime.
+    #[arg(long, value_enum, ignore_case = true)]
+    runtime: Option<CliRuntime>,
+}
+
+const KNOWN_ADAPTER_NAMES: [&str; 6] = ["node", "bun", "static", "vercel", "netlify", "cloudflare"];
+
+fn parse_adapter_name(value: &str) -> Result<String, String> {
+    let normalized = value.trim().to_ascii_lowercase();
+    if KNOWN_ADAPTER_NAMES.contains(&normalized.as_str()) {
+        Ok(normalized)
+    } else {
+        Err(format!(
+            "unknown adapter `{value}`; expected one of {}",
+            KNOWN_ADAPTER_NAMES.join(", ")
+        ))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, serde::Deserialize)]
@@ -394,7 +428,7 @@ impl ProjectConfig {
     }
 
     fn style_entries(&self, root: &Path) -> Vec<PathBuf> {
-        let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        let root = ruvyxa_diagnostics::normalized_canonical_path(root);
         self.css
             .entries
             .iter()
@@ -496,6 +530,8 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let cli = Cli::parse_from(normalized_cli_args(std::env::args_os()));
+
+    set_cli_runtime_override(command_runtime(&cli.command));
 
     match cli.command {
         Command::Dev(args) => {
@@ -933,25 +969,29 @@ fn run_adapter_runner(
     root: &Path,
     staging_dir: &Path,
     runtime: JavaScriptRuntime,
+    adapter_name: Option<&str>,
 ) -> anyhow::Result<Vec<AdapterArtifactReport>> {
     let runner = find_runtime_script(root, "adapter-runner.mjs").ok_or_else(|| {
         anyhow::anyhow!(
             "adapter build hook requires runtime/adapter-runner.mjs; reinstall the ruvyxa package"
         )
     })?;
-    let output = ProcessCommand::new(runtime.executable())
+    let mut command = ProcessCommand::new(runtime.executable());
+    command
         .arg(runner)
         .arg(root)
         .arg(staging_dir)
-        .env("RUVYXA_RUNTIME", runtime.command())
-        .output()
-        .with_context(|| {
-            format!(
-                "failed to run adapter build hook with {} for {}",
-                runtime.command(),
-                root.display()
-            )
-        })?;
+        .env("RUVYXA_RUNTIME", runtime.command());
+    if let Some(adapter_name) = adapter_name {
+        command.arg(adapter_name);
+    }
+    let output = command.output().with_context(|| {
+        format!(
+            "failed to run adapter build hook with {} for {}",
+            runtime.command(),
+            root.display()
+        )
+    })?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     let result: AdapterRunnerOutput = serde_json::from_str(&stdout).with_context(|| {
@@ -976,7 +1016,49 @@ fn run_adapter_runner(
     Ok(result.result.unwrap_or_default())
 }
 
+/// Process-wide runtime override set by the `--runtime` CLI flag. Takes
+/// precedence over `RUVYXA_RUNTIME` and `config.runtime`.
+static CLI_RUNTIME_OVERRIDE: std::sync::OnceLock<JavaScriptRuntime> = std::sync::OnceLock::new();
+
+fn command_runtime(command: &Command) -> Option<CliRuntime> {
+    match command {
+        Command::Dev(args) | Command::Start(args) | Command::Preview(args) => args.runtime,
+        Command::Build(args) => args.runtime,
+        Command::Check(args)
+        | Command::Routes(args)
+        | Command::Analyze(args)
+        | Command::Doctor(args)
+        | Command::Clean(args)
+        | Command::TestParity(args) => args.runtime,
+        Command::Trace(_) | Command::Bench(_) | Command::Plugin(_) => None,
+    }
+}
+
+fn set_cli_runtime_override(runtime: Option<CliRuntime>) {
+    if let Some(runtime) = runtime {
+        let _ = CLI_RUNTIME_OVERRIDE.set(runtime.into());
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum CliRuntime {
+    Node,
+    Bun,
+}
+
+impl From<CliRuntime> for JavaScriptRuntime {
+    fn from(value: CliRuntime) -> Self {
+        match value {
+            CliRuntime::Node => Self::Node,
+            CliRuntime::Bun => Self::Bun,
+        }
+    }
+}
+
 fn runtime_override() -> anyhow::Result<Option<JavaScriptRuntime>> {
+    if let Some(runtime) = CLI_RUNTIME_OVERRIDE.get() {
+        return Ok(Some(*runtime));
+    }
     let Ok(value) = std::env::var("RUVYXA_RUNTIME") else {
         return Ok(None);
     };
@@ -1219,7 +1301,11 @@ async fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Resul
         "serverDir": "server",
         "clientDir": "client",
         "assetsDir": "assets",
-        "adapter": config.adapter.clone(),
+        "adapter": args
+            .adapter
+            .as_deref()
+            .map(|name| serde_json::json!(name))
+            .or_else(|| config.adapter.clone()),
         "adapterOptions": config.adapter_options.clone(),
         "images": image_report,
         "hashAlgorithm": ASSET_HASH_ALGORITHM,
@@ -1265,8 +1351,21 @@ async fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Resul
             "prerenderMs": duration_ms(prerender_duration)
         }
     });
-    if config.adapter.is_some() {
-        let artifacts = run_adapter_runner(&args.root, &staging_dir, config.javascript_runtime())?;
+    if config.adapter.is_some() || args.adapter.is_some() {
+        let phase_started = Instant::now();
+        let artifacts = run_adapter_runner(
+            &args.root,
+            &staging_dir,
+            config.javascript_runtime(),
+            args.adapter.as_deref(),
+        )?;
+        if show_summary {
+            let detail = args
+                .adapter
+                .clone()
+                .unwrap_or_else(|| format!("{} artifact(s)", artifacts.len()));
+            print_build_phase("adapter", detail, phase_started.elapsed());
+        }
         build_info["adapterArtifacts"] = serde_json::to_value(artifacts)?;
     }
     fs::write(
@@ -1453,7 +1552,17 @@ fn add_manifest_entry_bytes(
     }
 }
 
-const BUILD_OUTPUT_DIRS: [&str; 4] = ["server", "client", "assets", "prerender"];
+// `deploy` and `static` hold adapter artifacts (see artifactDestination in
+// adapter-runner.mjs); omitting them here would silently drop adapter output
+// when the staged build is committed.
+const BUILD_OUTPUT_DIRS: [&str; 6] = [
+    "server",
+    "client",
+    "assets",
+    "prerender",
+    "deploy",
+    "static",
+];
 const BUILD_OUTPUT_FILES: [&str; 2] = ["manifest.json", "build.json"];
 // Default cap balances Node process memory against prerender throughput; an
 // explicit `build.parallelism` config value may raise it up to the pool limit.
@@ -1856,7 +1965,7 @@ async fn render_prerender_job(
 }
 
 fn stable_prerender_inputs(root: &Path, app_dir: &Path, inputs: &[PathBuf]) -> Vec<PathBuf> {
-    let project_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let project_root = ruvyxa_diagnostics::normalized_canonical_path(root);
     let staging_root = app_dir.parent().and_then(Path::parent);
     inputs
         .iter()
@@ -1871,7 +1980,7 @@ fn stable_prerender_inputs(root: &Path, app_dir: &Path, inputs: &[PathBuf]) -> V
             } else {
                 root.join(input)
             };
-            let input = input.canonicalize().unwrap_or(input);
+            let input = ruvyxa_diagnostics::normalized_canonical_path(&input);
             if input.strip_prefix(&project_root).is_ok() {
                 return input;
             }
@@ -2360,7 +2469,9 @@ impl ruvyxa_bundler::hooks::BuildHooks for TypeScriptPluginBridge {
             self.project_root.join(resolved)
         };
 
-        Ok(Some(resolved.canonicalize().unwrap_or(resolved)))
+        Ok(Some(ruvyxa_diagnostics::normalized_canonical_path(
+            &resolved,
+        )))
     }
 
     fn transform(
@@ -2538,7 +2649,7 @@ fn bundle_context_for_build(
 
     let runner = find_runtime_script(root, "plugin-runtime.mjs")
         .ok_or_else(|| anyhow::anyhow!("RUV1701 TypeScript plugin runtime not found"))?;
-    let project_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let project_root = ruvyxa_diagnostics::normalized_canonical_path(root);
     let workers = std::iter::once(
         TypeScriptPluginWorker::spawn(&runner, &project_root, runtime).map(Mutex::new),
     )
@@ -2569,7 +2680,7 @@ fn run_plugin_build_complete(
     }
     let runner = find_runtime_script(root, "plugin-runtime.mjs")
         .ok_or_else(|| anyhow::anyhow!("RUV1701 TypeScript plugin runtime not found"))?;
-    let project_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let project_root = ruvyxa_diagnostics::normalized_canonical_path(root);
     let mut worker = TypeScriptPluginWorker::spawn(&runner, &project_root, runtime)
         .map_err(|error| anyhow::anyhow!("failed to start TypeScript plugin runtime: {error}"))?;
     let result = worker
@@ -2717,10 +2828,8 @@ fn emit_client_bundles_with_runtime(
                     )
                 } else {
                     ruvyxa_bundler::bundle_shared_route_modules(
-                        root.canonicalize().unwrap_or_else(|_| root.to_path_buf()),
-                        app_dir
-                            .canonicalize()
-                            .unwrap_or_else(|_| app_dir.to_path_buf()),
+                        ruvyxa_diagnostics::normalized_canonical_path(root),
+                        ruvyxa_diagnostics::normalized_canonical_path(app_dir),
                         &shared_modules,
                         shared_options,
                         &bundle_context,
@@ -2740,7 +2849,7 @@ fn emit_client_bundles_with_runtime(
             let executable_modules = shared_output
                 .modules
                 .into_iter()
-                .map(|path| path.canonicalize().unwrap_or(path))
+                .map(|path| ruvyxa_diagnostics::normalized_canonical_path(&path))
                 .collect::<BTreeSet<_>>();
             let shared_chunk = emit_shared_route_chunk(
                 client_dir,
@@ -3089,7 +3198,7 @@ fn bundle_client_route(
                 .modules
                 .iter()
                 .map(PathBuf::from)
-                .map(|path| path.canonicalize().unwrap_or(path))
+                .map(|path| ruvyxa_diagnostics::normalized_canonical_path(&path))
                 .collect()
         })
         .unwrap_or_default();
@@ -3101,7 +3210,7 @@ fn bundle_client_route(
                 .modules
                 .iter()
                 .map(PathBuf::from)
-                .map(|path| path.canonicalize().unwrap_or(path))
+                .map(|path| ruvyxa_diagnostics::normalized_canonical_path(&path))
         }))
         .collect();
 
@@ -3146,10 +3255,8 @@ fn client_bundle_input(
 ) -> anyhow::Result<ruvyxa_bundler::BundleInput> {
     use ruvyxa_bundler::{BundleInput, BundleOptions, BundleTarget};
 
-    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
-    let app_dir = app_dir
-        .canonicalize()
-        .unwrap_or_else(|_| app_dir.to_path_buf());
+    let root = ruvyxa_diagnostics::normalized_canonical_path(root);
+    let app_dir = ruvyxa_diagnostics::normalized_canonical_path(app_dir);
     let entry = canonical_route_file(&root, &route.file);
     let layouts = route
         .layout_chain
@@ -3212,12 +3319,12 @@ fn prepare_client_route_plan(
     let module_paths = prepared
         .module_paths()
         .into_iter()
-        .map(|path| path.canonicalize().unwrap_or(path))
+        .map(|path| ruvyxa_diagnostics::normalized_canonical_path(&path))
         .collect();
     let dependency_paths = prepared
         .dependency_paths()
         .into_iter()
-        .map(|path| path.canonicalize().unwrap_or(path))
+        .map(|path| ruvyxa_diagnostics::normalized_canonical_path(&path))
         .collect::<BTreeSet<_>>();
     store_client_plan(
         cache_dir,
@@ -3509,7 +3616,7 @@ fn store_prerender_artifact(
     }
     let files = inputs
         .iter()
-        .map(|path| path.canonicalize().unwrap_or_else(|_| path.clone()))
+        .map(|path| ruvyxa_diagnostics::normalized_canonical_path(path))
         .filter_map(|path| {
             cache
                 .fingerprints
@@ -3735,12 +3842,14 @@ fn write_client_cache_file(path: PathBuf, source: Vec<u8>) {
 
 fn canonical_route_file(root: &Path, file: &Path) -> PathBuf {
     if file.is_absolute() {
-        return file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
+        return ruvyxa_diagnostics::normalized_canonical_path(file);
     }
 
-    file.canonicalize()
-        .or_else(|_| root.join(file).canonicalize())
-        .unwrap_or_else(|_| root.join(file))
+    let direct = ruvyxa_diagnostics::normalized_canonical_path(file);
+    if direct.is_absolute() {
+        return direct;
+    }
+    ruvyxa_diagnostics::normalized_canonical_path(&root.join(file))
 }
 
 fn resolve_layout_file(root: &Path, app_dir: &Path, layout_path: &str) -> Option<PathBuf> {
@@ -3772,7 +3881,7 @@ fn resolve_layout_file(root: &Path, app_dir: &Path, layout_path: &str) -> Option
     expanded
         .into_iter()
         .find(|candidate| candidate.is_file())
-        .and_then(|candidate| candidate.canonicalize().ok().or(Some(candidate)))
+        .map(|candidate| ruvyxa_diagnostics::normalized_canonical_path(&candidate))
 }
 
 fn create_build_staging_dir(out_dir: &Path) -> anyhow::Result<PathBuf> {
@@ -4143,7 +4252,7 @@ fn doctor(args: ProjectArgs) -> anyhow::Result<()> {
     print_field("node", tool_status(tool_version("node", &["--version"])));
     print_field("rustc", tool_status(tool_version("rustc", &["--version"])));
     print_field("cargo", tool_status(tool_version("cargo", &["--version"])));
-    print_field("bun", tool_status(tool_version("bun", &["--version"])));
+    print_field("bun", tool_status(bun_version()));
     print_field("deno", tool_status(tool_version("deno", &["--version"])));
 
     if package_json.exists() {
@@ -4261,6 +4370,8 @@ async fn bench(args: BenchArgs) -> anyhow::Result<()> {
             BuildArgs {
                 root: root.clone(),
                 target: None,
+                adapter: None,
+                runtime: None,
             },
             false,
         )
@@ -4352,6 +4463,8 @@ async fn test_parity(args: ProjectArgs) -> anyhow::Result<()> {
     build(BuildArgs {
         root: args.root.clone(),
         target: None,
+        adapter: None,
+        runtime: None,
     })
     .await?;
 
@@ -4399,6 +4512,7 @@ async fn test_parity(args: ProjectArgs) -> anyhow::Result<()> {
                 root: args.root.clone(),
                 host: None,
                 port: None,
+                runtime: None,
             },
             &config,
         )?,
@@ -4407,6 +4521,7 @@ async fn test_parity(args: ProjectArgs) -> anyhow::Result<()> {
                 root: args.root.clone(),
                 host: None,
                 port: None,
+                runtime: None,
             },
             &config,
         )?,
@@ -4562,9 +4677,9 @@ fn normalize_route_path(app_dir: &Path, path: &Path) -> String {
 }
 
 fn copy_style_sources(root: &Path, server_dir: &Path, files: &[PathBuf]) -> anyhow::Result<()> {
-    let root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let root = ruvyxa_diagnostics::normalized_canonical_path(root);
     for file in files {
-        let file = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
+        let file = ruvyxa_diagnostics::normalized_canonical_path(file);
         let Ok(relative) = file.strip_prefix(&root) else {
             continue;
         };
@@ -4942,7 +5057,7 @@ fn detect_package_manager(root: &Path) -> String {
 }
 
 fn find_upwards(root: &Path, file_name: &str) -> Option<PathBuf> {
-    let mut current = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let mut current = ruvyxa_diagnostics::normalized_canonical_path(root);
 
     loop {
         let candidate = current.join(file_name);
@@ -4965,13 +5080,29 @@ fn tool_version(command: &str, args: &[&str]) -> String {
     }
 }
 
+/// Reports Bun's version using the same executable resolution as the build
+/// and dev-server runtimes. Windows exposes Bun as a `bun.cmd` shim, which a
+/// plain `Command::new("bun")` cannot launch, so a naive check reports "missing"
+/// even when `bun --version` succeeds in a shell.
+fn bun_version() -> String {
+    match ProcessCommand::new(JavaScriptRuntime::Bun.executable())
+        .arg("--version")
+        .output()
+    {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        }
+        _ => "missing".to_string(),
+    }
+}
+
 fn local_binary_upwards(root: &Path, binary: &str) -> Option<PathBuf> {
     let binary = if cfg!(windows) {
         format!("{binary}.cmd")
     } else {
         binary.to_string()
     };
-    let mut current = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    let mut current = ruvyxa_diagnostics::normalized_canonical_path(root);
 
     loop {
         let candidate = current.join("node_modules").join(".bin").join(&binary);
@@ -5118,7 +5249,7 @@ export default {
         )
         .unwrap();
 
-        let artifacts = run_adapter_runner(root, &staging, JavaScriptRuntime::Node).unwrap();
+        let artifacts = run_adapter_runner(root, &staging, JavaScriptRuntime::Node, None).unwrap();
 
         assert_eq!(artifacts.len(), 1);
         assert_eq!(artifacts[0].kind, "file");
@@ -5285,7 +5416,10 @@ export default {
 
         let inputs = stable_prerender_inputs(temp.path(), &app, &[PathBuf::from("app/page.tsx")]);
 
-        assert_eq!(inputs, vec![page.canonicalize().unwrap()]);
+        assert_eq!(
+            inputs,
+            vec![ruvyxa_diagnostics::normalized_canonical_path(&page)]
+        );
     }
 
     #[test]
@@ -5338,6 +5472,7 @@ export default {
             root: PathBuf::from("."),
             host: None,
             port: None,
+            runtime: None,
         };
         let enabled: ProjectConfig = serde_json::from_value(json!({
             "debug": { "overlay": true, "traces": true }
@@ -5362,6 +5497,7 @@ export default {
             root: PathBuf::from("."),
             host: None,
             port: None,
+            runtime: None,
         };
         let config: ProjectConfig = serde_json::from_value(json!({
             "build": { "jsx": "classic" },
@@ -6387,6 +6523,9 @@ export default {
         fs::write(out_dir.join("build.json"), "{}").unwrap();
         fs::write(new_server_dir.join("new.js"), "new").unwrap();
         fs::write(new_client_dir.join("new.js"), "new").unwrap();
+        let new_deploy_dir = staging_dir.join("deploy").join("vercel");
+        fs::create_dir_all(&new_deploy_dir).unwrap();
+        fs::write(new_deploy_dir.join("config.json"), "{}").unwrap();
         fs::write(staging_dir.join("manifest.json"), "{\"routes\":[]}").unwrap();
         fs::write(staging_dir.join("build.json"), "{\"framework\":\"Ruvyxa\"}").unwrap();
 
@@ -6395,6 +6534,7 @@ export default {
         assert!(cache_dir.join("cached.js").exists());
         assert!(out_dir.join("server/new.js").exists());
         assert!(out_dir.join("client/new.js").exists());
+        assert!(out_dir.join("deploy/vercel/config.json").exists());
         assert!(!out_dir.join("server/old.js").exists());
         assert!(!out_dir.join("assets").exists());
         assert!(out_dir.join("manifest.json").exists());

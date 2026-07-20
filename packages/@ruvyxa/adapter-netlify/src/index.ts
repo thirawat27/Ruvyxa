@@ -56,7 +56,12 @@ export function netlifyAdapter(options: NetlifyAdapterOptions = {}): Adapter {
           {
             kind: 'file',
             path: 'deploy/netlify/netlify.toml',
-            contents: '[build]\n  publish = "publish"\n',
+            // Hashed client bundles are immutable; unhashed assets keep
+            // Netlify's default caching.
+            contents:
+              '[build]\n  publish = "publish"\n\n' +
+              '[[headers]]\n  for = "/client/*"\n  [headers.values]\n' +
+              '    Cache-Control = "public, max-age=31536000, immutable"\n',
           },
         ],
       }

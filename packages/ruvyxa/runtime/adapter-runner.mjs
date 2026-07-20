@@ -1,5 +1,6 @@
 import { cp, mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
+import { createRequire } from 'node:module'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -11,7 +12,7 @@ import {
   toImportPath,
 } from './compiler.mjs'
 
-const [projectRootArg, outputDirArg] = process.argv.slice(2)
+const [projectRootArg, outputDirArg, adapterNameArg] = process.argv.slice(2)
 
 if (!projectRootArg || !outputDirArg) {
   writeResponse(
@@ -23,10 +24,14 @@ if (!projectRootArg || !outputDirArg) {
 const projectRoot = path.resolve(projectRootArg)
 const outputDir = path.resolve(outputDirArg)
 const runtimeDir = path.dirname(fileURLToPath(import.meta.url))
+const KNOWN_ADAPTER_NAMES = ['node', 'bun', 'static', 'vercel', 'netlify', 'cloudflare']
 
 try {
-  const config = await loadConfig(projectRoot)
-  const adapter = config.adapter
+  // A named adapter from `ruvyxa build --adapter <name>` overrides the config
+  // so a deploy target can be selected without editing ruvyxa.config.
+  const adapter = adapterNameArg
+    ? await loadNamedAdapter(projectRoot, adapterNameArg)
+    : (await loadConfig(projectRoot)).adapter
   if (adapter === undefined) {
     writeResponse(success([]))
   } else if (!adapter || typeof adapter !== 'object' || typeof adapter.build !== 'function') {
@@ -42,6 +47,30 @@ try {
     failure('RUV2200', error instanceof Error ? error.message : String(error), error?.stack),
   )
   process.exitCode = 1
+}
+
+async function loadNamedAdapter(root, name) {
+  if (!KNOWN_ADAPTER_NAMES.includes(name)) {
+    throw new Error(
+      `RUV2203 unknown adapter name: ${name}. Expected one of ${KNOWN_ADAPTER_NAMES.join(', ')}.`,
+    )
+  }
+  const packageName = `@ruvyxa/adapter-${name}`
+  const requireFromProject = createRequire(path.join(root, 'package.json'))
+  let entry
+  try {
+    entry = requireFromProject.resolve(packageName)
+  } catch {
+    throw new Error(
+      `RUV2203 adapter package ${packageName} is not installed. Add it with your package manager, for example: pnpm add -D ${packageName}`,
+    )
+  }
+  const mod = await import(pathToFileURL(entry).href)
+  const factory = mod.default
+  if (typeof factory !== 'function') {
+    throw new Error(`RUV2203 ${packageName} does not export an adapter factory.`)
+  }
+  return factory()
 }
 
 async function loadConfig(root) {

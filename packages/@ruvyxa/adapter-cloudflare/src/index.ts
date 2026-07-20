@@ -56,6 +56,13 @@ export function cloudflareAdapter(options: CloudflareAdapterOptions = {}): Adapt
             path: 'deploy/cloudflare/wrangler.jsonc',
             contents: '{\n  "name": "ruvyxa-app",\n  "assets": { "directory": "./assets" }\n}\n',
           },
+          {
+            // Workers static assets read _headers from the asset directory;
+            // hashed client bundles are immutable.
+            kind: 'file',
+            path: 'deploy/cloudflare/assets/_headers',
+            contents: '/client/*\n  Cache-Control: public, max-age=31536000, immutable\n',
+          },
         ],
       }
     },

@@ -534,7 +534,7 @@ fn absolute_path(path: &Path) -> Result<PathBuf> {
 }
 
 fn canonical_or_original(path: PathBuf) -> PathBuf {
-    path.canonicalize().unwrap_or(path)
+    ruvyxa_diagnostics::normalized_canonical_path(&path)
 }
 
 fn is_within_project(root: &Path, path: &Path) -> bool {

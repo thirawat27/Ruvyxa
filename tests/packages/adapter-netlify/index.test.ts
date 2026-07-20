@@ -15,6 +15,14 @@ describe('netlifyAdapter', () => {
       ],
     )
 
+    const toml = output.artifacts?.find(
+      (artifact) => artifact.path === 'deploy/netlify/netlify.toml',
+    )
+    assert.match(
+      toml && 'contents' in toml ? String(toml.contents) : '',
+      /for = "\/client\/\*"[\s\S]*Cache-Control = "public, max-age=31536000, immutable"/,
+    )
+
     assert.deepEqual(
       {
         name: output.name,

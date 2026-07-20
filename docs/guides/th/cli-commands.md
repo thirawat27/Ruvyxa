@@ -59,7 +59,13 @@ npx ruvyxa build --target node      # default
 npx ruvyxa build --target bun       # bun runtime
 npx ruvyxa build --target static    # static output
 npx ruvyxa build --target edge      # edge runtime
+npx ruvyxa build --adapter vercel   # รัน deploy adapter โดยไม่ต้องแก้ config
+npx ruvyxa build --runtime bun      # รัน build workers ด้วย Bun
 ```
+
+`--runtime <node|bun>` ใช้ได้กับ `dev`, `start`, `preview`, `build`, `check`, `routes`, `analyze`,
+`doctor`, `clean` และ `test:parity` โดย override ตัวแปรแวดล้อม `RUVYXA_RUNTIME` และ `config.runtime`
+— สลับ JavaScript runtime ได้โดยไม่ต้องแก้ config
 
 Pipeline:
 

@@ -17,8 +17,22 @@
 }
 ```
 
+เลือก adapter ใน `ruvyxa.config.ts` หรือระบุผ่าน command line โดยไม่ต้องแก้ config:
+
+```bash
+ruvyxa build --adapter vercel
+```
+
+`--adapter` รองรับ `node`, `bun`, `static`, `vercel`, `netlify`, `cloudflare` โดยจะ resolve แพ็กเกจ
+`@ruvyxa/adapter-*` จากโปรเจกต์และ override `config.adapter` สำหรับ build ครั้งนั้น หากยังไม่ได้
+ติดตั้งแพ็กเกจ build จะจบด้วย `RUV2203` พร้อมคำสั่งติดตั้งที่ถูกต้อง
+
 Adapter จะสร้าง artifact หลัง build แต่ก่อน commit output จึงหาก adapter ล้มเหลว `.ruvyxa/` ชุดเดิม
-จะไม่ถูกแทนที่
+จะไม่ถูกแทนที่ ผลลัพธ์ deploy อยู่ที่ `.ruvyxa/deploy/<platform>/`
+
+Static output ของ Vercel, Netlify และ Cloudflare ใส่ cache header แบบ immutable
+(`Cache-Control: public, max-age=31536000, immutable`) ให้ `/client/*` ที่ hash ชื่อไฟล์แล้ว ผ่าน
+`config.json`, `netlify.toml` และไฟล์ `_headers` ตามลำดับ
 
 ### Vercel static output
 

@@ -15,6 +15,20 @@ describe('vercelAdapter', () => {
       ],
     )
 
+    const configArtifact = output.artifacts?.find(
+      (artifact) => artifact.path === 'deploy/vercel/.vercel/output/config.json',
+    )
+    const config = JSON.parse(
+      configArtifact && 'contents' in configArtifact ? String(configArtifact.contents) : '{}',
+    )
+    assert.equal(config.version, 3)
+    assert.deepEqual(config.routes[0], {
+      src: '^/client/(.*)$',
+      headers: { 'cache-control': 'public, max-age=31536000, immutable' },
+      continue: true,
+    })
+    assert.deepEqual(config.routes.at(-1), { handle: 'filesystem' })
+
     assert.deepEqual(
       {
         name: output.name,

@@ -85,10 +85,11 @@ jobs:
       - name: Smoke test package tarballs
         run: pnpm pack:smoke
       - name: Set up Bun runtime parity
-        if: matrix.os == 'ubuntu-latest'
+        if: matrix.os == 'ubuntu-latest' || matrix.os == 'windows-latest'
         uses: oven-sh/setup-bun@v2
         with:
           bun-version: '1.3.14'
       - name: Verify Bun JavaScript runtime parity
-        if: matrix.os == 'ubuntu-latest'
-        run: RUVYXA_RUNTIME=bun cargo run -p ruvyxa_cli -- check --root examples/demo
+        if: matrix.os == 'ubuntu-latest' || matrix.os == 'windows-latest'
+        shell: bash
+        run: cargo run -p ruvyxa_cli -- check --root examples/demo --runtime bun
