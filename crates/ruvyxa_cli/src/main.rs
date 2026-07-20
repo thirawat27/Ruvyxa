@@ -196,6 +196,11 @@ struct PluginNewArgs {
 
     #[arg(long, default_value = ".")]
     root: PathBuf,
+
+    /// Directory to scaffold the plugin package into, relative to --root.
+    /// Defaults to `<name>`.
+    #[arg(long)]
+    dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Default, serde::Deserialize)]
@@ -367,6 +372,10 @@ struct AdapterRunnerOutput {
 struct AdapterArtifactReport {
     kind: String,
     path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    scope: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    skipped: Option<bool>,
 }
 
 impl ProjectConfig {
@@ -569,7 +578,25 @@ fn plugin(args: PluginArgs) -> anyhow::Result<()> {
 
 fn scaffold_plugin(args: PluginNewArgs) -> anyhow::Result<()> {
     let plugin_name = normalize_plugin_name(&args.name)?;
-    let package_dir = args.root.join("plugins").join(&plugin_name);
+    let package_dir = match &args.dir {
+        Some(dir) => {
+            if dir.as_os_str().is_empty() {
+                anyhow::bail!("--dir must not be empty");
+            }
+            if dir
+                .components()
+                .any(|component| matches!(component, std::path::Component::ParentDir))
+            {
+                anyhow::bail!("--dir must not contain `..` components: {}", dir.display());
+            }
+            if dir.is_absolute() {
+                dir.clone()
+            } else {
+                args.root.join(dir)
+            }
+        }
+        None => args.root.join(&plugin_name),
+    };
     if package_dir.exists() {
         anyhow::bail!(
             "plugin package already exists: {}; choose a different name or remove it first",
@@ -588,7 +615,7 @@ fn scaffold_plugin(args: PluginNewArgs) -> anyhow::Result<()> {
     fs::write(
         package_dir.join("package.json"),
         format!(
-            "{{\n  \"name\": \"ruvyxa-plugin-{plugin_name}\",\n  \"version\": \"0.1.0\",\n  \"description\": \"Ruvyxa plugin: {plugin_name}\",\n  \"type\": \"module\",\n  \"files\": [\"dist\", \"README.md\"],\n  \"main\": \"./dist/index.js\",\n  \"types\": \"./dist/index.d.ts\",\n  \"exports\": {{\n    \".\": {{\n      \"types\": \"./dist/index.d.ts\",\n      \"import\": \"./dist/index.js\"\n    }}\n  }},\n  \"scripts\": {{\n    \"build\": \"tsc\",\n    \"prepublishOnly\": \"pnpm build\"\n  }},\n  \"peerDependencies\": {{\n    \"ruvyxa\": \"^{version}\"\n  }},\n  \"devDependencies\": {{\n    \"ruvyxa\": \"^{version}\",\n    \"typescript\": \"^5.0.0\"\n  }}\n}}\n",
+            "{{\n  \"name\": \"ruvyxa-plugin-{plugin_name}\",\n  \"version\": \"0.1.0\",\n  \"description\": \"Ruvyxa plugin: {plugin_name}\",\n  \"type\": \"module\",\n  \"files\": [\"dist\", \"README.md\"],\n  \"main\": \"./dist/index.js\",\n  \"types\": \"./dist/index.d.ts\",\n  \"exports\": {{\n    \".\": {{\n      \"types\": \"./dist/index.d.ts\",\n      \"import\": \"./dist/index.js\"\n    }}\n  }},\n  \"scripts\": {{\n    \"build\": \"tsc\",\n    \"prepublishOnly\": \"npm run build\"\n  }},\n  \"peerDependencies\": {{\n    \"ruvyxa\": \"^{version}\"\n  }},\n  \"devDependencies\": {{\n    \"ruvyxa\": \"^{version}\",\n    \"typescript\": \"^5.0.0\"\n  }}\n}}\n",
             version = env!("CARGO_PKG_VERSION")
         ),
     )?;
@@ -599,7 +626,7 @@ fn scaffold_plugin(args: PluginNewArgs) -> anyhow::Result<()> {
     fs::write(
         package_dir.join("README.md"),
         format!(
-            "# ruvyxa-plugin-{plugin_name}\n\nA Ruvyxa plugin package.\n\n## Development\n\n```bash\npnpm install\npnpm build\n``\n\n## Usage\n\n```ts\nimport {{ config }} from 'ruvyxa/config'\nimport {plugin_name} from 'ruvyxa-plugin-{plugin_name}'\n\nexport default config({{ plugins: [{plugin_name}] }})\n```\n\nPublish with `pnpm publish` after building.\n"
+            "# ruvyxa-plugin-{plugin_name}\n\nA Ruvyxa plugin package. Works with Node.js and Bun.\n\n## Development\n\n```bash\nnpm install   # or: bun install / pnpm install\nnpm run build # or: bun run build / pnpm build\n```\n\n## Usage\n\n```ts\nimport {{ config }} from 'ruvyxa/config'\nimport {plugin_name} from 'ruvyxa-plugin-{plugin_name}'\n\nexport default config({{ plugins: [{plugin_name}] }})\n```\n\nPublish with `npm publish` (or your package manager's publish command) after building.\n"
         ),
     )?;
 
@@ -622,8 +649,16 @@ fn scaffold_plugin(args: PluginNewArgs) -> anyhow::Result<()> {
         dim("1."),
         accent(format!("cd {}", package_dir.display()))
     );
-    println!("  {} {}", dim("2."), accent("pnpm install"));
-    println!("  {} {}", dim("3."), accent("pnpm build"));
+    println!(
+        "  {} {}",
+        dim("2."),
+        accent("npm install  (or: bun install)")
+    );
+    println!(
+        "  {} {}",
+        dim("3."),
+        accent("npm run build  (or: bun run build)")
+    );
     println!();
     println!(
         "  {} Plugin {} is ready to develop\n",
@@ -5195,10 +5230,11 @@ mod tests {
         scaffold_plugin(PluginNewArgs {
             name: "request-logger".to_string(),
             root: temp.path().to_path_buf(),
+            dir: None,
         })
         .unwrap();
 
-        let plugin_dir = temp.path().join("plugins/request-logger");
+        let plugin_dir = temp.path().join("request-logger");
         let source = fs::read_to_string(plugin_dir.join("src/index.ts")).unwrap();
         assert!(source.contains("import { plugin }"));
         assert!(source.contains("plugin('request-logger'"));
@@ -5207,8 +5243,44 @@ mod tests {
             serde_json::from_str(&fs::read_to_string(plugin_dir.join("package.json")).unwrap())
                 .unwrap();
         assert_eq!(package["name"], "ruvyxa-plugin-request-logger");
+        assert_eq!(package["scripts"]["prepublishOnly"], "npm run build");
         assert!(plugin_dir.join("tsconfig.json").exists());
         assert!(plugin_dir.join("README.md").exists());
+        assert!(!temp.path().join("plugins").exists());
+    }
+
+    #[test]
+    fn plugin_new_scaffolds_into_a_custom_directory() {
+        let temp = tempfile::tempdir().unwrap();
+
+        scaffold_plugin(PluginNewArgs {
+            name: "request-logger".to_string(),
+            root: temp.path().to_path_buf(),
+            dir: Some(PathBuf::from("tools/my-logger")),
+        })
+        .unwrap();
+
+        let plugin_dir = temp.path().join("tools/my-logger");
+        assert!(plugin_dir.join("src/index.ts").exists());
+        assert!(!temp.path().join("plugins").exists());
+        let package: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(plugin_dir.join("package.json")).unwrap())
+                .unwrap();
+        assert_eq!(package["name"], "ruvyxa-plugin-request-logger");
+    }
+
+    #[test]
+    fn plugin_new_rejects_custom_directory_traversal() {
+        let temp = tempfile::tempdir().unwrap();
+        let error = scaffold_plugin(PluginNewArgs {
+            name: "request-logger".to_string(),
+            root: temp.path().to_path_buf(),
+            dir: Some(PathBuf::from("../outside")),
+        })
+        .unwrap_err()
+        .to_string();
+
+        assert!(error.contains("--dir must not contain `..`"));
     }
 
     #[test]
@@ -5217,6 +5289,7 @@ mod tests {
         let error = scaffold_plugin(PluginNewArgs {
             name: "../escape".to_string(),
             root: temp.path().to_path_buf(),
+            dir: None,
         })
         .unwrap_err()
         .to_string();

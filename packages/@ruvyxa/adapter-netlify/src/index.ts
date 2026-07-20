@@ -1,4 +1,4 @@
-import type { Adapter, AdapterOutput, BuildContext } from '@ruvyxa/core'
+import type { Adapter, AdapterArtifact, AdapterOutput, BuildContext } from '@ruvyxa/core'
 import { clientBuildOutput, validateBuildContext } from '@ruvyxa/core'
 
 /**
@@ -7,6 +7,13 @@ import { clientBuildOutput, validateBuildContext } from '@ruvyxa/core'
 export interface NetlifyAdapterOptions {
   /** Custom Netlify functions directory. Defaults to `${outDir}/netlify/functions`. */
   functionsDir?: string
+  /**
+   * Also emit a `netlify.toml` at the project root pointing Netlify at the
+   * generated publish directory, so a fresh site deploys without dashboard
+   * configuration. An existing project `netlify.toml` is never overwritten.
+   * @default true
+   */
+  projectConfig?: boolean
 }
 
 /**
@@ -63,6 +70,22 @@ export function netlifyAdapter(options: NetlifyAdapterOptions = {}): Adapter {
               '[[headers]]\n  for = "/client/*"\n  [headers.values]\n' +
               '    Cache-Control = "public, max-age=31536000, immutable"\n',
           },
+          ...(options.projectConfig === false
+            ? []
+            : [
+                {
+                  kind: 'file',
+                  path: 'netlify.toml',
+                  scope: 'project',
+                  skipIfExists: true,
+                  contents:
+                    '[build]\n' +
+                    '  command = "npx --no-install ruvyxa build"\n' +
+                    '  publish = ".ruvyxa/deploy/netlify/publish"\n\n' +
+                    '[[headers]]\n  for = "/client/*"\n  [headers.values]\n' +
+                    '    Cache-Control = "public, max-age=31536000, immutable"\n',
+                } satisfies AdapterArtifact,
+              ]),
         ],
       }
     },

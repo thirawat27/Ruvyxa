@@ -1,4 +1,4 @@
-import { cp, mkdir, readdir, readFile, writeFile } from 'node:fs/promises'
+import { cp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { existsSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import path from 'node:path'
@@ -25,6 +25,17 @@ const projectRoot = path.resolve(projectRootArg)
 const outputDir = path.resolve(outputDirArg)
 const runtimeDir = path.dirname(fileURLToPath(import.meta.url))
 const KNOWN_ADAPTER_NAMES = ['node', 'bun', 'static', 'vercel', 'netlify', 'cloudflare']
+// Hosting platforms discover deployment output at fixed project-root
+// locations. Project-scope artifacts are limited to this allowlist so an
+// adapter can enable zero-config deploys without gaining arbitrary write
+// access to the project.
+const PROJECT_ARTIFACT_ALLOWLIST = [
+  '.vercel/output',
+  'netlify.toml',
+  'wrangler.jsonc',
+  '_headers',
+  '_redirects',
+]
 
 try {
   // A named adapter from `ruvyxa build --adapter <name>` overrides the config
@@ -123,24 +134,67 @@ async function materializeArtifacts(output, buildDir) {
     if (!artifact || typeof artifact !== 'object') {
       throw new Error('RUV2200 adapter artifact must be an object.')
     }
-    const destination = artifactDestination(buildDir, artifact.path)
+    const scope = artifact.scope ?? 'build'
+    if (scope !== 'build' && scope !== 'project') {
+      throw new Error(`RUV2200 unsupported adapter artifact scope: ${String(artifact.scope)}.`)
+    }
+    const destination =
+      scope === 'project'
+        ? projectArtifactDestination(artifact.path)
+        : artifactDestination(buildDir, artifact.path)
     if (artifact.kind === 'file') {
       if (typeof artifact.contents !== 'string') {
         throw new Error(`RUV2200 file artifact ${artifact.path} must include string contents.`)
       }
+      if (scope === 'project' && artifact.skipIfExists === true && existsSync(destination)) {
+        artifacts.push({ kind: 'file', path: artifact.path, scope, skipped: true })
+        continue
+      }
       await mkdir(path.dirname(destination), { recursive: true })
       await writeFile(destination, artifact.contents, 'utf8')
-      artifacts.push({ kind: 'file', path: artifact.path })
+      artifacts.push(
+        scope === 'project'
+          ? { kind: 'file', path: artifact.path, scope }
+          : { kind: 'file', path: artifact.path },
+      )
       continue
     }
     if (artifact.kind === 'static-site') {
+      // Project-scope publish directories are replaced wholesale so hashed
+      // bundles from previous builds do not accumulate at the platform root.
+      if (scope === 'project') await rm(destination, { recursive: true, force: true })
       await materializeStaticSite(buildDir, destination)
-      artifacts.push({ kind: 'static-site', path: artifact.path })
+      artifacts.push(
+        scope === 'project'
+          ? { kind: 'static-site', path: artifact.path, scope }
+          : { kind: 'static-site', path: artifact.path },
+      )
       continue
     }
     throw new Error(`RUV2200 unsupported adapter artifact kind: ${String(artifact.kind)}.`)
   }
   return artifacts
+}
+
+function projectArtifactDestination(artifactPath) {
+  if (typeof artifactPath !== 'string' || artifactPath.trim() === '') {
+    throw new Error('RUV2200 adapter artifact path must be a non-empty relative path.')
+  }
+  const destination = path.resolve(projectRoot, artifactPath)
+  if (destination === projectRoot || !destination.startsWith(projectRoot + path.sep)) {
+    throw new Error(`RUV2200 adapter artifact path escapes the project root: ${artifactPath}.`)
+  }
+  const relative = path.relative(projectRoot, destination).split(path.sep).join('/')
+  const allowed = PROJECT_ARTIFACT_ALLOWLIST.some(
+    (prefix) => relative === prefix || relative.startsWith(prefix + '/'),
+  )
+  if (!allowed) {
+    throw new Error(
+      `RUV2200 project-scope adapter artifact path is not allowlisted: ${artifactPath}. ` +
+        `Allowed locations: ${PROJECT_ARTIFACT_ALLOWLIST.join(', ')}.`,
+    )
+  }
+  return destination
 }
 
 function artifactDestination(buildDir, artifactPath) {

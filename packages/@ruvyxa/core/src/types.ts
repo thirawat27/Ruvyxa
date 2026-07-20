@@ -328,10 +328,26 @@ export interface AdapterOutput {
 export interface AdapterArtifact {
   /** Write a UTF-8 file or assemble a static-only publish directory. */
   kind: 'file' | 'static-site'
-  /** Destination relative to the Ruvyxa output directory. */
+  /**
+   * Destination relative to the Ruvyxa output directory (`scope: 'build'`,
+   * the default) or the project root (`scope: 'project'`).
+   */
   path: string
   /** Required UTF-8 contents for `file` artifacts. */
   contents?: string
+  /**
+   * Where the artifact is materialized. Project-scope paths are restricted to
+   * an allowlist of hosting-platform locations (for example `.vercel/output`
+   * or `netlify.toml`) so adapters cannot write arbitrary project files.
+   * @default 'build'
+   */
+  scope?: 'build' | 'project'
+  /**
+   * Skip writing a project-scope `file` artifact when the destination already
+   * exists, so user-authored platform config always wins.
+   * @default false
+   */
+  skipIfExists?: boolean
 }
 
 export interface Adapter {

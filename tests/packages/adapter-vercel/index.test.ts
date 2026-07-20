@@ -8,11 +8,30 @@ describe('vercelAdapter', () => {
     const output = await vercelAdapter().build({ root: '.', outDir: '.ruvyxa' })
 
     assert.deepEqual(
-      output.artifacts?.map(({ kind, path }) => ({ kind, path })),
+      output.artifacts?.map(({ kind, path, scope }) => ({ kind, path, scope })),
       [
-        { kind: 'static-site', path: 'deploy/vercel/.vercel/output/static' },
-        { kind: 'file', path: 'deploy/vercel/.vercel/output/config.json' },
+        { kind: 'static-site', path: 'deploy/vercel/.vercel/output/static', scope: undefined },
+        { kind: 'file', path: 'deploy/vercel/.vercel/output/config.json', scope: undefined },
+        { kind: 'static-site', path: '.vercel/output/static', scope: 'project' },
+        { kind: 'file', path: '.vercel/output/config.json', scope: 'project' },
       ],
+    )
+
+    const projectConfig = output.artifacts?.find(
+      (artifact) => artifact.path === '.vercel/output/config.json',
+    )
+    assert.equal(
+      projectConfig && 'contents' in projectConfig ? String(projectConfig.contents) : '',
+      output.artifacts?.find(
+        (artifact) => artifact.path === 'deploy/vercel/.vercel/output/config.json',
+      )?.contents,
+    )
+
+    assert.deepEqual(
+      vercelAdapter({ projectOutput: false })
+        .build({ root: '.', outDir: '.ruvyxa' })
+        .artifacts?.map(({ path }) => path),
+      ['deploy/vercel/.vercel/output/static', 'deploy/vercel/.vercel/output/config.json'],
     )
 
     const configArtifact = output.artifacts?.find(

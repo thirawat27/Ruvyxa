@@ -216,10 +216,13 @@ Removes the `.ruvyxa/` output directory entirely.
 npx ruvyxa plugin new request-logger
 ```
 
-`plugin new` creates a publishable package under `plugins/request-logger/` with `src/index.ts`,
-`package.json`, `tsconfig.json`, and `README.md`. Build it with `pnpm build`, then publish it with
-`pnpm publish`. Import the package entry from `ruvyxa.config.ts` and register it in
-`config({ plugins: [...] })`. See [Plugins](plugins.md) for the complete workflow.
+`plugin new` creates a publishable package directly under `request-logger/` (named after the plugin,
+no wrapping folder), with `src/index.ts`, `package.json`, `tsconfig.json`, and `README.md`. Pass
+`--dir <path>` only if you want a different location (relative to `--root`; `..` segments are
+rejected). The scaffold works with Node.js and Bun — build it with `npm run build` (or
+`bun run build`), then publish with your package manager. Import the package entry from
+`ruvyxa.config.ts` and register it in `config({ plugins: [...] })`. See [Plugins](plugins.md) for
+the complete workflow.
 
 ---
 

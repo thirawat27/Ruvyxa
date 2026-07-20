@@ -8,8 +8,9 @@
 npx ruvyxa plugin new auth
 ```
 
-คำสั่งจะสร้างแพ็กเกจ `plugins/auth/` พร้อม `package.json`, `tsconfig.json`, `README.md` และ
-`src/index.ts`:
+คำสั่งจะสร้างแพ็กเกจ `auth/` ตรงๆ (ชื่อโฟลเดอร์ = ชื่อ plugin ไม่ต้องใช้ `--dir`) พร้อม
+`package.json`, `tsconfig.json`, `README.md` และ `src/index.ts` ใส่ `--dir <path>` เฉพาะถ้าต้องการ
+ตำแหน่งอื่น plugin รันได้ทั้ง Node.js และ Bun (`--runtime bun` หรือ `RUVYXA_RUNTIME=bun`):
 
 ```ts
 import { plugin } from 'ruvyxa/config'

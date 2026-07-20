@@ -8,8 +8,9 @@ Create a starter:
 npx ruvyxa plugin new auth
 ```
 
-The command creates `plugins/auth/` with `src/index.ts`, `package.json`, `tsconfig.json`, and
-`README.md`:
+The command creates `auth/` (named after the plugin — no `--dir` flag needed) with `src/index.ts`,
+`package.json`, `tsconfig.json`, and `README.md`. Add `--dir <path>` only if you want a different
+location. Plugins run on both Node.js and Bun (`--runtime bun` or `RUVYXA_RUNTIME=bun`):
 
 ```ts
 import { plugin } from 'ruvyxa/config'

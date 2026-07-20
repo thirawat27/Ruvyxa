@@ -46,8 +46,43 @@ export default config({
 })
 ```
 
-หลัง `npm run build` ให้ deploy `.ruvyxa/deploy/vercel/` ซึ่งมี Vercel static Build Output
-(`.vercel/output/static` และ `config.json`) แล้วเลือก preset แบบ Other
+Adapter สร้าง Build Output API layout (`.vercel/output/static` และ `.vercel/output/config.json`)
+**ที่ project root** ตอน `ruvyxa build` — บน Vercel เลือก preset แบบ Other และตั้ง build command
+เป็น build script ของโปรเจกต์ (เช่น `npm run build`) Vercel จะ detect `.vercel/output/` ให้เอง
+ไม่ต้องตั้ง output directory เพิ่ม แนะนำใส่ `.vercel/` ใน `.gitignore` เพราะถูก generate ทุก build
+
+ใส่ `vercelAdapter({ projectOutput: false })` ถ้าต้องการพฤติกรรมเดิม (เขียนเฉพาะใน
+`.ruvyxa/deploy/vercel/` แล้ว deploy เอง)
+
+### Netlify zero-config
+
+```ts
+import { netlifyAdapter } from '@ruvyxa/adapter-netlify'
+
+export default config({
+  adapter: netlifyAdapter(),
+})
+```
+
+`ruvyxa build` ครั้งแรกจะสร้าง `netlify.toml` ที่ project root พร้อม build command และ publish
+directory (`.ruvyxa/deploy/netlify/publish`) ให้เสร็จ — commit ไฟล์นี้แล้วเชื่อม repo กับ Netlify
+ได้เลยโดยไม่ต้องตั้งค่าใน dashboard ถ้ามี `netlify.toml` อยู่แล้วจะ**ไม่ถูกเขียนทับ**
+(ไฟล์ของผู้ใช้ชนะเสมอ) ใส่ `netlifyAdapter({ projectConfig: false })` ถ้าไม่ต้องการให้ generate
+
+### Cloudflare zero-config
+
+```ts
+import { cloudflareAdapter } from '@ruvyxa/adapter-cloudflare'
+
+export default config({
+  adapter: cloudflareAdapter(),
+})
+```
+
+`ruvyxa build` จะสร้าง `wrangler.jsonc` ที่ project root ให้ด้วย โดย `assets.directory` ชี้ไปที่
+static assets ที่ generate แล้ว ทำให้ `wrangler deploy` ใช้ได้ทันทีโดยไม่ต้องตั้งค่าใน dashboard
+ถ้ามี `wrangler.jsonc` อยู่แล้วจะ**ไม่ถูกเขียนทับ** ใส่
+`cloudflareAdapter({ projectConfig: false })` ถ้าไม่ต้องการให้ generate
 
 Adapter ของ Vercel, Netlify และ Cloudflare รองรับ static SSG/CSR เท่านั้นในปัจจุบัน API, SSR, ISR
 และ PPR จะทำให้ build จบด้วย `RUV2202` แทนที่จะ deploy output ที่ไม่มี request handler

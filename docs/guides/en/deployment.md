@@ -47,9 +47,45 @@ export default config({
 })
 ```
 
-Build with `npm run build`, then deploy `.ruvyxa/deploy/vercel/`. The generated directory contains
-`.vercel/output/static` and `.vercel/output/config.json` using Vercel's static Build Output layout.
-Use Vercel's “Other” preset and set the deploy root to that generated directory.
+The adapter emits Vercel's Build Output API layout (`.vercel/output/static` and
+`.vercel/output/config.json`) **at the project root** during `ruvyxa build`. On Vercel, pick the
+“Other” framework preset and set the build command to your build script (for example
+`npm run build`) — Vercel detects `.vercel/output/` automatically, so no output-directory
+configuration is needed. Add `.vercel/` to `.gitignore`; it is generated on every build.
+
+Pass `vercelAdapter({ projectOutput: false })` to keep the previous behavior of writing only under
+`.ruvyxa/deploy/vercel/` (deploy that directory manually with the “Other” preset).
+
+### Netlify zero-config
+
+```ts
+import { netlifyAdapter } from '@ruvyxa/adapter-netlify'
+
+export default config({
+  adapter: netlifyAdapter(),
+})
+```
+
+The first `ruvyxa build` writes a `netlify.toml` at the project root with the build command and
+publish directory (`.ruvyxa/deploy/netlify/publish`) preconfigured — commit it and connect the
+repository to Netlify with no dashboard configuration. An existing `netlify.toml` is **never
+overwritten**; your own file always wins. Pass `netlifyAdapter({ projectConfig: false })` to skip
+generating it.
+
+### Cloudflare zero-config
+
+```ts
+import { cloudflareAdapter } from '@ruvyxa/adapter-cloudflare'
+
+export default config({
+  adapter: cloudflareAdapter(),
+})
+```
+
+`ruvyxa build` also writes a `wrangler.jsonc` at the project root pointing `assets.directory` at the
+generated static assets, so `wrangler deploy` works immediately with no dashboard configuration. An
+existing project `wrangler.jsonc` is **never overwritten**. Pass
+`cloudflareAdapter({ projectConfig: false })` to skip generating it.
 
 Vercel, Netlify, and Cloudflare adapters currently emit deployable **static** output only. They
 accept SSG and CSR page routes; API, SSR, ISR, and PPR routes fail with `RUV2202` rather than

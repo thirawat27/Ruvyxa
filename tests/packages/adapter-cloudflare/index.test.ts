@@ -8,11 +8,12 @@ describe('cloudflareAdapter', () => {
     const output = await cloudflareAdapter().build({ root: '.', outDir: '.ruvyxa' })
 
     assert.deepEqual(
-      output.artifacts?.map(({ kind, path }) => ({ kind, path })),
+      output.artifacts?.map(({ kind, path, scope }) => ({ kind, path, scope })),
       [
-        { kind: 'static-site', path: 'deploy/cloudflare/assets' },
-        { kind: 'file', path: 'deploy/cloudflare/wrangler.jsonc' },
-        { kind: 'file', path: 'deploy/cloudflare/assets/_headers' },
+        { kind: 'static-site', path: 'deploy/cloudflare/assets', scope: undefined },
+        { kind: 'file', path: 'deploy/cloudflare/wrangler.jsonc', scope: undefined },
+        { kind: 'file', path: 'deploy/cloudflare/assets/_headers', scope: undefined },
+        { kind: 'file', path: 'wrangler.jsonc', scope: 'project' },
       ],
     )
 
@@ -22,6 +23,24 @@ describe('cloudflareAdapter', () => {
     assert.match(
       headersArtifact && 'contents' in headersArtifact ? String(headersArtifact.contents) : '',
       /\/client\/\*\n {2}Cache-Control: public, max-age=31536000, immutable/,
+    )
+
+    const projectConfig = output.artifacts?.find((artifact) => artifact.path === 'wrangler.jsonc')
+    assert.equal(projectConfig?.skipIfExists, true)
+    assert.match(
+      projectConfig && 'contents' in projectConfig ? String(projectConfig.contents) : '',
+      /"directory": "\.ruvyxa\/deploy\/cloudflare\/assets"/,
+    )
+
+    assert.deepEqual(
+      (
+        await cloudflareAdapter({ projectConfig: false }).build({ root: '.', outDir: '.ruvyxa' })
+      ).artifacts?.map(({ path }) => path),
+      [
+        'deploy/cloudflare/assets',
+        'deploy/cloudflare/wrangler.jsonc',
+        'deploy/cloudflare/assets/_headers',
+      ],
     )
 
     assert.deepEqual(

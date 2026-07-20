@@ -93,6 +93,78 @@ describe('adapter runner', () => {
     }
   })
 
+  it('materializes allowlisted project-scope artifacts at the project root', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-adapter-runner-'))
+    const outputDir = path.join(root, '.ruvyxa-staging')
+    try {
+      await mkdir(path.join(outputDir, 'assets'), { recursive: true })
+      await mkdir(path.join(outputDir, 'client'), { recursive: true })
+      await mkdir(path.join(outputDir, 'prerender'), { recursive: true })
+      await writeFile(
+        path.join(root, 'ruvyxa.config.mjs'),
+        `export default { adapter: { build() { return { artifacts: [
+          { kind: 'static-site', path: '.vercel/output/static', scope: 'project' },
+          { kind: 'file', path: '.vercel/output/config.json', scope: 'project', contents: '{"version":3}' },
+          { kind: 'file', path: 'netlify.toml', scope: 'project', skipIfExists: true, contents: 'generated' },
+          { kind: 'file', path: 'wrangler.jsonc', scope: 'project', skipIfExists: true, contents: '{"name":"app"}' }
+        ] } } } }`,
+      )
+      await writeFile(
+        path.join(outputDir, 'manifest.json'),
+        JSON.stringify({ routes: [{ kind: 'page', path: '/', render: { strategy: 'ssg' } }] }),
+      )
+      await writeFile(path.join(outputDir, 'prerender', 'index.html'), '<main>home</main>')
+      // Stale output from an earlier build must be replaced, and a
+      // user-authored netlify.toml must never be overwritten.
+      await mkdir(path.join(root, '.vercel/output/static'), { recursive: true })
+      await writeFile(path.join(root, '.vercel/output/static/stale.js'), 'stale')
+      await writeFile(path.join(root, 'netlify.toml'), 'user-authored')
+
+      const result = await runRunner(root, outputDir)
+
+      assert.deepEqual(result.result, [
+        { kind: 'static-site', path: '.vercel/output/static', scope: 'project' },
+        { kind: 'file', path: '.vercel/output/config.json', scope: 'project' },
+        { kind: 'file', path: 'netlify.toml', scope: 'project', skipped: true },
+        { kind: 'file', path: 'wrangler.jsonc', scope: 'project' },
+      ])
+      assert.equal(
+        await readFile(path.join(root, '.vercel/output/static/index.html'), 'utf8'),
+        '<main>home</main>',
+      )
+      assert.equal(
+        await readFile(path.join(root, '.vercel/output/config.json'), 'utf8'),
+        '{"version":3}',
+      )
+      assert.equal(await readFile(path.join(root, 'netlify.toml'), 'utf8'), 'user-authored')
+      assert.equal(await readFile(path.join(root, 'wrangler.jsonc'), 'utf8'), '{"name":"app"}')
+      await assert.rejects(readFile(path.join(root, '.vercel/output/static/stale.js')))
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects project-scope artifacts outside the allowlist', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-adapter-runner-'))
+    const outputDir = path.join(root, '.ruvyxa-staging')
+    try {
+      await mkdir(outputDir, { recursive: true })
+      await writeFile(
+        path.join(root, 'ruvyxa.config.mjs'),
+        `export default { adapter: { build() { return { artifacts: [
+          { kind: 'file', path: 'package.json', scope: 'project', contents: '{}' }
+        ] } } } }`,
+      )
+
+      const result = await runRunnerResult(root, outputDir)
+
+      assert.equal(result.exitCode, 1)
+      assert.match(result.parsed.message, /project-scope adapter artifact path is not allowlisted/)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('rejects artifacts that overlap protected build output', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-adapter-runner-'))
     const outputDir = path.join(root, '.ruvyxa-staging')

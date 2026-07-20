@@ -211,10 +211,12 @@ npx ruvyxa clean
 npx ruvyxa plugin new request-logger
 ```
 
-สร้าง plugin package ที่ `plugins/request-logger/` พร้อม `src/index.ts`, `package.json`,
-`tsconfig.json`, `README.md` build ด้วย `pnpm build` แล้ว publish ด้วย `pnpm publish` import package
-entry จาก `ruvyxa.config.ts` และลงทะเบียนใน `config({ plugins: [...] })` ดู workflow เต็มได้ที่
-[Plugins](plugins.md)
+สร้าง plugin package ที่ `request-logger/` ตรงๆ (ชื่อโฟลเดอร์ = ชื่อ plugin ไม่มีชั้น `plugins/`
+ครอบ) พร้อม `src/index.ts`, `package.json`, `tsconfig.json`, `README.md` ใส่ `--dir <path>` เฉพาะถ้า
+ต้องการเลือกตำแหน่งอื่น (relative จาก `--root` และห้ามมี `..`) scaffold ใช้ได้ทั้ง Node.js และ Bun —
+build ด้วย `npm run build` (หรือ `bun run build`) แล้ว publish ด้วย package manager ที่ใช้ import
+package entry จาก `ruvyxa.config.ts` และลงทะเบียนใน `config({ plugins: [...] })` ดู workflow
+เต็มได้ที่ [Plugins](plugins.md)
 
 ## Environment Variables
 

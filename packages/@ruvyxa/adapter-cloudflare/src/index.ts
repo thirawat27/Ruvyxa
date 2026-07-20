@@ -1,4 +1,4 @@
-import type { Adapter, AdapterOutput, BuildContext } from '@ruvyxa/core'
+import type { Adapter, AdapterArtifact, AdapterOutput, BuildContext } from '@ruvyxa/core'
 import { clientBuildOutput, validateBuildContext } from '@ruvyxa/core'
 
 /**
@@ -7,6 +7,14 @@ import { clientBuildOutput, validateBuildContext } from '@ruvyxa/core'
 export interface CloudflareAdapterOptions {
   /** Custom worker entry point path. Defaults to `${outDir}/server/app`. */
   workerEntry?: string
+  /**
+   * Also emit a `wrangler.jsonc` at the project root pointing at the
+   * generated static assets directory, so `wrangler deploy` works right
+   * after `ruvyxa build` with no dashboard configuration. An existing
+   * project `wrangler.jsonc` is never overwritten.
+   * @default true
+   */
+  projectConfig?: boolean
 }
 
 /**
@@ -63,6 +71,17 @@ export function cloudflareAdapter(options: CloudflareAdapterOptions = {}): Adapt
             path: 'deploy/cloudflare/assets/_headers',
             contents: '/client/*\n  Cache-Control: public, max-age=31536000, immutable\n',
           },
+          ...(options.projectConfig === false
+            ? []
+            : [
+                {
+                  kind: 'file',
+                  path: 'wrangler.jsonc',
+                  scope: 'project',
+                  skipIfExists: true,
+                  contents: `{\n  "name": "ruvyxa-app",\n  "assets": { "directory": "${ctx.outDir}/deploy/cloudflare/assets" }\n}\n`,
+                } satisfies AdapterArtifact,
+              ]),
         ],
       }
     },

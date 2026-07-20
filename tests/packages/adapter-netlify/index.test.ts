@@ -8,10 +8,11 @@ describe('netlifyAdapter', () => {
     const output = await netlifyAdapter().build({ root: '.', outDir: '.ruvyxa' })
 
     assert.deepEqual(
-      output.artifacts?.map(({ kind, path }) => ({ kind, path })),
+      output.artifacts?.map(({ kind, path, scope }) => ({ kind, path, scope })),
       [
-        { kind: 'static-site', path: 'deploy/netlify/publish' },
-        { kind: 'file', path: 'deploy/netlify/netlify.toml' },
+        { kind: 'static-site', path: 'deploy/netlify/publish', scope: undefined },
+        { kind: 'file', path: 'deploy/netlify/netlify.toml', scope: undefined },
+        { kind: 'file', path: 'netlify.toml', scope: 'project' },
       ],
     )
 
@@ -21,6 +22,13 @@ describe('netlifyAdapter', () => {
     assert.match(
       toml && 'contents' in toml ? String(toml.contents) : '',
       /for = "\/client\/\*"[\s\S]*Cache-Control = "public, max-age=31536000, immutable"/,
+    )
+
+    const projectToml = output.artifacts?.find((artifact) => artifact.path === 'netlify.toml')
+    assert.equal(projectToml?.skipIfExists, true)
+    assert.match(
+      projectToml && 'contents' in projectToml ? String(projectToml.contents) : '',
+      /publish = "\.ruvyxa\/deploy\/netlify\/publish"/,
     )
 
     assert.deepEqual(

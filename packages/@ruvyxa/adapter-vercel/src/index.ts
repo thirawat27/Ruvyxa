@@ -7,6 +7,13 @@ import { clientBuildOutput, validateBuildContext } from '@ruvyxa/core'
 export interface VercelAdapterOptions {
   /** Custom functions output directory. Defaults to `${outDir}/functions`. */
   functionsDir?: string
+  /**
+   * Also emit the Build Output API directory at the project root
+   * (`.vercel/output/`), which Vercel picks up automatically after
+   * `ruvyxa build` runs — no dashboard output-directory configuration needed.
+   * @default true
+   */
+  projectOutput?: boolean
 }
 
 /**
@@ -42,6 +49,35 @@ export function vercelAdapter(options: VercelAdapterOptions = {}): Adapter {
     build(ctx: BuildContext): AdapterOutput {
       validateBuildContext(ctx, 'vercelAdapter')
       const functionsDir = options.functionsDir ?? `${ctx.outDir}/functions`
+      // Hashed client bundles are immutable; unhashed assets keep Vercel's
+      // default caching.
+      const buildOutputConfig = `${JSON.stringify(
+        {
+          version: 3,
+          routes: [
+            {
+              src: '^/client/(.*)$',
+              headers: { 'cache-control': 'public, max-age=31536000, immutable' },
+              continue: true,
+            },
+            { handle: 'filesystem' },
+          ],
+        },
+        null,
+        2,
+      )}\n`
+      const projectArtifacts: AdapterOutput['artifacts'] =
+        options.projectOutput === false
+          ? []
+          : [
+              { kind: 'static-site', path: '.vercel/output/static', scope: 'project' },
+              {
+                kind: 'file',
+                path: '.vercel/output/config.json',
+                scope: 'project',
+                contents: buildOutputConfig,
+              },
+            ]
       return {
         name: 'vercel',
         target: 'serverless',
@@ -56,24 +92,9 @@ export function vercelAdapter(options: VercelAdapterOptions = {}): Adapter {
           {
             kind: 'file',
             path: 'deploy/vercel/.vercel/output/config.json',
-            // Hashed client bundles are immutable; unhashed assets keep
-            // Vercel's default caching.
-            contents: `${JSON.stringify(
-              {
-                version: 3,
-                routes: [
-                  {
-                    src: '^/client/(.*)$',
-                    headers: { 'cache-control': 'public, max-age=31536000, immutable' },
-                    continue: true,
-                  },
-                  { handle: 'filesystem' },
-                ],
-              },
-              null,
-              2,
-            )}\n`,
+            contents: buildOutputConfig,
           },
+          ...projectArtifacts,
         ],
       }
     },
