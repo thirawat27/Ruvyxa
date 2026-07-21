@@ -1917,7 +1917,14 @@ async fn render_prerender_job(
     job: &PrerenderJob,
     artifact_cache: &PrerenderArtifactCache,
 ) -> anyhow::Result<PrerenderedRoute> {
-    let html_path = prerender_html_path(prerender_dir, &job.render_path);
+    let Some(html_path) = prerender_html_path(prerender_dir, &job.render_path) else {
+        anyhow::bail!(
+            "RUV1205 Prerender path `{}` for route `{}` cannot be written inside the build output. \
+             Return static params that map to plain URL segments.",
+            job.render_path,
+            job.route_path
+        );
+    };
     if let Some(parent) = html_path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -2212,13 +2219,34 @@ fn route_has_dynamic_segments(route_path: &str) -> bool {
 }
 
 /// Generate the output HTML file path for a pre-rendered route.
-fn prerender_html_path(prerender_dir: &Path, route_path: &str) -> PathBuf {
-    let sanitized = route_path.trim_matches('/');
-    if sanitized.is_empty() {
-        prerender_dir.join("index.html")
-    } else {
-        prerender_dir.join(sanitized).join("index.html")
+/// Map a render path to the file that stores its pre-rendered HTML.
+///
+/// Returns `None` when the path cannot be mapped inside `prerender_dir`.
+/// Render paths for dynamic routes come from the app's own `getStaticParams()`,
+/// so a parameter value such as `..` would otherwise write outside the build
+/// output. Mirrors `prerenderRelativePath` in `serverless-handler.mjs`, which
+/// reads these files back at request time.
+fn prerender_html_path(prerender_dir: &Path, route_path: &str) -> Option<PathBuf> {
+    let mut html_path = prerender_dir.to_path_buf();
+    for segment in route_path.split('/') {
+        if segment.is_empty() {
+            continue;
+        }
+        if is_unsafe_prerender_segment(segment) {
+            return None;
+        }
+        html_path.push(segment);
     }
+    Some(html_path.join("index.html"))
+}
+
+fn is_unsafe_prerender_segment(segment: &str) -> bool {
+    if segment == "." || segment == ".." {
+        return true;
+    }
+    segment
+        .chars()
+        .any(|character| matches!(character, '/' | '\\' | ':') || character.is_control())
 }
 
 /// Generate a minimal CSR shell HTML document.
@@ -2254,7 +2282,8 @@ fn csr_shell_html(
   <script type="module" src="{client_src}"></script>
 </body>
 </html>"#,
-        path_json = serde_json::to_string(route_path).unwrap_or_else(|_| "\"\"".to_string()),
+        client_src = escape_html_attribute(&client_src),
+        path_json = inline_script_json(route_path, "\"\""),
     )
 }
 
@@ -2310,8 +2339,23 @@ fn load_prerender_client_assets(client_dir: &Path) -> BTreeMap<String, Prerender
 fn module_preload_links(preloads: &[String]) -> String {
     preloads
         .iter()
-        .map(|src| format!(r#"<link rel="modulepreload" href="{src}">"#))
+        .map(|src| {
+            let src = escape_html_attribute(src);
+            format!(r#"<link rel="modulepreload" href="{src}">"#)
+        })
         .collect()
+}
+
+/// Escape a value interpolated into a double-quoted HTML attribute.
+///
+/// Mirrors the dev server's `escape_html`, so a manifest entry cannot inject
+/// markup in prerendered output while the same value stays inert in dev.
+fn escape_html_attribute(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
 }
 
 fn inject_prerender_client_assets(
@@ -2329,7 +2373,7 @@ fn inject_prerender_client_assets(
     let params_json = inline_script_json(params, "{}");
     let scripts = format!(
         r#"<script>globalThis.__RUVYXA_ROUTE_PARAMS__ = {params_json};globalThis.__RUVYXA_REQUEST_PATH__ = {request_path_json};</script><script type="module" src="{}"></script>"#,
-        assets.src
+        escape_html_attribute(&assets.src)
     );
     let lower = html.to_ascii_lowercase();
     if let (Some(head_end), Some(body_end)) = (lower.find("</head>"), lower.rfind("</body>"))
@@ -5210,6 +5254,46 @@ fn duplicate_dependencies(package: &serde_json::Value) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::{is_unsafe_prerender_segment, prerender_html_path};
+
+    #[test]
+    fn prerender_paths_stay_inside_the_build_output() {
+        let root = std::path::Path::new("/out/prerender");
+
+        assert_eq!(
+            prerender_html_path(root, "/"),
+            Some(root.join("index.html"))
+        );
+        assert_eq!(
+            prerender_html_path(root, "/blog/hello-world"),
+            Some(root.join("blog").join("hello-world").join("index.html"))
+        );
+
+        // Render paths for dynamic routes come from the app's own
+        // getStaticParams(), so a parameter value must never be able to walk
+        // out of the build output or name a Windows stream.
+        for escaping in [
+            "/../etc/passwd",
+            "/blog/../../secret",
+            "/blog/./x",
+            "/blog/a\\b",
+            "/blog/a:b",
+        ] {
+            assert_eq!(prerender_html_path(root, escaping), None, "{escaping}");
+        }
+    }
+
+    #[test]
+    fn unsafe_prerender_segments_cover_separators_and_control_characters() {
+        assert!(is_unsafe_prerender_segment(".."));
+        assert!(is_unsafe_prerender_segment("."));
+        assert!(is_unsafe_prerender_segment("a\\b"));
+        assert!(is_unsafe_prerender_segment("a:b"));
+        assert!(is_unsafe_prerender_segment("a\u{7f}b"));
+        assert!(!is_unsafe_prerender_segment("hello-world"));
+        assert!(!is_unsafe_prerender_segment("a%20b"));
+    }
+
     use clap::CommandFactory;
     use serde_json::json;
 

@@ -173,9 +173,11 @@ pub fn bundle_shared_route_modules(
                 .strip_prefix("//?/")
                 .or_else(|| path.strip_prefix("\\\\?\\"))
                 .unwrap_or(&path);
+            // Escaping only `"` leaves newlines and other control characters in
+            // the specifier able to break the generated import statement.
             format!(
-                "import * as __ruvyxa_shared_{index} from \"{}\";",
-                path.replace('"', "\\\"")
+                "import * as __ruvyxa_shared_{index} from {};",
+                output::js_string(path)
             )
         })
         .collect::<Vec<_>>()

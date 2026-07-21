@@ -26,13 +26,26 @@
 
 use crate::{BundleInput, BundleTarget};
 
+/// Encode a value as a JavaScript string literal.
+///
+/// `serde_json` never fails on a `str`, but keep an explicit fallback rather
+/// than an `unwrap` so a bundle can never panic the dev server.
+pub(crate) fn js_string(value: &str) -> String {
+    serde_json::to_string(value).unwrap_or_else(|_| "\"\"".to_string())
+}
+
 /// Build the virtual entry source that wires layouts + page together.
 ///
 /// Returns `(source_string, virtual_label)`.
 pub fn build_entry_source(input: &BundleInput) -> (String, String) {
     let label = "ruvyxa:bundle-entry.tsx".to_string();
 
-    let page_path = input.entry.display().to_string().replace('\\', "/");
+    // Every interpolated value is emitted as a JSON literal. A path or route
+    // that contains a quote, backslash, newline, or `</script` would otherwise
+    // terminate the generated string early and inject arbitrary code into the
+    // bundle. JSON string syntax is a subset of JavaScript string syntax, so a
+    // JSON literal is always a valid — and correctly escaped — JS literal.
+    let page_path = js_string(&input.entry.display().to_string().replace('\\', "/"));
 
     // Collect layout imports (root-to-leaf order).
     let layout_imports: String = input
@@ -40,8 +53,8 @@ pub fn build_entry_source(input: &BundleInput) -> (String, String) {
         .iter()
         .enumerate()
         .map(|(i, layout)| {
-            let lp = layout.display().to_string().replace('\\', "/");
-            format!("import Layout{i} from \"{lp}\";\n")
+            let lp = js_string(&layout.display().to_string().replace('\\', "/"));
+            format!("import Layout{i} from {lp};\n")
         })
         .collect();
 
@@ -50,17 +63,17 @@ pub fn build_entry_source(input: &BundleInput) -> (String, String) {
         .collect::<Vec<_>>()
         .join(", ");
 
-    let request_path = &input.request_path;
+    let request_path = js_string(&input.request_path);
 
     let source = match input.target {
         BundleTarget::Client => {
             format!(
                 r#"import React from "react";
 import {{ hydrateRoot }} from "react-dom/client";
-import Page from "{page_path}";
+import Page from {page_path};
 {layout_imports}
 const params = globalThis.__RUVYXA_ROUTE_PARAMS__ ?? {{}};
-const currentPath = globalThis.__RUVYXA_REQUEST_PATH__ ?? "{request_path}";
+const currentPath = globalThis.__RUVYXA_REQUEST_PATH__ ?? {request_path};
 let tree = React.createElement(Page, {{ params, requestPath: currentPath }});
 for (const Layout of [{layout_wrappers}].reverse()) {{
   tree = React.createElement(Layout, null, tree);
@@ -78,7 +91,7 @@ window.__RUVYXA_HYDRATED = true;
             format!(
                 r#"import React from "react";
 import {{ renderToString }} from "react-dom/server";
-import Page from "{page_path}";
+import Page from {page_path};
 {layout_imports}
 export async function render(ctx) {{
   let tree = React.createElement(Page, {{ params: ctx.params ?? {{}}, requestPath: ctx.path }});
@@ -94,7 +107,7 @@ export async function render(ctx) {{
             format!(
                 r#"import React from "react";
 import {{ renderToString }} from "react-dom/server";
-import Page from "{page_path}";
+import Page from {page_path};
 {layout_imports}
 export async function render(ctx) {{
   let tree = React.createElement(Page, {{ params: ctx.params ?? {{}}, requestPath: ctx.path }});
@@ -124,5 +137,62 @@ pub fn wrap(linked: String, input: &BundleInput) -> String {
             // entry render function as a top-level ESM export.
             format!("// Ruvyxa SSR bundle\n{linked}")
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{BundleOptions, BundleTarget};
+    use std::path::PathBuf;
+
+    fn input(entry: &str, layouts: Vec<&str>, request_path: &str) -> BundleInput {
+        BundleInput {
+            entry: PathBuf::from(entry),
+            project_root: PathBuf::from("/project"),
+            app_dir: PathBuf::from("/project/app"),
+            layouts: layouts.into_iter().map(PathBuf::from).collect(),
+            request_path: request_path.to_string(),
+            target: BundleTarget::Client,
+            options: BundleOptions::default(),
+        }
+    }
+
+    #[test]
+    fn entry_source_escapes_paths_and_request_paths() {
+        // A quote in a route or project path used to close the generated string
+        // literal early, producing a broken bundle or injected statements.
+        let (source, _) = build_entry_source(&input(
+            "/project/app/a\"b/page.tsx",
+            vec!["/project/app/l\"1/layout.tsx"],
+            "/a\";globalThis.pwned=1;\"",
+        ));
+
+        assert!(
+            source.contains(r#"import Page from "/project/app/a\"b/page.tsx";"#),
+            "{source}"
+        );
+        assert!(
+            source.contains(r#"import Layout0 from "/project/app/l\"1/layout.tsx";"#),
+            "{source}"
+        );
+        assert!(!source.contains("globalThis.pwned=1;\"\n"), "{source}");
+        assert!(
+            source.contains(r#"?? "/a\";globalThis.pwned=1;\"";"#),
+            "{source}"
+        );
+    }
+
+    #[test]
+    fn entry_source_keeps_ordinary_paths_readable() {
+        let (source, label) = build_entry_source(&input(
+            "/project/app/blog/[slug]/page.tsx",
+            Vec::new(),
+            "/blog/[slug]",
+        ));
+
+        assert_eq!(label, "ruvyxa:bundle-entry.tsx");
+        assert!(source.contains(r#"import Page from "/project/app/blog/[slug]/page.tsx";"#));
+        assert!(source.contains(r#"?? "/blog/[slug]";"#));
     }
 }

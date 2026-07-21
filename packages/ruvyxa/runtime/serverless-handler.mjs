@@ -81,10 +81,28 @@ export function createHandler(options) {
 
   return async function handle(request) {
     const url = new URL(request.url)
-    const pathname = basePath ? url.pathname.slice(basePath.length) || '/' : url.pathname
+    const pathname = stripBasePath(url.pathname, basePath)
+    // A request outside the configured base path is not ours to serve.
+    // Slicing unconditionally would turn `/other/thing` into `r/thing` and let
+    // it match an unrelated route.
+    if (pathname === null) {
+      return new Response('Not Found', { status: 404 })
+    }
 
-    // Match route
-    const match = matchRoute(compiledRoutes, pathname)
+    let match
+    try {
+      // Route matching percent-decodes parameters, which throws on malformed
+      // input such as `/blog/%ZZ`. This ran outside the handler's try block, so
+      // the URIError escaped as an unhandled rejection instead of a response.
+      match = matchRoute(compiledRoutes, pathname)
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      console.error(`[ruvyxa] Malformed request path ${pathname}:`, message)
+      return new Response('Bad Request', {
+        status: 400,
+        headers: { 'content-type': 'text/plain; charset=utf-8' },
+      })
+    }
     if (!match) {
       return new Response('Not Found', { status: 404 })
     }
@@ -222,7 +240,73 @@ export function createHandler(options) {
   }
 }
 
+// ─── Prerender Cache Paths ──────────────────────────────────────────────────
+
+/**
+ * Map a request path to the relative location of its pre-rendered HTML.
+ *
+ * Mirrors the build writer, which stores `<prerenderDir>/<path>/index.html`
+ * using the raw (still percent-encoded) route path, so this must not decode.
+ *
+ * Returns `null` when the path cannot be mapped to a contained location.
+ * Adapters join the result onto their cache directory and touch the file
+ * system, so this is the single place that decides what is in bounds — the
+ * platform URL parser is not a substitute, because adapters may be handed a
+ * path from a source that never went through it.
+ *
+ * @param {string} pathname Request path, beginning with `/`.
+ * @returns {string|null} A `.../index.html` relative path, or null if unsafe.
+ */
+/**
+ * Reject a path segment that could escape, or misname, the cache directory.
+ *
+ * Written as explicit character tests rather than a regular expression: this
+ * guard decides what reaches the file system, and it must stay obvious that
+ * separators, control characters, and Windows stream/drive separators are all
+ * covered.
+ */
+function isUnsafeSegment(segment) {
+  if (segment === '.' || segment === '..') return true
+  for (const char of segment) {
+    if (char === '/' || char === '\\' || char === ':') return true
+    const code = char.codePointAt(0)
+    if (code < 0x20 || code === 0x7f) return true
+  }
+  return false
+}
+
+export function prerenderRelativePath(pathname) {
+  if (typeof pathname !== 'string' || !pathname.startsWith('/')) return null
+
+  const segments = []
+  for (const segment of pathname.split('/')) {
+    if (segment === '') continue
+    if (isUnsafeSegment(segment)) return null
+    segments.push(segment)
+  }
+
+  return segments.length === 0 ? 'index.html' : `${segments.join('/')}/index.html`
+}
+
 // ─── Route Matching ─────────────────────────────────────────────────────────
+
+/**
+ * Remove `basePath` from a request path.
+ *
+ * Returns the remaining path, or `null` when the request falls outside the
+ * base path and must not be served by this handler.
+ */
+function stripBasePath(pathname, basePath) {
+  if (!basePath) return pathname
+
+  const prefix = basePath.endsWith('/') ? basePath.slice(0, -1) : basePath
+  if (!prefix) return pathname
+  if (pathname === prefix) return '/'
+  // Require a segment boundary so `/appointments` is not treated as `/app`
+  // plus `ointments`.
+  if (!pathname.startsWith(`${prefix}/`)) return null
+  return pathname.slice(prefix.length) || '/'
+}
 
 /**
  * Compile a route path pattern into a regex and parameter names.
@@ -318,7 +402,14 @@ function matchRoute(compiledRoutes, pathname) {
         // Decode each captured segment like the dev server does; leaving
         // them encoded makes /docs/a%20b produce different params in
         // serverless deploys than in development.
-        params[name] = value ? value.split('/').map((segment) => decodeURIComponent(segment)) : []
+        //
+        // An optional catch-all that captured nothing stays absent rather than
+        // becoming `[]`. The documented contract is "undefined at the parent
+        // route", and the dev server's router omits the key there, so emitting
+        // an empty array would make `/shop` behave differently in a deploy.
+        if (value) {
+          params[name] = value.split('/').map((segment) => decodeURIComponent(segment))
+        }
       } else {
         params[name] = value ? decodeURIComponent(value) : undefined
       }

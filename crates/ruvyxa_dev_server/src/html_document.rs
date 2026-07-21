@@ -73,10 +73,27 @@ pub(crate) fn contains_ascii_case(input: &str, needle: &str) -> bool {
     find_ascii_case(input, needle).is_some()
 }
 
+/// ASCII-case-insensitive substring search.
+///
+/// `compose_document` runs several of these over the whole rendered document on
+/// every SSR response, so this scans in place instead of allocating a lowercased
+/// copy of the page per call. ASCII case folding is byte-for-byte, so the
+/// returned index is a valid `str` boundary in the original input.
 pub(crate) fn find_ascii_case(input: &str, needle: &str) -> Option<usize> {
-    input
-        .to_ascii_lowercase()
-        .find(&needle.to_ascii_lowercase())
+    if needle.is_empty() {
+        return Some(0);
+    }
+    let haystack = input.as_bytes();
+    let needle = needle.as_bytes();
+    let first = needle[0].to_ascii_lowercase();
+
+    haystack.windows(needle.len()).position(|window| {
+        window[0].to_ascii_lowercase() == first
+            && window
+                .iter()
+                .zip(needle)
+                .all(|(left, right)| left.eq_ignore_ascii_case(right))
+    })
 }
 
 #[derive(Debug, Deserialize)]
@@ -220,8 +237,24 @@ fn load_client_manifest(manifest_path: &Path) -> Option<Arc<HashMap<String, Clie
     Some(routes)
 }
 
+/// Make a JSON value safe to embed inside an inline `<script>` element.
+///
+/// Escaping only `</` is not enough. The HTML tokenizer leaves script-data state
+/// on `<!--`, and a following `<script` puts it in "script data double escaped"
+/// state where `</script>` no longer closes the element — so a route parameter
+/// containing `<!--<script>` swallows the rest of the document.
+///
+/// U+2028/U+2029 are line terminators in JavaScript but legal raw characters in
+/// JSON, so they must be escaped too or they end the statement mid-literal.
+/// `\uXXXX` is a legal escape in a JSON string, so the decoded value is
+/// unchanged. This matches the prerender writer's `inline_script_json` in the
+/// CLI: both emit the same `<script>` payload and must agree.
 pub(crate) fn safe_json_for_script(json: &str) -> String {
-    json.replace("</", "<\\/")
+    json.replace('<', "\\u003c")
+        .replace('>', "\\u003e")
+        .replace('&', "\\u0026")
+        .replace('\u{2028}', "\\u2028")
+        .replace('\u{2029}', "\\u2029")
 }
 
 pub(crate) fn hmr_client_script() -> &'static str {
@@ -594,4 +627,57 @@ pub(crate) fn escape_html(input: &str) -> String {
         .replace('<', "&lt;")
         .replace('>', "&gt;")
         .replace('"', "&quot;")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ascii_case_search_matches_and_keeps_original_indices() {
+        assert_eq!(find_ascii_case("<HTML lang=\"en\">", "<html"), Some(0));
+        assert_eq!(find_ascii_case("<p>a</P></BODY>", "</body>"), Some(8));
+        assert_eq!(find_ascii_case("abc", "d"), None);
+        assert_eq!(find_ascii_case("ab", "abc"), None);
+        assert_eq!(find_ascii_case("", "a"), None);
+
+        // Multi-byte text must not shift the reported byte offset.
+        let input = "<p>สวัสดี</p></BODY>";
+        let index = find_ascii_case(input, "</body>").unwrap();
+        assert!(input.is_char_boundary(index));
+        assert_eq!(&input[index..], "</BODY>");
+    }
+
+    #[test]
+    fn script_json_neutralizes_html_comment_and_tag_openers() {
+        // `</` alone is not enough: `<!--<script>` moves the tokenizer into
+        // script-data-double-escaped state, where `</script>` stops closing the
+        // element and the rest of the document is swallowed.
+        let payload = serde_json::to_string(&serde_json::json!({
+            "slug": "<!--<script>alert(1)</script>"
+        }))
+        .unwrap();
+
+        let safe = safe_json_for_script(&payload);
+
+        assert!(!safe.contains('<'), "{safe}");
+        assert_eq!(
+            serde_json::from_str::<serde_json::Value>(&safe).unwrap(),
+            serde_json::json!({ "slug": "<!--<script>alert(1)</script>" }),
+            "escaping must preserve the decoded value"
+        );
+    }
+
+    #[test]
+    fn composed_document_escapes_untrusted_route_params() {
+        let params =
+            serde_json::to_string(&serde_json::json!({ "slug": "</script><img>" })).unwrap();
+        let script = format!(
+            "<script>globalThis.__RUVYXA_ROUTE_PARAMS__ = {};</script>",
+            safe_json_for_script(&params)
+        );
+
+        assert!(!script.contains("</script><img>"));
+        assert_eq!(script.matches("</script>").count(), 1);
+    }
 }

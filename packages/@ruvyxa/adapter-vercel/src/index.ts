@@ -34,7 +34,7 @@ export interface VercelAdapterOptions {
  * SSR/API/ISR/PPR requests.
  */
 function vercelHandlerSource(): string {
-  return `import { createHandler } from './serverless-handler.mjs';
+  return `import { createHandler, prerenderRelativePath } from './serverless-handler.mjs';
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
 import path from 'node:path';
 
@@ -55,19 +55,20 @@ const handler = createHandler({
     return import(\`./server/app/\${route.file}\`);
   },
   readPrerendered: (pathname) => {
-    const htmlPath = pathname === '/'
-      ? path.join(prerenderDir, 'index.html')
-      : path.join(prerenderDir, pathname, 'index.html');
+    // prerenderRelativePath rejects any request path that cannot be mapped to a
+    // location inside prerenderDir, so the cache read can never escape it.
+    const relative = prerenderRelativePath(pathname);
+    if (relative === null) return null;
     try {
-      return readFileSync(htmlPath, 'utf8');
+      return readFileSync(path.join(prerenderDir, relative), 'utf8');
     } catch {
       return null;
     }
   },
   writePrerendered: (pathname, html, revalidate) => {
-    const htmlPath = pathname === '/'
-      ? path.join(prerenderDir, 'index.html')
-      : path.join(prerenderDir, pathname, 'index.html');
+    const relative = prerenderRelativePath(pathname);
+    if (relative === null) return;
+    const htmlPath = path.join(prerenderDir, relative);
     try {
       mkdirSync(path.dirname(htmlPath), { recursive: true });
       writeFileSync(htmlPath, html, 'utf8');

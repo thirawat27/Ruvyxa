@@ -171,11 +171,16 @@ fn unix_port_owner(port: u16) -> Option<String> {
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout);
+    let suffix = format!(":{port}");
     stdout.lines().skip(1).find_map(|line| {
-        if !line.contains(&format!(":{port}")) {
+        let columns = line.split_whitespace().collect::<Vec<_>>();
+        // `lsof` puts the listening address last (`*:3000`, `127.0.0.1:3000`).
+        // A `contains` test would match the wrong row, because `:300` is a
+        // substring of `:3000`; anchor on the address column's end instead.
+        let address = columns.last()?;
+        if !address.ends_with(&suffix) {
             return None;
         }
-        let columns = line.split_whitespace().collect::<Vec<_>>();
         let process = columns.first()?;
         let pid = columns.get(1)?;
         Some(format!("PID {pid} ({process})"))
