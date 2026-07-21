@@ -2,6 +2,13 @@
 
 ## v1.0.17 (2026-07-21)
 
+### Bundler: Resolution Cache
+
+- Cache parsed `package.json` `exports` fields per package, fingerprinted by (mtime, len).
+  Bare-specifier resolution (`react`, `react/jsx-runtime`, etc.) no longer re-reads and re-parses
+  the same `node_modules` package.json for every importing module — the file is read once per build
+  and served from cache thereafter, invalidated automatically if the file changes.
+
 ### Dev Server: Modular Architecture
 
 - Split `ruvyxa_dev_server` into focused modules: `action_security.rs` (origin/fetch-metadata

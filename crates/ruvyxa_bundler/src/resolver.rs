@@ -118,9 +118,22 @@ pub struct ResolveGraphCache {
     tsconfigs: Arc<DashMap<PathBuf, CachedTsConfig>>,
     /// Fully resolved dependency lists for build-hook-free source snapshots.
     dependencies: Arc<DashMap<DependencyCacheKey, Arc<[PathBuf]>>>,
+    /// Parsed `package.json` `exports` fields, keyed by the package.json path.
+    /// Avoids re-reading and re-parsing the same `node_modules` package.json
+    /// for every importing module that resolves a bare specifier from it.
+    package_json: Arc<DashMap<PathBuf, CachedPackageExports>>,
     /// Production builds operate on one immutable input snapshot and can skip
     /// repeated metadata checks after the first source read.
     stable_snapshot: bool,
+}
+
+/// Cached `exports` field from a `package.json`, fingerprinted for
+/// invalidation. `None` means the file has no `exports` field (or failed to
+/// parse), which is itself worth caching to avoid re-reading it.
+#[derive(Debug, Clone)]
+struct CachedPackageExports {
+    fingerprint: SourceFingerprint,
+    exports: Option<Arc<PackageJsonValue>>,
 }
 
 impl ResolveGraphCache {
@@ -144,6 +157,7 @@ impl ResolveGraphCache {
             sources: Arc::new(DashMap::with_capacity(source_hint)),
             tsconfigs: Arc::new(DashMap::with_capacity(1)),
             dependencies: Arc::new(DashMap::with_capacity(source_hint)),
+            package_json: Arc::new(DashMap::new()),
             stable_snapshot: false,
         }
     }
@@ -227,6 +241,52 @@ impl ResolveGraphCache {
         paths
     }
 
+    /// Load a package.json's `exports` field once per (path, fingerprint),
+    /// mirroring the tsconfig cache above.
+    fn package_exports_value(&self, pkg_json_path: &Path) -> Option<Arc<PackageJsonValue>> {
+        if self.stable_snapshot
+            && let Some(entry) = self.package_json.get(pkg_json_path)
+        {
+            return entry.exports.clone();
+        }
+        let metadata = fs::metadata(pkg_json_path).ok()?;
+        let fingerprint = SourceFingerprint {
+            modified: metadata.modified().ok(),
+            len: metadata.len(),
+        };
+        if let Some(entry) = self.package_json.get(pkg_json_path)
+            && entry.fingerprint == fingerprint
+        {
+            return entry.exports.clone();
+        }
+
+        let content = fs::read_to_string(pkg_json_path).ok()?;
+        let Ok(PackageJsonValue::Object(fields)) =
+            serde_json::from_str::<PackageJsonValue>(&content)
+        else {
+            self.package_json.insert(
+                pkg_json_path.to_path_buf(),
+                CachedPackageExports {
+                    fingerprint,
+                    exports: None,
+                },
+            );
+            return None;
+        };
+        let exports = fields
+            .into_iter()
+            .find(|(field, _)| field == "exports")
+            .map(|(_, value)| Arc::new(value));
+        self.package_json.insert(
+            pkg_json_path.to_path_buf(),
+            CachedPackageExports {
+                fingerprint,
+                exports: exports.clone(),
+            },
+        );
+        exports
+    }
+
     /// Number of cached resolution entries. Intended for diagnostics/tests.
     pub fn resolution_count(&self) -> usize {
         self.resolutions.len()
@@ -246,6 +306,7 @@ impl ResolveGraphCache {
     pub fn invalidate_paths(&self, paths: &[PathBuf]) {
         for path in paths {
             self.sources.remove(path);
+            self.package_json.remove(path);
             // Remove any resolution entries that resolved to this path.
             self.resolutions.retain(|_, v| v.as_ref() != Some(path));
             self.tsconfigs.retain(|root, _| {
@@ -261,6 +322,7 @@ impl ResolveGraphCache {
         self.sources.clear();
         self.tsconfigs.clear();
         self.dependencies.clear();
+        self.package_json.clear();
     }
 }
 
@@ -573,6 +635,7 @@ impl<'de> Visitor<'de> for PackageJsonVisitor {
 /// entry is distinct from an absent map: it explicitly blocks filesystem
 /// fallback for that subpath.
 fn resolve_package_exports(
+    cache: &ResolveGraphCache,
     project_root: &Path,
     specifier: &str,
     target: BundleTarget,
@@ -584,21 +647,11 @@ fn resolve_package_exports(
     let pkg_dir = project_root.join("node_modules").join(pkg_name);
     let pkg_json_path = pkg_dir.join("package.json");
 
-    let Ok(content) = fs::read_to_string(&pkg_json_path) else {
-        return PackageExportsResolution::Unavailable;
-    };
-    let Ok(pkg) = serde_json::from_str::<PackageJsonValue>(&content) else {
+    let Some(exports) = cache.package_exports_value(&pkg_json_path) else {
         return PackageExportsResolution::Unavailable;
     };
 
-    let PackageJsonValue::Object(package_fields) = pkg else {
-        return PackageExportsResolution::Unavailable;
-    };
-    let Some((_, exports)) = package_fields.iter().find(|(field, _)| field == "exports") else {
-        return PackageExportsResolution::Unavailable;
-    };
-
-    match resolve_exports_entry(exports, &export_key, target) {
+    match resolve_exports_entry(&exports, &export_key, target) {
         ExportTargets::Blocked => PackageExportsResolution::Blocked,
         ExportTargets::Unmatched => PackageExportsResolution::Unavailable,
         ExportTargets::Targets(targets) => targets
@@ -1063,7 +1116,7 @@ fn collect_deps_uncached(
                 {
                     project_local
                 } else {
-                    match resolve_package_exports(project_root, &specifier, target) {
+                    match resolve_package_exports(cache, project_root, &specifier, target) {
                         PackageExportsResolution::Resolved(path) => Some(path),
                         PackageExportsResolution::Blocked => None,
                         PackageExportsResolution::Unavailable => project_local,
@@ -1616,6 +1669,7 @@ export default function Card() { return <div className={cn("card")} /> }"#,
     fn resolves_package_exports_subpath() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
+        let cache = ResolveGraphCache::new();
         let pkg = root.join("node_modules").join("pkg");
         fs::create_dir_all(pkg.join("dist")).unwrap();
         fs::write(pkg.join("dist").join("runtime.mjs"), "export const x = 1;").unwrap();
@@ -1626,7 +1680,7 @@ export default function Card() { return <div className={cn("card")} /> }"#,
         .unwrap();
 
         let PackageExportsResolution::Resolved(resolved) =
-            resolve_package_exports(root, "pkg/runtime", BundleTarget::Ssr)
+            resolve_package_exports(&cache, root, "pkg/runtime", BundleTarget::Ssr)
         else {
             panic!("expected package exports resolution");
         };
@@ -1637,6 +1691,7 @@ export default function Card() { return <div className={cn("card")} /> }"#,
     fn resolves_scoped_package_exports() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
+        let cache = ResolveGraphCache::new();
         let pkg = root.join("node_modules").join("@scope").join("pkg");
         fs::create_dir_all(pkg.join("dist")).unwrap();
         fs::write(pkg.join("dist").join("index.js"), "export default 1;").unwrap();
@@ -1647,7 +1702,7 @@ export default function Card() { return <div className={cn("card")} /> }"#,
         .unwrap();
 
         let PackageExportsResolution::Resolved(resolved) =
-            resolve_package_exports(root, "@scope/pkg", BundleTarget::Ssr)
+            resolve_package_exports(&cache, root, "@scope/pkg", BundleTarget::Ssr)
         else {
             panic!("expected package exports resolution");
         };
@@ -1658,6 +1713,7 @@ export default function Card() { return <div className={cn("card")} /> }"#,
     fn resolves_exports_wildcards_and_array_fallbacks() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
+        let cache = ResolveGraphCache::new();
         let pkg = root.join("node_modules").join("pkg");
         fs::create_dir_all(pkg.join("dist/features")).unwrap();
         fs::write(
@@ -1673,14 +1729,14 @@ export default function Card() { return <div className={cn("card")} /> }"#,
         .unwrap();
 
         let PackageExportsResolution::Resolved(wildcard) =
-            resolve_package_exports(root, "pkg/features/alpha", BundleTarget::Client)
+            resolve_package_exports(&cache, root, "pkg/features/alpha", BundleTarget::Client)
         else {
             panic!("expected wildcard resolution");
         };
         assert!(wildcard.ends_with("dist/features/alpha.mjs"));
 
         let PackageExportsResolution::Resolved(fallback) =
-            resolve_package_exports(root, "pkg/fallback", BundleTarget::Client)
+            resolve_package_exports(&cache, root, "pkg/fallback", BundleTarget::Client)
         else {
             panic!("expected fallback resolution");
         };
@@ -1691,6 +1747,7 @@ export default function Card() { return <div className={cn("card")} /> }"#,
     fn resolves_exports_for_the_active_runtime_condition() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
+        let cache = ResolveGraphCache::new();
         let pkg = root.join("node_modules").join("pkg");
         fs::create_dir_all(pkg.join("dist")).unwrap();
         fs::write(
@@ -1706,12 +1763,12 @@ export default function Card() { return <div className={cn("card")} /> }"#,
         .unwrap();
 
         let PackageExportsResolution::Resolved(browser) =
-            resolve_package_exports(root, "pkg", BundleTarget::Client)
+            resolve_package_exports(&cache, root, "pkg", BundleTarget::Client)
         else {
             panic!("expected browser export resolution");
         };
         let PackageExportsResolution::Resolved(node) =
-            resolve_package_exports(root, "pkg", BundleTarget::Ssr)
+            resolve_package_exports(&cache, root, "pkg", BundleTarget::Ssr)
         else {
             panic!("expected node export resolution");
         };
@@ -1724,6 +1781,7 @@ export default function Card() { return <div className={cn("card")} /> }"#,
     fn resolves_conditional_exports_in_package_declaration_order() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
+        let cache = ResolveGraphCache::new();
         let pkg = root.join("node_modules").join("pkg");
         fs::create_dir_all(pkg.join("dist")).unwrap();
         fs::write(
@@ -1743,7 +1801,7 @@ export default function Card() { return <div className={cn("card")} /> }"#,
         .unwrap();
 
         let PackageExportsResolution::Resolved(resolved) =
-            resolve_package_exports(root, "pkg", BundleTarget::Client)
+            resolve_package_exports(&cache, root, "pkg", BundleTarget::Client)
         else {
             panic!("expected conditional export resolution");
         };
@@ -1755,6 +1813,7 @@ export default function Card() { return <div className={cn("card")} /> }"#,
     fn package_exports_blocks_null_entries_and_rejects_path_escape() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
+        let cache = ResolveGraphCache::new();
         let pkg = root.join("node_modules").join("pkg");
         fs::create_dir_all(&pkg).unwrap();
         fs::write(
@@ -1769,12 +1828,48 @@ export default function Card() { return <div className={cn("card")} /> }"#,
         .unwrap();
 
         assert_eq!(
-            resolve_package_exports(root, "pkg/private", BundleTarget::Ssr),
+            resolve_package_exports(&cache, root, "pkg/private", BundleTarget::Ssr),
             PackageExportsResolution::Blocked
         );
         assert_eq!(
-            resolve_package_exports(root, "pkg/escape", BundleTarget::Ssr),
+            resolve_package_exports(&cache, root, "pkg/escape", BundleTarget::Ssr),
             PackageExportsResolution::Unavailable
         );
+    }
+
+    #[test]
+    fn package_exports_cache_invalidates_on_content_change() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        let cache = ResolveGraphCache::new();
+        let pkg = root.join("node_modules").join("pkg");
+        fs::create_dir_all(pkg.join("dist")).unwrap();
+        fs::write(pkg.join("dist/a.js"), "export default 1;").unwrap();
+        fs::write(pkg.join("dist/b.js"), "export default 2;").unwrap();
+        fs::write(
+            pkg.join("package.json"),
+            r#"{"exports":{".":"./dist/a.js"}}"#,
+        )
+        .unwrap();
+
+        let PackageExportsResolution::Resolved(first) =
+            resolve_package_exports(&cache, root, "pkg", BundleTarget::Ssr)
+        else {
+            panic!("expected first resolution");
+        };
+        assert!(first.ends_with("dist/a.js"));
+
+        fs::write(
+            pkg.join("package.json"),
+            r#"{"exports":{".":"./dist/b.js"}}"#,
+        )
+        .unwrap();
+
+        let PackageExportsResolution::Resolved(second) =
+            resolve_package_exports(&cache, root, "pkg", BundleTarget::Ssr)
+        else {
+            panic!("expected second resolution after package.json change");
+        };
+        assert!(second.ends_with("dist/b.js"));
     }
 }
