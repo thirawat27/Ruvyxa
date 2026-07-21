@@ -1,9 +1,14 @@
 //! Conversion layer between axum HTTP types and the plugin middleware wire
 //! format, plus the request/response plugin application entry points.
 
-use axum::body::{Body, Bytes, HttpBody, to_bytes};
+use std::collections::VecDeque;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+
+use axum::body::{Body, BodyDataStream, Bytes, HttpBody};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
+use futures_core::Stream;
 use ruvyxa_diagnostics::{Result, RuvyxaError};
 use ruvyxa_middleware::{MiddlewareRequestResult, PluginHttpRequest, PluginHttpResponse};
 
@@ -37,19 +42,22 @@ pub(crate) async fn apply_response_plugins(
     }
     let limit_bytes = state.config.plugin_response_body_limit_bytes;
     let (parts, body) = response.into_parts();
-    // A sized body over the buffer limit used to surface as a 500. Pass it
-    // through untouched instead: serving the response beats failing it, and
-    // only this response skips the middleware. Unsized (streaming) bodies
-    // still buffer up to the limit below.
+    // A body over the buffer limit used to surface as a 500. Pass it through
+    // untouched instead: serving the response beats failing it, and only this
+    // response skips the middleware. Sized bodies are detected up front;
+    // unsized (streaming) bodies buffer chunk-by-chunk and reassemble on
+    // overflow so nothing read so far is lost.
     if body_exceeds_plugin_limit(&body, limit_bytes) {
-        tracing::warn!(
-            limit_bytes,
-            path = %request.path,
-            "response body exceeds the plugin buffer limit; skipping response middleware for this response"
-        );
+        warn_plugin_limit_skip(limit_bytes, &request.path);
         return Ok(Response::from_parts(parts, body));
     }
-    let body = read_plugin_response_body(body, limit_bytes).await?;
+    let body = match buffer_plugin_response_body(body, limit_bytes).await? {
+        BufferedPluginBody::Buffered(bytes) => bytes,
+        BufferedPluginBody::Oversized(body) => {
+            warn_plugin_limit_skip(limit_bytes, &request.path);
+            return Ok(Response::from_parts(parts, body));
+        }
+    };
     let plugin_response = PluginHttpResponse {
         status: parts.status.as_u16(),
         headers: headers_to_plugin_pairs(&parts.headers),
@@ -65,12 +73,91 @@ pub(crate) fn body_exceeds_plugin_limit(body: &Body, limit_bytes: usize) -> bool
         .is_some_and(|size| size > limit_bytes as u64)
 }
 
-pub(crate) async fn read_plugin_response_body(body: Body, limit_bytes: usize) -> Result<Bytes> {
-    to_bytes(body, limit_bytes).await.map_err(|error| {
-        RuvyxaError::Message(format!(
-            "Response exceeds the {limit_bytes}-byte limit for response plugins: {error}"
-        ))
-    })
+fn warn_plugin_limit_skip(limit_bytes: usize, path: &str) {
+    tracing::warn!(
+        limit_bytes,
+        path = %path,
+        "response body exceeds the plugin buffer limit; skipping response middleware for this response"
+    );
+}
+
+/// Outcome of buffering a response body for the plugin round-trip.
+#[derive(Debug)]
+pub(crate) enum BufferedPluginBody {
+    /// The whole body fit within the limit and is ready for base64 transport.
+    Buffered(Bytes),
+    /// The body overflowed the limit. Carries a reassembled body — the chunks
+    /// read so far replayed in front of the untouched remainder — so the
+    /// response can be served as-is instead of failing.
+    Oversized(Body),
+}
+
+pub(crate) async fn buffer_plugin_response_body(
+    body: Body,
+    limit_bytes: usize,
+) -> Result<BufferedPluginBody> {
+    let mut stream = body.into_data_stream();
+    let mut chunks: VecDeque<Bytes> = VecDeque::new();
+    let mut total = 0_usize;
+    loop {
+        let next = std::future::poll_fn(|cx| Pin::new(&mut stream).poll_next(cx)).await;
+        match next {
+            None => break,
+            Some(Err(error)) => {
+                return Err(RuvyxaError::Message(format!(
+                    "Failed to read the response body for response plugins: {error}"
+                )));
+            }
+            Some(Ok(chunk)) => {
+                total = total.saturating_add(chunk.len());
+                chunks.push_back(chunk);
+                if total > limit_bytes {
+                    return Ok(BufferedPluginBody::Oversized(Body::from_stream(
+                        ReplayThenStream {
+                            replay: chunks,
+                            rest: Some(stream),
+                        },
+                    )));
+                }
+            }
+        }
+    }
+    if chunks.len() == 1 {
+        return Ok(BufferedPluginBody::Buffered(
+            chunks.pop_front().unwrap_or_default(),
+        ));
+    }
+    let mut buffered = Vec::with_capacity(total);
+    for chunk in chunks {
+        buffered.extend_from_slice(&chunk);
+    }
+    Ok(BufferedPluginBody::Buffered(Bytes::from(buffered)))
+}
+
+/// Replays already-buffered chunks, then continues with the remaining stream.
+struct ReplayThenStream {
+    replay: VecDeque<Bytes>,
+    rest: Option<BodyDataStream>,
+}
+
+impl Stream for ReplayThenStream {
+    type Item = std::result::Result<Bytes, axum::Error>;
+
+    fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
+        if let Some(chunk) = self.replay.pop_front() {
+            return Poll::Ready(Some(Ok(chunk)));
+        }
+        match self.rest.as_mut() {
+            Some(rest) => match Pin::new(rest).poll_next(cx) {
+                Poll::Ready(None) => {
+                    self.rest = None;
+                    Poll::Ready(None)
+                }
+                other => other,
+            },
+            None => Poll::Ready(None),
+        }
+    }
 }
 
 pub(crate) fn plugin_response_into_response(response: PluginHttpResponse) -> Result<Response> {

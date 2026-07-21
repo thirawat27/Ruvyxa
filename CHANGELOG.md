@@ -17,8 +17,11 @@
   with server core only (config, serve loop, watcher, HTTP handlers).
 - Response plugin middleware no longer fails oversized responses: a response whose sized body
   exceeds `plugin_response_body_limit_bytes` is now passed through unmodified (with a warning log)
-  instead of returning a 500. Response plugins are skipped only for that response; unsized
-  (streaming) bodies keep the existing buffered path and limit.
+  instead of returning a 500. Response plugins are skipped only for that response.
+- Extended the oversized pass-through to unsized (streaming) response bodies: chunks are buffered up
+  to the limit, and on overflow the already-read chunks are replayed in front of the untouched
+  remainder so the response is served byte-identically instead of failing. Genuine body read errors
+  still return a 500.
 
 ### Built-in Plugins and Middleware Fast Path
 

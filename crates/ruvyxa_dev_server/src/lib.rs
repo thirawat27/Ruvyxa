@@ -69,13 +69,14 @@ use html_document::{
 use html_document::{dev_error_overlay, error_response, plain_error_page, public_internal_error};
 
 mod plugin_bridge;
+#[cfg(test)]
+use plugin_bridge::{
+    BufferedPluginBody, body_exceeds_plugin_limit, buffer_plugin_response_body,
+    plugin_response_into_response,
+};
 use plugin_bridge::{
     apply_request_plugins, apply_response_plugins, decode_plugin_body, encode_plugin_body,
     headers_to_plugin_pairs, plugin_headers, request_method_allows_body, split_plugin_target,
-};
-#[cfg(test)]
-use plugin_bridge::{
-    body_exceeds_plugin_limit, plugin_response_into_response, read_plugin_response_body,
 };
 
 mod static_assets;
@@ -1904,26 +1905,68 @@ mod tests {
         assert!(plugin_response_into_response(response).is_err());
     }
 
-    #[tokio::test]
-    async fn plugin_response_body_rejects_oversized_responses() {
-        let limit_bytes = 8;
-        let body = Body::from(vec![0_u8; limit_bytes + 1]);
-        let error = read_plugin_response_body(body, limit_bytes)
-            .await
-            .unwrap_err();
+    /// Yields each chunk in turn; a `None` chunk injects a stream error.
+    struct ChunkStream(std::collections::VecDeque<Option<Bytes>>);
+    impl futures_core::Stream for ChunkStream {
+        type Item = std::result::Result<Bytes, std::io::Error>;
+        fn poll_next(
+            mut self: std::pin::Pin<&mut Self>,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<Self::Item>> {
+            std::task::Poll::Ready(
+                self.0.pop_front().map(|chunk| {
+                    chunk.ok_or_else(|| std::io::Error::other("stream failed mid-body"))
+                }),
+            )
+        }
+    }
 
-        assert!(
-            error
-                .to_string()
-                .contains("Response exceeds the 8-byte limit")
-        );
+    fn chunked_body(chunks: &[&'static [u8]]) -> Body {
+        Body::from_stream(ChunkStream(
+            chunks.iter().map(|c| Some(Bytes::from_static(c))).collect(),
+        ))
     }
 
     #[tokio::test]
-    async fn plugin_response_body_accepts_the_configured_limit() {
-        let body = Body::from(vec![0_u8; 8]);
+    async fn plugin_response_body_buffers_within_the_limit() {
+        match buffer_plugin_response_body(Body::from(vec![0_u8; 8]), 8)
+            .await
+            .unwrap()
+        {
+            BufferedPluginBody::Buffered(bytes) => assert_eq!(bytes.len(), 8),
+            BufferedPluginBody::Oversized(_) => panic!("body at the limit must buffer"),
+        }
 
-        assert_eq!(read_plugin_response_body(body, 8).await.unwrap().len(), 8);
+        match buffer_plugin_response_body(chunked_body(&[b"hel", b"lo"]), 8)
+            .await
+            .unwrap()
+        {
+            BufferedPluginBody::Buffered(bytes) => assert_eq!(&bytes[..], b"hello"),
+            BufferedPluginBody::Oversized(_) => panic!("multi-chunk body within limit must buffer"),
+        }
+    }
+
+    #[tokio::test]
+    async fn oversized_unsized_bodies_pass_through_with_all_bytes_intact() {
+        let body = chunked_body(&[b"abc", b"def", b"ghi"]);
+        match buffer_plugin_response_body(body, 4).await.unwrap() {
+            BufferedPluginBody::Buffered(_) => panic!("body over the limit must not buffer"),
+            BufferedPluginBody::Oversized(body) => {
+                let bytes = to_bytes(body, usize::MAX).await.unwrap();
+                assert_eq!(&bytes[..], b"abcdefghi");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn plugin_response_body_read_errors_still_fail() {
+        let body = Body::from_stream(ChunkStream(
+            [Some(Bytes::from_static(b"ok")), None]
+                .into_iter()
+                .collect(),
+        ));
+        let error = buffer_plugin_response_body(body, 64).await.unwrap_err();
+        assert!(error.to_string().contains("stream failed mid-body"));
     }
 
     #[test]
@@ -1931,22 +1974,10 @@ mod tests {
         assert!(body_exceeds_plugin_limit(&Body::from(vec![0_u8; 9]), 8));
         assert!(!body_exceeds_plugin_limit(&Body::from(vec![0_u8; 8]), 8));
         assert!(!body_exceeds_plugin_limit(&Body::empty(), 8));
-    }
 
-    #[test]
-    fn unsized_bodies_still_go_through_the_buffered_plugin_path() {
-        struct OneChunk(Option<Bytes>);
-        impl futures_core::Stream for OneChunk {
-            type Item = std::result::Result<Bytes, std::io::Error>;
-            fn poll_next(
-                mut self: std::pin::Pin<&mut Self>,
-                _cx: &mut std::task::Context<'_>,
-            ) -> std::task::Poll<Option<Self::Item>> {
-                std::task::Poll::Ready(self.0.take().map(Ok))
-            }
-        }
-
-        let body = Body::from_stream(OneChunk(Some(Bytes::from_static(b"chunk"))));
+        // Unsized bodies have no exact size hint, so the fast path never
+        // triggers; they go through the chunked buffering path instead.
+        let body = chunked_body(&[b"chunk"]);
         assert!(!body_exceeds_plugin_limit(&body, 4));
     }
 
