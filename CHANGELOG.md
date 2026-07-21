@@ -1,5 +1,97 @@
 # Changelog
 
+## v1.0.17 (2026-07-21)
+
+### Dev Server: Modular Architecture
+
+- Split `ruvyxa_dev_server` into focused modules: `action_security.rs` (origin/fetch-metadata
+  validation and per-key rate limiting), `cli_output.rs` (structured terminal formatting),
+  `env_file.rs` (environment variable file parsing), `html_document.rs` (HTML document manipulation
+  and template rendering), `plugin_bridge.rs` (plugin communication and lifecycle management),
+  `port_binding.rs` (port availability detection and binding), and `static_assets.rs` (asset serving
+  and caching strategies).
+- Reduced `lib.rs` from ~1675 lines to ~108 lines of focused public exports, improving separation of
+  concerns and maintainability.
+- Extracted the rendering pipeline into `render_pipeline.rs` (SSR/SSG/ISR/CSR/PPR strategy dispatch,
+  worker-pool render paths, ISR revalidation, and the render-process fallback), leaving `lib.rs`
+  with server core only (config, serve loop, watcher, HTTP handlers).
+- Response plugin middleware no longer fails oversized responses: a response whose sized body
+  exceeds `plugin_response_body_limit_bytes` is now passed through unmodified (with a warning log)
+  instead of returning a 500. Response plugins are skipped only for that response; unsized
+  (streaming) bodies keep the existing buffered path and limit.
+
+### Built-in Plugins and Middleware Fast Path
+
+- Added `ruvyxa/plugins` package with first-party plugins: `redirects` (declarative 307/308
+  redirects with wildcard remainders), `headers` (route-scoped response headers), `sitemap` and
+  `robots` (build-time `sitemap.xml`/`robots.txt` generation from the route manifest), `alias`
+  (exact import specifier resolution), `bundleBudget` (fail build when client JavaScript exceeds
+  per-chunk or total KiB budgets), and `requireEnv` (fail build when required environment variables
+  are missing or empty).
+- Added native middleware fast path: the plugin registry reports middleware route patterns per
+  direction, and the Rust server skips the plugin stdio round-trip for requests no middleware can
+  match. Registries without request middleware no longer pay any per-request plugin cost.
+- Added automatic plugin host recovery: when the persistent TypeScript plugin process crashes, the
+  server restarts it once and retries the in-flight hook instead of failing subsequent requests.
+- Added opt-in `middleware.workers` setting (1-8, default 1) for plugin runtime worker pool with
+  round-robin dispatch and per-process crash recovery.
+- Added the `ruvyxa/plugins` runtime alias for workspace and packed installs compatibility.
+- Updated demo app to integrate `sitemap`, `bundleBudget`, and two-worker middleware pool as
+  integration coverage.
+
+### Runtime Rendering Consolidation
+
+- Removed standalone `action-renderer.mjs`, `client-renderer.mjs`, and `ssg-renderer.mjs` modules.
+- Consolidated all rendering operations (SSR, SSG/ISR/PPR, API, actions, client) into the persistent
+  `worker-pool.mjs` process.
+- Added `ssr-renderer.mjs` and `api-renderer.mjs` as standalone fallbacks when the worker pool is
+  unavailable.
+- Updated package manifests, smoke tests, and documentation to reflect the consolidated runtime
+  architecture.
+
+### Edge Runtime Bundle Target
+
+- Added Edge bundle target variant for Cloudflare Workers and Vercel Edge Functions.
+- Updated bundler to treat Edge bundles like SSR with server-side rendering but restricted Node.js
+  APIs.
+- Extended resolver to use `edge-light` condition for Edge target exports resolution.
+- Added `serverless-handler.mjs` runtime for invoking Edge render functions.
+- Updated adapter implementations (Vercel, Netlify, Cloudflare) to support full server rendering
+  including SSR, API, and ISR routes on edge platforms.
+- Added Edge runtime rendering tests across all three serverless adapters.
+
+### Plugin Scaffolding Enhancements
+
+- Added `--dir` flag to `plugin new` for custom plugin package directory placement with path
+  traversal protection.
+- Changed default plugin output from `plugins/<name>` to root-level `<name>` directory.
+- Generated plugin packages now include npm, pnpm, and Bun setup instructions in README templates.
+- Added `scope` and `skipped` optional fields to adapter artifact reports for fine-grained build
+  tracking.
+
+### Platform and CI Improvements
+
+- Normalized Windows path handling across bundler, CLI, dev server (HMR tracker, style modules), and
+  diagnostics using `normalized_canonical_path()` utility.
+- Expanded Bun runtime parity tests to Windows in CI workflow.
+- Replaced environment variable runtime selection with explicit `--runtime` CLI flag for
+  cross-platform consistency.
+- Fixed Windows reserved port range handling (WSAEACCES 10013 errors from Hyper-V/WinNAT port
+  exclusions) during dev server listener binding.
+- Cleaned up unused `base64` dependency from `ruvyxa_middleware`.
+- Improved npm package existence check reliability with Windows shell compatibility.
+
+### Documentation
+
+- Updated v1.0.16 release notes with comprehensive coverage of build output enhancements, server
+  actions improvements, runtime detection, Bun support, progressive phase reporting, and CI/CD
+  upgrades.
+- Enhanced Thai CLI commands guide with detailed pipeline descriptions, `.ruvyxa/` output structure,
+  `build.json` timing metadata, and command examples.
+- Updated English and Thai plugin guides with built-in plugin documentation and middleware worker
+  pool configuration.
+- Updated deployment guides with Edge runtime serverless adapter capability matrix.
+
 ## v1.0.16 (2026-07-20)
 
 ### Plugin System Overhaul

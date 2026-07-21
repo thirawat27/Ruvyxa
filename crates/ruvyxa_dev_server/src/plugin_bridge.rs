@@ -1,7 +1,7 @@
 //! Conversion layer between axum HTTP types and the plugin middleware wire
 //! format, plus the request/response plugin application entry points.
 
-use axum::body::{Body, Bytes, to_bytes};
+use axum::body::{Body, Bytes, HttpBody, to_bytes};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
 use axum::response::{IntoResponse, Response};
 use ruvyxa_diagnostics::{Result, RuvyxaError};
@@ -35,9 +35,21 @@ pub(crate) async fn apply_response_plugins(
     if runtime.descriptor().middleware.response == 0 {
         return Ok(response);
     }
+    let limit_bytes = state.config.plugin_response_body_limit_bytes;
     let (parts, body) = response.into_parts();
-    let body =
-        read_plugin_response_body(body, state.config.plugin_response_body_limit_bytes).await?;
+    // A sized body over the buffer limit used to surface as a 500. Pass it
+    // through untouched instead: serving the response beats failing it, and
+    // only this response skips the middleware. Unsized (streaming) bodies
+    // still buffer up to the limit below.
+    if body_exceeds_plugin_limit(&body, limit_bytes) {
+        tracing::warn!(
+            limit_bytes,
+            path = %request.path,
+            "response body exceeds the plugin buffer limit; skipping response middleware for this response"
+        );
+        return Ok(Response::from_parts(parts, body));
+    }
+    let body = read_plugin_response_body(body, limit_bytes).await?;
     let plugin_response = PluginHttpResponse {
         status: parts.status.as_u16(),
         headers: headers_to_plugin_pairs(&parts.headers),
@@ -45,6 +57,12 @@ pub(crate) async fn apply_response_plugins(
     };
     let result = runtime.execute_response(request, &plugin_response).await?;
     plugin_response_into_response(result)
+}
+
+pub(crate) fn body_exceeds_plugin_limit(body: &Body, limit_bytes: usize) -> bool {
+    body.size_hint()
+        .exact()
+        .is_some_and(|size| size > limit_bytes as u64)
 }
 
 pub(crate) async fn read_plugin_response_body(body: Body, limit_bytes: usize) -> Result<Bytes> {
