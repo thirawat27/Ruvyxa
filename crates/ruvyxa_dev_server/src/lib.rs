@@ -2324,6 +2324,57 @@ mod tests {
     }
 
     #[test]
+    fn client_manifest_cache_serves_repeated_reads() {
+        let temp = tempfile::tempdir().unwrap();
+        let client_dir = temp.path().join(".ruvyxa/client");
+        std::fs::create_dir_all(&client_dir).unwrap();
+        std::fs::write(
+            client_dir.join("manifest.json"),
+            r#"{"routes":[{"path":"/","src":"/__ruvyxa/client/home.js","sharedChunks":[{"src":"/__ruvyxa/client/shared.123.js"}]}]}"#,
+        )
+        .unwrap();
+        let config = ServerConfig::production(temp.path(), "localhost", 3000);
+
+        // Two reads of an unchanged manifest must both resolve, exercising the
+        // fingerprint-match cache-hit path on the second call.
+        for _ in 0..2 {
+            let assets = prebuilt_client_assets(&config, "/").unwrap();
+            assert_eq!(assets.src, "/__ruvyxa/client/home.js");
+            assert_eq!(assets.preloads, vec!["/__ruvyxa/client/shared.123.js"]);
+        }
+    }
+
+    #[test]
+    fn client_manifest_cache_refreshes_after_rebuild() {
+        let temp = tempfile::tempdir().unwrap();
+        let client_dir = temp.path().join(".ruvyxa/client");
+        std::fs::create_dir_all(&client_dir).unwrap();
+        let manifest = client_dir.join("manifest.json");
+        std::fs::write(
+            &manifest,
+            r#"{"routes":[{"path":"/","src":"/__ruvyxa/client/old.js","sharedChunks":[]}]}"#,
+        )
+        .unwrap();
+        let config = ServerConfig::production(temp.path(), "localhost", 3000);
+        assert_eq!(
+            prebuilt_client_assets(&config, "/").unwrap().src,
+            "/__ruvyxa/client/old.js"
+        );
+
+        // A rebuild rewrites the manifest with different content and length, so
+        // the (mtime, len) fingerprint changes and the cache picks up new asset
+        // URLs instead of serving the previous build's bundles.
+        std::fs::write(
+            &manifest,
+            r#"{"routes":[{"path":"/","src":"/__ruvyxa/client/rebuilt.js","sharedChunks":[{"src":"/__ruvyxa/client/shared.abc.js"}]}]}"#,
+        )
+        .unwrap();
+        let assets = prebuilt_client_assets(&config, "/").unwrap();
+        assert_eq!(assets.src, "/__ruvyxa/client/rebuilt.js");
+        assert_eq!(assets.preloads, vec!["/__ruvyxa/client/shared.abc.js"]);
+    }
+
+    #[test]
     fn hydration_script_preloads_route_shared_chunks() {
         let temp = tempfile::tempdir().unwrap();
         let client_dir = temp.path().join(".ruvyxa/client");

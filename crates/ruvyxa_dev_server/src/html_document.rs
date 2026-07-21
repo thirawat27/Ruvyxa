@@ -1,8 +1,11 @@
 //! HTML document assembly: head/HMR injection, client hydration scripts,
 //! and the dev error overlay / production error pages.
 
+use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::SystemTime;
 
 use axum::http::StatusCode;
 use axum::response::Response;
@@ -95,6 +98,7 @@ struct ClientSharedChunk {
     src: String,
 }
 
+#[derive(Clone)]
 pub(crate) struct ClientAssets {
     pub(crate) src: String,
     pub(crate) preloads: Vec<String>,
@@ -143,24 +147,79 @@ pub(crate) fn client_hydration_script(
     )
 }
 
+/// Parsed client manifest cached by source-file fingerprint.
+///
+/// The document renderer looks up per-route script/preload assets on every SSR
+/// request. Re-reading and re-parsing the whole client manifest each time is a
+/// per-request file read plus full JSON deserialize of a file that only changes
+/// on rebuild. Caching the parsed route lookup keyed by the file's
+/// `(modified time, length)` fingerprint reduces the hot path to a single stat
+/// plus a hash lookup, while a dev rebuild (which changes the fingerprint) still
+/// invalidates it. This mirrors the resolver's fingerprint caching tradeoff.
+struct CachedClientManifest {
+    fingerprint: (SystemTime, u64),
+    routes: Arc<HashMap<String, ClientAssets>>,
+}
+
+static CLIENT_MANIFEST_CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedClientManifest>>> =
+    OnceLock::new();
+
 pub(crate) fn prebuilt_client_assets(
     config: &ServerConfig,
     route_path: &str,
 ) -> Option<ClientAssets> {
-    let source = fs::read_to_string(config.client_dir.join("manifest.json")).ok()?;
+    let manifest_path = config.client_dir.join("manifest.json");
+    let routes = load_client_manifest(&manifest_path)?;
+    routes.get(route_path).cloned()
+}
+
+/// Load the client manifest's per-route asset lookup, reusing the cached parse
+/// when the source file's `(modified time, length)` fingerprint is unchanged.
+fn load_client_manifest(manifest_path: &Path) -> Option<Arc<HashMap<String, ClientAssets>>> {
+    let fingerprint = fs::metadata(manifest_path)
+        .and_then(|meta| Ok((meta.modified()?, meta.len())))
+        .ok();
+
+    let cache = CLIENT_MANIFEST_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+
+    if let Some(fingerprint) = fingerprint
+        && let Ok(guard) = cache.lock()
+        && let Some(entry) = guard.get(manifest_path)
+        && entry.fingerprint == fingerprint
+    {
+        return Some(Arc::clone(&entry.routes));
+    }
+
+    // Cache miss or the file changed since it was parsed: read and parse once,
+    // then rebuild the route lookup for subsequent requests.
+    let source = fs::read_to_string(manifest_path).ok()?;
     let manifest: ClientAssetManifest = serde_json::from_str(&source).ok()?;
-    manifest
-        .routes
-        .into_iter()
-        .find(|route| route.path == route_path)
-        .map(|route| ClientAssets {
-            src: route.src,
-            preloads: route
-                .shared_chunks
-                .into_iter()
-                .map(|chunk| chunk.src)
-                .collect(),
-        })
+    let mut routes: HashMap<String, ClientAssets> = HashMap::with_capacity(manifest.routes.len());
+    for route in manifest.routes {
+        // The build emits unique route paths; keep the first if that ever
+        // changes, matching the previous `find`-based first-match behavior.
+        routes
+            .entry(route.path)
+            .or_insert_with(move || ClientAssets {
+                src: route.src,
+                preloads: route.shared_chunks.into_iter().map(|c| c.src).collect(),
+            });
+    }
+    let routes = Arc::new(routes);
+
+    if let Some(fingerprint) = fingerprint
+        && let Ok(mut guard) = cache.lock()
+    {
+        guard.insert(
+            manifest_path.to_path_buf(),
+            CachedClientManifest {
+                fingerprint,
+                routes: Arc::clone(&routes),
+            },
+        );
+    }
+
+    Some(routes)
 }
 
 pub(crate) fn safe_json_for_script(json: &str) -> String {

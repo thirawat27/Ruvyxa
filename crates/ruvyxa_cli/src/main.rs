@@ -1273,9 +1273,12 @@ async fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Resul
         },
         config.javascript_runtime(),
     )?;
+    // The client manifest is machine-read (the server resolves per-route scripts
+    // and preloads from it) and never hand-edited, so emit compact JSON: it is
+    // part of the deployed artifact and is parsed on the render path.
     fs::write(
         client_dir.join("manifest.json"),
-        serde_json::to_string_pretty(&client_manifest)?,
+        serde_json::to_string(&client_manifest)?,
     )?;
     let client_bundle_duration = phase_started.elapsed();
     let client_bundles = client_manifest
