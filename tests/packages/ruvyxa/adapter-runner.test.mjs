@@ -68,14 +68,14 @@ describe('adapter runner', () => {
     }
   })
 
-  it('rejects static deployment artifacts when dynamic routes or APIs are present', async () => {
+  it('rejects routes the adapter declares it does not support', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-adapter-runner-'))
     const outputDir = path.join(root, '.ruvyxa-staging')
     try {
       await mkdir(outputDir, { recursive: true })
       await writeFile(
         path.join(root, 'ruvyxa.config.mjs'),
-        `export default { adapter: { build() { return { artifacts: [{ kind: 'static-site', path: 'deploy/site' }] } } } }`,
+        `export default { adapter: { name: 'static', supports: ['ssg', 'csr'], build() { return { artifacts: [{ kind: 'static-site', path: 'deploy/site' }] } } } }`,
       )
       await writeFile(
         path.join(outputDir, 'manifest.json'),
@@ -87,7 +87,46 @@ describe('adapter runner', () => {
       const result = await runRunnerResult(root, outputDir)
 
       assert.equal(result.exitCode, 1)
-      assert.match(result.parsed.message, /RUV2202 static adapter output requires SSG or CSR pages/)
+      assert.match(result.parsed.message, /RUV2202 adapter static supports ssg, csr/)
+      assert.match(result.parsed.message, /\/api\/health \(api\)/)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  // Regression: the static-only rule used to live in `materializeStaticSite`
+  // and applied to every `static-site` artifact, so the vercel/netlify/
+  // cloudflare adapters -- which emit that artifact for the static layer beside
+  // a serverless function -- could never build an app with an API or SSR route.
+  it('allows a hybrid adapter to emit a static-site artifact alongside SSR and API routes', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-adapter-runner-'))
+    const outputDir = path.join(root, '.ruvyxa-staging')
+    try {
+      await mkdir(path.join(outputDir, 'prerender'), { recursive: true })
+      await writeFile(path.join(outputDir, 'prerender', 'index.html'), '<main>home</main>')
+      await writeFile(
+        path.join(root, 'ruvyxa.config.mjs'),
+        `export default { adapter: { name: 'vercel', supports: ['ssr', 'ssg', 'csr', 'isr', 'ppr', 'api'], build() { return { artifacts: [{ kind: 'static-site', path: 'deploy/vercel/static' }] } } } }`,
+      )
+      await writeFile(
+        path.join(outputDir, 'manifest.json'),
+        JSON.stringify({
+          routes: [
+            { kind: 'page', path: '/', render: { strategy: 'ssg' } },
+            { kind: 'page', path: '/blog/[slug]', render: { strategy: 'ssr' } },
+            { kind: 'page', path: '/isr-page', render: { strategy: 'isr' } },
+            { kind: 'api', path: '/api/health' },
+          ],
+        }),
+      )
+
+      const result = await runRunner(root, outputDir)
+
+      assert.deepEqual(result.result, [{ kind: 'static-site', path: 'deploy/vercel/static' }])
+      assert.equal(
+        await readFile(path.join(outputDir, 'deploy/vercel/static/index.html'), 'utf8'),
+        '<main>home</main>',
+      )
     } finally {
       await rm(root, { recursive: true, force: true })
     }

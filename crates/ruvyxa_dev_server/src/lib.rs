@@ -2361,8 +2361,7 @@ mod tests {
             "/__ruvyxa/client/old.js"
         );
 
-        // A rebuild rewrites the manifest with different content and length, so
-        // the (mtime, len) fingerprint changes and the cache picks up new asset
+        // A rebuild rewrites the manifest, so the cache picks up the new asset
         // URLs instead of serving the previous build's bundles.
         std::fs::write(
             &manifest,
@@ -2372,6 +2371,55 @@ mod tests {
         let assets = prebuilt_client_assets(&config, "/").unwrap();
         assert_eq!(assets.src, "/__ruvyxa/client/rebuilt.js");
         assert_eq!(assets.preloads, vec!["/__ruvyxa/client/shared.abc.js"]);
+    }
+
+    #[test]
+    fn client_manifest_cache_refreshes_on_same_length_rebuild() {
+        let temp = tempfile::tempdir().unwrap();
+        let client_dir = temp.path().join(".ruvyxa/client");
+        std::fs::create_dir_all(&client_dir).unwrap();
+        let manifest = client_dir.join("manifest.json");
+
+        // The realistic rebuild shape: only the content hash inside the bundle
+        // URL changes, so the rewritten manifest has the exact same byte
+        // length. A (mtime, len) fingerprint can therefore only detect this
+        // rebuild when the filesystem's mtime resolution is finer than the gap
+        // between the two writes, which is not guaranteed on FAT or on some
+        // network and container mounts. Keying the cache on the content hash
+        // makes the invalidation exact regardless of mtime resolution.
+        let before = r#"{"routes":[{"path":"/","src":"/__ruvyxa/client/home.a1b2c3.js","sharedChunks":[]}]}"#;
+        let after = r#"{"routes":[{"path":"/","src":"/__ruvyxa/client/home.d4e5f6.js","sharedChunks":[]}]}"#;
+        assert_eq!(before.len(), after.len(), "test inputs must be same length");
+
+        std::fs::write(&manifest, before).unwrap();
+        let config = ServerConfig::production(temp.path(), "localhost", 3000);
+        assert_eq!(
+            prebuilt_client_assets(&config, "/").unwrap().src,
+            "/__ruvyxa/client/home.a1b2c3.js"
+        );
+
+        // Restore the original mtime so the rewrite is indistinguishable from
+        // the first write by metadata alone, emulating a coarse-resolution
+        // filesystem without depending on the host's actual timestamp
+        // granularity.
+        let original = std::fs::metadata(&manifest).unwrap().modified().unwrap();
+        std::fs::write(&manifest, after).unwrap();
+        std::fs::File::options()
+            .write(true)
+            .open(&manifest)
+            .unwrap()
+            .set_modified(original)
+            .unwrap();
+        assert_eq!(
+            std::fs::metadata(&manifest).unwrap().modified().unwrap(),
+            original,
+            "mtime must be restored for this test to exercise the hash path"
+        );
+
+        assert_eq!(
+            prebuilt_client_assets(&config, "/").unwrap().src,
+            "/__ruvyxa/client/home.d4e5f6.js"
+        );
     }
 
     #[test]

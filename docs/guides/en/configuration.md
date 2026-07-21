@@ -192,9 +192,24 @@ export default config({
 
 An adapter's `build()` function is evaluated while configuration is loaded and again after the
 production build to materialize its declared artifacts inside `.ruvyxa/`. The result is written as
-`adapterArtifacts` in `.ruvyxa/build.json`. Node and Bun adapters create launchers; static,
-Cloudflare, Netlify, and Vercel adapters create static publish directories and reject API, SSR, ISR,
-and PPR routes with `RUV2202`.
+`adapterArtifacts` in `.ruvyxa/build.json`. Node and Bun adapters create launchers. Cloudflare,
+Netlify, and Vercel adapters are hybrid: they emit a static publish directory for pre-rendered pages
+and client assets alongside a serverless function that serves SSR and API routes.
+
+Each adapter declares the route kinds and render strategies it can deploy. Routes outside that set
+are rejected with `RUV2202`, naming each unsupported route, before the adapter's `build()` runs:
+
+| Adapter                      | Target                    | Deployable routes  |
+| ---------------------------- | ------------------------- | ------------------ |
+| `@ruvyxa/adapter-node`       | Node launcher             | all                |
+| `@ruvyxa/adapter-bun`        | Bun launcher              | all                |
+| `@ruvyxa/adapter-vercel`     | Vercel static + function  | all                |
+| `@ruvyxa/adapter-netlify`    | Netlify static + function | all                |
+| `@ruvyxa/adapter-cloudflare` | Worker + asset binding    | SSR, SSG, CSR, API |
+| `@ruvyxa/adapter-static`     | Static files              | SSG, CSR           |
+
+Cloudflare excludes ISR and PPR because a Worker's asset binding is read-only, so there is nowhere
+to write a revalidated page. The static adapter has no server at all.
 
 ### `runtime`
 

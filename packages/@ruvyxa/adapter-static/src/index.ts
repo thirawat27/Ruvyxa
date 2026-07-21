@@ -42,6 +42,11 @@ export function staticAdapter(options: StaticAdapterOptions = {}): Adapter {
   return {
     name: 'static',
     target: 'static',
+    // A static publish directory has no server, so only routes that are fully
+    // materialized at build time can be deployed. Declaring this lets the
+    // adapter runner reject SSR/ISR/PPR pages and API routes with a per-route
+    // error before the build hook runs.
+    supports: ['ssg', 'csr'],
     build(ctx: BuildContext): AdapterOutput {
       validateBuildContext(ctx, 'staticAdapter')
       return {

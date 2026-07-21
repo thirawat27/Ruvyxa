@@ -5,7 +5,6 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
-use std::time::SystemTime;
 
 use axum::http::StatusCode;
 use axum::response::Response;
@@ -147,17 +146,21 @@ pub(crate) fn client_hydration_script(
     )
 }
 
-/// Parsed client manifest cached by source-file fingerprint.
+/// Parsed client manifest cached by content hash.
 ///
 /// The document renderer looks up per-route script/preload assets on every SSR
-/// request. Re-reading and re-parsing the whole client manifest each time is a
-/// per-request file read plus full JSON deserialize of a file that only changes
-/// on rebuild. Caching the parsed route lookup keyed by the file's
-/// `(modified time, length)` fingerprint reduces the hot path to a single stat
-/// plus a hash lookup, while a dev rebuild (which changes the fingerprint) still
-/// invalidates it. This mirrors the resolver's fingerprint caching tradeoff.
+/// request, and re-deserializing the whole manifest each time is wasted work on
+/// a file that only changes on rebuild. The cache key is a blake3 hash of the
+/// file's bytes rather than its `(modified time, length)` metadata: a rebuild
+/// commonly rewrites the manifest to the *same* length (only the content hash
+/// inside each bundle URL changes, e.g. `home.a1b2c3.js` -> `home.d4e5f6.js`),
+/// so a metadata fingerprint can miss a real rebuild whenever the filesystem's
+/// mtime resolution is coarser than the gap between writes (FAT, some network
+/// and container mounts) and the server would then serve the previous build's
+/// bundle URLs. Hashing the bytes keeps the expensive part -- the JSON parse
+/// and route-map build -- cached while making invalidation exact.
 struct CachedClientManifest {
-    fingerprint: (SystemTime, u64),
+    content_hash: blake3::Hash,
     routes: Arc<HashMap<String, ClientAssets>>,
 }
 
@@ -174,26 +177,23 @@ pub(crate) fn prebuilt_client_assets(
 }
 
 /// Load the client manifest's per-route asset lookup, reusing the cached parse
-/// when the source file's `(modified time, length)` fingerprint is unchanged.
+/// when the source file's contents are byte-identical to the cached parse.
 fn load_client_manifest(manifest_path: &Path) -> Option<Arc<HashMap<String, ClientAssets>>> {
-    let fingerprint = fs::metadata(manifest_path)
-        .and_then(|meta| Ok((meta.modified()?, meta.len())))
-        .ok();
+    let source = fs::read(manifest_path).ok()?;
+    let content_hash = blake3::hash(&source);
 
     let cache = CLIENT_MANIFEST_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
 
-    if let Some(fingerprint) = fingerprint
-        && let Ok(guard) = cache.lock()
+    if let Ok(guard) = cache.lock()
         && let Some(entry) = guard.get(manifest_path)
-        && entry.fingerprint == fingerprint
+        && entry.content_hash == content_hash
     {
         return Some(Arc::clone(&entry.routes));
     }
 
-    // Cache miss or the file changed since it was parsed: read and parse once,
-    // then rebuild the route lookup for subsequent requests.
-    let source = fs::read_to_string(manifest_path).ok()?;
-    let manifest: ClientAssetManifest = serde_json::from_str(&source).ok()?;
+    // Cache miss or the file changed since it was parsed: parse once, then
+    // rebuild the route lookup for subsequent requests.
+    let manifest: ClientAssetManifest = serde_json::from_slice(&source).ok()?;
     let mut routes: HashMap<String, ClientAssets> = HashMap::with_capacity(manifest.routes.len());
     for route in manifest.routes {
         // The build emits unique route paths; keep the first if that ever
@@ -207,13 +207,11 @@ fn load_client_manifest(manifest_path: &Path) -> Option<Arc<HashMap<String, Clie
     }
     let routes = Arc::new(routes);
 
-    if let Some(fingerprint) = fingerprint
-        && let Ok(mut guard) = cache.lock()
-    {
+    if let Ok(mut guard) = cache.lock() {
         guard.insert(
             manifest_path.to_path_buf(),
             CachedClientManifest {
-                fingerprint,
+                content_hash,
                 routes: Arc::clone(&routes),
             },
         );

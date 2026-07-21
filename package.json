@@ -18,6 +18,7 @@
     "release:validate": "node scripts/validate-package-metadata.mjs",
     "release:bump": "node scripts/bump-version.mjs",
     "pack:smoke": "node scripts/pack-smoke.mjs",
+    "test:full-flow": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/test-full-flow.ps1",
     "publish:dry-run": "pnpm -r --filter './packages/**' publish --access public --dry-run"
   },
   "devDependencies": {

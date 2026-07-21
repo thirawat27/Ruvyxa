@@ -50,6 +50,7 @@ try {
     writeResponse(failure('RUV2200', 'config.adapter must provide a build(context) function.'))
     process.exitCode = 1
   } else {
+    await assertRoutesSupported(adapter, outputDir)
     const output = await adapter.build({ root: projectRoot, outDir: outputDir })
     const artifacts = await materializeArtifacts(output, outputDir)
     writeResponse(success(artifacts))
@@ -59,6 +60,43 @@ try {
     failure('RUV2200', error instanceof Error ? error.message : String(error), error?.stack),
   )
   process.exitCode = 1
+}
+
+/**
+ * Reject routes the adapter cannot deploy, before its build hook runs.
+ *
+ * The capability belongs to the adapter, not to the artifact kind it happens to
+ * emit. `static-site` is used both by the static adapter -- which publishes the
+ * whole site and therefore cannot deploy SSR/ISR/PPR pages or API routes -- and
+ * by the vercel/netlify/cloudflare adapters, which emit it for the static asset
+ * layer that sits *next to* a serverless function that serves exactly those
+ * routes. Enforcing the static-only constraint inside `materializeStaticSite`
+ * therefore blocked every hybrid adapter from building any app with an API
+ * route or an SSR page. Checking `adapter.supports` keeps the constraint with
+ * the adapter that actually has it.
+ *
+ * An adapter that omits `supports` is treated as full-featured.
+ */
+async function assertRoutesSupported(adapter, buildDir) {
+  if (!Array.isArray(adapter.supports)) return
+
+  const supported = new Set(adapter.supports)
+  const manifestPath = path.join(buildDir, 'manifest.json')
+  if (!existsSync(manifestPath)) return
+  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+
+  const unsupported = (manifest.routes ?? []).filter((route) =>
+    route.kind === 'api' ? !supported.has('api') : !supported.has(route.render?.strategy),
+  )
+  if (unsupported.length === 0) return
+
+  const detail = unsupported
+    .map((route) => `${route.path} (${route.kind === 'api' ? 'api' : route.render?.strategy})`)
+    .join(', ')
+  throw new Error(
+    `RUV2202 adapter ${adapter.name ?? 'unknown'} supports ${adapter.supports.join(', ')}; ` +
+      `unsupported routes: ${detail}.`,
+  )
 }
 
 async function loadNamedAdapter(root, name) {
@@ -268,20 +306,12 @@ async function materializeFunction(buildDir, destination, handlerSource) {
   )
 }
 
+// Copies the pre-rendered pages and client assets into a publish directory.
+// Which routes are allowed to exist at all is decided by `adapter.supports`
+// before the build hook runs (see `assertRoutesSupported`); a hybrid adapter
+// legitimately emits this artifact for the static layer of an app that also has
+// SSR pages and API routes served by its function artifact.
 async function materializeStaticSite(buildDir, destination) {
-  const manifestPath = path.join(buildDir, 'manifest.json')
-  const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
-  const unsupported = (manifest.routes ?? []).filter((route) => {
-    if (route.kind === 'api') return true
-    return !['ssg', 'csr'].includes(route.render?.strategy)
-  })
-  if (unsupported.length > 0) {
-    const routes = unsupported.map((route) => route.path).join(', ')
-    throw new Error(
-      `RUV2202 static adapter output requires SSG or CSR pages and no API routes; unsupported: ${routes}.`,
-    )
-  }
-
   const prerenderDir = path.join(buildDir, 'prerender')
   if (!existsSync(prerenderDir)) {
     throw new Error('RUV2202 static adapter output requires generated prerendered pages.')
