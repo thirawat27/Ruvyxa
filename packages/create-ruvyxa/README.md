@@ -7,8 +7,8 @@ Create a Ruvyxa app from a minimal or focused file-system route starter.
 ```bash
 npm create ruvyxa@latest my-app
 cd my-app
-pnpm install
-pnpm dev
+npm install
+npm run dev
 ```
 
 Choose a starter with `--template` (or `-t` when invoking the binary directly):

@@ -1,6 +1,6 @@
 # @ruvyxa/adapter-vercel
 
-Vercel static deployment adapter for Ruvyxa production builds.
+Vercel deployment adapter for Ruvyxa production builds.
 
 ## Install
 
@@ -35,8 +35,9 @@ export default config({
 }
 ```
 
-`ruvyxa build` creates `.ruvyxa/deploy/vercel/.vercel/output/`, using Vercel's static Build Output
+`ruvyxa build` creates `.ruvyxa/deploy/vercel/.vercel/output/`, using Vercel's Build Output API
 layout. Deploy `.ruvyxa/deploy/vercel/`.
 
-This adapter safely supports static SSG/CSR output only. It rejects API, SSR, ISR, and PPR routes
-with `RUV2202`; no Vercel serverless function handler is generated.
+This adapter supports SSR, API, ISR, PPR, SSG, and CSR routes via the serverless runtime. Static
+assets and pre-rendered pages are served through Vercel's static output; dynamic routes are handled
+by serverless functions.

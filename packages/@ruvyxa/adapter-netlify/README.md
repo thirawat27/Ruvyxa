@@ -1,6 +1,6 @@
 # @ruvyxa/adapter-netlify
 
-Netlify static deployment adapter for Ruvyxa production builds.
+Netlify deployment adapter for Ruvyxa production builds.
 
 ## Install
 
@@ -35,8 +35,9 @@ export default config({
 }
 ```
 
-`ruvyxa build` creates `.ruvyxa/deploy/netlify/` with `publish/` and `netlify.toml`. Deploy that
-directory on Netlify.
+`ruvyxa build` creates `.ruvyxa/deploy/netlify/` with `publish/`, Netlify Functions handlers, and
+`netlify.toml`. Deploy that directory on Netlify.
 
-This adapter safely supports static SSG/CSR output only. It rejects API, SSR, ISR, and PPR routes
-with `RUV2202`; no Netlify Function handler is generated.
+This adapter supports SSR, API, ISR, PPR, SSG, and CSR routes via the serverless runtime. Static
+assets and pre-rendered pages are served through Netlify's publish directory; dynamic routes are
+handled by Netlify Functions.

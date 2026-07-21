@@ -234,12 +234,12 @@ strategies, see [examples/demo](examples/demo).
 
 ## Documentation
 
-| Guide                                                               | Description                                       |
-| ------------------------------------------------------------------- | ------------------------------------------------- |
-| [User Guide](docs/guides/index.md)                                  | Build and deploy a Ruvyxa app — EN & TH           |
-| [Developer Guide](docs/developer-guide.md)                          | Develop, test, and package the framework          |
-| [Bundler Modernization](docs/architecture/bundler-modernization.md) | Oxc integration boundary and pipeline design      |
-| [Production Readiness](docs/architecture/production-readiness.md)   | Framework assessment, caching, and security audit |
+| Guide                                                  | Description                              |
+| ------------------------------------------------------ | ---------------------------------------- |
+| [User Guide](docs/guides/index.md)                     | Build and deploy a Ruvyxa app — EN & TH  |
+| [Developer Guide](docs/developer-guide.md)             | Develop, test, and package the framework |
+| [Architecture Overview](docs/architecture/overview.md) | System architecture and module reference |
+| [Getting Started](docs/guides/en/getting-started.md)   | Create your first Ruvyxa app             |
 
 ---
 
