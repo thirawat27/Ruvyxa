@@ -17,7 +17,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use ruvyxa_dev_server::{
     JavaScriptRuntime, MAX_ACTION_BODY_LIMIT_BYTES, MAX_ACTION_RATE_LIMIT_REQUESTS,
     MAX_ACTION_RATE_LIMIT_WINDOW_SECS, MAX_API_BODY_LIMIT_BYTES,
-    MAX_PLUGIN_RESPONSE_BODY_LIMIT_BYTES, ServerConfig, render_request, serve,
+    MAX_PLUGIN_RESPONSE_BODY_LIMIT_BYTES, ServerConfig, find_runtime_script, render_request, serve,
 };
 use ruvyxa_diagnostics::Diagnostic;
 use ruvyxa_graph::{
@@ -4083,27 +4083,6 @@ fn remove_path(path: &Path) -> anyhow::Result<()> {
         fs::remove_file(path)?;
     }
     Ok(())
-}
-
-fn find_runtime_script(root: &Path, file_name: &str) -> Option<PathBuf> {
-    if let Ok(mut cwd) = std::env::current_dir() {
-        loop {
-            let candidate = cwd.join("packages/ruvyxa/runtime").join(file_name);
-            if candidate.is_file() {
-                return Some(candidate);
-            }
-            if !cwd.pop() {
-                break;
-            }
-        }
-    }
-
-    let package_renderer = root.join("node_modules/ruvyxa/runtime").join(file_name);
-    if package_renderer.is_file() {
-        return Some(package_renderer);
-    }
-
-    None
 }
 
 fn print_routes(args: ProjectArgs) -> anyhow::Result<()> {

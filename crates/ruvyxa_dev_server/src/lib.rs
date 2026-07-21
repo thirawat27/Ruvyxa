@@ -88,13 +88,13 @@ mod worker_pool;
 pub use worker_pool::{NodeWorkerPool, StaticParamSegment, StaticParamsRoute};
 
 mod render_pipeline;
-pub use render_pipeline::render_request;
-use render_pipeline::{
-    find_runtime_script, render_client_bundle_pooled, render_request_pooled,
-    render_server_action_pooled, runtime_env, runtime_trace_cached,
-};
+pub use render_pipeline::{find_runtime_script, render_request};
 #[cfg(test)]
 use render_pipeline::{page_has_default_export, serve_prerendered_html};
+use render_pipeline::{
+    render_client_bundle_pooled, render_request_pooled, render_server_action_pooled, runtime_env,
+    runtime_trace_cached,
+};
 
 mod router;
 pub use router::RadixRouter;
@@ -2168,15 +2168,13 @@ mod tests {
     fn resolves_single_webp_outputs_and_development_sources() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(temp.path().join("hero.png"), b"png").unwrap();
-        let (fallback, vary) = resolve_public_asset(temp.path(), "hero.webp", None).unwrap();
+        let fallback = resolve_public_asset(temp.path(), "hero.webp").unwrap();
         assert!(fallback.ends_with("hero.png"));
-        assert!(!vary);
 
         fs::remove_file(temp.path().join("hero.png")).unwrap();
         fs::write(temp.path().join("hero.webp"), b"webp").unwrap();
-        let (selected, vary) = resolve_public_asset(temp.path(), "hero.png", None).unwrap();
+        let selected = resolve_public_asset(temp.path(), "hero.png").unwrap();
         assert!(selected.ends_with("hero.webp"));
-        assert!(!vary);
     }
 
     #[test]
@@ -2184,15 +2182,23 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         fs::write(temp.path().join("hero.png"), b"png").unwrap();
         fs::write(temp.path().join("hero.jpg"), b"jpg").unwrap();
-        assert!(resolve_public_asset(temp.path(), "hero.webp", None).is_none());
+        assert!(resolve_public_asset(temp.path(), "hero.webp").is_none());
     }
 
     #[test]
     fn resolves_uppercase_development_image_extensions() {
         let temp = tempfile::tempdir().unwrap();
         fs::write(temp.path().join("hero.PNG"), b"png").unwrap();
-        let (source, _) = resolve_public_asset(temp.path(), "hero.webp", None).unwrap();
+        let source = resolve_public_asset(temp.path(), "hero.webp").unwrap();
         assert!(source.ends_with("hero.PNG"));
+
+        // An upper-case source must still be served as an image, not as a
+        // binary download the browser refuses to render.
+        assert_eq!(
+            static_assets::content_type_for(&source),
+            "image/png",
+            "case-sensitive extension matching would break upper-case sources"
+        );
     }
 
     #[test]
@@ -2202,7 +2208,7 @@ mod tests {
         fs::create_dir_all(&public).unwrap();
         fs::write(temp.path().join("secret.txt"), b"secret").unwrap();
 
-        assert!(resolve_public_asset(&public, "../secret.txt", None).is_none());
+        assert!(resolve_public_asset(&public, "../secret.txt").is_none());
     }
 
     #[test]

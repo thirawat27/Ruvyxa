@@ -636,11 +636,99 @@ fn code_without_strings_and_comments(source: &str) -> String {
                 output.push(' ');
                 skip_block_comment(&mut chars, &mut output);
             }
+            '/' if regex_can_start(&output) => {
+                output.push(' ');
+                skip_regex_literal(&mut chars, &mut output);
+            }
             _ => output.push(character),
         }
     }
 
     output
+}
+
+/// Decide whether the `/` about to be consumed opens a regular expression.
+///
+/// `output` holds the code produced so far, so its last non-space character is
+/// the previous token. A regex may only start where a value is expected; after
+/// an identifier, number, or closing bracket the slash is a division operator.
+///
+/// Without this, a regex such as `/['"]/` is read as a division followed by an
+/// unterminated string, and every later `import` and `process.env` read in the
+/// file is blanked out — silently disabling the RUV1007/RUV1008/RUV1010
+/// boundary rules for that module.
+fn regex_can_start(output: &str) -> bool {
+    let trimmed = output.trim_end();
+    let Some(previous) = trimmed.chars().next_back() else {
+        return true;
+    };
+    match previous {
+        ')' | ']' | '}' => false,
+        character if is_identifier_char(character) => {
+            let word_start = trimmed
+                .rfind(|character| !is_identifier_char(character))
+                .map(|index| index + trimmed[index..].chars().next().map_or(1, char::len_utf8))
+                .unwrap_or(0);
+            matches!(
+                &trimmed[word_start..],
+                "await"
+                    | "case"
+                    | "delete"
+                    | "do"
+                    | "else"
+                    | "in"
+                    | "instanceof"
+                    | "new"
+                    | "of"
+                    | "return"
+                    | "throw"
+                    | "typeof"
+                    | "void"
+                    | "yield"
+            )
+        }
+        _ => true,
+    }
+}
+
+fn is_identifier_char(character: char) -> bool {
+    character.is_alphanumeric() || character == '_' || character == '$'
+}
+
+/// Consume a regular expression literal, replacing it with spaces.
+fn skip_regex_literal(
+    chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>,
+    output: &mut String,
+) {
+    let mut inside_character_class = false;
+    let mut escaped = false;
+
+    for (_, character) in chars.by_ref() {
+        output.push(' ');
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match character {
+            '\\' => escaped = true,
+            '[' => inside_character_class = true,
+            ']' if inside_character_class => inside_character_class = false,
+            // An unterminated literal was a division after all; stop so the rest
+            // of the line keeps its original meaning.
+            '\n' => return,
+            '/' if !inside_character_class => break,
+            _ => {}
+        }
+    }
+
+    // Consume trailing flags so they cannot be mistaken for an identifier.
+    while chars
+        .peek()
+        .is_some_and(|(_, character)| is_identifier_char(*character))
+    {
+        chars.next();
+        output.push(' ');
+    }
 }
 
 fn code_for_import_specifiers(source: &str) -> String {
@@ -673,6 +761,10 @@ fn code_for_import_specifiers(source: &str) -> String {
                 chars.next();
                 output.push(' ');
                 skip_block_comment(&mut chars, &mut output);
+            }
+            '/' if regex_can_start(&output) => {
+                output.push(' ');
+                skip_regex_literal(&mut chars, &mut output);
             }
             _ => output.push(character),
         }
@@ -1711,6 +1803,35 @@ mod tests {
         let report = validate_app(temp.path(), &manifest).unwrap();
 
         assert!(report.diagnostics.is_empty(), "{:?}", report.diagnostics);
+    }
+
+    #[test]
+    fn regex_literals_do_not_blank_out_the_rest_of_a_module() {
+        // A quote inside a regex character class used to open a string that ran
+        // to end-of-file, blanking every later import and env read and silently
+        // disabling the boundary rules for the module.
+        let names =
+            private_env_reads(r#"const re = /['"]/g; const secret = process.env.DATABASE_URL;"#);
+        assert_eq!(names, vec!["DATABASE_URL"]);
+
+        let code = code_for_import_specifiers(
+            r#"const re = /['"]/g;
+import 'server-only';
+"#,
+        );
+        assert!(code.contains("server-only"), "{code}");
+    }
+
+    #[test]
+    fn division_is_not_mistaken_for_a_regex_literal() {
+        let names = private_env_reads(
+            "const ratio = total / count; const secret = process.env.DATABASE_URL;",
+        );
+        assert_eq!(names, vec!["DATABASE_URL"]);
+
+        let names =
+            private_env_reads("const ratio = (a + b) / 2 / 4; const secret = process.env.API_KEY;");
+        assert_eq!(names, vec!["API_KEY"]);
     }
 
     #[test]

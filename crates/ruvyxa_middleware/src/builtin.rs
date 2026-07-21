@@ -334,6 +334,13 @@ where
                     credentials,
                     &max_age,
                 );
+            } else {
+                // The response body is identical, but its CORS headers depend on
+                // the request Origin. Without `Vary: Origin` on the rejected
+                // path a shared cache can store this header-less response and
+                // replay it to an allowed origin (and the reverse), which reads
+                // to the browser as a random CORS failure.
+                append_vary_origin(response.headers_mut());
             }
             Ok(response)
         })
@@ -677,6 +684,40 @@ mod tests {
         assert!(
             vary.iter()
                 .any(|value| value.eq_ignore_ascii_case("origin"))
+        );
+    }
+
+    #[tokio::test]
+    async fn cors_marks_responses_as_origin_dependent_even_when_rejected() {
+        let inner = tower::service_fn(|_request: Request<Body>| async {
+            Ok::<_, Infallible>(Response::new(Body::from("handled")))
+        });
+        let mut service = test_cors_layer().layer(inner);
+        let request = Request::builder()
+            .header(header::ORIGIN, "https://attacker.example")
+            .body(Body::empty())
+            .unwrap();
+
+        let response = service.call(request).await.unwrap();
+
+        assert!(
+            response
+                .headers()
+                .get(header::ACCESS_CONTROL_ALLOW_ORIGIN)
+                .is_none()
+        );
+        let vary = response
+            .headers()
+            .get_all(header::VARY)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .flat_map(|value| value.split(','))
+            .map(str::trim)
+            .collect::<Vec<_>>();
+        assert!(
+            vary.iter()
+                .any(|value| value.eq_ignore_ascii_case("origin")),
+            "a shared cache must not reuse this response for an allowed origin"
         );
     }
 

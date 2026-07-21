@@ -984,27 +984,45 @@ fn find_api_renderer(root: &Path) -> Option<PathBuf> {
     find_runtime_script(root, "api-renderer.mjs")
 }
 
-pub(crate) fn find_runtime_script(root: &Path, file_name: &str) -> Option<PathBuf> {
-    if let Ok(renderer) = std::env::var("RUVYXA_SSR_RENDERER") {
+/// Locate one of the `ruvyxa` package runtime scripts.
+///
+/// Resolution order:
+/// 1. `RUVYXA_SSR_RENDERER`, for `ssr-renderer.mjs` only.
+/// 2. `packages/ruvyxa/runtime/` from the current directory upwards, so the
+///    framework monorepo runs its own working tree.
+/// 3. `node_modules/ruvyxa/runtime/` from the project root upwards. The upward
+///    walk is required: package managers hoist dependencies to the workspace
+///    root, so an app at `apps/web` in a user monorepo has no local
+///    `node_modules/ruvyxa`.
+pub fn find_runtime_script(root: &Path, file_name: &str) -> Option<PathBuf> {
+    if file_name == "ssr-renderer.mjs"
+        && let Ok(renderer) = std::env::var("RUVYXA_SSR_RENDERER")
+    {
         let path = PathBuf::from(renderer);
-        if file_name == "ssr-renderer.mjs" && path.is_file() {
+        if path.is_file() {
             return Some(path);
         }
     }
 
-    let cwd_renderer = std::env::current_dir()
-        .ok()
-        .map(|cwd| cwd.join("packages/ruvyxa/runtime").join(file_name));
-    if let Some(path) = cwd_renderer.filter(|path| path.is_file()) {
+    if let Ok(cwd) = std::env::current_dir()
+        && let Some(path) = find_upwards(&cwd, Path::new("packages/ruvyxa/runtime"), file_name)
+    {
         return Some(path);
     }
 
-    let package_renderer = root.join("node_modules/ruvyxa/runtime").join(file_name);
-    if package_renderer.is_file() {
-        return Some(package_renderer);
-    }
+    find_upwards(root, Path::new("node_modules/ruvyxa/runtime"), file_name)
+}
 
-    None
+/// Walk `start` and each of its ancestors looking for `<dir>/<relative>/<file_name>`.
+fn find_upwards(start: &Path, relative: &Path, file_name: &str) -> Option<PathBuf> {
+    let mut current = start;
+    loop {
+        let candidate = current.join(relative).join(file_name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+        current = current.parent()?;
+    }
 }
 
 fn javascript_command(config: &ServerConfig) -> Result<Command> {

@@ -1464,16 +1464,25 @@ function privateEnvReads(source) {
 // and must still be checked for private environment reads.
 function scanPrivateEnvReads(source, start, templateExpressionDepth, names) {
   let index = start
+  // Index of the last byte that can end a token. A `/` only opens a regular
+  // expression when no value precedes it. Without this, `/['"]/` reads as a
+  // division followed by an unterminated string, and every later env read in
+  // the module goes unreported.
+  let previousSignificant = -1
+
   while (index < source.length) {
     const char = source[index]
     const next = source[index + 1]
+    const tokenStart = index
 
     if (char === '"' || char === "'") {
       index = readStringEnd(source, index, char)
+      previousSignificant = tokenStart
       continue
     }
     if (char === '`') {
       index = scanTemplateForPrivateEnv(source, index, names)
+      previousSignificant = tokenStart
       continue
     }
     if (char === '/' && next === '/') {
@@ -1486,15 +1495,22 @@ function scanPrivateEnvReads(source, start, templateExpressionDepth, names) {
       index = end === -1 ? source.length : end + 2
       continue
     }
+    if (char === '/' && regexCanStart(source, previousSignificant)) {
+      index = readRegexEnd(source, index)
+      previousSignificant = tokenStart
+      continue
+    }
     if (templateExpressionDepth > 0 && char === '{') {
       templateExpressionDepth += 1
       index += 1
+      previousSignificant = tokenStart
       continue
     }
     if (templateExpressionDepth > 0 && char === '}') {
       templateExpressionDepth -= 1
       index += 1
       if (templateExpressionDepth === 0) return index
+      previousSignificant = tokenStart
       continue
     }
 
@@ -1504,10 +1520,72 @@ function scanPrivateEnvReads(source, start, templateExpressionDepth, names) {
         names.push(parsed.name)
       }
       index = parsed?.end ?? index + 'process.env'.length
+      previousSignificant = index - 1
       continue
+    }
+    if (!/\s/.test(char)) previousSignificant = tokenStart
+    index += 1
+  }
+  return index
+}
+
+const REGEX_PRECEDING_KEYWORDS = new Set([
+  'await',
+  'case',
+  'delete',
+  'do',
+  'else',
+  'in',
+  'instanceof',
+  'new',
+  'of',
+  'return',
+  'throw',
+  'typeof',
+  'void',
+  'yield',
+])
+
+/** A regex may only start where a value is expected, never after one. */
+function regexCanStart(source, previousSignificant) {
+  if (previousSignificant < 0) return true
+  const previous = source[previousSignificant]
+  if (previous === ')' || previous === ']' || previous === '}') return false
+  if (previous === '"' || previous === "'" || previous === '`') return false
+  if (!isIdentifierChar(previous)) return true
+
+  let wordStart = previousSignificant
+  while (wordStart > 0 && isIdentifierChar(source[wordStart - 1])) wordStart -= 1
+  return REGEX_PRECEDING_KEYWORDS.has(source.slice(wordStart, previousSignificant + 1))
+}
+
+function isIdentifierChar(char) {
+  return char !== undefined && /[\w$]/.test(char)
+}
+
+/** Return the index just past a regular expression literal and its flags. */
+function readRegexEnd(source, start) {
+  let index = start + 1
+  let insideCharacterClass = false
+
+  while (index < source.length) {
+    const char = source[index]
+    if (char === '\\') {
+      index = Math.min(index + 2, source.length)
+      continue
+    }
+    // An unterminated literal was a division after all; resume normal scanning.
+    if (char === '\n') return index
+    if (char === '[') insideCharacterClass = true
+    else if (char === ']' && insideCharacterClass) insideCharacterClass = false
+    else if (char === '/' && !insideCharacterClass) {
+      index += 1
+      break
     }
     index += 1
   }
+
+  while (index < source.length && isIdentifierChar(source[index])) index += 1
   return index
 }
 

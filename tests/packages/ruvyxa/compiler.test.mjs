@@ -748,6 +748,48 @@ export class contentFormat {}
     })
   })
 
+  it('rejects private environment reads that follow a regular expression literal', async () => {
+    await withFixture(async ({ root, outDir }) => {
+      const pageFile = path.join(root, 'page.ts')
+      // A quote inside the character class used to open a string that ran to
+      // end-of-file, so the env read below was never seen and the secret
+      // shipped to the browser without a diagnostic.
+      await writeFile(
+        pageFile,
+        'const quoted = /[\'"]/g\nexport default () => quoted.test(process.env.DATABASE_URL)\n',
+      )
+
+      await assert.rejects(
+        compileBundle({
+          projectRoot: root,
+          entrySource: `export { default } from ${JSON.stringify(toImportPath(pageFile))}`,
+          sourcefile: 'ruvyxa:regex-env-entry.ts',
+          outfile: path.join(outDir, 'regex-env.mjs'),
+          platform: 'browser',
+        }),
+        /RUV1008: Private environment variable DATABASE_URL used in client bundle/,
+      )
+    })
+  })
+
+  it('treats division as division when checking the client boundary', async () => {
+    await withFixture(async ({ root, outDir }) => {
+      const pageFile = path.join(root, 'page.ts')
+      await writeFile(
+        pageFile,
+        'export const ratio = (a: number, b: number) => a / b / 2\nexport default () => ratio(1, 2)\n',
+      )
+
+      await compileBundle({
+        projectRoot: root,
+        entrySource: `export { default } from ${JSON.stringify(toImportPath(pageFile))}`,
+        sourcefile: 'ruvyxa:division-entry.ts',
+        outfile: path.join(outDir, 'division.mjs'),
+        platform: 'browser',
+      })
+    })
+  })
+
   it('drops side-effect asset imports from wrapped modules', async () => {
     await withFixture(async ({ root, outDir }) => {
       const pageFile = path.join(root, 'page.tsx')

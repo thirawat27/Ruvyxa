@@ -12,32 +12,27 @@ use serde_json::Value;
 #[derive(Debug, Clone)]
 pub struct RadixRouter {
     root: TrieNode,
+    /// Parsed pattern of every manifest route, indexed by route index.
+    ///
+    /// The trie collapses sibling routes that share a URL shape into one
+    /// parameter node, so it can only decide *which* route matched. Parameter
+    /// names must come from the matched route's own pattern.
+    patterns: Vec<Vec<PatternSegment>>,
 }
 
 #[derive(Debug, Clone)]
 struct TrieNode {
     /// Static children keyed by path segment.
     static_children: Vec<(String, TrieNode)>,
-    /// Dynamic parameter child (`[param]`).
-    param_child: Option<Box<ParamChild>>,
-    /// Catch-all child (`[...rest]`).
-    wildcard: Option<Box<WildcardChild>>,
-    /// Optional catch-all child (`[[...rest]]`).
-    optional_wildcard: Option<Box<WildcardChild>>,
+    /// Dynamic parameter child (`[param]`). The name lives on the route
+    /// pattern, not here, because siblings may declare different names.
+    param_child: Option<Box<TrieNode>>,
+    /// Route reached through a catch-all child (`[...rest]`).
+    wildcard: Option<usize>,
+    /// Route reached through an optional catch-all child (`[[...rest]]`).
+    optional_wildcard: Option<usize>,
     /// Route stored at this node (if a route terminates here).
     route_index: Option<usize>,
-}
-
-#[derive(Debug, Clone)]
-struct ParamChild {
-    name: String,
-    node: TrieNode,
-}
-
-#[derive(Debug, Clone)]
-struct WildcardChild {
-    name: String,
-    route_index: usize,
 }
 
 pub struct RouteMatch<'a> {
@@ -49,13 +44,15 @@ impl RadixRouter {
     /// Compile a router from a route manifest.
     pub fn compile(manifest: &RouteManifest) -> Self {
         let mut root = TrieNode::new();
+        let mut patterns = Vec::with_capacity(manifest.routes.len());
 
         for (index, route) in manifest.routes.iter().enumerate() {
             let segments = parse_pattern(&route.path);
             root.insert(&segments, index);
+            patterns.push(segments);
         }
 
-        Self { root }
+        Self { root, patterns }
     }
 
     /// Look up a request path and return the matched route with extracted params.
@@ -65,13 +62,56 @@ impl RadixRouter {
         request_path: &str,
     ) -> Option<RouteMatch<'a>> {
         let parts = split_path(request_path);
-        let mut params = RouteParams::new();
 
-        let route_index = self.root.lookup(&parts, 0, &mut params)?;
+        let route_index = self.root.lookup(&parts, 0)?;
         let route = manifest.routes.get(route_index)?;
+        let params = self
+            .patterns
+            .get(route_index)
+            .map(|pattern| extract_params(pattern, &parts))
+            .unwrap_or_default();
 
         Some(RouteMatch { route, params })
     }
+}
+
+/// Bind request segments to the parameter names declared by one route pattern.
+///
+/// `/users/[id]/posts` and `/users/[userId]/settings` are distinct URL shapes
+/// that the manifest accepts, yet they share a trie parameter node. Reading the
+/// names from the matched route keeps each route's declared parameter name.
+fn extract_params(pattern: &[PatternSegment], parts: &[&str]) -> RouteParams {
+    let mut params = RouteParams::new();
+
+    for (index, segment) in pattern.iter().enumerate() {
+        match segment {
+            PatternSegment::Static(_) => {}
+            PatternSegment::Param(name) => {
+                let Some(value) = parts.get(index) else {
+                    break;
+                };
+                params.insert(name.clone(), Value::String((*value).to_string()));
+            }
+            PatternSegment::Wildcard(name) | PatternSegment::OptionalWildcard(name) => {
+                let rest = parts.get(index..).unwrap_or_default();
+                // An optional catch-all that captured nothing stays absent so
+                // pages can distinguish "/shop" from "/shop/<segment>".
+                if !rest.is_empty() {
+                    params.insert(
+                        name.clone(),
+                        Value::Array(
+                            rest.iter()
+                                .map(|segment| Value::String((*segment).to_string()))
+                                .collect(),
+                        ),
+                    );
+                }
+                break;
+            }
+        }
+    }
+
+    params
 }
 
 impl TrieNode {
@@ -96,26 +136,17 @@ impl TrieNode {
                 let child = self.find_or_create_static(value);
                 child.insert(&segments[1..], route_index);
             }
-            PatternSegment::Param(name) => {
-                let child = self.param_child.get_or_insert_with(|| {
-                    Box::new(ParamChild {
-                        name: name.clone(),
-                        node: TrieNode::new(),
-                    })
-                });
-                child.node.insert(&segments[1..], route_index);
+            PatternSegment::Param(_) => {
+                let child = self
+                    .param_child
+                    .get_or_insert_with(|| Box::new(TrieNode::new()));
+                child.insert(&segments[1..], route_index);
             }
-            PatternSegment::Wildcard(name) => {
-                self.wildcard = Some(Box::new(WildcardChild {
-                    name: name.clone(),
-                    route_index,
-                }));
+            PatternSegment::Wildcard(_) => {
+                self.wildcard = Some(route_index);
             }
-            PatternSegment::OptionalWildcard(name) => {
-                self.optional_wildcard = Some(Box::new(WildcardChild {
-                    name: name.clone(),
-                    route_index,
-                }));
+            PatternSegment::OptionalWildcard(_) => {
+                self.optional_wildcard = Some(route_index);
             }
         }
     }
@@ -137,75 +168,38 @@ impl TrieNode {
         }
     }
 
-    fn lookup(&self, parts: &[&str], index: usize, params: &mut RouteParams) -> Option<usize> {
+    /// Resolve which route owns `parts`. Parameter binding happens afterwards
+    /// from the matched route's pattern, so this walk carries no param state.
+    fn lookup(&self, parts: &[&str], index: usize) -> Option<usize> {
         // If we've consumed all path segments, check if this node has a route
         if index >= parts.len() {
             if let Some(route_index) = self.route_index {
                 return Some(route_index);
             }
-            return self
-                .optional_wildcard
-                .as_ref()
-                .map(|wildcard| wildcard.route_index);
+            return self.optional_wildcard;
         }
 
-        let segment = parts[index];
-
         // 1. Try static children first (highest priority)
-        if let Some(result) = self.lookup_static(parts, index, params) {
+        if let Some(result) = self.lookup_static(parts, index) {
             return Some(result);
         }
 
         // 2. Try dynamic parameter child
-        if let Some(param_child) = &self.param_child {
-            params.insert(param_child.name.clone(), Value::String(segment.to_string()));
-            if let Some(result) = param_child.node.lookup(parts, index + 1, params) {
-                return Some(result);
-            }
-            params.remove(&param_child.name);
+        if let Some(param_child) = &self.param_child
+            && let Some(result) = param_child.lookup(parts, index + 1)
+        {
+            return Some(result);
         }
 
-        // 3. Try required catch-all.
-        if let Some(wildcard) = &self.wildcard {
-            params.insert(
-                wildcard.name.clone(),
-                Value::Array(
-                    parts[index..]
-                        .iter()
-                        .map(|segment| Value::String((*segment).to_string()))
-                        .collect(),
-                ),
-            );
-            return Some(wildcard.route_index);
-        }
-
-        // 4. Try optional catch-all (lowest priority).
-        if let Some(wildcard) = &self.optional_wildcard {
-            params.insert(
-                wildcard.name.clone(),
-                Value::Array(
-                    parts[index..]
-                        .iter()
-                        .map(|segment| Value::String((*segment).to_string()))
-                        .collect(),
-                ),
-            );
-            return Some(wildcard.route_index);
-        }
-
-        None
+        // 3. Required catch-all, then optional catch-all (lowest priority).
+        self.wildcard.or(self.optional_wildcard)
     }
 
-    fn lookup_static(
-        &self,
-        parts: &[&str],
-        index: usize,
-        params: &mut RouteParams,
-    ) -> Option<usize> {
+    fn lookup_static(&self, parts: &[&str], index: usize) -> Option<usize> {
         let segment = parts[index];
         for (key, child) in &self.static_children {
             if key == segment {
-                return child.lookup(parts, index + 1, params);
+                return child.lookup(parts, index + 1);
             }
         }
         None
@@ -371,6 +365,46 @@ mod tests {
 
         let m = router.find(&manifest, "/blog/other").unwrap();
         assert_eq!(m.route.path, "/blog/[slug]");
+    }
+
+    #[test]
+    fn sibling_routes_keep_their_own_parameter_names() {
+        // Both routes are accepted by the manifest conflict check because their
+        // URL shapes differ, but they share one trie parameter node. Each must
+        // still receive the parameter name it declared.
+        let manifest = make_manifest(vec![
+            ("/users/[id]/posts", RouteKind::Page),
+            ("/users/[userId]/settings", RouteKind::Page),
+        ]);
+        let router = RadixRouter::compile(&manifest);
+
+        let m = router.find(&manifest, "/users/7/posts").unwrap();
+        assert_eq!(m.route.path, "/users/[id]/posts");
+        assert_eq!(m.params["id"], json!("7"));
+
+        let m = router.find(&manifest, "/users/7/settings").unwrap();
+        assert_eq!(m.route.path, "/users/[userId]/settings");
+        assert_eq!(m.params["userId"], json!("7"));
+        assert!(!m.params.contains_key("id"));
+    }
+
+    #[test]
+    fn backtracking_does_not_leak_parameters_from_rejected_branches() {
+        let manifest = make_manifest(vec![
+            ("/[locale]/docs", RouteKind::Page),
+            ("/blog/[slug]", RouteKind::Page),
+        ]);
+        let router = RadixRouter::compile(&manifest);
+
+        let m = router.find(&manifest, "/blog/intro").unwrap();
+        assert_eq!(m.route.path, "/blog/[slug]");
+        assert_eq!(m.params["slug"], json!("intro"));
+        assert!(!m.params.contains_key("locale"));
+
+        let m = router.find(&manifest, "/th/docs").unwrap();
+        assert_eq!(m.route.path, "/[locale]/docs");
+        assert_eq!(m.params["locale"], json!("th"));
+        assert!(!m.params.contains_key("slug"));
     }
 
     #[test]

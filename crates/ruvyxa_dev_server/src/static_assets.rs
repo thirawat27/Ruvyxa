@@ -20,14 +20,13 @@ pub(crate) async fn serve_public_file(
         return Ok(None);
     }
 
-    let Some((file, vary_accept)) = resolve_public_asset(public_dir, trimmed, request_headers)
-    else {
+    let Some(file) = resolve_public_asset(public_dir, trimmed) else {
         return Ok(None);
     };
-    let metadata = match tokio::fs::metadata(&file).await {
-        Ok(meta) if meta.is_file() => meta,
+    match tokio::fs::metadata(&file).await {
+        Ok(meta) if meta.is_file() => {}
         _ => return Ok(None),
-    };
+    }
 
     let bytes = tokio::fs::read(&file)
         .await
@@ -45,11 +44,6 @@ pub(crate) async fn serve_public_file(
         && etag_matches(if_none_match, &etag)
     {
         let mut response = StatusCode::NOT_MODIFIED.into_response();
-        if vary_accept {
-            response
-                .headers_mut()
-                .insert(header::VARY, HeaderValue::from_static("Accept"));
-        }
         apply_security_headers(&mut response);
         return Ok(Some(response));
     }
@@ -66,11 +60,6 @@ pub(crate) async fn serve_public_file(
         header::CACHE_CONTROL,
         HeaderValue::from_static("public, max-age=3600, must-revalidate"),
     );
-    if vary_accept {
-        headers.insert(header::VARY, HeaderValue::from_static("Accept"));
-    }
-
-    let _ = metadata; // used for existence check
     apply_security_headers(&mut response);
     Ok(Some(response))
 }
@@ -84,7 +73,7 @@ pub(crate) fn serve_public_file_sync(
     if !is_safe_relative_path(trimmed) {
         return Ok(None);
     }
-    let Some((file, _)) = resolve_public_asset(public_dir, trimmed, None) else {
+    let Some(file) = resolve_public_asset(public_dir, trimmed) else {
         return Ok(None);
     };
     let bytes = fs::read(&file)?;
@@ -194,14 +183,14 @@ pub(crate) async fn serve_client_file(
     Ok(Some(response))
 }
 
-pub(crate) fn resolve_public_asset(
-    public_dir: &Path,
-    request_path: &str,
-    _request_headers: Option<&HeaderMap>,
-) -> Option<(PathBuf, bool)> {
+/// Map a public URL path to the file that should answer it.
+///
+/// Resolution is driven entirely by the requested URL extension, never by the
+/// `Accept` header, so responses are not content-negotiated and need no `Vary`.
+pub(crate) fn resolve_public_asset(public_dir: &Path, request_path: &str) -> Option<PathBuf> {
     let requested = public_dir.join(request_path);
     if requested.is_file() {
-        return contained_public_asset(public_dir, &requested).map(|file| (file, false));
+        return contained_public_asset(public_dir, &requested);
     }
 
     // Development keeps source images untouched while the React component
@@ -220,7 +209,7 @@ pub(crate) fn resolve_public_asset(
         candidates.sort();
         candidates.dedup();
         if candidates.len() == 1 {
-            return Some((candidates.into_iter().next()?, false));
+            return candidates.into_iter().next();
         }
     }
 
@@ -229,7 +218,7 @@ pub(crate) fn resolve_public_asset(
     if is_convertible_image_url(&requested) {
         let webp = requested.with_extension("webp");
         if webp.is_file() {
-            return contained_public_asset(public_dir, &webp).map(|file| (file, false));
+            return contained_public_asset(public_dir, &webp);
         }
     }
     None
@@ -294,9 +283,16 @@ pub(crate) fn etag_matches(value: &HeaderValue, etag: &str) -> bool {
 }
 
 pub(crate) fn content_type_for(path: &Path) -> &'static str {
-    match path.extension().and_then(|extension| extension.to_str()) {
+    // File-system extensions are case-preserving, and `resolve_public_asset`
+    // deliberately resolves upper-case image sources such as `hero.PNG`.
+    // Matching case-sensitively here would serve those as a binary download.
+    let extension = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .map(str::to_ascii_lowercase);
+    match extension.as_deref() {
         Some("css") => "text/css; charset=utf-8",
-        Some("js") => "text/javascript; charset=utf-8",
+        Some("js" | "mjs") => "text/javascript; charset=utf-8",
         Some("json") => "application/json; charset=utf-8",
         Some("webmanifest") => "application/manifest+json; charset=utf-8",
         Some("svg") => "image/svg+xml",

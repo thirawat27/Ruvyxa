@@ -12,7 +12,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use std::task::{Context, Poll};
 
@@ -293,7 +293,6 @@ impl WorkerResponse {
 #[derive(Clone)]
 struct PendingResponse {
     sender: mpsc::Sender<WorkerResponse>,
-    queued: Arc<AtomicUsize>,
     /// Set after an API response has started streaming. A worker exit must be
     /// delivered to these consumers as a body error rather than a clean EOF.
     streaming: Arc<AtomicBool>,
@@ -304,7 +303,6 @@ type PendingResponses = Arc<Mutex<BTreeMap<String, PendingResponse>>>;
 struct ResponseChannel {
     id: String,
     receiver: mpsc::Receiver<WorkerResponse>,
-    queued: Arc<AtomicUsize>,
     streaming: Arc<AtomicBool>,
 }
 
@@ -316,7 +314,6 @@ pub(crate) struct WorkerApiResponse {
 struct WorkerBodyStream {
     id: String,
     receiver: mpsc::Receiver<WorkerResponse>,
-    queued: Arc<AtomicUsize>,
     pending: PendingResponses,
     idle_timeout: std::time::Duration,
     deadline: Pin<Box<tokio::time::Sleep>>,
@@ -332,7 +329,6 @@ impl WorkerBodyStream {
         Self {
             id: channel.id,
             receiver: channel.receiver,
-            queued: channel.queued,
             pending,
             idle_timeout,
             deadline: Box::pin(tokio::time::sleep(idle_timeout)),
@@ -357,7 +353,6 @@ impl Stream for WorkerBodyStream {
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match self.receiver.poll_recv(cx) {
             Poll::Ready(Some(response)) => {
-                self.queued.fetch_sub(1, Ordering::AcqRel);
                 let idle_timeout = self.idle_timeout;
                 self.deadline
                     .as_mut()
@@ -497,7 +492,6 @@ impl Worker {
                             id,
                             "Node worker stdin closed before completing API response stream",
                         );
-                        pending_response.queued.fetch_add(1, Ordering::AcqRel);
                         let _ = pending_response.sender.send(error).await;
                     }
                     break;
@@ -541,9 +535,7 @@ impl Worker {
                     continue;
                 };
 
-                pending_response.queued.fetch_add(1, Ordering::AcqRel);
                 if pending_response.sender.send(response).await.is_err() {
-                    pending_response.queued.fetch_sub(1, Ordering::AcqRel);
                     reader_pending.lock().await.remove(&id);
                 }
             }
@@ -562,7 +554,6 @@ impl Worker {
                     id,
                     "Node worker exited before completing API response stream",
                 );
-                pending_response.queued.fetch_add(1, Ordering::AcqRel);
                 let _ = pending_response.sender.send(error).await;
             }
             debug!("worker stdout reader exited");
@@ -620,10 +611,7 @@ impl Worker {
         let mut channel = self.open_response(request).await?;
 
         match tokio::time::timeout(response_timeout, channel.receiver.recv()).await {
-            Ok(Some(response)) => {
-                channel.queued.fetch_sub(1, Ordering::AcqRel);
-                Ok(response)
-            }
+            Ok(Some(response)) => Ok(response),
             Ok(None) => Err(RuvyxaError::Message(
                 "Worker response channel closed unexpectedly".to_string(),
             )),
@@ -644,10 +632,7 @@ impl Worker {
     ) -> Result<WorkerApiResponse> {
         let mut channel = self.open_response(request).await?;
         let response = match tokio::time::timeout(response_timeout, channel.receiver.recv()).await {
-            Ok(Some(response)) => {
-                channel.queued.fetch_sub(1, Ordering::AcqRel);
-                response
-            }
+            Ok(Some(response)) => response,
             Ok(None) => {
                 return Err(RuvyxaError::Message(
                     "Worker response channel closed unexpectedly".to_string(),
@@ -706,13 +691,11 @@ impl Worker {
 
         let id = request.id().to_string();
         let (sender, receiver) = mpsc::channel(MAX_PENDING_RESPONSE_FRAMES);
-        let queued = Arc::new(AtomicUsize::new(0));
         let streaming = Arc::new(AtomicBool::new(false));
         self.pending.lock().await.insert(
             id.clone(),
             PendingResponse {
                 sender,
-                queued: Arc::clone(&queued),
                 streaming: Arc::clone(&streaming),
             },
         );
@@ -733,7 +716,6 @@ impl Worker {
         Ok(ResponseChannel {
             id,
             receiver,
-            queued,
             streaming,
         })
     }
@@ -1343,19 +1325,9 @@ fn positive_worker_timeout_ms(value: &str) -> Option<u64> {
 }
 
 fn find_worker_script(root: &Path) -> Option<PathBuf> {
-    let cwd_script = std::env::current_dir()
-        .ok()
-        .map(|cwd| cwd.join("packages/ruvyxa/runtime/worker-pool.mjs"));
-    if let Some(path) = cwd_script.filter(|p| p.is_file()) {
-        return Some(path);
-    }
-
-    let package_script = root.join("node_modules/ruvyxa/runtime/worker-pool.mjs");
-    if package_script.is_file() {
-        return Some(package_script);
-    }
-
-    None
+    // Shared with every other runtime script so a project that resolves its
+    // renderers cannot fail to resolve the worker that runs them.
+    crate::find_runtime_script(root, "worker-pool.mjs")
 }
 
 #[cfg(test)]
@@ -1457,7 +1429,6 @@ mod tests {
     #[tokio::test]
     async fn api_body_stream_decodes_binary_frames_without_text_conversion() {
         let (sender, receiver) = mpsc::channel(2);
-        let queued = Arc::new(AtomicUsize::new(2));
         sender
             .send(WorkerResponse {
                 id: "stream".to_string(),
@@ -1483,7 +1454,6 @@ mod tests {
             ResponseChannel {
                 id: "stream".to_string(),
                 receiver,
-                queued,
                 streaming: Arc::new(AtomicBool::new(true)),
             },
             Arc::new(Mutex::new(BTreeMap::new())),
@@ -1513,7 +1483,6 @@ mod tests {
             ResponseChannel {
                 id: "stream".to_string(),
                 receiver,
-                queued: Arc::new(AtomicUsize::new(1)),
                 streaming: Arc::new(AtomicBool::new(true)),
             },
             Arc::new(Mutex::new(BTreeMap::new())),
@@ -1527,7 +1496,6 @@ mod tests {
     #[tokio::test]
     async fn api_body_stream_propagates_worker_errors() {
         let (sender, receiver) = mpsc::channel(1);
-        let queued = Arc::new(AtomicUsize::new(1));
         sender
             .send(WorkerResponse::stream_error(
                 "stream".to_string(),
@@ -1541,7 +1509,6 @@ mod tests {
             ResponseChannel {
                 id: "stream".to_string(),
                 receiver,
-                queued,
                 streaming: Arc::new(AtomicBool::new(true)),
             },
             Arc::new(Mutex::new(BTreeMap::new())),
@@ -1559,7 +1526,6 @@ mod tests {
             ResponseChannel {
                 id: "stream".to_string(),
                 receiver,
-                queued: Arc::new(AtomicUsize::new(0)),
                 streaming: Arc::new(AtomicBool::new(true)),
             },
             Arc::new(Mutex::new(BTreeMap::new())),
@@ -1835,7 +1801,6 @@ mod tests {
                 next_request_id(),
                 PendingResponse {
                     sender,
-                    queued: Arc::new(AtomicUsize::new(0)),
                     streaming: Arc::new(AtomicBool::new(false)),
                 },
             );

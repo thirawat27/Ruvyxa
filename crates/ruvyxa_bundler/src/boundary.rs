@@ -169,17 +169,35 @@ fn scan_code_for_env_reads(
     mut template_expression_depth: usize,
     names: &mut Vec<String>,
 ) {
+    // Index of the last byte that can end a JavaScript token. A `/` is only a
+    // regular expression when no value precedes it; without this the scanner
+    // treats `/["']/` as a division followed by an unterminated string and
+    // silently skips the rest of the module, hiding every later env read.
+    let mut previous_significant: Option<usize> = None;
+
     while *index < source.len() {
+        let start = *index;
         match source[*index] {
-            b'\'' | b'"' => skip_quoted_bytes(source, index),
-            b'`' => skip_template_literal(source, index, names),
+            b'\'' | b'"' => {
+                skip_quoted_bytes(source, index);
+                previous_significant = Some(start);
+            }
+            b'`' => {
+                skip_template_literal(source, index, names);
+                previous_significant = Some(start);
+            }
             b'/' if source.get(*index + 1) == Some(&b'/') => skip_line_comment_bytes(source, index),
             b'/' if source.get(*index + 1) == Some(&b'*') => {
                 skip_block_comment_bytes(source, index)
             }
+            b'/' if regex_can_start(source, previous_significant) => {
+                skip_regex_literal(source, index);
+                previous_significant = Some(start);
+            }
             b'{' if template_expression_depth > 0 => {
                 template_expression_depth += 1;
                 *index += 1;
+                previous_significant = Some(start);
             }
             b'}' if template_expression_depth > 0 => {
                 template_expression_depth -= 1;
@@ -187,6 +205,7 @@ fn scan_code_for_env_reads(
                 if template_expression_depth == 0 {
                     return;
                 }
+                previous_significant = Some(start);
             }
             _ if starts_env_read(source, *index) => {
                 if let Some(name) = parse_env_name(source, *index + b"process.env".len())
@@ -196,9 +215,88 @@ fn scan_code_for_env_reads(
                     names.push(name);
                 }
                 *index += b"process.env".len();
+                previous_significant = Some(*index - 1);
+            }
+            byte => {
+                if !byte.is_ascii_whitespace() {
+                    previous_significant = Some(start);
+                }
+                *index += 1;
+            }
+        }
+    }
+}
+
+/// Decide whether a `/` opens a regular expression rather than a division.
+///
+/// A regex may only appear where a value is expected. When the preceding token
+/// could end a value (identifier, number, string, closing bracket) the slash is
+/// division. Keywords such as `return` are values-expected positions.
+fn regex_can_start(source: &[u8], previous_significant: Option<usize>) -> bool {
+    let Some(index) = previous_significant else {
+        return true;
+    };
+    match source[index] {
+        b')' | b']' | b'}' | b'\'' | b'"' | b'`' => false,
+        byte if is_identifier_byte(byte) => previous_token_is_keyword(source, index),
+        _ => true,
+    }
+}
+
+fn previous_token_is_keyword(source: &[u8], end: usize) -> bool {
+    let mut start = end + 1;
+    while start > 0 && is_identifier_byte(source[start - 1]) {
+        start -= 1;
+    }
+    matches!(
+        std::str::from_utf8(&source[start..=end]).unwrap_or_default(),
+        "await"
+            | "case"
+            | "delete"
+            | "do"
+            | "else"
+            | "in"
+            | "instanceof"
+            | "new"
+            | "of"
+            | "return"
+            | "throw"
+            | "typeof"
+            | "void"
+            | "yield"
+    )
+}
+
+fn skip_regex_literal(source: &[u8], index: &mut usize) {
+    *index += 1;
+    let mut inside_character_class = false;
+    while *index < source.len() {
+        match source[*index] {
+            b'\\' => *index = (*index + 2).min(source.len()),
+            b'[' => {
+                inside_character_class = true;
+                *index += 1;
+            }
+            b']' if inside_character_class => {
+                inside_character_class = false;
+                *index += 1;
+            }
+            // An unterminated literal was a division after all. Stop here so the
+            // rest of the line is still scanned normally.
+            b'\n' => return,
+            b'/' if !inside_character_class => {
+                *index += 1;
+                break;
             }
             _ => *index += 1,
         }
+    }
+
+    while source
+        .get(*index)
+        .is_some_and(|byte| is_identifier_byte(*byte))
+    {
+        *index += 1;
     }
 }
 
@@ -322,6 +420,33 @@ fn is_identifier_byte(byte: u8) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn regex_literals_do_not_hide_later_env_reads() {
+        // A quote inside a regex character class used to start a string skip
+        // that ran to end-of-file, so every later private env read went
+        // unreported and could reach the browser bundle unnoticed.
+        let source = "const re = /[\"']/g; const db = process.env.DATABASE_URL;";
+        assert_eq!(find_private_env_reads(source), vec!["DATABASE_URL"]);
+
+        let source = r#"if (/^a\/b$/.test(x)) {} const key = process.env['API_KEY'];"#;
+        assert_eq!(find_private_env_reads(source), vec!["API_KEY"]);
+    }
+
+    #[test]
+    fn division_is_not_mistaken_for_a_regex_literal() {
+        let source = "const ratio = total / count; const db = process.env.DATABASE_URL;";
+        assert_eq!(find_private_env_reads(source), vec!["DATABASE_URL"]);
+
+        let source = "const ratio = (a + b) / 2 / 4; const key = process.env.API_KEY;";
+        assert_eq!(find_private_env_reads(source), vec!["API_KEY"]);
+    }
+
+    #[test]
+    fn regex_after_a_keyword_is_still_a_regex() {
+        let source = "function f() { return /['\"]/.source } const db = process.env.DATABASE_URL;";
+        assert_eq!(find_private_env_reads(source), vec!["DATABASE_URL"]);
+    }
 
     #[test]
     fn detects_private_env_reads() {
