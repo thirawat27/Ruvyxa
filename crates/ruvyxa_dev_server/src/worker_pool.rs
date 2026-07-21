@@ -577,6 +577,16 @@ impl Worker {
     }
 
     /// Close the worker input, then force-stop it if graceful shutdown takes too long.
+    /// Number of requests registered but not yet delivered a terminal frame.
+    ///
+    /// The pending map is the exact in-flight set: the stdout reader removes an
+    /// entry the moment its terminal response arrives (and stream bodies remove
+    /// theirs on `api-end`/drop), so its length is the worker's live load. The
+    /// pool uses this to route new work to the least-busy worker.
+    async fn in_flight(&self) -> usize {
+        self.pending.lock().await.len()
+    }
+
     async fn shutdown(&self) {
         self.alive.store(false, Ordering::Release);
         let sender = self.stdin_tx.lock().ok().and_then(|mut guard| guard.take());
@@ -898,9 +908,9 @@ impl NodeWorkerPool {
         }
     }
 
-    /// Send a request to the next available worker (round-robin).
+    /// Send a request to the least-loaded worker.
     pub async fn send(&self, request: WorkerRequest) -> Result<WorkerResponse> {
-        let (index, worker) = self.select_worker()?;
+        let (index, worker) = self.select_worker().await?;
         let response = worker.send(&request, self.response_timeout).await;
 
         if response.is_err()
@@ -917,18 +927,47 @@ impl NodeWorkerPool {
         response
     }
 
-    fn select_worker(&self) -> Result<(usize, Arc<Worker>)> {
-        let workers = self
-            .workers
-            .read()
-            .map_err(|_| RuvyxaError::Message("Worker pool lock poisoned".to_string()))?;
-        if workers.is_empty() {
-            return Err(RuvyxaError::Message(
-                "Worker pool has no workers".to_string(),
-            ));
+    /// Pick the worker with the fewest in-flight requests.
+    ///
+    /// Blind round-robin ignores load, so a burst can stack several requests
+    /// behind one worker still blocked in a CPU-bound `renderToString` while a
+    /// sibling worker sits idle. Selecting the least-loaded worker keeps a slow
+    /// render from serializing unrelated requests. A rotating start offset
+    /// breaks ties fairly (and preserves round-robin behavior when every worker
+    /// is equally idle), and an idle worker short-circuits the scan.
+    async fn select_worker(&self) -> Result<(usize, Arc<Worker>)> {
+        // Clone the Arcs out of the sync lock before awaiting any worker's
+        // pending mutex; holding the std RwLock guard across an await is unsound.
+        let workers = {
+            let guard = self
+                .workers
+                .read()
+                .map_err(|_| RuvyxaError::Message("Worker pool lock poisoned".to_string()))?;
+            if guard.is_empty() {
+                return Err(RuvyxaError::Message(
+                    "Worker pool has no workers".to_string(),
+                ));
+            }
+            guard.clone()
+        };
+
+        let len = workers.len();
+        let start = self.next_worker.fetch_add(1, Ordering::Relaxed) as usize;
+        let mut best_index = start % len;
+        let mut best_load = usize::MAX;
+        for offset in 0..len {
+            let index = (start + offset) % len;
+            let load = workers[index].in_flight().await;
+            if load == 0 {
+                // An idle worker is optimal; stop probing the rest.
+                return Ok((index, workers[index].clone()));
+            }
+            if load < best_load {
+                best_load = load;
+                best_index = index;
+            }
         }
-        let index = self.next_worker.fetch_add(1, Ordering::Relaxed) as usize % workers.len();
-        Ok((index, workers[index].clone()))
+        Ok((best_index, workers[best_index].clone()))
     }
 
     /// Replaces a failed worker before the next request can select its slot.
@@ -1134,7 +1173,7 @@ impl NodeWorkerPool {
             stream_response: true,
             params: api.params.clone(),
         };
-        let (index, worker) = self.select_worker()?;
+        let (index, worker) = self.select_worker().await?;
         let response = worker
             .start_api_response(&request, self.response_timeout)
             .await;
@@ -1764,6 +1803,99 @@ mod tests {
             &failed_worker,
             &pool.workers.read().expect("worker pool lock poisoned")[0]
         ));
+
+        pool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn select_worker_avoids_the_busy_worker() {
+        let temp = tempfile::tempdir().unwrap();
+        let worker_script = temp.path().join("worker.mjs");
+        std::fs::write(
+            &worker_script,
+            "process.stdin.on('end', () => process.exit(0)); process.stdin.resume();",
+        )
+        .unwrap();
+
+        let spawn = || async {
+            Arc::new(
+                Worker::spawn(&worker_script, &BTreeMap::new(), JavaScriptRuntime::Node)
+                    .await
+                    .unwrap(),
+            )
+        };
+        let busy = spawn().await;
+        let idle = spawn().await;
+
+        // Register three in-flight requests on the first worker without touching
+        // the second, so a load-aware selector must route away from it.
+        for _ in 0..3 {
+            let (sender, _receiver) = mpsc::channel(1);
+            busy.pending.lock().await.insert(
+                next_request_id(),
+                PendingResponse {
+                    sender,
+                    queued: Arc::new(AtomicUsize::new(0)),
+                    streaming: Arc::new(AtomicBool::new(false)),
+                },
+            );
+        }
+
+        let pool = NodeWorkerPool {
+            workers: StdRwLock::new(vec![busy.clone(), idle.clone()]),
+            worker_script,
+            env: BTreeMap::new(),
+            runtime: JavaScriptRuntime::Node,
+            next_worker: AtomicU64::new(0),
+            response_timeout: std::time::Duration::from_millis(DEFAULT_WORKER_TIMEOUT_MS),
+        };
+
+        // Every selection must land on the idle worker regardless of the
+        // rotating start offset, never the loaded one.
+        for _ in 0..6 {
+            let (index, worker) = pool.select_worker().await.unwrap();
+            assert_eq!(index, 1, "selector routed to the busy worker");
+            assert!(Arc::ptr_eq(&worker, &idle));
+        }
+
+        pool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn select_worker_rotates_when_all_idle() {
+        let temp = tempfile::tempdir().unwrap();
+        let worker_script = temp.path().join("worker.mjs");
+        std::fs::write(
+            &worker_script,
+            "process.stdin.on('end', () => process.exit(0)); process.stdin.resume();",
+        )
+        .unwrap();
+
+        let mut workers = Vec::new();
+        for _ in 0..3 {
+            workers.push(Arc::new(
+                Worker::spawn(&worker_script, &BTreeMap::new(), JavaScriptRuntime::Node)
+                    .await
+                    .unwrap(),
+            ));
+        }
+
+        let pool = NodeWorkerPool {
+            workers: StdRwLock::new(workers.clone()),
+            worker_script,
+            env: BTreeMap::new(),
+            runtime: JavaScriptRuntime::Node,
+            next_worker: AtomicU64::new(0),
+            response_timeout: std::time::Duration::from_millis(DEFAULT_WORKER_TIMEOUT_MS),
+        };
+
+        // With every worker idle the rotating offset spreads work round-robin.
+        let mut picked = Vec::new();
+        for _ in 0..3 {
+            picked.push(pool.select_worker().await.unwrap().0);
+        }
+        picked.sort();
+        assert_eq!(picked, vec![0, 1, 2]);
 
         pool.shutdown().await;
     }
