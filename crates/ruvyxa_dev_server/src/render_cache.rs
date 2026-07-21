@@ -454,10 +454,19 @@ pub fn client_cache_key(request_path: &str, params: &RouteParams) -> String {
 }
 
 fn cache_key_matches_route(cache_key: &str, route_path: &str) -> bool {
+    // Keys are `ssr:`/`client:` optionally wrapped in a render namespace
+    // (`ssg:`/`isr:`/`ppr:`). Strip prefixes structurally — searching for
+    // the marker anywhere in the key would mis-parse catch-all request
+    // paths or serialized params that contain "ssr:"/"client:" as text,
+    // leaving stale entries alive after a file change.
+    let without_namespace = ["ssg:", "isr:", "ppr:"]
+        .into_iter()
+        .find_map(|namespace| cache_key.strip_prefix(namespace))
+        .unwrap_or(cache_key);
     let request_path = ["client:", "ssr:"]
         .into_iter()
-        .find_map(|marker| cache_key.rsplit_once(marker).map(|(_, path)| path))
-        .and_then(|path| path.split('?').next())
+        .find_map(|marker| without_namespace.strip_prefix(marker))
+        .map(|path| path.split('?').next().unwrap_or(path))
         .unwrap_or(cache_key);
     let dynamic_index = route_path
         .char_indices()
@@ -623,6 +632,25 @@ mod tests {
 
         assert_eq!(cache.invalidate_route("/blog/[slug]").await, 3);
         assert_eq!(cache.get("ssr:/about").await, Some("4".into()));
+        assert_index_and_order_consistent(&cache).await;
+    }
+
+    #[tokio::test]
+    async fn invalidate_route_handles_marker_text_inside_paths_and_params() {
+        let cache = RenderCache::new(8, 60);
+        // Catch-all URL whose captured segment contains "ssr:" as text; the
+        // serialized params repeat it. Structural prefix parsing must still
+        // recognize the real request path and evict the entry.
+        cache
+            .put(
+                "ssr:/docs/ssr:evil?{\"path\":[\"ssr:evil\"]}".into(),
+                "stale".into(),
+            )
+            .await;
+        cache.put("ssr:/about".into(), "keep".into()).await;
+
+        assert_eq!(cache.invalidate_route("/docs/[...path]").await, 1);
+        assert_eq!(cache.get("ssr:/about").await, Some("keep".into()));
         assert_index_and_order_consistent(&cache).await;
     }
 

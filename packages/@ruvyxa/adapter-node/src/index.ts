@@ -50,13 +50,15 @@ export function nodeAdapter(options: NodeAdapterOptions = {}): Adapter {
           {
             kind: 'file',
             path: 'deploy/node/start.mjs',
-            contents: `import { spawn } from 'node:child_process'\n\nconst child = spawn('npx', ['--no-install', 'ruvyxa', 'start'], { cwd: process.cwd(), stdio: 'inherit' })\nchild.on('exit', (code, signal) => process.exitCode = code ?? (signal ? 1 : 0))\n`,
+            // npx resolves to npx.cmd on Windows, which spawn() refuses to
+            // execute without a shell; keep the shell off elsewhere.
+            contents: `import { spawn } from 'node:child_process'\n\nconst child = spawn('npx', ['--no-install', 'ruvyxa', 'start'], { cwd: process.cwd(), stdio: 'inherit', shell: process.platform === 'win32' })\nchild.on('exit', (code, signal) => process.exitCode = code ?? (signal ? 1 : 0))\n`,
           },
           {
             kind: 'file',
             path: 'deploy/node/README.md',
             contents:
-              '# Ruvyxa Node deployment\\n\\nRun `node .ruvyxa/deploy/node/start.mjs` from the application root after installing production dependencies.\\n',
+              '# Ruvyxa Node deployment\n\nRun `node .ruvyxa/deploy/node/start.mjs` from the application root after installing production dependencies.\n',
           },
         ],
       }

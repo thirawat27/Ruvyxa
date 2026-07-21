@@ -1113,8 +1113,14 @@ pub(crate) fn find_dep_for_specifier<'a>(
     deps.iter().find(|dep| {
         let dep_str = dep.display().to_string().replace('\\', "/");
 
-        // Direct path match.
-        if dep_str.ends_with(direct_suffix) {
+        // Direct path match. The suffix must start at a path-segment
+        // boundary: a bare `ends_with` would let "./Button.module.css"
+        // match ".../IconButton.module.css" and bind the wrong module.
+        if dep_str == direct_suffix
+            || dep_str
+                .strip_suffix(direct_suffix)
+                .is_some_and(|prefix| prefix.ends_with('/'))
+        {
             return true;
         }
 
@@ -1207,6 +1213,27 @@ fn extract_var_declaration_name(decl: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn find_dep_requires_a_path_segment_boundary() {
+        let deps = vec![
+            PathBuf::from("/app/components/IconButton.module.css"),
+            PathBuf::from("/app/components/Button.module.css"),
+        ];
+
+        let resolved = find_dep_for_specifier("./Button.module.css", &deps).unwrap();
+        assert_eq!(
+            resolved,
+            &PathBuf::from("/app/components/Button.module.css"),
+            "suffix match must not bind IconButton for the Button specifier"
+        );
+
+        let icon = find_dep_for_specifier("./IconButton.module.css", &deps).unwrap();
+        assert_eq!(
+            icon,
+            &PathBuf::from("/app/components/IconButton.module.css")
+        );
+    }
 
     #[test]
     fn module_id_is_deterministic() {

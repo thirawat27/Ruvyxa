@@ -219,6 +219,25 @@ pub(crate) fn action_origin_is_cross_site(
     !origin_host.eq_ignore_ascii_case(host) || !origin_scheme.eq_ignore_ascii_case(expected_scheme)
 }
 
+/// Cross-site check for the HMR WebSocket handshake.
+///
+/// Browsers always send `Origin` on WebSocket upgrades, so a missing header
+/// means a non-browser client (curl, tooling) and is allowed; a present
+/// header must match the request host exactly like the action endpoint.
+/// Without this, any web page open in the developer's browser can connect to
+/// the HMR socket and read changed file paths and route patterns
+/// (cross-site WebSocket hijacking).
+pub(crate) fn hmr_origin_is_cross_site(
+    headers: &HeaderMap,
+    config: &ServerConfig,
+    peer: IpAddr,
+) -> bool {
+    if headers.get(header::ORIGIN).is_none() {
+        return action_fetch_site_is_cross_site(headers);
+    }
+    action_origin_is_cross_site(headers, config, peer)
+}
+
 pub(crate) fn action_fetch_site_is_cross_site(headers: &HeaderMap) -> bool {
     headers
         .get("sec-fetch-site")

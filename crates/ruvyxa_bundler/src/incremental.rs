@@ -252,8 +252,18 @@ impl IncrementalGraphCache {
     /// change propagating through imports).
     pub fn compute_dirty_set(&self, changed_paths: &[PathBuf]) -> BTreeSet<PathBuf> {
         if !self.enabled {
-            // If cache disabled, everything is dirty.
-            return self.previous.modules.keys().cloned().collect();
+            // If cache disabled, everything is dirty: every module the
+            // previous manifest knows about plus the changed paths
+            // themselves. (A disabled cache loads no manifest, so the
+            // changed paths must be included explicitly — returning only
+            // `previous.modules` would yield an empty, "nothing dirty" set.)
+            return self
+                .previous
+                .modules
+                .keys()
+                .cloned()
+                .chain(changed_paths.iter().cloned())
+                .collect();
         }
 
         let mut dirty = BTreeSet::new();

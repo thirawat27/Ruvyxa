@@ -66,11 +66,18 @@ export function createHandler(options) {
     supportedStrategies = ['ssr', 'ssg', 'csr', 'isr', 'ppr', 'api'],
   } = options
 
-  // Pre-compile route patterns for matching
-  const compiledRoutes = routes.map((route) => ({
-    ...route,
-    pattern: compilePattern(route.path),
-  }))
+  // Pre-compile route patterns for matching. Sort by specificity so a
+  // static segment always wins over a dynamic one at the same position —
+  // manifest order is alphabetical, where "[" sorts before letters and
+  // would otherwise shadow /blog/new behind /blog/[slug], diverging from
+  // the dev server's static-first router.
+  const compiledRoutes = routes
+    .map((route) => ({
+      ...route,
+      pattern: compilePattern(route.path),
+      specificity: routeSpecificity(route.path),
+    }))
+    .sort((left, right) => compareSpecificity(left.specificity, right.specificity))
 
   return async function handle(request) {
     const url = new URL(request.url)
@@ -102,7 +109,9 @@ export function createHandler(options) {
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       console.error(`[ruvyxa] Error handling ${pathname}:`, message)
-      return new Response(`Internal Server Error\n\n${message}`, {
+      // Log the detail server-side only: serverless is production, and the
+      // dev server likewise never exposes internal error text to clients.
+      return new Response('Internal Server Error', {
         status: 500,
         headers: { 'content-type': 'text/plain; charset=utf-8' },
       })
@@ -268,6 +277,33 @@ function compilePattern(routePath) {
   return { regex: new RegExp(pattern), paramNames, catchAll }
 }
 
+/**
+ * Per-segment specificity score: static (0) < dynamic (1) < catch-all (2)
+ * < optional catch-all (3). Lower-scoring routes match first.
+ */
+function routeSpecificity(routePath) {
+  if (routePath === '/') return [0]
+  return routePath
+    .split('/')
+    .filter(Boolean)
+    .map((segment) => {
+      if (/^\[\[\.\.\.\w+\]\]$/.test(segment)) return 3
+      if (/^\[\.\.\.\w+\]$/.test(segment)) return 2
+      if (/^\[\w+\]$/.test(segment)) return 1
+      return 0
+    })
+}
+
+function compareSpecificity(left, right) {
+  const length = Math.max(left.length, right.length)
+  for (let index = 0; index < length; index++) {
+    const leftScore = left[index] ?? -1
+    const rightScore = right[index] ?? -1
+    if (leftScore !== rightScore) return leftScore - rightScore
+  }
+  return 0
+}
+
 function matchRoute(compiledRoutes, pathname) {
   for (const route of compiledRoutes) {
     const match = route.pattern.regex.exec(pathname)
@@ -279,7 +315,10 @@ function matchRoute(compiledRoutes, pathname) {
       const value = match[i + 1]
 
       if (route.pattern.catchAll && name === route.pattern.catchAll.name) {
-        params[name] = value ? value.split('/') : []
+        // Decode each captured segment like the dev server does; leaving
+        // them encoded makes /docs/a%20b produce different params in
+        // serverless deploys than in development.
+        params[name] = value ? value.split('/').map((segment) => decodeURIComponent(segment)) : []
       } else {
         params[name] = value ? decodeURIComponent(value) : undefined
       }

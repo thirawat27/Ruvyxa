@@ -8,7 +8,7 @@ use tower_http::compression::{
     CompressionLayer,
     predicate::{DefaultPredicate, Predicate},
 };
-use tracing::{info, warn};
+use tracing::info;
 
 use crate::builtin::{
     CorsLayer, CustomHeadersLayer, RateLimitLayerWithKey, RequestLoggingLayer, TimingLayer,
@@ -57,14 +57,17 @@ impl MiddlewareStack {
     /// 4. Timing (X-Response-Time header)
     /// 5. Request Logging
     /// 6. Custom Headers
-    pub fn apply<S: Clone + Send + Sync + 'static>(&self, router: Router<S>) -> Router<S> {
+    ///
+    /// Fails when the configuration is invalid: installing a layer that
+    /// `validate()` rejects (for example credentialed wildcard CORS) would
+    /// silently weaken security, so an invalid config must never produce a
+    /// running stack.
+    pub fn apply<S: Clone + Send + Sync + 'static>(
+        &self,
+        router: Router<S>,
+    ) -> std::result::Result<Router<S>, String> {
+        self.validate()?;
         let mut app = router;
-
-        // Validate config — log warnings for issues that don't warrant a hard failure
-        // in dev mode but should be addressed.
-        if let Err(reason) = self.validate() {
-            warn!(%reason, "middleware configuration issue detected");
-        }
 
         // Apply custom headers if any
         if !self.config.builtin.headers.is_empty() {
@@ -117,7 +120,7 @@ impl MiddlewareStack {
             "middleware stack applied"
         );
 
-        app
+        Ok(app)
     }
 
     /// Validate the middleware configuration before applying it.
@@ -254,6 +257,26 @@ mod tests {
     }
 
     #[test]
+    fn apply_refuses_invalid_configuration() {
+        let mut config = MiddlewareConfig::default();
+        config.builtin.cors = Some(crate::config::CorsConfig {
+            origins: vec!["*".to_string()],
+            methods: vec!["POST".to_string()],
+            headers: Vec::new(),
+            credentials: true,
+            max_age: 60,
+        });
+
+        // An invalid config must fail to build a stack, not degrade to a
+        // warning while installing credentialed wildcard CORS.
+        assert!(
+            MiddlewareStack::new(config)
+                .apply(Router::<()>::new())
+                .is_err()
+        );
+    }
+
+    #[test]
     fn rejects_unknown_rate_limit_key_selectors() {
         for key_by in ["forwarded", "header:", "header:invalid header"] {
             let mut config = MiddlewareConfig::default();
@@ -307,7 +330,8 @@ mod tests {
     #[tokio::test]
     async fn leaves_unknown_size_streams_uncompressed_and_complete() {
         let app = MiddlewareStack::new(MiddlewareConfig::default())
-            .apply(Router::new().route("/stream", get(streamed_response)));
+            .apply(Router::new().route("/stream", get(streamed_response)))
+            .expect("default middleware config is valid");
         let response = app
             .oneshot(
                 Request::builder()
@@ -330,7 +354,8 @@ mod tests {
     #[tokio::test]
     async fn still_compresses_complete_sized_responses() {
         let app = MiddlewareStack::new(MiddlewareConfig::default())
-            .apply(Router::new().route("/buffered", get(buffered_response)));
+            .apply(Router::new().route("/buffered", get(buffered_response)))
+            .expect("default middleware config is valid");
         let response = app
             .oneshot(
                 Request::builder()

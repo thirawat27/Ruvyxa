@@ -41,31 +41,13 @@ struct CompiledModuleOutput {
     hook_source_map: Option<String>,
 }
 
-/// Compile every module in the resolved graph, using the provided cache.
-pub fn compile_graph_with_cache(
-    graph: &[ResolvedModule],
-    input: &BundleInput,
-    cache: &CompileCache,
-) -> Result<Vec<CompiledModule>> {
-    compile_graph_with_hooks(graph, input, cache, &BuildHookPipeline::empty())
-}
-
-/// Compile every module using the provided cache and TypeScript build hooks.
-pub fn compile_graph_with_hooks(
-    graph: &[ResolvedModule],
-    input: &BundleInput,
-    cache: &CompileCache,
-    build_hooks: &BuildHookPipeline,
-) -> Result<Vec<CompiledModule>> {
-    Ok(compile_graph_with_hooks_and_maps(graph, input, cache, build_hooks)?.0)
-}
-
 pub(crate) fn compile_graph_with_hooks_and_maps(
     graph: &[ResolvedModule],
     input: &BundleInput,
     cache: &CompileCache,
     build_hooks: &BuildHookPipeline,
 ) -> Result<(Vec<CompiledModule>, BTreeMap<PathBuf, String>)> {
+    reject_case_colliding_css_modules(graph, input)?;
     let results: Vec<Result<CompiledModuleOutput>> = graph
         .par_iter()
         .map(|module| compile_module(module, input, cache, build_hooks))
@@ -81,6 +63,35 @@ pub(crate) fn compile_graph_with_hooks_and_maps(
         modules.push(output.module);
     }
     Ok((modules, source_maps))
+}
+
+/// Scoped class names hash a case-folded project-relative path (so the same
+/// file hashes identically across case-insensitive filesystems). Two
+/// *distinct* CSS module files whose paths differ only by case would
+/// therefore share every generated class name and silently swap styles —
+/// reject that graph up front with an actionable error instead.
+fn reject_case_colliding_css_modules(graph: &[ResolvedModule], input: &BundleInput) -> Result<()> {
+    let mut seen: BTreeMap<String, &Path> = BTreeMap::new();
+    for module in graph {
+        if !crate::style_module::is_css_module_path(&module.path) {
+            continue;
+        }
+        let key = crate::style_module::normalized_relative_path(&module.path, &input.project_root);
+        match seen.get(&key) {
+            Some(existing) if *existing != module.path.as_path() => {
+                return Err(BundleError::Compiler(format!(
+                    "CSS module paths {} and {} differ only by letter case and would generate identical scoped class names; rename one file",
+                    existing.display(),
+                    module.path.display()
+                )));
+            }
+            Some(_) => {}
+            None => {
+                seen.insert(key, &module.path);
+            }
+        }
+    }
+    Ok(())
 }
 
 fn compile_module(

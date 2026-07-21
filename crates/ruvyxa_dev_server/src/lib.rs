@@ -42,7 +42,8 @@ pub use env_file::project_env;
 
 mod action_security;
 use action_security::{
-    ActionRateLimiter, action_rate_limit_key, validate_action_payload, validate_action_request,
+    ActionRateLimiter, action_rate_limit_key, hmr_origin_is_cross_site, validate_action_payload,
+    validate_action_request,
 };
 #[cfg(test)]
 use action_security::{
@@ -637,7 +638,7 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
         .with_state(Arc::new(state));
 
     // Apply middleware stack from config (compression, CORS, timing, logging, custom headers)
-    let app = middleware_stack.apply(app);
+    let app = middleware_stack.apply(app).map_err(RuvyxaError::Message)?;
     let security_headers = config.security_headers;
     let app =
         app.layer(axum::middleware::map_response(
@@ -951,7 +952,20 @@ fn format_update_elapsed(elapsed: Duration) -> String {
     format!("{}.{:01}ms", tenths / 10, tenths % 10)
 }
 
-async fn hmr_ws(ws: WebSocketUpgrade, State(state): State<Arc<AppState>>) -> Response {
+async fn hmr_ws(
+    ws: WebSocketUpgrade,
+    State(state): State<Arc<AppState>>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    // Cross-site pages can open WebSockets to localhost and, unlike fetch,
+    // read the messages. Reject handshakes without same-origin evidence so
+    // project structure never leaks to other sites open in the browser.
+    if hmr_origin_is_cross_site(&headers, &state.config, peer.ip()) {
+        return with_security_headers(
+            (StatusCode::FORBIDDEN, "Cross-origin HMR connection blocked").into_response(),
+        );
+    }
     ws.on_upgrade(move |mut socket| async move {
         let mut reload_rx = state.reload_tx.subscribe();
 

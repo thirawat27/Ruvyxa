@@ -57,7 +57,7 @@ export function bunAdapter(options: BunAdapterOptions = {}): Adapter {
             kind: 'file',
             path: 'deploy/bun/README.md',
             contents:
-              '# Ruvyxa Bun deployment\\n\\nRun `bun .ruvyxa/deploy/bun/start.mjs` from the application root after installing production dependencies.\\n',
+              '# Ruvyxa Bun deployment\n\nRun `bun .ruvyxa/deploy/bun/start.mjs` from the application root after installing production dependencies.\n',
           },
         ],
       }

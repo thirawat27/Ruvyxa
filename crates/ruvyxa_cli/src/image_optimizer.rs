@@ -133,12 +133,15 @@ pub fn optimize_public_images(
 }
 
 fn discover_sources(public_dir: &Path) -> anyhow::Result<Vec<PathBuf>> {
-    let mut sources = WalkDir::new(public_dir)
-        .into_iter()
-        .filter_map(Result::ok)
-        .filter(|entry| entry.file_type().is_file())
-        .map(|entry| entry.into_path())
-        .collect::<Vec<_>>();
+    // Walk errors must not silently drop assets from the build output.
+    let mut sources = Vec::new();
+    for entry in WalkDir::new(public_dir) {
+        let entry = entry
+            .with_context(|| format!("failed to walk {} for image assets", public_dir.display()))?;
+        if entry.file_type().is_file() {
+            sources.push(entry.into_path());
+        }
+    }
     sources.sort();
     Ok(sources)
 }
@@ -149,13 +152,18 @@ fn ensure_unique_outputs(
     sources: &[PathBuf],
     optimize: bool,
 ) -> anyhow::Result<()> {
-    let mut output_sources = HashMap::<PathBuf, &Path>::new();
+    // Key on a case-folded path: the output directory may be
+    // case-insensitive (NTFS/APFS default) even when the source tree is
+    // case-sensitive, so `Hero.webp` and `hero.webp` are the same physical
+    // file and racing writers would silently drop one image.
+    let mut output_sources = HashMap::<String, &Path>::new();
     for source in sources {
         let mut output = assets_dir.join(source.strip_prefix(public_dir).unwrap_or(source));
         if optimize && is_optimizable_source(source) {
             output.set_extension("webp");
         }
-        if let Some(existing) = output_sources.insert(output.clone(), source) {
+        let folded = output.to_string_lossy().to_lowercase();
+        if let Some(existing) = output_sources.insert(folded, source) {
             bail!(
                 "image output collision: {} and {} both map to {}; rename one source",
                 existing.display(),
@@ -421,6 +429,21 @@ mod tests {
         assert!(public.join("hero.png").is_file());
         assert!(public.join("hero.jpg").is_file());
         assert!(!assets.join("hero.webp").exists());
+    }
+
+    #[test]
+    fn rejects_case_variant_output_collisions() {
+        let temp = tempfile::tempdir().unwrap();
+        let public = temp.path().join("public");
+        let assets = temp.path().join("assets");
+        fs::create_dir(&public).unwrap();
+
+        // On a case-insensitive output filesystem `Hero.webp` and
+        // `hero.webp` are one physical file; the guard must catch the
+        // collision even when the byte-for-byte paths differ.
+        let sources = vec![public.join("Hero.png"), public.join("hero.PNG")];
+        let error = ensure_unique_outputs(&public, &assets, &sources, true).unwrap_err();
+        assert!(error.to_string().contains("image output collision"));
     }
 
     #[test]

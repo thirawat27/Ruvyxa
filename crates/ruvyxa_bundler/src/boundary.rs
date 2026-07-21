@@ -34,12 +34,22 @@ pub fn check(
         return Ok(());
     }
 
-    // Client bundles: enforce all three rules.
+    // Client bundles: enforce all three rules. Keep scanning after the
+    // first hard violation so one build reports every affected module
+    // instead of surfacing them one fix-and-rebuild cycle at a time.
+    let mut first_error = None;
     for module in modules {
-        check_client_module(module, &input.project_root, out)?;
+        if let Err(error) = check_client_module(module, &input.project_root, out)
+            && first_error.is_none()
+        {
+            first_error = Some(error);
+        }
     }
 
-    Ok(())
+    match first_error {
+        Some(error) => Err(error),
+        None => Ok(()),
+    }
 }
 
 fn check_client_module(

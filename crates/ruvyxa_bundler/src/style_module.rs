@@ -342,7 +342,7 @@ fn fnv1a_64(input: &[u8]) -> u64 {
     hash
 }
 
-fn normalized_relative_path(path: &Path, project_root: &Path) -> String {
+pub(crate) fn normalized_relative_path(path: &Path, project_root: &Path) -> String {
     let path = path.canonicalize().unwrap_or_else(|_| PathBuf::from(path));
     let root = project_root
         .canonicalize()

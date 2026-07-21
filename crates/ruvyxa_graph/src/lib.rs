@@ -2,7 +2,7 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::fs;
 use std::path::{Component, Path, PathBuf};
 
-use ruvyxa_diagnostics::{Diagnostic, Result, RuvyxaError};
+use ruvyxa_diagnostics::{Diagnostic, Result, RuvyxaError, normalized_canonical_path};
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
@@ -211,11 +211,6 @@ pub fn write_manifest(manifest: &RouteManifest, output_file: &Path) -> Result<()
     Ok(())
 }
 
-pub fn read_manifest(manifest_file: &Path) -> Result<RouteManifest> {
-    let json = fs::read_to_string(manifest_file)?;
-    serde_json::from_str(&json).map_err(|error| RuvyxaError::Message(error.to_string()))
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ValidationReport {
@@ -239,7 +234,9 @@ pub fn validate_app(root: &Path, manifest: &RouteManifest) -> Result<ValidationR
     let mut server_modules = BTreeSet::new();
 
     // Pre-canonicalize root once instead of per-module (avoids repeated syscalls).
-    let canonical_root = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+    // Use the verbatim-prefix-free helper so `strip_prefix` against module
+    // paths (also normalized) actually matches on Windows.
+    let canonical_root = normalized_canonical_path(root);
 
     // Track which modules have already been validated to avoid duplicate reads.
     let mut validated_client: BTreeSet<PathBuf> = BTreeSet::new();
@@ -367,8 +364,10 @@ fn validate_client_module(
     let is_server_dir = if let Ok(relative) = file.strip_prefix(canonical_root) {
         relative_starts_with_server(relative)
     } else {
-        // Paths don't share a prefix — try canonicalizing the file as fallback.
-        let canonical_file = file.canonicalize().unwrap_or_else(|_| file.to_path_buf());
+        // Paths don't share a prefix — normalize the file the same way as the
+        // root before giving up, so Windows verbatim prefixes can't silently
+        // skip the server/ boundary check.
+        let canonical_file = normalized_canonical_path(file);
         if let Ok(relative) = canonical_file.strip_prefix(canonical_root) {
             relative_starts_with_server(relative)
         } else {
@@ -412,7 +411,9 @@ fn validate_server_module(file: &Path, diagnostics: &mut Vec<Diagnostic>) -> Res
 
 fn collect_relative_graph(entry: &Path) -> BTreeSet<PathBuf> {
     let mut visited = BTreeSet::new();
-    let mut queue = VecDeque::from([entry.to_path_buf()]);
+    // Normalize the entry exactly like resolved imports so a cycle back to
+    // the entry file compares equal instead of being visited twice.
+    let mut queue = VecDeque::from([normalized_canonical_path(entry)]);
 
     while let Some(file) = queue.pop_front() {
         if !visited.insert(file.clone()) {
@@ -548,7 +549,7 @@ fn resolve_relative_import(from: &Path, specifier: &str) -> Option<PathBuf> {
     candidates
         .into_iter()
         .find(|candidate| candidate.is_file())
-        .and_then(|candidate| candidate.canonicalize().ok().or(Some(candidate)))
+        .map(|candidate| normalized_canonical_path(&candidate))
 }
 
 fn private_env_reads(source: &str) -> Vec<String> {
@@ -621,7 +622,7 @@ fn code_without_strings_and_comments(source: &str) -> String {
             }
             '`' => {
                 output.push(' ');
-                skip_template_literal(&mut chars, &mut output);
+                skip_template_literal(&mut chars, &mut output, false);
             }
             '/' if chars.peek().is_some_and(|(_, next)| *next == '/') => {
                 output.push(' ');
@@ -659,7 +660,7 @@ fn code_for_import_specifiers(source: &str) -> String {
             }
             '`' => {
                 output.push(' ');
-                skip_template_literal(&mut chars, &mut output);
+                skip_template_literal(&mut chars, &mut output, true);
             }
             '/' if chars.peek().is_some_and(|(_, next)| *next == '/') => {
                 output.push(' ');
@@ -713,6 +714,19 @@ fn copy_quoted_string(
     }
 }
 
+/// Blank out one source character while preserving byte offsets, so scanners
+/// that map positions in the stripped code back into the original source
+/// (e.g. `literal_env_name`) stay index-accurate even after multibyte text.
+fn push_blanked(output: &mut String, character: char) {
+    if character == '\n' {
+        output.push('\n');
+    } else {
+        for _ in 0..character.len_utf8() {
+            output.push(' ');
+        }
+    }
+}
+
 fn skip_quoted_string(
     quote: char,
     chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>,
@@ -720,11 +734,7 @@ fn skip_quoted_string(
 ) {
     let mut escaped = false;
     for (_, character) in chars.by_ref() {
-        if character == '\n' {
-            output.push('\n');
-        } else {
-            output.push(' ');
-        }
+        push_blanked(output, character);
 
         if escaped {
             escaped = false;
@@ -745,27 +755,87 @@ fn skip_quoted_string(
 fn skip_template_literal(
     chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>,
     output: &mut String,
+    preserve_import_strings: bool,
 ) {
     let mut escaped = false;
-    for (_, character) in chars.by_ref() {
-        if character == '\n' {
-            output.push('\n');
-        } else {
-            output.push(' ');
-        }
-
+    while let Some((_, character)) = chars.next() {
         if escaped {
             escaped = false;
+            push_blanked(output, character);
             continue;
         }
 
-        if character == '\\' {
-            escaped = true;
-            continue;
+        match character {
+            '\\' => {
+                escaped = true;
+                output.push(' ');
+            }
+            '`' => {
+                output.push(' ');
+                return;
+            }
+            // `${...}` interpolations are live expressions, not string text.
+            // Blanking them would hide private env reads and server-only
+            // imports from the boundary scanners, so emit their code.
+            '$' if chars.peek().is_some_and(|(_, next)| *next == '{') => {
+                chars.next();
+                output.push(' ');
+                output.push(' ');
+                emit_template_interpolation(chars, output, preserve_import_strings);
+            }
+            _ => push_blanked(output, character),
         }
+    }
+}
 
-        if character == '`' {
-            break;
+/// Emit the code inside a `${...}` template interpolation, stripping nested
+/// strings, templates, and comments the same way as the top-level scan.
+fn emit_template_interpolation(
+    chars: &mut std::iter::Peekable<std::str::CharIndices<'_>>,
+    output: &mut String,
+    preserve_import_strings: bool,
+) {
+    let mut depth = 1_usize;
+    while let Some((_, character)) = chars.next() {
+        match character {
+            '{' => {
+                depth += 1;
+                output.push('{');
+            }
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    output.push(' ');
+                    return;
+                }
+                output.push('}');
+            }
+            '"' | '\'' => {
+                if preserve_import_strings && should_preserve_import_string(output) {
+                    output.push(character);
+                    copy_quoted_string(character, chars, output);
+                } else {
+                    output.push(' ');
+                    skip_quoted_string(character, chars, output);
+                }
+            }
+            '`' => {
+                output.push(' ');
+                skip_template_literal(chars, output, preserve_import_strings);
+            }
+            '/' if chars.peek().is_some_and(|(_, next)| *next == '/') => {
+                output.push(' ');
+                chars.next();
+                output.push(' ');
+                skip_line_comment(chars, output);
+            }
+            '/' if chars.peek().is_some_and(|(_, next)| *next == '*') => {
+                output.push(' ');
+                chars.next();
+                output.push(' ');
+                skip_block_comment(chars, output);
+            }
+            _ => output.push(character),
         }
     }
 }
@@ -779,7 +849,7 @@ fn skip_line_comment(
             output.push('\n');
             break;
         }
-        output.push(' ');
+        push_blanked(output, character);
     }
 }
 
@@ -789,11 +859,7 @@ fn skip_block_comment(
 ) {
     let mut previous = '\0';
     for (_, character) in chars.by_ref() {
-        if character == '\n' {
-            output.push('\n');
-        } else {
-            output.push(' ');
-        }
+        push_blanked(output, character);
 
         if previous == '*' && character == '/' {
             break;
@@ -1651,6 +1717,47 @@ mod tests {
     fn detects_literal_bracket_private_env_reads() {
         let names = private_env_reads(
             r#"const secret = process.env["DATABASE_URL"]; const docs = "process.env['EXAMPLE']";"#,
+        );
+
+        assert_eq!(names, vec!["DATABASE_URL"]);
+    }
+
+    #[test]
+    fn detects_private_env_reads_inside_template_interpolations() {
+        let names = private_env_reads(
+            "const label = `db: ${process.env.DATABASE_URL}`;\nconst doc = `plain process.env.IGNORED text`;",
+        );
+
+        assert_eq!(names, vec!["DATABASE_URL"]);
+
+        let nested = private_env_reads(
+            "const value = `outer ${cond ? `inner ${process.env.API_SECRET}` : \"\"}`;",
+        );
+        assert_eq!(nested, vec!["API_SECRET"]);
+    }
+
+    #[test]
+    fn detects_server_only_imports_inside_template_interpolations() {
+        let specifiers = import_specifiers(
+            "const loader = `${require(\"server-only\")}`;\nconst doc = `import \"ignored-in-text\";`;",
+        );
+
+        assert!(
+            specifiers.iter().any(|s| s == "server-only"),
+            "{specifiers:?}"
+        );
+        assert!(
+            !specifiers.iter().any(|s| s == "ignored-in-text"),
+            "{specifiers:?}"
+        );
+    }
+
+    #[test]
+    fn bracket_env_reads_stay_index_accurate_after_multibyte_text() {
+        // Thai comment before the read shifts byte offsets; blanking must be
+        // byte-width preserving or the bracket lookup reads garbage.
+        let names = private_env_reads(
+            "// คอมเมนต์ภาษาไทยก่อนหน้า\nconst secret = process.env[\"DATABASE_URL\"];",
         );
 
         assert_eq!(names, vec!["DATABASE_URL"]);

@@ -1408,7 +1408,14 @@ async fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Resul
         serde_json::to_string_pretty(&build_info)?,
     )?;
 
-    commit_staged_build_outputs(&staging_dir, &out_dir)
+    // The commit path retries renames with blocking backoff sleeps on
+    // Windows; run it off the async runtime so a locked file can't stall
+    // other tasks sharing the worker thread.
+    let commit_staging = staging_dir.clone();
+    let commit_out = out_dir.clone();
+    tokio::task::spawn_blocking(move || commit_staged_build_outputs(&commit_staging, &commit_out))
+        .await
+        .context("build output commit task panicked")?
         .with_context(|| format!("failed to commit build output into {}", out_dir.display()))?;
     run_plugin_build_complete(
         &args.root,
@@ -4744,10 +4751,12 @@ fn copy_optional_dir(from: &Path, to: &Path) -> anyhow::Result<()> {
 fn copy_dir_all(from: &Path, to: &Path) -> anyhow::Result<()> {
     fs::create_dir_all(to)?;
 
-    for entry in WalkDir::new(from)
-        .into_iter()
-        .filter_map(std::result::Result::ok)
-    {
+    // A walk error (permission denied, locked file, broken reparse point)
+    // must fail the copy: dropping the entry would commit a silently
+    // incomplete build tree that only surfaces later at runtime.
+    for entry in WalkDir::new(from) {
+        let entry = entry
+            .with_context(|| format!("failed to walk {} during build copy", from.display()))?;
         let relative = entry.path().strip_prefix(from)?;
         let target = to.join(relative);
 
