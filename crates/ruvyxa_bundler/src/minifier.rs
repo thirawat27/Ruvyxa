@@ -323,22 +323,39 @@ fn is_ascii_identifier_byte(byte: u8) -> bool {
 
 /// Remove unused exports from the linked bundle.
 ///
+/// Runs [`tree_shake_pass`] to a fixed point (bounded) so that unused
+/// re-export chains (`__exports.bar = __ruv_a__.foo;` where `bar` is itself
+/// unused) collapse fully instead of leaving one dead hop behind after a
+/// single pass.
+fn tree_shake(source: &str) -> String {
+    let mut current = source.to_string();
+    for _ in 0..64 {
+        let next = tree_shake_pass(&current);
+        if next == current {
+            break;
+        }
+        current = next;
+    }
+    current
+}
+
+/// Remove unused exports from the linked bundle, one pass.
+///
 /// Strategy:
 /// 1. Scan for all `__ruv_<hex16>__.<member>` property accesses across the
-///    entire bundle to build a "used set" per module.
+///    entire bundle (ignoring already tree-shaken lines) to build a "used
+///    set" per module.
 /// 2. Remove lines matching `__exports.<name> = <name>;` where `<name>` is
 ///    not in the used set for that module.
-/// 3. Remove variable declarations whose sole purpose was the removed export,
-///    if they are not referenced elsewhere in the same module scope.
 ///
 /// This is conservative — if we can't prove an export is unused, we keep it.
-fn tree_shake(source: &str) -> String {
-    // Step 1: Collect all consumed members: `__ruv_xxx__.member`
+/// Chained re-exports need repeated passes; see [`tree_shake`].
+fn tree_shake_pass(source: &str) -> String {
+    // Step 1: Collect all consumed members: `__ruv_xxx__.member`. An empty
+    // set is meaningful, not a signal to bail — it means every remaining
+    // live export in this pass is unreferenced (e.g. the last hop of a
+    // cascading dead re-export chain) and should still be shaken.
     let used_members = collect_used_members(source);
-
-    if used_members.is_empty() {
-        return source.to_string();
-    }
 
     // Step 2: Remove unused `__exports.name = name;` assignments.
     let mut out = String::with_capacity(source.len());
@@ -395,9 +412,22 @@ fn tree_shake(source: &str) -> String {
 
 /// Scan the source for all `__ruv_<hex16>__.<member>` accesses.
 ///
+/// Lines already marked `// [tree-shaken]` are skipped so a dead export's
+/// own now-unreachable references don't keep something else alive forever.
+///
 /// Returns a set of `"__ruv_xxx__.member"` strings.
 fn collect_used_members(source: &str) -> BTreeSet<String> {
     let mut members = BTreeSet::new();
+    for line in source.lines() {
+        if line.trim_start().starts_with("// [tree-shaken]") {
+            continue;
+        }
+        collect_used_members_in(line, &mut members);
+    }
+    members
+}
+
+fn collect_used_members_in(source: &str, members: &mut BTreeSet<String>) {
     let prefix = "__ruv_";
     let mut search = source;
 
@@ -430,8 +460,6 @@ fn collect_used_members(source: &str) -> BTreeSet<String> {
 
         search = &search[start + id_end..];
     }
-
-    members
 }
 
 /// Extract the module ID from a line like `var __ruv_abc123__ = (function() {`
@@ -921,6 +949,50 @@ var __ruv_bbbb2222bbbb2222__ = (function() {
         let result = tree_shake(src);
         // `default` is never shaken — it's always considered used.
         assert!(result.contains("__exports.default = Page;"));
+    }
+
+    #[test]
+    fn tree_shake_collapses_unused_reexport_chains() {
+        // `c` re-exports `b`'s `unused`, which re-exports `a`'s `unused`.
+        // Nothing ever reads `__ruv_cccc__.unused`, so all three hops should
+        // shake out, not just the outermost one.
+        let src = r#"var __ruv_aaaa1111aaaa1111__ = (function() {
+  "use strict";
+  var __exports = {};
+  const unused = 2;
+  __exports.unused = unused;
+  return __exports;
+})();
+var __ruv_bbbb2222bbbb2222__ = (function() {
+  "use strict";
+  var __exports = {};
+  __exports.unused = __ruv_aaaa1111aaaa1111__.unused;
+  return __exports;
+})();
+var __ruv_cccc3333cccc3333__ = (function() {
+  "use strict";
+  var __exports = {};
+  __exports.unused = __ruv_bbbb2222bbbb2222__.unused;
+  return __exports;
+})();
+"#;
+        let result = tree_shake(src);
+        let active_lines: Vec<&str> = result
+            .lines()
+            .filter(|l| l.contains("__exports.unused") && !l.contains("[tree-shaken]"))
+            .collect();
+        assert!(
+            active_lines.is_empty(),
+            "unused re-export chain should fully collapse: {:?}",
+            active_lines
+        );
+        assert!(result.contains("[tree-shaken] __exports.unused = unused;"));
+        assert!(
+            result.contains("[tree-shaken] __exports.unused = __ruv_aaaa1111aaaa1111__.unused;")
+        );
+        assert!(
+            result.contains("[tree-shaken] __exports.unused = __ruv_bbbb2222bbbb2222__.unused;")
+        );
     }
 
     #[test]
