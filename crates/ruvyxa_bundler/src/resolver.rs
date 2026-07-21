@@ -1845,7 +1845,7 @@ export default function Card() { return <div className={cn("card")} /> }"#,
         let pkg = root.join("node_modules").join("pkg");
         fs::create_dir_all(pkg.join("dist")).unwrap();
         fs::write(pkg.join("dist/a.js"), "export default 1;").unwrap();
-        fs::write(pkg.join("dist/b.js"), "export default 2;").unwrap();
+        fs::write(pkg.join("dist/second.js"), "export default 2;").unwrap();
         fs::write(
             pkg.join("package.json"),
             r#"{"exports":{".":"./dist/a.js"}}"#,
@@ -1859,9 +1859,12 @@ export default function Card() { return <div className={cn("card")} /> }"#,
         };
         assert!(first.ends_with("dist/a.js"));
 
+        // Different byte length than the first package.json (not just
+        // different mtime) so the fingerprint changes even if the two
+        // writes land within the same filesystem timestamp tick.
         fs::write(
             pkg.join("package.json"),
-            r#"{"exports":{".":"./dist/b.js"}}"#,
+            r#"{"exports":{".":"./dist/second.js"}}"#,
         )
         .unwrap();
 
@@ -1870,6 +1873,6 @@ export default function Card() { return <div className={cn("card")} /> }"#,
         else {
             panic!("expected second resolution after package.json change");
         };
-        assert!(second.ends_with("dist/b.js"));
+        assert!(second.ends_with("dist/second.js"));
     }
 }
