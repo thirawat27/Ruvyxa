@@ -1,5 +1,24 @@
 # Changelog
 
+## v1.0.18 (2026-07-22)
+
+### Markdown Content Route Validation
+
+- Boundary validation and rendering-strategy detection no longer treat fenced code blocks and inline
+  code spans in `page.md`/`page.mdx` content routes as executable code. A guide that shows
+  `process.env.SECRET` or `import 'server-only'` inside an example previously failed the build with
+  false `RUV1007`/`RUV1008`/`RUV1009` diagnostics, and an example containing `fetch(` could silently
+  demote a static page from SSG to SSR. MDX ESM outside fences is still validated.
+
+### Bundler: Windows Path Normalization
+
+- The package-`exports` resolver branch now strips Windows verbatim path prefixes (`\\?\`) the same
+  way as every other resolver branch. Mixed prefixes previously broke shared-route chunk planning on
+  Windows with `build.split: 'route'` in npm-layout projects, failing production builds with
+  `prepared shared route module is unavailable: …\react\index.js`.
+
+Both defects were found by building the Ruvyxa documentation site with the framework itself.
+
 ## v1.0.17 (2026-07-22)
 
 ### Official Data, Auth, and Realtime Packages
