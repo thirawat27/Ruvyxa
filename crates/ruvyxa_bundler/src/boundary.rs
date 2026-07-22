@@ -64,7 +64,11 @@ fn check_client_module(
     let source = &module.js;
 
     // RUV1007 – "server-only" import
-    if imports_marker(source, "server-only") {
+    if ast::parse_module(source)
+        .imports
+        .iter()
+        .any(|edge| is_server_only_specifier(&edge.specifier))
+    {
         return Err(Diagnostic::new(
             "RUV1007",
             "Server-only module imported into client bundle",
@@ -142,6 +146,13 @@ fn imports_marker(source: &str, marker: &str) -> bool {
         .imports
         .iter()
         .any(|edge| edge.specifier == marker)
+}
+
+fn is_server_only_specifier(specifier: &str) -> bool {
+    matches!(
+        specifier,
+        "server-only" | "@ruvyxa/auth" | "@ruvyxa/database"
+    )
 }
 
 fn is_inside_server_dir(path: &Path, project_root: &Path) -> bool {
@@ -492,5 +503,8 @@ mod tests {
             "server-only"
         ));
         assert!(imports_marker("import 'server-only';", "server-only"));
+        assert!(is_server_only_specifier("@ruvyxa/auth"));
+        assert!(is_server_only_specifier("@ruvyxa/database"));
+        assert!(!is_server_only_specifier("@ruvyxa/auth/client"));
     }
 }

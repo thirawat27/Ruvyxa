@@ -100,6 +100,7 @@ describe('config API', () => {
       resolveId() {},
       transform() {},
       onBuildComplete() {},
+      enableRealtime() {},
     })
 
     assert.equal(auth.name, 'auth')
@@ -114,6 +115,7 @@ describe('config API', () => {
       resolveId() {},
       transform() {},
       onBuildComplete() {},
+      enableRealtime() {},
     })
     assert.equal(typeof registered, 'function')
   })

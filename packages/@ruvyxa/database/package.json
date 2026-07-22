@@ -1,0 +1,41 @@
+{
+  "name": "@ruvyxa/database",
+  "version": "1.0.17",
+  "description": "Typed database primitives and production adapter contracts for Ruvyxa applications.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": ["dist", "README.md"],
+  "keywords": [
+    "ruvyxa",
+    "database",
+    "prisma",
+    "postgresql",
+    "mysql",
+    "sqlite",
+    "mongodb",
+    "dynamodb"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/thirawat27/ruvyxa.git",
+    "directory": "packages/@ruvyxa/database"
+  },
+  "bugs": { "url": "https://github.com/thirawat27/ruvyxa/issues" },
+  "homepage": "https://github.com/thirawat27/ruvyxa#readme",
+  "engines": { "node": ">=22.0.0" },
+  "publishConfig": { "access": "public" },
+  "exports": {
+    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" }
+  },
+  "dependencies": { "@ruvyxa/core": "workspace:^" },
+  "devDependencies": { "@types/node": "^26.1.1" },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.check.json",
+    "test": "pnpm run build && node --test \"../../../tests/packages/database/**/*.test.ts\"",
+    "format": "tsc -p tsconfig.check.json",
+    "prepack": "pnpm run build"
+  }
+}

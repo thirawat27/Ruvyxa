@@ -30,6 +30,26 @@ describe('server API', () => {
     assert.equal(await save(' hello '), 'HELLO')
   })
 
+  it('records validated realtime channels without changing action execution', async () => {
+    const save = action
+      .input({ parse: (value: unknown) => String(value) })
+      .realtime(['users', 'users', 'dashboard'])
+      .handler(async ({ input }) => input)
+
+    assert.equal(await save('ok'), 'ok')
+    assert.deepEqual(save.ruvyxa.realtime?.channels, ['users', 'dashboard'])
+    assert.throws(() => action.realtime(' '), /1-128 letters/)
+    assert.throws(
+      () => action.realtime(Array.from({ length: 17 }, (_, index) => `channel-${index}`)),
+      /at most 16/,
+    )
+  })
+
+  it('uses route-scoped realtime when no channel is provided', () => {
+    const refresh = action.realtime().handler(async () => true)
+    assert.deepEqual(refresh.ruvyxa.realtime?.channels, [])
+  })
+
   it('creates redirect responses', () => {
     const response = redirect('/login')
     assert.equal(response.status, 302)

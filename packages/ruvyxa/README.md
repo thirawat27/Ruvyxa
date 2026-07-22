@@ -151,6 +151,11 @@ export default config({
 
 ## Built-in Plugins
 
+For production stateful features, Ruvyxa also ships `@ruvyxa/database`, `@ruvyxa/auth`, and
+`@ruvyxa/realtime`. Database and auth use explicit durable adapters rather than process-global
+state. Native realtime is action-driven and supported on self-hosted Node/Bun; unsupported static,
+edge, and serverless targets fail during build instead of deploying a dead socket.
+
 `ruvyxa/plugins` provides typed first-party plugins without extra packages:
 
 - Runtime: `observability()`, `securityHeaders()`, and `cacheRules()`

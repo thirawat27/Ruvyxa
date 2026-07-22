@@ -785,6 +785,29 @@ export class contentFormat {}
     })
   })
 
+  it('rejects official server-only auth and database entrypoints in client bundles', async () => {
+    await withFixture(async ({ root, outDir }) => {
+      for (const packageName of ['@ruvyxa/auth', '@ruvyxa/database']) {
+        const pageFile = path.join(root, `${packageName.split('/')[1]}.ts`)
+        await writeFile(
+          pageFile,
+          `import * as serverApi from '${packageName}'\nexport default serverApi\n`,
+        )
+        await assert.rejects(
+          compileBundle({
+            projectRoot: root,
+            entrySource: `export { default } from ${JSON.stringify(toImportPath(pageFile))}`,
+            sourcefile: 'ruvyxa:official-server-only-entry.ts',
+            outfile: path.join(outDir, 'official-server-only.mjs'),
+            platform: 'browser',
+            external: [packageName],
+          }),
+          /RUV1007: Server-only module imported into client bundle/,
+        )
+      }
+    })
+  })
+
   it('rejects private environment reads that follow a regular expression literal', async () => {
     await withFixture(async ({ root, outDir }) => {
       const pageFile = path.join(root, 'page.ts')
@@ -1056,6 +1079,7 @@ export class contentFormat {}
         resolveId: 0,
         transform: 0,
         buildComplete: 1,
+        realtime: null,
       })
 
       const request = await runJson(pluginRuntime, [root, 'middlewareRequest'], {
@@ -1143,6 +1167,7 @@ export class contentFormat {}
         resolveId: 0,
         transform: 0,
         buildComplete: 2,
+        realtime: null,
       })
       const configCache = path.join(root, '.ruvyxa', 'cache', 'config')
       const compiledConfigs = await Promise.all(
@@ -1190,6 +1215,60 @@ export class contentFormat {}
       assert.equal(failed.exitCode, 1)
       assert.equal(failed.parsed.ok, false)
       assert.match(failed.parsed.message, /middleware routes\[0\].*start with "\/" or equal "\*"/)
+    })
+  })
+
+  it('describes one validated native realtime transport', async () => {
+    await withFixture(async ({ root }) => {
+      await writeFile(
+        path.join(root, 'ruvyxa.config.ts'),
+        `export default {
+          plugins: [{
+            name: 'realtime',
+            setup({ enableRealtime }) {
+              enableRealtime({ path: '/events', heartbeatMs: 10000, capacity: 64 })
+            },
+          }],
+        }`,
+      )
+
+      const described = await runJson(pluginRuntime, [root, 'describe'], {})
+      assert.deepEqual(described.result.realtime, {
+        plugin: 'realtime',
+        path: '/events',
+        heartbeatMs: 10_000,
+        capacity: 64,
+      })
+    })
+  })
+
+  it('rejects invalid or duplicate realtime transport registrations', async () => {
+    await withFixture(async ({ root }) => {
+      await writeFile(
+        path.join(root, 'ruvyxa.config.ts'),
+        `export default {
+          plugins: [
+            { name: 'one', setup({ enableRealtime }) { enableRealtime({ path: 'events' }) } },
+            { name: 'two', setup({ enableRealtime }) { enableRealtime() } },
+          ],
+        }`,
+      )
+      const invalid = await runJsonResult(pluginRuntime, [root, 'describe'], {})
+      assert.equal(invalid.exitCode, 1)
+      assert.match(invalid.parsed.message, /realtime path must be an absolute path/)
+
+      await writeFile(
+        path.join(root, 'ruvyxa.config.ts'),
+        `export default {
+          plugins: [
+            { name: 'one', setup({ enableRealtime }) { enableRealtime() } },
+            { name: 'two', setup({ enableRealtime }) { enableRealtime() } },
+          ],
+        }`,
+      )
+      const duplicate = await runJsonResult(pluginRuntime, [root, 'describe'], {})
+      assert.equal(duplicate.exitCode, 1)
+      assert.match(duplicate.parsed.message, /already owns the transport/)
     })
   })
 

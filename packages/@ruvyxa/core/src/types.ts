@@ -293,6 +293,16 @@ export interface PluginBuildContext {
 
 export type PluginBuildCompleteHook = (context: PluginBuildContext) => void | Promise<void>
 
+/** Native self-hosted realtime transport requested by a first-party plugin. */
+export interface RealtimePluginOptions {
+  /** WebSocket endpoint. Must be an absolute application path. @default "/__ruvyxa/realtime" */
+  path?: string
+  /** WebSocket heartbeat interval in milliseconds. @default 25000 */
+  heartbeatMs?: number
+  /** Per-process broadcast queue capacity. @default 256 */
+  capacity?: number
+}
+
 /** Registration surface available while a plugin is set up. */
 export interface PluginSetupContext {
   /** Add request and/or response middleware to Ruvyxa's ordered middleware pipeline. */
@@ -303,6 +313,8 @@ export interface PluginSetupContext {
   transform(hook: PluginTransformHook): void
   /** Run after core output is committed and before adapters materialize deployment artifacts. */
   onBuildComplete(hook: PluginBuildCompleteHook): void
+  /** Enable Ruvyxa's native self-hosted WebSocket transport for this plugin. */
+  enableRealtime(options?: RealtimePluginOptions): void
 }
 
 /** A Ruvyxa plugin configured in `ruvyxa.config.ts`. */

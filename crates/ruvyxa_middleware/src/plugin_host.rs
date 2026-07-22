@@ -84,6 +84,18 @@ pub struct PluginRegistryDescriptor {
     pub resolve_id: usize,
     pub transform: usize,
     pub build_complete: usize,
+    #[serde(default)]
+    pub realtime: Option<RealtimeDescriptor>,
+}
+
+/// Native realtime registration reported by the TypeScript plugin registry.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RealtimeDescriptor {
+    pub plugin: String,
+    pub path: String,
+    pub heartbeat_ms: u64,
+    pub capacity: usize,
 }
 
 #[derive(Debug, Deserialize)]
@@ -503,6 +515,41 @@ mod tests {
         .unwrap();
         assert_eq!(counts.request_routes, Some(vec!["/admin/*".to_string()]));
         assert_eq!(counts.response_routes, None);
+    }
+
+    #[test]
+    fn realtime_descriptor_is_additive_for_older_runtimes() {
+        let descriptor: PluginRegistryDescriptor = serde_json::from_value(serde_json::json!({
+            "plugins": [],
+            "middleware": { "request": 0, "response": 0 },
+            "resolveId": 0,
+            "transform": 0,
+            "buildComplete": 0
+        }))
+        .unwrap();
+        assert_eq!(descriptor.realtime, None);
+
+        let descriptor: PluginRegistryDescriptor = serde_json::from_value(serde_json::json!({
+            "plugins": ["ruvyxa:realtime"],
+            "middleware": { "request": 0, "response": 0 },
+            "resolveId": 0,
+            "transform": 0,
+            "buildComplete": 1,
+            "realtime": {
+                "plugin": "ruvyxa:realtime",
+                "path": "/__ruvyxa/realtime",
+                "heartbeatMs": 25000,
+                "capacity": 256
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            descriptor
+                .realtime
+                .as_ref()
+                .map(|value| value.path.as_str()),
+            Some("/__ruvyxa/realtime")
+        );
     }
 
     #[test]

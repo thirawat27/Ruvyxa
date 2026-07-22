@@ -11,6 +11,7 @@ use std::time::Duration;
 use axum::body::Body;
 use axum::http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use axum::response::{IntoResponse, Response};
+use base64::Engine;
 use ruvyxa_bundler::JsxRuntime;
 use ruvyxa_diagnostics::{Diagnostic, Result, RuvyxaError};
 use ruvyxa_graph::{
@@ -801,6 +802,7 @@ pub(crate) async fn render_server_action_pooled(
 
     let status = StatusCode::from_u16(response.status.unwrap_or(200)).unwrap_or(StatusCode::OK);
     let mut http_response = (status, response.body.unwrap_or_default()).into_response();
+    let mut realtime_event = None;
 
     if let Some(headers) = response.header_pairs.or_else(|| {
         response
@@ -808,6 +810,15 @@ pub(crate) async fn render_server_action_pooled(
             .map(|headers| headers.into_iter().collect::<Vec<_>>())
     }) {
         for (key, value) in headers {
+            if key.eq_ignore_ascii_case("x-ruvyxa-realtime-event") {
+                if realtime_event.is_some() {
+                    return Err(RuvyxaError::Message(
+                        "RUV1500 action returned duplicate realtime event metadata".into(),
+                    ));
+                }
+                realtime_event = Some(decode_realtime_event(&value)?);
+                continue;
+            }
             let Ok(name) = HeaderName::from_bytes(key.as_bytes()) else {
                 continue;
             };
@@ -818,7 +829,60 @@ pub(crate) async fn render_server_action_pooled(
         }
     }
 
+    if let (Some(runtime), Some(event)) = (&state.realtime, realtime_event) {
+        let _ = runtime.tx.send(event);
+    }
+
     Ok(with_security_headers(http_response))
+}
+
+pub(crate) fn decode_realtime_event(value: &str) -> Result<String> {
+    if value.len() > 24 * 1024 {
+        return Err(RuvyxaError::Message(
+            "RUV1500 action realtime event metadata exceeds 24 KiB".into(),
+        ));
+    }
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(value)
+        .map_err(|_| {
+            RuvyxaError::Message("RUV1500 action realtime event is not base64url".into())
+        })?;
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| {
+        RuvyxaError::Message("RUV1500 action realtime event is not valid JSON".into())
+    })?;
+    let channels = payload
+        .get("channels")
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| {
+            RuvyxaError::Message("RUV1500 action realtime event has no channels".into())
+        })?;
+    let action = payload.get("action").and_then(serde_json::Value::as_str);
+    let path = payload.get("path").and_then(serde_json::Value::as_str);
+    let invalidated = payload
+        .get("invalidated")
+        .and_then(serde_json::Value::as_array);
+    let valid = payload.get("version").and_then(serde_json::Value::as_u64) == Some(1)
+        && payload.get("type").and_then(serde_json::Value::as_str) == Some("action")
+        && !channels.is_empty()
+        && channels.len() <= 16
+        && channels
+            .iter()
+            .all(|channel| channel.as_str().is_some_and(crate::valid_realtime_channel))
+        && action.is_some_and(|action| !action.is_empty() && action.len() <= 256)
+        && path.is_some_and(|path| path.starts_with('/') && path.len() <= 2_048)
+        && invalidated.is_some_and(|keys| {
+            keys.len() <= 64
+                && keys
+                    .iter()
+                    .all(|key| key.as_str().is_some_and(|key| key.len() <= 256))
+        });
+    if !valid {
+        return Err(RuvyxaError::Message(
+            "RUV1500 action realtime event has invalid metadata".into(),
+        ));
+    }
+    String::from_utf8(bytes)
+        .map_err(|_| RuvyxaError::Message("RUV1500 action realtime event is not UTF-8".into()))
 }
 
 pub(crate) async fn runtime_trace_cached(

@@ -24,6 +24,7 @@ export type {
   PluginTransformContext,
   PluginTransformHook,
   RateLimitConfig,
+  RealtimePluginOptions,
   RenderConfig,
   RenderStrategy,
   RouteParamValue,

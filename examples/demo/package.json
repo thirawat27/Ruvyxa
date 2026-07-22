@@ -17,6 +17,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@ruvyxa/realtime": "workspace:*",
     "@ruvyxa/react": "workspace:*",
     "ruvyxa": "workspace:*",
     "react": "^19.2.7",

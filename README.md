@@ -172,6 +172,9 @@
   can be controlled independently, alongside observability, security policy, cache rules, PWA,
   OpenAPI, redirects, bundle budgets, and environment validation. Build-generated files are included
   in adapter artifacts.
+- **Official state packages** — `@ruvyxa/database` provides a typed adapter facade, `@ruvyxa/auth`
+  provides secure provider-driven sessions, and `@ruvyxa/realtime` connects opted-in server actions
+  to the native self-hosted WebSocket transport with explicit deployment guards.
 
 ### CLI & diagnostics
 

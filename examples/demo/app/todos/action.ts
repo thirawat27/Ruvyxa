@@ -11,6 +11,7 @@ export const createTodo = action
       return { title }
     },
   })
+  .realtime('todos')
   .handler(async ({ input, invalidate }) => {
     invalidate('todos')
     return {

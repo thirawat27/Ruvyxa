@@ -118,21 +118,37 @@ Raised by `ruvyxa_middleware`.
 | **RUV2100** | Plugin runtime error        | Plugin runtime could not start or returned invalid protocol data                                    | Check the Node/Bun runtime and plugin setup                                         |
 | **RUV2101** | Plugin hook error           | Plugin callback threw or returned an unsupported value                                              | Check the named hook and return `undefined`, `Request`, or `Response` as documented |
 
+## Official Package Diagnostics (RUV3xxx)
+
+Raised by the official state packages during adapter calls, authentication requests, and builds.
+
+| Code             | Package            | Condition                                                     | Fix                                                                  |
+| ---------------- | ------------------ | ------------------------------------------------------------- | -------------------------------------------------------------------- |
+| **RUV3001**      | `@ruvyxa/database` | Invalid model, operation, arguments, or required environment  | Correct the query/options and keep database environment vars private |
+| **RUV3002**      | `@ruvyxa/database` | Adapter has no mapped model or operation                      | Correct Prisma model mapping or implement the transport operation    |
+| **RUV3003**      | `@ruvyxa/database` | Transaction requested from an adapter without transactions    | Supply an adapter with atomic transaction support                    |
+| **RUV3100–3104** | `@ruvyxa/auth`     | Auth runtime, request, rate limit, token, or provider failure | Inspect the named provider/store and preserve atomic store semantics |
+| **RUV3105**      | `@ruvyxa/auth`     | Process-local auth store used in a production build           | Configure durable session/token and rate-limit stores                |
+| **RUV3201**      | `@ruvyxa/realtime` | Native realtime selected for an unsupported deployment        | Self-host with Node/Bun or remove the native realtime plugin         |
+
 ---
 
 ## Diagnostic Code Ranges
 
-| Range   | Source crate        | Category                      |
-| ------- | ------------------- | ----------------------------- |
-| RUV10xx | `ruvyxa_graph`      | Route discovery & validation  |
-| RUV11xx | `ruvyxa_dev_server` | SSR rendering                 |
-| RUV12xx | `ruvyxa_dev_server` | API & server                  |
-| RUV13xx | `ruvyxa_dev_server` | Client bundles                |
-| RUV14xx | `ruvyxa_dev_server` | Styles                        |
-| RUV15xx | `ruvyxa_dev_server` | SSG/ISR/Actions/PPR           |
-| RUV16xx | `ruvyxa_dev_server` | Config validation             |
-| RUV20xx | `ruvyxa_middleware` | Middleware config & execution |
-| RUV21xx | `ruvyxa_middleware` | Plugin bridge                 |
+| Range   | Source crate        | Category                              |
+| ------- | ------------------- | ------------------------------------- |
+| RUV10xx | `ruvyxa_graph`      | Route discovery & validation          |
+| RUV11xx | `ruvyxa_dev_server` | SSR rendering                         |
+| RUV12xx | `ruvyxa_dev_server` | API & server                          |
+| RUV13xx | `ruvyxa_dev_server` | Client bundles                        |
+| RUV14xx | `ruvyxa_dev_server` | Styles                                |
+| RUV15xx | `ruvyxa_dev_server` | SSG/ISR/Actions/PPR                   |
+| RUV16xx | `ruvyxa_dev_server` | Config validation                     |
+| RUV20xx | `ruvyxa_middleware` | Middleware config & execution         |
+| RUV21xx | `ruvyxa_middleware` | Plugin bridge                         |
+| RUV30xx | `@ruvyxa/database`  | Database adapter and query validation |
+| RUV31xx | `@ruvyxa/auth`      | Authentication and store safety       |
+| RUV32xx | `@ruvyxa/realtime`  | Realtime deployment compatibility     |
 
 ---
 

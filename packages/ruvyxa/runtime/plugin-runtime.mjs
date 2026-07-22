@@ -95,6 +95,7 @@ async function createRegistry(root, pluginsValue) {
     resolveId: [],
     transform: [],
     buildComplete: [],
+    realtime: null,
   }
 
   for (const [index, plugin] of plugins.entries()) {
@@ -126,11 +127,46 @@ async function createRegistry(root, pluginsValue) {
         assertHook(name, 'onBuildComplete', hook)
         registry.buildComplete.push({ plugin: name, hook })
       },
+      enableRealtime(options = {}) {
+        if (registry.realtime) {
+          throw new TypeError(
+            `plugin "${name}" cannot enable realtime because plugin "${registry.realtime.plugin}" already owns the transport`,
+          )
+        }
+        registry.realtime = normalizeRealtime(name, options)
+      },
     })
     await plugin.setup(setupContext)
   }
 
   return registry
+}
+
+function normalizeRealtime(plugin, value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new TypeError(`plugin "${plugin}" enableRealtime() expects an options object`)
+  }
+  const pathValue = value.path ?? '/__ruvyxa/realtime'
+  const heartbeatMs = value.heartbeatMs ?? 25_000
+  const capacity = value.capacity ?? 256
+  if (
+    typeof pathValue !== 'string' ||
+    !pathValue.startsWith('/') ||
+    pathValue.includes('?') ||
+    pathValue.includes('#') ||
+    pathValue.includes('*')
+  ) {
+    throw new TypeError(
+      `plugin "${plugin}" realtime path must be an absolute path without query, fragment, or wildcard`,
+    )
+  }
+  if (!Number.isInteger(heartbeatMs) || heartbeatMs < 5_000 || heartbeatMs > 120_000) {
+    throw new TypeError(`plugin "${plugin}" realtime heartbeatMs must be between 5000 and 120000`)
+  }
+  if (!Number.isInteger(capacity) || capacity < 16 || capacity > 4096) {
+    throw new TypeError(`plugin "${plugin}" realtime capacity must be between 16 and 4096`)
+  }
+  return Object.freeze({ plugin, path: pathValue, heartbeatMs, capacity })
 }
 
 function normalizeMiddleware(plugin, value) {
@@ -207,6 +243,7 @@ async function handleHook(registry, hook, payload) {
         resolveId: registry.resolveId.length,
         transform: registry.transform.length,
         buildComplete: registry.buildComplete.length,
+        realtime: registry.realtime,
       })
     case 'resolveId':
       return success(await runResolveId(registry, payload))

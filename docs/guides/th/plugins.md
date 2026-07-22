@@ -46,6 +46,41 @@ export default config({ plugins: [auth] })
 
 ## Built-in plugins
 
+Ruvyxa มี official package สำหรับ state ของแอปเพิ่มอีก 3 ตัว:
+
+- `@ruvyxa/database` — facade CRUD/transaction แบบ typed โดย `prismaAdapter()` ใช้กับ PostgreSQL,
+  MySQL, SQLite และ MongoDB ส่วน `dynamoAdapter()` รับ AWS transport แบบ explicit
+- `@ruvyxa/auth` — credentials, OAuth PKCE (มี helper Google/GitHub), magic link, WebAuthn ผ่าน
+  verification adapter, secure session, atomic token store และ rate limit
+- `@ruvyxa/realtime` — WebSocket แบบ native ที่ publish event จาก server action สำหรับ Node/Bun แบบ
+  self-host
+
+```ts
+// ruvyxa.config.ts
+import { databasePlugin } from '@ruvyxa/database'
+import { realtime } from '@ruvyxa/realtime'
+import { config } from 'ruvyxa/config'
+
+export default config({
+  plugins: [databasePlugin({ requiredEnv: ['DATABASE_URL'] }), realtime()],
+})
+```
+
+ให้สร้าง database client และ auth runtime ใน server-only module ของแอป ห้ามใช้ module-global state
+ใน config เป็น shared store เพราะ config plugin, middleware worker และ render/action worker อยู่คนละ
+process ฝั่ง browser ของ Auth ต้อง import จาก `@ruvyxa/auth/client` และ Realtime จาก
+`@ruvyxa/realtime/client`; root import ของ `@ruvyxa/auth` และ `@ruvyxa/database` ใน client graph
+จะถูก ปฏิเสธด้วย `RUV1007`
+
+Native Realtime รองรับ `ruvyxa dev` และ Node/Bun self-host ผ่าน `ruvyxa start` เท่านั้น ส่วน Static,
+Vercel, Netlify, Cloudflare และ Edge จะ fail ตอน build ด้วย `RUV3201` เพราะ adapter เหล่านี้ไม่มี
+persistent WebSocket process กลาง สำหรับ Auth ให้ใช้ `auth.plugin` บน self-host middleware หรือ
+เรียก `auth.handle(request)` จาก API route ของ serverless อ่าน flow, endpoint, security invariant
+และ compatibility matrix ฉบับเต็มได้ที่
+[Official Data, Auth, and Realtime Packages](../../architecture/official-plugins.md)
+
+`ruvyxa/plugins` ยังเป็นชุด zero-install built-in plugin ที่ใช้ public hooks ชุดเดียวกัน:
+
 `ruvyxa/plugins` มี plugin สำเร็จรูปที่สร้างบน public hooks ชุดเดียวกัน:
 
 ```ts

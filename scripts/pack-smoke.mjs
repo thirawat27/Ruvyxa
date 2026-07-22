@@ -20,6 +20,9 @@ const currentPlatformPackage = `@ruvyxa/cli-${platform}-${arch}`
 const packages = [
   '@ruvyxa/core',
   '@ruvyxa/react',
+  '@ruvyxa/auth',
+  '@ruvyxa/database',
+  '@ruvyxa/realtime',
   '@ruvyxa/adapter-node',
   '@ruvyxa/adapter-vercel',
   '@ruvyxa/adapter-cloudflare',
@@ -62,6 +65,21 @@ for (const file of readdirSync(destination).filter((name) => name.endsWith('.tgz
 
   assert(!serialized.includes('workspace:'), `${file} contains workspace protocol`)
   assert(!listing.includes('.test.'), `${file} includes test files`)
+
+  if (['@ruvyxa/auth', '@ruvyxa/database', '@ruvyxa/realtime'].includes(packageJson.name)) {
+    assert(listing.includes('package/dist/index.js'), `${packageJson.name} missing dist/index.js`)
+    assert(listing.includes('package/dist/index.d.ts'), `${packageJson.name} missing declarations`)
+  }
+  if (['@ruvyxa/auth', '@ruvyxa/realtime'].includes(packageJson.name)) {
+    assert(
+      listing.includes('package/dist/client.js'),
+      `${packageJson.name} missing client entrypoint`,
+    )
+    assert(
+      listing.includes('package/dist/client.d.ts'),
+      `${packageJson.name} missing client declarations`,
+    )
+  }
 
   if (packageJson.name === 'ruvyxa') {
     assert(
@@ -124,38 +142,14 @@ const extracted = '.npm-smoke'
 rmSync(extracted, { recursive: true, force: true })
 mkdirSync(extracted, { recursive: true })
 
-const ruvyxaTgz = readdirSync(destination).find(
-  (name) =>
-    name.startsWith('ruvyxa-') &&
-    name.endsWith('.tgz') &&
-    !name.includes('adapter') &&
-    !name.includes('cli') &&
-    !name.includes('core') &&
-    !name.includes('react') &&
-    !name.includes('create'),
-)
-if (!ruvyxaTgz) throw new Error('ruvyxa tarball not found in ' + destination)
-
-const createRuvyxaTgz = readdirSync(destination).find(
-  (name) => name.startsWith('create-ruvyxa-') && name.endsWith('.tgz'),
-)
-if (!createRuvyxaTgz) throw new Error('create-ruvyxa tarball not found in ' + destination)
-
-const coreTgz = readdirSync(destination).find(
-  (name) => name.startsWith('ruvyxa-core-') && name.endsWith('.tgz'),
-)
-if (!coreTgz) throw new Error('@ruvyxa/core tarball not found in ' + destination)
-
-const reactTgz = readdirSync(destination).find(
-  (name) => name.startsWith('ruvyxa-react-') && name.endsWith('.tgz'),
-)
-if (!reactTgz) throw new Error('@ruvyxa/react tarball not found in ' + destination)
-
-const currentPlatformTgz = readdirSync(destination).find(
-  (name) => name.startsWith(`ruvyxa-cli-${platform}-${arch}-`) && name.endsWith('.tgz'),
-)
-if (!currentPlatformTgz)
-  throw new Error(`${currentPlatformPackage} tarball not found in ` + destination)
+const ruvyxaTgz = packedTarball('ruvyxa')
+const createRuvyxaTgz = packedTarball('create-ruvyxa')
+const coreTgz = packedTarball('@ruvyxa/core')
+const reactTgz = packedTarball('@ruvyxa/react')
+const authTgz = packedTarball('@ruvyxa/auth')
+const databaseTgz = packedTarball('@ruvyxa/database')
+const realtimeTgz = packedTarball('@ruvyxa/realtime')
+const currentPlatformTgz = packedTarball(currentPlatformPackage)
 
 execFileSync('tar', ['-xzf', `${destination}/${ruvyxaTgz}`, '-C', extracted])
 execFileSync('node', [`${extracted}/package/bin/ruvyxa.js`, '--help'], {
@@ -191,6 +185,9 @@ for (const starter of starters) {
   const packageJson = JSON.parse(readFileSync(packageJsonPath, 'utf8'))
   packageJson.dependencies.ruvyxa = scaffoldTarball(ruvyxaTgz)
   packageJson.dependencies['@ruvyxa/react'] = scaffoldTarball(reactTgz)
+  packageJson.dependencies['@ruvyxa/auth'] = scaffoldTarball(authTgz)
+  packageJson.dependencies['@ruvyxa/database'] = scaffoldTarball(databaseTgz)
+  packageJson.dependencies['@ruvyxa/realtime'] = scaffoldTarball(realtimeTgz)
   writeFileSync(packageJsonPath, JSON.stringify(packageJson, null, 2) + '\n')
   writeFileSync(`${appDir}/app/type-check.module.scss`, '.typeCheck {}\n')
   writeFileSync(
@@ -200,14 +197,26 @@ for (const starter of starters) {
       "import 'ruvyxa/config'",
       "import { contentEngine } from 'ruvyxa/plugins'",
       "import 'ruvyxa/server'",
+      "import type { AuthSession } from '@ruvyxa/auth/client'",
+      "import { databasePlugin } from '@ruvyxa/database'",
+      "import { realtime } from '@ruvyxa/realtime'",
+      "import { createRealtimeClient } from '@ruvyxa/realtime/client'",
       "import type { AnswerProps, SeoProps } from '@ruvyxa/react'",
       "import styles from './type-check.module.scss'",
       'const moduleClass: string = styles.typeCheck',
       "const contentPlugin = contentEngine({ siteUrl: 'https://example.com', title: 'Example', description: 'Articles' })",
+      'const databaseBuildPlugin = databasePlugin()',
+      'const realtimePlugin = realtime()',
+      'const realtimeClient = createRealtimeClient()',
+      'const authSession: AuthSession | null = null',
       "const answerProps: AnswerProps = { question: 'Is it typed?', answer: 'Yes.' }",
       "const seoProps: SeoProps = { title: 'Guide', article: { authors: [{ name: 'Ada' }] } }",
       'void moduleClass',
       'void contentPlugin',
+      'void databaseBuildPlugin',
+      'void realtimePlugin',
+      'void realtimeClient',
+      'void authSession',
       'void answerProps',
       'void seoProps',
       '',
@@ -219,10 +228,12 @@ for (const starter of starters) {
     const configSource = readFileSync(configPath, 'utf8')
     writeFileSync(
       configPath,
-      `import { contentEngine } from 'ruvyxa/plugins'\n${configSource.replace(
+      `import { databasePlugin } from '@ruvyxa/database'\nimport { realtime } from '@ruvyxa/realtime'\nimport { contentEngine } from 'ruvyxa/plugins'\n${configSource.replace(
         'const settings: RuvyxaConfig = {',
         `const settings: RuvyxaConfig = {
   plugins: [
+    databasePlugin(),
+    realtime(),
     contentEngine({
       siteUrl: 'https://example.com',
       title: 'Example',
@@ -292,6 +303,16 @@ function assert(condition, message) {
   if (!condition) {
     throw new Error(message)
   }
+}
+
+function packedTarball(packageName) {
+  for (const file of readdirSync(destination).filter((name) => name.endsWith('.tgz'))) {
+    const manifest = JSON.parse(
+      execFileSync('tar', ['-xOf', `${destination}/${file}`, 'package/package.json']).toString(),
+    )
+    if (manifest.name === packageName) return file
+  }
+  throw new Error(`${packageName} tarball not found in ${destination}`)
 }
 
 async function rmWithRetry(path) {

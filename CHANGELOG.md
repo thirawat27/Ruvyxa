@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Official Data, Auth, and Realtime Packages
+
+- Added `@ruvyxa/database`, a typed CRUD and transaction facade with Prisma-compatible, DynamoDB,
+  and custom adapter contracts plus production environment validation.
+- Added `@ruvyxa/auth`, with opaque durable sessions, credentials, OAuth PKCE, magic links,
+  delegated WebAuthn, atomic replay/rate-limit contracts, and browser/server entrypoint separation.
+- Added `@ruvyxa/realtime`, with action opt-in metadata, a bounded native Axum WebSocket transport,
+  same-origin and channel filtering, reconnect/resync support, and explicit unsupported-target
+  failures.
+
 ## v1.0.17 (2026-07-21)
 
 ### Bundler: Resolution Cache

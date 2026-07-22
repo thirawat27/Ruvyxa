@@ -1,4 +1,5 @@
 import { config, type RuvyxaConfig } from 'ruvyxa/config'
+import { realtime } from '@ruvyxa/realtime'
 import { demoPlugins } from './plugins'
 
 const settings: RuvyxaConfig = {
@@ -43,7 +44,7 @@ const settings: RuvyxaConfig = {
     workers: 0,
   },
 
-  plugins: demoPlugins,
+  plugins: [...demoPlugins, realtime()],
 }
 
 export default config(settings)

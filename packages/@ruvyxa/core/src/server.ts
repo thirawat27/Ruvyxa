@@ -42,6 +42,8 @@ export interface Schema<TInput> {
 
 export interface ActionBuilder<TInput = unknown> {
   input<TNextInput>(schema: Schema<TNextInput>): ActionBuilder<TNextInput>
+  /** Publish an action event after a successful invocation. Omit channels to use the route channel. */
+  realtime(channels?: string | readonly string[]): ActionBuilder<TInput>
   handler<TResult>(
     handler: (ctx: ActionContext<TInput>) => TResult | Promise<TResult>,
   ): ServerAction<TInput, TResult>
@@ -51,15 +53,40 @@ export interface ServerAction<TInput, TResult> {
   (input: TInput, ctx?: Partial<ActionContext<TInput>>): Promise<TResult>
   ruvyxa: {
     kind: 'action'
+    realtime?: ActionRealtimeOptions
   }
+}
+
+export interface ActionRealtimeOptions {
+  /** Explicit subscription channels. An empty list resolves to `route:<request pathname>`. */
+  channels: readonly string[]
 }
 
 export const action: ActionBuilder = createActionBuilder()
 
-function createActionBuilder<TInput>(schema?: Schema<TInput>): ActionBuilder<TInput> {
+function createActionBuilder<TInput>(
+  schema?: Schema<TInput>,
+  realtimeOptions?: ActionRealtimeOptions,
+): ActionBuilder<TInput> {
   return {
     input<TNextInput>(nextSchema: Schema<TNextInput>) {
-      return createActionBuilder(nextSchema)
+      return createActionBuilder(nextSchema, realtimeOptions)
+    },
+    realtime(channels: string | readonly string[] = []) {
+      const values = typeof channels === 'string' ? [channels] : [...channels]
+      if (values.length > 16) {
+        throw new TypeError('action.realtime() accepts at most 16 channels')
+      }
+      for (const [index, channel] of values.entries()) {
+        if (typeof channel !== 'string' || !/^[A-Za-z0-9:._/-]{1,128}$/.test(channel.trim())) {
+          throw new TypeError(
+            `action.realtime() channels[${index}] must use 1-128 letters, digits, colon, dot, underscore, slash, or dash`,
+          )
+        }
+      }
+      return createActionBuilder(schema, {
+        channels: Object.freeze([...new Set(values.map((channel) => channel.trim()))]),
+      })
     },
     handler<TResult>(handler: (ctx: ActionContext<TInput>) => TResult | Promise<TResult>) {
       const callable = async (rawInput: TInput, ctx: Partial<ActionContext<TInput>> = {}) => {
@@ -75,6 +102,7 @@ function createActionBuilder<TInput>(schema?: Schema<TInput>): ActionBuilder<TIn
       return Object.assign(callable, {
         ruvyxa: {
           kind: 'action' as const,
+          ...(realtimeOptions ? { realtime: realtimeOptions } : {}),
         },
       })
     },

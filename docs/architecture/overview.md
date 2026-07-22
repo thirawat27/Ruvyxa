@@ -103,6 +103,9 @@ Two enforcement levels: graph-level (source scan in `ruvyxa_graph::validate_app`
 | `create-ruvyxa`     | Project scaffold                                                                            |
 | `@ruvyxa/core`      | Core runtime utilities                                                                      |
 | `@ruvyxa/react`     | React components (Image, SEO, error boundaries, hydration, loaders)                         |
+| `@ruvyxa/database`  | Typed CRUD/transaction facade with Prisma, DynamoDB, and custom adapter contracts           |
+| `@ruvyxa/auth`      | Sessions, credentials, OAuth PKCE, magic-link, and delegated WebAuthn authentication        |
+| `@ruvyxa/realtime`  | Action-driven native WebSocket transport and browser subscriptions                          |
 | `@ruvyxa/adapter-*` | Platform adapters (bun, cloudflare, netlify, node, static, vercel)                          |
 | `@ruvyxa/cli-*`     | Native binaries per platform (darwin-arm64, linux-arm64, linux-x64, win32-arm64, win32-x64) |
 
@@ -114,6 +117,8 @@ Two enforcement levels: graph-level (source scan in `ruvyxa_graph::validate_app`
 - [CLI & Build Pipeline](cli.md) — `ruvyxa_cli` commands, config, build orchestration
 - [Middleware](middleware.md) — built-in Tower stack and plugin bridge
 - [Plugins](plugins.md) — unified setup registry and lifecycle
+- [Official Data/Auth/Realtime Packages](official-plugins.md) — state ownership, security, flows,
+  and deployment compatibility
 - [Worker Pool](worker-pool.md) — Node/Bun worker pool protocol, streaming, failure recovery
 - [Diagnostic Codes](diagnostics.md) — RUV#### error catalog
 - [Concurrency Model](concurrency.md) — locks, parallelism, performance characteristics

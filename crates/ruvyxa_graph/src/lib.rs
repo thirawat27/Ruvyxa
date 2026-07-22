@@ -338,7 +338,7 @@ fn validate_client_module(
 
     if import_specifiers(&source)
         .iter()
-        .any(|specifier| specifier == "server-only")
+        .any(|specifier| is_server_only_specifier(specifier))
     {
         diagnostics.push(
             Diagnostic::new("RUV1007", "Server-only module imported into client graph")
@@ -385,6 +385,13 @@ fn validate_client_module(
     }
 
     Ok(())
+}
+
+fn is_server_only_specifier(specifier: &str) -> bool {
+    matches!(
+        specifier,
+        "server-only" | "@ruvyxa/auth" | "@ruvyxa/database"
+    )
 }
 
 fn validate_server_module(file: &Path, diagnostics: &mut Vec<Diagnostic>) -> Result<()> {

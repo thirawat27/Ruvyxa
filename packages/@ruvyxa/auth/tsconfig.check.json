@@ -1,0 +1,13 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "../../..",
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
+    "paths": {
+      "@ruvyxa/auth": ["../../../packages/@ruvyxa/auth/src/index.ts"],
+      "@ruvyxa/core/config": ["../../../packages/@ruvyxa/core/src/config.ts"]
+    }
+  },
+  "include": ["src/**/*.ts"]
+}

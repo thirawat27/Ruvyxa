@@ -44,6 +44,39 @@ command, or custom middleware ABI.
 
 ## Built-in plugins
 
+Ruvyxa also publishes three installable official packages for application state:
+
+- `@ruvyxa/database` — typed CRUD/transaction facade. `prismaAdapter()` covers PostgreSQL, MySQL,
+  SQLite, and MongoDB; `dynamoAdapter()` uses an explicit AWS transport.
+- `@ruvyxa/auth` — credentials, OAuth PKCE (Google/GitHub helpers), magic links, delegated WebAuthn,
+  secure sessions, atomic token stores, and rate limiting.
+- `@ruvyxa/realtime` — native action-driven WebSocket updates for self-hosted Node/Bun.
+
+```ts
+// ruvyxa.config.ts
+import { databasePlugin } from '@ruvyxa/database'
+import { realtime } from '@ruvyxa/realtime'
+import { config } from 'ruvyxa/config'
+
+export default config({
+  plugins: [databasePlugin({ requiredEnv: ['DATABASE_URL'] }), realtime()],
+})
+```
+
+Create database and auth runtimes in server-only application modules; do not use process-global
+state from config as a shared store. Browser auth code imports `@ruvyxa/auth/client`, and browser
+realtime code imports `@ruvyxa/realtime/client`. Root `@ruvyxa/auth` and `@ruvyxa/database` imports
+are rejected in client graphs with `RUV1007`.
+
+Native realtime supports `ruvyxa dev` and self-hosted Node/Bun through `ruvyxa start`. Static,
+Vercel, Netlify, Cloudflare, and Edge builds fail with `RUV3201` because those adapters do not own a
+persistent portable WebSocket process. Auth uses `auth.plugin` on the self-hosted middleware path or
+`auth.handle(request)` in a serverless API route. See
+[Official Data, Auth, and Realtime Packages](../../architecture/official-plugins.md) for complete
+flows, endpoints, security invariants, and the compatibility matrix.
+
+`ruvyxa/plugins` continues to ship zero-install first-party plugins built on the same public hooks:
+
 `ruvyxa/plugins` ships first-party plugins built on the same public hooks:
 
 ```ts

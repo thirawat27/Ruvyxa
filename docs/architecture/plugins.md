@@ -10,11 +10,13 @@ import { definePlugin } from 'ruvyxa/config'
 
 export default definePlugin({
   name: 'example',
-  setup({ addMiddleware, resolveId, transform, onBuildComplete }) {
+  setup({ addMiddleware, resolveId, transform, onBuildComplete, enableRealtime }) {
     addMiddleware({ onRequest: () => undefined })
     resolveId((specifier, importer, context) => undefined)
     transform((code, id, context) => ({ code }))
     onBuildComplete(({ root, outDir, manifest }) => {})
+    // Reserved for the first-party @ruvyxa/realtime transport owner.
+    // enableRealtime({ path: '/__ruvyxa/realtime' })
   },
 })
 ```
@@ -79,6 +81,13 @@ module state.
 - Context: `{ root, outDir, manifest }`
 - Runs after the core production output is committed and before adapter artifacts are materialized
 - Public files written into `outDir/assets` are therefore visible to adapters in the same build
+
+### `enableRealtime(options)`
+
+- Registers one native self-hosted WebSocket transport owner
+- Validates path, heartbeat interval, and bounded broadcast capacity during plugin startup
+- A second registration fails instead of creating competing transports
+- Used by `@ruvyxa/realtime`; see [official package architecture](official-plugins.md)
 
 ## Design properties
 

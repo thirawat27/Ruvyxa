@@ -1465,7 +1465,7 @@ function checkClientBoundary(root, filePath, source) {
   ) {
     throw new Error(`RUV1007: Server-only file imported into client bundle: ${filePath}`)
   }
-  if (extractSpecifiers(source).includes('server-only')) {
+  if (extractSpecifiers(source).some(isServerOnlySpecifier)) {
     throw new Error(`RUV1007: Server-only module imported into client bundle: ${filePath}`)
   }
   for (const envName of privateEnvReads(source)) {
@@ -1473,6 +1473,10 @@ function checkClientBoundary(root, filePath, source) {
       `RUV1008: Private environment variable ${envName} used in client bundle: ${filePath}`,
     )
   }
+}
+
+function isServerOnlySpecifier(specifier) {
+  return ['server-only', '@ruvyxa/auth', '@ruvyxa/database'].includes(specifier)
 }
 
 function privateEnvReads(source) {

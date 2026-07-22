@@ -88,9 +88,9 @@ mod worker_pool;
 pub use worker_pool::{NodeWorkerPool, StaticParamSegment, StaticParamsRoute};
 
 mod render_pipeline;
-pub use render_pipeline::{find_runtime_script, render_request};
 #[cfg(test)]
-use render_pipeline::{page_has_default_export, serve_prerendered_html};
+use render_pipeline::{decode_realtime_event, page_has_default_export, serve_prerendered_html};
+pub use render_pipeline::{find_runtime_script, render_request};
 use render_pipeline::{
     render_client_bundle_pooled, render_request_pooled, render_server_action_pooled, runtime_env,
     runtime_trace_cached,
@@ -380,6 +380,14 @@ struct AppState {
     isr_revalidating: Arc<tokio::sync::Mutex<HashSet<String>>>,
     hmr_tracker: Arc<HmrTracker>,
     plugin_runtime: Option<Arc<PluginHost>>,
+    realtime: Option<RealtimeRuntime>,
+}
+
+#[derive(Clone)]
+struct RealtimeRuntime {
+    path: String,
+    heartbeat: Duration,
+    tx: broadcast::Sender<String>,
 }
 
 #[derive(Default)]
@@ -606,6 +614,27 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
         }
         Some(Arc::new(host))
     };
+    let realtime = plugin_runtime
+        .as_ref()
+        .and_then(|runtime| runtime.descriptor().realtime.as_ref())
+        .map(|descriptor| {
+            if !descriptor.path.starts_with('/')
+                || descriptor.path.contains(['?', '#', '*'])
+                || !(5_000..=120_000).contains(&descriptor.heartbeat_ms)
+                || !(16..=4_096).contains(&descriptor.capacity)
+            {
+                return Err(RuvyxaError::Message(
+                    "RUV1701 TypeScript plugin host returned invalid realtime configuration".into(),
+                ));
+            }
+            let (tx, _) = broadcast::channel(descriptor.capacity);
+            Ok(RealtimeRuntime {
+                path: descriptor.path.clone(),
+                heartbeat: Duration::from_millis(descriptor.heartbeat_ms),
+                tx,
+            })
+        })
+        .transpose()?;
     let state = AppState {
         config: config.clone(),
         reload_tx,
@@ -619,6 +648,7 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
         isr_revalidating: Arc::new(tokio::sync::Mutex::new(HashSet::new())),
         hmr_tracker,
         plugin_runtime,
+        realtime,
     };
 
     let _watcher = if config.watch {
@@ -635,16 +665,20 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
         None
     };
 
-    let app = Router::new()
+    let realtime_path = state.realtime.as_ref().map(|runtime| runtime.path.clone());
+    let state = Arc::new(state);
+    let mut app = Router::new()
         .route("/__ruvyxa/hmr", get(hmr_ws))
         .route("/__ruvyxa/client", get(client_bundle))
         .route(
             "/__ruvyxa/action",
             post(action_endpoint).layer(DefaultBodyLimit::max(config.action_body_limit_bytes)),
         )
-        .route("/__ruvyxa/trace", get(trace_endpoint))
-        .fallback(handle_request)
-        .with_state(Arc::new(state));
+        .route("/__ruvyxa/trace", get(trace_endpoint));
+    if let Some(path) = realtime_path {
+        app = app.route(&path, get(realtime_ws));
+    }
+    let app = app.fallback(handle_request).with_state(state);
 
     // Apply middleware stack from config (compression, CORS, timing, logging, custom headers)
     let app = middleware_stack.apply(app).map_err(RuvyxaError::Message)?;
@@ -984,6 +1018,125 @@ async fn hmr_ws(
             }
         }
     })
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct RealtimeQuery {
+    channels: Option<String>,
+}
+
+async fn realtime_ws(
+    ws: WebSocketUpgrade,
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<RealtimeQuery>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+) -> Response {
+    let Some(runtime) = state.realtime.clone() else {
+        return (StatusCode::NOT_FOUND, "Realtime is not enabled").into_response();
+    };
+    if hmr_origin_is_cross_site(&headers, &state.config, peer.ip()) {
+        return with_security_headers(
+            (
+                StatusCode::FORBIDDEN,
+                "Cross-origin realtime connection blocked",
+            )
+                .into_response(),
+        );
+    }
+    let channels = match parse_realtime_channels(query.channels.as_deref()) {
+        Ok(channels) => channels,
+        Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
+    };
+    ws.on_upgrade(move |mut socket| async move {
+        let mut receiver = runtime.tx.subscribe();
+        let mut heartbeat = tokio::time::interval(runtime.heartbeat);
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+
+        loop {
+            tokio::select! {
+                received = receiver.recv() => {
+                    match received {
+                        Ok(payload) if realtime_payload_matches(&payload, &channels) => {
+                            if socket.send(Message::Text(payload.into())).await.is_err() {
+                                break;
+                            }
+                        }
+                        Ok(_) => {}
+                        Err(broadcast::error::RecvError::Lagged(_)) => {
+                            if socket.send(Message::Text(
+                                r#"{"version":1,"type":"resync","reason":"lagged"}"#.into(),
+                            )).await.is_err() {
+                                break;
+                            }
+                        }
+                        Err(broadcast::error::RecvError::Closed) => break,
+                    }
+                }
+                _ = heartbeat.tick() => {
+                    if socket.send(Message::Ping(Vec::new().into())).await.is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    })
+}
+
+fn parse_realtime_channels(
+    value: Option<&str>,
+) -> std::result::Result<HashSet<String>, &'static str> {
+    let Some(value) = value else {
+        return Err("Realtime requires at least one channel");
+    };
+    let requested = value.split(',').collect::<Vec<_>>();
+    if requested.is_empty()
+        || requested.len() > 16
+        || requested.iter().any(|channel| channel.is_empty())
+    {
+        return Err("Realtime requires between 1 and 16 non-empty channels");
+    }
+    let channels = requested
+        .into_iter()
+        .map(str::to_string)
+        .collect::<HashSet<_>>();
+    if channels.len() > 16
+        || channels
+            .iter()
+            .any(|channel| !valid_realtime_channel(channel))
+    {
+        return Err("Realtime accepts at most 16 channels of 128 bytes each");
+    }
+    Ok(channels)
+}
+
+fn valid_realtime_channel(channel: &str) -> bool {
+    !channel.is_empty()
+        && channel.len() <= 128
+        && channel.bytes().all(|byte| {
+            byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'.' | b'_' | b'/' | b'-')
+        })
+}
+
+fn realtime_payload_matches(payload: &str, subscriptions: &HashSet<String>) -> bool {
+    if subscriptions.is_empty() {
+        return false;
+    }
+    serde_json::from_str::<serde_json::Value>(payload)
+        .ok()
+        .and_then(|value| {
+            value
+                .get("channels")
+                .and_then(serde_json::Value::as_array)
+                .cloned()
+        })
+        .is_some_and(|channels| {
+            channels.iter().any(|channel| {
+                channel
+                    .as_str()
+                    .is_some_and(|channel| subscriptions.contains(channel))
+            })
+        })
 }
 
 #[derive(Debug, Deserialize)]
@@ -1586,6 +1739,26 @@ fn extension_is(path: &Path, expected: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use base64::Engine;
+
+    #[test]
+    fn validates_realtime_event_metadata_and_channel_filters() {
+        let payload = r#"{"version":1,"type":"action","channels":["todos"],"action":"save","path":"/todos","invalidated":[]}"#;
+        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload);
+        assert_eq!(decode_realtime_event(&encoded).unwrap(), payload);
+        assert!(decode_realtime_event("not-base64!").is_err());
+
+        let subscriptions = HashSet::from(["todos".to_string()]);
+        assert!(realtime_payload_matches(payload, &subscriptions));
+        assert!(!realtime_payload_matches(
+            r#"{"version":1,"type":"action","channels":["users"]}"#,
+            &subscriptions
+        ));
+        assert!(parse_realtime_channels(Some("todos,users")).is_ok());
+        assert!(parse_realtime_channels(None).is_err());
+        assert!(parse_realtime_channels(Some("todos,,users")).is_err());
+        assert!(parse_realtime_channels(Some(&"a".repeat(129))).is_err());
+    }
 
     #[test]
     fn composes_react_rendered_html_documents() {

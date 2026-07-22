@@ -425,10 +425,17 @@ export const createTodo = action
       return { title: String(value.title).trim() }
     },
   })
+  .realtime(['todos'])
   .handler(async ({ input, invalidate }) => {
     invalidate('todos')
     return { title: input.title, completed: false }
   })
+
+export const rejectTodo = action.realtime('todos').handler(async () => {
+  return new Response('rejected', { status: 422 })
+})
+
+export const routeTodo = action.realtime().handler(async () => ({ ok: true }))
 `,
   )
   const { request } = startWorker(t, [projectRoot])
@@ -453,6 +460,40 @@ export const createTodo = action
     data: { title: 'Test', completed: false },
     invalidated: ['todos'],
   })
+  const realtimeEvent = JSON.parse(
+    Buffer.from(json.headers['x-ruvyxa-realtime-event'], 'base64url').toString('utf8'),
+  )
+  assert.deepEqual(realtimeEvent, {
+    version: 1,
+    type: 'action',
+    channels: ['todos'],
+    action: 'createTodo',
+    path: '/todos',
+    invalidated: ['todos'],
+  })
+
+  const rejected = await request({
+    ...base,
+    actionName: 'rejectTodo',
+    payloadJson: '{}',
+    contentType: 'application/json',
+  })
+  assert.equal(rejected.ok, true, rejected.message)
+  assert.equal(rejected.status, 422)
+  assert.equal(rejected.headers['x-ruvyxa-realtime-event'], undefined)
+
+  const longRoute = `/${'segment/'.repeat(30)}`
+  const routeScoped = await request({
+    ...base,
+    actionName: 'routeTodo',
+    requestPath: longRoute,
+    payloadJson: '{}',
+    contentType: 'application/json',
+  })
+  const routeEvent = JSON.parse(
+    Buffer.from(routeScoped.headers['x-ruvyxa-realtime-event'], 'base64url').toString('utf8'),
+  )
+  assert.equal(routeEvent.channels[0], 'route-hash:64d412af0acae2fa')
 
   const form = await request({
     ...base,

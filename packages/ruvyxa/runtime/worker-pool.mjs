@@ -748,12 +748,65 @@ async function handleAction(request) {
       invalidated.push(key)
     },
   })
-  const response = normalizeActionResult(result, invalidated)
+  let response = normalizeActionResult(result, invalidated)
+  const headersWithInternalEventRemoved = new Headers(response.headers)
+  headersWithInternalEventRemoved.delete('x-ruvyxa-realtime-event')
+  response = new Response(response.body, {
+    status: response.status,
+    statusText: response.statusText,
+    headers: headersWithInternalEventRemoved,
+  })
+  const realtimeEvent =
+    response.status >= 200 && response.status < 400
+      ? actionRealtimeEvent(action, actionName, requestPath, invalidated)
+      : null
+  if (realtimeEvent) {
+    response.headers.set(
+      'x-ruvyxa-realtime-event',
+      Buffer.from(JSON.stringify(realtimeEvent)).toString('base64url'),
+    )
+  }
   const body = await response.text()
   const headerPairsResult = responseHeaderPairs(response)
   const headers = Object.fromEntries(headerPairsResult)
 
   return { ok: true, status: response.status, headers, headerPairs: headerPairsResult, body }
+}
+
+function actionRealtimeEvent(action, actionName, requestPath, invalidated) {
+  const configured = action.ruvyxa?.realtime
+  if (!configured) return null
+  if (!Array.isArray(configured.channels) || configured.channels.length > 16) {
+    throw new TypeError(`Action ${actionName} has invalid realtime channel metadata`)
+  }
+  const channels = configured.channels.map((channel) => {
+    if (typeof channel !== 'string' || !/^[A-Za-z0-9:._/-]{1,128}$/.test(channel)) {
+      throw new TypeError(`Action ${actionName} has invalid realtime channel metadata`)
+    }
+    return channel
+  })
+  const pathname = new URL(requestPath, 'http://ruvyxa.local').pathname
+  return {
+    version: 1,
+    type: 'action',
+    channels: channels.length > 0 ? channels : [realtimeRouteChannel(pathname)],
+    action: actionName,
+    path: pathname.slice(0, 2048),
+    invalidated: invalidated
+      .filter((key) => typeof key === 'string' && key.length <= 256)
+      .slice(0, 64),
+  }
+}
+
+function realtimeRouteChannel(pathname) {
+  const readable = `route:${pathname}`
+  if (readable.length <= 128) return readable
+  let hash = 0xcbf29ce484222325n
+  for (const character of pathname) {
+    hash ^= BigInt(character.codePointAt(0))
+    hash = BigInt.asUintN(64, hash * 0x100000001b3n)
+  }
+  return `route-hash:${hash.toString(16).padStart(16, '0')}`
 }
 
 // --- Client Bundle Handler ---
