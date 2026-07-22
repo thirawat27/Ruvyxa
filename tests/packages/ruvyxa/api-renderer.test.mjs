@@ -36,6 +36,28 @@ describe('API renderer request forwarding', () => {
     })
   })
 
+  it('preserves repeated response headers through the standalone renderer', async () => {
+    await withFixture(async ({ root, routeFile }) => {
+      const result = await runJson(apiRenderer, [
+        root,
+        routeFile,
+        'POST',
+        '/api/echo',
+        '{}',
+        'payload',
+        JSON.stringify({ 'content-type': 'application/octet-stream' }),
+      ])
+
+      assert.deepEqual(
+        result.headerPairs.filter(([name]) => name === 'set-cookie'),
+        [
+          ['set-cookie', 'first=1; Path=/'],
+          ['set-cookie', 'second=2; Path=/'],
+        ],
+      )
+    })
+  })
+
   it('forwards POST body and headers through the persistent worker pool', async () => {
     await withFixture(async ({ root, routeFile }) => {
       const result = await runWorkerJson({

@@ -120,19 +120,76 @@ export default function HomePage() {
       title="My Page"
       description="A concise description for search results"
       canonical="https://example.com/page"
-      robots="index, follow"
-      ogImage="/og-image.png"
-      ogType="website"
+      image="https://example.com/og-image.png"
+      type="article"
       twitterCard="summary_large_image"
-      jsonLd={{
-        '@context': 'https://schema.org',
-        '@type': 'WebSite',
-        name: 'My App',
+      article={{
+        type: 'BlogPosting',
+        publishedAt: '2026-07-22',
+        updatedAt: '2026-07-23T10:30:00+07:00',
+        authors: [{ name: 'Ada', url: 'https://example.com/authors/ada' }],
+        tags: ['Ruvyxa', 'SSR'],
       }}
+      breadcrumbs={[
+        { name: 'Home', url: 'https://example.com/' },
+        { name: 'My Page', url: 'https://example.com/page' },
+      ]}
     />
   )
 }
 ```
+
+`article` and `breadcrumbs` generate escaped Article and BreadcrumbList JSON-LD from explicit page
+facts. Use `jsonLd` for other applicable schema types. Do not describe content that a reader cannot
+see on the page.
+
+### Answer-ready content
+
+Use `Answer` for a concise answer that remains visible, accessible, and citeable:
+
+```tsx
+import { Answer } from '@ruvyxa/react'
+
+export default function RenderingAnswer() {
+  return (
+    <Answer
+      question="Does Ruvyxa render on the server?"
+      answer="Yes. Pages render on the server by default."
+      sources={[{ name: 'Rendering guide', url: '/docs/rendering' }]}
+    />
+  )
+}
+```
+
+`Answer` emits Schema.org Question/Answer microdata around the same text readers see. It does not
+generate `FAQPage` or `QAPage`: those formats have narrower eligibility rules and must be selected
+only when the whole page genuinely matches them.
+
+For Markdown/MDX collections, pair this with `contentEngine()`. Explicit `answers` frontmatter is
+included in `/content.json` and the experimental `/llms.txt` discovery index:
+
+```mdx
+---
+title: Rendering guide
+description: How Ruvyxa renders pages.
+answers:
+  - question: Does Ruvyxa render on the server?
+    answer: Yes. Pages render on the server by default.
+    sources:
+      - name: Rendering guide
+        url: /docs/rendering
+---
+
+import { Answer } from '@ruvyxa/react'
+
+# {frontmatter.title}
+
+<Answer {...frontmatter.answers[0]} />
+```
+
+This keeps the visible answer and machine-readable content graph on one author-controlled source.
+`llms.txt` is an experimental convenience, not a ranking signal or replacement for crawlable HTML,
+canonical URLs, sitemap freshness, and accurate structured data.
 
 ### Layout Metadata
 

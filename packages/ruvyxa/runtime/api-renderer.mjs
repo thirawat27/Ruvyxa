@@ -56,13 +56,15 @@ try {
   })
   const response = normalizeResponse(result)
   const body = await response.text()
-  const headers = Object.fromEntries(response.headers.entries())
+  const headerPairs = responseHeaderPairs(response)
+  const headers = Object.fromEntries(headerPairs)
 
   process.stdout.write(
     JSON.stringify({
       ok: true,
       status: response.status,
       headers,
+      headerPairs,
       body,
     }),
   )
@@ -93,6 +95,17 @@ function normalizeResponse(result) {
   }
 
   return Response.json(result)
+}
+
+function responseHeaderPairs(response) {
+  const headerPairs = []
+  for (const [name, value] of response.headers.entries()) {
+    if (name !== 'set-cookie') headerPairs.push([name, value])
+  }
+  for (const value of response.headers.getSetCookie()) {
+    headerPairs.push(['set-cookie', value])
+  }
+  return headerPairs
 }
 
 function fail(code, message, stack) {

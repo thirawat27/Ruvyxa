@@ -119,19 +119,77 @@ export default function HomePage() {
       title="My Page"
       description="A concise description for search results"
       canonical="https://example.com/page"
-      robots="index, follow"
-      ogImage="/og-image.png"
-      ogType="website"
+      image="https://example.com/og-image.png"
+      type="article"
       twitterCard="summary_large_image"
-      jsonLd={{
-        '@context': 'https://schema.org',
-        '@type': 'WebSite',
-        name: 'My App',
+      article={{
+        type: 'BlogPosting',
+        publishedAt: '2026-07-22',
+        updatedAt: '2026-07-23T10:30:00+07:00',
+        authors: [{ name: 'Ada', url: 'https://example.com/authors/ada' }],
+        tags: ['Ruvyxa', 'SSR'],
       }}
+      breadcrumbs={[
+        { name: 'Home', url: 'https://example.com/' },
+        { name: 'My Page', url: 'https://example.com/page' },
+      ]}
     />
   )
 }
 ```
+
+`article` และ `breadcrumbs` จะสร้าง Article กับ BreadcrumbList JSON-LD ที่ escape อย่างปลอดภัยจาก
+ข้อเท็จจริงของหน้า ใช้ `jsonLd` สำหรับ schema ชนิดอื่นที่ตรงกับหน้านั้น และห้ามระบุข้อมูลที่ผู้อ่าน
+มองไม่เห็นในหน้า
+
+### เนื้อหาที่พร้อมสำหรับ Answer Engine
+
+ใช้ `Answer` เพื่อแสดงคำตอบแบบสั้น ชัดเจน เข้าถึงได้ และมีแหล่งอ้างอิง:
+
+```tsx
+import { Answer } from '@ruvyxa/react'
+
+export default function RenderingAnswer() {
+  return (
+    <Answer
+      question="Ruvyxa render ที่ server หรือไม่?"
+      answer="ใช่ หน้าเว็บจะ render ที่ server เป็นค่าเริ่มต้น"
+      sources={[{ name: 'คู่มือ Rendering', url: '/docs/rendering' }]}
+      sourcesLabel="แหล่งอ้างอิง"
+    />
+  )
+}
+```
+
+`Answer` ครอบข้อความเดียวกับที่ผู้อ่านเห็นด้วย Schema.org Question/Answer microdata โดยไม่สร้าง
+`FAQPage` หรือ `QAPage` อัตโนมัติ เพราะ schema สองแบบนี้มีเงื่อนไขเฉพาะและควรใช้เมื่อทั้งหน้าตรงตาม
+ประเภทนั้นจริงเท่านั้น
+
+สำหรับชุด Markdown/MDX ให้ใช้ร่วมกับ `contentEngine()` โดย `answers` frontmatter ที่ระบุเองจะอยู่ใน
+`/content.json` และ discovery index แบบ experimental ที่ `/llms.txt`:
+
+```mdx
+---
+title: คู่มือ Rendering
+description: วิธีที่ Ruvyxa render หน้าเว็บ
+answers:
+  - question: Ruvyxa render ที่ server หรือไม่?
+    answer: ใช่ หน้าเว็บจะ render ที่ server เป็นค่าเริ่มต้น
+    sources:
+      - name: คู่มือ Rendering
+        url: /docs/rendering
+---
+
+import { Answer } from '@ruvyxa/react'
+
+# {frontmatter.title}
+
+<Answer {...frontmatter.answers[0]} sourcesLabel="แหล่งอ้างอิง" />
+```
+
+รูปแบบนี้ทำให้คำตอบที่มองเห็นและ content graph ใช้ข้อมูลชุดเดียวที่ผู้เขียนควบคุม `llms.txt` เป็น
+เพียงความสะดวกแบบ experimental ไม่ใช่ ranking signal และไม่แทน crawlable HTML, canonical URL,
+sitemap ที่มีวันที่ถูกต้อง หรือ structured data ที่ตรงกับเนื้อหาจริง
 
 ### Layout Metadata
 

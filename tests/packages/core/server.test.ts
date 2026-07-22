@@ -71,6 +71,48 @@ describe('cache', () => {
     assert.equal(calls, 1)
   })
 
+  it('starts the TTL after a slow producer finishes', async () => {
+    let calls = 0
+    const producer = async () => {
+      calls++
+      await new Promise((resolve) => setTimeout(resolve, 30))
+      return 'slow-value'
+    }
+
+    const first = await cache('slow-producer').ttl('10ms').get(producer)
+    const second = await cache('slow-producer').ttl('10ms').get(producer)
+
+    assert.equal(first, 'slow-value')
+    assert.equal(second, 'slow-value')
+    assert.equal(calls, 1)
+  })
+
+  it('does not let an in-flight producer repopulate an invalidated key', async () => {
+    let resolveProducer: (value: string) => void = () => {}
+    const producerResult = new Promise<string>((resolve) => {
+      resolveProducer = resolve
+    })
+
+    const pending = cache('pending-write')
+      .ttl('10s')
+      .get(() => producerResult)
+    await Promise.resolve()
+    invalidateCache('pending-write')
+    resolveProducer('obsolete')
+    assert.equal(await pending, 'obsolete')
+
+    let calls = 0
+    const current = await cache('pending-write')
+      .ttl('10s')
+      .get(() => {
+        calls++
+        return 'current'
+      })
+
+    assert.equal(current, 'current')
+    assert.equal(calls, 1)
+  })
+
   it('invalidates by exact key', async () => {
     let calls = 0
     const producer = () => {

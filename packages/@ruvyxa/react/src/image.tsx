@@ -164,7 +164,7 @@ function rewriteLocalSrcSet(srcSet: string | undefined): string | undefined {
 }
 
 function webpUrl(src: string): string {
-  if (!src.startsWith('/')) return src
+  if (!src.startsWith('/') || src.startsWith('//')) return src
   const marker = src.search(/[?#]/)
   const path = marker === -1 ? src : src.slice(0, marker)
   if (!/\.(?:png|jpe?g)$/i.test(path)) return src

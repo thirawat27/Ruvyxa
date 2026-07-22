@@ -908,6 +908,7 @@ struct ApiRenderResult {
     ok: bool,
     status: Option<u16>,
     headers: Option<BTreeMap<String, String>>,
+    header_pairs: Option<Vec<(String, String)>>,
     body: Option<String>,
     code: Option<String>,
     message: Option<String>,
@@ -1117,7 +1118,10 @@ fn render_api(
     let body = result.body.unwrap_or_default();
     let mut response = (status, body).into_response();
 
-    if let Some(headers) = result.headers {
+    if let Some(headers) = result
+        .header_pairs
+        .or_else(|| result.headers.map(|headers| headers.into_iter().collect()))
+    {
         for (name, value) in headers {
             let Ok(name) = HeaderName::from_bytes(name.as_bytes()) else {
                 continue;
@@ -1125,7 +1129,7 @@ fn render_api(
             let Ok(value) = HeaderValue::from_str(&value) else {
                 continue;
             };
-            response.headers_mut().insert(name, value);
+            response.headers_mut().append(name, value);
         }
     }
 

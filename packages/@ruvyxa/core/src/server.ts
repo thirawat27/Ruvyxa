@@ -116,6 +116,7 @@ const CACHE_MAX_ENTRIES = 1024
 class CacheStore {
   #entries = new Map<string, CacheEntry>()
   #accessOrder: string[] = []
+  #pendingWrites = new Map<string, Set<symbol>>()
   #maxEntries: number
 
   constructor(maxEntries = CACHE_MAX_ENTRIES) {
@@ -131,6 +132,10 @@ class CacheStore {
     return entry
   }
 
+  peek(key: string): CacheEntry | undefined {
+    return this.#entries.get(key)
+  }
+
   set(key: string, entry: CacheEntry): void {
     // Updating an existing key does not increase the cache size. Evicting before
     // that check would discard an unrelated LRU entry on every refresh at capacity.
@@ -144,12 +149,50 @@ class CacheStore {
 
   delete(key: string): boolean {
     this.#accessOrder = this.#accessOrder.filter((k) => k !== key)
+    this.#pendingWrites.delete(key)
     return this.#entries.delete(key)
   }
 
   clear(): void {
     this.#entries.clear()
     this.#accessOrder = []
+    this.#pendingWrites.clear()
+  }
+
+  invalidate(keyOrPrefix?: string): void {
+    if (!keyOrPrefix) {
+      this.clear()
+      return
+    }
+
+    const keys = new Set([...this.#entries.keys(), ...this.#pendingWrites.keys()])
+    for (const key of keys) {
+      if (key === keyOrPrefix || key.startsWith(keyOrPrefix + ':')) {
+        this.delete(key)
+      }
+    }
+  }
+
+  beginWrite(key: string): symbol {
+    const token = Symbol(key)
+    const writes = this.#pendingWrites.get(key) ?? new Set<symbol>()
+    writes.add(token)
+    this.#pendingWrites.set(key, writes)
+    return token
+  }
+
+  commitWrite(key: string, token: symbol, entry: CacheEntry, expectedEntry?: CacheEntry): boolean {
+    if (!this.#pendingWrites.get(key)?.has(token)) return false
+    if (expectedEntry && this.#entries.get(key) !== expectedEntry) return false
+    this.set(key, entry)
+    return true
+  }
+
+  finishWrite(key: string, token: symbol): void {
+    const writes = this.#pendingWrites.get(key)
+    if (!writes) return
+    writes.delete(token)
+    if (writes.size === 0) this.#pendingWrites.delete(key)
   }
 
   /** Remove all entries that have fully expired (past staleUntil). */
@@ -158,7 +201,7 @@ class CacheStore {
     let pruned = 0
     for (const [key, entry] of this.#entries) {
       if (entry.staleUntil < now) {
-        this.#entries.delete(key)
+        this.delete(key)
         pruned++
       }
     }
@@ -172,11 +215,6 @@ class CacheStore {
     return this.#entries.size
   }
 
-  /** Iterate all keys (for prefix invalidation). */
-  keys(): IterableIterator<string> {
-    return this.#entries.keys()
-  }
-
   #touchAccessOrder(key: string): void {
     const idx = this.#accessOrder.indexOf(key)
     if (idx !== -1) {
@@ -188,7 +226,7 @@ class CacheStore {
   #evictOldest(): void {
     const oldest = this.#accessOrder.shift()
     if (oldest) {
-      this.#entries.delete(oldest)
+      this.delete(oldest)
     }
   }
 }
@@ -281,42 +319,54 @@ export function cache(key: string): CacheBuilder {
       if (cached && cached.staleUntil > now) {
         if (!cached.refreshing) {
           cached.refreshing = true
+          const writeToken = cacheStore.beginWrite(key)
           // Fire-and-forget background refresh. All concurrent stale readers
           // receive the stale value; only the first reader starts the refresh.
           Promise.resolve()
             .then(() => producer())
             .then((value) => {
-              cacheStore.set(key, {
-                value,
-                expiresAt: Date.now() + ttlMs,
-                staleUntil: Date.now() + ttlMs + swrMs,
-                refreshing: false,
-              })
+              const populatedAt = Date.now()
+              cacheStore.commitWrite(
+                key,
+                writeToken,
+                {
+                  value,
+                  expiresAt: populatedAt + ttlMs,
+                  staleUntil: populatedAt + ttlMs + swrMs,
+                  refreshing: false,
+                },
+                cached,
+              )
             })
             .catch(() => {
               // Producer failed during background refresh — keep serving stale
-              cached.refreshing = false
+              if (cacheStore.peek(key) === cached) cached.refreshing = false
             })
+            .finally(() => cacheStore.finishWrite(key, writeToken))
         }
         return cached.value as T
       }
 
       // Miss or fully expired: produce fresh value with error isolation
+      const writeToken = cacheStore.beginWrite(key)
       try {
         const value = await producer()
-        cacheStore.set(key, {
+        const populatedAt = Date.now()
+        cacheStore.commitWrite(key, writeToken, {
           value,
-          expiresAt: now + ttlMs,
-          staleUntil: now + ttlMs + swrMs,
+          expiresAt: populatedAt + ttlMs,
+          staleUntil: populatedAt + ttlMs + swrMs,
           refreshing: false,
         })
         return value
       } catch (error) {
         // If we have stale data, return it rather than propagating the error
-        if (cached) {
+        if (cached && cacheStore.peek(key) === cached) {
           return cached.value as T
         }
         throw error
+      } finally {
+        cacheStore.finishWrite(key, writeToken)
       }
     },
   }
@@ -329,15 +379,7 @@ export function cache(key: string): CacheBuilder {
  *   exact key and any keys that start with `keyOrPrefix:`.
  */
 export function invalidateCache(keyOrPrefix?: string): void {
-  if (!keyOrPrefix) {
-    cacheStore.clear()
-    return
-  }
-  for (const key of cacheStore.keys()) {
-    if (key === keyOrPrefix || key.startsWith(keyOrPrefix + ':')) {
-      cacheStore.delete(key)
-    }
-  }
+  cacheStore.invalidate(keyOrPrefix)
 }
 
 /**

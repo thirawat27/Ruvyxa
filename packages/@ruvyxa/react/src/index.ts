@@ -13,4 +13,6 @@ export type {
   PictureSource,
 } from './image.js'
 export { Seo } from './seo.js'
-export type { SeoProps } from './seo.js'
+export type { SeoArticle, SeoAuthor, SeoBreadcrumb, SeoProps } from './seo.js'
+export { Answer } from './answer.js'
+export type { AnswerProps, AnswerSource } from './answer.js'
