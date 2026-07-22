@@ -12,7 +12,7 @@ use std::io;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use std::task::{Context, Poll};
 
@@ -298,7 +298,56 @@ struct PendingResponse {
     streaming: Arc<AtomicBool>,
 }
 
-type PendingResponses = Arc<Mutex<BTreeMap<String, PendingResponse>>>;
+#[derive(Default)]
+struct PendingResponseSet {
+    entries: Mutex<BTreeMap<String, PendingResponse>>,
+    count: AtomicUsize,
+}
+
+impl PendingResponseSet {
+    async fn insert(&self, id: String, response: PendingResponse) {
+        let mut entries = self.entries.lock().await;
+        if entries.insert(id, response).is_none() {
+            self.count.fetch_add(1, Ordering::Release);
+        }
+    }
+
+    async fn remove(&self, id: &str) -> Option<PendingResponse> {
+        let mut entries = self.entries.lock().await;
+        let removed = entries.remove(id);
+        if removed.is_some() {
+            let previous = self.count.fetch_sub(1, Ordering::AcqRel);
+            debug_assert!(previous > 0, "pending response count underflow");
+        }
+        removed
+    }
+
+    async fn response(&self, id: &str, terminal: bool) -> Option<PendingResponse> {
+        if terminal {
+            return self.remove(id).await;
+        }
+        self.entries.lock().await.get(id).cloned()
+    }
+
+    async fn take_all(&self) -> BTreeMap<String, PendingResponse> {
+        let mut entries = self.entries.lock().await;
+        let pending = std::mem::take(&mut *entries);
+        self.count.store(0, Ordering::Release);
+        pending
+    }
+
+    async fn clear(&self) {
+        let mut entries = self.entries.lock().await;
+        entries.clear();
+        self.count.store(0, Ordering::Release);
+    }
+
+    fn len(&self) -> usize {
+        self.count.load(Ordering::Acquire)
+    }
+}
+
+type PendingResponses = Arc<PendingResponseSet>;
 
 struct ResponseChannel {
     id: String,
@@ -341,7 +390,7 @@ impl WorkerBodyStream {
         let id = self.id.clone();
         if let Ok(handle) = tokio::runtime::Handle::try_current() {
             handle.spawn(async move {
-                pending.lock().await.remove(&id);
+                pending.remove(&id).await;
             });
         }
     }
@@ -465,7 +514,7 @@ impl Worker {
         let stdout = child.stdout.take().expect("stdout was piped");
         let stderr = child.stderr.take().expect("stderr was piped");
 
-        let pending: PendingResponses = Arc::new(Mutex::new(BTreeMap::new()));
+        let pending: PendingResponses = Arc::new(PendingResponseSet::default());
         let alive = Arc::new(AtomicBool::new(true));
 
         // Spawn stdin writer task. A broken pipe is a transport failure, not a
@@ -479,7 +528,7 @@ impl Worker {
             while let Some(line) = stdin_rx.recv().await {
                 if stdin.write_all(line.as_bytes()).await.is_err() || stdin.flush().await.is_err() {
                     writer_alive.store(false, Ordering::Release);
-                    let pending = std::mem::take(&mut *writer_pending.lock().await);
+                    let pending = writer_pending.take_all().await;
                     for (id, pending_response) in pending {
                         if !pending_response.streaming.load(Ordering::Acquire) {
                             // Dropping the sender makes the request receiver
@@ -523,20 +572,13 @@ impl Worker {
                 };
                 let id = response.id.clone();
                 let terminal = response.is_terminal();
-                let pending_response = {
-                    let mut map = reader_pending.lock().await;
-                    if terminal {
-                        map.remove(&id)
-                    } else {
-                        map.get(&id).cloned()
-                    }
-                };
+                let pending_response = reader_pending.response(&id, terminal).await;
                 let Some(pending_response) = pending_response else {
                     continue;
                 };
 
                 if pending_response.sender.send(response).await.is_err() {
-                    reader_pending.lock().await.remove(&id);
+                    reader_pending.remove(&id).await;
                 }
             }
             // Requests that have not started streaming still observe their
@@ -544,7 +586,7 @@ impl Worker {
             // Streams must instead receive an explicit error: a clean EOF is
             // only valid after the worker has sent `api-end`.
             reader_alive.store(false, Ordering::Release);
-            let pending = std::mem::take(&mut *reader_pending.lock().await);
+            let pending = reader_pending.take_all().await;
             for (id, pending_response) in pending {
                 if !pending_response.streaming.load(Ordering::Acquire) {
                     continue;
@@ -574,15 +616,15 @@ impl Worker {
     /// entry the moment its terminal response arrives (and stream bodies remove
     /// theirs on `api-end`/drop), so its length is the worker's live load. The
     /// pool uses this to route new work to the least-busy worker.
-    async fn in_flight(&self) -> usize {
-        self.pending.lock().await.len()
+    fn in_flight(&self) -> usize {
+        self.pending.len()
     }
 
     async fn shutdown(&self) {
         self.alive.store(false, Ordering::Release);
         let sender = self.stdin_tx.lock().ok().and_then(|mut guard| guard.take());
         drop(sender);
-        self.pending.lock().await.clear();
+        self.pending.clear().await;
 
         let Some(mut child) = self.child.lock().await.take() else {
             return;
@@ -616,7 +658,7 @@ impl Worker {
                 "Worker response channel closed unexpectedly".to_string(),
             )),
             Err(_) => {
-                self.pending.lock().await.remove(&channel.id);
+                self.pending.remove(&channel.id).await;
                 Err(RuvyxaError::Message(format!(
                     "Worker request timed out after {}ms",
                     response_timeout.as_millis()
@@ -639,7 +681,7 @@ impl Worker {
                 ));
             }
             Err(_) => {
-                self.pending.lock().await.remove(&channel.id);
+                self.pending.remove(&channel.id).await;
                 return Err(RuvyxaError::Message(format!(
                     "Worker request timed out after {}ms",
                     response_timeout.as_millis()
@@ -664,7 +706,7 @@ impl Worker {
                 body: None,
             }),
             frame => {
-                self.pending.lock().await.remove(&channel.id);
+                self.pending.remove(&channel.id).await;
                 Err(RuvyxaError::Message(format!(
                     "Worker returned an unexpected first API response frame: {frame:?}"
                 )))
@@ -692,22 +734,24 @@ impl Worker {
         let id = request.id().to_string();
         let (sender, receiver) = mpsc::channel(MAX_PENDING_RESPONSE_FRAMES);
         let streaming = Arc::new(AtomicBool::new(false));
-        self.pending.lock().await.insert(
-            id.clone(),
-            PendingResponse {
-                sender,
-                streaming: Arc::clone(&streaming),
-            },
-        );
+        self.pending
+            .insert(
+                id.clone(),
+                PendingResponse {
+                    sender,
+                    streaming: Arc::clone(&streaming),
+                },
+            )
+            .await;
         if !self.alive.load(Ordering::Acquire) {
-            self.pending.lock().await.remove(&id);
+            self.pending.remove(&id).await;
             return Err(RuvyxaError::Message(
                 "Worker process has exited".to_string(),
             ));
         }
 
         if stdin_tx.send(line).await.is_err() {
-            self.pending.lock().await.remove(&id);
+            self.pending.remove(&id).await;
             return Err(RuvyxaError::Message(
                 "Worker process stdin closed".to_string(),
             ));
@@ -918,8 +962,8 @@ impl NodeWorkerPool {
     /// breaks ties fairly (and preserves round-robin behavior when every worker
     /// is equally idle), and an idle worker short-circuits the scan.
     async fn select_worker(&self) -> Result<(usize, Arc<Worker>)> {
-        // Clone the Arcs out of the sync lock before awaiting any worker's
-        // pending mutex; holding the std RwLock guard across an await is unsound.
+        // Clone the Arcs out of the sync lock so worker replacement never races
+        // with this selection snapshot.
         let workers = {
             let guard = self
                 .workers
@@ -939,7 +983,7 @@ impl NodeWorkerPool {
         let mut best_load = usize::MAX;
         for offset in 0..len {
             let index = (start + offset) % len;
-            let load = workers[index].in_flight().await;
+            let load = workers[index].in_flight();
             if load == 0 {
                 // An idle worker is optimal; stop probing the rest.
                 return Ok((index, workers[index].clone()));
@@ -1456,7 +1500,7 @@ mod tests {
                 receiver,
                 streaming: Arc::new(AtomicBool::new(true)),
             },
-            Arc::new(Mutex::new(BTreeMap::new())),
+            Arc::new(PendingResponseSet::default()),
             std::time::Duration::from_secs(1),
         ));
         let bytes = axum::body::to_bytes(body, 1024).await.unwrap();
@@ -1485,7 +1529,7 @@ mod tests {
                 receiver,
                 streaming: Arc::new(AtomicBool::new(true)),
             },
-            Arc::new(Mutex::new(BTreeMap::new())),
+            Arc::new(PendingResponseSet::default()),
             std::time::Duration::from_secs(1),
         ));
         let error = axum::body::to_bytes(body, 1024).await.unwrap_err();
@@ -1511,7 +1555,7 @@ mod tests {
                 receiver,
                 streaming: Arc::new(AtomicBool::new(true)),
             },
-            Arc::new(Mutex::new(BTreeMap::new())),
+            Arc::new(PendingResponseSet::default()),
             std::time::Duration::from_secs(1),
         ));
         let error = axum::body::to_bytes(body, 1024).await.unwrap_err();
@@ -1528,7 +1572,7 @@ mod tests {
                 receiver,
                 streaming: Arc::new(AtomicBool::new(true)),
             },
-            Arc::new(Mutex::new(BTreeMap::new())),
+            Arc::new(PendingResponseSet::default()),
             std::time::Duration::from_millis(20),
         ));
         let error = axum::body::to_bytes(body, 1024).await.unwrap_err();
@@ -1797,13 +1841,15 @@ mod tests {
         // the second, so a load-aware selector must route away from it.
         for _ in 0..3 {
             let (sender, _receiver) = mpsc::channel(1);
-            busy.pending.lock().await.insert(
-                next_request_id(),
-                PendingResponse {
-                    sender,
-                    streaming: Arc::new(AtomicBool::new(false)),
-                },
-            );
+            busy.pending
+                .insert(
+                    next_request_id(),
+                    PendingResponse {
+                        sender,
+                        streaming: Arc::new(AtomicBool::new(false)),
+                    },
+                )
+                .await;
         }
 
         let pool = NodeWorkerPool {
@@ -1824,6 +1870,74 @@ mod tests {
         }
 
         pool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn select_worker_does_not_wait_for_pending_map_lock() {
+        let temp = tempfile::tempdir().unwrap();
+        let worker_script = temp.path().join("worker.mjs");
+        std::fs::write(
+            &worker_script,
+            "process.stdin.on('end', () => process.exit(0)); process.stdin.resume();",
+        )
+        .unwrap();
+
+        let busy = Arc::new(
+            Worker::spawn(&worker_script, &BTreeMap::new(), JavaScriptRuntime::Node)
+                .await
+                .unwrap(),
+        );
+        let idle = Arc::new(
+            Worker::spawn(&worker_script, &BTreeMap::new(), JavaScriptRuntime::Node)
+                .await
+                .unwrap(),
+        );
+        let pool = NodeWorkerPool {
+            workers: StdRwLock::new(vec![busy.clone(), idle]),
+            worker_script,
+            env: BTreeMap::new(),
+            runtime: JavaScriptRuntime::Node,
+            next_worker: AtomicU64::new(0),
+            response_timeout: std::time::Duration::from_millis(DEFAULT_WORKER_TIMEOUT_MS),
+        };
+
+        // Request completion also needs this mutex. Routing new work must not
+        // join that contention chain just to observe a worker's load.
+        let pending_guard = busy.pending.entries.lock().await;
+        let selection =
+            tokio::time::timeout(std::time::Duration::from_millis(100), pool.select_worker()).await;
+        drop(pending_guard);
+
+        assert!(
+            selection.is_ok(),
+            "worker selection waited for the pending response map"
+        );
+        pool.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn pending_response_count_tracks_the_map_lifecycle() {
+        let pending = PendingResponseSet::default();
+        let response = || {
+            let (sender, _receiver) = mpsc::channel(1);
+            PendingResponse {
+                sender,
+                streaming: Arc::new(AtomicBool::new(false)),
+            }
+        };
+
+        pending.insert("first".to_string(), response()).await;
+        assert_eq!(pending.len(), 1);
+        assert!(pending.response("first", false).await.is_some());
+        assert_eq!(pending.len(), 1);
+        assert!(pending.response("first", true).await.is_some());
+        assert_eq!(pending.len(), 0);
+
+        pending.insert("second".to_string(), response()).await;
+        pending.insert("third".to_string(), response()).await;
+        assert_eq!(pending.len(), 2);
+        assert_eq!(pending.take_all().await.len(), 2);
+        assert_eq!(pending.len(), 0);
     }
 
     #[tokio::test]

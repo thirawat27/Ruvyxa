@@ -6,31 +6,32 @@ How Ruvyxa uses threads, locks, channels, and parallelism across the Rust layer.
 
 ## Lock & synchronization map
 
-| Component                          | Mechanism                                        | Crate       | Rationale                                            |
-| ---------------------------------- | ------------------------------------------------ | ----------- | ---------------------------------------------------- |
-| **ResolveGraphCache.resolutions**  | `DashMap<(Arc<str>, Arc<str>), Option<PathBuf>>` | dashmap     | Read-heavy, lock-free reads, 64 shards               |
-| **ResolveGraphCache.sources**      | `DashMap<PathBuf, CachedSource>`                 | dashmap     | Concurrent source reads                              |
-| **ResolveGraphCache.tsconfigs**    | `DashMap<PathBuf, CachedTsConfig>`               | dashmap     | Infrequent tsconfig reads                            |
-| **ResolveGraphCache.dependencies** | `DashMap<DependencyCacheKey, Arc<[PathBuf]>>`    | dashmap     | Cached dep lists                                     |
-| **CompileCache.memory**            | `Arc<Mutex<HashMap<String, MemEntry>>>`          | std::sync   | Write infrequent, LRU needs correct order            |
-| **CompileCache.disk**              | Atomic file writes (temp + rename)               | std::fs     | No concurrent write to same key possible             |
-| **RenderCache.entries**            | `tokio::sync::RwLock<HashMap<...>>`              | tokio       | Async access, read-mostly                            |
-| **RenderCache.order**              | `tokio::sync::RwLock<VecDeque<...>>`             | tokio       | Held together with entries during write              |
-| **RenderCache.hits/misses**        | `AtomicU64`                                      | std::sync   | Relaxed ordering, stats only                         |
-| **HmrTracker.file_to_routes**      | `parking_lot::RwLock<BTreeMap<...>>`             | parking_lot | Synchronous use (notify callback, no tokio)          |
-| **HmrTracker.route_to_files**      | `parking_lot::RwLock<BTreeMap<...>>`             | parking_lot | Same as above                                        |
-| **RuntimeCache.manifest**          | `tokio::sync::RwLock<Option<...>>`               | tokio       | Async manifest reads/writes                          |
-| **RuntimeCache.styles**            | `tokio::sync::RwLock<Option<...>>`               | tokio       | Async style reads/invalidation                       |
-| **RuntimeCache.router**            | `tokio::sync::RwLock<Option<...>>`               | tokio       | Async router rebuild on manifest change              |
-| **WorkerPool.workers**             | `StdRwLock<Vec<Arc<Worker>>>`                    | std::sync   | Infrequent writes (failure recovery)                 |
-| **WorkerPool.next_worker**         | `AtomicU64`                                      | std::sync   | Relaxed cursor for fair ties after load comparison   |
-| **Worker.stdin_tx**                | `StdMutex<Option<mpsc::Sender<String>>>`         | std::sync   | Drop = signal shutdown                               |
-| **Worker.pending**                 | `Arc<Mutex<BTreeMap<String, PendingResponse>>>`  | std::sync   | Write on every request (insert/remove), fast section |
-| **Worker.child**                   | `Mutex<Option<Child>>`                           | std::sync   | Protect kill_on_drop + shutdown                      |
-| **ISR revalidating set**           | `tokio::sync::Mutex<HashSet<String>>`            | tokio       | Async lock, coalesce concurrent revalidations        |
-| **Action rate limiter**            | `Arc<Mutex<ActionRateLimiter>>`                  | std::sync   | Single writer, fast section                          |
-| **Content module cache**           | `OnceLock<Mutex<HashMap<...>>>`                  | std::sync   | Global shared, lazy init                             |
-| **PluginHost.worker**              | `tokio::sync::Mutex<PluginWorker>`               | tokio       | Serialize calls to the persistent plugin runtime     |
+| Component                          | Mechanism                                        | Crate       | Rationale                                          |
+| ---------------------------------- | ------------------------------------------------ | ----------- | -------------------------------------------------- |
+| **ResolveGraphCache.resolutions**  | `DashMap<(Arc<str>, Arc<str>), Option<PathBuf>>` | dashmap     | Read-heavy, lock-free reads, 64 shards             |
+| **ResolveGraphCache.sources**      | `DashMap<PathBuf, CachedSource>`                 | dashmap     | Concurrent source reads                            |
+| **ResolveGraphCache.tsconfigs**    | `DashMap<PathBuf, CachedTsConfig>`               | dashmap     | Infrequent tsconfig reads                          |
+| **ResolveGraphCache.dependencies** | `DashMap<DependencyCacheKey, Arc<[PathBuf]>>`    | dashmap     | Cached dep lists                                   |
+| **CompileCache.memory**            | `Arc<Mutex<HashMap<String, MemEntry>>>`          | std::sync   | Write infrequent, LRU needs correct order          |
+| **CompileCache.disk**              | Atomic file writes (temp + rename)               | std::fs     | No concurrent write to same key possible           |
+| **RenderCache.entries**            | `tokio::sync::RwLock<HashMap<...>>`              | tokio       | Async access, read-mostly                          |
+| **RenderCache.order**              | `tokio::sync::RwLock<VecDeque<...>>`             | tokio       | Held together with entries during write            |
+| **RenderCache.hits/misses**        | `AtomicU64`                                      | std::sync   | Relaxed ordering, stats only                       |
+| **HmrTracker.file_to_routes**      | `parking_lot::RwLock<BTreeMap<...>>`             | parking_lot | Synchronous use (notify callback, no tokio)        |
+| **HmrTracker.route_to_files**      | `parking_lot::RwLock<BTreeMap<...>>`             | parking_lot | Same as above                                      |
+| **RuntimeCache.manifest**          | `tokio::sync::RwLock<Option<...>>`               | tokio       | Async manifest reads/writes                        |
+| **RuntimeCache.styles**            | `tokio::sync::RwLock<Option<...>>`               | tokio       | Async style reads/invalidation                     |
+| **RuntimeCache.router**            | `tokio::sync::RwLock<Option<...>>`               | tokio       | Async router rebuild on manifest change            |
+| **WorkerPool.workers**             | `StdRwLock<Vec<Arc<Worker>>>`                    | std::sync   | Infrequent writes (failure recovery)               |
+| **WorkerPool.next_worker**         | `AtomicU64`                                      | std::sync   | Relaxed cursor for fair ties after load comparison |
+| **Worker.stdin_tx**                | `StdMutex<Option<mpsc::Sender<String>>>`         | std::sync   | Drop = signal shutdown                             |
+| **Worker.pending.entries**         | `Arc<Mutex<BTreeMap<String, PendingResponse>>>`  | tokio       | Serialize request lifecycle mutations              |
+| **Worker.pending.count**           | `AtomicUsize`                                    | std::sync   | Lock-free load observation during worker selection |
+| **Worker.child**                   | `Mutex<Option<Child>>`                           | std::sync   | Protect kill_on_drop + shutdown                    |
+| **ISR revalidating set**           | `tokio::sync::Mutex<HashSet<String>>`            | tokio       | Async lock, coalesce concurrent revalidations      |
+| **Action rate limiter**            | `Arc<Mutex<ActionRateLimiter>>`                  | std::sync   | Single writer, fast section                        |
+| **Content module cache**           | `OnceLock<Mutex<HashMap<...>>>`                  | std::sync   | Global shared, lazy init                           |
+| **PluginHost.worker**              | `tokio::sync::Mutex<PluginWorker>`               | tokio       | Serialize calls to the persistent plugin runtime   |
 
 ---
 
@@ -80,8 +81,9 @@ How Ruvyxa uses threads, locks, channels, and parallelism across the Rust layer.
 2. **Render cache get**: `RwLock<HashMap>.read()` + `VecDeque` promote — O(1). Tokio RwLock handles
    concurrent reads efficiently.
 
-3. **Worker pool send**: inspect each worker's pending count, starting at a rotating atomic cursor,
-   then use the least-loaded worker. The NDJSON channel write itself is O(1).
+3. **Worker pool send**: inspect each worker's atomic pending count without taking its response-map
+   mutex, starting at a rotating cursor, then use the least-loaded worker. The scan is bounded to
+   2-8 workers and the NDJSON channel write itself is O(1).
 
 4. **HTML composition**: string search (`find_ascii_case`) + `format!()` — negligible.
 
@@ -113,7 +115,7 @@ Same as dev minus HMR + error overlay overhead. Cache TTL is higher (1800s vs 30
 | ---------------------------------------------- | -------- | ---------------------------------------------------------------------- |
 | Concurrent render cache reads                  | Low      | tokio RwLock, read-mostly                                              |
 | Render cache write + invalidate simultaneously | Medium   | Both locks held together briefly; write path uncommon in prod (cached) |
-| Worker pending map insert/remove               | Low      | Mutex held for insert+send or remove+drain; microsecond-scale          |
+| Worker pending map insert/remove               | Low      | Mutex serializes lifecycle writes; selection reads an atomic counter   |
 | Compile cache LRU eviction                     | Low      | Local Mutex, held only during check-and-evict                          |
 | ResolveGraphCache high concurrency             | Very low | DashMap: 64 shards, RwLock per shard, avg 1/64 contention              |
 | HMR event during render cache write            | Low      | Different lock types (parking_lot vs tokio)                            |

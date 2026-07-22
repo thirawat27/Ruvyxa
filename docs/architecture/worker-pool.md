@@ -66,12 +66,17 @@ pub struct NodeWorkerPool {
 ```rust
 struct Worker {
     stdin_tx: StdMutex<Option<mpsc::Sender<String>>>,  // None = shutting down
-    pending: PendingResponses,           // Arc<Mutex<BTreeMap<String, PendingResponse>>>
+    pending: PendingResponses,           // Arc<PendingResponseSet>
     child: Mutex<Option<Child>>,         // std::process::Child
     alive: Arc<AtomicBool>,
 }
 
-type PendingResponses = Arc<Mutex<BTreeMap<String, PendingResponse>>>;
+struct PendingResponseSet {
+    entries: Mutex<BTreeMap<String, PendingResponse>>,
+    count: AtomicUsize,                  // lock-free worker load
+}
+
+type PendingResponses = Arc<PendingResponseSet>;
 ```
 
 ### `PendingResponse`
@@ -79,7 +84,6 @@ type PendingResponses = Arc<Mutex<BTreeMap<String, PendingResponse>>>;
 ```rust
 struct PendingResponse {
     sender: mpsc::Sender<WorkerResponse>,   // bounded(16)
-    queued: Arc<AtomicUsize>,               // frames pending in channel
     streaming: Arc<AtomicBool>,             // true after api-start frame
 }
 ```
@@ -200,22 +204,14 @@ async fn spawn(worker_script: &Path, env: &BTreeMap<String, String>) -> Result<S
        while let Some(Ok(line)) = lines.next_line().await {
            let response: WorkerResponse = serde_json::from_str(&line)?;
 
-           let pending_map = pending.lock().await;
-           if response.frame.is_some() {
-               // Non-terminal frame: forward to existing pending sender
-               if let Some(pr) = pending_map.get(&response.id) {
-                   pr.sender.send(response).await.ok();
-               }
-           } else {
-               // Terminal response: remove from pending map, send final
-               if let Some(pr) = pending_map.remove(&response.id) {
-                   pr.sender.send(response).await.ok();
-               }
+           let terminal = response.is_terminal();
+           if let Some(pr) = pending.response(&response.id, terminal).await {
+               pr.sender.send(response).await.ok();
            }
        }
        // On EOF: drain pending, mark dead
        alive.store(false, Ordering::Release);
-       for (_, pr) in pending_map.drain() {
+       for (_, pr) in pending.take_all().await {
            pr.sender.send(stream_error()).await.ok();
        }
    });
@@ -376,14 +372,12 @@ async fn send<F>(&self, build_request: F) -> Result<WorkerResponse>
 
     // Create response channel first (before sending, to avoid race)
     let (tx, rx) = mpsc::channel(MAX_PENDING_RESPONSE_FRAMES);
-    {
-        let mut pending = worker.pending.lock().unwrap();
-        pending.insert(id.clone(), PendingResponse {
+    worker.pending
+        .insert(id.clone(), PendingResponse {
             sender: tx,
-            queued: Arc::new(AtomicUsize::new(0)),
             streaming: Arc::new(AtomicBool::new(false)),
-        });
-    }
+        })
+        .await;
 
     // Send to worker stdin
     let stdin = worker.stdin_tx.lock().unwrap();
@@ -403,7 +397,7 @@ async fn send<F>(&self, build_request: F) -> Result<WorkerResponse>
     }).await;
 
     // Cleanup pending entry
-    worker.pending.lock().unwrap().remove(&id);
+    worker.pending.remove(&id).await;
 
     match result {
         Ok(Ok(resp)) if resp.ok => Ok(resp),
@@ -429,13 +423,13 @@ status + headers (`api-start` frame). Subsequent frames arrive on the stream.
 async fn select_worker(&self) -> Result<(usize, Arc<Worker>)> {
     let workers = {
         let guard = self.workers.read().map_err(|_| worker_pool_lock_error())?;
-        guard.clone() // release the sync lock before awaiting pending counts
+        guard.clone() // stable worker snapshot; pending counts are atomic
     };
     let start = self.next_worker.fetch_add(1, Ordering::Relaxed) as usize;
     let mut best = None;
     for offset in 0..workers.len() {
         let index = (start + offset) % workers.len();
-        let load = workers[index].in_flight().await;
+        let load = workers[index].in_flight();
         if load == 0 { return Ok((index, Arc::clone(&workers[index]))); }
         if best.as_ref().is_none_or(|(_, best_load)| load < *best_load) {
             best = Some((index, load));
@@ -447,7 +441,8 @@ async fn select_worker(&self) -> Result<(usize, Arc<Worker>)> {
 ```
 
 The cursor only decides where an equal-load scan begins. A busy worker is skipped when a sibling has
-fewer pending requests, while all-idle workers still rotate fairly.
+fewer pending requests, while all-idle workers still rotate fairly. Selection never waits for a
+pending-response map lock, so response delivery and request routing do not form a contention chain.
 
 ### Failure recovery in `send()`
 

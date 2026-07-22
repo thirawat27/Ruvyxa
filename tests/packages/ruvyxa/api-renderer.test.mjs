@@ -2,13 +2,17 @@ import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
 import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
-import { describe, it } from 'node:test'
+import { after, describe, it } from 'node:test'
 import { fileURLToPath } from 'node:url'
+
+import { createFixtureWorkspace } from './fixture-workspace.mjs'
 
 const workspaceRoot = path.resolve(fileURLToPath(new URL('../../..', import.meta.url)))
 const exampleRoot = path.join(workspaceRoot, 'examples/demo')
 const apiRenderer = path.join(workspaceRoot, 'packages/ruvyxa/runtime/api-renderer.mjs')
 const workerPool = path.join(workspaceRoot, 'packages/ruvyxa/runtime/worker-pool.mjs')
+const fixtureWorkspace = await createFixtureWorkspace('ruvyxa-api-tests-', exampleRoot)
+after(() => rm(fixtureWorkspace, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }))
 
 describe('API renderer request forwarding', () => {
   it('forwards POST body and headers through the standalone renderer', async () => {
@@ -196,7 +200,7 @@ function runWorkerJson(request) {
 }
 
 async function withFixture(run) {
-  const root = await mkdtemp(path.join(exampleRoot, '.ruvyxa-api-test-'))
+  const root = await mkdtemp(path.join(fixtureWorkspace, 'fixture-'))
   const routeDir = path.join(root, 'app/api/echo')
   const appDir = path.join(root, 'app')
   const routeFile = path.join(routeDir, 'route.ts')

@@ -4,10 +4,17 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
 import { createInterface } from 'node:readline'
-import test from 'node:test'
+import test, { after } from 'node:test'
+
+import { createFixtureWorkspace } from './fixture-workspace.mjs'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..')
 const workerScript = path.join(repoRoot, 'packages/ruvyxa/runtime/worker-pool.mjs')
+const fixtureWorkspace = await createFixtureWorkspace(
+  'ruvyxa-worker-tests-',
+  path.join(repoRoot, 'examples/demo'),
+)
+after(() => rm(fixtureWorkspace, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }))
 
 /// Spawns one worker with a request/response helper and registers cleanup on `t`.
 function startWorker(t, cleanupDirs = []) {
@@ -123,7 +130,7 @@ test('rejects numeric environment values with trailing units', async (t) => {
 })
 
 test('invalidates a cached route bundle when an imported utility changes', async (t) => {
-  const projectRoot = await mkdtemp(path.join(repoRoot, '.worker-pool-test-'))
+  const projectRoot = await mkdtemp(path.join(fixtureWorkspace, 'cache-test-'))
   const appDir = path.join(projectRoot, 'app/api/value')
   const routeFile = path.join(appDir, 'route.ts')
   const utilityFile = path.join(projectRoot, 'lib/value.ts')
@@ -193,7 +200,7 @@ test('invalidates a cached route bundle when an imported utility changes', async
 })
 
 test('forwards action request headers and preserves repeated response headers', async (t) => {
-  const projectRoot = await mkdtemp(path.join(repoRoot, '.worker-pool-action-test-'))
+  const projectRoot = await mkdtemp(path.join(fixtureWorkspace, 'action-test-'))
   const actionFile = path.join(projectRoot, 'app/account/action.ts')
   await mkdir(path.dirname(actionFile), { recursive: true })
   await writeFile(
@@ -262,7 +269,7 @@ export const inspect = action.handler(async ({ request }) => {
 })
 
 test('resolves static params and isolates build-time page module state', async (t) => {
-  const projectRoot = await mkdtemp(path.join(repoRoot, 'examples/demo/.worker-pool-test-'))
+  const projectRoot = await mkdtemp(path.join(fixtureWorkspace, 'render-test-'))
   const appDir = path.join(projectRoot, 'app/products/[id]')
   const pageFile = path.join(appDir, 'page.tsx')
   const paramsFile = path.join(appDir, 'params.ts')
@@ -406,7 +413,7 @@ export default function Page({ params }) {
 })
 
 test('parses action payloads by content type and rejects malformed JSON', async (t) => {
-  const projectRoot = await mkdtemp(path.join(repoRoot, '.worker-pool-action-payload-test-'))
+  const projectRoot = await mkdtemp(path.join(fixtureWorkspace, 'action-payload-test-'))
   const actionFile = path.join(projectRoot, 'app/todos/action.ts')
   await mkdir(path.dirname(actionFile), { recursive: true })
   await writeFile(
@@ -473,11 +480,8 @@ export const createTodo = action
 })
 
 test('client bundles hydrate cleanly and enforce boundary diagnostics', async (t) => {
-  // React must resolve from the project root, so the fixture lives inside the
-  // demo app the same way real pages do.
-  const projectRoot = path.join(repoRoot, 'examples/demo')
-  const fixtureDir = await mkdtemp(path.join(projectRoot, '.worker-pool-client-test-'))
-  const appDir = path.join(fixtureDir, 'app')
+  const projectRoot = await mkdtemp(path.join(fixtureWorkspace, 'client-test-'))
+  const appDir = path.join(projectRoot, 'app')
   const pageFile = path.join(appDir, 'page.tsx')
   await mkdir(appDir, { recursive: true })
   await writeFile(
@@ -485,7 +489,7 @@ test('client bundles hydrate cleanly and enforce boundary diagnostics', async (t
     'export default function Layout({ children }) { return <html><body>{children}</body></html> }\n',
   )
   await writeFile(pageFile, 'export default function Page() { return <main>Hello</main> }\n')
-  const { request } = startWorker(t, [fixtureDir])
+  const { request } = startWorker(t, [projectRoot])
 
   const base = { type: 'client', projectRoot, appDir, pageFile, requestPath: '/', params: {} }
 
@@ -524,7 +528,7 @@ test('client bundles hydrate cleanly and enforce boundary diagnostics', async (t
 })
 
 test('streams large binary API responses as bounded frames', async (t) => {
-  const projectRoot = await mkdtemp(path.join(repoRoot, '.worker-pool-stream-test-'))
+  const projectRoot = await mkdtemp(path.join(fixtureWorkspace, 'stream-test-'))
   const appDir = path.join(projectRoot, 'app/api/binary')
   const routeFile = path.join(appDir, 'route.ts')
   await mkdir(appDir, { recursive: true })

@@ -3,7 +3,7 @@ import { spawn } from 'node:child_process'
 import { copyFile, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { describe, it } from 'node:test'
+import { after, describe, it } from 'node:test'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import {
@@ -14,11 +14,14 @@ import {
   invalidateCompilerCache,
   toImportPath,
 } from '../../../packages/ruvyxa/runtime/compiler.mjs'
+import { createFixtureWorkspace } from './fixture-workspace.mjs'
 
 const workspaceRoot = path.resolve(fileURLToPath(new URL('../../..', import.meta.url)))
 const exampleRoot = path.join(workspaceRoot, 'examples/demo')
 const configRenderer = path.join(workspaceRoot, 'packages/ruvyxa/runtime/config-renderer.mjs')
 const pluginRuntime = path.join(workspaceRoot, 'packages/ruvyxa/runtime/plugin-runtime.mjs')
+const fixtureWorkspace = await createFixtureWorkspace('ruvyxa-compiler-tests-', exampleRoot)
+after(() => rm(fixtureWorkspace, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }))
 
 describe('runtime compiler', () => {
   it('resolves runtime aliases when the runtime path contains spaces', async () => {
@@ -1406,7 +1409,7 @@ function runJsonResult(script, args, payload) {
 }
 
 async function withFixture(run) {
-  const root = await mkdtemp(path.join(exampleRoot, '.ruvyxa-compiler-test-'))
+  const root = await mkdtemp(path.join(fixtureWorkspace, 'fixture-'))
   const outDir = path.join(root, '.ruvyxa', 'cache')
   await mkdir(outDir, { recursive: true })
 
