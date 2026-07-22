@@ -390,6 +390,16 @@ struct RealtimeRuntime {
     tx: broadcast::Sender<String>,
 }
 
+/// Framework endpoints registered on the router before the plugin realtime
+/// route. Must stay in sync with the `Router::new()` chain in [`serve`];
+/// registering a realtime transport on one of these would panic in axum.
+const RESERVED_FRAMEWORK_ROUTES: [&str; 4] = [
+    "/__ruvyxa/hmr",
+    "/__ruvyxa/client",
+    "/__ruvyxa/action",
+    "/__ruvyxa/trace",
+];
+
 #[derive(Default)]
 struct RuntimeCache {
     manifest: tokio::sync::RwLock<Option<RouteManifest>>,
@@ -626,6 +636,14 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
                 return Err(RuvyxaError::Message(
                     "RUV1701 TypeScript plugin host returned invalid realtime configuration".into(),
                 ));
+            }
+            // Registering over a reserved framework route would panic inside
+            // axum's router; fail with a diagnostic instead.
+            if RESERVED_FRAMEWORK_ROUTES.contains(&descriptor.path.as_str()) {
+                return Err(RuvyxaError::Message(format!(
+                    "RUV1701 realtime path {} collides with a reserved framework route",
+                    descriptor.path
+                )));
             }
             let (tx, _) = broadcast::channel(descriptor.capacity);
             Ok(RealtimeRuntime {

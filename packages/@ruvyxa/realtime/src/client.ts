@@ -106,34 +106,35 @@ export function createRealtimeClient(options: RealtimeClientOptions = {}): Realt
     connect()
   }
 
+  const subscribe = (channel: string, listener: RealtimeListener) => {
+    const normalized = validateChannel(channel)
+    if (typeof listener !== 'function') throw new TypeError('Realtime listener must be a function')
+    if (!listeners.has(normalized) && listeners.size >= 16) {
+      throw new TypeError('Realtime clients accept at most 16 active channels')
+    }
+    const group = listeners.get(normalized) ?? new Set<RealtimeListener>()
+    const changed = !group.has(listener)
+    group.add(listener)
+    listeners.set(normalized, group)
+    if (changed) refresh()
+    let active = true
+    return () => {
+      if (!active) return
+      active = false
+      const current = listeners.get(normalized)
+      current?.delete(listener)
+      if (current?.size === 0) listeners.delete(normalized)
+      refresh()
+    }
+  }
+
   return Object.freeze({
-    subscribe(channel: string, listener: RealtimeListener) {
-      const normalized = validateChannel(channel)
-      if (typeof listener !== 'function')
-        throw new TypeError('Realtime listener must be a function')
-      if (!listeners.has(normalized) && listeners.size >= 16) {
-        throw new TypeError('Realtime clients accept at most 16 active channels')
-      }
-      const group = listeners.get(normalized) ?? new Set<RealtimeListener>()
-      const changed = !group.has(listener)
-      group.add(listener)
-      listeners.set(normalized, group)
-      if (changed) refresh()
-      let active = true
-      return () => {
-        if (!active) return
-        active = false
-        const current = listeners.get(normalized)
-        current?.delete(listener)
-        if (current?.size === 0) listeners.delete(normalized)
-        refresh()
-      }
-    },
+    subscribe,
     subscribeRoute(pathname: string, listener: RealtimeListener) {
       if (!pathname.startsWith('/') || pathname.includes('?') || pathname.includes('#')) {
         throw new TypeError('Realtime route subscriptions require an absolute pathname')
       }
-      return this.subscribe(routeChannel(pathname), listener)
+      return subscribe(routeChannel(pathname), listener)
     },
     close() {
       stopped = true

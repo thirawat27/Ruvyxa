@@ -1261,6 +1261,18 @@ export class contentFormat {}
         path.join(root, 'ruvyxa.config.ts'),
         `export default {
           plugins: [
+            { name: 'one', setup({ enableRealtime }) { enableRealtime({ path: '/__ruvyxa/hmr' }) } },
+          ],
+        }`,
+      )
+      const reserved = await runJsonResult(pluginRuntime, [root, 'describe'], {})
+      assert.equal(reserved.exitCode, 1)
+      assert.match(reserved.parsed.message, /collides with a reserved framework route/)
+
+      await writeFile(
+        path.join(root, 'ruvyxa.config.ts'),
+        `export default {
+          plugins: [
             { name: 'one', setup({ enableRealtime }) { enableRealtime() } },
             { name: 'two', setup({ enableRealtime }) { enableRealtime() } },
           ],

@@ -104,7 +104,8 @@ export function createAuth(options: AuthOptions): AuthRuntime {
     if (url.pathname === `${settings.basePath}/webauthn/options` && request.method === 'POST') {
       assertSameOrigin(request, settings.origin)
       const provider = findProvider(settings.providers, 'webauthn')
-      if (!provider || provider.type !== 'webauthn') return authFailure(notConfigured('webauthn'))
+      if (!provider || provider.type !== 'webauthn') throw notConfigured('webauthn')
+      await consumeRateLimit(request, 'webauthn', settings)
       return json(await provider.options(await readJson(request), request))
     }
     if (url.pathname === `${settings.basePath}/webauthn/verify` && request.method === 'POST') {

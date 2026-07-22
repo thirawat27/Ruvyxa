@@ -193,6 +193,33 @@ describe('@ruvyxa/auth', () => {
     assert.match(verified?.headers.get('set-cookie') ?? '', /HttpOnly/)
   })
 
+  it('rate limits WebAuthn challenge options like every other credential endpoint', async () => {
+    const auth = runtime({
+      rateLimit: { max: 1, windowSeconds: 60 },
+      providers: {
+        passkey: {
+          type: 'webauthn',
+          async options() {
+            return { challenge: 'adapter-owned' }
+          },
+          async verify() {
+            return { id: 'passkey-1' }
+          },
+        },
+      },
+    })
+    const request = () =>
+      new Request(`${origin}/__ruvyxa/auth/webauthn/options`, {
+        method: 'POST',
+        headers: { origin },
+        body: '{}',
+      })
+    assert.equal((await auth.handle(request()))?.status, 200)
+    const limited = await auth.handle(request())
+    assert.equal(limited?.status, 429)
+    assert.equal(limited?.headers.get('retry-after'), '60')
+  })
+
   it('uses OAuth PKCE, consumes state once, and never returns provider tokens', async () => {
     const originalFetch = globalThis.fetch
     const fetchCalls: Array<{ url: string; init?: RequestInit }> = []

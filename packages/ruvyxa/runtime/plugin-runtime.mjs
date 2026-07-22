@@ -166,6 +166,12 @@ function normalizeRealtime(plugin, value) {
   if (!Number.isInteger(capacity) || capacity < 16 || capacity > 4096) {
     throw new TypeError(`plugin "${plugin}" realtime capacity must be between 16 and 4096`)
   }
+  const reserved = ['/__ruvyxa/hmr', '/__ruvyxa/client', '/__ruvyxa/action', '/__ruvyxa/trace']
+  if (reserved.includes(pathValue)) {
+    throw new TypeError(
+      `plugin "${plugin}" realtime path "${pathValue}" collides with a reserved framework route`,
+    )
+  }
   return Object.freeze({ plugin, path: pathValue, heartbeatMs, capacity })
 }
 
