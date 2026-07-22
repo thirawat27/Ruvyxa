@@ -52,10 +52,12 @@ export default config({ plugins: [auth] })
 import { config } from 'ruvyxa/config'
 import {
   cacheRules,
+  contentEngine,
   feed,
   observability,
   openApi,
   pwa,
+  robots,
   searchIndex,
   securityHeaders,
 } from 'ruvyxa/plugins'
@@ -74,15 +76,15 @@ export default config({
       { source: '/blog/*', browser: 'public, max-age=60', cdn: 'max-age=300' },
     ]),
     pwa({ name: 'Example', offlineFallback: '/offline' }),
-    feed({
+    robots({
+      sitemap: 'https://example.com/sitemap.xml',
+      openAi: { search: true, training: false },
+    }),
+    contentEngine({
       siteUrl: 'https://example.com',
       title: 'Example',
       description: 'บทความล่าสุด',
-      items: [{ title: 'เปิดตัว', url: '/blog/launch' }],
-    }),
-    searchIndex({
       locale: 'th',
-      documents: [{ id: 'home', title: 'หน้าแรก', url: '/', text: 'ยินดีต้อนรับ' }],
     }),
     openApi({
       info: { title: 'Example API', version: '1.0.0' },
@@ -109,11 +111,22 @@ export default config({
 - `sitemap({ siteUrl, exclude, robots })` — เขียน `sitemap.xml` (และ `robots.txt` ถ้าเปิด) ลง
   โฟลเดอร์ asset ที่เสิร์ฟจริงหลังจบ production build โดยอ่านจาก route manifest ข้าม dynamic route
   และ API route ให้อัตโนมัติ
-- `robots({ rules, sitemap })` — สร้าง `robots.txt` แยกเดี่ยว
+- `robots({ rules, sitemap, openAi })` — สร้าง `robots.txt` แยกเดี่ยว โดย preset `openAi` แยกควบคุม
+  OAI-SearchBot (`search`) ออกจาก GPTBot (`training`) และจะปฏิเสธ rule ของ agent เดียวกันที่กำหนดซ้ำ
+  เพื่อไม่ให้เกิด policy กำกวม
 - `pwa(options)` — สร้างและเสิร์ฟ web manifest, service worker และ registration module พร้อม inject
   tag ให้ HTML response และ prerendered HTML ที่ตรง route ควรกำหนด `precache` กับ `offlineFallback`
   เองเพื่อไม่ให้ service worker เดาข้อมูลที่ต้อง cache โดย cache namespace จะแยกตาม service-worker
   scope จึงไม่ลบ cache ข้ามกันแม้หลายแอปใช้ origin เดียวกัน
+- `contentEngine({ siteUrl, title, description, ... })` — สแกน route แบบ native ที่
+  `app/**/page.md(x)` เพียงครั้งเดียว แล้วสร้าง `/content.json`, `/search-index.json`, `/rss.xml`,
+  `/sitemap.xml` และ link/answer index แบบ experimental ที่ `/llms.txt` จาก frontmatter กับเนื้อหา
+  ชุดเดียว ระหว่างพัฒนาไฟล์จะอัปเดตสด และตอน production จะเขียนผลลัพธ์ที่ตรงกันทุก byte ระบบตัด
+  route group, draft และโฟลเดอร์ private ออก พร้อมข้าม dynamic route ที่ยังไม่มี canonical path
+  รองรับ metadata `title`, `description`/`summary`, `tags`, `publishedAt`/`date`, `updatedAt`,
+  `author`, `answers` และ `draft` โดย citation URL จะถูก normalize เป็น HTTP(S) สาธารณะ ส่วน custom
+  frontmatter ที่เป็น JSON-compatible จะคงอยู่ใน content manifest ใช้ `llmsPath: false` เพื่อปิด
+  ไฟล์ experimental หรือกำหนด public path ใหม่
 - `feed({ siteUrl, title, description, items, path })` — สร้าง RSS 2.0 จาก array หรือ async loader
   ตอน build โดยค่า output เริ่มต้นคือ `/rss.xml`
 - `searchIndex({ documents, locale, stopWords, minTermLength, path })` — สร้าง inverted index แบบ
@@ -127,12 +140,22 @@ export default config({
 - `requireEnv(names)` — ทำให้ production build ล้มเหลวเมื่อ environment variable ที่จำเป็นหายไป
   หรือว่างเปล่า
 
-ไฟล์ public ที่ plugin สร้างจะเสร็จก่อน adapter materialize output ดังนั้น sitemap, PWA, feed,
-search index และ OpenAPI จะติดไปกับ static/hybrid deployment artifact ด้วย ไม่ได้อยู่แค่ใน `.ruvyxa`
-ฝั่ง local ส่วน static adapter จะรักษา URL ให้ตรง production server คือ public file อยู่ที่ `/...`
-และ client bundle อยู่ใต้ `/__ruvyxa/client/...` ไฟล์ที่สร้างจะถูกแทนที่แบบ atomic และ path ของ
-artifact จะถูกตรวจไม่ให้เป็น cross-origin, traversal, directory หรือ endpoint ของ PWA
-ที่ชนกันตั้งแต่ตอนอ่าน config
+ถ้า RSS, search และ sitemap มาจากชุด Markdown/MDX เดียวกัน ให้ใช้ `contentEngine()` แทน `feed()`,
+`searchIndex()` และ `sitemap()` แบบแยกตัว หากแอปจำเป็นต้องใช้ร่วมกัน ต้องตั้ง output path ให้ต่างกัน
+เพื่อไม่ให้ plugin สองตัวเขียนทับ artifact เดียวกัน
+
+`answers` ต้องเป็น `question` และ `answer` ที่ผู้เขียนระบุเอง และใส่ `sources: [{ name, url }]`
+เพิ่มได้ ให้นำข้อมูลชุดเดียวกันไป render ให้ผู้ใช้เห็นด้วย `Answer` จาก `@ruvyxa/react`; Content
+Engine จะไม่เดาคำตอบหรือสร้าง FAQ/QAPage markup ให้เอง ส่วน `llms.txt` เป็นเพียง discovery aid แบบ
+experimental ไม่ได้แทน HTML ที่ index ได้, structured data ที่ตรงจริง, canonical URL
+หรือความสดใหม่ของ sitemap
+
+ไฟล์ public ที่ plugin สร้างจะเสร็จก่อน adapter materialize output ดังนั้น Content Engine, sitemap,
+PWA, feed, search index และ OpenAPI จะติดไปกับ static/hybrid deployment artifact ด้วย
+ไม่ได้อยู่แค่ใน `.ruvyxa` ฝั่ง local ส่วน static adapter จะรักษา URL ให้ตรง production server คือ
+public file อยู่ที่ `/...` และ client bundle อยู่ใต้ `/__ruvyxa/client/...`
+ไฟล์ที่สร้างจะถูกแทนที่แบบ atomic และ path ของ artifact จะถูกตรวจไม่ให้เป็น cross-origin, traversal,
+directory หรือ endpoint ของ PWA ที่ชนกันตั้งแต่ตอนอ่าน config
 
 `observability`, `securityHeaders` และ `cacheRules` เป็น runtime response plugin จึงทำงานตามปกติบน
 serverless หรือ long-running adapter แต่ static host ล้วนไม่มี middleware runtime ต้องตั้ง security/

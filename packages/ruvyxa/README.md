@@ -154,30 +154,34 @@ export default config({
 `ruvyxa/plugins` provides typed first-party plugins without extra packages:
 
 - Runtime: `observability()`, `securityHeaders()`, and `cacheRules()`
-- App delivery: `pwa()`, `feed()`, `searchIndex()`, and `openApi()`
+- Content and app delivery: `contentEngine()`, `pwa()`, `feed()`, `searchIndex()`, and `openApi()`
 - Routing/build utilities: `redirects()`, `headers()`, `sitemap()`, `robots()`, `alias()`,
   `bundleBudget()`, and `requireEnv()`
 
 ```ts
 import { config } from 'ruvyxa/config'
-import { cacheRules, observability, openApi, securityHeaders } from 'ruvyxa/plugins'
+import { cacheRules, contentEngine, observability, securityHeaders } from 'ruvyxa/plugins'
 
 export default config({
   plugins: [
     observability({ routes: ['/api/*'] }),
     securityHeaders({ contentSecurityPolicy: { 'default-src': ["'self'"] } }),
     cacheRules([{ source: '/api/*', browser: 'no-store' }]),
-    openApi({
-      info: { title: 'App API', version: '1.0.0' },
-      operations: [{ method: 'get', path: '/api/health' }],
+    contentEngine({
+      siteUrl: 'https://example.com',
+      title: 'Example',
+      description: 'Latest articles',
+      locale: 'en',
     }),
   ],
 })
 ```
 
-Build-generated files are written before adapters materialize deployment artifacts, so PWA, RSS,
-search-index, OpenAPI, sitemap, and robots outputs ship with static and hybrid adapters. See the
-English and Thai plugin guides for complete option examples.
+Content Engine also publishes explicit answer metadata and an experimental `/llms.txt` index from
+the same Markdown/MDX graph. Build-generated files are written before adapters materialize
+deployment artifacts, so PWA, RSS, search-index, OpenAPI, sitemap, robots, and `llms.txt` outputs
+ship with static and hybrid adapters. See the English and Thai plugin guides for complete options,
+including independent OpenAI search/training crawler policy.
 
 ## Runtime Architecture
 

@@ -1,6 +1,16 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { copyFile, mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from 'node:fs/promises'
+import {
+  copyFile,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  realpath,
+  rm,
+  stat,
+  writeFile,
+} from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { after, describe, it } from 'node:test'
@@ -1094,11 +1104,16 @@ export class contentFormat {}
       await writeFile(
         path.join(root, 'ruvyxa.config.ts'),
         `
-          import { observability, openApi } from "ruvyxa/plugins"
+          import { contentEngine, observability, openApi } from "ruvyxa/plugins"
 
           export default {
             plugins: [
               observability({ routes: ["/api/*"], log: false }),
+              contentEngine({
+                siteUrl: "https://example.com",
+                title: "Fixture content",
+                description: "Fixture articles",
+              }),
               openApi({
                 info: { title: "Fixture API", version: "1.0.0" },
                 operations: [{ method: "get", path: "/api/health" }],
@@ -1110,17 +1125,32 @@ export class contentFormat {}
 
       const described = await runJson(pluginRuntime, [root, 'describe'], {})
       assert.deepEqual(described.result, {
-        plugins: ['ruvyxa:observability', 'ruvyxa:openapi'],
+        plugins: ['ruvyxa:observability', 'ruvyxa:content-engine', 'ruvyxa:openapi'],
         middleware: {
-          request: 2,
+          request: 3,
           response: 1,
-          requestRoutes: ['/api/*', '/openapi.json'],
+          requestRoutes: [
+            '/api/*',
+            '/content.json',
+            '/search-index.json',
+            '/rss.xml',
+            '/sitemap.xml',
+            '/llms.txt',
+            '/openapi.json',
+          ],
           responseRoutes: ['/api/*'],
         },
         resolveId: 0,
         transform: 0,
-        buildComplete: 1,
+        buildComplete: 2,
       })
+      const configCache = path.join(root, '.ruvyxa', 'cache', 'config')
+      const compiledConfigs = await Promise.all(
+        (await readdir(configCache))
+          .filter((name) => name.endsWith('.mjs'))
+          .map((name) => readFile(path.join(configCache, name), 'utf8')),
+      )
+      assert.doesNotMatch(compiledConfigs.join('\n'), /^import \* as \w+ from ["']yaml["'];$/m)
 
       const requestResult = await runJson(pluginRuntime, [root, 'middlewareRequest'], {
         request: { method: 'GET', path: '/api/health', headers: [] },

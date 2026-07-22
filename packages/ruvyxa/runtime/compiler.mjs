@@ -88,6 +88,7 @@ export async function compileBundleWithMetadata({
   outfile,
   platform = 'node',
   bundlePackages = false,
+  bundleAliasDependencies = false,
   external = [],
   aliases = {},
   minify = false,
@@ -116,6 +117,8 @@ export async function compileBundleWithMetadata({
     aliases,
     platform,
     bundlePackages,
+    bundleAliasDependencies,
+    bundleDependencies: false,
     jsxRuntime: normalizedJsxRuntime,
   })
 
@@ -245,6 +248,8 @@ async function visitModule(context) {
     aliases,
     platform,
     bundlePackages,
+    bundleAliasDependencies,
+    bundleDependencies,
     jsxRuntime,
   } = context
 
@@ -285,11 +290,17 @@ async function visitModule(context) {
     const resolved = resolvedAlias
       ? resolveFile(path.resolve(resolvedAlias))
       : (resolveLocalSpecifier(baseDir, specifier) ??
-        (platform === 'browser' || bundlePackages ? resolvePackage(baseDir, specifier) : null))
+        (platform === 'browser' || bundlePackages || bundleDependencies
+          ? resolvePackage(baseDir, specifier)
+          : null))
 
     if (
       resolved &&
-      (resolvedAlias || isProjectLocal(root, resolved) || platform === 'browser' || bundlePackages)
+      (resolvedAlias ||
+        isProjectLocal(root, resolved) ||
+        platform === 'browser' ||
+        bundlePackages ||
+        bundleDependencies)
     ) {
       const depSource = await readSourceFile(resolved)
       const dep = await visitModule({
@@ -306,6 +317,9 @@ async function visitModule(context) {
         aliases,
         platform,
         bundlePackages,
+        bundleAliasDependencies,
+        bundleDependencies:
+          bundleDependencies || (bundleAliasDependencies && Boolean(resolvedAlias)),
         jsxRuntime,
       })
       module.deps.set(specifier, dep)

@@ -1,5 +1,13 @@
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  writeFileSync,
+} from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { after, describe, it } from 'node:test'
@@ -8,6 +16,7 @@ import {
   alias,
   bundleBudget,
   cacheRules,
+  contentEngine,
   feed,
   headers,
   observability,
@@ -343,6 +352,26 @@ describe('robots()', () => {
     const body = readFileSync(path.join(context.outDir, 'assets', 'robots.txt'), 'utf8')
     assert.match(body, /User-agent: \*\nAllow: \//)
   })
+
+  it('controls OpenAI search discovery independently from training', async () => {
+    const { buildComplete } = register(robots({ openAi: { search: true, training: false } }))
+    const context = tempBuildContext({ routes: [] })
+    await buildComplete[0](context)
+    const body = readFileSync(path.join(context.outDir, 'assets', 'robots.txt'), 'utf8')
+    assert.match(body, /User-agent: OAI-SearchBot\nAllow: \//)
+    assert.match(body, /User-agent: GPTBot\nDisallow: \//)
+  })
+
+  it('rejects ambiguous duplicate OpenAI crawler policies', () => {
+    assert.throws(
+      () =>
+        robots({
+          rules: [{ userAgent: 'oai-searchbot', disallow: ['/private'] }],
+          openAi: { search: true },
+        }),
+      /configured by both rules and openAi\.search/,
+    )
+  })
 })
 
 describe('pwa()', () => {
@@ -531,6 +560,225 @@ describe('searchIndex()', () => {
       }),
     )
     await assert.rejects(() => buildComplete[0](tempBuildContext({ routes: [] })), /duplicate id/)
+  })
+})
+
+describe('contentEngine()', () => {
+  function contentProject() {
+    const root = mkdtempSync(path.join(tmpdir(), 'ruvyxa-content-engine-'))
+    tempDirs.push(root)
+    const writePage = (relative, source) => {
+      const file = path.join(root, 'app', relative)
+      mkdirSync(path.dirname(file), { recursive: true })
+      writeFileSync(file, source)
+    }
+    writePage(
+      '(marketing)/blog/launch/page.mdx',
+      `---
+title: Launch Day
+description: The fast Ruvyxa launch.
+publishedAt: 2026-07-22
+updatedAt: 2026-07-23T10:30:00Z
+author: Ada
+tags: [release, framework]
+answers:
+  - question: Does Ruvyxa support citeable answers?
+    answer: Yes. Answer data is explicit and links back to the canonical page.
+    sources:
+      - name: Ruvyxa rendering guide
+        url: /docs/rendering
+campaign:
+  featured: true
+---
+# {frontmatter.title}
+
+Ruvyxa ships **fast content** for everyone.
+`,
+    )
+    writePage('about/page.md', '# About Ruvyxa\n\nA framework built for clear delivery.')
+    writePage('blog/draft/page.md', '---\ndraft: true\n---\n# Secret roadmap')
+    writePage('_private/page.md', '# Private notes')
+    writePage('[slug]/page.md', '# Dynamic content')
+    return root
+  }
+
+  const options = {
+    siteUrl: 'https://example.com',
+    title: 'Example content',
+    description: 'News from Example.',
+    locale: 'en',
+  }
+
+  it('derives live content, search, RSS, and sitemap artifacts from one source', async () => {
+    const root = contentProject()
+    const registered = register(contentEngine(options))
+    assert.deepEqual(registered.middleware[0].routes, [
+      '/content.json',
+      '/search-index.json',
+      '/rss.xml',
+      '/sitemap.xml',
+      '/llms.txt',
+    ])
+
+    const context = { plugin: 'ruvyxa:content-engine', root }
+    const manifestResponse = await registered.middleware[0].onRequest(
+      request('/content.json'),
+      context,
+    )
+    const manifestBody = await manifestResponse.text()
+    const manifest = JSON.parse(manifestBody)
+    assert.deepEqual(
+      manifest.entries.map((entry) => entry.route),
+      ['/blog/launch', '/about'],
+    )
+    assert.equal(manifest.entries[0].url, 'https://example.com/blog/launch')
+    assert.equal(manifest.entries[0].publishedAt, '2026-07-22T00:00:00.000Z')
+    assert.equal(manifest.entries[0].frontmatter.campaign.featured, true)
+    assert.deepEqual(manifest.entries[0].tags, ['framework', 'release'])
+    assert.deepEqual(manifest.entries[0].answers, [
+      {
+        question: 'Does Ruvyxa support citeable answers?',
+        answer: 'Yes. Answer data is explicit and links back to the canonical page.',
+        sources: [{ name: 'Ruvyxa rendering guide', url: 'https://example.com/docs/rendering' }],
+      },
+    ])
+    assert.equal(manifest.entries[1].title, 'About Ruvyxa')
+    assert.equal(
+      manifest.entries[1].description,
+      'About Ruvyxa A framework built for clear delivery.',
+    )
+    assert.equal(
+      manifest.entries.some((entry) => entry.route.includes('draft')),
+      false,
+    )
+
+    const searchResponse = await registered.middleware[0].onRequest(
+      request('/search-index.json'),
+      context,
+    )
+    const searchBody = await searchResponse.text()
+    const search = JSON.parse(searchBody)
+    assert.deepEqual(search.terms.framework, ['/about', '/blog/launch'])
+    assert.deepEqual(search.terms.content, ['/blog/launch'])
+
+    const feedResponse = await registered.middleware[0].onRequest(request('/rss.xml'), context)
+    const feedBody = await feedResponse.text()
+    assert.match(feedBody, /<title>Launch Day<\/title>/)
+    assert.match(feedBody, /<author>Ada<\/author>/)
+    assert.doesNotMatch(feedBody, /Secret roadmap/)
+
+    const sitemapResponse = await registered.middleware[0].onRequest(
+      request('/sitemap.xml'),
+      context,
+    )
+    const sitemapBody = await sitemapResponse.text()
+    assert.match(sitemapBody, /https:\/\/example\.com\/blog\/launch/)
+    assert.match(sitemapBody, /<lastmod>2026-07-23T10:30:00\.000Z<\/lastmod>/)
+    assert.doesNotMatch(sitemapBody, /\[slug\]|_private|draft/)
+
+    const llmsResponse = await registered.middleware[0].onRequest(request('/llms.txt'), context)
+    assert.equal(llmsResponse.headers.get('content-type'), 'text/plain; charset=utf-8')
+    const llmsBody = await llmsResponse.text()
+    assert.match(llmsBody, /^# Example content\n\n> News from Example\./)
+    assert.match(
+      llmsBody,
+      /\[Launch Day\]\(<https:\/\/example\.com\/blog\/launch>\): The fast Ruvyxa launch\./,
+    )
+    assert.match(llmsBody, /Does Ruvyxa support citeable answers\? — Yes\./)
+
+    const buildContext = tempBuildContext({ routes: [] })
+    buildContext.root = root
+    await registered.buildComplete[0](buildContext)
+    for (const [name, expected] of [
+      ['content.json', manifestBody],
+      ['search-index.json', searchBody],
+      ['rss.xml', feedBody],
+      ['sitemap.xml', sitemapBody],
+      ['llms.txt', llmsBody],
+    ]) {
+      assert.equal(readFileSync(path.join(buildContext.outDir, 'assets', name), 'utf8'), expected)
+    }
+  })
+
+  it('handles HEAD safely and lets unsupported methods or missing source trees continue', async () => {
+    const root = contentProject()
+    const { middleware } = register(contentEngine(options))
+    const context = { plugin: 'ruvyxa:content-engine', root }
+    const head = await middleware[0].onRequest(
+      request('/content.json', { method: 'HEAD' }),
+      context,
+    )
+    assert.equal(await head.text(), '')
+    assert.equal(
+      await middleware[0].onRequest(request('/content.json', { method: 'POST' }), context),
+      undefined,
+    )
+    assert.equal(
+      await middleware[0].onRequest(request('/content.json'), {
+        ...context,
+        root: path.join(root, 'missing'),
+      }),
+      undefined,
+    )
+  })
+
+  it('invalidates live artifacts when a content page changes', async () => {
+    const root = contentProject()
+    const { middleware } = register(contentEngine(options))
+    const context = { plugin: 'ruvyxa:content-engine', root }
+    const before = await middleware[0].onRequest(request('/content.json'), context)
+    assert.match(await before.text(), /A framework built for clear delivery/)
+
+    writeFileSync(
+      path.join(root, 'app', 'about', 'page.md'),
+      '# About Ruvyxa\n\nUpdated content appears without restarting the development server.',
+    )
+    const after = await middleware[0].onRequest(request('/content.json'), context)
+    assert.match(await after.text(), /Updated content appears without restarting/)
+  })
+
+  it('rejects unsafe configuration and invalid content metadata', async () => {
+    assert.throws(() => contentEngine({ ...options, appDir: '../content' }), /project root/)
+    assert.throws(
+      () => contentEngine({ ...options, feedPath: '/same', sitemapPath: '/same' }),
+      /must be distinct/,
+    )
+    assert.throws(() => contentEngine({ ...options, locale: 'invalid_locale' }), /BCP 47/)
+
+    const root = mkdtempSync(path.join(tmpdir(), 'ruvyxa-content-engine-invalid-'))
+    tempDirs.push(root)
+    const file = path.join(root, 'app', 'bad', 'page.md')
+    mkdirSync(path.dirname(file), { recursive: true })
+    writeFileSync(file, '---\ntags: release\n---\n# Bad metadata')
+    const { buildComplete } = register(contentEngine(options))
+    const context = tempBuildContext({ routes: [] })
+    context.root = root
+    assert.throws(() => buildComplete[0](context), /frontmatter\.tags/)
+
+    writeFileSync(file, '---\npublishedAt: 2026-02-31\n---\n# Invalid date')
+    assert.throws(() => buildComplete[0](context), /ISO date string/)
+
+    writeFileSync(file, '---\nnull\n---\n# Invalid mapping')
+    assert.throws(() => buildComplete[0](context), /YAML mapping/)
+
+    writeFileSync(file, '---\nanswers:\n  - question: Missing answer\n---\n# Invalid answer')
+    assert.throws(() => buildComplete[0](context), /answers\[0\]\.answer/)
+
+    writeFileSync(
+      file,
+      '---\nanswers:\n  - question: Bad source\n    answer: Explicit\n    sources:\n      - name: Local\n        url: javascript:alert(1)\n---\n# Invalid source',
+    )
+    assert.throws(() => buildComplete[0](context), /must use http\(s\)/)
+  })
+
+  it('can disable the experimental llms.txt artifact', async () => {
+    const root = contentProject()
+    const registered = register(contentEngine({ ...options, llmsPath: false }))
+    assert.doesNotMatch(registered.middleware[0].routes.join(','), /llms\.txt/)
+    const context = tempBuildContext({ routes: [] })
+    context.root = root
+    await registered.buildComplete[0](context)
+    assert.equal(existsSync(path.join(context.outDir, 'assets', 'llms.txt')), false)
   })
 })
 

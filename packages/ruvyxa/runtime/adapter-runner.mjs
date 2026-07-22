@@ -143,6 +143,7 @@ async function loadConfig(root) {
     sourcefile: 'ruvyxa:adapter-config-entry.ts',
     outfile,
     platform: serverPlatform(),
+    bundleAliasDependencies: true,
     aliases: runtimeAliases(runtimeDir),
   })
 

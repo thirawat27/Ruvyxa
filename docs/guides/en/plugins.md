@@ -50,10 +50,12 @@ command, or custom middleware ABI.
 import { config } from 'ruvyxa/config'
 import {
   cacheRules,
+  contentEngine,
   feed,
   observability,
   openApi,
   pwa,
+  robots,
   searchIndex,
   securityHeaders,
 } from 'ruvyxa/plugins'
@@ -72,15 +74,15 @@ export default config({
       { source: '/blog/*', browser: 'public, max-age=60', cdn: 'max-age=300' },
     ]),
     pwa({ name: 'Example', offlineFallback: '/offline' }),
-    feed({
+    robots({
+      sitemap: 'https://example.com/sitemap.xml',
+      openAi: { search: true, training: false },
+    }),
+    contentEngine({
       siteUrl: 'https://example.com',
       title: 'Example',
       description: 'Latest articles',
-      items: [{ title: 'Launch', url: '/blog/launch' }],
-    }),
-    searchIndex({
       locale: 'en',
-      documents: [{ id: 'home', title: 'Home', url: '/', text: 'Welcome to Example' }],
     }),
     openApi({
       info: { title: 'Example API', version: '1.0.0' },
@@ -107,12 +109,24 @@ export default config({
 - `sitemap({ siteUrl, exclude, robots })` — writes `sitemap.xml` (and optionally `robots.txt`) into
   the served asset directory after each production build, from the route manifest. Dynamic patterns
   and API routes are skipped.
-- `robots({ rules, sitemap })` — standalone `robots.txt` generation.
+- `robots({ rules, sitemap, openAi })` — standalone `robots.txt` generation. The `openAi` preset
+  controls OAI-SearchBot (`search`) independently from GPTBot (`training`); explicit duplicate agent
+  rules are rejected instead of producing an ambiguous policy.
 - `pwa(options)` — generates and serves a web manifest, service worker, and registration module;
   injects their tags into matching HTML responses; and patches matching prerendered HTML. Provide
   `precache` and `offlineFallback` explicitly so the service worker never guesses application data.
   Cache namespaces are isolated by service-worker scope, including when several apps share an
   origin.
+- `contentEngine({ siteUrl, title, description, ... })` — scans native `app/**/page.md(x)` routes
+  once and derives `/content.json`, `/search-index.json`, `/rss.xml`, `/sitemap.xml`, and an
+  experimental `/llms.txt` link/answer index from their frontmatter and body. Artifacts stay live
+  during development and are written byte-equivalently for production. Route groups are removed,
+  drafts and private folders are excluded, and dynamic routes are skipped until they have a
+  canonical static path. Supported metadata includes `title`, `description`/`summary`, `tags`,
+  `publishedAt`/`date`, `updatedAt`, `author`, `answers`, and `draft`; answer citations are
+  normalized to public HTTP(S) URLs, and custom JSON-compatible frontmatter remains available in the
+  content manifest. Use `llmsPath: false` to disable the experimental file or set a different public
+  path.
 - `feed({ siteUrl, title, description, items, path })` — generates RSS 2.0 from an item array or an
   async build-time loader. The default output is `/rss.xml`.
 - `searchIndex({ documents, locale, stopWords, minTermLength, path })` — generates a deterministic
@@ -126,12 +140,22 @@ export default config({
 - `requireEnv(names)` — fails the production build when required environment variables are missing
   or empty.
 
-Build-generated public files run before adapter materialization. Therefore sitemap, PWA, feed,
-search, and OpenAPI files are included in static and hybrid deployment artifacts rather than only
-the local `.ruvyxa` directory. Static adapters preserve the same URLs as the production server:
-public files stay at `/...` and client bundles stay under `/__ruvyxa/client/...`. Generated files
-use atomic replacement, and configurable artifact paths reject cross-origin, traversal, directory,
-and colliding PWA endpoint values during configuration.
+Use `contentEngine()` instead of the standalone `feed()`, `searchIndex()`, and `sitemap()` plugins
+when they describe the same Markdown/MDX collection. If an application needs both, configure
+distinct output paths so two plugins never write the same artifact.
+
+`answers` must contain author-written `question` and `answer` strings, with optional
+`sources: [{ name, url }]`. Render that same data visibly with `Answer` from `@ruvyxa/react`;
+Content Engine deliberately does not infer answers or generate FAQ/QAPage markup. `llms.txt` is an
+experimental discovery aid and does not replace indexable HTML, accurate structured data, canonical
+URLs, or sitemap freshness.
+
+Build-generated public files run before adapter materialization. Therefore Content Engine, sitemap,
+PWA, feed, search, and OpenAPI files are included in static and hybrid deployment artifacts rather
+than only the local `.ruvyxa` directory. Static adapters preserve the same URLs as the production
+server: public files stay at `/...` and client bundles stay under `/__ruvyxa/client/...`. Generated
+files use atomic replacement, and configurable artifact paths reject cross-origin, traversal,
+directory, and colliding PWA endpoint values during configuration.
 
 `observability`, `securityHeaders`, and `cacheRules` are runtime response plugins. On a serverless
 or long-running adapter they run normally; a fully static host has no middleware runtime, so set

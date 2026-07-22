@@ -141,8 +141,9 @@
   and fallback rendering when hydration fails.
 - **Image components** — `<Image>` (responsive, `fill`, `priority`, `loader`, `unoptimized`,
   `fetchPriority`) and `<Picture>` for art-direction with multi-source support.
-- **SEO component** — `<Seo>` with typed canonical, robots, Open Graph, Twitter Card, and safe
-  JSON-LD structured data.
+- **SEO, GEO, and AEO primitives** — `<Seo>` with typed canonical, robots, Open Graph, Twitter Card,
+  Article/Breadcrumb JSON-LD, plus a visible `<Answer>` primitive with citations and Question/Answer
+  microdata.
 - **Client loader hook** — `useRuvyxaLoader` loads client-side data and returns
   `{ data, loading, error, refetch }` with built-in race-condition handling and mount-safety checks.
   See the [client loader guide](docs/guides/en/data-loading-and-cache.md#client-side-data-loading).
@@ -165,9 +166,12 @@
   via `ruvyxa.config.ts`. Route-scoped middleware targets specific path patterns.
 - **Plugin middleware** — application modules register route-scoped Fetch `Request`/`Response` hooks
   alongside build transforms and completion callbacks.
-- **First-party plugin kit** — `ruvyxa/plugins` includes observability, security policy, cache
-  rules, PWA, RSS, locale-aware search index, OpenAPI, redirects, sitemap, bundle budgets, and
-  environment validation. Build-generated files are included in adapter artifacts.
+- **First-party plugin kit** — `ruvyxa/plugins` includes a Content Engine that turns native
+  Markdown/MDX routes into a live content API, locale-aware search, RSS, sitemap, explicit answer
+  data, and an experimental `llms.txt` index from one metadata source. AI search/training crawlers
+  can be controlled independently, alongside observability, security policy, cache rules, PWA,
+  OpenAPI, redirects, bundle budgets, and environment validation. Build-generated files are included
+  in adapter artifacts.
 
 ### CLI & diagnostics
 

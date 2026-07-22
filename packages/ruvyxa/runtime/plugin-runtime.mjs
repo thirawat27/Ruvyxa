@@ -63,6 +63,7 @@ async function loadRegistry(root) {
     sourcefile: 'ruvyxa:plugin-config-entry.ts',
     outfile,
     platform: serverPlatform(),
+    bundleAliasDependencies: true,
     aliases: runtimeAliases(runtimeDir),
   })
 

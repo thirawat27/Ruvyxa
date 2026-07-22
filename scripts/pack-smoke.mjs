@@ -83,6 +83,15 @@ for (const file of readdirSync(destination).filter((name) => name.endsWith('.tgz
       listing.includes('package/dist/plugins.js'),
       'ruvyxa package missing built-in plugin entrypoint',
     )
+    const pluginDeclarations = execFileSync('tar', [
+      '-xOf',
+      tarball,
+      'package/dist/plugins.d.ts',
+    ]).toString()
+    assert(
+      pluginDeclarations.includes('contentEngine'),
+      'ruvyxa package missing Content Engine declarations',
+    )
     for (const typeFile of [
       'css.d.ts',
       'index.d.ts',
@@ -189,13 +198,41 @@ for (const starter of starters) {
     [
       "import 'ruvyxa'",
       "import 'ruvyxa/config'",
+      "import { contentEngine } from 'ruvyxa/plugins'",
       "import 'ruvyxa/server'",
       "import styles from './type-check.module.scss'",
       'const moduleClass: string = styles.typeCheck',
+      "const contentPlugin = contentEngine({ siteUrl: 'https://example.com', title: 'Example', description: 'Articles' })",
       'void moduleClass',
+      'void contentPlugin',
       '',
     ].join('\n'),
   )
+
+  if (starter === 'minimal') {
+    const configPath = `${appDir}/ruvyxa.config.ts`
+    const configSource = readFileSync(configPath, 'utf8')
+    writeFileSync(
+      configPath,
+      `import { contentEngine } from 'ruvyxa/plugins'\n${configSource.replace(
+        'const settings: RuvyxaConfig = {',
+        `const settings: RuvyxaConfig = {
+  plugins: [
+    contentEngine({
+      siteUrl: 'https://example.com',
+      title: 'Example',
+      description: 'Articles',
+      locale: 'en',
+    }),
+  ],`,
+      )}`,
+    )
+    mkdirSync(`${appDir}/app/guide`, { recursive: true })
+    writeFileSync(
+      `${appDir}/app/guide/page.md`,
+      '---\ntitle: Packed Content Engine\ntags: [release, smoke]\n---\n# Packed guide\n',
+    )
+  }
 }
 
 writeFileSync(
@@ -224,6 +261,23 @@ for (const starter of starters) {
     shell: process.platform === 'win32',
   })
 }
+execFileSync(pnpmBin, ['exec', 'ruvyxa', 'check', '--root', '.'], {
+  cwd: `${extracted}/scaffolded-minimal`,
+  stdio: 'inherit',
+  shell: process.platform === 'win32',
+})
+const packedManifest = JSON.parse(
+  readFileSync(`${extracted}/scaffolded-minimal/.ruvyxa/assets/content.json`, 'utf8'),
+)
+assert(
+  packedManifest.entries.some((entry) => entry.route === '/guide'),
+  'packed Content Engine did not emit the Markdown route',
+)
+const packedLlms = readFileSync(`${extracted}/scaffolded-minimal/.ruvyxa/assets/llms.txt`, 'utf8')
+assert(
+  packedLlms.includes('[Packed Content Engine](<https://example.com/guide>)'),
+  'packed Content Engine did not emit the llms.txt route',
+)
 
 await rmWithRetry(extracted)
 
