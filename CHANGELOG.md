@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.0.18 (2026-07-22)
+## v1.0.17 (2026-07-22)
 
 ### Official Data, Auth, and Realtime Packages
 
@@ -68,8 +68,6 @@
 - Added user guide chapter 15, "Official Packages: Database, Auth & Realtime" (English and Thai).
 - Rewrote the Routing and Server & Client Components guides and expanded Getting Started with a
   first-10-minutes path and troubleshooting tables (English and Thai).
-
-## v1.0.17 (2026-07-21)
 
 ### Bundler: Resolution Cache
 
