@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.0.18 (2026-07-22)
 
 ### Official Data, Auth, and Realtime Packages
 
@@ -11,6 +11,63 @@
 - Added `@ruvyxa/realtime`, with action opt-in metadata, a bounded native Axum WebSocket transport,
   same-origin and channel filtering, reconnect/resync support, and explicit unsupported-target
   failures.
+- The bundler and graph validator now treat root `@ruvyxa/auth` and `@ruvyxa/database` imports as
+  server-only (`RUV1007`); browser code uses the `/client` entrypoints.
+
+### Hardening
+
+- Realtime transport paths are validated against reserved framework routes (`/__ruvyxa/hmr`,
+  `/__ruvyxa/client`, `/__ruvyxa/action`, `/__ruvyxa/trace`) on both the TypeScript plugin runtime
+  and the Rust dev server, failing configuration with a clear `RUV1701` diagnostic instead of a
+  router panic at startup.
+- The WebAuthn `options` endpoint now consumes the shared auth rate limit and reports failures
+  through the same fail-closed error path as every other credential endpoint.
+- The realtime browser client's `subscribe` no longer depends on `this` binding, so destructured
+  usage (`const { subscribeRoute } = client`) works correctly.
+
+### Plugin Infrastructure
+
+- One `definePlugin({ name, setup })` registry now provides `resolveId`, `transform`, request and
+  response middleware, and `onBuildComplete` hooks through a persistent Node/Bun plugin host, with
+  NDJSON protocol isolation and per-plugin validation of names, hooks, and middleware route
+  patterns.
+- Middleware `routes` unions are reported to the native server, which skips the plugin round-trip
+  entirely for requests no middleware can match.
+- Added a configurable middleware worker pool (`middleware.workers`, 1–8) with round-robin dispatch,
+  per-hook timeouts, crash restart with single retry, and replacement without retry on timeout or
+  protocol errors.
+
+### Content Engine and React Primitives
+
+- Added the `contentEngine()` plugin: scans native `app/**/page.md(x)` routes once and derives
+  `/content.json`, `/search-index.json`, `/rss.xml`, `/sitemap.xml`, and an experimental `/llms.txt`
+  from frontmatter and body, live in development and byte-equivalent in production.
+- Added the `Answer` component to `@ruvyxa/react` for schema.org Question/Answer microdata rendered
+  from author-written content.
+- SEO metadata API now supports `article` and `breadcrumbs` structured data, and `image`/`type`
+  replace the previous `ogImage`/`ogType` property names.
+- The render pipeline supports `header_pairs` so responses can carry multiple headers with the same
+  name (for example several `set-cookie` values); header insertion appends instead of overwriting.
+
+### Runtime and Tooling
+
+- Persistent worker pool request handling was extended with a dedicated test suite and shared
+  fixture workspace for API, compiler, and worker-pool tests.
+- Serverless runtime adapters were expanded, including Cloudflare adapter updates and deployment
+  documentation for every adapter target.
+- `ruvyxa doctor` no longer reports a Deno version check; toolchain reporting focuses on the
+  supported Node and Bun runtimes.
+- Automated npm package smoke testing (`pnpm pack:smoke`) validates packed tarballs, template
+  scaffolds, and Content Engine build artifacts.
+
+### Documentation and Benchmarks
+
+- Added a measured benchmark suite against the Next.js and Astro minimal starters with a
+  reproducible harness at `scripts/bench-frameworks.mjs`; results and methodology are published in
+  the README.
+- Added user guide chapter 15, "Official Packages: Database, Auth & Realtime" (English and Thai).
+- Rewrote the Routing and Server & Client Components guides and expanded Getting Started with a
+  first-10-minutes path and troubleshooting tables (English and Thai).
 
 ## v1.0.17 (2026-07-21)
 

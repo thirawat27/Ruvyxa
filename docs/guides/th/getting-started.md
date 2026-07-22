@@ -1,10 +1,16 @@
 # เริ่มต้นใช้งาน
 
+Ruvyxa เป็น React framework ที่ **โฟลเดอร์คือ route, หน้าคือ component และ toolchain เป็น native
+binary ตัวเดียว** ถ้ารู้ React พื้นฐานอยู่แล้ว คุณรู้เกือบทุกอย่างที่ต้องใช้ —
+หน้านี้พาจากศูนย์ถึงแอปที่รันได้ในราวห้านาที
+
 ## ความต้องการ
 
-- **Node.js** 22 หรือใหม่กว่า
+- **Node.js** 22 หรือใหม่กว่า (เช็คด้วย `node --version`)
 - **Package manager**: npm, pnpm, Yarn, หรือ Bun
-- ไม่จำเป็นต้องมี Rust toolchain สำหรับการใช้งานโปรเจค
+- ไม่จำเป็นต้องมี Rust toolchain — CLI native มาเป็น binary สำเร็จรูปตามแพลตฟอร์ม
+
+ไม่แน่ใจเรื่อง environment? ให้ Ruvyxa ตรวจให้หลังติดตั้ง: `npx ruvyxa doctor`
 
 ## สร้างโปรเจคใหม่
 
@@ -15,7 +21,8 @@ npm install
 npm run dev
 ```
 
-เปิด `http://localhost:3000` โปรเจคเริ่มต้น:
+เปิด `http://localhost:3000` — จะเห็นหน้า starter ลองแก้ `app/page.tsx` แล้วบันทึก browser
+อัปเดตทันทีโดยไม่ reload ทั้งหน้า (นั่นคือ HMR) โปรเจคเริ่มต้น:
 
 ```text
 my-app/
@@ -116,6 +123,31 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
 }
 ```
 
+## 10 นาทีแรกของคุณ
+
+เส้นทางแนะนำเมื่อ `npm run dev` รันแล้ว:
+
+1. **แก้หน้าแรก** — แก้ `app/page.tsx` ดู HMR อัปเดต browser
+2. **เพิ่มหน้าที่สอง** — สร้าง `app/about/page.tsx` ที่ default-export component แล้วเปิด `/about`
+   ไม่ต้องลงทะเบียนที่ไหน โฟลเดอร์*คือ* route
+3. **เพิ่มหน้า dynamic** — สร้าง `app/hello/[name]/page.tsx` อ่าน `params.name` แล้วเปิด
+   `/hello/world`
+4. **ดูสิ่งที่ framework เห็น** — รัน `npx ruvyxa routes` พิมพ์ตาราง route ที่ค้นพบ
+5. **Ship** — `npm run build` แล้ว `npm run start` รัน production server จริงบนเครื่อง
+
+## เมื่อมีอะไรพัง
+
+| อาการ                          | ลองอันนี้ก่อน                                                                  |
+| ------------------------------ | ------------------------------------------------------------------------------ |
+| `npm run dev` ไม่ start        | `npx ruvyxa doctor` — เช็ค Node version, port, config                          |
+| Port 3000 ไม่ว่าง              | Ruvyxa สแกน 100 port ถัดไปอัตโนมัติพร้อมบอกว่าใครใช้อยู่ หรือใส่ `--port 4000` |
+| URL ขึ้น 404 ทั้งที่ไม่ควร     | `npx ruvyxa routes` — route อยู่ในตารางไหม?                                    |
+| Build fail พร้อมรหัส `RUV____` | ข้อความบอกไฟล์ + คำแนะนำ; รหัสมีเอกสารใน diagnostics reference                 |
+| Output ค้างหลังแก้เยอะ         | `npx ruvyxa clean` ล้าง cache `.ruvyxa/` อย่างปลอดภัย                          |
+
+ทุก error ของ Ruvyxa มีรหัส `RUV` คงที่ ไฟล์ต้นเหตุ และคำแนะนำแก้ — อ่านข้อความก่อนไปหาในเว็บ
+คำตอบมักอยู่ในนั้นแล้ว
+
 ## ขั้นตอนต่อไป
 
 - [Routing](routing.md) — file-system routes, dynamic segments, catch-all, route groups
@@ -123,3 +155,4 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   boundary checks
 - [Configuration](configuration.md) — `ruvyxa.config.ts` ฉบับเต็ม
 - [Styling](styling.md) — global CSS, SCSS/Sass และ CSS Modules
+- [แพ็กเกจทางการ](official-packages.md) — เพิ่มฐานข้อมูล ระบบ login และ realtime เมื่อพร้อม

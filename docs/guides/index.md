@@ -27,6 +27,7 @@ validates the application graph, builds production output, and checks developmen
 | 12. CLI Commands                    | [EN](en/cli-commands.md)             | [TH](th/cli-commands.md)             |
 | 13. Deployment                      | [EN](en/deployment.md)               | [TH](th/deployment.md)               |
 | 14. Plugins                         | [EN](en/plugins.md)                  | [TH](th/plugins.md)                  |
+| 15. Official Packages (DB/Auth/RT)  | [EN](en/official-packages.md)        | [TH](th/official-packages.md)        |
 
 ---
 
@@ -56,6 +57,8 @@ Then explore by topic:
 - **Secure & tune**: [Configuration](en/configuration.md) — full `ruvyxa.config.ts` reference
 - **Ship**: [Deployment](en/deployment.md) — Vercel, adapters, CI, production checklist
 - **Extend safely**: [Plugins](en/plugins.md) — scaffold and register middleware/build hooks plugins
+- **Add state**: [Official Packages](en/official-packages.md) — `@ruvyxa/database`, `@ruvyxa/auth`,
+  and `@ruvyxa/realtime` for data, login, and live updates
 
 ### For Framework Contributors
 
