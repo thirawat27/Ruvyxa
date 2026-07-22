@@ -159,7 +159,7 @@ npx ruvyxa doctor
 รายงาน:
 
 - Ruvyxa CLI version
-- Node.js, Rust (`rustc`, `cargo`), Bun, Deno versions
+- Node.js, Rust (`rustc`, `cargo`) และ Bun versions
 - Package manager
 - Project structure (package.json, tsconfig.json, config, app dir)
 - Dependency status

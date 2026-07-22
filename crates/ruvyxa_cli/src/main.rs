@@ -4328,7 +4328,6 @@ fn doctor(args: ProjectArgs) -> anyhow::Result<()> {
     print_field("rustc", tool_status(tool_version("rustc", &["--version"])));
     print_field("cargo", tool_status(tool_version("cargo", &["--version"])));
     print_field("bun", tool_status(bun_version()));
-    print_field("deno", tool_status(tool_version("deno", &["--version"])));
 
     if package_json.exists() {
         let package = read_package_json(&package_json)?;
