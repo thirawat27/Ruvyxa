@@ -71,9 +71,9 @@
   "dependencies": {
     "@mdx-js/mdx": "^3.1.1",
     "@ruvyxa/core": "workspace:^",
-    "oxc-transform": "0.139.0",
+    "oxc-transform": "0.141.0",
     "remark-gfm": "^4.0.1",
-    "sass": "^1.101.0",
+    "sass": "^1.101.3",
     "yaml": "^2.9.0"
   },
   "devDependencies": {

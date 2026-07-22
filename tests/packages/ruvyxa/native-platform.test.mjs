@@ -30,6 +30,19 @@ describe('Ruvyxa CLI platforms', () => {
     assert.deepEqual(windowsArmPackage.cpu, ['arm64'])
   })
 
+  it('builds Linux release packages against static musl targets', () => {
+    assert.equal(supportedPlatforms['linux-x64'].rustTarget, 'x86_64-unknown-linux-musl')
+    assert.equal(supportedPlatforms['linux-arm64'].rustTarget, 'aarch64-unknown-linux-musl')
+
+    const releaseWorkflow = readFileSync(
+      new URL('../../../.github/workflows/release.yml', import.meta.url),
+      'utf8',
+    )
+    assert.match(releaseWorkflow, /rust_target: x86_64-unknown-linux-musl/)
+    assert.match(releaseWorkflow, /rust_target: aarch64-unknown-linux-musl/)
+    assert.match(releaseWorkflow, /RUVYXA_REQUIRE_STATIC_LINUX:/)
+  })
+
   it('does not resolve an optional package for unsupported platforms', () => {
     assert.equal(nativeBinaryPackageName('freebsd-x64'), null)
   })

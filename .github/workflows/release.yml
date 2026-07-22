@@ -98,16 +98,21 @@ jobs:
             package: '@ruvyxa/cli-win32-x64'
           - os: windows-11-arm
             package: '@ruvyxa/cli-win32-arm64'
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             package: '@ruvyxa/cli-linux-x64'
+            rust_target: x86_64-unknown-linux-musl
           - os: ubuntu-24.04-arm
             package: '@ruvyxa/cli-linux-arm64'
+            rust_target: aarch64-unknown-linux-musl
           - os: macos-latest
             package: '@ruvyxa/cli-darwin-arm64'
 
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install Rust release target
+        if: matrix.rust_target != ''
+        run: rustup target add "${{ matrix.rust_target }}"
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: 'ruvyxa-release-${{ matrix.os }}'
@@ -140,10 +145,15 @@ jobs:
             sleep "$delay"
           done
           pnpm install --frozen-lockfile --prefer-offline
+      - name: Install musl linker
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install --yes musl-tools
       - name: Publish ${{ matrix.package }}
         run: node scripts/publish-if-new.mjs ${{ matrix.package }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          RUVYXA_RUST_TARGET: ${{ matrix.rust_target }}
+          RUVYXA_REQUIRE_STATIC_LINUX: ${{ runner.os == 'Linux' && '1' || '0' }}
 
   publish-packages:
     name: Publish JavaScript packages
