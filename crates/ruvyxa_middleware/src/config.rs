@@ -4,9 +4,17 @@
 
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 /// Largest configurable TypeScript plugin middleware worker pool.
 pub const MAX_PLUGIN_MIDDLEWARE_WORKERS: usize = 8;
+
+/// Default upper bound for one TypeScript plugin middleware hook.
+pub const DEFAULT_PLUGIN_HOOK_TIMEOUT_MS: u64 = 30_000;
+
+/// Largest configurable hook timeout, preventing accidental effectively
+/// unbounded recovery windows.
+pub const MAX_PLUGIN_HOOK_TIMEOUT_MS: u64 = 300_000;
 
 /// Top-level middleware configuration block.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -20,6 +28,10 @@ pub struct MiddlewareConfig {
     /// module-level plugin state, so the default stays at one process.
     #[serde(default)]
     pub workers: Option<usize>,
+
+    /// Maximum duration of one TypeScript plugin middleware hook.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
 }
 
 impl MiddlewareConfig {
@@ -31,6 +43,20 @@ impl MiddlewareConfig {
             Some(workers) => Err(format!(
                 "RUV1602 config field `middleware.workers` must be between 1 and \
                  {MAX_PLUGIN_MIDDLEWARE_WORKERS}, got {workers}"
+            )),
+        }
+    }
+
+    /// Validated timeout for one plugin middleware hook.
+    pub fn plugin_timeout(&self) -> Result<Duration, String> {
+        match self.timeout_ms {
+            None => Ok(Duration::from_millis(DEFAULT_PLUGIN_HOOK_TIMEOUT_MS)),
+            Some(timeout_ms) if (1..=MAX_PLUGIN_HOOK_TIMEOUT_MS).contains(&timeout_ms) => {
+                Ok(Duration::from_millis(timeout_ms))
+            }
+            Some(timeout_ms) => Err(format!(
+                "RUV1602 config field `middleware.timeoutMs` must be between 1 and \
+                 {MAX_PLUGIN_HOOK_TIMEOUT_MS}, got {timeout_ms}"
             )),
         }
     }
@@ -158,6 +184,26 @@ mod tests {
                 serde_json::from_value(serde_json::json!({ "workers": workers })).unwrap();
             let error = config.plugin_workers().unwrap_err();
             assert!(error.contains("middleware.workers"), "{error}");
+        }
+    }
+
+    #[test]
+    fn plugin_timeout_defaults_to_thirty_seconds_and_rejects_out_of_range_values() {
+        let config = MiddlewareConfig::default();
+        assert_eq!(
+            config.plugin_timeout(),
+            Ok(Duration::from_millis(DEFAULT_PLUGIN_HOOK_TIMEOUT_MS))
+        );
+
+        let config: MiddlewareConfig =
+            serde_json::from_value(serde_json::json!({ "timeoutMs": 15_000 })).unwrap();
+        assert_eq!(config.plugin_timeout(), Ok(Duration::from_millis(15_000)));
+
+        for timeout_ms in [0_u64, MAX_PLUGIN_HOOK_TIMEOUT_MS + 1] {
+            let config: MiddlewareConfig =
+                serde_json::from_value(serde_json::json!({ "timeoutMs": timeout_ms })).unwrap();
+            let error = config.plugin_timeout().unwrap_err();
+            assert!(error.contains("middleware.timeoutMs"), "{error}");
         }
     }
 }

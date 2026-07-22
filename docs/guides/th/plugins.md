@@ -77,7 +77,9 @@ export default config({
   หรือว่างเปล่า
 
 `routes` ของ middleware จะถูกส่งให้ native server ด้วย ทำให้ request ที่ไม่มีทาง match ข้ามการ
-round-trip ไปยัง plugin runtime ทั้งหมด — จึงควรระบุ route ให้ middleware เสมอเมื่อทำได้
+round-trip ไปยัง plugin runtime ทั้งหมด — จึงควรระบุ route ให้ middleware เสมอเมื่อทำได้ pattern
+ต้องเป็น `*`, exact path ที่ขึ้นต้นด้วย `/` หรือ prefix ที่ลงท้ายด้วย `*` เท่านั้น pattern ที่ผิดจะ
+fail ตั้งแต่เริ่ม plugin แทนการถูกข้ามแบบเงียบ ๆ
 
 ## Middleware worker pool
 
@@ -87,10 +89,16 @@ process ที่เหมือนกันแบบ round-robin:
 
 ```ts
 export default config({
-  middleware: { workers: 2 },
+  middleware: {
+    workers: 2,
+    timeoutMs: 15_000,
+  },
 })
 ```
 
 Worker แต่ละตัวไม่แชร์ state ระดับ module ของ plugin — ตัวนับ, cache หรือ session ที่เก็บใน module
 scope จะแยกต่อ process ดังนั้นคงค่า default หนึ่ง worker ไว้เว้นแต่ middleware เป็น stateless จริง ๆ
-Worker ที่ crash จะถูก restart อัตโนมัติและ retry hook ที่ค้างอยู่หนึ่งครั้ง
+pool จะเลือก worker ที่ว่างก่อนต่อคิวหลัง worker ที่กำลังทำงาน `timeoutMs` จำกัดเวลาของ middleware
+hook แต่ละครั้ง (ค่าเริ่มต้น 30,000; ช่วง 1–300,000 ms) Worker ที่ crash จะถูก restart และ retry
+hook เดิมหนึ่งครั้ง ส่วน hook ที่ timeout หรือส่ง protocol ผิดจะเปลี่ยน worker โดยไม่ retry เพราะ
+hook อาจทำ side effect ไปแล้ว

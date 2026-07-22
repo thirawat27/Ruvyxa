@@ -151,6 +151,19 @@ function normalizeMiddleware(plugin, value) {
   ) {
     throw new TypeError(`plugin "${plugin}" middleware routes must be an array of strings`)
   }
+  if (routes) {
+    for (const [index, route] of routes.entries()) {
+      const wildcard = route.indexOf('*')
+      const validStart = route === '*' || route.startsWith('/')
+      const validWildcard =
+        wildcard === -1 || (wildcard === route.length - 1 && wildcard === route.lastIndexOf('*'))
+      if (!validStart || !validWildcard) {
+        throw new TypeError(
+          `plugin "${plugin}" middleware routes[${index}] must start with "/" or equal "*", with a wildcard only at the end`,
+        )
+      }
+    }
+  }
   return { plugin, routes, onRequest, onResponse }
 }
 

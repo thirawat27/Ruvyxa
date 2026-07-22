@@ -127,6 +127,9 @@ impl MiddlewareStack {
     ///
     /// Returns an error when builtin middleware values are invalid.
     pub fn validate(&self) -> std::result::Result<(), String> {
+        self.config.plugin_workers()?;
+        self.config.plugin_timeout()?;
+
         for (name, value) in &self.config.builtin.headers {
             if axum::http::HeaderName::from_bytes(name.as_bytes()).is_err()
                 || axum::http::HeaderValue::from_str(value).is_err()
@@ -254,6 +257,21 @@ mod tests {
 
             assert!(MiddlewareStack::new(config).validate().is_err());
         }
+    }
+
+    #[test]
+    fn rejects_invalid_plugin_runtime_limits_during_stack_validation() {
+        let config = MiddlewareConfig {
+            workers: Some(0),
+            ..MiddlewareConfig::default()
+        };
+        assert!(MiddlewareStack::new(config).validate().is_err());
+
+        let config = MiddlewareConfig {
+            timeout_ms: Some(0),
+            ..MiddlewareConfig::default()
+        };
+        assert!(MiddlewareStack::new(config).validate().is_err());
     }
 
     #[test]

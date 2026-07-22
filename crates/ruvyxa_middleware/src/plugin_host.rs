@@ -2,6 +2,7 @@
 
 use std::path::Path;
 use std::process::Stdio;
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
@@ -10,6 +11,8 @@ use tokio::sync::Mutex;
 use tracing::warn;
 
 use ruvyxa_diagnostics::{Result, RuvyxaError};
+
+use crate::config::DEFAULT_PLUGIN_HOOK_TIMEOUT_MS;
 
 /// HTTP request representation transported losslessly over the plugin protocol.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -115,6 +118,7 @@ pub struct PluginHost {
     next_worker: std::sync::atomic::AtomicUsize,
     descriptor: PluginRegistryDescriptor,
     spawn: PluginSpawnConfig,
+    call_timeout: Duration,
 }
 
 impl PluginHost {
@@ -134,15 +138,34 @@ impl PluginHost {
         executable: &Path,
         pool_size: usize,
     ) -> Result<Self> {
+        Self::start_pool_with_timeout(
+            project_root,
+            runtime_script,
+            executable,
+            pool_size,
+            Duration::from_millis(DEFAULT_PLUGIN_HOOK_TIMEOUT_MS),
+        )
+        .await
+    }
+
+    /// Start a pool with an explicit upper bound for each registry call.
+    pub async fn start_pool_with_timeout(
+        project_root: &Path,
+        runtime_script: &Path,
+        executable: &Path,
+        pool_size: usize,
+        call_timeout: Duration,
+    ) -> Result<Self> {
         let spawn = PluginSpawnConfig {
             project_root: project_root.to_path_buf(),
             runtime_script: runtime_script.to_path_buf(),
             executable: executable.to_path_buf(),
         };
         let mut worker = spawn_worker(&spawn)?;
-        let descriptor = call_worker(&mut worker, "describe", serde_json::json!({}))
-            .await
-            .map_err(CallFailure::into_error)?;
+        let descriptor =
+            call_worker_with_timeout(&mut worker, "describe", serde_json::json!({}), call_timeout)
+                .await
+                .map_err(CallFailure::into_error)?;
         let descriptor: PluginRegistryDescriptor =
             serde_json::from_value(descriptor).map_err(|error| {
                 RuvyxaError::Message(format!(
@@ -165,6 +188,7 @@ impl PluginHost {
             next_worker: std::sync::atomic::AtomicUsize::new(0),
             descriptor,
             spawn,
+            call_timeout,
         })
     }
 
@@ -230,12 +254,33 @@ impl PluginHost {
     }
 
     async fn call(&self, hook: &str, payload: serde_json::Value) -> Result<serde_json::Value> {
-        let index = self
+        let start = self
             .next_worker
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             % self.workers.len();
-        let mut worker = self.workers[index].lock().await;
-        match call_worker(&mut worker, hook, payload.clone()).await {
+
+        // Preserve round-robin fairness while avoiding head-of-line blocking:
+        // if the selected worker is busy, use another idle process before
+        // queueing behind it.
+        for offset in 0..self.workers.len() {
+            let index = (start + offset) % self.workers.len();
+            if let Ok(worker) = self.workers[index].try_lock() {
+                return self.call_locked(worker, hook, payload).await;
+            }
+        }
+
+        let worker = self.workers[start].lock().await;
+        self.call_locked(worker, hook, payload).await
+    }
+
+    async fn call_locked(
+        &self,
+        mut worker: tokio::sync::MutexGuard<'_, PluginWorker>,
+        hook: &str,
+        payload: serde_json::Value,
+    ) -> Result<serde_json::Value> {
+        match call_worker_with_timeout(&mut worker, hook, payload.clone(), self.call_timeout).await
+        {
             Ok(value) => Ok(value),
             Err(CallFailure::Hook(error)) => Err(error),
             Err(CallFailure::WorkerGone(error)) => {
@@ -243,13 +288,36 @@ impl PluginHost {
                     target: "ruvyxa::plugin",
                     "TypeScript plugin host stopped responding ({error}); restarting it once"
                 );
-                *worker = spawn_worker(&self.spawn)?;
-                call_worker(&mut worker, hook, payload)
-                    .await
-                    .map_err(CallFailure::into_error)
+                replace_worker(&mut worker, &self.spawn)?;
+                match call_worker_with_timeout(&mut worker, hook, payload, self.call_timeout).await
+                {
+                    Ok(value) => Ok(value),
+                    Err(CallFailure::Hook(error)) => Err(error),
+                    Err(
+                        failure @ (CallFailure::WorkerGone(_) | CallFailure::WorkerPoisoned(_)),
+                    ) => {
+                        let error = failure.into_error();
+                        replace_worker(&mut worker, &self.spawn)?;
+                        Err(error)
+                    }
+                }
+            }
+            Err(CallFailure::WorkerPoisoned(error)) => {
+                warn!(
+                    target: "ruvyxa::plugin",
+                    "TypeScript plugin host protocol became unusable ({error}); replacing it without retrying the hook"
+                );
+                replace_worker(&mut worker, &self.spawn)?;
+                Err(error)
             }
         }
     }
+}
+
+fn replace_worker(worker: &mut PluginWorker, spawn: &PluginSpawnConfig) -> Result<()> {
+    let _ = worker.child.start_kill();
+    *worker = spawn_worker(spawn)?;
+    Ok(())
 }
 
 fn spawn_worker(spawn: &PluginSpawnConfig) -> Result<PluginWorker> {
@@ -292,14 +360,44 @@ enum CallFailure {
     Hook(RuvyxaError),
     /// The worker exited or its pipes broke. Eligible for one restart.
     WorkerGone(RuvyxaError),
+    /// The worker may still be alive, but its request/response stream can no
+    /// longer be correlated safely. Replaced without retrying the hook.
+    WorkerPoisoned(RuvyxaError),
 }
 
 impl CallFailure {
     fn into_error(self) -> RuvyxaError {
         match self {
-            Self::Hook(error) | Self::WorkerGone(error) => error,
+            Self::Hook(error) | Self::WorkerGone(error) | Self::WorkerPoisoned(error) => error,
         }
     }
+}
+
+async fn call_worker_with_timeout(
+    worker: &mut PluginWorker,
+    hook: &str,
+    payload: serde_json::Value,
+    call_timeout: Duration,
+) -> std::result::Result<serde_json::Value, CallFailure> {
+    enforce_call_timeout(hook, call_timeout, call_worker(worker, hook, payload)).await
+}
+
+async fn enforce_call_timeout<F>(
+    hook: &str,
+    call_timeout: Duration,
+    call: F,
+) -> std::result::Result<serde_json::Value, CallFailure>
+where
+    F: std::future::Future<Output = std::result::Result<serde_json::Value, CallFailure>>,
+{
+    tokio::time::timeout(call_timeout, call)
+        .await
+        .unwrap_or_else(|_| {
+            Err(CallFailure::WorkerPoisoned(RuvyxaError::Message(format!(
+                "RUV1700 TypeScript plugin hook `{hook}` timed out after {} ms",
+                call_timeout.as_millis()
+            ))))
+        })
 }
 
 async fn call_worker(
@@ -343,11 +441,7 @@ async fn call_worker(
             "RUV1700 TypeScript plugin host exited before responding (status: {status})"
         ))));
     }
-    let output: RuntimeOutput = serde_json::from_str(line.trim()).map_err(|error| {
-        CallFailure::Hook(RuvyxaError::Message(format!(
-            "RUV1701 TypeScript plugin host returned invalid JSON: {error}"
-        )))
-    })?;
+    let output = decode_runtime_output(line.trim())?;
     if output.ok {
         return Ok(output.result.unwrap_or(serde_json::Value::Null));
     }
@@ -359,6 +453,14 @@ async fn call_worker(
             .or(output.stack)
             .unwrap_or_else(|| "TypeScript plugin hook failed".to_string())
     ))))
+}
+
+fn decode_runtime_output(line: &str) -> std::result::Result<RuntimeOutput, CallFailure> {
+    serde_json::from_str(line).map_err(|error| {
+        CallFailure::WorkerPoisoned(RuvyxaError::Message(format!(
+            "RUV1701 TypeScript plugin host returned invalid JSON: {error}"
+        )))
+    })
 }
 
 #[cfg(test)]
@@ -418,5 +520,199 @@ mod tests {
         }))
         .unwrap();
         assert!(matches!(response, MiddlewareRequestResult::Response { .. }));
+    }
+
+    #[tokio::test]
+    async fn hanging_hook_times_out_as_a_poisoned_worker_without_retry() {
+        let failure = enforce_call_timeout(
+            "middlewareRequest",
+            Duration::from_millis(5),
+            std::future::pending(),
+        )
+        .await
+        .unwrap_err();
+
+        match failure {
+            CallFailure::WorkerPoisoned(RuvyxaError::Message(message)) => {
+                assert!(message.contains("middlewareRequest"), "{message}");
+                assert!(message.contains("5 ms"), "{message}");
+            }
+            _ => panic!("a timed-out call must poison its protocol stream"),
+        }
+    }
+
+    #[test]
+    fn malformed_runtime_output_poisons_the_protocol_stream() {
+        assert!(matches!(
+            decode_runtime_output("plugin wrote to stdout"),
+            Err(CallFailure::WorkerPoisoned(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn poisoned_workers_are_replaced_before_the_next_hook() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ruvyxa-plugin-host-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("ruvyxa.config.mjs"),
+            r#"
+export default {
+  plugins: [{
+    name: "recovery",
+    setup({ addMiddleware }) {
+      addMiddleware({
+        async onRequest(request) {
+          const pathname = new URL(request.url).pathname
+          if (pathname === "/hang") await new Promise(() => {})
+          if (pathname === "/corrupt") process.stdout.write("protocol-noise\n")
+          return request
+        },
+      })
+    },
+  }],
+}
+"#,
+        )
+        .unwrap();
+
+        let runtime_script = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packages/ruvyxa/runtime/plugin-runtime.mjs");
+        let executable = if cfg!(windows) { "node.exe" } else { "node" };
+        let mut host = PluginHost::start_pool_with_timeout(
+            &root,
+            &runtime_script,
+            Path::new(executable),
+            1,
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+        host.call_timeout = Duration::from_secs(1);
+
+        let request = |path: &str| PluginHttpRequest {
+            method: "GET".to_string(),
+            path: path.to_string(),
+            headers: Vec::new(),
+            body_base64: None,
+        };
+
+        let corrupt = host
+            .execute_request(&request("/corrupt"))
+            .await
+            .unwrap_err();
+        assert!(corrupt.to_string().contains("invalid JSON"), "{corrupt}");
+        assert!(matches!(
+            host.execute_request(&request("/ok-after-corrupt")).await,
+            Ok(MiddlewareRequestResult::Request { .. })
+        ));
+
+        let timeout = host.execute_request(&request("/hang")).await.unwrap_err();
+        assert!(timeout.to_string().contains("timed out"), "{timeout}");
+        assert!(matches!(
+            host.execute_request(&request("/ok-after-timeout")).await,
+            Ok(MiddlewareRequestResult::Request { .. })
+        ));
+
+        drop(host);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[tokio::test]
+    async fn pool_uses_an_idle_worker_instead_of_queueing_behind_the_cursor() {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "ruvyxa-plugin-pool-{}-{unique}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(
+            root.join("ruvyxa.config.mjs"),
+            r#"
+import { writeFileSync } from "node:fs"
+
+export default {
+  plugins: [{
+    name: "pool-selection",
+    setup({ addMiddleware }) {
+      addMiddleware({
+        async onRequest(request, { root }) {
+          if (new URL(request.url).pathname === "/slow") {
+            writeFileSync(root + "/slow-started", "yes")
+            await new Promise((resolve) => setTimeout(resolve, 10_000))
+          }
+          return request
+        },
+      })
+    },
+  }],
+}
+"#,
+        )
+        .unwrap();
+
+        let runtime_script = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../packages/ruvyxa/runtime/plugin-runtime.mjs");
+        let executable = if cfg!(windows) { "node.exe" } else { "node" };
+        let host = std::sync::Arc::new(
+            PluginHost::start_pool_with_timeout(
+                &root,
+                &runtime_script,
+                Path::new(executable),
+                2,
+                Duration::from_secs(30),
+            )
+            .await
+            .unwrap(),
+        );
+        assert_eq!(host.pool_size(), 2);
+
+        let request = |path: &str| PluginHttpRequest {
+            method: "GET".to_string(),
+            path: path.to_string(),
+            headers: Vec::new(),
+            body_base64: None,
+        };
+        let slow_host = std::sync::Arc::clone(&host);
+        let slow_request = request("/slow");
+        let slow = tokio::spawn(async move { slow_host.execute_request(&slow_request).await });
+
+        for _ in 0..200 {
+            if root.join("slow-started").exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(root.join("slow-started").exists());
+
+        // Advances the rotating cursor to worker zero again after warming the
+        // second process. The next call must scan past busy worker zero.
+        host.execute_request(&request("/warm-second-worker"))
+            .await
+            .unwrap();
+        let fast = tokio::time::timeout(
+            Duration::from_secs(1),
+            host.execute_request(&request("/must-not-queue")),
+        )
+        .await;
+        assert!(
+            fast.is_ok(),
+            "the idle worker should answer without head-of-line blocking"
+        );
+        assert!(fast.unwrap().is_ok());
+
+        slow.abort();
+        let _ = slow.await;
+        drop(host);
+        std::fs::remove_dir_all(root).unwrap();
     }
 }

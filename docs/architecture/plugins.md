@@ -47,8 +47,9 @@ flowchart LR
 
 Node owns module loading, callback execution, and JavaScript state. Rust owns process lifecycle,
 ordering, protocol validation, HTTP limits, and integration with Axum and the Oxc bundler. The
-registry is built once and all phases share the same module instances, so module-level caches and
-closures behave like normal application code.
+registry is built once per runtime process. Calls handled by that process share normal module-level
+caches and closures; dev middleware workers and build hosts are separate processes and do not share
+module state.
 
 ## Hook contracts
 
@@ -57,7 +58,7 @@ closures behave like normal application code.
 - `middleware` is either a `PluginRequestMiddleware` function
   `(Request, context) → Request | Response | void`
 - Or a `PluginMiddleware` object with optional fields:
-  - `routes?: string[]` — path patterns (exact or `*`-suffixed)
+  - `routes?: string[]` — `/`-prefixed exact paths, `/prefix/*`, or the global `*`
   - `onRequest?: PluginRequestMiddleware`
   - `onResponse?: PluginResponseMiddleware`
 
@@ -86,3 +87,12 @@ closures behave like normal application code.
   boundary; private env values stay in Node config process
 - **Deterministic lifecycle:** setup once, ordered hooks, bounded response buffering, explicit
   errors
+- **Bounded middleware execution:** each dev-server hook defaults to a 30-second timeout; a
+  timed-out worker is replaced without retrying the possibly side-effecting hook
+- **Protocol recovery:** an exited worker is restarted and retried once; malformed NDJSON poisons
+  and replaces the worker without reusing a desynchronized stream
+- **Observable diagnostics:** stdout is reserved for NDJSON; plugin console output is redirected to
+  stderr and remains visible in both dev and production builds
+- **HTTP compatibility:** header pairs remain ordered and repeated response headers such as
+  `Set-Cookie` survive the JavaScript/Rust round-trip
+- **Pool scheduling:** the rotating cursor prefers an idle worker before queueing behind a busy one

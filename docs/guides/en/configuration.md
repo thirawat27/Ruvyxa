@@ -105,6 +105,8 @@ when the same plugin also needs build lifecycle hooks.
 
 ```ts
 middleware: {
+  workers: 1,              // TypeScript middleware processes (1-8)
+  timeoutMs: 30_000,       // per-hook timeout (1-300,000 ms)
   builtin: {
     timing: true,           // server-timing response headers
     log: true,              // request logging
@@ -129,6 +131,10 @@ middleware: {
 `addMiddleware` accepts `onRequest` and `onResponse` callbacks using Fetch `Request` and `Response`
 objects. `resolveId`, `transform`, and `onBuildComplete` are available beside middleware. All hooks
 run in registration order through the persistent plugin runtime.
+
+`workers` defaults to one because module state is process-local. `timeoutMs` defaults to 30 seconds;
+a timed-out or protocol-corrupt worker is replaced without retrying that hook, while a worker that
+exits before responding is restarted and retried once.
 
 ### `render`
 

@@ -2635,7 +2635,10 @@ impl TypeScriptPluginWorker {
             .arg("--persistent")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::null())
+            // Stdout is reserved for the NDJSON protocol. The runtime routes
+            // plugin console output to stderr, so inherit it instead of
+            // silently discarding diagnostics during production builds.
+            .stderr(Stdio::inherit())
             .env("RUVYXA_RUNTIME", runtime.command())
             .spawn()
             .map_err(|err| {

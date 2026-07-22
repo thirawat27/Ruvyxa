@@ -128,6 +128,8 @@ Same as dev minus HMR + error overlay overhead. Cache TTL is higher (1800s vs 30
 | Parameter                         | Where set          | Default             | Max               | Effect                                 |
 | --------------------------------- | ------------------ | ------------------- | ----------------- | -------------------------------------- |
 | `build.workers`                   | `ruvyxa.config.ts` | CPU count           | —                 | Parallel bundling & prerendering       |
+| `middleware.workers`              | `ruvyxa.config.ts` | 1                   | 8                 | Stateless plugin middleware processes  |
+| `middleware.timeoutMs`            | `ruvyxa.config.ts` | 30000               | 300000            | Timeout for one middleware hook        |
 | `RUVYXA_RENDER_CACHE_SIZE`        | Env var            | 1024 dev / 512 prod | 16384             | More cache = fewer SSR renders         |
 | `RUVYXA_WORKER_TIMEOUT_MS`        | Env var            | 30000               | i32::MAX          | Timeout for stalled workers            |
 | `RUVYXA_JSX_RUNTIME`              | Env var (auto-set) | automatic           | automatic/classic | JSX transform runtime                  |

@@ -83,6 +83,18 @@ describe('redirects()', () => {
     assert.equal(await onRequest(request('/other'), middlewareContext), undefined)
   })
 
+  it('accepts the documented global wildcard source', async () => {
+    const { middleware } = register(redirects([{ source: '*', destination: '/maintenance' }]))
+    assert.deepEqual(middleware[0].routes, ['*'])
+
+    const response = await middleware[0].onRequest(
+      request('/anywhere?from=test'),
+      middlewareContext,
+    )
+    assert.equal(response.status, 307)
+    assert.equal(response.headers.get('location'), '/maintenance?from=test')
+  })
+
   it('rejects sources that do not start with a slash', () => {
     assert.throws(() => redirects([{ source: 'old', destination: '/new' }]), TypeError)
   })

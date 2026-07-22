@@ -586,9 +586,18 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
             .middleware
             .plugin_workers()
             .map_err(RuvyxaError::Message)?;
-        let host =
-            PluginHost::start_pool(&config.root, &runtime_script, &executable, plugin_workers)
-                .await?;
+        let plugin_timeout = config
+            .middleware
+            .plugin_timeout()
+            .map_err(RuvyxaError::Message)?;
+        let host = PluginHost::start_pool_with_timeout(
+            &config.root,
+            &runtime_script,
+            &executable,
+            plugin_workers,
+            plugin_timeout,
+        )
+        .await?;
         if host.pool_size() > 1 {
             info!(
                 workers = host.pool_size(),
@@ -1917,6 +1926,31 @@ mod tests {
             body_base64: Some(encode_plugin_body(b"body")),
         };
         assert!(plugin_response_into_response(response).is_err());
+    }
+
+    #[test]
+    fn plugin_responses_preserve_repeated_headers() {
+        let response = PluginHttpResponse {
+            status: 200,
+            headers: vec![
+                ("content-type".to_string(), "application/json".to_string()),
+                ("set-cookie".to_string(), "session=one; Path=/".to_string()),
+                ("set-cookie".to_string(), "theme=dark; Path=/".to_string()),
+            ],
+            body_base64: None,
+        };
+
+        let response = plugin_response_into_response(response).unwrap();
+        let cookies = response
+            .headers()
+            .get_all("set-cookie")
+            .iter()
+            .map(|value| value.to_str().unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(cookies, vec!["session=one; Path=/", "theme=dark; Path=/"]);
+        assert_eq!(response.headers().get_all("content-type").iter().count(), 1);
+        assert_eq!(response.headers()["content-type"], "application/json");
     }
 
     /// Yields each chunk in turn; a `None` chunk injects a stream error.

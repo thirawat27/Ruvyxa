@@ -75,7 +75,9 @@ export default config({
   or empty.
 
 Middleware `routes` are also reported to the native server, which skips the plugin round-trip
-entirely for requests no middleware can match — keep middleware route-scoped where possible.
+entirely for requests no middleware can match — keep middleware route-scoped where possible. Route
+patterns must be `*`, an exact path beginning with `/`, or a prefix ending in `*`; invalid patterns
+fail during plugin startup instead of silently never matching.
 
 ## Middleware worker pool
 
@@ -85,10 +87,16 @@ runtime processes dispatched round-robin:
 
 ```ts
 export default config({
-  middleware: { workers: 2 },
+  middleware: {
+    workers: 2,
+    timeoutMs: 15_000,
+  },
 })
 ```
 
 Workers do not share module-level plugin state — counters, caches, or sessions kept in plugin module
-scope become per-process. Keep the default of one worker unless plugin middleware is stateless. A
-crashed worker is restarted automatically and the in-flight hook retried once.
+scope become per-process. Keep the default of one worker unless plugin middleware is stateless. The
+pool prefers an idle worker before queueing behind a busy one. `timeoutMs` bounds each middleware
+hook (default 30,000; range 1–300,000 ms). A crashed worker is restarted and the in-flight hook is
+retried once. Timed-out hooks and malformed protocol responses replace the worker without retrying,
+because the hook may already have produced side effects.

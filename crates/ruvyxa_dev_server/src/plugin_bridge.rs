@@ -7,7 +7,7 @@ use std::task::{Context, Poll};
 
 use axum::body::{Body, BodyDataStream, Bytes, HttpBody};
 use axum::http::{HeaderMap, HeaderName, HeaderValue, Method, StatusCode};
-use axum::response::{IntoResponse, Response};
+use axum::response::Response;
 use futures_core::Stream;
 use ruvyxa_diagnostics::{Result, RuvyxaError};
 use ruvyxa_middleware::{MiddlewareRequestResult, PluginHttpRequest, PluginHttpResponse};
@@ -165,7 +165,11 @@ pub(crate) fn plugin_response_into_response(response: PluginHttpResponse) -> Res
         RuvyxaError::Message(format!("Plugin returned invalid status: {error}"))
     })?;
     let body = decode_plugin_body(response.body_base64.as_deref())?.unwrap_or_default();
-    let mut output = (status, body).into_response();
+    // Construct the body directly so Axum does not inject a synthetic
+    // content-type that would be duplicated when the plugin's header pairs
+    // are appended below.
+    let mut output = Response::new(Body::from(body));
+    *output.status_mut() = status;
     for (name, value) in response.headers {
         let name = HeaderName::from_bytes(name.as_bytes()).map_err(|error| {
             RuvyxaError::Message(format!("Plugin returned invalid header name: {error}"))
@@ -173,7 +177,10 @@ pub(crate) fn plugin_response_into_response(response: PluginHttpResponse) -> Res
         let value = HeaderValue::from_str(&value).map_err(|error| {
             RuvyxaError::Message(format!("Plugin returned invalid header value: {error}"))
         })?;
-        output.headers_mut().insert(name, value);
+        // Preserve repeated response fields such as `Set-Cookie`. The wire
+        // format is a pair list, so replacing earlier values here would lose
+        // valid HTTP semantics at the JavaScript/Rust boundary.
+        output.headers_mut().append(name, value);
     }
     Ok(output)
 }

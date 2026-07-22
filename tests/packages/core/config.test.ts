@@ -35,6 +35,8 @@ describe('config API', () => {
     })
     const settings: RuvyxaConfig = {
       middleware: {
+        workers: 2,
+        timeoutMs: 15_000,
         builtin: {
           timing: true,
           log: true,
@@ -68,6 +70,8 @@ describe('config API', () => {
     const defined = config(settings)
 
     assert.equal(defined.middleware?.builtin?.timing, true)
+    assert.equal(defined.middleware?.workers, 2)
+    assert.equal(defined.middleware?.timeoutMs, 15_000)
     assert.equal(defined.plugins?.[0]?.name, 'auth')
     assert.equal(defined.adapterOptions?.region, 'iad1')
     assert.equal(defined.build?.treeShake, false)

@@ -45,8 +45,14 @@ export interface RedirectRule {
  */
 export function redirects(rules: RedirectRule[]): RuvyxaPlugin {
   const normalized = rules.map((rule, index) => {
-    if (!rule || typeof rule.source !== 'string' || !rule.source.startsWith('/')) {
-      throw new TypeError(`redirects: rules[${index}].source must be a path starting with "/"`)
+    if (
+      !rule ||
+      typeof rule.source !== 'string' ||
+      (rule.source !== '*' && !rule.source.startsWith('/'))
+    ) {
+      throw new TypeError(
+        `redirects: rules[${index}].source must be "*" or a path starting with "/"`,
+      )
     }
     if (typeof rule.destination !== 'string' || rule.destination.length === 0) {
       throw new TypeError(`redirects: rules[${index}].destination must be a non-empty string`)

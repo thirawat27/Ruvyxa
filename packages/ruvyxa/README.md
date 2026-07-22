@@ -152,10 +152,11 @@ export default config({
 ## Runtime Architecture
 
 The `ruvyxa` package includes a persistent Node/Bun render worker pool (`runtime/worker-pool.mjs`)
-and one persistent plugin runtime (`runtime/plugin-runtime.mjs`). The runtime loads
-`ruvyxa.config.ts` once, registers middleware and build hooks, and serves validated NDJSON calls
-from the Rust server and bundler. Plugin transform source maps are forwarded into generated client
-maps.
+and a persistent plugin-runtime entry point (`runtime/plugin-runtime.mjs`). Each plugin host loads
+`ruvyxa.config.ts` once and serves validated NDJSON calls; dev middleware can use 1–8 processes,
+while build hooks run in build-owned hosts. Module state is shared only inside one process. Dev
+middleware calls default to a 30-second timeout, and repeated HTTP headers survive the native
+bridge. Plugin transform source maps are forwarded into generated client maps.
 
 The runtime files included in this package:
 

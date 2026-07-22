@@ -197,6 +197,14 @@ export interface MiddlewareConfig {
    * @default 1
    */
   workers?: number
+  /**
+   * Maximum duration of one TypeScript middleware hook before its worker is
+   * replaced. Timed-out hooks are not retried because they may have produced
+   * side effects before stalling.
+   * @default 30000
+   * @maximum 300000
+   */
+  timeoutMs?: number
 }
 
 export interface BuiltinMiddlewareConfig {

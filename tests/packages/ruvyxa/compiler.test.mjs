@@ -1089,6 +1089,27 @@ export class contentFormat {}
     })
   })
 
+  it('rejects middleware route patterns that can never match a pathname', async () => {
+    await withFixture(async ({ root }) => {
+      await writeFile(
+        path.join(root, 'ruvyxa.config.ts'),
+        `export default {
+          plugins: [{
+            name: 'invalid-route',
+            setup({ addMiddleware }) {
+              addMiddleware({ routes: ['api/*'], onRequest() {} })
+            },
+          }],
+        }`,
+      )
+
+      const failed = await runJsonResult(pluginRuntime, [root, 'describe'], {})
+      assert.equal(failed.exitCode, 1)
+      assert.equal(failed.parsed.ok, false)
+      assert.match(failed.parsed.message, /middleware routes\[0\].*start with "\/" or equal "\*"/)
+    })
+  })
+
   it('changes the config dependency fingerprint when imported plugin code changes', async () => {
     await withFixture(async ({ root }) => {
       const pluginFile = path.join(root, 'plugin.ts')
@@ -1189,7 +1210,11 @@ export class contentFormat {}
         `export default {
           build: { prerenderCache: false },
           render: { strategy: 'isr', revalidate: 90 },
-          middleware: { builtin: { timing: false, headers: { 'X-Frame-Options': 'DENY' } } }
+          middleware: {
+            workers: 2,
+            timeoutMs: 15000,
+            builtin: { timing: false, headers: { 'X-Frame-Options': 'DENY' } }
+          }
         }`,
       )
 
@@ -1200,6 +1225,8 @@ export class contentFormat {}
       })
       assert.deepEqual(config.config.build, { prerenderCache: false })
       assert.deepEqual(config.config.middleware, {
+        workers: 2,
+        timeoutMs: 15000,
         builtin: { timing: false, headers: { 'X-Frame-Options': 'DENY' } },
       })
     })
