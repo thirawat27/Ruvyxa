@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto'
 import { existsSync, statSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
-import { createRequire } from 'node:module'
+import { createRequire, isBuiltin } from 'node:module'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -87,6 +87,7 @@ export async function compileBundleWithMetadata({
   sourcefile = 'ruvyxa:entry.ts',
   outfile,
   platform = 'node',
+  bundlePackages = false,
   external = [],
   aliases = {},
   minify = false,
@@ -114,6 +115,7 @@ export async function compileBundleWithMetadata({
     externalSet,
     aliases,
     platform,
+    bundlePackages,
     jsxRuntime: normalizedJsxRuntime,
   })
 
@@ -242,6 +244,7 @@ async function visitModule(context) {
     externalSet,
     aliases,
     platform,
+    bundlePackages,
     jsxRuntime,
   } = context
 
@@ -282,9 +285,12 @@ async function visitModule(context) {
     const resolved = resolvedAlias
       ? resolveFile(path.resolve(resolvedAlias))
       : (resolveLocalSpecifier(baseDir, specifier) ??
-        (platform === 'browser' ? resolveBrowserPackage(baseDir, specifier) : null))
+        (platform === 'browser' || bundlePackages ? resolvePackage(baseDir, specifier) : null))
 
-    if (resolved && (resolvedAlias || isProjectLocal(root, resolved) || platform === 'browser')) {
+    if (
+      resolved &&
+      (resolvedAlias || isProjectLocal(root, resolved) || platform === 'browser' || bundlePackages)
+    ) {
       const depSource = await readSourceFile(resolved)
       const dep = await visitModule({
         key: resolved,
@@ -299,6 +305,7 @@ async function visitModule(context) {
         externalSet,
         aliases,
         platform,
+        bundlePackages,
         jsxRuntime,
       })
       module.deps.set(specifier, dep)
@@ -718,7 +725,8 @@ function rewriteCommonJsRequires(line, module) {
   return line.replace(/\brequire\s*\(\s*["']([^"']+)["']\s*\)/g, (match, specifier, offset) => {
     if (codeOnly.slice(offset, offset + match.length).trim() !== match) return match
     const source = module.deps.get(specifier)
-    return source && !source.external ? source.id : match
+    if (!source) return match
+    return source.external ? source.alias : source.id
   })
 }
 
@@ -767,8 +775,8 @@ function resolveLocalSpecifier(baseDir, specifier) {
   return resolveFile(base)
 }
 
-function resolveBrowserPackage(baseDir, specifier) {
-  if (specifier.startsWith('node:')) return null
+function resolvePackage(baseDir, specifier) {
+  if (isBuiltin(specifier)) return null
   try {
     return createRequire(path.join(baseDir, '__ruvyxa-resolve__.cjs')).resolve(specifier)
   } catch {

@@ -149,6 +149,72 @@ describe('prerender cache path mapping', () => {
   })
 })
 
+describe('ISR cache freshness', () => {
+  it('does not regenerate a fresh cache hit', async () => {
+    let renders = 0
+    const route = pageRoute('isr', '/isr', 'isr')
+    route.render.revalidate = 60
+    const handler = createHandler({
+      routes: [route],
+      importPage: async () => ({
+        render: async () => {
+          renders += 1
+          return '<html>new</html>'
+        },
+      }),
+      importApi: async () => ({}),
+      readPrerendered: () => ({ html: '<html>cached</html>', stale: false }),
+      writePrerendered: () => {},
+    })
+
+    const response = await handler(new Request('http://localhost/isr'))
+    await new Promise((resolve) => setImmediate(resolve))
+
+    assert.equal(await response.text(), '<html>cached</html>')
+    assert.equal(renders, 0)
+  })
+
+  it('coalesces concurrent regeneration for a stale cache entry', async () => {
+    let renders = 0
+    let writes = 0
+    let releaseRender
+    const renderGate = new Promise((resolve) => {
+      releaseRender = resolve
+    })
+    const route = pageRoute('isr', '/isr', 'isr')
+    route.render.revalidate = 60
+    const handler = createHandler({
+      routes: [route],
+      importPage: async () => ({
+        render: async () => {
+          renders += 1
+          await renderGate
+          return '<html>new</html>'
+        },
+      }),
+      importApi: async () => ({}),
+      readPrerendered: () => ({ html: '<html>stale</html>', stale: true }),
+      writePrerendered: () => {
+        writes += 1
+      },
+    })
+
+    const runtimeContext = { waitUntil() {} }
+    const [first, second] = await Promise.all([
+      handler(new Request('http://localhost/isr'), runtimeContext),
+      handler(new Request('http://localhost/isr'), runtimeContext),
+    ])
+    assert.equal(await first.text(), '<html>stale</html>')
+    assert.equal(await second.text(), '<html>stale</html>')
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(renders, 1)
+
+    releaseRender()
+    await new Promise((resolve) => setImmediate(resolve))
+    assert.equal(writes, 1)
+  })
+})
+
 describe('optional catch-all parity with the dev server', () => {
   it('omits the parameter at the parent route instead of using an empty array', async () => {
     const rendered = []

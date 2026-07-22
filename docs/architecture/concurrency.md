@@ -23,7 +23,7 @@ How Ruvyxa uses threads, locks, channels, and parallelism across the Rust layer.
 | **RuntimeCache.styles**            | `tokio::sync::RwLock<Option<...>>`               | tokio       | Async style reads/invalidation                       |
 | **RuntimeCache.router**            | `tokio::sync::RwLock<Option<...>>`               | tokio       | Async router rebuild on manifest change              |
 | **WorkerPool.workers**             | `StdRwLock<Vec<Arc<Worker>>>`                    | std::sync   | Infrequent writes (failure recovery)                 |
-| **WorkerPool.next_worker**         | `AtomicU64`                                      | std::sync   | Relaxed, round-robin                                 |
+| **WorkerPool.next_worker**         | `AtomicU64`                                      | std::sync   | Relaxed cursor for fair ties after load comparison   |
 | **Worker.stdin_tx**                | `StdMutex<Option<mpsc::Sender<String>>>`         | std::sync   | Drop = signal shutdown                               |
 | **Worker.pending**                 | `Arc<Mutex<BTreeMap<String, PendingResponse>>>`  | std::sync   | Write on every request (insert/remove), fast section |
 | **Worker.child**                   | `Mutex<Option<Child>>`                           | std::sync   | Protect kill_on_drop + shutdown                      |
@@ -80,8 +80,8 @@ How Ruvyxa uses threads, locks, channels, and parallelism across the Rust layer.
 2. **Render cache get**: `RwLock<HashMap>.read()` + `VecDeque` promote — O(1). Tokio RwLock handles
    concurrent reads efficiently.
 
-3. **Worker pool send**: `mpsc::Sender::send()` — O(1) channel write. NDJSON line serialization.
-   Worker selection: `AtomicU64.fetch_add()`.
+3. **Worker pool send**: inspect each worker's pending count, starting at a rotating atomic cursor,
+   then use the least-loaded worker. The NDJSON channel write itself is O(1).
 
 4. **HTML composition**: string search (`find_ascii_case`) + `format!()` — negligible.
 

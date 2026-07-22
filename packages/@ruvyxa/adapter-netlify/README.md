@@ -40,4 +40,6 @@ export default config({
 
 This adapter supports SSR, API, ISR, PPR, SSG, and CSR routes via the serverless runtime. Static
 assets and pre-rendered pages are served through Netlify's publish directory; dynamic routes are
-handled by Netlify Functions.
+handled by Netlify Functions. Function output contains a compiled `.mjs` static route registry. ISR
+checks file age against `revalidate` and coalesces concurrent stale refreshes within a warm function
+instance.

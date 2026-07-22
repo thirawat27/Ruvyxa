@@ -247,8 +247,9 @@ Document only what source code and tests support.
   assets need a project-local import/copy strategy.
 - Adapter packages return typed output metadata and declarative build artifacts. The config renderer
   executes `adapter.build()` and the CLI re-runs it after building to materialize artifacts within
-  staging before it commits `build.json`. Static adapters intentionally do not create serverless or
-  edge request handlers.
+  staging before it commits `build.json`. Function artifacts compile route TS/TSX into an executable
+  `.mjs` static registry bundle; handlers load that registry rather than raw manifest paths. Static
+  adapters intentionally do not create serverless or edge request handlers.
 - `check` is an application-readiness signal, not a browser E2E suite, load test, or security audit.
   Add verification in the layer changed by a feature.
 

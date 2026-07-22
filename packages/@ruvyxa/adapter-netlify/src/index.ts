@@ -26,7 +26,8 @@ export interface NetlifyAdapterOptions {
  */
 function netlifyHandlerSource(): string {
   return `import { createHandler, prerenderRelativePath } from './serverless-handler.mjs';
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { loadRouteModule } from './route-modules.mjs';
+import { readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 
 const manifestPath = path.join(import.meta.dirname, 'manifest.json');
@@ -35,23 +36,18 @@ const prerenderDir = path.join(import.meta.dirname, 'prerender');
 
 const handler = createHandler({
   routes: manifest.routes,
-  importPage: async (routeId) => {
-    const route = manifest.routes.find(r => r.id === routeId);
-    if (!route) throw new Error(\`Route \${routeId} not found in manifest\`);
-    return import(\`./server/app/\${route.file}\`);
-  },
-  importApi: async (routeId) => {
-    const route = manifest.routes.find(r => r.id === routeId);
-    if (!route) throw new Error(\`Route \${routeId} not found in manifest\`);
-    return import(\`./server/app/\${route.file}\`);
-  },
-  readPrerendered: (pathname) => {
+  importPage: loadRouteModule,
+  importApi: loadRouteModule,
+  readPrerendered: (pathname, revalidate = 60) => {
     // prerenderRelativePath rejects any request path that cannot be mapped to a
     // location inside prerenderDir, so the cache read can never escape it.
     const relative = prerenderRelativePath(pathname);
     if (relative === null) return null;
     try {
-      return readFileSync(path.join(prerenderDir, relative), 'utf8');
+      const htmlPath = path.join(prerenderDir, relative);
+      const html = readFileSync(htmlPath, 'utf8');
+      const stale = Date.now() - statSync(htmlPath).mtimeMs >= revalidate * 1000;
+      return { html, stale };
     } catch {
       return null;
     }
@@ -72,7 +68,7 @@ const handler = createHandler({
 
 // Netlify Functions v2 — Web-standard Request/Response
 export default async function(request, context) {
-  return handler(request);
+  return handler(request, context);
 }
 
 // Netlify Functions v2 config

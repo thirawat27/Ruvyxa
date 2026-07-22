@@ -133,7 +133,7 @@ Compiles shared module set into a registry accessing `globalThis.__RUVYXA_SHARED
 
 ---
 
-## 1. Resolver (`resolver.rs` — 1771 lines)
+## 1. Resolver (`resolver.rs`)
 
 ### `resolve_graph_with_cache(entry_source, entry_label, project_root, app_dir, cache) → Vec<ResolvedModule>`
 
@@ -271,7 +271,7 @@ Resolution algorithm:
 
 ---
 
-## 2. Compiler (`compiler.rs` — 403 lines)
+## 2. Compiler (`compiler.rs`)
 
 ### `compile_graph_with_cache(graph, input, cache) → Vec<CompiledModule>`
 
@@ -344,7 +344,7 @@ Shorthand using classic JSX. Calls `transform_with_options`.
 
 Full Oxc pipeline as above. Return plain JS string.
 
-### `CompileCache` (`cache.rs` — 518 lines)
+### `CompileCache` (`cache.rs`)
 
 ```rust
 const MEMORY_CACHE_LIMIT: usize = 512;
@@ -372,7 +372,7 @@ memory > 512.
 
 ---
 
-## 3. Boundary Checker (`boundary.rs` — 361 lines)
+## 3. Boundary Checker (`boundary.rs`)
 
 ### `check(modules, input, out: &mut Vec<Diagnostic>) → Result<()>`
 
@@ -408,7 +408,7 @@ Handles:
 
 ---
 
-## 4. Linker (`linker.rs` — 1727 lines)
+## 4. Linker (`linker.rs`)
 
 ### `detect_cycles(modules) → Result<()>`
 
@@ -499,7 +499,7 @@ concatenates results sequentially.
 
 ---
 
-## 5. Minifier (`minifier.rs` — 970 lines)
+## 5. Minifier (`minifier.rs`)
 
 ### `minify(source, target) → Result<String>`
 
@@ -548,7 +548,7 @@ delimiter matching.
 
 ---
 
-## 6. Chunking (`chunking.rs` — 224 lines)
+## 6. Chunking (`chunking.rs`)
 
 ### `plan_dynamic_chunk_files(compiled, entry) → BTreeMap<PathBuf, String>`
 
@@ -582,7 +582,7 @@ minify (no tree-shaking).
 
 ---
 
-## 7. Output (`output.rs` — 112 lines)
+## 7. Output (`output.rs`)
 
 ### `build_entry_source(input) → (String, String)` (`output.rs:32`)
 
@@ -645,7 +645,7 @@ export async function render(ctx) {
 
 ---
 
-## 8. AST Scanner (`ast.rs` — 402 lines)
+## 8. AST Scanner (`ast.rs`)
 
 ### `parse_module(source: &str) → ModuleAst`
 
@@ -688,7 +688,7 @@ Skips: strings (all quote types), comments (line + block), whitespace.
 
 ---
 
-## 9. CSS Modules (`style_module.rs` — 471 lines)
+## 9. CSS Modules (`style_module.rs`)
 
 ### `is_css_module_path(path) → bool`
 
@@ -738,7 +738,7 @@ Returns: `export default {"local":"scoped","other":"scoped_other__hex"};`
 
 ---
 
-## 10. Content Compilation (`content.rs` — 1139 lines)
+## 10. Content Compilation (`content.rs`)
 
 ### `compile_content_module(source, path) → Result<String>`
 
@@ -802,7 +802,7 @@ static CONTENT_MODULE_CACHE: OnceLock<Mutex<ContentModuleCache>>;
 
 ---
 
-## 11. Plugin System (`plugin.rs` — 221 lines)
+## 11. Build hooks (`hooks.rs`)
 
 ### `BuildHooks` trait
 

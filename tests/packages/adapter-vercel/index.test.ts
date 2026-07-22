@@ -1,7 +1,14 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { Readable } from 'node:stream'
+import { copyFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import { vercelAdapter } from '../../../packages/@ruvyxa/adapter-vercel/src/index.ts'
+
+const workspaceRoot = path.resolve(fileURLToPath(new URL('../../..', import.meta.url)))
 
 describe('vercelAdapter', () => {
   it('returns serverless deployment output with function artifacts', async () => {
@@ -75,7 +82,11 @@ describe('vercelAdapter', () => {
     assert.ok(functionArtifact)
     assert.ok('handlerSource' in functionArtifact!)
     assert.match(String(functionArtifact!.handlerSource), /createHandler/)
+    assert.match(String(functionArtifact!.handlerSource), /loadRouteModule/)
+    assert.doesNotMatch(String(functionArtifact!.handlerSource), /\.\/server\/app/)
     assert.match(String(functionArtifact!.handlerSource), /export default/)
+    assert.match(String(functionArtifact!.handlerSource), /for await \(const chunk of req\)/)
+    assert.match(String(functionArtifact!.handlerSource), /getSetCookie/)
 
     // The ISR cache reads and writes files by request path, so it must go
     // through the shared containment helper rather than joining the raw
@@ -147,5 +158,85 @@ describe('vercelAdapter', () => {
     const config = JSON.parse(vcConfig && 'contents' in vcConfig ? String(vcConfig.contents) : '{}')
     assert.equal(config.runtime, 'nodejs22.x')
     assert.equal(config.maxDuration, 30)
+  })
+
+  it('forwards a streamed Node request body and repeated Set-Cookie headers', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-vercel-handler-'))
+    try {
+      const output = vercelAdapter({ projectOutput: false }).build({ root, outDir: '.ruvyxa' })
+      const artifact = output.artifacts?.find((item) => item.kind === 'function')
+      assert.ok(artifact?.handlerSource)
+      await mkdir(path.join(root, 'prerender'), { recursive: true })
+      await writeFile(path.join(root, 'index.mjs'), artifact.handlerSource)
+      await writeFile(
+        path.join(root, 'manifest.json'),
+        JSON.stringify({
+          routes: [
+            {
+              id: 'app/api/echo/route',
+              kind: 'api',
+              path: '/api/echo',
+              file: 'app/api/echo/route.ts',
+              render: { strategy: 'ssr' },
+            },
+          ],
+        }),
+      )
+      await writeFile(
+        path.join(root, 'route-modules.mjs'),
+        `const api = { async POST({ request }) {
+          const headers = new Headers()
+          headers.append('set-cookie', 'first=1; Path=/')
+          headers.append('set-cookie', 'second=2; Path=/')
+          return new Response(await request.text(), { headers })
+        } }
+        export async function loadRouteModule() { return api }
+        `,
+      )
+      await copyFile(
+        path.join(workspaceRoot, 'packages/ruvyxa/runtime/serverless-handler.mjs'),
+        path.join(root, 'serverless-handler.mjs'),
+      )
+
+      const { default: handler } = await import(
+        pathToFileURL(path.join(root, 'index.mjs')).href + `?t=${Date.now()}`
+      )
+      const request = Readable.from([Buffer.from('streamed-payload')])
+      Object.assign(request, {
+        url: '/api/echo',
+        method: 'POST',
+        headers: { host: 'localhost', 'content-type': 'text/plain' },
+      })
+      const headers = new Map()
+      let body = ''
+      const response = {
+        statusCode: 0,
+        setHeader(name, value) {
+          headers.set(name, value)
+        },
+        end(value) {
+          body = String(value)
+        },
+      }
+
+      await handler(request, response)
+
+      assert.equal(response.statusCode, 200)
+      assert.equal(body, 'streamed-payload')
+      assert.deepEqual(headers.get('set-cookie'), ['first=1; Path=/', 'second=2; Path=/'])
+
+      const parsedRequest = Readable.from([])
+      Object.assign(parsedRequest, {
+        url: '/api/echo',
+        method: 'POST',
+        headers: { host: 'localhost', 'content-type': 'application/json' },
+        body: { parsed: true },
+      })
+      body = ''
+      await handler(parsedRequest, response)
+      assert.equal(body, '{"parsed":true}')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
   })
 })

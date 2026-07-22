@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   cacheFileName,
   compileBundle,
+  collectLayouts,
   runtimeAliases,
   serverPlatform,
   toImportPath,
@@ -216,7 +217,7 @@ async function materializeArtifacts(output, buildDir) {
           `RUV2200 function artifact ${artifact.path} must include handlerSource string.`,
         )
       }
-      await materializeFunction(buildDir, destination, artifact.handlerSource)
+      await materializeFunction(buildDir, destination, artifact.handlerSource, output.target)
       artifacts.push(
         scope === 'project'
           ? { kind: 'function', path: artifact.path, scope }
@@ -271,10 +272,13 @@ function artifactDestination(buildDir, artifactPath) {
   return destination
 }
 
-async function materializeFunction(buildDir, destination, handlerSource) {
+async function materializeFunction(buildDir, destination, handlerSource, target) {
   const manifestPath = path.join(buildDir, 'manifest.json')
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
 
+  // A function artifact is a complete deployment unit. Replacing it prevents
+  // removed or renamed route bundles from surviving incremental builds.
+  await rm(destination, { recursive: true, force: true })
   await mkdir(destination, { recursive: true })
 
   // Write the platform-specific handler entry point
@@ -286,11 +290,11 @@ async function materializeFunction(buildDir, destination, handlerSource) {
     await cp(serverlessHandlerSrc, path.join(destination, 'serverless-handler.mjs'))
   }
 
-  // Copy the server source directory (app modules needed for rendering)
-  const serverDir = path.join(buildDir, 'server')
-  if (existsSync(serverDir)) {
-    await cp(serverDir, path.join(destination, 'server'), { recursive: true })
-  }
+  // Compile every route into executable JavaScript and expose it through a
+  // static import registry. Static imports let edge bundlers discover all
+  // modules; compiling here avoids shipping raw TS/TSX and removes the
+  // manifest path ambiguity that previously produced server/app/app/....
+  await materializeRouteModules(manifest, destination, target)
 
   // Copy pre-rendered pages for ISR/SSG fallback
   const prerenderDir = path.join(buildDir, 'prerender')
@@ -304,6 +308,118 @@ async function materializeFunction(buildDir, destination, handlerSource) {
     JSON.stringify(manifest, null, 2),
     'utf8',
   )
+}
+
+async function materializeRouteModules(manifest, destination, target) {
+  const routes = Array.isArray(manifest.routes) ? manifest.routes : []
+  const imports = []
+  const definitions = []
+  const records = []
+  const seenIds = new Set()
+  const hasPages = routes.some((route) => route?.kind !== 'api')
+  if (hasPages) {
+    const renderer = target === 'edge' ? 'react-dom/server.browser' : 'react-dom/server'
+    imports.push('import React from "react"')
+    imports.push(`import * as ReactDomServer from ${JSON.stringify(renderer)}`)
+  }
+
+  for (const [index, route] of routes.entries()) {
+    if (!route || typeof route !== 'object' || typeof route.id !== 'string') {
+      throw new Error(`RUV2200 manifest route at index ${index} must have a string id.`)
+    }
+    if (seenIds.has(route.id)) {
+      throw new Error(`RUV2200 manifest contains duplicate route id: ${route.id}.`)
+    }
+    seenIds.add(route.id)
+
+    const routeFile = resolveProjectRouteFile(route.file, route.id)
+    if (route.kind === 'api') {
+      const alias = `ApiRoute${index}`
+      imports.push(`import * as ${alias} from ${JSON.stringify(toImportPath(routeFile))}`)
+      records.push(`  ${JSON.stringify(route.id)}: ${alias}`)
+      continue
+    }
+
+    const page = pageRouteDefinition(routeFile, index)
+    imports.push(...page.imports)
+    definitions.push(page.definition)
+    records.push(`  ${JSON.stringify(route.id)}: { render: ${page.renderName} }`)
+  }
+
+  const registrySource = `${imports.join('\n')}
+
+${definitions.join('\n\n')}
+
+const routeModules = Object.freeze({
+${records.join(',\n')}
+})
+
+export async function loadRouteModule(routeId) {
+  const routeModule = routeModules[routeId]
+  if (!routeModule) throw new Error(\`Route \${routeId} is not present in the compiled registry\`)
+  return routeModule
+}
+`
+  await compileBundle({
+    projectRoot,
+    entrySource: registrySource,
+    sourcefile: 'ruvyxa:serverless-route-registry.tsx',
+    outfile: path.join(destination, 'route-modules.mjs'),
+    platform: target === 'edge' ? 'browser' : serverPlatform(),
+    bundlePackages: true,
+    aliases: runtimeAliases(runtimeDir),
+  })
+}
+
+function resolveProjectRouteFile(routeFile, routeId) {
+  if (typeof routeFile !== 'string' || routeFile.trim() === '') {
+    throw new Error(`RUV2200 manifest route ${routeId} must have a source file.`)
+  }
+  const segments = routeFile.split(/[\\/]+/).filter((segment) => segment && segment !== '.')
+  const samePlatformAbsolute = path.isAbsolute(routeFile)
+  const candidates = samePlatformAbsolute
+    ? [path.resolve(routeFile)]
+    : [path.resolve(projectRoot, ...segments), path.resolve(...segments)]
+  const resolved = candidates.find(
+    (candidate) => candidate.startsWith(projectRoot + path.sep) && existsSync(candidate),
+  )
+  if (!resolved) {
+    throw new Error(`RUV2200 manifest route ${routeId} source does not exist: ${routeFile}.`)
+  }
+  return resolved
+}
+
+function pageRouteDefinition(pageFile, routeIndex) {
+  const appDir = path.join(projectRoot, 'app')
+  const layouts = collectLayouts(appDir, path.dirname(pageFile))
+  const pageName = `Page${routeIndex}`
+  const renderName = `renderPage${routeIndex}`
+  const imports = [`import ${pageName} from ${JSON.stringify(toImportPath(pageFile))}`]
+  const wrappers = []
+  layouts.forEach((layoutFile, index) => {
+    const layoutName = `Layout${routeIndex}_${index}`
+    imports.push(`import ${layoutName} from ${JSON.stringify(toImportPath(layoutFile))}`)
+    wrappers.push(layoutName)
+  })
+
+  const definition = `async function ${renderName}(ctx) {
+  let tree = React.createElement(${pageName}, { params: ctx.params ?? {}, requestPath: ctx.path })
+  for (const Layout of [${wrappers.join(', ')}].reverse()) {
+    tree = React.createElement(Layout, null, tree)
+  }
+
+  let html
+  if (typeof ReactDomServer.renderToReadableStream === "function") {
+    const stream = await ReactDomServer.renderToReadableStream(tree)
+    html = await new Response(stream).text()
+  } else if (typeof ReactDomServer.renderToString === "function") {
+    html = ReactDomServer.renderToString(tree)
+  } else {
+    throw new Error("React server renderer is unavailable")
+  }
+  return html.trimStart().toLowerCase().startsWith("<!doctype") ? html : "<!doctype html>" + html
+}`
+  return { imports, definition, renderName }
 }
 
 // Copies the pre-rendered pages and client assets into a publish directory.

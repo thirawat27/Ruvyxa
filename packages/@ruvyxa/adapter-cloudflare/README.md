@@ -37,6 +37,7 @@ export default config({
 `ruvyxa build` creates `.ruvyxa/deploy/cloudflare/` with a Workers handler, `assets/`, and
 `wrangler.jsonc`. Deploy that directory with Wrangler/Cloudflare Workers.
 
-This adapter supports SSR, API, ISR, PPR, SSG, and CSR routes via the Edge runtime
-(`--target edge`). Static assets (client bundles, pre-rendered pages) are served through
-Cloudflare's assets binding; dynamic routes are handled by the Worker.
+This adapter supports SSR, API, SSG, and CSR routes via the Edge runtime (`--target edge`). ISR and
+PPR are rejected because the assets binding is read-only and the adapter does not configure a
+persistent KV or Durable Object cache. Static assets are served through the assets binding; dynamic
+routes use compiled edge modules loaded from a static registry in the Worker bundle.

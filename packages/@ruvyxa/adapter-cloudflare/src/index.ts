@@ -34,20 +34,13 @@ export interface CloudflareAdapterOptions {
  */
 function workerHandlerSource(): string {
   return `import { createHandler } from './serverless-handler.mjs';
+import { loadRouteModule } from './route-modules.mjs';
 import manifest from './manifest.json';
 
 const handler = createHandler({
   routes: manifest.routes,
-  importPage: async (routeId) => {
-    const route = manifest.routes.find(r => r.id === routeId);
-    if (!route) throw new Error(\`Route \${routeId} not found in manifest\`);
-    return import(\`./server/app/\${route.file}\`);
-  },
-  importApi: async (routeId) => {
-    const route = manifest.routes.find(r => r.id === routeId);
-    if (!route) throw new Error(\`Route \${routeId} not found in manifest\`);
-    return import(\`./server/app/\${route.file}\`);
-  },
+  importPage: loadRouteModule,
+  importApi: loadRouteModule,
   readPrerendered: (pathname) => {
     // In Workers, pre-rendered pages are served as static assets.
     // ISR revalidation requires KV or Durable Objects (not yet supported).

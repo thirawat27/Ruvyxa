@@ -40,4 +40,6 @@ layout. Deploy `.ruvyxa/deploy/vercel/`.
 
 This adapter supports SSR, API, ISR, PPR, SSG, and CSR routes via the serverless runtime. Static
 assets and pre-rendered pages are served through Vercel's static output; dynamic routes are handled
-by serverless functions.
+by serverless functions. Function output contains a compiled `.mjs` static route registry. ISR
+checks file age against `revalidate` and coalesces concurrent stale refreshes within a warm function
+instance.

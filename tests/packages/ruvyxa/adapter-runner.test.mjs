@@ -132,6 +132,94 @@ describe('adapter runner', () => {
     }
   })
 
+  it('materializes executable page and API modules instead of raw TypeScript sources', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-adapter-runner-'))
+    const outputDir = path.join(root, '.ruvyxa-staging')
+    const functionDir = path.join(outputDir, 'deploy', 'function')
+    try {
+      await installFakeReact(root)
+      await mkdir(path.join(root, 'app', 'hello', '[name]'), { recursive: true })
+      await mkdir(path.join(root, 'app', 'api', 'echo'), { recursive: true })
+      await mkdir(path.join(outputDir, 'prerender'), { recursive: true })
+
+      await writeFile(
+        path.join(root, 'app', 'layout.tsx'),
+        `export default function Layout({ children }) { return <body>{children}</body> }`,
+      )
+      await writeFile(
+        path.join(root, 'app', 'hello', '[name]', 'page.tsx'),
+        `export default function Page({ params }) { return <main>Hello {params.name}</main> }`,
+      )
+      await writeFile(
+        path.join(root, 'app', 'api', 'echo', 'route.ts'),
+        `export async function POST({ request, params }) {
+          return Response.json({ body: await request.text(), params })
+        }`,
+      )
+
+      // Backslashes deliberately model a manifest produced on Windows. Route
+      // resolution must stay portable instead of treating them as filename
+      // characters on POSIX hosts.
+      const manifest = {
+        routes: [
+          {
+            id: 'app/hello/[name]/page',
+            kind: 'page',
+            path: '/hello/[name]',
+            file: 'app\\hello\\[name]\\page.tsx',
+            layoutChain: ['app/layout'],
+            render: { strategy: 'ssr' },
+          },
+          {
+            id: 'app/api/echo/route',
+            kind: 'api',
+            path: '/api/echo',
+            file: 'app\\api\\echo\\route.ts',
+            layoutChain: ['app/layout'],
+            render: { strategy: 'ssr' },
+          },
+        ],
+      }
+      await writeFile(path.join(outputDir, 'manifest.json'), JSON.stringify(manifest))
+
+      const handlerSource = `import { createHandler } from './serverless-handler.mjs'
+import { loadRouteModule } from './route-modules.mjs'
+const routes = ${JSON.stringify(manifest.routes)}
+const handler = createHandler({ routes, importPage: loadRouteModule, importApi: loadRouteModule })
+export default handler
+`
+      await writeFile(
+        path.join(root, 'ruvyxa.config.mjs'),
+        `export default { adapter: { build() { return {
+          target: 'edge',
+          artifacts: [{ kind: 'function', path: 'deploy/function', handlerSource: ${JSON.stringify(handlerSource)} }]
+        } } } }`,
+      )
+
+      await runRunner(root, outputDir)
+
+      const { default: handler } = await import(
+        `${new URL(`file://${functionDir.replaceAll('\\', '/')}/index.mjs`).href}?t=${Date.now()}`
+      )
+      const pageResponse = await handler(new Request('http://localhost/hello/Ada'))
+      assert.equal(pageResponse.status, 200)
+      assert.equal(await pageResponse.text(), '<!doctype html><body><main>Hello Ada</main></body>')
+
+      const apiResponse = await handler(
+        new Request('http://localhost/api/echo', { method: 'POST', body: 'payload' }),
+      )
+      assert.equal(apiResponse.status, 200)
+      assert.deepEqual(await apiResponse.json(), { body: 'payload', params: {} })
+
+      const registry = await readFile(path.join(functionDir, 'route-modules.mjs'), 'utf8')
+      assert.match(registry, /loadRouteModule/)
+      assert.match(registry, /renderPage0/)
+      assert.doesNotMatch(registry, /import\(`\.\/server\/app\//)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('materializes allowlisted project-scope artifacts at the project root', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-adapter-runner-'))
     const outputDir = path.join(root, '.ruvyxa-staging')
@@ -225,6 +313,57 @@ describe('adapter runner', () => {
     }
   })
 })
+
+async function installFakeReact(root) {
+  const reactDir = path.join(root, 'node_modules', 'react')
+  const reactDomDir = path.join(root, 'node_modules', 'react-dom')
+  await mkdir(reactDir, { recursive: true })
+  await mkdir(reactDomDir, { recursive: true })
+  await writeFile(
+    path.join(reactDir, 'package.json'),
+    JSON.stringify({
+      name: 'react',
+      type: 'module',
+      exports: { '.': './index.js', './jsx-runtime': './jsx-runtime.js' },
+    }),
+  )
+  await writeFile(
+    path.join(reactDir, 'index.js'),
+    `export function createElement(type, props, ...children) {
+      return { type, props: { ...(props ?? {}), children: children.length > 1 ? children : children[0] } }
+    }
+    export default { createElement }
+    `,
+  )
+  await writeFile(
+    path.join(reactDir, 'jsx-runtime.js'),
+    `export function jsx(type, props) { return { type, props: props ?? {} } }
+     export const jsxs = jsx
+     export const Fragment = Symbol.for('fake.fragment')
+    `,
+  )
+  await writeFile(
+    path.join(reactDomDir, 'package.json'),
+    JSON.stringify({
+      name: 'react-dom',
+      type: 'module',
+      exports: { './server': './server.js', './server.browser': './server.js' },
+    }),
+  )
+  await writeFile(
+    path.join(reactDomDir, 'server.js'),
+    `function render(value) {
+      if (value == null || value === false) return ''
+      if (Array.isArray(value)) return value.map(render).join('')
+      if (typeof value !== 'object') return String(value)
+      if (typeof value.type === 'function') return render(value.type(value.props ?? {}))
+      const children = render(value.props?.children)
+      return '<' + value.type + '>' + children + '</' + value.type + '>'
+    }
+    export function renderToString(tree) { return render(tree) }
+    `,
+  )
+}
 
 function runRunner(root, outputDir) {
   return new Promise((resolve, reject) => {

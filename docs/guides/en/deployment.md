@@ -105,6 +105,11 @@ Static-only deployments (SSG/CSR pages without API or SSR routes) continue to wo
 before. The adapters emit both static assets and a serverless function; platforms serve static files
 directly and forward unmatched requests to the function handler.
 
+Function output contains a compiled `.mjs` static route registry bundle, not raw TypeScript/TSX.
+This makes the emitted artifact executable as-is and lets Wrangler discover edge modules during
+bundling. On Vercel and Netlify, ISR cache age is checked against `revalidate`; only stale entries
+regenerate, and concurrent stale hits are coalesced within a warm function instance.
+
 ### Permission Denied Error
 
 ```

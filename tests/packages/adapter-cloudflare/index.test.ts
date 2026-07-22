@@ -40,6 +40,8 @@ describe('cloudflareAdapter', () => {
     assert.ok(functionArtifact)
     assert.ok('handlerSource' in functionArtifact!)
     assert.match(String(functionArtifact!.handlerSource), /createHandler/)
+    assert.match(String(functionArtifact!.handlerSource), /loadRouteModule/)
+    assert.doesNotMatch(String(functionArtifact!.handlerSource), /\.\/server\/app/)
     assert.match(String(functionArtifact!.handlerSource), /export default/)
 
     // Verify _headers for client cache

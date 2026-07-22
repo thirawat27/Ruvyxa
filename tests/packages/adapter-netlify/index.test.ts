@@ -47,6 +47,8 @@ describe('netlifyAdapter', () => {
     assert.ok(functionArtifact)
     assert.ok('handlerSource' in functionArtifact!)
     assert.match(String(functionArtifact!.handlerSource), /createHandler/)
+    assert.match(String(functionArtifact!.handlerSource), /loadRouteModule/)
+    assert.doesNotMatch(String(functionArtifact!.handlerSource), /\.\/server\/app/)
     assert.match(String(functionArtifact!.handlerSource), /export default/)
 
     // The ISR cache reads and writes files by request path, so it must go

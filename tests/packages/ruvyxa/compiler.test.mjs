@@ -412,6 +412,30 @@ export class contentFormat {}
     })
   })
 
+  it('rewrites external CommonJS requires to ESM imports', async () => {
+    await withFixture(async ({ root, outDir }) => {
+      const entryFile = path.join(root, 'entry.cjs')
+      const outfile = path.join(outDir, 'commonjs-external.mjs')
+      await writeFile(
+        entryFile,
+        `const util = require('node:util')\nmodule.exports = { encoder: util.TextEncoder.name }\n`,
+      )
+
+      await compileBundle({
+        projectRoot: root,
+        entrySource: `export { encoder } from ${JSON.stringify(toImportPath(entryFile))}`,
+        sourcefile: 'ruvyxa:commonjs-external-entry.js',
+        outfile,
+        platform: 'node',
+      })
+
+      const output = await readFile(outfile, 'utf8')
+      const mod = await import(pathToFileURL(outfile).href + `?t=${Date.now()}`)
+      assert.equal(mod.encoder, 'TextEncoder')
+      assert.doesNotMatch(output, /require\(['"]node:util['"]\)/)
+    })
+  })
+
   it('recompiles a changed source after compiler-cache invalidation', async () => {
     await withFixture(async ({ root, outDir }) => {
       const pageFile = path.join(root, 'page.ts')

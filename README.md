@@ -531,6 +531,10 @@ cache examples.
 └── build.json     # Build metadata, security defaults, build settings, render summary
 ```
 
+Hybrid adapters add platform deployment directories containing a compiled `.mjs` static route
+registry. Serverless and edge handlers execute that bundle directly; raw TS/TSX source is not used
+as a deployment entrypoint.
+
 ---
 
 ## Packages

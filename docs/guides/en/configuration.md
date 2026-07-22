@@ -196,6 +196,9 @@ production build to materialize its declared artifacts inside `.ruvyxa/`. The re
 Netlify, and Vercel adapters are hybrid: they emit a static publish directory for pre-rendered pages
 and client assets alongside a serverless function that serves SSR and API routes.
 
+The function artifact contains `route-modules.mjs`, a compiled static registry bundle used by the
+platform handler. Adapter handlers do not execute copied `.ts`/`.tsx` source files.
+
 Each adapter declares the route kinds and render strategies it can deploy. Routes outside that set
 are rejected with `RUV2202`, naming each unsupported route, before the adapter's `build()` runs:
 

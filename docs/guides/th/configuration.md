@@ -191,6 +191,9 @@ Adapter จะ materialize deployment artifact ภายใน `.ruvyxa/` หล
 เป็นแบบ hybrid คือสร้าง static publish directory สำหรับหน้า pre-render และ client asset ควบคู่กับ
 serverless function ที่ให้บริการ route แบบ SSR และ API
 
+function artifact จะบรรจุ `route-modules.mjs` ซึ่งเป็น static registry bundle ที่ compile แล้ว
+สำหรับ platform handler โดย handler จะไม่รันไฟล์ `.ts`/`.tsx` ที่คัดลอกมาโดยตรง
+
 Adapter แต่ละตัวประกาศชนิด route และ render strategy ที่ deploy ได้ ถ้ามี route อยู่นอกชุดนั้น build
 จะถูกปฏิเสธด้วย `RUV2202` พร้อมระบุชื่อ route ที่ไม่รองรับ ก่อนที่ `build()` ของ adapter จะทำงาน
 

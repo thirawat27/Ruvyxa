@@ -338,7 +338,7 @@ export interface AdapterArtifact {
    * - `'static-site'` — assemble a static-only publish directory from
    *   pre-rendered pages and client assets.
    * - `'function'` — bundle a serverless/edge function from a handler entry
-   *   point and the pre-compiled server modules.
+   *   point and a compiled static route registry.
    */
   kind: 'file' | 'static-site' | 'function'
   /**
@@ -350,8 +350,9 @@ export interface AdapterArtifact {
   contents?: string
   /**
    * Handler entry source code for `function` artifacts. This is the
-   * platform-specific wrapper that imports `serverless-handler.mjs` and
-   * adapts it to the platform's function signature.
+   * platform-specific wrapper that imports `serverless-handler.mjs` plus the
+   * generated `route-modules.mjs` registry and adapts them to the platform's
+   * function signature.
    */
   handlerSource?: string
   /**

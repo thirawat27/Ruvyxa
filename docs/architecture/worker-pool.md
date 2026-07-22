@@ -1,6 +1,6 @@
 # Worker Pool (`NodeWorkerPool`)
 
-**File**: `crates/ruvyxa_dev_server/src/worker_pool.rs` (1680 lines)
+**File**: `crates/ruvyxa_dev_server/src/worker_pool.rs`
 
 Persistent Node.js or Bun worker processes communicating via newline-delimited JSON (NDJSON) over
 stdin/stdout. Eliminates per-request JavaScript process spawn overhead (~100-500ms). The public Rust
@@ -16,7 +16,8 @@ type remains `NodeWorkerPool` for backwards compatibility.
                     │  - workers: Vec<Arc<Worker>>    │
                     │  - next_worker: AtomicU64       │
                     └──────┬───────────────┘
-                           │ round-robin
+                           │ least in-flight load
+                           │ rotating tie-break
         ┌──────────────────┼──────────────────┐
         ▼                  ▼                  ▼
   ┌──────────┐      ┌──────────┐      ┌──────────┐
@@ -40,7 +41,8 @@ const WORKER_SHUTDOWN_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_PENDING_RESPONSE_FRAMES: usize = 16;             // streaming backpressure
 ```
 
-Pool size: `min(8, max(2, num_cpus::get()))` by default. Configurable via `build.workers`.
+Pool size: available parallelism clamped to 2–8 by default. An explicit `build.workers` value is
+clamped to 1–8, allowing a short-lived build with one rendering job to avoid an idle process.
 
 ---
 
@@ -54,7 +56,7 @@ pub struct NodeWorkerPool {
     worker_script: PathBuf,              // packages/ruvyxa/runtime/worker-pool.mjs
     env: BTreeMap<String, String>,
     runtime: JavaScriptRuntime,           // node when available, otherwise bun if unspecified
-    next_worker: AtomicU64,               // round-robin counter
+    next_worker: AtomicU64,               // rotating tie-break cursor
     response_timeout: Duration,           // configurable via RUVYXA_WORKER_TIMEOUT_MS
 }
 ```
@@ -118,7 +120,7 @@ pub async fn start(root: &Path, env: BTreeMap<String, String>) -> Result<Arc<Sel
         worker_script,
         env,
         next_worker: AtomicU64::new(0),
-        response_timeout: Duration::from_secs(DEFAULT_WORKER_TIMEOUT_MS),
+        response_timeout: Duration::from_millis(DEFAULT_WORKER_TIMEOUT_MS),
     });
 
     for _ in 0..pool_size {
@@ -367,7 +369,7 @@ pub struct WorkerResponse {
 ```rust
 async fn send<F>(&self, build_request: F) -> Result<WorkerResponse>
 {
-    let worker = self.select_worker();
+    let (index, worker) = self.select_worker().await?;
     let id = Uuid::new_v4().to_string();
     let request = build_request(id.clone());
     let line = serde_json::to_string(&request)?;
@@ -421,15 +423,31 @@ status + headers (`api-start` frame). Subsequent frames arrive on the stream.
 
 ## Worker Selection & Failure Recovery
 
-### Round-robin
+### Least-loaded selection with fair ties
 
 ```rust
-fn select_worker(&self) -> Arc<Worker> {
-    let workers = self.workers.read().unwrap();
-    let index = self.next_worker.fetch_add(1, Ordering::Relaxed) as usize % workers.len();
-    Arc::clone(&workers[index])
+async fn select_worker(&self) -> Result<(usize, Arc<Worker>)> {
+    let workers = {
+        let guard = self.workers.read().map_err(|_| worker_pool_lock_error())?;
+        guard.clone() // release the sync lock before awaiting pending counts
+    };
+    let start = self.next_worker.fetch_add(1, Ordering::Relaxed) as usize;
+    let mut best = None;
+    for offset in 0..workers.len() {
+        let index = (start + offset) % workers.len();
+        let load = workers[index].in_flight().await;
+        if load == 0 { return Ok((index, Arc::clone(&workers[index]))); }
+        if best.as_ref().is_none_or(|(_, best_load)| load < *best_load) {
+            best = Some((index, load));
+        }
+    }
+    let index = best.unwrap().0;
+    Ok((index, Arc::clone(&workers[index])))
 }
 ```
+
+The cursor only decides where an equal-load scan begins. A busy worker is skipped when a sibling has
+fewer pending requests, while all-idle workers still rotate fairly.
 
 ### Failure recovery in `send()`
 
@@ -591,7 +609,7 @@ impl NodeWorkerPool {
     pub fn invalidate_from_watcher(&self, paths: &[String]) -> Result<()>;
 
     // Internal
-    fn select_worker(&self) -> Arc<Worker>;
+    async fn select_worker(&self) -> Result<(usize, Arc<Worker>)>;
     async fn send<F>(&self, build_request: F) -> Result<WorkerResponse>;
     async fn send_streaming<F>(&self, build_request: F) -> Result<(WorkerResponse, WorkerBodyStream)>;
 }

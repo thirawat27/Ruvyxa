@@ -39,9 +39,9 @@
  *   platform-specific module resolution.
  * @property {(routeId: string) => Promise<Record<string, Function>>} importApi
  *   Import a pre-compiled API route module.
- * @property {(path: string) => string|null} [readPrerendered]
- *   Synchronous read of a pre-rendered HTML file (for ISR cache). Null if not
- *   found or expired.
+ * @property {(path: string, revalidate?: number) => string|{html: string, stale: boolean}|null} [readPrerendered]
+ *   Synchronous read of a pre-rendered HTML file. ISR-capable adapters return
+ *   freshness explicitly; a legacy string result is treated as stale.
  * @property {(path: string, html: string, revalidate: number) => void} [writePrerendered]
  *   Write pre-rendered HTML to ISR cache with a TTL.
  * @property {string[]} [supportedStrategies]
@@ -53,7 +53,7 @@
  * Create a serverless request handler.
  *
  * @param {HandlerOptions} options
- * @returns {(request: Request) => Promise<Response>}
+ * @returns {(request: Request, runtimeContext?: {waitUntil?: (promise: Promise<unknown>) => void}) => Promise<Response>}
  */
 export function createHandler(options) {
   const {
@@ -65,6 +65,7 @@ export function createHandler(options) {
     writePrerendered,
     supportedStrategies = ['ssr', 'ssg', 'csr', 'isr', 'ppr', 'api'],
   } = options
+  const pendingRevalidations = new Map()
 
   // Pre-compile route patterns for matching. Sort by specificity so a
   // static segment always wins over a dynamic one at the same position —
@@ -79,7 +80,7 @@ export function createHandler(options) {
     }))
     .sort((left, right) => compareSpecificity(left.specificity, right.specificity))
 
-  return async function handle(request) {
+  return async function handle(request, runtimeContext = {}) {
     const url = new URL(request.url)
     const pathname = stripBasePath(url.pathname, basePath)
     // A request outside the configured base path is not ours to serve.
@@ -123,7 +124,7 @@ export function createHandler(options) {
       if (route.kind === 'api') {
         return await handleApi(route, request, params)
       }
-      return await handlePage(route, request, pathname, params)
+      return await handlePage(route, request, pathname, params, runtimeContext)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       console.error(`[ruvyxa] Error handling ${pathname}:`, message)
@@ -152,14 +153,14 @@ export function createHandler(options) {
     return normalizeResponse(result)
   }
 
-  async function handlePage(route, request, pathname, params) {
+  async function handlePage(route, request, pathname, params, runtimeContext) {
     const strategy = route.render.strategy
 
     // CSR: return pre-rendered shell (no server render needed)
     if (strategy === 'csr') {
-      const html = readPrerendered?.(pathname)
-      if (html) {
-        return new Response(html, {
+      const cached = normalizeCacheEntry(readPrerendered?.(pathname))
+      if (cached) {
+        return new Response(cached.html, {
           status: 200,
           headers: { 'content-type': 'text/html; charset=utf-8' },
         })
@@ -170,9 +171,9 @@ export function createHandler(options) {
 
     // SSG: serve pre-rendered HTML directly
     if (strategy === 'ssg') {
-      const html = readPrerendered?.(pathname)
-      if (html) {
-        return new Response(html, {
+      const cached = normalizeCacheEntry(readPrerendered?.(pathname))
+      if (cached) {
+        return new Response(cached.html, {
           status: 200,
           headers: { 'content-type': 'text/html; charset=utf-8' },
         })
@@ -183,11 +184,23 @@ export function createHandler(options) {
 
     // ISR: serve cached HTML, revalidate in background if stale
     if (strategy === 'isr') {
-      const html = readPrerendered?.(pathname)
-      if (html) {
-        // Schedule background revalidation (non-blocking)
-        scheduleRevalidation(route, pathname, params)
-        return new Response(html, {
+      const revalidate = route.render.revalidate ?? 60
+      const cached = normalizeCacheEntry(readPrerendered?.(pathname, revalidate))
+      if (cached) {
+        if (cached.stale) {
+          const revalidation = scheduleRevalidation(route, pathname, params)
+          if (revalidation) {
+            if (typeof runtimeContext.waitUntil === 'function') {
+              runtimeContext.waitUntil(revalidation)
+            } else {
+              // A serverless runtime may freeze untracked work as soon as the
+              // response is returned. Waiting is slower, but never loses the
+              // refresh when the platform exposes no lifetime hook.
+              await revalidation
+            }
+          }
+        }
+        return new Response(cached.html, {
           status: 200,
           headers: {
             'content-type': 'text/html; charset=utf-8',
@@ -227,17 +240,29 @@ export function createHandler(options) {
   }
 
   function scheduleRevalidation(route, pathname, params) {
-    // Fire-and-forget background revalidation
-    Promise.resolve().then(async () => {
+    if (!writePrerendered) return null
+    const pending = pendingRevalidations.get(pathname)
+    if (pending) return pending
+    const revalidation = Promise.resolve().then(async () => {
       try {
         const mod = await importPage(route.id)
         const html = await mod.render({ path: pathname, params: params ?? {} })
-        writePrerendered?.(pathname, html, route.render.revalidate ?? 60)
+        writePrerendered(pathname, html, route.render.revalidate ?? 60)
       } catch (error) {
         console.error(`[ruvyxa] ISR revalidation failed for ${pathname}:`, error)
+      } finally {
+        pendingRevalidations.delete(pathname)
       }
     })
+    pendingRevalidations.set(pathname, revalidation)
+    return revalidation
   }
+}
+
+function normalizeCacheEntry(value) {
+  if (typeof value === 'string') return { html: value, stale: true }
+  if (!value || typeof value !== 'object' || typeof value.html !== 'string') return null
+  return { html: value.html, stale: value.stale === true }
 }
 
 // ─── Prerender Cache Paths ──────────────────────────────────────────────────

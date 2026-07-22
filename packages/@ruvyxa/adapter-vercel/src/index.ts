@@ -1,4 +1,4 @@
-import type { Adapter, AdapterArtifact, AdapterOutput, BuildContext } from '@ruvyxa/core'
+import type { Adapter, AdapterOutput, BuildContext } from '@ruvyxa/core'
 import { clientBuildOutput, validateBuildContext } from '@ruvyxa/core'
 
 /**
@@ -35,7 +35,8 @@ export interface VercelAdapterOptions {
  */
 function vercelHandlerSource(): string {
   return `import { createHandler, prerenderRelativePath } from './serverless-handler.mjs';
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'node:fs';
+import { loadRouteModule } from './route-modules.mjs';
+import { readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 
 const manifestPath = path.join(import.meta.dirname, 'manifest.json');
@@ -44,23 +45,18 @@ const prerenderDir = path.join(import.meta.dirname, 'prerender');
 
 const handler = createHandler({
   routes: manifest.routes,
-  importPage: async (routeId) => {
-    const route = manifest.routes.find(r => r.id === routeId);
-    if (!route) throw new Error(\`Route \${routeId} not found in manifest\`);
-    return import(\`./server/app/\${route.file}\`);
-  },
-  importApi: async (routeId) => {
-    const route = manifest.routes.find(r => r.id === routeId);
-    if (!route) throw new Error(\`Route \${routeId} not found in manifest\`);
-    return import(\`./server/app/\${route.file}\`);
-  },
-  readPrerendered: (pathname) => {
+  importPage: loadRouteModule,
+  importApi: loadRouteModule,
+  readPrerendered: (pathname, revalidate = 60) => {
     // prerenderRelativePath rejects any request path that cannot be mapped to a
     // location inside prerenderDir, so the cache read can never escape it.
     const relative = prerenderRelativePath(pathname);
     if (relative === null) return null;
     try {
-      return readFileSync(path.join(prerenderDir, relative), 'utf8');
+      const htmlPath = path.join(prerenderDir, relative);
+      const html = readFileSync(htmlPath, 'utf8');
+      const stale = Date.now() - statSync(htmlPath).mtimeMs >= revalidate * 1000;
+      return { html, stale };
     } catch {
       return null;
     }
@@ -79,22 +75,60 @@ const handler = createHandler({
   supportedStrategies: ['ssr', 'ssg', 'csr', 'isr', 'ppr', 'api'],
 });
 
-export default async function(req, res) {
+async function readRequestBody(req) {
+  const parsed = req.body;
+  if (parsed !== undefined && parsed !== null) {
+    if (parsed instanceof ReadableStream) {
+      return new Uint8Array(await new Response(parsed).arrayBuffer());
+    }
+    if (
+      typeof parsed === 'string' ||
+      parsed instanceof ArrayBuffer ||
+      ArrayBuffer.isView(parsed) ||
+      parsed instanceof Blob ||
+      parsed instanceof FormData ||
+      parsed instanceof URLSearchParams
+    ) {
+      return parsed;
+    }
+    const contentType = String(req.headers['content-type'] ?? '');
+    if (contentType.includes('application/x-www-form-urlencoded')) {
+      return new URLSearchParams(parsed).toString();
+    }
+    return JSON.stringify(parsed);
+  }
+  const chunks = [];
+  for await (const chunk of req) {
+    chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
+  }
+  return Buffer.concat(chunks);
+}
+
+export default async function(req, res, context) {
   const url = new URL(req.url, \`http://\${req.headers.host || 'localhost'}\`);
   const headers = new Headers();
   for (const [key, value] of Object.entries(req.headers)) {
     if (value) headers.set(key, Array.isArray(value) ? value.join(', ') : value);
   }
   const requestInit = { method: req.method, headers };
-  if (req.method !== 'GET' && req.method !== 'HEAD' && req.body) {
-    requestInit.body = req.body;
+  if (req.method !== 'GET' && req.method !== 'HEAD') {
+    try {
+      requestInit.body = await readRequestBody(req);
+    } catch {
+      res.statusCode = 400;
+      res.end('Bad Request');
+      return;
+    }
   }
   const request = new Request(url.toString(), requestInit);
-  const response = await handler(request);
+  const response = await handler(request, context);
   res.statusCode = response.status;
   for (const [key, value] of response.headers.entries()) {
+    if (key === 'set-cookie') continue;
     res.setHeader(key, value);
   }
+  const setCookies = response.headers.getSetCookie?.() ?? [];
+  if (setCookies.length > 0) res.setHeader('set-cookie', setCookies);
   const body = await response.text();
   res.end(body);
 }
