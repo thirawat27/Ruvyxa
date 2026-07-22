@@ -126,6 +126,12 @@ pub(crate) fn client_hydration_script(
     request_path: &str,
     params: &RouteParams,
 ) -> String {
+    // `export const hydrate = false` pages ship zero client JavaScript.
+    // CSR routes never reach this branch: the 'use client' directive forces
+    // hydrate=true during graph discovery.
+    if !route.render.hydrate {
+        return String::new();
+    }
     let params_json = serde_json::to_string(params).unwrap_or_else(|_| "{}".to_string());
     let params_json = safe_json_for_script(&params_json);
     let request_path_json = safe_json_for_script(

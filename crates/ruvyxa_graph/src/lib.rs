@@ -71,7 +71,7 @@ pub enum RenderStrategy {
 }
 
 /// Metadata that controls the rendering strategy for a route.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RenderMeta {
     /// The rendering strategy for this route.
@@ -90,6 +90,28 @@ pub struct RenderMeta {
     /// dynamic slots to be streamed at request time.
     #[serde(default)]
     pub has_dynamic_slots: bool,
+    /// Whether the served HTML includes the client hydration bundle.
+    /// `export const hydrate = false` opts a page out for zero-JS content
+    /// pages; interactivity ('use client' islands) does not run there.
+    #[serde(default = "default_hydrate")]
+    pub hydrate: bool,
+}
+
+fn default_hydrate() -> bool {
+    true
+}
+
+impl Default for RenderMeta {
+    fn default() -> Self {
+        Self {
+            strategy: RenderStrategy::default(),
+            revalidate: None,
+            has_static_params: false,
+            static_paths: Vec::new(),
+            has_dynamic_slots: false,
+            hydrate: true,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1150,17 +1172,24 @@ fn detect_render_strategy(
     // 1. Check for "use client" directive (must be in original source, at top)
     let trimmed = source.trim_start();
     if trimmed.starts_with("\"use client\"") || trimmed.starts_with("'use client'") {
+        // CSR pages render entirely in the browser, so the hydration opt-out
+        // does not apply — the directive wins.
         return RenderMeta {
             strategy: RenderStrategy::Csr,
             ..Default::default()
         };
     }
 
+    // `export const hydrate = false` opts a server-rendered page out of the
+    // client hydration bundle (zero-JS content pages).
+    let hydrate = !has_export_const_bool(&code, "hydrate", false);
+
     // 2. Check for PPR opt-in: export const ppr = true
     if has_export_const_bool(&code, "ppr", true) {
         return RenderMeta {
             strategy: RenderStrategy::Ppr,
             has_dynamic_slots: true,
+            hydrate,
             ..Default::default()
         };
     }
@@ -1172,6 +1201,7 @@ fn detect_render_strategy(
             strategy: RenderStrategy::Isr,
             revalidate: Some(seconds),
             has_static_params,
+            hydrate,
             ..Default::default()
         };
     }
@@ -1181,6 +1211,7 @@ fn detect_render_strategy(
         return RenderMeta {
             strategy: RenderStrategy::Ssg,
             has_static_params: true,
+            hydrate,
             ..Default::default()
         };
     }
@@ -1189,12 +1220,16 @@ fn detect_render_strategy(
     if !route_has_dynamic_segments(route_path) && !has_dynamic_data_markers(&reachable_code) {
         return RenderMeta {
             strategy: RenderStrategy::Ssg,
+            hydrate,
             ..Default::default()
         };
     }
 
     // 6. Default: SSR
-    RenderMeta::default()
+    RenderMeta {
+        hydrate,
+        ..Default::default()
+    }
 }
 
 /// Return all statically reachable route and layout source after stripping strings/comments.
@@ -1561,6 +1596,53 @@ mod tests {
 
         assert_eq!(route.render.strategy, RenderStrategy::Ssg);
         assert!(!route.render.has_static_params);
+        assert!(route.render.hydrate);
+    }
+
+    #[test]
+    fn hydrate_false_export_opts_pages_out_of_hydration() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        fs::create_dir_all(app.join("no-js")).unwrap();
+        fs::write(
+            app.join("no-js/page.tsx"),
+            r#"
+                export const hydrate = false
+                export default function NoJsPage() {
+                    return <h1>Content only</h1>;
+                }
+            "#,
+        )
+        .unwrap();
+        fs::create_dir_all(app.join("csr-page")).unwrap();
+        fs::write(
+            app.join("csr-page/page.tsx"),
+            r#""use client"
+                export const hydrate = false
+                export default function CsrPage() {
+                    return <h1>Client page</h1>;
+                }
+            "#,
+        )
+        .unwrap();
+
+        let manifest = discover_routes(DiscoverOptions::new(&app)).unwrap();
+        let no_js = manifest
+            .routes
+            .iter()
+            .find(|route| route.path == "/no-js")
+            .unwrap();
+        assert_eq!(no_js.render.strategy, RenderStrategy::Ssg);
+        assert!(!no_js.render.hydrate);
+
+        // 'use client' wins: CSR pages cannot opt out of client rendering.
+        let csr = manifest
+            .routes
+            .iter()
+            .find(|route| route.path == "/csr-page")
+            .unwrap();
+        assert_eq!(csr.render.strategy, RenderStrategy::Csr);
+        assert!(csr.render.hydrate);
     }
 
     #[test]

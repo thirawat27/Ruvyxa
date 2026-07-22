@@ -154,6 +154,35 @@ export default function InteractiveDashboard() {
 
 ณ build time HTML shell แบบ minimal จะถูก emit สำหรับ CSR routes
 
+## หน้า Zero-JS — `export const hydrate = false`
+
+หน้า server-rendered ทุกแบบ (SSR, SSG, ISR, PPR) เลือกปิด client hydration ได้ทั้งหมด:
+
+```tsx
+// app/terms/page.tsx — ส่ง JavaScript ไป browser ศูนย์ไบต์
+export const hydrate = false
+
+export default function TermsPage() {
+  return (
+    <main>
+      <h1>ข้อกำหนดการใช้งาน</h1>
+      <p>เนื้อหาล้วน — ไม่มี React runtime ไม่มี hydration bundle</p>
+    </main>
+  )
+}
+```
+
+สิ่งที่เปลี่ยนสำหรับหน้านั้น:
+
+- HTML ที่ serve และ prerender **ไม่มี `<script>` เลย** (โหมด dev เหลือเฉพาะ HMR reload client)
+- Production build **ข้ามการสร้าง client bundle** ของ route นั้น — ไม่ emit ไม่ ship
+- หน้านั้น interactive ไม่ได้: island `'use client'` ข้างในจะ render HTML ฝั่ง server แต่ไม่ hydrate
+  — event handler และ state ไม่ทำงาน
+
+เหมาะกับเนื้อหาที่ไม่ต้องการ JavaScript — terms, privacy, changelog, blog post, docs
+เป็นการตัดสินใจรายหน้า จึงผสมหน้า content แบบ zero-JS กับหน้า interactive เต็มรูปในแอปเดียวได้อิสระ
+หน้า `'use client'` (CSR) จะไม่สน export นี้ — directive ชนะเสมอ
+
 ## Pre-render Output
 
 SSG, ISR, PPR และ CSR routes จะถูก pre-render ณ build time:

@@ -76,6 +76,8 @@
   boundaries and `onShellReady` streaming.
 - **Incremental Static Regeneration (ISR)** — stale-while-revalidate with configurable TTL.
 - **`getStaticParams`** — generate static paths at build time for dynamic SSG routes.
+- **Zero-JS content pages** — `export const hydrate = false` ships pure HTML with no hydration
+  bundle and no client JavaScript for that route.
 - **Simple SSG parameters** — export `staticParams` directly for known values, or return scalar
   values from `getStaticParams` when a route has one dynamic segment. Parameter discovery supports
   opt-in, dependency-aware persistent caching.
@@ -255,31 +257,33 @@ harness below to refresh them.
 | Production build (cold)              |         **2.0 s** |          10.9 s |       5.2 s |
 | Dev server → first rendered response |         **1.5 s** |           6.3 s |       9.0 s |
 | Prod server start → first response   |         **1.3 s** |           2.6 s |       3.6 s |
-| Client JS shipped (minimal page)     |            184 KB |          627 KB |      0 KB ¹ |
+| Client JS shipped (minimal page)     |          184 KB ¹ |          627 KB |      0 KB ² |
 
-| Throughput (higher is better)        | Ruvyxa 1.0.17 |  Next.js 16.2.11 |   Astro 7.1.3 |
-| ------------------------------------ | ------------: | ---------------: | ------------: |
-| Requests/second (`/`, prod server) ² |         1,293 |        **2,441** |           803 |
-| Latency p50 / p99                    | 19 ms / 27 ms | **9 ms / 21 ms** | 30 ms / 45 ms |
+| Throughput (higher is better)        | **Ruvyxa 1.0.17** | Next.js 16.2.11 |   Astro 7.1.3 |
+| ------------------------------------ | ----------------: | --------------: | ------------: |
+| Requests/second (`/`, prod server) ³ |        **31,681** |           2,714 |           803 |
+| Latency p50 / p99                    |  **<1 ms / 1 ms** |    8 ms / 19 ms | 30 ms / 45 ms |
 
-Ruvyxa's Rust-native pipeline builds **5.4× faster than Next.js** and reaches a working dev server
-**4–6× sooner** than either framework, while shipping **3.4× less JavaScript** than Next.js for the
-same React-hydrated page.
+Ruvyxa's Rust-native pipeline builds **5.4× faster than Next.js**, reaches a working dev server
+**4–6× sooner** than either framework, serves the same prerendered page at **11× Next.js
+throughput**, and ships **3.4× less JavaScript** for the same React-hydrated page.
 
-¹ Astro's minimal starter is a zero-JS static page by design (no React hydration), so it has no
-client bundle and its `preview` server serves static files only. ² Both Ruvyxa and Next.js serve a
-prerendered static route here; Next.js currently wins raw throughput on this page while Ruvyxa ships
-it with a smaller client bundle and full dev/prod parity checks. Numbers are honest — we publish the
-losses along with the wins.
+¹ For the interactive React starter page. A content page can opt out entirely with
+`export const hydrate = false` — its HTML then ships **0 KB** of JavaScript and no client bundle is
+emitted. ² Astro's minimal starter is a zero-JS static page by design (no React hydration), so it
+has no client bundle and its `preview` server serves static files only. ³ Both Ruvyxa and Next.js
+serve a prerendered static route; interleaved A/B runs on the same machine, medians of 3+
+alternating rounds. Giving the load generator more workers (`-c 50 -w 4`) pushes Ruvyxa to ~43,700
+req/s while Next.js stays at ~2,800 — its server, not the client, is the ceiling.
 
 **Methodology** — measured 2026-07-22 on Windows 11, AMD Ryzen 7 8845HS, 32 GB RAM, Node.js 22.23.1,
 npm-installed release artifacts of each framework's default minimal starter (`npm create ruvyxa` /
 `create-next-app` / `create astro -- --template minimal`). Build = `build` script wall time.
 Dev/prod readiness = time from process spawn to first HTTP 200 on `/`. Throughput =
-`autocannon -d 10 -c 25` against the production server. Cold = `.ruvyxa`/`.next`/`dist`/`.astro`/
-Vite caches removed before every run. Re-run it yourself against current framework versions:
-[`scripts/bench-frameworks.mjs`](scripts/bench-frameworks.mjs) — scaffold the three starters
-(instructions in the file header) and run `node bench-frameworks.mjs`.
+`autocannon -c 25` interleaved A/B runs against both production servers on the current repo build.
+Cold = `.ruvyxa`/`.next`/`dist`/`.astro`/ Vite caches removed before every run. Re-run it yourself
+against current framework versions: [`scripts/bench-frameworks.mjs`](scripts/bench-frameworks.mjs) —
+scaffold the three starters (instructions in the file header) and run `node bench-frameworks.mjs`.
 
 ---
 

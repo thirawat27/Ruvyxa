@@ -193,16 +193,22 @@ async fn render_page_ssg(
     params: &RouteParams,
     styles: &str,
 ) -> Result<String> {
-    // In production, try to serve the pre-rendered HTML file directly
-    if !state.config.watch
-        && let Some(html) = serve_prerendered_html(&state.config.prerender_dir, request_path)
-    {
-        return Ok(html);
-    }
-
     let cache_key = format!("ssg:{}", render_cache::ssr_cache_key(request_path, params));
     if let Some(cached) = state.render_cache.get(&cache_key).await {
         return Ok(cached);
+    }
+
+    // In production, serve the pre-rendered HTML file. Read it from disk once
+    // and serve subsequent requests from the in-memory render cache — a
+    // synchronous file open per request otherwise dominates the hot path.
+    if !state.config.watch
+        && let Some(html) = serve_prerendered_html(&state.config.prerender_dir, request_path)
+    {
+        state
+            .render_cache
+            .put(cache_key.clone(), html.clone())
+            .await;
+        return Ok(html);
     }
 
     // Render via worker pool (same as SSR but with the SSG bundle type)

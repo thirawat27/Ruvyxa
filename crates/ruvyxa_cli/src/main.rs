@@ -2838,6 +2838,9 @@ fn emit_client_bundles_with_runtime(
         .routes
         .iter()
         .filter(|route| route.kind == ruvyxa_graph::RouteKind::Page)
+        // `export const hydrate = false` pages ship no client bundle at all;
+        // prerender injection and the serve path skip them via the same flag.
+        .filter(|route| route.render.hydrate)
         .cloned()
         .collect::<Vec<_>>();
     let parallelism = build_parallelism(build.parallelism, page_routes.len());

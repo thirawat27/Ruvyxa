@@ -402,9 +402,9 @@ const RESERVED_FRAMEWORK_ROUTES: [&str; 4] = [
 
 #[derive(Default)]
 struct RuntimeCache {
-    manifest: tokio::sync::RwLock<Option<RouteManifest>>,
+    manifest: tokio::sync::RwLock<Option<Arc<RouteManifest>>>,
     styles: tokio::sync::RwLock<Option<StyleCacheEntry>>,
-    router: tokio::sync::RwLock<Option<RadixRouter>>,
+    router: tokio::sync::RwLock<Option<Arc<RadixRouter>>>,
 }
 
 #[derive(Debug, Clone)]
@@ -417,44 +417,47 @@ impl RuntimeCache {
     fn with_manifest(manifest: RouteManifest) -> Self {
         let router = RadixRouter::compile(&manifest);
         Self {
-            manifest: tokio::sync::RwLock::new(Some(manifest)),
+            manifest: tokio::sync::RwLock::new(Some(Arc::new(manifest))),
             styles: tokio::sync::RwLock::new(None),
-            router: tokio::sync::RwLock::new(Some(router)),
+            router: tokio::sync::RwLock::new(Some(Arc::new(router))),
         }
     }
 
-    async fn manifest(&self, config: &ServerConfig) -> Result<RouteManifest> {
+    async fn manifest(&self, config: &ServerConfig) -> Result<Arc<RouteManifest>> {
         if !config.cache_route_manifest {
-            return discover_routes(discover_options(config));
+            return Ok(Arc::new(discover_routes(discover_options(config))?));
         }
 
         {
             let cached = self.manifest.read().await;
             if let Some(manifest) = cached.as_ref() {
-                return Ok(manifest.clone());
+                return Ok(Arc::clone(manifest));
             }
         }
 
-        let manifest = discover_routes(discover_options(config))?;
+        let manifest = Arc::new(discover_routes(discover_options(config))?);
         {
             let mut cached = self.manifest.write().await;
-            *cached = Some(manifest.clone());
+            *cached = Some(Arc::clone(&manifest));
         }
         {
             let mut router_cache = self.router.write().await;
-            *router_cache = Some(RadixRouter::compile(&manifest));
+            *router_cache = Some(Arc::new(RadixRouter::compile(&manifest)));
         }
 
         Ok(manifest)
     }
 
-    async fn router(&self, config: &ServerConfig) -> Result<(RouteManifest, RadixRouter)> {
+    async fn router(
+        &self,
+        config: &ServerConfig,
+    ) -> Result<(Arc<RouteManifest>, Arc<RadixRouter>)> {
         let manifest = self.manifest(config).await?;
         let router_cache = self.router.read().await;
         let router = router_cache
             .as_ref()
-            .cloned()
-            .unwrap_or_else(|| RadixRouter::compile(&manifest));
+            .map(Arc::clone)
+            .unwrap_or_else(|| Arc::new(RadixRouter::compile(&manifest)));
         Ok((manifest, router))
     }
 
@@ -2760,6 +2763,14 @@ mod tests {
             script.contains(r#"<link rel="modulepreload" href="/__ruvyxa/client/shared.123.js">"#)
         );
         assert!(script.contains(r#"<script type="module" src="/__ruvyxa/client/home.js">"#));
+
+        // `export const hydrate = false` pages get no hydration payload at all.
+        let mut no_hydrate = route.clone();
+        no_hydrate.render.hydrate = false;
+        assert_eq!(
+            client_hydration_script(&config, &no_hydrate, "/", &BTreeMap::new()),
+            ""
+        );
     }
 
     #[tokio::test]

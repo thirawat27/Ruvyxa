@@ -60,6 +60,20 @@
 - Automated npm package smoke testing (`pnpm pack:smoke`) validates packed tarballs, template
   scaffolds, and Content Engine build artifacts.
 
+### Performance: Static Serve Hot Path
+
+- Production SSG responses are now served from the in-memory render cache after a single disk read,
+  instead of re-opening the prerendered HTML file on every request. Measured on the minimal starter:
+  ~1,300 → ~31,700 requests/second (p50 <1 ms) at 25 connections.
+- The route manifest and radix router are shared via `Arc` instead of deep-cloned per request.
+
+### Zero-JS Content Pages
+
+- `export const hydrate = false` opts any server-rendered page (SSR, SSG, ISR, PPR) out of client
+  hydration: the served and prerendered HTML contains no script tags and the production build emits
+  no client bundle for that route. `'use client'` (CSR) pages ignore the export — the directive
+  wins. Interactivity does not run on opted-out pages.
+
 ### Documentation and Benchmarks
 
 - Added a measured benchmark suite against the Next.js and Astro minimal starters with a

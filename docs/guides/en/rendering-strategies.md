@@ -155,6 +155,36 @@ export default function InteractiveDashboard() {
 
 At build time, a minimal shell HTML is emitted for CSR routes.
 
+## Zero-JS Pages — `export const hydrate = false`
+
+Any server-rendered page (SSR, SSG, ISR, PPR) can opt out of client hydration entirely:
+
+```tsx
+// app/terms/page.tsx — ships zero JavaScript to the browser
+export const hydrate = false
+
+export default function TermsPage() {
+  return (
+    <main>
+      <h1>Terms of Service</h1>
+      <p>Pure content — no React runtime, no hydration bundle.</p>
+    </main>
+  )
+}
+```
+
+What changes for that page:
+
+- The served and prerendered HTML contains **no `<script>` tags** (dev mode keeps only the HMR
+  reload client).
+- The production build **skips the client bundle** for that route — nothing is emitted or shipped.
+- The page cannot be interactive: `'use client'` islands inside it will render their server HTML but
+  never hydrate. Event handlers and state do not run.
+
+Use it for content that never needs JavaScript — terms, privacy, changelogs, blog posts, docs. It is
+a per-page decision, so an app can mix zero-JS content pages with fully interactive pages freely.
+`'use client'` (CSR) pages ignore the export — the directive wins.
+
 ## Pre-render Output
 
 SSG, ISR, PPR, and CSR routes are pre-rendered at build time:
