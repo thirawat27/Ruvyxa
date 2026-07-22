@@ -357,6 +357,11 @@ fn validate_client_module(
     let Ok(source) = fs::read_to_string(file) else {
         return Ok(());
     };
+    let source = if is_markdown_route(file) {
+        markdown_without_code_examples(&source)
+    } else {
+        source
+    };
 
     if import_specifiers(&source)
         .iter()
@@ -416,9 +421,75 @@ fn is_server_only_specifier(specifier: &str) -> bool {
     )
 }
 
+/// Whether a route file is a Markdown/MDX content route.
+fn is_markdown_route(file: &Path) -> bool {
+    matches!(
+        file.extension().and_then(|extension| extension.to_str()),
+        Some("md" | "mdx")
+    )
+}
+
+/// Blank out fenced code blocks and inline code spans in Markdown/MDX source.
+///
+/// Fenced examples are display text, not executable code: a guide that shows
+/// `process.env.SECRET` or `import 'server-only'` inside a code block must not
+/// trip the boundary validators or flip the route's rendering strategy. MDX
+/// ESM (`import`/`export`) lives outside fences and is preserved. Blanked
+/// regions keep their newlines so diagnostics retain meaningful positions.
+fn markdown_without_code_examples(source: &str) -> String {
+    let mut output = String::with_capacity(source.len());
+    let mut fence: Option<(char, usize)> = None;
+
+    for line in source.split_inclusive('\n') {
+        let trimmed = line.trim_start();
+        let fence_marker = ['`', '~'].into_iter().find_map(|marker| {
+            let length = trimmed.chars().take_while(|&c| c == marker).count();
+            (length >= 3).then_some((marker, length))
+        });
+
+        match (&fence, fence_marker) {
+            // Opening fence line.
+            (None, Some(marker)) => {
+                fence = Some(marker);
+                output.push('\n');
+            }
+            // Closing fence: same character, at least the opening length.
+            (Some((open_char, open_len)), Some((close_char, close_len)))
+                if close_char == *open_char && close_len >= *open_len =>
+            {
+                fence = None;
+                output.push('\n');
+            }
+            // Inside a fence: keep only the newline.
+            (Some(_), _) => output.push('\n'),
+            // Regular markdown line: blank inline code spans.
+            (None, None) => {
+                let mut in_span = false;
+                for character in line.chars() {
+                    if character == '`' {
+                        in_span = !in_span;
+                        output.push(' ');
+                    } else if in_span && character != '\n' {
+                        output.push(' ');
+                    } else {
+                        output.push(character);
+                    }
+                }
+            }
+        }
+    }
+
+    output
+}
+
 fn validate_server_module(file: &Path, diagnostics: &mut Vec<Diagnostic>) -> Result<()> {
     let Ok(source) = fs::read_to_string(file) else {
         return Ok(());
+    };
+    let source = if is_markdown_route(file) {
+        markdown_without_code_examples(&source)
+    } else {
+        source
     };
 
     if import_specifiers(&source)
@@ -1162,6 +1233,11 @@ fn detect_render_strategy(
     let Ok(source) = fs::read_to_string(file) else {
         return RenderMeta::default();
     };
+    let source = if is_markdown_route(file) {
+        markdown_without_code_examples(&source)
+    } else {
+        source
+    };
 
     let code = code_without_strings_and_comments(&source);
     let Some(reachable_code) = render_reachable_code(app_dir, file, layout_chain) else {
@@ -1244,7 +1320,12 @@ fn render_reachable_code(app_dir: &Path, file: &Path, layout_chain: &[String]) -
 
     let mut code = String::new();
     for path in files {
-        let source = fs::read_to_string(path).ok()?;
+        let source = fs::read_to_string(&path).ok()?;
+        let source = if is_markdown_route(&path) {
+            markdown_without_code_examples(&source)
+        } else {
+            source
+        };
         code.push_str(&code_without_strings_and_comments(&source));
         code.push('\n');
     }

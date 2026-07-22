@@ -1,6 +1,6 @@
 {
   "name": "@ruvyxa/auth",
-  "version": "1.0.17",
+  "version": "1.0.18",
   "description": "Secure sessions and provider-driven authentication for Ruvyxa applications.",
   "license": "Apache-2.0",
   "type": "module",
@@ -13,16 +13,32 @@
     "url": "git+https://github.com/thirawat27/ruvyxa.git",
     "directory": "packages/@ruvyxa/auth"
   },
-  "bugs": { "url": "https://github.com/thirawat27/ruvyxa/issues" },
-  "homepage": "https://github.com/thirawat27/ruvyxa#readme",
-  "engines": { "node": ">=22.0.0" },
-  "publishConfig": { "access": "public" },
-  "exports": {
-    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" },
-    "./client": { "types": "./dist/client.d.ts", "default": "./dist/client.js" }
+  "bugs": {
+    "url": "https://github.com/thirawat27/ruvyxa/issues"
   },
-  "dependencies": { "@ruvyxa/core": "workspace:^" },
-  "devDependencies": { "@types/node": "^26.1.1" },
+  "homepage": "https://github.com/thirawat27/ruvyxa#readme",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./client": {
+      "types": "./dist/client.d.ts",
+      "default": "./dist/client.js"
+    }
+  },
+  "dependencies": {
+    "@ruvyxa/core": "workspace:^"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.check.json",

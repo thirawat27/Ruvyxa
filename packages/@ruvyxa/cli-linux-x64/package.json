@@ -1,6 +1,6 @@
 {
   "name": "@ruvyxa/cli-linux-x64",
-  "version": "1.0.17",
+  "version": "1.0.18",
   "description": "Prebuilt Ruvyxa CLI binary for Linux x64.",
   "license": "Apache-2.0",
   "type": "module",

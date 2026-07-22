@@ -1,6 +1,6 @@
 {
   "name": "@ruvyxa/database",
-  "version": "1.0.17",
+  "version": "1.0.18",
   "description": "Typed database primitives and production adapter contracts for Ruvyxa applications.",
   "license": "Apache-2.0",
   "type": "module",
@@ -22,15 +22,28 @@
     "url": "git+https://github.com/thirawat27/ruvyxa.git",
     "directory": "packages/@ruvyxa/database"
   },
-  "bugs": { "url": "https://github.com/thirawat27/ruvyxa/issues" },
-  "homepage": "https://github.com/thirawat27/ruvyxa#readme",
-  "engines": { "node": ">=22.0.0" },
-  "publishConfig": { "access": "public" },
-  "exports": {
-    ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" }
+  "bugs": {
+    "url": "https://github.com/thirawat27/ruvyxa/issues"
   },
-  "dependencies": { "@ruvyxa/core": "workspace:^" },
-  "devDependencies": { "@types/node": "^26.1.1" },
+  "homepage": "https://github.com/thirawat27/ruvyxa#readme",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "dependencies": {
+    "@ruvyxa/core": "workspace:^"
+  },
+  "devDependencies": {
+    "@types/node": "^26.1.1"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.check.json",

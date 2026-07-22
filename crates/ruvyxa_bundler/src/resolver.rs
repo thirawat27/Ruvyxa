@@ -675,8 +675,12 @@ fn resolve_export_target(pkg_dir: &Path, target: &str) -> Option<PathBuf> {
         return None;
     }
 
-    let package_root = pkg_dir.canonicalize().ok()?;
-    let candidate = pkg_dir.join(relative).canonicalize().ok()?;
+    // Canonicalize to verify existence, then strip Windows verbatim prefixes so
+    // module paths compare equal across every resolver branch (shared-route
+    // chunk planning keys on these paths).
+    pkg_dir.join(relative).canonicalize().ok()?;
+    let package_root = ruvyxa_diagnostics::normalized_canonical_path(pkg_dir);
+    let candidate = ruvyxa_diagnostics::normalized_canonical_path(&pkg_dir.join(relative));
     candidate.starts_with(package_root).then_some(candidate)
 }
 
