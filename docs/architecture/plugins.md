@@ -77,7 +77,8 @@ module state.
 
 - `hook(context) → void | Promise<void>`
 - Context: `{ root, outDir, manifest }`
-- Runs after production output is committed and adapter artifacts are written
+- Runs after the core production output is committed and before adapter artifacts are materialized
+- Public files written into `outDir/assets` are therefore visible to adapters in the same build
 
 ## Design properties
 
@@ -95,4 +96,8 @@ module state.
   stderr and remains visible in both dev and production builds
 - **HTTP compatibility:** header pairs remain ordered and repeated response headers such as
   `Set-Cookie` survive the JavaScript/Rust round-trip
+- **Policy precedence:** native security headers fill missing values; explicit response/plugin
+  policy is preserved, including when framework defaults are disabled
+- **Deployment parity:** static adapters expose public assets at `/...` and hashed client files at
+  `/__ruvyxa/client/...`, matching the production server URL contract
 - **Pool scheduling:** the rotating cursor prefers an idle worker before queueing behind a busy one

@@ -1456,34 +1456,47 @@ fn json_response<T: Serialize>(status: StatusCode, value: &T) -> Response {
 
 fn apply_security_headers(response: &mut Response) {
     let headers = response.headers_mut();
-    headers.insert(
+    insert_default_header(
+        headers,
         header::X_CONTENT_TYPE_OPTIONS,
         HeaderValue::from_static("nosniff"),
     );
-    headers.insert(
+    insert_default_header(
+        headers,
         HeaderName::from_static("referrer-policy"),
         HeaderValue::from_static("strict-origin-when-cross-origin"),
     );
-    headers.insert(
+    insert_default_header(
+        headers,
         HeaderName::from_static("permissions-policy"),
         HeaderValue::from_static("camera=(), microphone=(), geolocation=()"),
     );
-    headers.insert(
+    insert_default_header(
+        headers,
         HeaderName::from_static("cross-origin-opener-policy"),
         HeaderValue::from_static("same-origin"),
     );
-    headers.insert(
+    insert_default_header(
+        headers,
         HeaderName::from_static("cross-origin-resource-policy"),
         HeaderValue::from_static("same-origin"),
     );
-    headers.insert(
+    insert_default_header(
+        headers,
         HeaderName::from_static("x-frame-options"),
         HeaderValue::from_static("DENY"),
     );
-    headers.insert(
+    insert_default_header(
+        headers,
         HeaderName::from_static("x-permitted-cross-domain-policies"),
         HeaderValue::from_static("none"),
     );
+}
+
+fn insert_default_header(headers: &mut HeaderMap, name: HeaderName, value: HeaderValue) {
+    if !headers.contains_key(&name) {
+        headers.insert(name, value);
+    }
 }
 
 fn finalize_security_headers(mut response: Response, enabled: bool) -> Response {
@@ -1491,15 +1504,44 @@ fn finalize_security_headers(mut response: Response, enabled: bool) -> Response 
         apply_security_headers(&mut response);
     } else {
         let headers = response.headers_mut();
-        headers.remove(header::X_CONTENT_TYPE_OPTIONS);
-        headers.remove("referrer-policy");
-        headers.remove("permissions-policy");
-        headers.remove("cross-origin-opener-policy");
-        headers.remove("cross-origin-resource-policy");
-        headers.remove("x-frame-options");
-        headers.remove("x-permitted-cross-domain-policies");
+        remove_default_header(headers, header::X_CONTENT_TYPE_OPTIONS, "nosniff");
+        remove_default_header(
+            headers,
+            HeaderName::from_static("referrer-policy"),
+            "strict-origin-when-cross-origin",
+        );
+        remove_default_header(
+            headers,
+            HeaderName::from_static("permissions-policy"),
+            "camera=(), microphone=(), geolocation=()",
+        );
+        remove_default_header(
+            headers,
+            HeaderName::from_static("cross-origin-opener-policy"),
+            "same-origin",
+        );
+        remove_default_header(
+            headers,
+            HeaderName::from_static("cross-origin-resource-policy"),
+            "same-origin",
+        );
+        remove_default_header(headers, HeaderName::from_static("x-frame-options"), "DENY");
+        remove_default_header(
+            headers,
+            HeaderName::from_static("x-permitted-cross-domain-policies"),
+            "none",
+        );
     }
     response
+}
+
+fn remove_default_header(headers: &mut HeaderMap, name: HeaderName, default_value: &str) {
+    if headers
+        .get(&name)
+        .is_some_and(|value| value.as_bytes() == default_value.as_bytes())
+    {
+        headers.remove(name);
+    }
 }
 
 fn with_security_headers(mut response: Response) -> Response {
@@ -2284,6 +2326,42 @@ mod tests {
                 .headers()
                 .get("cross-origin-resource-policy")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn explicit_security_headers_override_framework_defaults() {
+        let mut response = StatusCode::OK.into_response();
+        response.headers_mut().insert(
+            HeaderName::from_static("permissions-policy"),
+            HeaderValue::from_static("camera=(self)"),
+        );
+
+        let response = finalize_security_headers(response, true);
+
+        assert_eq!(
+            response.headers().get("permissions-policy"),
+            Some(&HeaderValue::from_static("camera=(self)"))
+        );
+        assert_eq!(
+            response.headers().get(header::X_CONTENT_TYPE_OPTIONS),
+            Some(&HeaderValue::from_static("nosniff"))
+        );
+    }
+
+    #[test]
+    fn disabling_framework_defaults_preserves_explicit_security_headers() {
+        let mut response = StatusCode::OK.into_response();
+        response.headers_mut().insert(
+            HeaderName::from_static("permissions-policy"),
+            HeaderValue::from_static("camera=(self)"),
+        );
+
+        let response = finalize_security_headers(response, false);
+
+        assert_eq!(
+            response.headers().get("permissions-policy"),
+            Some(&HeaderValue::from_static("camera=(self)"))
         );
     }
 

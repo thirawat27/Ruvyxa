@@ -79,7 +79,17 @@ for (const file of readdirSync(destination).filter((name) => name.endsWith('.tgz
         `ruvyxa package missing runtime/${runtimeFile}`,
       )
     }
-    for (const typeFile of ['css.d.ts', 'index.d.ts', 'config.d.ts', 'server.d.ts']) {
+    assert(
+      listing.includes('package/dist/plugins.js'),
+      'ruvyxa package missing built-in plugin entrypoint',
+    )
+    for (const typeFile of [
+      'css.d.ts',
+      'index.d.ts',
+      'config.d.ts',
+      'server.d.ts',
+      'plugins.d.ts',
+    ]) {
       assert(
         listing.includes(`package/types/${typeFile}`),
         `ruvyxa package missing types/${typeFile}`,

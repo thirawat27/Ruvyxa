@@ -209,13 +209,20 @@ Retry-After: <seconds>
 
 Applied as Axum middleware on every response via `finalize_security_headers()`:
 
-| Header                   | Value                                      | Configurable?  |
-| ------------------------ | ------------------------------------------ | -------------- |
-| `X-Content-Type-Options` | `nosniff`                                  | No (always on) |
-| `X-Frame-Options`        | `DENY`                                     | No (always on) |
-| Custom headers           | Configured in `middleware.builtin.headers` | Yes            |
+| Header                              | Framework default                          |
+| ----------------------------------- | ------------------------------------------ |
+| `X-Content-Type-Options`            | `nosniff`                                  |
+| `Referrer-Policy`                   | `strict-origin-when-cross-origin`          |
+| `Permissions-Policy`                | `camera=(), microphone=(), geolocation=()` |
+| `Cross-Origin-Opener-Policy`        | `same-origin`                              |
+| `Cross-Origin-Resource-Policy`      | `same-origin`                              |
+| `X-Frame-Options`                   | `DENY`                                     |
+| `X-Permitted-Cross-Domain-Policies` | `none`                                     |
 
-Enabled/disabled via `security.headers` config (default depends on build).
+`security.headers` defaults to `true`. Defaults fill only missing values, so explicit response
+headers from `securityHeaders()` or application middleware win. When defaults are disabled, Ruvyxa
+removes only values equal to its own defaults and preserves explicit policies. CSP and HSTS are not
+native defaults; use `securityHeaders()` or deployment configuration when required.
 
 ---
 

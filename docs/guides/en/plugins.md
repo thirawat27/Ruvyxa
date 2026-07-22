@@ -48,14 +48,44 @@ command, or custom middleware ABI.
 
 ```ts
 import { config } from 'ruvyxa/config'
-import { alias, headers, redirects, robots, sitemap } from 'ruvyxa/plugins'
+import {
+  cacheRules,
+  feed,
+  observability,
+  openApi,
+  pwa,
+  searchIndex,
+  securityHeaders,
+} from 'ruvyxa/plugins'
 
 export default config({
   plugins: [
-    redirects([{ source: '/old-blog/*', destination: '/blog/*', permanent: true }]),
-    headers([{ source: '/api/*', headers: { 'cache-control': 'no-store' } }]),
-    sitemap({ siteUrl: 'https://example.com', robots: true }),
-    alias({ '~content': 'content/index.ts' }),
+    observability({ routes: ['/api/*'] }),
+    securityHeaders({
+      contentSecurityPolicy: {
+        'default-src': ["'self'"],
+        'object-src': ["'none'"],
+      },
+    }),
+    cacheRules([
+      { source: '/api/*', browser: 'no-store' },
+      { source: '/blog/*', browser: 'public, max-age=60', cdn: 'max-age=300' },
+    ]),
+    pwa({ name: 'Example', offlineFallback: '/offline' }),
+    feed({
+      siteUrl: 'https://example.com',
+      title: 'Example',
+      description: 'Latest articles',
+      items: [{ title: 'Launch', url: '/blog/launch' }],
+    }),
+    searchIndex({
+      locale: 'en',
+      documents: [{ id: 'home', title: 'Home', url: '/', text: 'Welcome to Example' }],
+    }),
+    openApi({
+      info: { title: 'Example API', version: '1.0.0' },
+      operations: [{ method: 'get', path: '/api/health', summary: 'Health check' }],
+    }),
   ],
 })
 ```
@@ -64,15 +94,48 @@ export default config({
   prefixes; a `*`-suffixed destination receives the matched remainder. `permanent: true` responds
   308 instead of 307.
 - `headers(rules)` — response headers per route. Rules without `source` apply everywhere.
+- `observability({ routes, requestIdHeader, traceContext, serverTiming, log, logger })` — propagates
+  a validated request ID and W3C `traceparent`, measures across middleware workers, appends a
+  `Server-Timing` metric, and logs method/path/status without query strings. Set `log: false` or
+  provide `logger(entry)` when the application already has a log pipeline. A failing custom log sink
+  is reported but never fails the application response.
+- `securityHeaders(options)` — adds HSTS by default and optional CSP, permissions, referrer,
+  cross-origin, frame, and custom headers. Ruvyxa's native defaults fill only missing headers, so
+  explicit plugin policies win. CSP is opt-in because one universal policy would break valid apps.
+- `cacheRules(rules)` — sets browser `Cache-Control`, shared `CDN-Cache-Control`, and merged `Vary`
+  values per route. Later matching rules override earlier cache policies.
 - `sitemap({ siteUrl, exclude, robots })` — writes `sitemap.xml` (and optionally `robots.txt`) into
   the served asset directory after each production build, from the route manifest. Dynamic patterns
   and API routes are skipped.
 - `robots({ rules, sitemap })` — standalone `robots.txt` generation.
+- `pwa(options)` — generates and serves a web manifest, service worker, and registration module;
+  injects their tags into matching HTML responses; and patches matching prerendered HTML. Provide
+  `precache` and `offlineFallback` explicitly so the service worker never guesses application data.
+  Cache namespaces are isolated by service-worker scope, including when several apps share an
+  origin.
+- `feed({ siteUrl, title, description, items, path })` — generates RSS 2.0 from an item array or an
+  async build-time loader. The default output is `/rss.xml`.
+- `searchIndex({ documents, locale, stopWords, minTermLength, path })` — generates a deterministic
+  JSON inverted index. `Intl.Segmenter` provides word boundaries for languages including Thai; the
+  default output is `/search-index.json`.
+- `openApi({ info, operations, servers, tags, components, path })` — validates operation uniqueness,
+  serves OpenAPI 3.1 JSON during development, and writes `/openapi.json` for production.
 - `alias(map)` — resolves exact import specifiers to project files before the native resolver.
 - `bundleBudget({ maxChunkKb, maxTotalKb })` — fails the production build when emitted client
   JavaScript exceeds the budget, so bundle regressions surface in CI.
 - `requireEnv(names)` — fails the production build when required environment variables are missing
   or empty.
+
+Build-generated public files run before adapter materialization. Therefore sitemap, PWA, feed,
+search, and OpenAPI files are included in static and hybrid deployment artifacts rather than only
+the local `.ruvyxa` directory. Static adapters preserve the same URLs as the production server:
+public files stay at `/...` and client bundles stay under `/__ruvyxa/client/...`. Generated files
+use atomic replacement, and configurable artifact paths reject cross-origin, traversal, directory,
+and colliding PWA endpoint values during configuration.
+
+`observability`, `securityHeaders`, and `cacheRules` are runtime response plugins. On a serverless
+or long-running adapter they run normally; a fully static host has no middleware runtime, so set
+equivalent security/cache headers in that host or adapter configuration.
 
 Middleware `routes` are also reported to the native server, which skips the plugin round-trip
 entirely for requests no middleware can match — keep middleware route-scoped where possible. Route

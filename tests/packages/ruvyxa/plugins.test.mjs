@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { after, describe, it } from 'node:test'
@@ -7,10 +7,17 @@ import { after, describe, it } from 'node:test'
 import {
   alias,
   bundleBudget,
+  cacheRules,
+  feed,
   headers,
+  observability,
+  openApi,
+  pwa,
   redirects,
   requireEnv,
   robots,
+  searchIndex,
+  securityHeaders,
   sitemap,
 } from '../../../packages/ruvyxa/dist/plugins.js'
 
@@ -137,6 +144,131 @@ describe('headers()', () => {
   })
 })
 
+describe('observability()', () => {
+  it('propagates correlation metadata and records timing across request/response hooks', async () => {
+    const entries = []
+    const { middleware } = register(
+      observability({
+        routes: ['/api/*'],
+        logger(entry) {
+          entries.push(entry)
+        },
+      }),
+    )
+    const plugin = middleware[0]
+    assert.deepEqual(plugin.routes, ['/api/*'])
+
+    const observedRequest = await plugin.onRequest(request('/api/users?secret=hidden'))
+    assert.match(observedRequest.headers.get('x-request-id'), /^[0-9a-f-]{36}$/)
+    assert.match(observedRequest.headers.get('traceparent'), /^00-[0-9a-f]{32}-[0-9a-f]{16}-01$/)
+
+    const response = await plugin.onResponse(
+      observedRequest,
+      new Response('ok', { status: 202, headers: { 'server-timing': 'render;dur=4' } }),
+    )
+    assert.equal(response.headers.get('x-request-id'), observedRequest.headers.get('x-request-id'))
+    assert.match(response.headers.get('server-timing'), /render;dur=4, ruvyxa;dur=\d+/)
+    assert.equal(entries.length, 1)
+    assert.equal(entries[0].pathname, '/api/users')
+    assert.equal(entries[0].status, 202)
+    assert.equal('search' in entries[0], false)
+  })
+
+  it('replaces untrusted request IDs and invalid trace context', async () => {
+    const { middleware } = register(observability({ log: false }))
+    const output = await middleware[0].onRequest(
+      request('/', { headers: { 'x-request-id': 'contains whitespace', traceparent: 'bad' } }),
+    )
+    assert.notEqual(output.headers.get('x-request-id'), 'contains whitespace')
+    assert.match(output.headers.get('traceparent'), /^00-/)
+  })
+
+  it('keeps the response healthy when a custom log sink fails', async () => {
+    const originalError = console.error
+    const sinkFailures = []
+    console.error = (...args) => sinkFailures.push(args)
+    try {
+      const { middleware } = register(
+        observability({
+          logger() {
+            throw new Error('sink unavailable')
+          },
+        }),
+      )
+      const observedRequest = await middleware[0].onRequest(request('/healthy'))
+      const response = await middleware[0].onResponse(observedRequest, new Response('ok'))
+
+      assert.equal(await response.text(), 'ok')
+      assert.equal(sinkFailures.length, 1)
+      assert.deepEqual(sinkFailures[0], ['[ruvyxa:observability] log sink failed'])
+    } finally {
+      console.error = originalError
+    }
+  })
+})
+
+describe('securityHeaders()', () => {
+  it('serializes CSP directives and applies explicit policy headers', async () => {
+    const { middleware } = register(
+      securityHeaders({
+        routes: ['/admin/*'],
+        contentSecurityPolicy: { 'default-src': ["'self'"], 'object-src': ["'none'"] },
+        permissionsPolicy: 'camera=(self)',
+      }),
+    )
+    assert.deepEqual(middleware[0].routes, ['/admin/*'])
+    const response = await middleware[0].onResponse(request('/admin/users'), new Response('ok'))
+    assert.equal(
+      response.headers.get('content-security-policy'),
+      "default-src 'self'; object-src 'none'",
+    )
+    assert.equal(response.headers.get('permissions-policy'), 'camera=(self)')
+    assert.equal(
+      response.headers.get('strict-transport-security'),
+      'max-age=31536000; includeSubDomains',
+    )
+  })
+
+  it('rejects malformed CSP directives and header values during config load', () => {
+    assert.throws(
+      () => securityHeaders({ contentSecurityPolicy: { 'script-src;': ["'self'"] } }),
+      TypeError,
+    )
+    assert.throws(
+      () => securityHeaders({ headers: { 'x-test': 'ok\r\ninjected: yes' } }),
+      TypeError,
+    )
+  })
+})
+
+describe('cacheRules()', () => {
+  it('applies the last matching cache policy and merges Vary values', async () => {
+    const { middleware } = register(
+      cacheRules([
+        { source: '/api/*', browser: 'no-store', vary: ['accept-encoding'] },
+        {
+          source: '/api/public/*',
+          browser: 'public, max-age=60',
+          cdn: 'max-age=300',
+          vary: ['origin'],
+        },
+      ]),
+    )
+    const response = await middleware[0].onResponse(
+      request('/api/public/items'),
+      new Response('ok', { headers: { vary: 'Accept-Encoding' } }),
+    )
+    assert.equal(response.headers.get('cache-control'), 'public, max-age=60')
+    assert.equal(response.headers.get('cdn-cache-control'), 'max-age=300')
+    assert.equal(response.headers.get('vary'), 'Accept-Encoding, origin')
+  })
+
+  it('requires at least one effective rule value', () => {
+    assert.throws(() => cacheRules([]), TypeError)
+    assert.throws(() => cacheRules([{ source: '/empty' }]), TypeError)
+  })
+})
+
 describe('sitemap()', () => {
   const manifest = {
     routes: [
@@ -210,6 +342,257 @@ describe('robots()', () => {
     await buildComplete[0](context)
     const body = readFileSync(path.join(context.outDir, 'assets', 'robots.txt'), 'utf8')
     assert.match(body, /User-agent: \*\nAllow: \//)
+  })
+})
+
+describe('pwa()', () => {
+  it('serves development artifacts and injects HTML once', async () => {
+    const { middleware } = register(
+      pwa({ name: 'Example', routes: ['/app/*'], offlineFallback: '/offline' }),
+    )
+    const plugin = middleware[0]
+    const manifest = await plugin.onRequest(request('/manifest.webmanifest'))
+    assert.equal(manifest.headers.get('content-type'), 'application/manifest+json; charset=utf-8')
+    assert.equal((await manifest.json()).name, 'Example')
+
+    const sw = await plugin.onRequest(request('/sw.js'))
+    assert.match(await sw.text(), /const OFFLINE_FALLBACK = "\/offline"/)
+    const htmlResponse = await plugin.onResponse(
+      request('/app/home'),
+      new Response('<html><head></head><body>App</body></html>', {
+        headers: { 'content-type': 'text/html; charset=utf-8', 'content-length': '44' },
+      }),
+    )
+    const html = await htmlResponse.text()
+    assert.match(html, /rel="manifest"/)
+    assert.match(html, /pwa-register\.js/)
+    assert.equal(htmlResponse.headers.has('content-length'), false)
+
+    const second = await plugin.onResponse(
+      request('/app/home'),
+      new Response(html, { headers: { 'content-type': 'text/html' } }),
+    )
+    assert.equal(second, undefined)
+  })
+
+  it('writes PWA files and patches matching prerendered pages', async () => {
+    const { buildComplete } = register(pwa({ name: 'Example', routes: ['/docs', '/docs/*'] }))
+    const context = tempBuildContext({ routes: [] })
+    mkdirSync(path.join(context.outDir, 'prerender', 'docs'), { recursive: true })
+    mkdirSync(path.join(context.outDir, 'prerender', 'private'), { recursive: true })
+    writeFileSync(
+      path.join(context.outDir, 'prerender', 'docs', 'index.html'),
+      '<html><head></head><body>Docs</body></html>',
+    )
+    writeFileSync(
+      path.join(context.outDir, 'prerender', 'private', 'index.html'),
+      '<html><head></head><body>Private</body></html>',
+    )
+    await buildComplete[0](context)
+
+    assert.equal(
+      JSON.parse(readFileSync(path.join(context.outDir, 'assets', 'manifest.webmanifest'))).name,
+      'Example',
+    )
+    assert.match(
+      readFileSync(path.join(context.outDir, 'assets', 'sw.js'), 'utf8'),
+      /ruvyxa-pwa-[0-9a-f]{12}-v1/,
+    )
+    assert.match(
+      readFileSync(path.join(context.outDir, 'prerender', 'docs', 'index.html'), 'utf8'),
+      /data-ruvyxa-pwa/,
+    )
+    assert.doesNotMatch(
+      readFileSync(path.join(context.outDir, 'prerender', 'private', 'index.html'), 'utf8'),
+      /data-ruvyxa-pwa/,
+    )
+  })
+
+  it('rejects public path traversal', () => {
+    assert.throws(() => pwa({ name: 'Bad', serviceWorkerPath: '/../sw.js' }), TypeError)
+    assert.throws(
+      () => pwa({ name: 'Bad', manifestPath: '//cdn.example/manifest.json' }),
+      TypeError,
+    )
+    assert.throws(() => pwa({ name: 'Bad', serviceWorkerPath: '/%2e%2e/sw.js' }), TypeError)
+    assert.throws(() => pwa({ name: 'Bad', serviceWorkerPath: '/%zz/sw.js' }), TypeError)
+  })
+
+  it('rejects colliding or non-file artifact paths', () => {
+    assert.throws(
+      () => pwa({ name: 'Bad', manifestPath: '/same', serviceWorkerPath: '/same' }),
+      /must be distinct/,
+    )
+    assert.throws(() => pwa({ name: 'Bad', registerPath: '/' }), /must identify a file/)
+  })
+
+  it('isolates caches by scope and waits for runtime cache writes', async () => {
+    const app = register(pwa({ name: 'App', scope: '/app/' })).middleware[0]
+    const admin = register(pwa({ name: 'Admin', scope: '/admin/' })).middleware[0]
+    const appSource = await (await app.onRequest(request('/sw.js'))).text()
+    const adminSource = await (await admin.onRequest(request('/sw.js'))).text()
+    const appCache = appSource.match(/const CACHE = "([^"]+)"/)[1]
+    const adminCache = adminSource.match(/const CACHE = "([^"]+)"/)[1]
+
+    assert.notEqual(appCache, adminCache)
+    assert.match(appSource, /name\.startsWith\(CACHE_PREFIX\)/)
+    assert.doesNotMatch(appSource, /name\.startsWith\('ruvyxa-pwa-'\)/)
+    assert.match(appSource, /event\.waitUntil\(cacheWrite\)/)
+    assert.match(appSource, /\.catch\(\(\) => undefined\)/)
+  })
+})
+
+describe('feed()', () => {
+  it('writes RSS from an async content loader with escaped metadata', async () => {
+    const { buildComplete } = register(
+      feed({
+        siteUrl: 'https://example.com',
+        title: 'News & Notes',
+        description: 'Latest posts',
+        async items() {
+          return [
+            {
+              title: 'Ruvyxa <1.0>',
+              url: '/blog/launch',
+              publishedAt: '2026-07-22T00:00:00Z',
+              content: '<p>Fast ]]> launch</p>',
+            },
+          ]
+        },
+      }),
+    )
+    const context = tempBuildContext({ routes: [] })
+    await buildComplete[0](context)
+    const xml = readFileSync(path.join(context.outDir, 'assets', 'rss.xml'), 'utf8')
+    assert.match(xml, /<title>News &amp; Notes<\/title>/)
+    assert.match(xml, /<link>https:\/\/example\.com\/blog\/launch<\/link>/)
+    assert.match(xml, /Wed, 22 Jul 2026 00:00:00 GMT/)
+    assert.match(xml, /xmlns:content=/)
+  })
+})
+
+describe('searchIndex()', () => {
+  it('writes a stable locale-aware inverted index', async () => {
+    const { buildComplete } = register(
+      searchIndex({
+        locale: 'th',
+        stopWords: ['และ'],
+        documents: [
+          { id: 'b', title: 'ระบบปลั๊กอิน', url: '/plugins', text: 'รวดเร็ว และ เสถียร' },
+          { id: 'a', title: 'เริ่มต้น', url: '/', text: 'Ruvyxa รวดเร็ว' },
+        ],
+      }),
+    )
+    const context = tempBuildContext({ routes: [] })
+    await buildComplete[0](context)
+    const index = JSON.parse(
+      readFileSync(path.join(context.outDir, 'assets', 'search-index.json'), 'utf8'),
+    )
+    assert.deepEqual(
+      index.documents.map((document) => document.id),
+      ['a', 'b'],
+    )
+    assert.deepEqual(index.terms.รวดเร็ว, ['a', 'b'])
+    assert.equal(index.terms.และ, undefined)
+  })
+
+  it('uses runtime-independent code-unit ordering for serialized output', async () => {
+    const { buildComplete } = register(
+      searchIndex({
+        locale: 'en',
+        documents: [
+          { id: 'ä', title: 'Äther', url: '/a', text: 'zulu' },
+          { id: 'z', title: 'Zulu', url: '/z', text: 'alpha' },
+          { id: 'A', title: 'Alpha', url: '/capital-a', text: 'äther' },
+        ],
+      }),
+    )
+    const context = tempBuildContext({ routes: [] })
+    await buildComplete[0](context)
+    const index = JSON.parse(
+      readFileSync(path.join(context.outDir, 'assets', 'search-index.json'), 'utf8'),
+    )
+
+    assert.deepEqual(
+      index.documents.map((document) => document.id),
+      ['A', 'z', 'ä'],
+    )
+    assert.deepEqual(Object.keys(index.terms), ['alpha', 'zulu', 'äther'])
+    assert.deepEqual(index.terms.äther, ['A', 'ä'])
+  })
+
+  it('rejects duplicate document IDs at build time', async () => {
+    const { buildComplete } = register(
+      searchIndex({
+        documents: [
+          { id: 'same', title: 'One', url: '/one', text: 'one' },
+          { id: 'same', title: 'Two', url: '/two', text: 'two' },
+        ],
+      }),
+    )
+    await assert.rejects(() => buildComplete[0](tempBuildContext({ routes: [] })), /duplicate id/)
+  })
+})
+
+describe('openApi()', () => {
+  const options = {
+    info: { title: 'Example API', version: '1.0.0' },
+    operations: [
+      { method: 'GET', path: '/api/users', operationId: 'listUsers', summary: 'List users' },
+      {
+        method: 'post',
+        path: '/api/users',
+        operationId: 'createUser',
+        responses: { 201: { description: 'Created' } },
+      },
+    ],
+  }
+
+  it('serves the document in development and writes it after build', async () => {
+    const registered = register(openApi(options))
+    const response = await registered.middleware[0].onRequest(request('/openapi.json'))
+    const document = await response.json()
+    assert.equal(document.openapi, '3.1.0')
+    assert.equal(document.paths['/api/users'].get.operationId, 'listUsers')
+    assert.equal(document.paths['/api/users'].post.responses['201'].description, 'Created')
+
+    const context = tempBuildContext({ routes: [] })
+    mkdirSync(path.join(context.outDir, 'assets'), { recursive: true })
+    writeFileSync(path.join(context.outDir, 'assets', 'openapi.json'), 'stale')
+    await registered.buildComplete[0](context)
+    assert.equal(
+      JSON.parse(readFileSync(path.join(context.outDir, 'assets', 'openapi.json'))).info.title,
+      'Example API',
+    )
+    assert.deepEqual(
+      readdirSync(path.join(context.outDir, 'assets')).filter((name) => name.includes('.tmp-')),
+      [],
+    )
+  })
+
+  it('rejects duplicate method/path pairs and operation IDs', () => {
+    assert.throws(
+      () =>
+        openApi({
+          info: { title: 'API', version: '1' },
+          operations: [
+            { method: 'get', path: '/x' },
+            { method: 'GET', path: '/x' },
+          ],
+        }),
+      /duplicate GET \/x/,
+    )
+    assert.throws(
+      () =>
+        openApi({
+          info: { title: 'API', version: '1' },
+          operations: [
+            { method: 'get', path: '/x', operationId: 'same' },
+            { method: 'post', path: '/x', operationId: 'same' },
+          ],
+        }),
+      /duplicate operationId/,
+    )
   })
 })
 

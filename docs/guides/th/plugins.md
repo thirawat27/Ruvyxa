@@ -50,14 +50,44 @@ export default config({ plugins: [auth] })
 
 ```ts
 import { config } from 'ruvyxa/config'
-import { alias, headers, redirects, robots, sitemap } from 'ruvyxa/plugins'
+import {
+  cacheRules,
+  feed,
+  observability,
+  openApi,
+  pwa,
+  searchIndex,
+  securityHeaders,
+} from 'ruvyxa/plugins'
 
 export default config({
   plugins: [
-    redirects([{ source: '/old-blog/*', destination: '/blog/*', permanent: true }]),
-    headers([{ source: '/api/*', headers: { 'cache-control': 'no-store' } }]),
-    sitemap({ siteUrl: 'https://example.com', robots: true }),
-    alias({ '~content': 'content/index.ts' }),
+    observability({ routes: ['/api/*'] }),
+    securityHeaders({
+      contentSecurityPolicy: {
+        'default-src': ["'self'"],
+        'object-src': ["'none'"],
+      },
+    }),
+    cacheRules([
+      { source: '/api/*', browser: 'no-store' },
+      { source: '/blog/*', browser: 'public, max-age=60', cdn: 'max-age=300' },
+    ]),
+    pwa({ name: 'Example', offlineFallback: '/offline' }),
+    feed({
+      siteUrl: 'https://example.com',
+      title: 'Example',
+      description: 'บทความล่าสุด',
+      items: [{ title: 'เปิดตัว', url: '/blog/launch' }],
+    }),
+    searchIndex({
+      locale: 'th',
+      documents: [{ id: 'home', title: 'หน้าแรก', url: '/', text: 'ยินดีต้อนรับ' }],
+    }),
+    openApi({
+      info: { title: 'Example API', version: '1.0.0' },
+      operations: [{ method: 'get', path: '/api/health', summary: 'ตรวจสุขภาพระบบ' }],
+    }),
   ],
 })
 ```
@@ -66,15 +96,47 @@ export default config({
   ที่ลงท้าย ด้วย `*` ได้ ถ้า destination ลงท้ายด้วย `*` ส่วนที่เหลือของ path จะถูกต่อท้ายให้ และ
   `permanent: true` ตอบ 308 แทน 307
 - `headers(rules)` — กำหนด response header ต่อ route กติกาที่ไม่ระบุ `source` จะมีผลทุกหน้า
+- `observability({ routes, requestIdHeader, traceContext, serverTiming, log, logger })` — ตรวจและส่ง
+  request ID กับ W3C `traceparent` ต่อ วัดเวลาข้าม middleware worker เพิ่ม `Server-Timing` และ log
+  เฉพาะ method/path/status โดยไม่เก็บ query string ถ้ามี log pipeline อยู่แล้วให้ใช้ `log: false`
+  หรือส่ง `logger(entry)` ถ้า custom logger ขัดข้อง ระบบจะแจ้งข้อผิดพลาดแต่จะไม่ทำให้ response
+  ของแอปล้ม
+- `securityHeaders(options)` — เพิ่ม HSTS เป็นค่าเริ่มต้น และรองรับ CSP, permissions, referrer,
+  cross-origin, frame และ header อื่น ค่า explicit จาก plugin จะชนะ native default ส่วน CSP ต้องเปิด
+  เองเพราะ policy เดียวไม่สามารถใช้ได้ปลอดภัยกับทุกแอป
+- `cacheRules(rules)` — ตั้ง `Cache-Control` สำหรับ browser, `CDN-Cache-Control` สำหรับ shared cache
+  และรวมค่า `Vary` ตาม route ถ้ามีหลายกฎตรงกัน กฎหลังสุดจะชนะสำหรับ cache policy
 - `sitemap({ siteUrl, exclude, robots })` — เขียน `sitemap.xml` (และ `robots.txt` ถ้าเปิด) ลง
   โฟลเดอร์ asset ที่เสิร์ฟจริงหลังจบ production build โดยอ่านจาก route manifest ข้าม dynamic route
   และ API route ให้อัตโนมัติ
 - `robots({ rules, sitemap })` — สร้าง `robots.txt` แยกเดี่ยว
+- `pwa(options)` — สร้างและเสิร์ฟ web manifest, service worker และ registration module พร้อม inject
+  tag ให้ HTML response และ prerendered HTML ที่ตรง route ควรกำหนด `precache` กับ `offlineFallback`
+  เองเพื่อไม่ให้ service worker เดาข้อมูลที่ต้อง cache โดย cache namespace จะแยกตาม service-worker
+  scope จึงไม่ลบ cache ข้ามกันแม้หลายแอปใช้ origin เดียวกัน
+- `feed({ siteUrl, title, description, items, path })` — สร้าง RSS 2.0 จาก array หรือ async loader
+  ตอน build โดยค่า output เริ่มต้นคือ `/rss.xml`
+- `searchIndex({ documents, locale, stopWords, minTermLength, path })` — สร้าง inverted index แบบ
+  deterministic เป็น JSON และใช้ `Intl.Segmenter` แบ่งคำภาษาไทยได้ ค่าเริ่มต้นคือ
+  `/search-index.json`
+- `openApi({ info, operations, servers, tags, components, path })` — ตรวจ method/path และ
+  `operationId` ไม่ให้ซ้ำ เสิร์ฟ OpenAPI 3.1 ระหว่าง dev และเขียน `/openapi.json` ตอน build
 - `alias(map)` — จับคู่ import specifier แบบตรงตัวไปยังไฟล์ในโปรเจกต์ก่อนถึง native resolver
 - `bundleBudget({ maxChunkKb, maxTotalKb })` — ทำให้ production build ล้มเหลวเมื่อ client JavaScript
   เกินงบที่ตั้งไว้ ช่วยจับ bundle regression ได้ตั้งแต่ใน CI
 - `requireEnv(names)` — ทำให้ production build ล้มเหลวเมื่อ environment variable ที่จำเป็นหายไป
   หรือว่างเปล่า
+
+ไฟล์ public ที่ plugin สร้างจะเสร็จก่อน adapter materialize output ดังนั้น sitemap, PWA, feed,
+search index และ OpenAPI จะติดไปกับ static/hybrid deployment artifact ด้วย ไม่ได้อยู่แค่ใน `.ruvyxa`
+ฝั่ง local ส่วน static adapter จะรักษา URL ให้ตรง production server คือ public file อยู่ที่ `/...`
+และ client bundle อยู่ใต้ `/__ruvyxa/client/...` ไฟล์ที่สร้างจะถูกแทนที่แบบ atomic และ path ของ
+artifact จะถูกตรวจไม่ให้เป็น cross-origin, traversal, directory หรือ endpoint ของ PWA
+ที่ชนกันตั้งแต่ตอนอ่าน config
+
+`observability`, `securityHeaders` และ `cacheRules` เป็น runtime response plugin จึงทำงานตามปกติบน
+serverless หรือ long-running adapter แต่ static host ล้วนไม่มี middleware runtime ต้องตั้ง security/
+cache header ที่เทียบเท่ากันใน host หรือ adapter นั้นเพิ่มเอง
 
 `routes` ของ middleware จะถูกส่งให้ native server ด้วย ทำให้ request ที่ไม่มีทาง match ข้ามการ
 round-trip ไปยัง plugin runtime ทั้งหมด — จึงควรระบุ route ให้ middleware เสมอเมื่อทำได้ pattern

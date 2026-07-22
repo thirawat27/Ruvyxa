@@ -434,8 +434,15 @@ async function materializeStaticSite(buildDir, destination) {
   }
 
   await mkdir(destination, { recursive: true })
-  await copyDirectoryContents(path.join(buildDir, 'assets'), path.join(destination, 'assets'))
-  await copyDirectoryContents(path.join(buildDir, 'client'), path.join(destination, 'client'))
+  // Match the production server's public URLs: `assets/foo.png` is served as
+  // `/foo.png`, while hashed client bundles live under `/__ruvyxa/client/`.
+  // Prerendered routes are copied last so a page wins an exact URL collision
+  // in the same way routing wins before public-file fallback at runtime.
+  await copyDirectoryContents(path.join(buildDir, 'assets'), destination)
+  await copyDirectoryContents(
+    path.join(buildDir, 'client'),
+    path.join(destination, '__ruvyxa', 'client'),
+  )
   await copyDirectoryContents(prerenderDir, destination, new Set(['manifest.json']))
 }
 

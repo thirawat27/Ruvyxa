@@ -165,6 +165,9 @@
   via `ruvyxa.config.ts`. Route-scoped middleware targets specific path patterns.
 - **Plugin middleware** — application modules register route-scoped Fetch `Request`/`Response` hooks
   alongside build transforms and completion callbacks.
+- **First-party plugin kit** — `ruvyxa/plugins` includes observability, security policy, cache
+  rules, PWA, RSS, locale-aware search index, OpenAPI, redirects, sitemap, bundle budgets, and
+  environment validation. Build-generated files are included in adapter artifacts.
 
 ### CLI & diagnostics
 

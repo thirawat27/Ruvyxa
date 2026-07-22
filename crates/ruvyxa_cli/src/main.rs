@@ -1389,23 +1389,6 @@ async fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Resul
             "prerenderMs": duration_ms(prerender_duration)
         }
     });
-    if config.adapter.is_some() || args.adapter.is_some() {
-        let phase_started = Instant::now();
-        let artifacts = run_adapter_runner(
-            &args.root,
-            &staging_dir,
-            config.javascript_runtime(),
-            args.adapter.as_deref(),
-        )?;
-        if show_summary {
-            let detail = args
-                .adapter
-                .clone()
-                .unwrap_or_else(|| format!("{} artifact(s)", artifacts.len()));
-            print_build_phase("adapter", detail, phase_started.elapsed());
-        }
-        build_info["adapterArtifacts"] = serde_json::to_value(artifacts)?;
-    }
     fs::write(
         staging_dir.join("build.json"),
         serde_json::to_string_pretty(&build_info)?,
@@ -1427,6 +1410,26 @@ async fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Resul
         &config.plugins,
         config.javascript_runtime(),
     )?;
+    // Adapters must snapshot the committed output after build-complete hooks:
+    // first-party and application plugins can add public artifacts such as a
+    // sitemap or service worker that must be present in static deploy output.
+    if config.adapter.is_some() || args.adapter.is_some() {
+        let phase_started = Instant::now();
+        let artifacts = run_adapter_runner(
+            &args.root,
+            &out_dir,
+            config.javascript_runtime(),
+            args.adapter.as_deref(),
+        )?;
+        if show_summary {
+            let detail = args
+                .adapter
+                .clone()
+                .unwrap_or_else(|| format!("{} artifact(s)", artifacts.len()));
+            print_build_phase("adapter", detail, phase_started.elapsed());
+        }
+        build_info["adapterArtifacts"] = serde_json::to_value(artifacts)?;
+    }
     build_info["timing"]["totalMs"] = serde_json::json!(duration_ms(started.elapsed()));
     fs::write(
         out_dir.join("build.json"),

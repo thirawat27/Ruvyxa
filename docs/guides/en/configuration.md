@@ -178,7 +178,7 @@ exits before responding is restarted and retried once.
 | `sameOrigin`      | `boolean`         | `true`                     | Same-origin validation for actions                                         |
 | `fetchMeta`       | `boolean`         | `true`                     | Fetch Metadata protection                                                  |
 | `trustedProxyIps` | `string[]`        | `[]`                       | Exact non-loopback proxies trusted for forwarded identity/protocol headers |
-| `headers`         | `boolean`         | `true`                     | Security response headers (CSP, etc.)                                      |
+| `headers`         | `boolean`         | `true`                     | Fill missing response headers with Ruvyxa security defaults                |
 
 Security limits must be positive when set.
 

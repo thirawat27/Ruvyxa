@@ -55,9 +55,10 @@ describe('adapter runner', () => {
         await readFile(path.join(outputDir, 'deploy/site/about/index.html'), 'utf8'),
         '<main>about</main>',
       )
+      assert.equal(await readFile(path.join(outputDir, 'deploy/site/app.css'), 'utf8'), 'body {}')
       assert.equal(
-        await readFile(path.join(outputDir, 'deploy/site/assets/app.css'), 'utf8'),
-        'body {}',
+        await readFile(path.join(outputDir, 'deploy/site/__ruvyxa/client/app.js'), 'utf8'),
+        'export {}',
       )
       assert.equal(
         await readFile(path.join(outputDir, 'deploy/site/_headers'), 'utf8'),

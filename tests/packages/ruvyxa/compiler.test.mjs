@@ -1089,6 +1089,59 @@ export class contentFormat {}
     })
   })
 
+  it('loads first-party plugins through the public ruvyxa/plugins entrypoint', async () => {
+    await withFixture(async ({ root }) => {
+      await writeFile(
+        path.join(root, 'ruvyxa.config.ts'),
+        `
+          import { observability, openApi } from "ruvyxa/plugins"
+
+          export default {
+            plugins: [
+              observability({ routes: ["/api/*"], log: false }),
+              openApi({
+                info: { title: "Fixture API", version: "1.0.0" },
+                operations: [{ method: "get", path: "/api/health" }],
+              }),
+            ],
+          }
+        `,
+      )
+
+      const described = await runJson(pluginRuntime, [root, 'describe'], {})
+      assert.deepEqual(described.result, {
+        plugins: ['ruvyxa:observability', 'ruvyxa:openapi'],
+        middleware: {
+          request: 2,
+          response: 1,
+          requestRoutes: ['/api/*', '/openapi.json'],
+          responseRoutes: ['/api/*'],
+        },
+        resolveId: 0,
+        transform: 0,
+        buildComplete: 1,
+      })
+
+      const requestResult = await runJson(pluginRuntime, [root, 'middlewareRequest'], {
+        request: { method: 'GET', path: '/api/health', headers: [] },
+      })
+      assert.equal(requestResult.result.kind, 'request')
+      assert.match(
+        requestResult.result.request.headers.find(([name]) => name === 'x-request-id')[1],
+        /^[0-9a-f-]{36}$/,
+      )
+
+      const specResult = await runJson(pluginRuntime, [root, 'middlewareRequest'], {
+        request: { method: 'GET', path: '/openapi.json', headers: [] },
+      })
+      assert.equal(specResult.result.kind, 'response')
+      assert.equal(
+        JSON.parse(Buffer.from(specResult.result.response.bodyBase64, 'base64')).info.title,
+        'Fixture API',
+      )
+    })
+  })
+
   it('rejects middleware route patterns that can never match a pathname', async () => {
     await withFixture(async ({ root }) => {
       await writeFile(

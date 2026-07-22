@@ -301,7 +301,7 @@ export interface PluginSetupContext {
   resolveId(hook: PluginResolveIdHook): void
   /** Transform application source before Ruvyxa compiles TypeScript and JSX. */
   transform(hook: PluginTransformHook): void
-  /** Run after the complete production output has been written. */
+  /** Run after core output is committed and before adapters materialize deployment artifacts. */
   onBuildComplete(hook: PluginBuildCompleteHook): void
 }
 
