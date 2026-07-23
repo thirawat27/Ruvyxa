@@ -257,7 +257,7 @@ pub(crate) fn action_rate_limit_key(
     // explicitly allowlisted. Private ranges alone are not a trust boundary:
     // a LAN client can otherwise forge X-Forwarded-For and bypass the limiter.
     let client = if is_trusted_proxy_ip(config, peer_ip) {
-        forwarded_client_ip(headers).unwrap_or(peer_ip)
+        forwarded_client_ip(config, headers).unwrap_or(peer_ip)
     } else {
         peer_ip
     };
@@ -265,14 +265,23 @@ pub(crate) fn action_rate_limit_key(
     format!("{client}:{}:{}", query.path, query.name)
 }
 
-fn forwarded_client_ip(headers: &HeaderMap) -> Option<IpAddr> {
+/// Pick the client IP from forwarded headers, scanning from the right.
+///
+/// Each proxy appends the peer it actually saw, so rightmost entries are
+/// proxy-written while leftmost entries arrive from the client and are
+/// forgeable. Taking the leftmost entry would let a client behind a trusted
+/// proxy rotate fabricated addresses through the rate limiter; instead, skip
+/// trusted proxy addresses from the right and use the first address that is
+/// not one of ours.
+fn forwarded_client_ip(config: &ServerConfig, headers: &HeaderMap) -> Option<IpAddr> {
     headers
         .get("x-forwarded-for")
         .or_else(|| headers.get("x-real-ip"))
         .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
-        .map(str::trim)
-        .and_then(|value| value.parse().ok())
+        .into_iter()
+        .flat_map(|value| value.split(',').rev())
+        .filter_map(|value| value.trim().parse::<IpAddr>().ok())
+        .find(|candidate| !is_trusted_proxy_ip(config, *candidate))
 }
 
 fn is_trusted_proxy_ip(config: &ServerConfig, ip: IpAddr) -> bool {

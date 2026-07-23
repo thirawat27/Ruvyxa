@@ -2106,6 +2106,42 @@ mod tests {
         );
     }
 
+    #[test]
+    fn forwarded_client_ip_ignores_client_forged_prefix_entries() {
+        // The client sent its own X-Forwarded-For value and the trusted proxy
+        // appended the address it actually saw. The forged prefix must not
+        // become the rate-limit identity, or rotating it defeats the limiter.
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("198.51.100.99, 203.0.113.8"),
+        );
+        let query = ActionQuery {
+            path: "/todos".to_string(),
+            name: "create".to_string(),
+        };
+        let peer: SocketAddr = "10.0.0.9:5000".parse().unwrap();
+        let mut config = ServerConfig::dev(".", "localhost", 3000);
+        config.trusted_proxy_ips.push("10.0.0.9".parse().unwrap());
+
+        assert_eq!(
+            action_rate_limit_key(peer, &headers, &query, &config),
+            "203.0.113.8:/todos:create"
+        );
+
+        // A two-hop chain of trusted proxies: skip our own addresses from the
+        // right and land on the first external one.
+        let mut chained = HeaderMap::new();
+        chained.insert(
+            "x-forwarded-for",
+            HeaderValue::from_static("198.51.100.99, 203.0.113.8, 10.0.0.9"),
+        );
+        assert_eq!(
+            action_rate_limit_key(peer, &chained, &query, &config),
+            "203.0.113.8:/todos:create"
+        );
+    }
+
     #[tokio::test]
     async fn server_make_service_attaches_tcp_peer_metadata() {
         async fn peer_handler(
