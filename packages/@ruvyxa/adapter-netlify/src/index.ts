@@ -40,11 +40,22 @@ function netlifyHandlerSource(): string {
   return `import { createHandler, prerenderRelativePath } from './serverless-handler.mjs';
 import { loadRouteModule } from './route-modules.mjs';
 import { readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
+import os from 'node:os';
 import path from 'node:path';
 
 const manifestPath = path.join(import.meta.dirname, 'manifest.json');
 const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
 const prerenderDir = path.join(import.meta.dirname, 'prerender');
+// The function bundle directory is read-only at runtime; only the platform
+// tmp directory accepts writes. ISR revalidations land there and are read
+// back before the bundled deploy-time prerender output.
+const isrCacheDir = path.join(os.tmpdir(), 'ruvyxa-isr-cache');
+
+const readEntry = (htmlPath, revalidate) => {
+  const html = readFileSync(htmlPath, 'utf8');
+  const stale = Date.now() - statSync(htmlPath).mtimeMs >= revalidate * 1000;
+  return { html, stale };
+};
 
 const handler = createHandler({
   routes: manifest.routes,
@@ -52,14 +63,16 @@ const handler = createHandler({
   importApi: loadRouteModule,
   readPrerendered: (pathname, revalidate = 60) => {
     // prerenderRelativePath rejects any request path that cannot be mapped to a
-    // location inside prerenderDir, so the cache read can never escape it.
+    // location inside the cache directories, so reads can never escape them.
     const relative = prerenderRelativePath(pathname);
     if (relative === null) return null;
     try {
-      const htmlPath = path.join(prerenderDir, relative);
-      const html = readFileSync(htmlPath, 'utf8');
-      const stale = Date.now() - statSync(htmlPath).mtimeMs >= revalidate * 1000;
-      return { html, stale };
+      return readEntry(path.join(isrCacheDir, relative), revalidate);
+    } catch {
+      // fall through to the bundled prerender output
+    }
+    try {
+      return readEntry(path.join(prerenderDir, relative), revalidate);
     } catch {
       return null;
     }
@@ -67,7 +80,7 @@ const handler = createHandler({
   writePrerendered: (pathname, html, revalidate) => {
     const relative = prerenderRelativePath(pathname);
     if (relative === null) return;
-    const htmlPath = path.join(prerenderDir, relative);
+    const htmlPath = path.join(isrCacheDir, relative);
     try {
       mkdirSync(path.dirname(htmlPath), { recursive: true });
       writeFileSync(htmlPath, html, 'utf8');
@@ -172,8 +185,11 @@ export function netlifyAdapter(options: NetlifyAdapterOptions = {}): Adapter {
         functionsDir,
         configFiles: ['netlify.toml'],
         artifacts: [
-          // Static assets (pre-rendered pages + client bundles)
-          { kind: 'static-site', path: 'deploy/netlify/publish' },
+          // Static assets (pre-rendered pages + client bundles). `optional`:
+          // an API-only or all-SSR app has no prerendered pages; the function
+          // still serves every route, so the missing prerender directory must
+          // not fail the build.
+          { kind: 'static-site', path: 'deploy/netlify/publish', optional: true },
           // Serverless function bundle
           {
             kind: 'function',

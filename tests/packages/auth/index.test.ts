@@ -54,6 +54,19 @@ describe('@ruvyxa/auth', () => {
     assert.equal(session?.remember, true)
   })
 
+  it('treats malformed percent-encoding in the provider path as no match', async () => {
+    const auth = runtime()
+    const response = await auth.handle(
+      new Request(`${origin}/__ruvyxa/auth/login/%ZZ`, {
+        method: 'POST',
+        headers: { origin, 'content-type': 'application/json' },
+        body: JSON.stringify({}),
+      }),
+    )
+    // Not an auth route: the handler passes it through instead of failing 500.
+    assert.equal(response, undefined)
+  })
+
   it('blocks cross-origin login and does not reveal credential details', async () => {
     const auth = runtime()
     const crossOrigin = await auth.handle(
@@ -117,6 +130,24 @@ describe('@ruvyxa/auth', () => {
     assert.equal(limited?.headers.get('retry-after'), '60')
   })
 
+  it('binds rate-limit buckets to the resolved client IP when configured', async () => {
+    const auth = runtime({
+      rateLimit: { max: 1, windowSeconds: 60 },
+      clientIp: (request: Request) => request.headers.get('x-test-ip'),
+    })
+    const request = (userAgent: string, ip: string) =>
+      new Request(`${origin}/__ruvyxa/auth/login/email`, {
+        method: 'POST',
+        headers: { origin, 'user-agent': userAgent, 'x-test-ip': ip },
+        body: JSON.stringify({ email: 'ada@example.com', password: 'wrong' }),
+      })
+    // Rotating the user-agent no longer rotates the bucket: the IP pins it.
+    assert.equal((await auth.handle(request('agent-a', '203.0.113.7')))?.status, 401)
+    assert.equal((await auth.handle(request('agent-b', '203.0.113.7')))?.status, 429)
+    // A different client IP is a different bucket.
+    assert.equal((await auth.handle(request('agent-a', '203.0.113.8')))?.status, 401)
+  })
+
   it('expires logout cookies and deletes the stored session', async () => {
     const auth = runtime()
     const result = await auth.login('email', { email: 'ada@example.com', password: 'correct' })
@@ -154,10 +185,34 @@ describe('@ruvyxa/auth', () => {
       }),
     )
     assert.equal(start?.status, 200)
-    const first = await auth.handle(new Request(sentUrl))
-    const replay = await auth.handle(new Request(sentUrl))
+
+    // GET renders a confirmation page without consuming the token, so a mail
+    // scanner prefetching the link cannot invalidate it.
+    const scannerVisit = await auth.handle(new Request(sentUrl))
+    assert.equal(scannerVisit?.status, 200)
+    assert.match(await scannerVisit!.text(), /method="post"/)
+    const userVisit = await auth.handle(new Request(sentUrl))
+    assert.equal(userVisit?.status, 200)
+
+    // The page's form POST consumes the token exactly once.
+    const token = new URL(sentUrl).searchParams.get('token')!
+    const confirm = () =>
+      auth.handle(
+        new Request(`${origin}/__ruvyxa/auth/magic-link/callback`, {
+          method: 'POST',
+          headers: { origin, 'content-type': 'application/x-www-form-urlencoded' },
+          body: new URLSearchParams({ token }).toString(),
+        }),
+      )
+    const first = await confirm()
+    const replay = await confirm()
     assert.equal(first?.status, 303)
+    assert.match(first?.headers.get('set-cookie') ?? '', /HttpOnly/)
     assert.equal(replay?.status, 400)
+
+    // A consumed token renders the expired page instead of a fresh form.
+    const staleVisit = await auth.handle(new Request(sentUrl))
+    assert.equal(staleVisit?.status, 400)
   })
 
   it('delegates WebAuthn verification and applies the shared session policy', async () => {

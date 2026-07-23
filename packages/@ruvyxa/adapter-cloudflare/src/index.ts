@@ -132,8 +132,11 @@ export function cloudflareAdapter(options: CloudflareAdapterOptions = {}): Adapt
         ...clientBuildOutput(ctx),
         configFiles: ['wrangler.jsonc'],
         artifacts: [
-          // Static assets served by Cloudflare's asset binding
-          { kind: 'static-site', path: 'deploy/cloudflare/assets' },
+          // Static assets served by Cloudflare's asset binding. `optional`:
+          // an API-only or all-SSR app has no prerendered pages; the Worker
+          // still serves every route, so the missing prerender directory must
+          // not fail the build.
+          { kind: 'static-site', path: 'deploy/cloudflare/assets', optional: true },
           // Worker function bundle (SSR/API handler)
           {
             kind: 'function',

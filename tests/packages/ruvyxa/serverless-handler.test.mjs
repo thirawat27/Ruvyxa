@@ -65,6 +65,40 @@ describe('serverless handler route matching', () => {
     assert.deepEqual(rendered.at(-1).params.path, ['a b', 'c'])
   })
 
+  it('matches trailing and duplicate slashes like the dev router', async () => {
+    const rendered = []
+    const handler = handlerFor(
+      [
+        pageRoute('docs', '/docs/[...path]'),
+        pageRoute('shop', '/shop/[[...slug]]'),
+        pageRoute('about', '/about'),
+      ],
+      rendered,
+    )
+
+    // The dev router splits on `/` and drops empty segments, so a trailing
+    // slash must not leak an empty catch-all segment into params.
+    const trailing = await handler(new Request('http://localhost/docs/a/'))
+    assert.equal(trailing.status, 200)
+    assert.deepEqual(rendered.at(-1).params.path, ['a'])
+    // The un-normalized request path still reaches render, like the dev server.
+    assert.equal(rendered.at(-1).pathname, '/docs/a/')
+
+    const duplicate = await handler(new Request('http://localhost/docs//a'))
+    assert.equal(duplicate.status, 200)
+    assert.deepEqual(rendered.at(-1).params.path, ['a'])
+
+    // An optional catch-all keeps its "absent at the parent route" contract
+    // even when the parent is requested with a trailing slash.
+    const optionalParent = await handler(new Request('http://localhost/shop/'))
+    assert.equal(optionalParent.status, 200)
+    assert.equal(rendered.at(-1).routeId, 'shop')
+    assert.equal('slug' in rendered.at(-1).params, false)
+
+    assert.equal((await handler(new Request('http://localhost/about/'))).status, 200)
+    assert.equal(rendered.at(-1).routeId, 'about')
+  })
+
   it('does not leak internal error detail in responses', async () => {
     const handler = createHandler({
       routes: [pageRoute('boom', '/boom')],

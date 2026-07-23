@@ -44,6 +44,14 @@ describe('vercelAdapter', () => {
       ],
     )
 
+    // Every static-site artifact must tolerate builds with no prerendered
+    // pages (API-only or all-SSR apps) instead of failing with RUV2202.
+    assert.ok(
+      output.artifacts
+        ?.filter((artifact) => artifact.kind === 'static-site')
+        .every((artifact) => artifact.optional === true),
+    )
+
     // Verify Build Output API config
     const configArtifact = output.artifacts?.find(
       (artifact) => artifact.path === 'deploy/vercel/.vercel/output/config.json',

@@ -18,6 +18,14 @@ describe('netlifyAdapter', () => {
       ],
     )
 
+    // Every static-site artifact must tolerate builds with no prerendered
+    // pages (API-only or all-SSR apps) instead of failing with RUV2202.
+    assert.ok(
+      output.artifacts
+        ?.filter((artifact) => artifact.kind === 'static-site')
+        .every((artifact) => artifact.optional === true),
+    )
+
     // Verify netlify.toml includes functions directory
     const toml = output.artifacts?.find(
       (artifact) => artifact.path === 'deploy/netlify/netlify.toml',

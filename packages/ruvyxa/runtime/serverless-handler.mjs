@@ -95,7 +95,15 @@ export function createHandler(options) {
       // Route matching percent-decodes parameters, which throws on malformed
       // input such as `/blog/%ZZ`. This ran outside the handler's try block, so
       // the URIError escaped as an unhandled rejection instead of a response.
-      match = matchRoute(compiledRoutes, pathname)
+      //
+      // Matching uses the dev router's segment semantics (split_path in
+      // crates/ruvyxa_dev_server/src/router.rs drops empty segments), so
+      // `/docs/a/`, `/docs//a`, and `/docs/a` resolve to the same route with
+      // the same params. Without this, the greedy catch-all regex captured the
+      // trailing slash and produced params like ["a", ""] in deploys only.
+      // The un-normalized pathname is still what render and the prerender
+      // cache receive, matching what the dev server passes.
+      match = matchRoute(compiledRoutes, normalizeMatchPath(pathname))
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
       console.error(`[ruvyxa] Malformed request path ${pathname}:`, message)
@@ -331,6 +339,17 @@ function stripBasePath(pathname, basePath) {
   // plus `ointments`.
   if (!pathname.startsWith(`${prefix}/`)) return null
   return pathname.slice(prefix.length) || '/'
+}
+
+/**
+ * Collapse duplicate slashes and drop the trailing slash so pattern matching
+ * sees the same segments as the dev server's router, which splits on `/` and
+ * filters empty segments.
+ */
+function normalizeMatchPath(pathname) {
+  if (pathname === '/') return pathname
+  const segments = pathname.split('/').filter(Boolean)
+  return segments.length === 0 ? '/' : `/${segments.join('/')}`
 }
 
 /**

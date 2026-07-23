@@ -99,6 +99,12 @@ export function createAuth(options: AuthOptions): AuthRuntime {
       return json({ sent: true })
     }
     if (url.pathname === `${settings.basePath}/magic-link/callback` && request.method === 'GET') {
+      // GET must not consume the token: email security scanners prefetch
+      // links, and a consuming GET burns the token before the user clicks.
+      return magicLinkConfirmPage(request, settings)
+    }
+    if (url.pathname === `${settings.basePath}/magic-link/callback` && request.method === 'POST') {
+      assertSameOrigin(request, settings.origin)
       return finishMagicLink(request, settings)
     }
     if (url.pathname === `${settings.basePath}/webauthn/options` && request.method === 'POST') {
@@ -317,10 +323,53 @@ async function startMagicLink(
   }
 }
 
-async function finishMagicLink(request: Request, settings: NormalizedOptions): Promise<Response> {
+/** Accepts base64url tokens from `randomToken` with headroom for store-specific sizes. */
+const MAGIC_LINK_TOKEN_PATTERN = /^[A-Za-z0-9_-]{16,256}$/
+
+/**
+ * Render the confirmation page for a magic-link visit without consuming the
+ * token. Consumption happens in the POST handler the page's form submits to,
+ * so a prefetching mail scanner cannot invalidate the link.
+ */
+async function magicLinkConfirmPage(
+  request: Request,
+  settings: NormalizedOptions,
+): Promise<Response> {
   const provider = findProvider(settings.providers, 'magic-link')
   if (!provider || provider.type !== 'magic-link') throw notConfigured('magic-link')
   const token = new URL(request.url).searchParams.get('token')
+  if (!token || !MAGIC_LINK_TOKEN_PATTERN.test(token)) {
+    return htmlPage(
+      400,
+      'Sign-in link is invalid',
+      '<p>This sign-in link is invalid. Request a new one and try again.</p>',
+    )
+  }
+  // Peek (never take): expiry feedback belongs on the page, consumption
+  // belongs to the POST.
+  const email = await settings.store.get(await tokenKey('magic', token, settings.secret))
+  if (!email) {
+    return htmlPage(
+      400,
+      'Sign-in link has expired',
+      '<p>This sign-in link is invalid or has already been used. Request a new one.</p>',
+    )
+  }
+  const action = escapeHtmlAttribute(`${settings.basePath}/magic-link/callback`)
+  return htmlPage(
+    200,
+    'Confirm your sign-in',
+    `<p>Select continue to finish signing in.</p>` +
+      `<form method="post" action="${action}">` +
+      `<input type="hidden" name="token" value="${escapeHtmlAttribute(token)}">` +
+      `<button type="submit">Continue</button></form>`,
+  )
+}
+
+async function finishMagicLink(request: Request, settings: NormalizedOptions): Promise<Response> {
+  const provider = findProvider(settings.providers, 'magic-link')
+  if (!provider || provider.type !== 'magic-link') throw notConfigured('magic-link')
+  const token = await readCallbackToken(request)
   if (!token) throw new AuthError('RUV3103', 'Magic link token is missing', 400)
   const email = await settings.store.take(await tokenKey('magic', token, settings.secret))
   if (!email) throw new AuthError('RUV3103', 'Magic link is invalid or expired', 400)
@@ -332,13 +381,37 @@ async function finishMagicLink(request: Request, settings: NormalizedOptions): P
   return new Response(null, { status: 303, headers })
 }
 
+/**
+ * Read the magic-link token from the callback POST body: the confirmation
+ * page submits `application/x-www-form-urlencoded`, programmatic clients may
+ * send JSON.
+ */
+async function readCallbackToken(request: Request): Promise<string | null> {
+  const contentType = request.headers.get('content-type') ?? ''
+  let token: unknown
+  if (contentType.includes('application/x-www-form-urlencoded')) {
+    token = new URLSearchParams(await readBoundedBody(request)).get('token')
+  } else {
+    token = (await readJson(request)).token
+  }
+  return typeof token === 'string' && MAGIC_LINK_TOKEN_PATTERN.test(token) ? token : null
+}
+
 async function consumeRateLimit(
   request: Request,
   scope: string,
   settings: NormalizedOptions,
 ): Promise<void> {
-  const userAgent = request.headers.get('user-agent')?.slice(0, 128) ?? 'unknown'
-  const key = await tokenKey('rate', `${scope}:${userAgent}`, settings.secret)
+  // Bind the bucket to the client IP whenever the deployment can vouch for
+  // one; the user-agent fallback is client-rotatable and only used when no
+  // resolver is configured. The resolver is opt-in (see AuthOptions.clientIp):
+  // trusting forwarded headers without a proxy would hand attackers the same
+  // rotation the IP is meant to prevent. The IP must be the whole key — mixing
+  // the user-agent back in would reopen bucket rotation via UA rotation.
+  const clientIp = resolveClientIp(request, settings)
+  const clientKey =
+    clientIp ?? `ua:${request.headers.get('user-agent')?.slice(0, 128) ?? 'unknown'}`
+  const key = await tokenKey('rate', `${scope}:${clientKey}`, settings.secret)
   const decision = await settings.rateLimitStore.consume(
     key,
     settings.rateLimitMax,
@@ -352,6 +425,36 @@ async function consumeRateLimit(
       decision.retryAfterSeconds,
     )
   }
+}
+
+function resolveClientIp(request: Request, settings: NormalizedOptions): string | null {
+  if (!settings.clientIp) return null
+  try {
+    const resolved = settings.clientIp(request)
+    const trimmed = typeof resolved === 'string' ? resolved.trim().slice(0, 64) : ''
+    return trimmed === '' ? null : `ip:${trimmed}`
+  } catch {
+    // A broken resolver must not take authentication down; fall back to the
+    // user-agent bucket instead.
+    return null
+  }
+}
+
+/**
+ * Read the client IP from `x-forwarded-for`, taking the rightmost entry: each
+ * proxy appends the peer address it actually saw, so the rightmost value is
+ * the one written by the nearest (trusted) proxy, while the leftmost entries
+ * are client-supplied and spoofable. Use as `clientIp: forwardedClientIp`
+ * only when a trusted proxy or platform edge sits in front of the app.
+ */
+export function forwardedClientIp(request: Request): string | null {
+  const header = request.headers.get('x-forwarded-for')
+  if (!header) return null
+  const entries = header
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean)
+  return entries.at(-1) ?? null
 }
 
 function normalizeOptions(options: AuthOptions) {
@@ -429,7 +532,7 @@ function assertSameOrigin(request: Request, origin: string): void {
   }
 }
 
-async function readJson(request: Request): Promise<Record<string, unknown>> {
+async function readBoundedBody(request: Request): Promise<string> {
   const declared = Number(request.headers.get('content-length') ?? 0)
   if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
     throw new AuthError('RUV3101', 'Authentication request body is too large', 413)
@@ -455,12 +558,43 @@ async function readJson(request: Request): Promise<Record<string, unknown>> {
     bodyBytes.set(chunk, offset)
     offset += chunk.byteLength
   }
-  const body = new TextDecoder().decode(bodyBytes)
+  return new TextDecoder().decode(bodyBytes)
+}
+
+async function readJson(request: Request): Promise<Record<string, unknown>> {
+  const body = await readBoundedBody(request)
   try {
     return record(body ? JSON.parse(body) : {})
   } catch {
     throw new AuthError('RUV3101', 'Authentication request must contain valid JSON', 400)
   }
+}
+
+function escapeHtmlAttribute(value: string): string {
+  return value
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;')
+}
+
+function htmlPage(status: number, title: string, body: string): Response {
+  const escapedTitle = escapeHtmlAttribute(title)
+  const html =
+    '<!doctype html>\n<html lang="en">\n<head>\n<meta charset="utf-8">\n' +
+    '<meta name="viewport" content="width=device-width, initial-scale=1">\n' +
+    // Sign-in URLs carry tokens: keep them out of search indexes and referrers.
+    '<meta name="robots" content="noindex">\n<meta name="referrer" content="no-referrer">\n' +
+    `<title>${escapedTitle}</title>\n` +
+    '<style>body{font-family:system-ui,sans-serif;display:grid;place-items:center;min-height:100vh;margin:0}' +
+    'main{max-width:24rem;padding:2rem;text-align:center}' +
+    'button{font:inherit;padding:.6rem 1.4rem;cursor:pointer}</style>\n' +
+    `</head>\n<body><main><h1>${escapedTitle}</h1>${body}</main></body>\n</html>\n`
+  return new Response(html, {
+    status,
+    headers: { 'content-type': 'text/html; charset=utf-8', 'cache-control': 'no-store' },
+  })
 }
 
 function sessionCookie(token: string, ttlSeconds: number, settings: NormalizedOptions): string {
@@ -648,16 +782,28 @@ function findProvider(
 function matchPath(pathname: string, prefix: string): string | null {
   if (!pathname.startsWith(prefix)) return null
   const value = pathname.slice(prefix.length)
-  return value && !value.includes('/') ? decodeURIComponent(value) : null
+  return value && !value.includes('/') ? safeDecodeComponent(value) : null
 }
 
 function matchOAuthPath(pathname: string, basePath: string) {
   const match = pathname.match(
     new RegExp(`^${escapeRegex(basePath)}/oauth/([^/]+)/(start|callback)$`),
   )
-  return match
-    ? { provider: decodeURIComponent(match[1]!), phase: match[2] as 'start' | 'callback' }
-    : null
+  if (!match) return null
+  const provider = safeDecodeComponent(match[1]!)
+  return provider ? { provider, phase: match[2] as 'start' | 'callback' } : null
+}
+
+/**
+ * Decode a path segment, treating malformed percent-encoding such as `%ZZ` as
+ * a non-match instead of letting the URIError surface as a 500.
+ */
+function safeDecodeComponent(value: string): string | null {
+  try {
+    return decodeURIComponent(value)
+  } catch {
+    return null
+  }
 }
 
 function normalizeBasePath(value: string): string {
