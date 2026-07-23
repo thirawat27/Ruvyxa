@@ -99,6 +99,17 @@ export interface AuthOptions {
     sameSite?: 'Lax' | 'Strict'
   }
   rateLimit?: { max?: number; windowSeconds?: number }
+  /**
+   * Resolve the client IP for rate-limit bucketing. Off by default because
+   * forwarded headers are attacker-controlled unless a trusted proxy sets
+   * them; without an IP the limiter falls back to the user-agent, which a
+   * client can rotate. Deployments behind a proxy or platform edge should
+   * provide this — `forwardedClientIp` covers the common `x-forwarded-for`
+   * case, or read a platform header directly, for example
+   * `(request) => request.headers.get('cf-connecting-ip')`.
+   * A thrown error or empty result falls back to the user-agent-only key.
+   */
+  clientIp?(request: Request): string | null | undefined
   /** Observe full server-side failures without exposing them in HTTP responses. */
   onError?(error: unknown, request: Request): void | Promise<void>
 }

@@ -1913,6 +1913,8 @@ mod tests {
             DATABASE_URL='postgres://localhost/db'
             EMPTY=
             INVALID
+            export EXPORTED_TOKEN=shell-style
+            export=literal-export-key
             "#,
         );
 
@@ -1926,6 +1928,11 @@ mod tests {
         );
         assert_eq!(env.get("EMPTY"), Some(&"".to_string()));
         assert!(!env.contains_key("INVALID"));
+        // Shell-sourceable files prefix assignments with `export`; the prefix
+        // is not part of the key.
+        assert_eq!(env.get("EXPORTED_TOKEN"), Some(&"shell-style".to_string()));
+        assert!(!env.contains_key("export EXPORTED_TOKEN"));
+        assert_eq!(env.get("export"), Some(&"literal-export-key".to_string()));
     }
 
     #[test]

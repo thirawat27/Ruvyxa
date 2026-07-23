@@ -38,6 +38,15 @@ pub(crate) fn parse_env_source(source: &str) -> BTreeMap<String, String> {
             continue;
         }
 
+        // dotenv-style `export KEY=value`: files written for `source` keep
+        // the shell prefix, which is not part of the variable name. A literal
+        // `export=value` line still assigns the key `export`.
+        let line = line
+            .strip_prefix("export ")
+            .or_else(|| line.strip_prefix("export\t"))
+            .map(str::trim_start)
+            .unwrap_or(line);
+
         let Some((key, value)) = line.split_once('=') else {
             continue;
         };

@@ -73,7 +73,8 @@ The default endpoint base is `/__ruvyxa/auth`:
 | `/oauth/:provider/start`    | GET    | Create PKCE verifier/state and redirect                        |
 | `/oauth/:provider/callback` | GET    | Atomically consume state, exchange code, resolve profile       |
 | `/magic-link`               | POST   | Create and deliver a one-time email token                      |
-| `/magic-link/callback`      | GET    | Atomically consume the email token and create a session        |
+| `/magic-link/callback`      | GET    | Render a confirmation page without consuming the token         |
+| `/magic-link/callback`      | POST   | Atomically consume the email token and create a session        |
 | `/webauthn/options`         | POST   | Delegate challenge/options creation                            |
 | `/webauthn/verify`          | POST   | Delegate standards-compliant verification and create a session |
 
@@ -87,7 +88,12 @@ Security invariants:
   state, protected protocol parameters, HTTPS provider endpoints, bounded provider calls, and safe
   local return paths;
 - magic links and OAuth state require atomic `AuthStore.take()` to prevent replay;
-- rate limiting requires atomic `AuthRateLimitStore.consume()` and does not trust forwarded IPs;
+- the magic-link GET renders a non-consuming confirmation page, so mail scanners that prefetch links
+  cannot burn tokens; consumption happens on the same-origin POST the page submits;
+- rate-limit buckets bind to the resolved client IP when `clientIp` is configured (for example
+  `forwardedClientIp` behind a trusted proxy) and fall back to the user-agent otherwise;
+- rate limiting requires atomic `AuthRateLimitStore.consume()` and never trusts forwarded IP headers
+  unless the deployment opts in through `clientIp`;
 - provider tokens never enter the browser session payload;
 - process-local memory stores require `{ development: true }` and fail production plugin builds.
 
