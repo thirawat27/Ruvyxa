@@ -814,7 +814,19 @@ function normalizeBasePath(value: string): string {
 }
 
 function safeReturnTo(value: string | null): string {
-  return value && value.startsWith('/') && !value.startsWith('//') ? value : '/'
+  if (typeof value !== 'string' || !value.startsWith('/')) return '/'
+  // A naive "starts with / but not //" check still lets "/\evil.com" through:
+  // browsers fold the backslash (and tabs/newlines) into "//authority", turning
+  // the Location header into a cross-origin redirect. Resolve against a fixed
+  // base and require the origin to survive — only a genuine same-origin path
+  // round-trips, so every normalization trick collapses to "/".
+  try {
+    const resolved = new URL(value, 'http://ruvyxa.invalid')
+    if (resolved.origin !== 'http://ruvyxa.invalid') return '/'
+    return `${resolved.pathname}${resolved.search}${resolved.hash}`
+  } catch {
+    return '/'
+  }
 }
 
 function loginRateKey(provider: string, input: Record<string, unknown>): string {

@@ -332,6 +332,56 @@ describe('@ruvyxa/auth', () => {
     }
   })
 
+  it('neutralizes backslash open-redirect payloads in returnTo', async () => {
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async (input: string | URL | Request) => {
+      if (String(input) === 'https://provider.example/token') {
+        return Response.json({ access_token: 'provider-secret-token', token_type: 'Bearer' })
+      }
+      return Response.json({ sub: 'oauth-1', email: 'oauth@example.com' })
+    }) as typeof fetch
+    try {
+      const auth = runtime({
+        providers: {
+          example: {
+            type: 'oauth',
+            id: 'example',
+            authorizationUrl: 'https://provider.example/authorize',
+            tokenUrl: 'https://provider.example/token',
+            userInfoUrl: 'https://provider.example/me',
+            clientId: 'client-id',
+            clientSecret: 'client-secret',
+            scopes: ['openid'],
+            mapProfile(profile: unknown) {
+              const value = profile as { sub: string; email: string }
+              return { id: value.sub, email: value.email }
+            },
+          },
+        },
+      })
+      // Attacker sends "/\evil.com": a browser folds the backslash into
+      // "//evil.com" and follows the Location cross-origin. The callback must
+      // collapse the payload back to a same-origin "/".
+      const start = await auth.handle(
+        new Request(`${origin}/__ruvyxa/auth/oauth/example/start?returnTo=%2F%5Cevil.com`, {
+          headers: { 'user-agent': 'oauth-redirect-test' },
+        }),
+      )
+      const authorization = new URL(start?.headers.get('location') ?? '')
+      const state = authorization.searchParams.get('state')!
+      const stateCookie = start?.headers.get('set-cookie')?.split(';')[0]
+      const completed = await auth.handle(
+        new Request(`${origin}/__ruvyxa/auth/oauth/example/callback?code=one&state=${state}`, {
+          headers: { cookie: stateCookie! },
+        }),
+      )
+      assert.equal(completed?.status, 303)
+      assert.equal(completed?.headers.get('location'), '/')
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
   it('binds OAuth state to the initiating browser and protects PKCE parameters', async () => {
     const provider = {
       type: 'oauth' as const,
