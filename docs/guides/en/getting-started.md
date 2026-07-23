@@ -1,5 +1,10 @@
 # Getting Started
 
+> 🟢 **Beginner friendly** · ⏱️ ~5 min read
+>
+> **You'll learn:** install Ruvyxa, create a project, make your first pages, and know where to go
+> when something breaks. No prior framework experience needed — basic React is enough.
+
 Ruvyxa is a React framework where **folders are routes, pages are components, and the toolchain is
 one native binary**. If you know basic React, you already know most of what you need — this page
 gets you from zero to a running app in about five minutes.
@@ -150,6 +155,29 @@ A suggested path once `npm run dev` is running:
 
 Every Ruvyxa error has a stable `RUV` code, the offending file, and a suggested fix — read the
 message before searching the web; it usually contains the answer.
+
+## Words You'll Meet in These Docs
+
+Skim this once — every chapter uses these terms.
+
+| Term                | Plain meaning                                                                        |
+| ------------------- | ------------------------------------------------------------------------------------ |
+| **Route**           | A URL your app answers. Created by making a folder with `page.tsx` under `app/`.     |
+| **Layout**          | A component that wraps every page below it (nav bar, footer).                        |
+| **HMR**             | Hot Module Replacement — save a file, browser updates without a full reload.         |
+| **SSR**             | HTML rendered on the server on every request. Good for fresh data.                   |
+| **SSG**             | HTML rendered once at build time. Fastest; good for stable pages.                    |
+| **ISR**             | SSG that re-renders itself after a timer expires. Good for "mostly static" pages.    |
+| **CSR**             | Page rendered in the browser by JavaScript. For heavily interactive UI.              |
+| **PPR**             | Static shell served instantly, slow parts stream in after. Best of both.             |
+| **API route**       | A `route.ts` file exporting `GET`/`POST`/… — a backend endpoint, no page.            |
+| **Server action**   | A validated server function you call from a form or component — mutations made safe. |
+| **Adapter**         | Converts your build output into the shape a hosting platform expects.                |
+| **`.ruvyxa/`**      | The build output folder. Generated — never edit, never commit.                       |
+| **`RUV____` codes** | Every Ruvyxa error has a stable code, the offending file, and a suggested fix.       |
+
+Full rendering details live in [Rendering Strategies](rendering-strategies.md) — including a "which
+one should I use?" decision table.
 
 ## Next Steps
 

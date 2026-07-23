@@ -1,5 +1,13 @@
 # Data Loading & Cache
 
+> 🟡 **ระดับกลาง** · ⏱️ อ่าน ~8 นาที
+>
+> **จะได้เรียนรู้:** ดึงข้อมูลฝั่ง server ด้วย `loader`, cache ผลลัพธ์ที่แพง และ refresh แบบ SWR
+
+บทนี้ว่าด้วยการ**อ่าน**ข้อมูลฝั่ง server — ดึงจากฐานข้อมูลหรือ API ก่อนหน้า render และ cache
+ผลลัพธ์ให้ request ซ้ำเร็วขึ้น ส่วนการ**เขียน**ข้อมูล (submit form, mutation) ดูที่
+[Server Actions](server-actions.md)
+
 ## Loaders
 
 ใช้ `loader` เพื่อสร้างฟังก์ชันดึงข้อมูลฝั่ง server เรียกใช้จาก server page หรือ server-only module:

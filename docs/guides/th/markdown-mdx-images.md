@@ -1,5 +1,10 @@
 # Markdown, MDX, Images & Metadata
 
+> 🟢 **เหมาะกับมือใหม่** · ⏱️ อ่าน ~7 นาที
+>
+> **จะได้เรียนรู้:** เขียนหน้าเว็บด้วย Markdown/MDX, รูปถูก optimize เป็น WebP ให้อัตโนมัติ และตั้ง
+> SEO metadata รายหน้า
+
 ## Markdown และ MDX Pages
 
 `page.md` และ `page.mdx` เป็น first-class route files รองรับ frontmatter, Markdown, MDX/JSX และ

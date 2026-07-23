@@ -1,5 +1,16 @@
 # Environment Variables
 
+> 🟢 **Beginner friendly** · ⏱️ ~4 min read
+>
+> **You'll learn:** keep API keys and database URLs out of your code, and which values are safe to
+> expose to the browser.
+
+Environment variables keep values out of your code — API keys, database URLs, feature flags.
+
+> ⚠️ **The one rule that matters:** anything prefixed `RUVYXA_PUBLIC_` is shipped to every visitor's
+> browser — **secrets must never carry that prefix**. Ruvyxa enforces this boundary at build time
+> and fails the build if server-only values leak toward the client.
+
 ## Public vs Private
 
 | Type    | Prefix            | Access                                                          |

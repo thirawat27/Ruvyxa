@@ -1,5 +1,15 @@
 # Server Actions
 
+> 🟡 **ระดับกลาง** · ⏱️ อ่าน ~8 นาที
+>
+> **จะได้เรียนรู้:** แก้ข้อมูลจาก form และ component โดยไม่ต้องเขียน endpoint, validate
+> ข้อมูลที่ไม่น่าไว้ใจ และจัดการสถานะสำเร็จ/ผิดพลาด
+
+Server action คือวิธีที่หน้าเว็บ**เปลี่ยน**ข้อมูล — submit form, เพิ่ม todo, ลบ record
+มันคือฟังก์ชันฝั่ง server ที่ component เรียกได้ตรง ๆ: ไม่ต้องประกาศ endpoint ไม่ต้องเขียนโค้ด fetch
+และ validation อยู่ใน pattern ให้แล้ว ใช้ [API route](api-routes.md) แทนเฉพาะเมื่อมีอะไร _นอกแอป_
+ต้องเรียก endpoint นั้น
+
 ## การสร้าง Actions
 
 วาง mutation ในไฟล์ `action.ts` ไว้ข้าง route ที่เป็นเจ้าของ ตรวจสอบและ validate

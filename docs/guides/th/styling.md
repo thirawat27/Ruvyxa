@@ -1,5 +1,10 @@
 # Styling, SCSS และ CSS Modules
 
+> 🟢 **เหมาะกับมือใหม่** · ⏱️ อ่าน ~5 นาที
+>
+> **จะได้เรียนรู้:** global stylesheet, Sass/SCSS และ CSS Modules รายคอมโพเนนต์ — hot reload ครบ
+> ไม่ต้องตั้งค่าอะไรเพิ่ม
+
 Ruvyxa รองรับ global CSS, SCSS/Sass และ CSS Modules แบบ local scope ผ่าน module graph ตามปกติ
 ไฟล์ที่ import สามารถอยู่ที่ใดก็ได้ภายในโปรเจค
 

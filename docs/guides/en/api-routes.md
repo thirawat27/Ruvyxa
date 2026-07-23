@@ -1,5 +1,15 @@
 # API Routes
 
+> 🟡 **Intermediate** · ⏱️ ~6 min read
+>
+> **You'll learn:** create JSON endpoints with `route.ts`, handle each HTTP method, and validate
+> incoming request bodies safely.
+
+An API route is a backend endpoint without a page — a URL that returns JSON (or anything else)
+instead of HTML. Use one when the browser, a mobile app, or another service needs to call your
+server: form submissions from external sites, webhooks, health checks, a public API. If you only
+need to mutate data from your own pages, [Server Actions](server-actions.md) are usually simpler.
+
 ## Creating API Routes
 
 Create `route.ts` and export named HTTP method handlers. Handlers receive a standard `Request` and

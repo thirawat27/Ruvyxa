@@ -1,5 +1,12 @@
 # Server & Client Components
 
+> 🟡 **Intermediate** · ⏱️ ~8 min read
+>
+> **You'll learn:** the two worlds your code runs in, when to write `'use client'`, and how Ruvyxa
+> stops secrets from leaking into the browser.
+>
+> Read [Routing](routing.md) first if you haven't.
+
 ## The mental model
 
 Every Ruvyxa app has **two worlds**:

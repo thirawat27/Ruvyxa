@@ -1,5 +1,10 @@
 # Plugins
 
+> 🔴 **ขั้นสูง** · ⏱️ อ่าน ~10 นาที
+>
+> **จะได้เรียนรู้:** ต่อขยาย build และ request pipeline ด้วย TypeScript plugin — transform,
+> middleware, build-complete hook — แอปส่วนใหญ่ไม่จำเป็นต้องเขียน plugin เอง
+
 ระบบ plugin ของ Ruvyxa เป็นโมดูลแอปพลิเคชันที่เขียนด้วย TypeScript
 
 สร้าง starter:

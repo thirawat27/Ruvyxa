@@ -1,9 +1,31 @@
 # Rendering Strategies
 
-Ruvyxa chooses a rendering strategy per page. The source detection order is significant — the
-**first matching rule wins**.
+> 🟢 **Beginner friendly** · ⏱️ ~8 min read
+>
+> **You'll learn:** the five ways a page can be rendered, how to pick one in a single question, and
+> how each is declared. Safe default: declare nothing.
+
+## Which One Should I Use?
+
+New to rendering strategies? Answer one question — _when should this page's HTML be produced?_ — and
+pick from the table. You don't configure a strategy globally; each page declares (or auto-detects)
+its own.
+
+| Your page is…                                             | Use     | How                                                      |
+| --------------------------------------------------------- | ------- | -------------------------------------------------------- |
+| The same for everyone, rarely changes (about, docs)       | **SSG** | Do nothing — static pages are detected for you           |
+| Fresh data on every request (dashboard, search results)   | **SSR** | Do nothing — pages with request-time data default to SSR |
+| Mostly static but should refresh sometimes (blog listing) | **ISR** | `export const revalidate = 60`                           |
+| Heavily interactive, browser-only (editor, canvas, game)  | **CSR** | `'use client'` at the top of the file                    |
+| A static shell with a few slow dynamic parts              | **PPR** | `export const ppr = true` + `<Suspense>`                 |
+
+Not sure? Do nothing — Ruvyxa picks SSG for static pages and SSR for dynamic ones, which is correct
+for most pages. Run `npx ruvyxa routes` anytime to see what each page resolved to.
 
 ## Detection Order
+
+Ruvyxa chooses a rendering strategy per page. The source detection order is significant — the
+**first matching rule wins**.
 
 | Priority | Declaration                                | Strategy | Appropriate Use                              |
 | -------- | ------------------------------------------ | -------- | -------------------------------------------- |

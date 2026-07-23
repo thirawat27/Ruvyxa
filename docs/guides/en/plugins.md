@@ -1,5 +1,10 @@
 # Plugins
 
+> 🔴 **Advanced** · ⏱️ ~10 min read
+>
+> **You'll learn:** extend the build and the request pipeline with TypeScript plugins — transforms,
+> middleware, and build-complete hooks. Most apps never need a custom plugin.
+
 Ruvyxa plugins are ordinary application modules written in TypeScript.
 
 Create a starter:

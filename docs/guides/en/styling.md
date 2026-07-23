@@ -1,5 +1,10 @@
 # Styling, SCSS, and CSS Modules
 
+> 🟢 **Beginner friendly** · ⏱️ ~5 min read
+>
+> **You'll learn:** global stylesheets, Sass/SCSS, and per-component CSS Modules — all with hot
+> reload and zero extra configuration.
+
 Ruvyxa handles global CSS, SCSS/Sass, and locally scoped CSS Modules in the normal module graph.
 Imported styles can live anywhere inside the project.
 

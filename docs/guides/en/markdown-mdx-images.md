@@ -1,5 +1,10 @@
 # Markdown, MDX, Images & Metadata
 
+> 🟢 **Beginner friendly** · ⏱️ ~7 min read
+>
+> **You'll learn:** write pages in Markdown/MDX, get automatic WebP image optimization, and set SEO
+> metadata per page.
+
 ## Markdown and MDX Pages
 
 `page.md` and `page.mdx` are first-class route files. They support frontmatter, Markdown, MDX/JSX,

@@ -1,5 +1,14 @@
 # Configuration
 
+> 🔴 **Reference** · ⏱️ เปิดหาเฉพาะที่ต้องใช้
+>
+> **ในบทนี้มี:** ทุก option ของ `ruvyxa.config.ts` — server, build, rendering, security, cache,
+> styles — พร้อม default และ type
+
+**มือใหม่ข้ามบทนี้ไปก่อนได้เลย** — โปรเจกต์ใหม่ทำงานได้โดยไม่ต้องแตะ `ruvyxa.config.ts` ที่ generate
+มา ทุก option มี default ที่เหมาะสมอยู่แล้ว กลับมาอ่านเมื่อต้องเปลี่ยน port, ใส่ adapter, จูน cache
+หรือเข้มงวด security และใช้ autocomplete ใน editor สำรวจได้เลย (`config()` มี type ครบ)
+
 `ruvyxa.config.ts` — ใช้ `config()` เพื่อ TypeScript validation:
 
 ```ts

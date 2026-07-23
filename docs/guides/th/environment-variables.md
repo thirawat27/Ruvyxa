@@ -1,5 +1,15 @@
 # Environment Variables
 
+> 🟢 **เหมาะกับมือใหม่** · ⏱️ อ่าน ~4 นาที
+>
+> **จะได้เรียนรู้:** เก็บ API key และ database URL ออกจากโค้ด และค่าไหนปลอดภัยพอจะให้ browser เห็น
+
+Environment variable เก็บค่าออกจากโค้ด — API key, database URL, feature flag
+
+> ⚠️ **กฎเดียวที่ต้องจำ:** อะไรที่ prefix `RUVYXA_PUBLIC_` จะถูกส่งไป browser ของผู้เข้าชมทุกคน —
+> **secret ห้ามใช้ prefix นี้เด็ดขาด** Ruvyxa บังคับ boundary นี้ตอน build และ fail ให้ทันทีถ้าค่า
+> server-only รั่วไปฝั่ง client
+
 ## Public vs Private
 
 | ประเภท  | Prefix            | เข้าถึงจาก                                                          |

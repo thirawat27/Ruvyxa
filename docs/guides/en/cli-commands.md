@@ -1,5 +1,21 @@
 # CLI Commands
 
+> 🟢 **Beginner friendly** · ⏱️ ~5 min read
+>
+> **You'll learn:** the three everyday commands, plus the diagnostic tools that explain your app
+> back to you when something is unclear.
+
+Just starting out? You only need three commands day to day:
+
+```bash
+npm run dev     # write code — local server with instant reload
+npm run build   # prepare for production
+npm run start   # run the production build locally
+```
+
+Everything else on this page is diagnostics and tooling you can reach for when you need it —
+`analyze` and `check` are the two worth learning next, since they catch problems before deploying.
+
 ## Quick Reference
 
 | Command                         | Purpose                                                            |

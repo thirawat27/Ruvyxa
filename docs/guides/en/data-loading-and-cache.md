@@ -1,5 +1,14 @@
 # Data Loading & Cache
 
+> 🟡 **Intermediate** · ⏱️ ~8 min read
+>
+> **You'll learn:** fetch data on the server with `loader`, cache expensive results, and refresh
+> them with SWR-style revalidation.
+
+This chapter is about **reading** data on the server — fetching from a database or API before the
+page renders, and caching the result so repeat requests are fast. For **writing** data (form
+submissions, mutations), see [Server Actions](server-actions.md).
+
 ## Loaders
 
 Use `loader` to create a server-side data-fetching function. Call it from a server page or

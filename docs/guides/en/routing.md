@@ -1,5 +1,10 @@
 # Routing
 
+> 🟢 **Beginner friendly** · ⏱️ ~7 min read
+>
+> **You'll learn:** how folders become URLs, pages with changing parts (`[slug]`), catch-all routes,
+> and how to group files without affecting URLs.
+
 Routes come directly from folders under `app/`. There is no route configuration file, no second
 pattern to learn, and nothing to keep in sync: **the folder structure is the route table**.
 

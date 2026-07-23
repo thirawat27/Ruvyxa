@@ -1,5 +1,10 @@
 # Official Packages: Database, Auth & Realtime
 
+> 🟡 **Intermediate** · ⏱️ ~10 min read
+>
+> **You'll learn:** add a typed database layer, login/sessions, and live UI updates — each package
+> optional and removable without migration.
+
 Ruvyxa ships three installable first-party packages for application state. Each one is optional,
 additive, and removable — deleting the import restores the previous behavior with no migration.
 

@@ -1,5 +1,15 @@
 # Configuration Reference
 
+> 🔴 **Reference** · ⏱️ dip in as needed
+>
+> **You'll find:** every `ruvyxa.config.ts` option — server, build, rendering, security, cache,
+> styles — with defaults and types.
+
+**Beginners: you can skip this chapter for now.** A new project works with the generated
+`ruvyxa.config.ts` untouched — every option below has a sensible default. Come back here when you
+need to change a port, add an adapter, tune caching, or tighten security, and use your editor's
+autocomplete (the `config()` helper is fully typed) to explore.
+
 Use `config()` so TypeScript validates the public configuration shape:
 
 ```ts

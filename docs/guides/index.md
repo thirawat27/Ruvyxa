@@ -11,23 +11,39 @@ validates the application graph, builds production output, and checks developmen
 
 ## Table of Contents
 
-| Chapter                             | EN                                   | TH                                   |
-| ----------------------------------- | ------------------------------------ | ------------------------------------ |
-| 1. Getting Started                  | [EN](en/getting-started.md)          | [TH](th/getting-started.md)          |
-| 2. Routing                          | [EN](en/routing.md)                  | [TH](th/routing.md)                  |
-| 3. Server & Client Components       | [EN](en/server-client-components.md) | [TH](th/server-client-components.md) |
-| 4. API Routes                       | [EN](en/api-routes.md)               | [TH](th/api-routes.md)               |
-| 5. Data Loading & Cache             | [EN](en/data-loading-and-cache.md)   | [TH](th/data-loading-and-cache.md)   |
-| 6. Server Actions                   | [EN](en/server-actions.md)           | [TH](th/server-actions.md)           |
-| 7. Rendering Strategies             | [EN](en/rendering-strategies.md)     | [TH](th/rendering-strategies.md)     |
-| 8. Styling, SCSS & CSS Modules      | [EN](en/styling.md)                  | [TH](th/styling.md)                  |
-| 9. Markdown, MDX, Images & Metadata | [EN](en/markdown-mdx-images.md)      | [TH](th/markdown-mdx-images.md)      |
-| 10. Environment Variables           | [EN](en/environment-variables.md)    | [TH](th/environment-variables.md)    |
-| 11. Configuration Reference         | [EN](en/configuration.md)            | [TH](th/configuration.md)            |
-| 12. CLI Commands                    | [EN](en/cli-commands.md)             | [TH](th/cli-commands.md)             |
-| 13. Deployment                      | [EN](en/deployment.md)               | [TH](th/deployment.md)               |
-| 14. Plugins                         | [EN](en/plugins.md)                  | [TH](th/plugins.md)                  |
-| 15. Official Packages (DB/Auth/RT)  | [EN](en/official-packages.md)        | [TH](th/official-packages.md)        |
+Levels: 🟢 beginner friendly · 🟡 intermediate · 🔴 advanced/reference
+
+| Chapter                             | Level | EN                                   | TH                                   |
+| ----------------------------------- | ----- | ------------------------------------ | ------------------------------------ |
+| 1. Getting Started                  | 🟢    | [EN](en/getting-started.md)          | [TH](th/getting-started.md)          |
+| 2. Routing                          | 🟢    | [EN](en/routing.md)                  | [TH](th/routing.md)                  |
+| 3. Server & Client Components       | 🟡    | [EN](en/server-client-components.md) | [TH](th/server-client-components.md) |
+| 4. API Routes                       | 🟡    | [EN](en/api-routes.md)               | [TH](th/api-routes.md)               |
+| 5. Data Loading & Cache             | 🟡    | [EN](en/data-loading-and-cache.md)   | [TH](th/data-loading-and-cache.md)   |
+| 6. Server Actions                   | 🟡    | [EN](en/server-actions.md)           | [TH](th/server-actions.md)           |
+| 7. Rendering Strategies             | 🟢    | [EN](en/rendering-strategies.md)     | [TH](th/rendering-strategies.md)     |
+| 8. Styling, SCSS & CSS Modules      | 🟢    | [EN](en/styling.md)                  | [TH](th/styling.md)                  |
+| 9. Markdown, MDX, Images & Metadata | 🟢    | [EN](en/markdown-mdx-images.md)      | [TH](th/markdown-mdx-images.md)      |
+| 10. Environment Variables           | 🟢    | [EN](en/environment-variables.md)    | [TH](th/environment-variables.md)    |
+| 11. Configuration Reference         | 🔴    | [EN](en/configuration.md)            | [TH](th/configuration.md)            |
+| 12. CLI Commands                    | 🟢    | [EN](en/cli-commands.md)             | [TH](th/cli-commands.md)             |
+| 13. Deployment                      | 🟢    | [EN](en/deployment.md)               | [TH](th/deployment.md)               |
+| 14. Plugins                         | 🔴    | [EN](en/plugins.md)                  | [TH](th/plugins.md)                  |
+| 15. Official Packages (DB/Auth/RT)  | 🟡    | [EN](en/official-packages.md)        | [TH](th/official-packages.md)        |
+
+## Pick Your Path
+
+**🌱 Never used a web framework** — read in order: 1 → 2 → 8 → 13. Build something small after
+chapter 2; the glossary at the end of chapter 1 explains every term you'll meet. Skip everything
+marked 🟡/🔴 until you want it.
+
+**⚛️ Know React, new to Ruvyxa** — skim 1, then 2 → 3 → 7. Add 5–6 when you need data, 13 to ship.
+Chapters 4, 9, 10 as needed.
+
+**▲ Coming from Next.js** — the mental model maps almost one-to-one: `app/` routing (2),
+`'use client'` boundaries (3), SSG/ISR/PPR (7), server actions (6). Read 13 for the adapter/deploy
+story — zero-config detection replaces `next.config` output modes. Chapter 15 covers the batteries
+(DB/auth/realtime) that Next leaves to third parties.
 
 ---
 
@@ -40,6 +56,10 @@ Start here:
 1. [Getting Started](en/getting-started.md) — requirements, create a project, application structure
 2. [Routing](en/routing.md) — file-system routes, dynamic segments, catch-all, route groups
 3. [CLI Commands](en/cli-commands.md) — `dev`, `build`, `start`, `analyze`, `doctor`, and more
+
+New to web frameworks? Chapter 1 ends with a **glossary** of every term these docs use, chapter 7
+opens with a **"which rendering strategy?"** decision table, and chapter 13 opens with **Quick
+Deploy** — two or three steps per platform.
 
 Then explore by topic:
 

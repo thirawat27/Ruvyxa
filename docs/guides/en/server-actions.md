@@ -1,5 +1,15 @@
 # Server Actions
 
+> 🟡 **Intermediate** · ⏱️ ~8 min read
+>
+> **You'll learn:** mutate data from forms and components without writing endpoints, validate
+> untrusted input, and handle success/error states.
+
+A server action is how a page **changes** data — submitting a form, adding a todo, deleting a
+record. It's a server function your components can call directly: no endpoint to define, no fetch
+code to write, and validation is built into the pattern. Reach for an [API route](api-routes.md)
+instead only when something _outside_ your app needs to call the endpoint.
+
 ## Creating Actions
 
 Place mutations in an `action.ts` file next to the route that owns them. Parse and validate
