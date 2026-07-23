@@ -1,5 +1,5 @@
 import type { Adapter, AdapterArtifact, AdapterOutput, BuildContext } from '@ruvyxa/core'
-import { clientBuildOutput, validateBuildContext } from '@ruvyxa/core'
+import { clientBuildOutput, projectRelativeOutDir, validateBuildContext } from '@ruvyxa/core'
 
 /**
  * Options for the Cloudflare Workers deployment adapter.
@@ -9,10 +9,13 @@ export interface CloudflareAdapterOptions {
   workerEntry?: string
   /**
    * Also emit a `wrangler.jsonc` at the project root pointing at the
-   * generated Worker script and static assets, so `wrangler deploy` works
-   * right after `ruvyxa build` with no dashboard configuration. An existing
-   * project `wrangler.jsonc` is never overwritten.
-   * @default true
+   * generated Worker script and static assets. An existing project
+   * `wrangler.jsonc` is never overwritten.
+   *
+   * Off by default: the deploy directory already contains a self-sufficient
+   * config, so `wrangler deploy -c .ruvyxa/deploy/cloudflare/wrangler.jsonc`
+   * works with no file at the project root.
+   * @default false
    */
   projectConfig?: boolean
   /**
@@ -94,6 +97,9 @@ export function cloudflareAdapter(options: CloudflareAdapterOptions = {}): Adapt
       validateBuildContext(ctx, 'cloudflareAdapter')
 
       const compatDate = options.compatibilityDate ?? new Date().toISOString().slice(0, 10)
+      // Config files are committed or read on other machines; never embed the
+      // absolute build-machine outDir in them.
+      const relativeOutDir = projectRelativeOutDir(ctx)
 
       const wranglerConfig = JSON.stringify(
         {
@@ -109,9 +115,9 @@ export function cloudflareAdapter(options: CloudflareAdapterOptions = {}): Adapt
       const projectWranglerConfig = JSON.stringify(
         {
           name: 'ruvyxa-app',
-          main: `${ctx.outDir}/deploy/cloudflare/worker/index.mjs`,
+          main: `${relativeOutDir}/deploy/cloudflare/worker/index.mjs`,
           compatibility_date: compatDate,
-          assets: { directory: `${ctx.outDir}/deploy/cloudflare/assets` },
+          assets: { directory: `${relativeOutDir}/deploy/cloudflare/assets` },
         },
         null,
         2,
@@ -142,14 +148,14 @@ export function cloudflareAdapter(options: CloudflareAdapterOptions = {}): Adapt
           },
           {
             // Workers static assets read _headers from the asset directory;
-            // hashed client bundles are immutable.
+            // hashed client bundles live under /__ruvyxa/client/ and are
+            // immutable.
             kind: 'file',
             path: 'deploy/cloudflare/assets/_headers',
-            contents: '/client/*\n  Cache-Control: public, max-age=31536000, immutable\n',
+            contents: '/__ruvyxa/client/*\n  Cache-Control: public, max-age=31536000, immutable\n',
           },
-          ...(options.projectConfig === false
-            ? []
-            : [
+          ...(options.projectConfig === true
+            ? [
                 {
                   kind: 'file',
                   path: 'wrangler.jsonc',
@@ -157,7 +163,8 @@ export function cloudflareAdapter(options: CloudflareAdapterOptions = {}): Adapt
                   skipIfExists: true,
                   contents: projectWranglerConfig + '\n',
                 } satisfies AdapterArtifact,
-              ]),
+              ]
+            : []),
         ],
       }
     },

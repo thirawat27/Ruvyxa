@@ -23,9 +23,80 @@ Select an adapter in `ruvyxa.config.ts`, or pass one on the command line without
 ruvyxa build --adapter vercel
 ```
 
-`--adapter` accepts `node`, `bun`, `static`, `vercel`, `netlify`, or `cloudflare`, resolves the
-matching `@ruvyxa/adapter-*` package from your project, and overrides `config.adapter` for that
-build. If the package is not installed the build fails with `RUV2203` and the exact install command.
+`--adapter` accepts two kinds of value, and overrides `config.adapter` for that build only:
+
+**1. Built-in names** — `node`, `bun`, `static`, `vercel`, `netlify`, `cloudflare`
+
+All six official adapters ship as dependencies of the `ruvyxa` package itself, so these names work
+with `ruvyxa` alone installed — no extra `pnpm add @ruvyxa/adapter-*` needed:
+
+```bash
+ruvyxa build --adapter node      # standalone server, ready to run
+ruvyxa build --adapter netlify   # .netlify/v1/ + deploy dir, ready to deploy
+```
+
+Install an individual `@ruvyxa/adapter-*` package only when you need to pass options through
+`ruvyxa.config.ts`, such as `netlifyAdapter({ projectConfig: true })` — the `--adapter` flag always
+uses the adapter's defaults.
+
+**2. Any adapter package name** — opens the ecosystem to platforms without an official adapter (Deno
+Deploy, Fastly, AWS Lambda, and so on):
+
+```bash
+ruvyxa build --adapter @acme/ruvyxa-adapter-deno   # scoped names are used verbatim
+ruvyxa build --adapter fastly                       # short names try the conventions
+```
+
+Resolution order:
+
+1. A scoped name (`@scope/name`) or one containing `/` resolves as that exact package.
+2. A short name tries `@ruvyxa/adapter-<name>`, then `ruvyxa-adapter-<name>`, then `<name>`.
+3. Each candidate resolves from your project's `node_modules` first, then falls back to the copies
+   bundled with `ruvyxa` — **a project-installed version always wins**, so you can pin an adapter
+   version per project.
+
+When no candidate resolves, the build fails with `RUV2203` listing every package name that was
+tried, so the missing install is obvious.
+
+An adapter package has a single contract: its default export must be a factory function returning an
+object matching the `Adapter` interface from `@ruvyxa/core` (`name`, `target`, `supports?`,
+`build(ctx)`) — exactly what every official adapter does:
+
+```ts
+// ruvyxa-adapter-fastly/src/index.ts
+import type { Adapter, BuildContext } from '@ruvyxa/core'
+
+export default function fastlyAdapter(): Adapter {
+  return {
+    name: 'fastly',
+    target: 'edge',
+    supports: ['ssr', 'ssg', 'csr', 'api'],
+    build(ctx: BuildContext) {
+      return {
+        name: 'fastly',
+        target: 'edge',
+        entry: `${ctx.outDir}/server/app`,
+        assetsDir: `${ctx.outDir}/assets`,
+        artifacts: [/* ... */],
+      }
+    },
+  }
+}
+```
+
+### Zero-config platform detection
+
+When neither `config.adapter` nor `--adapter` selects an adapter, `ruvyxa build` detects the hosting
+platform from its build environment and picks the matching adapter automatically:
+
+| Environment variable | Adapter      |
+| -------------------- | ------------ |
+| `VERCEL`             | `vercel`     |
+| `NETLIFY`            | `netlify`    |
+| `CF_PAGES`           | `cloudflare` |
+
+Set `RUVYXA_ADAPTER=<name>` to override detection, or set it to a specific adapter on any other CI.
+A configured adapter always wins over detection.
 
 An adapter's post-build lifecycle runs while the build is still in the staging directory, so a
 failed adapter cannot replace a previously successful `.ruvyxa/` build. Generated deploy output
@@ -56,7 +127,7 @@ configuration is needed. Add `.vercel/` to `.gitignore`; it is generated on ever
 Pass `vercelAdapter({ projectOutput: false })` to keep the previous behavior of writing only under
 `.ruvyxa/deploy/vercel/` (deploy that directory manually with the “Other” preset).
 
-### Netlify zero-config
+### Netlify
 
 ```ts
 import { netlifyAdapter } from '@ruvyxa/adapter-netlify'
@@ -66,13 +137,18 @@ export default config({
 })
 ```
 
-The first `ruvyxa build` writes a `netlify.toml` at the project root with the build command and
-publish directory (`.ruvyxa/deploy/netlify/publish`) preconfigured — commit it and connect the
-repository to Netlify with no dashboard configuration. An existing `netlify.toml` is **never
-overwritten**; your own file always wins. Pass `netlifyAdapter({ projectConfig: false })` to skip
-generating it.
+No file is written at your project root. `ruvyxa build` emits Netlify's Frameworks API directory
+(`.netlify/v1/`, a gitignored build artifact) containing the SSR/API function and the immutable
+cache headers — Netlify picks it up automatically on deploy. One-time setup in the Netlify
+dashboard: set **Build command** to `npm run build` and **Publish directory** to
+`.ruvyxa/deploy/netlify/publish`.
 
-### Cloudflare zero-config
+Prefer a committed config file instead? Pass `netlifyAdapter({ projectConfig: true })` to generate a
+project-root `netlify.toml` (with project-relative paths) on the next build; an existing
+`netlify.toml` is **never overwritten**. Pass `frameworksApi: false` to skip the `.netlify/v1/`
+output.
+
+### Cloudflare
 
 ```ts
 import { cloudflareAdapter } from '@ruvyxa/adapter-cloudflare'
@@ -82,10 +158,16 @@ export default config({
 })
 ```
 
-`ruvyxa build` also writes a `wrangler.jsonc` at the project root pointing `assets.directory` at the
-generated static assets, so `wrangler deploy` works immediately with no dashboard configuration. An
-existing project `wrangler.jsonc` is **never overwritten**. Pass
-`cloudflareAdapter({ projectConfig: false })` to skip generating it.
+No file is written at your project root. The deploy directory is self-sufficient — deploy it
+directly:
+
+```bash
+npx wrangler deploy -c .ruvyxa/deploy/cloudflare/wrangler.jsonc
+```
+
+Prefer a committed root config? Pass `cloudflareAdapter({ projectConfig: true })` to generate a
+project-root `wrangler.jsonc` (with project-relative paths); an existing `wrangler.jsonc` is **never
+overwritten**.
 
 Vercel, Netlify, and Cloudflare adapters now support **full server rendering**:
 
@@ -118,6 +200,17 @@ node_modules/.bin/ruvyxa: Permission denied
 
 This means the installed Ruvyxa launcher was published without executable permission. Upgrade to a
 Ruvyxa release that includes the executable launcher.
+
+### GLIBC Version Error
+
+```
+ruvyxa: /lib64/libc.so.6: version `GLIBC_2.39' not found
+```
+
+Ruvyxa releases before 1.0.19 shipped dynamically linked Linux binaries that required the build
+machine's glibc, which broke on hosts with an older glibc (for example Vercel's Amazon Linux build
+image). Since 1.0.19 the Linux CLI binaries are fully static musl builds and run on any Linux —
+upgrade the `ruvyxa` package to fix this error.
 
 ### Node Version
 
@@ -170,14 +263,20 @@ For a static adapter, use its generated publish directory instead of deploying a
 
 ### Available
 
-| Adapter                      | Target                                         |
-| ---------------------------- | ---------------------------------------------- |
-| `@ruvyxa/adapter-node`       | Node launcher: `.ruvyxa/deploy/node/start.mjs` |
-| `@ruvyxa/adapter-bun`        | Bun launcher: `.ruvyxa/deploy/bun/start.mjs`   |
-| `@ruvyxa/adapter-static`     | Static files: `.ruvyxa/static/`                |
-| `@ruvyxa/adapter-cloudflare` | Cloudflare Pages: `.ruvyxa/deploy/cloudflare/` |
-| `@ruvyxa/adapter-netlify`    | Netlify static: `.ruvyxa/deploy/netlify/`      |
-| `@ruvyxa/adapter-vercel`     | Vercel static: `.ruvyxa/deploy/vercel/`        |
+| Adapter                      | Target                                                    |
+| ---------------------------- | --------------------------------------------------------- |
+| `@ruvyxa/adapter-node`       | Standalone server: `.ruvyxa/deploy/node/server/index.mjs` |
+| `@ruvyxa/adapter-bun`        | Bun launcher: `.ruvyxa/deploy/bun/start.mjs`              |
+| `@ruvyxa/adapter-static`     | Static files: `.ruvyxa/static/`                           |
+| `@ruvyxa/adapter-cloudflare` | Cloudflare Workers: `.ruvyxa/deploy/cloudflare/`          |
+| `@ruvyxa/adapter-netlify`    | Netlify functions + static: `.netlify/v1/` + deploy dir   |
+| `@ruvyxa/adapter-vercel`     | Vercel Build Output API: `.vercel/output/`                |
+
+All official adapters are bundled with the `ruvyxa` package — `--adapter <name>` and platform
+auto-detection work without installing anything. Install the individual `@ruvyxa/adapter-*` package
+only when you need to pass adapter options in `ruvyxa.config.ts`. Third-party adapter packages (any
+package exporting an adapter factory as its default export) work the same way via
+`--adapter <package-name>` or `config.adapter`.
 
 ### Usage
 
@@ -209,19 +308,17 @@ npm run build
 npm run start          # serve from .ruvyxa/
 ```
 
-Or use the Node adapter:
+Or build a standalone server that runs without the ruvyxa CLI at runtime:
 
 ```bash
-npm install @ruvyxa/adapter-node
+ruvyxa build --adapter node
+node .ruvyxa/deploy/node/server/index.mjs
 ```
 
-```ts
-import { nodeAdapter } from '@ruvyxa/adapter-node'
-
-export default config({
-  adapter: nodeAdapter(),
-})
-```
+The `deploy/node/` directory is self-contained (server + `public/` assets). Copy it into a Docker
+image, a VPS, PM2, systemd, or any PaaS (Render, Railway, Fly.io, Heroku) and run the same command —
+no `node_modules` and no native binary needed at runtime. The server honors `PORT` (default 3000)
+and `HOST` (default 0.0.0.0), and supports SSR, API, ISR, PPR, SSG, and CSR.
 
 ## Static Hosting
 

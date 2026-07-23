@@ -17,7 +17,6 @@ describe('cloudflareAdapter', () => {
         { kind: 'function', path: 'deploy/cloudflare/worker', scope: undefined },
         { kind: 'file', path: 'deploy/cloudflare/wrangler.jsonc', scope: undefined },
         { kind: 'file', path: 'deploy/cloudflare/assets/_headers', scope: undefined },
-        { kind: 'file', path: 'wrangler.jsonc', scope: 'project' },
       ],
     )
 
@@ -44,38 +43,37 @@ describe('cloudflareAdapter', () => {
     assert.doesNotMatch(String(functionArtifact!.handlerSource), /\.\/server\/app/)
     assert.match(String(functionArtifact!.handlerSource), /export default/)
 
-    // Verify _headers for client cache
+    // Verify _headers for client cache (hashed bundles live under
+    // /__ruvyxa/client/)
     const headersArtifact = output.artifacts?.find(
       (artifact) => artifact.path === 'deploy/cloudflare/assets/_headers',
     )
     assert.match(
       headersArtifact && 'contents' in headersArtifact ? String(headersArtifact.contents) : '',
-      /\/client\/\*\n {2}Cache-Control: public, max-age=31536000, immutable/,
+      /\/__ruvyxa\/client\/\*\n {2}Cache-Control: public, max-age=31536000, immutable/,
     )
 
-    // Verify project-scope wrangler.jsonc
-    const projectConfig = output.artifacts?.find((artifact) => artifact.path === 'wrangler.jsonc')
+    // Opt-in project-scope wrangler.jsonc embeds project-relative paths only —
+    // the file is committed, so an absolute build-machine path would break
+    // every other machine.
+    const optIn = await cloudflareAdapter({
+      projectConfig: true,
+      compatibilityDate: '2024-12-01',
+    }).build({ root: 'D:\\work\\site', outDir: 'D:\\work\\site\\.ruvyxa' })
+    const projectConfig = optIn.artifacts?.find((artifact) => artifact.path === 'wrangler.jsonc')
+    assert.ok(projectConfig)
     assert.equal(projectConfig?.skipIfExists, true)
     const projectWrangler = JSON.parse(
       projectConfig && 'contents' in projectConfig ? String(projectConfig.contents) : '{}',
     )
     assert.equal(projectWrangler.main, '.ruvyxa/deploy/cloudflare/worker/index.mjs')
+    assert.deepEqual(projectWrangler.assets, { directory: '.ruvyxa/deploy/cloudflare/assets' })
     assert.ok(projectWrangler.compatibility_date)
 
-    // Verify projectConfig: false disables project-scope artifacts
-    assert.deepEqual(
-      (
-        await cloudflareAdapter({ projectConfig: false, compatibilityDate: '2024-12-01' }).build({
-          root: '.',
-          outDir: '.ruvyxa',
-        })
-      ).artifacts?.map(({ path }) => path),
-      [
-        'deploy/cloudflare/assets',
-        'deploy/cloudflare/worker',
-        'deploy/cloudflare/wrangler.jsonc',
-        'deploy/cloudflare/assets/_headers',
-      ],
+    // Default: no project-scope artifacts at all
+    assert.equal(
+      output.artifacts?.some((artifact) => artifact.scope === 'project'),
+      false,
     )
 
     // Verify adapter metadata

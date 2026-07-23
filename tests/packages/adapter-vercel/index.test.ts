@@ -53,7 +53,7 @@ describe('vercelAdapter', () => {
     )
     assert.equal(config.version, 3)
     assert.deepEqual(config.routes[0], {
-      src: '^/client/(.*)$',
+      src: '^/__ruvyxa/client/(.*)$',
       headers: { 'cache-control': 'public, max-age=31536000, immutable' },
       continue: true,
     })

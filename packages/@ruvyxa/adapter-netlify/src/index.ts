@@ -1,5 +1,5 @@
 import type { Adapter, AdapterArtifact, AdapterOutput, BuildContext } from '@ruvyxa/core'
-import { clientBuildOutput, validateBuildContext } from '@ruvyxa/core'
+import { clientBuildOutput, projectRelativeOutDir, validateBuildContext } from '@ruvyxa/core'
 
 /**
  * Options for Netlify deployment.
@@ -9,12 +9,24 @@ export interface NetlifyAdapterOptions {
   functionsDir?: string
   /**
    * Also emit a `netlify.toml` at the project root pointing Netlify at the
-   * generated publish directory and functions, so a fresh site deploys
-   * without dashboard configuration. An existing project `netlify.toml` is
-   * never overwritten.
-   * @default true
+   * generated publish directory and functions. An existing project
+   * `netlify.toml` is never overwritten.
+   *
+   * Off by default: the adapter already emits the serverless function and
+   * cache headers through Netlify's Frameworks API (`.netlify/v1/`, a
+   * gitignored build artifact), so the only remaining setup is the publish
+   * directory — set once in the Netlify dashboard, or opt into this file.
+   * @default false
    */
   projectConfig?: boolean
+  /**
+   * Emit the Netlify Frameworks API directory (`.netlify/v1/`) at the project
+   * root during `ruvyxa build`: the SSR/API function and the immutable cache
+   * headers for hashed client bundles. Netlify picks the directory up
+   * automatically on the next deploy — no config file at the project root.
+   * @default true
+   */
+  frameworksApi?: boolean
 }
 
 /**
@@ -114,21 +126,41 @@ export function netlifyAdapter(options: NetlifyAdapterOptions = {}): Adapter {
     build(ctx: BuildContext): AdapterOutput {
       validateBuildContext(ctx, 'netlifyAdapter')
       const functionsDir = options.functionsDir ?? `${ctx.outDir}/netlify/functions`
+      // Config files are committed or read on other machines; never embed the
+      // absolute build-machine outDir in them.
+      const relativeOutDir = projectRelativeOutDir(ctx)
+
+      // Hashed client bundles are served under /__ruvyxa/client/ (see the
+      // chunk manifest src fields); the immutable header must match that URL.
+      const immutableHeaderToml =
+        '[[headers]]\n  for = "/__ruvyxa/client/*"\n  [headers.values]\n' +
+        '    Cache-Control = "public, max-age=31536000, immutable"\n'
 
       // Netlify.toml for the deploy directory
       const netlifyToml =
-        '[build]\n  publish = "publish"\n  functions = "functions"\n\n' +
-        '[[headers]]\n  for = "/client/*"\n  [headers.values]\n' +
-        '    Cache-Control = "public, max-age=31536000, immutable"\n'
+        '[build]\n  publish = "publish"\n  functions = "functions"\n\n' + immutableHeaderToml
 
-      // Project-root netlify.toml pointing at the build output
+      // Project-root netlify.toml pointing at the build output (opt-in)
       const projectNetlifyToml =
         '[build]\n' +
         '  command = "npx --no-install ruvyxa build"\n' +
-        `  publish = "${ctx.outDir}/deploy/netlify/publish"\n` +
-        `  functions = "${ctx.outDir}/deploy/netlify/functions"\n\n` +
-        '[[headers]]\n  for = "/client/*"\n  [headers.values]\n' +
-        '    Cache-Control = "public, max-age=31536000, immutable"\n'
+        `  publish = "${relativeOutDir}/deploy/netlify/publish"\n` +
+        `  functions = "${relativeOutDir}/deploy/netlify/functions"\n\n` +
+        immutableHeaderToml
+
+      // Frameworks API deploy configuration (.netlify/v1/config.json)
+      const frameworksApiConfig = JSON.stringify(
+        {
+          headers: [
+            {
+              for: '/__ruvyxa/client/*',
+              values: { 'Cache-Control': 'public, max-age=31536000, immutable' },
+            },
+          ],
+        },
+        null,
+        2,
+      )
 
       return {
         name: 'netlify',
@@ -154,9 +186,27 @@ export function netlifyAdapter(options: NetlifyAdapterOptions = {}): Adapter {
             path: 'deploy/netlify/netlify.toml',
             contents: netlifyToml,
           },
-          ...(options.projectConfig === false
+          // Frameworks API artifacts: Netlify discovers .netlify/v1/ at the
+          // project root automatically, so a fresh site needs only the publish
+          // directory set once in the dashboard — no committed config file.
+          ...(options.frameworksApi === false
             ? []
             : [
+                {
+                  kind: 'function',
+                  path: '.netlify/v1/functions/ruvyxa-handler',
+                  scope: 'project',
+                  handlerSource: netlifyHandlerSource(),
+                } satisfies AdapterArtifact,
+                {
+                  kind: 'file',
+                  path: '.netlify/v1/config.json',
+                  scope: 'project',
+                  contents: frameworksApiConfig + '\n',
+                } satisfies AdapterArtifact,
+              ]),
+          ...(options.projectConfig === true
+            ? [
                 {
                   kind: 'file',
                   path: 'netlify.toml',
@@ -164,7 +214,8 @@ export function netlifyAdapter(options: NetlifyAdapterOptions = {}): Adapter {
                   skipIfExists: true,
                   contents: projectNetlifyToml,
                 } satisfies AdapterArtifact,
-              ]),
+              ]
+            : []),
         ],
       }
     },

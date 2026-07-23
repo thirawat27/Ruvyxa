@@ -19,6 +19,7 @@ packages/@ruvyxa/cli-*/bin/
 # when the demo app is built for a hosting platform. Scoped to examples/demo so
 # a hand-authored netlify.toml or wrangler.jsonc elsewhere is still tracked.
 examples/demo/.vercel/
+examples/demo/.netlify/
 examples/demo/netlify.toml
 examples/demo/netlify/functions/
 examples/demo/wrangler.jsonc

@@ -1,6 +1,6 @@
 {
   "name": "@ruvyxa/core",
-  "version": "1.0.18",
+  "version": "1.0.19",
   "description": "Tiny typed primitives behind Ruvyxa: config, loaders, actions, cache helpers, responses, and adapter contracts.",
   "license": "Apache-2.0",
   "type": "module",

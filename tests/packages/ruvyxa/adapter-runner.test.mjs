@@ -313,6 +313,180 @@ export default handler
       await rm(root, { recursive: true, force: true })
     }
   })
+
+  it('materializes Netlify Frameworks API artifacts at the project root', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-adapter-runner-'))
+    const outputDir = path.join(root, '.ruvyxa-staging')
+    try {
+      await mkdir(outputDir, { recursive: true })
+      await writeFile(
+        path.join(root, 'ruvyxa.config.mjs'),
+        `export default { adapter: { build() { return { artifacts: [
+          { kind: 'file', path: '.netlify/v1/config.json', scope: 'project', contents: '{"headers":[]}' }
+        ] } } } }`,
+      )
+      await writeFile(
+        path.join(outputDir, 'manifest.json'),
+        JSON.stringify({ routes: [{ kind: 'page', path: '/', render: { strategy: 'ssg' } }] }),
+      )
+
+      const result = await runRunner(root, outputDir)
+
+      assert.deepEqual(result.result, [
+        { kind: 'file', path: '.netlify/v1/config.json', scope: 'project' },
+      ])
+      assert.equal(
+        await readFile(path.join(root, '.netlify/v1/config.json'), 'utf8'),
+        '{"headers":[]}',
+      )
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  // An API-only app has no prerendered pages. A static-site artifact marked
+  // optional must assemble assets and client bundles instead of failing with
+  // RUV2202.
+  it('tolerates a missing prerender directory for optional static-site artifacts', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-adapter-runner-'))
+    const outputDir = path.join(root, '.ruvyxa-staging')
+    try {
+      await mkdir(path.join(outputDir, 'assets'), { recursive: true })
+      await mkdir(path.join(outputDir, 'client'), { recursive: true })
+      await writeFile(path.join(outputDir, 'assets', 'logo.svg'), '<svg/>')
+      await writeFile(path.join(outputDir, 'client', 'app.js'), 'export {}')
+      await writeFile(
+        path.join(root, 'ruvyxa.config.mjs'),
+        `export default { adapter: { build() { return { artifacts: [
+          { kind: 'static-site', path: 'deploy/node/public', optional: true }
+        ] } } } }`,
+      )
+      await writeFile(
+        path.join(outputDir, 'manifest.json'),
+        JSON.stringify({ routes: [{ kind: 'api', path: '/api/health' }] }),
+      )
+
+      const result = await runRunner(root, outputDir)
+
+      assert.deepEqual(result.result, [{ kind: 'static-site', path: 'deploy/node/public' }])
+      assert.equal(
+        await readFile(path.join(outputDir, 'deploy/node/public/logo.svg'), 'utf8'),
+        '<svg/>',
+      )
+      assert.equal(
+        await readFile(path.join(outputDir, 'deploy/node/public/__ruvyxa/client/app.js'), 'utf8'),
+        'export {}',
+      )
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  // The same function bundle emitted at several destinations (deploy directory
+  // plus a platform discovery directory) must compile once and copy after.
+  it('reuses an identical function bundle across destinations', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-adapter-runner-'))
+    const outputDir = path.join(root, '.ruvyxa-staging')
+    try {
+      await installFakeReact(root)
+      await mkdir(path.join(root, 'app', 'api', 'echo'), { recursive: true })
+      await mkdir(outputDir, { recursive: true })
+      await writeFile(
+        path.join(root, 'app', 'api', 'echo', 'route.ts'),
+        `export async function GET() { return Response.json({ ok: true }) }`,
+      )
+      const manifest = {
+        routes: [
+          {
+            id: 'app/api/echo/route',
+            kind: 'api',
+            path: '/api/echo',
+            file: 'app/api/echo/route.ts',
+            layoutChain: [],
+            render: { strategy: 'ssr' },
+          },
+        ],
+      }
+      await writeFile(path.join(outputDir, 'manifest.json'), JSON.stringify(manifest))
+      const handlerSource = `import { loadRouteModule } from './route-modules.mjs'
+export default loadRouteModule
+`
+      await writeFile(
+        path.join(root, 'ruvyxa.config.mjs'),
+        `export default { adapter: { build() { return {
+          artifacts: [
+            { kind: 'function', path: 'deploy/a', handlerSource: ${JSON.stringify(handlerSource)} },
+            { kind: 'function', path: 'deploy/b', handlerSource: ${JSON.stringify(handlerSource)} }
+          ]
+        } } } }`,
+      )
+
+      const result = await runRunner(root, outputDir)
+
+      assert.deepEqual(result.result, [
+        { kind: 'function', path: 'deploy/a' },
+        { kind: 'function', path: 'deploy/b' },
+      ])
+      const first = await readFile(path.join(outputDir, 'deploy/a/route-modules.mjs'), 'utf8')
+      const second = await readFile(path.join(outputDir, 'deploy/b/route-modules.mjs'), 'utf8')
+      assert.equal(first, second)
+      assert.equal(
+        await readFile(path.join(outputDir, 'deploy/b/index.mjs'), 'utf8'),
+        handlerSource,
+      )
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('reports the resolution candidates for an unknown named adapter', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-adapter-runner-'))
+    const outputDir = path.join(root, '.ruvyxa-staging')
+    try {
+      await mkdir(outputDir, { recursive: true })
+
+      const result = await runRunnerResult(root, outputDir, 'does-not-exist')
+
+      assert.equal(result.exitCode, 1)
+      assert.match(result.parsed.message, /RUV2203 adapter does-not-exist could not be resolved/)
+      assert.match(result.parsed.message, /@ruvyxa\/adapter-does-not-exist/)
+      assert.match(result.parsed.message, /ruvyxa-adapter-does-not-exist/)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  // Official adapters resolve through the ruvyxa package's own dependencies,
+  // so `--adapter node` works in a project that never installed the adapter.
+  it('resolves official adapters without a project install', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-adapter-runner-'))
+    const outputDir = path.join(root, '.ruvyxa-staging')
+    try {
+      await mkdir(path.join(outputDir, 'assets'), { recursive: true })
+      await mkdir(path.join(outputDir, 'client'), { recursive: true })
+      await mkdir(path.join(outputDir, 'prerender'), { recursive: true })
+      await writeFile(path.join(outputDir, 'prerender', 'index.html'), '<main>home</main>')
+      await installFakeReact(root)
+      await mkdir(path.join(root, 'app'), { recursive: true })
+      await writeFile(path.join(outputDir, 'manifest.json'), JSON.stringify({ routes: [] }))
+
+      const result = await runRunner(root, outputDir, 'node')
+
+      const kinds = result.result.map(({ kind, path: artifactPath }) => ({
+        kind,
+        path: artifactPath,
+      }))
+      assert.deepEqual(kinds, [
+        { kind: 'function', path: 'deploy/node/server' },
+        { kind: 'static-site', path: 'deploy/node/public' },
+        { kind: 'file', path: 'deploy/node/start.mjs' },
+        { kind: 'file', path: 'deploy/node/README.md' },
+      ])
+      await readFile(path.join(outputDir, 'deploy/node/server/index.mjs'), 'utf8')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
 })
 
 async function installFakeReact(root) {
@@ -366,9 +540,11 @@ async function installFakeReact(root) {
   )
 }
 
-function runRunner(root, outputDir) {
+function runRunner(root, outputDir, adapterName) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [adapterRunner, root, outputDir], { stdio: 'pipe' })
+    const args = [adapterRunner, root, outputDir]
+    if (adapterName) args.push(adapterName)
+    const child = spawn(process.execPath, args, { stdio: 'pipe' })
     let stdout = ''
     let stderr = ''
     child.stdout.setEncoding('utf8')
@@ -394,9 +570,11 @@ function runRunner(root, outputDir) {
   })
 }
 
-function runRunnerResult(root, outputDir) {
+function runRunnerResult(root, outputDir, adapterName) {
   return new Promise((resolve, reject) => {
-    const child = spawn(process.execPath, [adapterRunner, root, outputDir], { stdio: 'pipe' })
+    const args = [adapterRunner, root, outputDir]
+    if (adapterName) args.push(adapterName)
+    const child = spawn(process.execPath, args, { stdio: 'pipe' })
     let stdout = ''
     child.stdout.setEncoding('utf8')
     child.stdout.on('data', (chunk) => {

@@ -59,6 +59,8 @@ npx ruvyxa build --target bun      # bun runtime
 npx ruvyxa build --target static   # static output
 npx ruvyxa build --target edge     # edge runtime
 npx ruvyxa build --adapter vercel  # run a deploy adapter without config changes
+# accepts node, bun, static, vercel, netlify, cloudflare, or any adapter package name;
+# with no adapter configured, VERCEL/NETLIFY/CF_PAGES build environments are auto-detected
 npx ruvyxa build --runtime bun     # execute build workers with Bun
 ```
 

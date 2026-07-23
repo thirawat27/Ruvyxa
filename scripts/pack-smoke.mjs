@@ -251,6 +251,18 @@ for (const starter of starters) {
   }
 }
 
+// The ruvyxa package depends on the official adapter packages, which are
+// unpublished at this point in the release; the freshly packed tarballs must
+// satisfy those ranges instead of the registry.
+const adapterOverrides = [
+  '@ruvyxa/adapter-bun',
+  '@ruvyxa/adapter-cloudflare',
+  '@ruvyxa/adapter-netlify',
+  '@ruvyxa/adapter-node',
+  '@ruvyxa/adapter-static',
+  '@ruvyxa/adapter-vercel',
+].map((name) => `  '${name}': ${JSON.stringify(workspaceTarball(packedTarball(name)))}`)
+
 writeFileSync(
   `${extracted}/pnpm-workspace.yaml`,
   [
@@ -259,6 +271,7 @@ writeFileSync(
     'overrides:',
     `  '@ruvyxa/core': ${JSON.stringify(workspaceTarball(coreTgz))}`,
     `  '${currentPlatformPackage}': ${JSON.stringify(workspaceTarball(currentPlatformTgz))}`,
+    ...adapterOverrides,
     'allowBuilds:',
     "  '@parcel/watcher': false",
     '',

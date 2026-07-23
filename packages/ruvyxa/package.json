@@ -1,6 +1,6 @@
 {
   "name": "ruvyxa",
-  "version": "1.0.18",
+  "version": "1.0.19",
   "description": "The Ruvyxa CLI and runtime for building, validating, serving, and shipping production-minded web applications.",
   "license": "Apache-2.0",
   "type": "module",
@@ -70,6 +70,12 @@
   },
   "dependencies": {
     "@mdx-js/mdx": "^3.1.1",
+    "@ruvyxa/adapter-bun": "workspace:^",
+    "@ruvyxa/adapter-cloudflare": "workspace:^",
+    "@ruvyxa/adapter-netlify": "workspace:^",
+    "@ruvyxa/adapter-node": "workspace:^",
+    "@ruvyxa/adapter-static": "workspace:^",
+    "@ruvyxa/adapter-vercel": "workspace:^",
     "@ruvyxa/core": "workspace:^",
     "oxc-transform": "0.141.0",
     "remark-gfm": "^4.0.1",

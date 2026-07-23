@@ -1,5 +1,53 @@
 # Changelog
 
+## v1.0.19 (2026-07-23)
+
+### Deploy Anywhere: Static Linux Binaries
+
+- Linux CLI binaries (`@ruvyxa/cli-linux-x64`, `@ruvyxa/cli-linux-arm64`) are now fully static musl
+  builds. Releases before 1.0.19 were dynamically linked against the build machine's glibc and
+  failed on hosts with an older glibc — most visibly Vercel's build image with
+  ``/lib64/libc.so.6: version `GLIBC_2.39' not found``. The release pipeline now rejects any
+  dynamically linked Linux artifact.
+
+### Zero-Config Deploys Without Root Config Files
+
+- `ruvyxa build` auto-detects the hosting platform from its build environment (`VERCEL`, `NETLIFY`,
+  `CF_PAGES`) and runs the matching adapter when no adapter is configured. `RUVYXA_ADAPTER`
+  overrides detection.
+- All six official adapters are bundled with the `ruvyxa` package: `--adapter <name>` and platform
+  detection work with zero installs. A project-installed adapter package still wins, and `--adapter`
+  now also accepts any third-party adapter package name (`@scope/…` or `ruvyxa-adapter-…`), reported
+  with the tried candidates in `RUV2203` on failure.
+- The Netlify adapter now emits Netlify's Frameworks API directory (`.netlify/v1/`: the SSR/API
+  function plus immutable cache headers) as a gitignored build artifact — no `netlify.toml` is
+  written to the project root by default. Opt back in with
+  `netlifyAdapter({ projectConfig: true })`.
+- The Cloudflare adapter no longer writes a root `wrangler.jsonc` by default; the deploy directory
+  is self-sufficient (`wrangler deploy -c .ruvyxa/deploy/cloudflare/wrangler.jsonc`). Opt back in
+  with `cloudflareAdapter({ projectConfig: true })`.
+- Fixed: opt-in `netlify.toml` and `wrangler.jsonc` previously embedded the absolute build-machine
+  `outDir` (including a transient staging path and Windows backslashes), which broke Netlify deploys
+  with a 404 on every route when the file was committed. Generated configs now embed
+  project-relative POSIX paths only (`projectRelativeOutDir` in `@ruvyxa/core`).
+
+### Standalone Node Server
+
+- The Node adapter now emits a self-contained server at `.ruvyxa/deploy/node/server/index.mjs`
+  (plain `node:http` around the shared serverless handler, static assets from `deploy/node/public`,
+  `PORT`/`HOST` env, SSR/API/ISR/PPR/SSG/CSR). It runs on any Node host — Docker, PM2, systemd, any
+  PaaS — with no ruvyxa CLI or native binary at runtime.
+
+### Correctness
+
+- Immutable cache headers for hashed client bundles now target the real URL prefix
+  `/__ruvyxa/client/*` on Vercel, Netlify, and Cloudflare; the previous `/client/*` rules never
+  matched, so hashed bundles were re-downloaded on every visit.
+- `static-site` adapter artifacts can be marked `optional`, tolerating API-only builds with no
+  prerendered pages instead of failing with `RUV2202`.
+- Identical function bundles emitted at several destinations (deploy directory + platform discovery
+  directory) are compiled once and copied, keeping build time flat.
+
 ## v1.0.18 (2026-07-22)
 
 ### Markdown Content Route Validation

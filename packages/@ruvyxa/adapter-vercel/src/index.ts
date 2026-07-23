@@ -178,7 +178,8 @@ export function vercelAdapter(options: VercelAdapterOptions = {}): Adapter {
           version: 3,
           routes: [
             {
-              src: '^/client/(.*)$',
+              // Hashed client bundles are served under /__ruvyxa/client/
+              src: '^/__ruvyxa/client/(.*)$',
               headers: { 'cache-control': 'public, max-age=31536000, immutable' },
               continue: true,
             },

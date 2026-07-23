@@ -32,6 +32,7 @@ const KNOWN_ADAPTER_NAMES = ['node', 'bun', 'static', 'vercel', 'netlify', 'clou
 // access to the project.
 const PROJECT_ARTIFACT_ALLOWLIST = [
   '.vercel/output',
+  '.netlify/v1',
   'netlify.toml',
   'netlify/functions',
   'wrangler.jsonc',
@@ -101,25 +102,44 @@ async function assertRoutesSupported(adapter, buildDir) {
 }
 
 async function loadNamedAdapter(root, name) {
-  if (!KNOWN_ADAPTER_NAMES.includes(name)) {
-    throw new Error(
-      `RUV2203 unknown adapter name: ${name}. Expected one of ${KNOWN_ADAPTER_NAMES.join(', ')}.`,
-    )
-  }
-  const packageName = `@ruvyxa/adapter-${name}`
+  // A bare short name maps onto the official and community naming
+  // conventions; a scoped or slashed name is used verbatim so any published
+  // adapter package works with `ruvyxa build --adapter <package>`.
+  const candidates =
+    name.startsWith('@') || name.includes('/')
+      ? [name]
+      : [`@ruvyxa/adapter-${name}`, `ruvyxa-adapter-${name}`, name]
+
   const requireFromProject = createRequire(path.join(root, 'package.json'))
+  // Official adapters ship as dependencies of the ruvyxa package itself, so
+  // built-in names work with zero install even when the project has not added
+  // the adapter package. A project-installed copy still wins.
+  const requireFromRuntime = createRequire(import.meta.url)
+
   let entry
-  try {
-    entry = requireFromProject.resolve(packageName)
-  } catch {
-    throw new Error(
-      `RUV2203 adapter package ${packageName} is not installed. Add it with your package manager, for example: pnpm add -D ${packageName}`,
-    )
+  let resolvedPackage
+  for (const candidate of candidates) {
+    for (const resolve of [requireFromProject, requireFromRuntime]) {
+      try {
+        entry = resolve.resolve(candidate)
+        resolvedPackage = candidate
+        break
+      } catch {
+        // try the next resolution base
+      }
+    }
+    if (entry) break
+  }
+  if (!entry) {
+    const hint = KNOWN_ADAPTER_NAMES.includes(name)
+      ? `Reinstall the ruvyxa package, or add it directly: pnpm add -D @ruvyxa/adapter-${name}`
+      : `Expected one of ${KNOWN_ADAPTER_NAMES.join(', ')}, or an installed adapter package (tried: ${candidates.join(', ')}).`
+    throw new Error(`RUV2203 adapter ${name} could not be resolved. ${hint}`)
   }
   const mod = await import(pathToFileURL(entry).href)
   const factory = mod.default
   if (typeof factory !== 'function') {
-    throw new Error(`RUV2203 ${packageName} does not export an adapter factory.`)
+    throw new Error(`RUV2203 ${resolvedPackage} does not export an adapter factory.`)
   }
   return factory()
 }
@@ -171,6 +191,11 @@ async function materializeArtifacts(output, buildDir) {
   if (!Array.isArray(output.artifacts)) return []
 
   const artifacts = []
+  // An adapter may emit the same function bundle at several destinations
+  // (deploy directory + platform discovery directory). Compiling the route
+  // registry is the expensive step, so identical handler sources are built
+  // once and copied afterwards.
+  const materializedFunctions = new Map()
   for (const artifact of output.artifacts) {
     if (!artifact || typeof artifact !== 'object') {
       throw new Error('RUV2200 adapter artifact must be an object.')
@@ -204,7 +229,9 @@ async function materializeArtifacts(output, buildDir) {
       // Project-scope publish directories are replaced wholesale so hashed
       // bundles from previous builds do not accumulate at the platform root.
       if (scope === 'project') await rm(destination, { recursive: true, force: true })
-      await materializeStaticSite(buildDir, destination)
+      await materializeStaticSite(buildDir, destination, {
+        requirePrerender: artifact.optional !== true,
+      })
       artifacts.push(
         scope === 'project'
           ? { kind: 'static-site', path: artifact.path, scope }
@@ -218,7 +245,16 @@ async function materializeArtifacts(output, buildDir) {
           `RUV2200 function artifact ${artifact.path} must include handlerSource string.`,
         )
       }
-      await materializeFunction(buildDir, destination, artifact.handlerSource, output.target)
+      const functionKey = `${output.target ?? ''}\n${artifact.handlerSource}`
+      const alreadyBuilt = materializedFunctions.get(functionKey)
+      if (alreadyBuilt) {
+        await rm(destination, { recursive: true, force: true })
+        await mkdir(path.dirname(destination), { recursive: true })
+        await cp(alreadyBuilt, destination, { recursive: true })
+      } else {
+        await materializeFunction(buildDir, destination, artifact.handlerSource, output.target)
+        materializedFunctions.set(functionKey, destination)
+      }
       artifacts.push(
         scope === 'project'
           ? { kind: 'function', path: artifact.path, scope }
@@ -428,9 +464,9 @@ function pageRouteDefinition(pageFile, routeIndex) {
 // before the build hook runs (see `assertRoutesSupported`); a hybrid adapter
 // legitimately emits this artifact for the static layer of an app that also has
 // SSR pages and API routes served by its function artifact.
-async function materializeStaticSite(buildDir, destination) {
+async function materializeStaticSite(buildDir, destination, { requirePrerender = true } = {}) {
   const prerenderDir = path.join(buildDir, 'prerender')
-  if (!existsSync(prerenderDir)) {
+  if (requirePrerender && !existsSync(prerenderDir)) {
     throw new Error('RUV2202 static adapter output requires generated prerendered pages.')
   }
 

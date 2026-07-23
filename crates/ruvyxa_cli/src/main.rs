@@ -125,7 +125,8 @@ struct BuildArgs {
     target: Option<BuildTarget>,
 
     /// Deploy adapter to run without editing ruvyxa.config
-    /// (node, bun, static, vercel, netlify, cloudflare).
+    /// (node, bun, static, vercel, netlify, cloudflare, or any
+    /// adapter package name such as @scope/ruvyxa-adapter-deno).
     #[arg(long, value_parser = parse_adapter_name)]
     adapter: Option<String>,
 
@@ -137,16 +138,66 @@ struct BuildArgs {
 
 const KNOWN_ADAPTER_NAMES: [&str; 6] = ["node", "bun", "static", "vercel", "netlify", "cloudflare"];
 
+/// Hosting platforms that identify themselves through build-environment
+/// variables. When no adapter is configured, the matching adapter is selected
+/// automatically so a fresh project deploys with zero configuration.
+const PLATFORM_ADAPTER_ENV: [(&str, &str); 3] = [
+    ("VERCEL", "vercel"),
+    ("NETLIFY", "netlify"),
+    ("CF_PAGES", "cloudflare"),
+];
+
 fn parse_adapter_name(value: &str) -> Result<String, String> {
     let normalized = value.trim().to_ascii_lowercase();
-    if KNOWN_ADAPTER_NAMES.contains(&normalized.as_str()) {
+    if KNOWN_ADAPTER_NAMES.contains(&normalized.as_str()) || is_npm_package_name(&normalized) {
         Ok(normalized)
     } else {
         Err(format!(
-            "unknown adapter `{value}`; expected one of {}",
+            "unknown adapter `{value}`; expected one of {}, or an adapter package name",
             KNOWN_ADAPTER_NAMES.join(", ")
         ))
     }
+}
+
+/// Accept anything shaped like an npm package name (optionally scoped) so
+/// third-party adapters can be selected from the command line. The JS adapter
+/// runner resolves the actual package and reports RUV2203 when missing.
+fn is_npm_package_name(value: &str) -> bool {
+    fn valid_part(part: &str) -> bool {
+        !part.is_empty()
+            && !part.starts_with('.')
+            && part
+                .chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || "-._~".contains(c))
+    }
+    match value.strip_prefix('@') {
+        Some(rest) => match rest.split_once('/') {
+            Some((scope, name)) => valid_part(scope) && valid_part(name),
+            None => false,
+        },
+        None => !value.contains('/') && valid_part(value),
+    }
+}
+
+/// Detect the hosting platform from build-environment variables. Returns the
+/// adapter name and the variable that selected it. `RUVYXA_ADAPTER` overrides
+/// platform detection; empty, `0`, and `false` values are ignored.
+fn detect_platform_adapter(env: impl Fn(&str) -> Option<String>) -> Option<(String, String)> {
+    if let Some(value) = env("RUVYXA_ADAPTER") {
+        let name = value.trim().to_ascii_lowercase();
+        if !name.is_empty() && parse_adapter_name(&name).is_ok() {
+            return Some((name, "RUVYXA_ADAPTER".to_string()));
+        }
+    }
+    for (variable, adapter) in PLATFORM_ADAPTER_ENV {
+        if let Some(value) = env(variable) {
+            let value = value.trim();
+            if !value.is_empty() && value != "0" && !value.eq_ignore_ascii_case("false") {
+                return Some((adapter.to_string(), variable.to_string()));
+            }
+        }
+    }
+    None
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, serde::Deserialize)]
@@ -1326,6 +1377,17 @@ async fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Resul
         );
     }
 
+    // Zero-config deploys: pick the adapter from the hosting platform's build
+    // environment when neither ruvyxa.config nor --adapter selected one.
+    let detected_adapter = if args.adapter.is_none() && config.adapter.is_none() {
+        detect_platform_adapter(|key| std::env::var(key).ok())
+    } else {
+        None
+    };
+    if let Some((name, source)) = &detected_adapter {
+        info!(adapter = %name, source = %source, "auto-detected deploy adapter");
+    }
+
     let mut build_info = serde_json::json!({
         "framework": "Ruvyxa",
         "version": env!("CARGO_PKG_VERSION"),
@@ -1343,7 +1405,10 @@ async fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Resul
             .adapter
             .as_deref()
             .map(|name| serde_json::json!(name))
-            .or_else(|| config.adapter.clone()),
+            .or_else(|| config.adapter.clone())
+            .or_else(|| detected_adapter
+                .as_ref()
+                .map(|(name, _)| serde_json::json!(name))),
         "adapterOptions": config.adapter_options.clone(),
         "images": image_report,
         "hashAlgorithm": ASSET_HASH_ALGORITHM,
@@ -1413,19 +1478,24 @@ async fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Resul
     // Adapters must snapshot the committed output after build-complete hooks:
     // first-party and application plugins can add public artifacts such as a
     // sitemap or service worker that must be present in static deploy output.
-    if config.adapter.is_some() || args.adapter.is_some() {
+    if config.adapter.is_some() || args.adapter.is_some() || detected_adapter.is_some() {
         let phase_started = Instant::now();
+        let named_adapter = args
+            .adapter
+            .as_deref()
+            .or_else(|| detected_adapter.as_ref().map(|(name, _)| name.as_str()));
         let artifacts = run_adapter_runner(
             &args.root,
             &out_dir,
             config.javascript_runtime(),
-            args.adapter.as_deref(),
+            named_adapter,
         )?;
         if show_summary {
-            let detail = args
-                .adapter
-                .clone()
-                .unwrap_or_else(|| format!("{} artifact(s)", artifacts.len()));
+            let detail = match (&args.adapter, &detected_adapter) {
+                (Some(name), _) => name.clone(),
+                (None, Some((name, source))) => format!("{name} (auto via {source})"),
+                (None, None) => format!("{} artifact(s)", artifacts.len()),
+            };
             print_build_phase("adapter", detail, phase_started.elapsed());
         }
         build_info["adapterArtifacts"] = serde_json::to_value(artifacts)?;
@@ -5262,7 +5332,73 @@ fn duplicate_dependencies(package: &serde_json::Value) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_unsafe_prerender_segment, prerender_html_path};
+    use super::{
+        detect_platform_adapter, is_npm_package_name, is_unsafe_prerender_segment,
+        parse_adapter_name, prerender_html_path,
+    };
+
+    #[test]
+    fn adapter_names_accept_known_and_package_shapes() {
+        assert_eq!(parse_adapter_name("vercel").unwrap(), "vercel");
+        assert_eq!(parse_adapter_name(" Netlify ").unwrap(), "netlify");
+        assert_eq!(
+            parse_adapter_name("@acme/ruvyxa-adapter-deno").unwrap(),
+            "@acme/ruvyxa-adapter-deno"
+        );
+        assert_eq!(
+            parse_adapter_name("ruvyxa-adapter-fastly").unwrap(),
+            "ruvyxa-adapter-fastly"
+        );
+
+        assert!(parse_adapter_name("").is_err());
+        assert!(parse_adapter_name("@bad").is_err());
+        assert!(parse_adapter_name("bad/../escape").is_err());
+        assert!(parse_adapter_name(".hidden").is_err());
+    }
+
+    #[test]
+    fn npm_package_name_rejects_path_like_values() {
+        assert!(is_npm_package_name("@scope/name"));
+        assert!(is_npm_package_name("plain-name"));
+        assert!(!is_npm_package_name("a/b"));
+        assert!(!is_npm_package_name("@scope/"));
+        assert!(!is_npm_package_name("..\\escape"));
+    }
+
+    #[test]
+    fn platform_detection_reads_hosting_environment() {
+        let env = |vars: &'static [(&'static str, &'static str)]| {
+            move |key: &str| {
+                vars.iter()
+                    .find(|(name, _)| *name == key)
+                    .map(|(_, value)| value.to_string())
+            }
+        };
+
+        assert_eq!(
+            detect_platform_adapter(env(&[("VERCEL", "1")])),
+            Some(("vercel".to_string(), "VERCEL".to_string()))
+        );
+        assert_eq!(
+            detect_platform_adapter(env(&[("NETLIFY", "true")])),
+            Some(("netlify".to_string(), "NETLIFY".to_string()))
+        );
+        assert_eq!(
+            detect_platform_adapter(env(&[("CF_PAGES", "1")])),
+            Some(("cloudflare".to_string(), "CF_PAGES".to_string()))
+        );
+
+        // Explicit override wins over the platform variable.
+        assert_eq!(
+            detect_platform_adapter(env(&[("RUVYXA_ADAPTER", "node"), ("VERCEL", "1")])),
+            Some(("node".to_string(), "RUVYXA_ADAPTER".to_string()))
+        );
+
+        // Disabled or absent values fall through.
+        assert_eq!(detect_platform_adapter(env(&[("VERCEL", "0")])), None);
+        assert_eq!(detect_platform_adapter(env(&[("NETLIFY", "false")])), None);
+        assert_eq!(detect_platform_adapter(env(&[])), None);
+    }
 
     #[test]
     fn prerender_paths_stay_inside_the_build_output() {

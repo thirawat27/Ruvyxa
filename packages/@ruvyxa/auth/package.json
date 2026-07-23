@@ -1,6 +1,6 @@
 {
   "name": "@ruvyxa/auth",
-  "version": "1.0.18",
+  "version": "1.0.19",
   "description": "Secure sessions and provider-driven authentication for Ruvyxa applications.",
   "license": "Apache-2.0",
   "type": "module",

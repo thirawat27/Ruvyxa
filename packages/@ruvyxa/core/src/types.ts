@@ -388,6 +388,13 @@ export interface AdapterArtifact {
    * @default false
    */
   skipIfExists?: boolean
+  /**
+   * For `static-site` artifacts: tolerate a build without pre-rendered pages
+   * (for example an API-only app) instead of failing with RUV2202. Assets and
+   * client bundles are still assembled.
+   * @default false
+   */
+  optional?: boolean
 }
 
 export interface Adapter {

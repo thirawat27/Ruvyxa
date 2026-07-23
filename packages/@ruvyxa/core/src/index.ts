@@ -38,7 +38,7 @@ export type {
   StaticParamsValues,
   TransformResult,
 } from './types.js'
-export { clientBuildOutput, validateBuildContext } from './utils.js'
+export { clientBuildOutput, projectRelativeOutDir, validateBuildContext } from './utils.js'
 export {
   action,
   cache,
