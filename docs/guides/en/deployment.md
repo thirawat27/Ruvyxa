@@ -180,6 +180,10 @@ ruvyxa build --adapter node
 node .ruvyxa/deploy/node/server/index.mjs
 ```
 
+On Bun, build with `--adapter bun` and run `bun .ruvyxa/deploy/bun/server/index.mjs`. Both adapters
+emit the same server, so ordering, static fallbacks, and cache headers are identical on either
+runtime.
+
 The `deploy/node/` directory is self-contained (server + `public/` assets). Copy it into a Docker
 image, a VPS, PM2, systemd, or any PaaS (Render, Railway, Fly.io, Heroku) and run the same command —
 no `node_modules` and no native binary needed at runtime. The server honors `PORT` (default 3000)
@@ -322,8 +326,8 @@ Before deploying:
 
 `examples/demo/` is an integration app containing static, dynamic, and catch-all routes; API routes;
 server actions; MDX; public environment variables; external CSS; and SSR, SSG, ISR, CSR, and PPR
-examples. Read its [README](../../examples/demo/README.md), run the diagnostic commands, and copy a
-proven pattern before adding a new feature to your own app.
+examples. Read its [README](../../../examples/demo/README.md), run the diagnostic commands, and copy
+a proven pattern before adding a new feature to your own app.
 
 ---
 
@@ -339,7 +343,7 @@ Everything below is for power users and adapter authors — deploying an app nev
 | Adapter                      | Target                                                    |
 | ---------------------------- | --------------------------------------------------------- |
 | `@ruvyxa/adapter-node`       | Standalone server: `.ruvyxa/deploy/node/server/index.mjs` |
-| `@ruvyxa/adapter-bun`        | Bun launcher: `.ruvyxa/deploy/bun/start.mjs`              |
+| `@ruvyxa/adapter-bun`        | Standalone server: `.ruvyxa/deploy/bun/server/index.mjs`  |
 | `@ruvyxa/adapter-static`     | Static files: `.ruvyxa/static/`                           |
 | `@ruvyxa/adapter-cloudflare` | Cloudflare Workers: `.ruvyxa/deploy/cloudflare/`          |
 | `@ruvyxa/adapter-netlify`    | Netlify functions + static: `.netlify/v1/` + deploy dir   |

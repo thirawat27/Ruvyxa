@@ -38,6 +38,7 @@ export type {
   StaticParamsValues,
   TransformResult,
 } from './types.js'
+export { standaloneServerSource } from './standalone-server.js'
 export {
   CLIENT_BUNDLE_PREFIX,
   clientBuildOutput,

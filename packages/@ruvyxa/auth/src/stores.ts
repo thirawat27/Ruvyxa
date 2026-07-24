@@ -10,6 +10,31 @@ interface MemoryValue {
   expiresAt: number
 }
 
+/**
+ * Entry ceiling for the process-local stores.
+ *
+ * Expiry alone only reclaims a key that someone reads again, and rate-limit
+ * keys are derived from client IPs — a key per attacker address, never read
+ * twice. A long-running dev server or a load test would grow the map without
+ * bound, so writes sweep expired entries first and then evict the oldest.
+ */
+const MEMORY_STORE_MAX_ENTRIES = 10_000
+
+/**
+ * Drop expired entries, then oldest-first, until the map is under the ceiling.
+ * `Map` preserves insertion order, so the first keys are the oldest writes.
+ */
+function enforceCeiling<T>(values: Map<string, T>, isExpired: (entry: T) => boolean): void {
+  if (values.size < MEMORY_STORE_MAX_ENTRIES) return
+  for (const [key, entry] of values) {
+    if (isExpired(entry)) values.delete(key)
+  }
+  for (const key of values.keys()) {
+    if (values.size < MEMORY_STORE_MAX_ENTRIES) break
+    values.delete(key)
+  }
+}
+
 /** Create a bounded-lifecycle process-local auth store for tests and development only. */
 export function memoryAuthStore(options: MemoryStoreOptions): AuthStore {
   assertDevelopment(options)
@@ -27,6 +52,10 @@ export function memoryAuthStore(options: MemoryStoreOptions): AuthStore {
       return read(key)?.value ?? null
     },
     async set(key, value, ttlSeconds) {
+      // Delete first so a re-set moves the key to the end of the insertion
+      // order and is not treated as one of the oldest entries.
+      values.delete(key)
+      enforceCeiling(values, (entry) => entry.expiresAt <= Date.now())
       values.set(key, { value, expiresAt: Date.now() + ttlSeconds * 1000 })
     },
     async delete(key) {
@@ -51,6 +80,8 @@ export function memoryRateLimitStore(options: MemoryStoreOptions): AuthRateLimit
       const now = Date.now()
       let entry = values.get(key)
       if (!entry || entry.resetAt <= now) {
+        values.delete(key)
+        enforceCeiling(values, (candidate) => candidate.resetAt <= now)
         entry = { count: 0, resetAt: now + windowSeconds * 1000 }
         values.set(key, entry)
       }

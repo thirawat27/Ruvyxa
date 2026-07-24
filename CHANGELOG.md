@@ -1,6 +1,53 @@
 # Changelog
 
-## Unreleased
+## v1.0.20 (2026-07-24)
+
+### Security: Open Redirect in the `redirects()` Plugin
+
+- **Fixed: a wildcard redirect rule could send visitors to another origin.** The matched remainder
+  of the request path was concatenated straight into the `Location` header, so with a rule such as
+  `redirects([{ source: '/go/*', destination: '/*' }])` a request to `/go//evil.example` — or
+  `/go/\evil.example`, which browsers fold the same way — produced `Location: //evil.example` and a
+  cross-origin navigation. The remainder is request-controlled; the origin now is not.
+  - A rule's reachable origin is fixed by its configured destination: an absolute destination pins
+    its own origin, a path destination pins the requesting origin. Only path, query, and fragment
+    may come from the request, and a rule whose interpolated destination would leave that origin is
+    skipped instead of sent.
+  - Destinations a browser reads as another origin (`*`, `//host`, `/\host`, non-http(s) schemes)
+    are now rejected when the plugin is constructed, rather than at the first request that exploits
+    them.
+  - This is the same escape `safeReturnTo` blocks for `returnTo` in `@ruvyxa/auth`; the redirect
+    plugin had been missed.
+
+### Stability and Consistency
+
+- **`--adapter bun` now emits a self-contained deployment.** It previously produced only a launcher
+  that shelled out to `bunx ruvyxa start`, so a Bun host still needed the CLI and its native binary
+  installed at runtime — unlike every other self-hosted target. Bun and Node now share one server
+  source (`standaloneServerSource()` in `@ruvyxa/core`), so request ordering, static fallbacks, and
+  cache headers cannot drift between the two runtimes. Run it with
+  `bun .ruvyxa/deploy/bun/server/index.mjs`; the launcher is still emitted for the CLI workflow.
+- **Fixed: a failed background refresh could freeze a cache entry as stale.** In `cache().swr()`, a
+  refresh whose commit was rejected (the entry had been replaced or invalidated meanwhile) left the
+  old entry flagged as refreshing, and no later reader ever started another refresh. The flag is now
+  cleared when the commit does not land.
+- **Fixed: the development auth stores grew without bound.** `memoryAuthStore` and
+  `memoryRateLimitStore` only reclaimed a key when someone read it again, and rate-limit keys are
+  derived from client IPs — one key per address, never read twice. Writes now sweep expired entries
+  and evict oldest-first under a 10,000-entry ceiling.
+- Every published package declares the same Node floor (`>=22.12.0`). Some advertised `>=22.0.0`
+  while the framework they ship with requires `>=22.12.0`, so npm enforced a version that could not
+  actually run the code. `pnpm release:validate` now fails on any package that disagrees.
+- Published packages include `src`, so the shipped declaration maps resolve. `declarationMap` and
+  `sourceMap` were on while `files` listed only `dist`, which pointed every "go to definition" and
+  every stack frame at a file that was never in the tarball. `release:validate` enforces the
+  pairing.
+
+### Quality Gate
+
+- `noUnusedLocals` and `noUnusedParameters` are enabled in `tsconfig.base.json`, giving the
+  TypeScript packages the dead-code gate the Rust crates already get from
+  `cargo clippy -- -D warnings`. The workspace passes today, so this only keeps it that way.
 
 ### Deployed Apps Now Behave Like `ruvyxa dev`
 

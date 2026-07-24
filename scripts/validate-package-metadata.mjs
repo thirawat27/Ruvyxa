@@ -33,14 +33,21 @@ for (const dir of packageDirs) {
   )
   check(pkg.publishConfig?.access === 'public', `${pkg.name} must publish with public access`)
   check(Array.isArray(pkg.files) && pkg.files.length > 0, `${pkg.name} must declare package files`)
-  if (
-    pkg.name === 'ruvyxa' ||
-    pkg.name === 'create-ruvyxa' ||
-    pkg.name.startsWith('@ruvyxa/cli-')
-  ) {
+  // Every published package states the same floor. A package that advertised a
+  // lower one was making a promise the framework it ships with cannot keep:
+  // the packages are only usable together, so a split floor is a false claim
+  // that npm enforces against the wrong number.
+  check(
+    pkg.engines?.node === requiredRuntimeNodeEngine,
+    `${pkg.name} Node engine must match the framework requirement (${requiredRuntimeNodeEngine})`,
+  )
+  // A published declaration map points at `src/`, so `src` must be in the
+  // tarball or every "go to definition" and every stack frame resolves to a
+  // file that was never shipped.
+  if (Array.isArray(pkg.files) && pkg.files.includes('dist')) {
     check(
-      pkg.engines?.node === requiredRuntimeNodeEngine,
-      `${pkg.name} Node engine must match the framework requirement (${requiredRuntimeNodeEngine})`,
+      pkg.files.includes('src'),
+      `${pkg.name} publishes dist with declaration maps, so it must also publish src`,
     )
   }
 }

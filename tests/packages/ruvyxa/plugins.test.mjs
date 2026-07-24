@@ -114,6 +114,46 @@ describe('redirects()', () => {
   it('rejects sources that do not start with a slash', () => {
     assert.throws(() => redirects([{ source: 'old', destination: '/new' }]), TypeError)
   })
+
+  // The wildcard remainder is request-controlled. Concatenating it onto a
+  // destination let `/go//evil.example` and `/go/\evil.example` produce a
+  // `//evil.example` Location, which browsers resolve as another origin — the
+  // same escape `safeReturnTo` already blocks in @ruvyxa/auth.
+  it('never redirects off the requesting origin through the wildcard remainder', async () => {
+    const { middleware } = register(redirects([{ source: '/go/*', destination: '/*' }]))
+    for (const escape of ['/go//evil.example', '/go/\\evil.example', '/go//evil.example/path']) {
+      const response = await middleware[0].onRequest(request(escape), middlewareContext)
+      assert.equal(response, undefined, escape)
+    }
+
+    const same = await middleware[0].onRequest(request('/go/inside'), middlewareContext)
+    assert.equal(same.headers.get('location'), '/inside')
+  })
+
+  it('keeps an absolute destination pinned to its own configured origin', async () => {
+    const { middleware } = register(
+      redirects([{ source: '/cdn/*', destination: 'https://assets.example/*' }]),
+    )
+    const response = await middleware[0].onRequest(
+      request('/cdn//evil.example/logo.png'),
+      middlewareContext,
+    )
+    assert.equal(
+      new URL(response.headers.get('location')).origin,
+      'https://assets.example',
+      'a request path must not repoint an absolute destination',
+    )
+  })
+
+  it('rejects destinations a browser reads as another origin', () => {
+    for (const destination of ['*', '//evil.example', '/\\evil.example', 'ftp://example.com/x']) {
+      assert.throws(
+        () => redirects([{ source: '/x', destination }]),
+        TypeError,
+        `destination ${destination}`,
+      )
+    }
+  })
 })
 
 describe('headers()', () => {

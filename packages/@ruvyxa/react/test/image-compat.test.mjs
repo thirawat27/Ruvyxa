@@ -1,3 +1,7 @@
+// These tests live inside the package, not under `tests/packages/`, because
+// they import `react` directly. pnpm installs peer dependencies into the
+// consuming package, and Node resolves a bare specifier by walking up from the
+// importing file — so the same file under `tests/` cannot find React at all.
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 

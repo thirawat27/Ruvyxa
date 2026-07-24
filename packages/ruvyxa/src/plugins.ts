@@ -68,6 +68,7 @@ export function redirects(rules: RedirectRule[]): RuvyxaPlugin {
     if (typeof rule.destination !== 'string' || rule.destination.length === 0) {
       throw new TypeError(`redirects: rules[${index}].destination must be a non-empty string`)
     }
+    assertRedirectDestination(rule.destination, `redirects: rules[${index}].destination`)
     return { ...rule, permanent: rule.permanent === true }
   })
 
@@ -81,11 +82,10 @@ export function redirects(rules: RedirectRule[]): RuvyxaPlugin {
           for (const rule of normalized) {
             const remainder = matchSource(rule.source, url.pathname)
             if (remainder === null) continue
-            let destination = rule.destination
-            if (destination.endsWith('*')) {
-              destination = destination.slice(0, -1) + (remainder ?? '')
-            }
-            const location = destination.includes('://') ? destination : destination + url.search
+            const location = redirectLocation(rule.destination, remainder, url.search)
+            // A rule whose interpolated destination leaves the intended origin
+            // is skipped rather than sent: the remainder is request-controlled.
+            if (location === null) continue
             return new Response(null, {
               status: rule.permanent ? 308 : 307,
               headers: { location },
@@ -96,6 +96,79 @@ export function redirects(rules: RedirectRule[]): RuvyxaPlugin {
       })
     },
   })
+}
+
+/**
+ * Base used to decide whether a redirect destination stays on the requesting
+ * origin. The same technique guards `returnTo` in `@ruvyxa/auth`: resolve
+ * against a fixed base and require the origin to survive, so every
+ * normalization trick a browser performs (`//host`, `/\host`, folded tabs)
+ * collapses into a detectable origin change instead of a silent escape.
+ */
+const REDIRECT_ORIGIN_PROBE = 'http://ruvyxa.invalid'
+
+const ABSOLUTE_URL_PATTERN = /^[a-z][a-z0-9+.-]*:\/\//i
+
+/**
+ * Reject a destination that is neither an absolute http(s) URL nor a
+ * same-origin absolute path, at config time.
+ *
+ * `//evil.example` and a bare `*` are both "non-empty strings" that a browser
+ * reads as another origin, so accepting them turned a redirect rule into an
+ * open redirect as soon as the request path was interpolated into it.
+ */
+function assertRedirectDestination(destination: string, field: string): void {
+  const base = destination.endsWith('*') ? destination.slice(0, -1) : destination
+  if (ABSOLUTE_URL_PATTERN.test(base)) {
+    let parsed: URL
+    try {
+      parsed = new URL(base)
+    } catch {
+      throw new TypeError(`${field} must be an absolute http(s) URL or a path starting with "/"`)
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      throw new TypeError(`${field} must use http(s) when it is an absolute URL`)
+    }
+    return
+  }
+  if (!base.startsWith('/') || base.startsWith('//') || base.includes('\\')) {
+    throw new TypeError(`${field} must be an absolute http(s) URL or a path starting with "/"`)
+  }
+}
+
+/**
+ * Build the `Location` for a matched rule, or `null` when interpolating the
+ * request-controlled remainder would move the redirect off the intended
+ * origin.
+ *
+ * The origin a rule is allowed to reach is fixed by its configured
+ * destination: an absolute destination pins its own origin, a path destination
+ * pins the requesting origin. Only the path, query, and fragment may come from
+ * the request.
+ */
+function redirectLocation(
+  destination: string,
+  remainder: string | null,
+  search: string,
+): string | null {
+  const wildcard = destination.endsWith('*')
+  const base = wildcard ? destination.slice(0, -1) : destination
+  const absolute = ABSOLUTE_URL_PATTERN.test(base)
+
+  let expectedOrigin: string
+  let resolved: URL
+  try {
+    expectedOrigin = absolute ? new URL(base).origin : REDIRECT_ORIGIN_PROBE
+    resolved = new URL(wildcard ? base + (remainder ?? '') : base, REDIRECT_ORIGIN_PROBE)
+  } catch {
+    return null
+  }
+  if (resolved.origin !== expectedOrigin) return null
+
+  if (absolute) return resolved.href
+  // A path destination carries the original query forward unless the rule
+  // already specified one, matching the documented behavior.
+  return `${resolved.pathname}${resolved.search || search}${resolved.hash}`
 }
 
 /** Returns the wildcard remainder, `''` for exact matches, or `null` for no match. */

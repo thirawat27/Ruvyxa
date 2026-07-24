@@ -7,7 +7,7 @@
   "bin": {
     "create-ruvyxa": "./bin/create-ruvyxa.js"
   },
-  "files": ["bin", "dist", "template", "README.md"],
+  "files": ["bin", "dist", "src", "template", "README.md"],
   "keywords": ["create", "starter", "template", "ruvyxa", "typescript", "react"],
   "repository": {
     "type": "git",

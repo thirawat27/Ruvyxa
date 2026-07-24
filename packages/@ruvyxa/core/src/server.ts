@@ -354,7 +354,7 @@ export function cache(key: string): CacheBuilder {
             .then(() => producer())
             .then((value) => {
               const populatedAt = Date.now()
-              cacheStore.commitWrite(
+              const committed = cacheStore.commitWrite(
                 key,
                 writeToken,
                 {
@@ -365,6 +365,11 @@ export function cache(key: string): CacheBuilder {
                 },
                 cached,
               )
+              // A rejected commit leaves the old entry in place. Without
+              // clearing its flag the entry claims a refresh is still running
+              // and no later reader ever starts another one, so it serves
+              // stale until it falls out of the window entirely.
+              if (!committed && cacheStore.peek(key) === cached) cached.refreshing = false
             })
             .catch(() => {
               // Producer failed during background refresh — keep serving stale

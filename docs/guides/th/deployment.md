@@ -177,6 +177,10 @@ ruvyxa build --adapter node
 node .ruvyxa/deploy/node/server/index.mjs
 ```
 
+บน Bun ให้ build ด้วย `--adapter bun` แล้วรัน `bun .ruvyxa/deploy/bun/server/index.mjs` — adapter
+ทั้งสอง ตัว emit server ตัวเดียวกัน ลำดับการ route, static fallback และ cache header
+จึงเหมือนกันทั้งสอง runtime
+
 directory `deploy/node/` ครบจบในตัว (server + assets ใน `public/`) — copy ไปใส่ Docker image, VPS,
 PM2, systemd หรือ PaaS ใดก็ได้ (Render, Railway, Fly.io, Heroku) แล้วรันคำสั่งเดิม ไม่ต้องมี
 `node_modules` และไม่ต้องมี native binary ตอน runtime รองรับ `PORT` (default 3000), `HOST` (default
@@ -313,7 +317,7 @@ Linux เป็น static musl ทั้งหมด รันได้บน Li
 
 `examples/demo/` เป็น integration app ที่มี static, dynamic และ catch-all routes; API routes; server
 actions; MDX; public environment variables; external CSS; และ SSR, SSG, ISR, CSR, PPR ตัวอย่าง อ่าน
-[README](../../examples/demo/README.md), รันคำสั่ง diagnostic และคัดลอกรูปแบบที่
+[README](../../../examples/demo/README.md), รันคำสั่ง diagnostic และคัดลอกรูปแบบที่
 พิสูจน์แล้วก่อนเพิ่ม feature ใหม่ในแอปของคุณ
 
 ---
@@ -330,7 +334,7 @@ actions; MDX; public environment variables; external CSS; และ SSR, SSG, IS
 | Adapter                      | เป้าหมาย                                                  |
 | ---------------------------- | --------------------------------------------------------- |
 | `@ruvyxa/adapter-node`       | Standalone server: `.ruvyxa/deploy/node/server/index.mjs` |
-| `@ruvyxa/adapter-bun`        | Bun launcher: `.ruvyxa/deploy/bun/start.mjs`              |
+| `@ruvyxa/adapter-bun`        | Standalone server: `.ruvyxa/deploy/bun/server/index.mjs`  |
 | `@ruvyxa/adapter-static`     | Static files: `.ruvyxa/static/`                           |
 | `@ruvyxa/adapter-cloudflare` | Cloudflare Workers: `.ruvyxa/deploy/cloudflare/`          |
 | `@ruvyxa/adapter-netlify`    | Netlify functions + static: `.netlify/v1/` + deploy dir   |

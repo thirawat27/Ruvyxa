@@ -1,5 +1,5 @@
 import type { Adapter, AdapterOutput, BuildContext } from '@ruvyxa/core'
-import { clientBuildOutput, validateBuildContext } from '@ruvyxa/core'
+import { clientBuildOutput, standaloneServerSource, validateBuildContext } from '@ruvyxa/core'
 
 /**
  * Options for the Bun adapter.
@@ -12,8 +12,17 @@ export interface BunAdapterOptions {
 /**
  * Create a Bun runtime deployment adapter for Ruvyxa.
  *
- * Produces a Bun-optimized server bundle that takes advantage of Bun's
- * native performance features. Deploys to any Bun-compatible hosting.
+ * Produces the same self-contained deployment the node adapter does — a
+ * compiled route registry, the request handler, and a `public/` directory —
+ * and runs it with `bun .ruvyxa/deploy/bun/server/index.mjs`. Bun implements
+ * `node:http`, `import.meta.dirname`, and the Web `Request`/`Response` classes
+ * the handler is written against, so the server source is shared rather than
+ * forked.
+ *
+ * Earlier releases emitted only a launcher that shelled out to
+ * `bunx ruvyxa start`, which meant a Bun host still needed the ruvyxa CLI and
+ * its native binary installed at runtime. The launcher is still emitted for
+ * that workflow; it is no longer the only option.
  *
  * @example
  * ```ts
@@ -21,7 +30,7 @@ export interface BunAdapterOptions {
  * import { bunAdapter } from "@ruvyxa/adapter-bun"
  *
  * export default config({
- *   adapter: bunAdapter({ entry: "./bun-entry.ts" })
+ *   adapter: bunAdapter()
  * })
  * ```
  */
@@ -37,6 +46,7 @@ export function bunAdapter(options: BunAdapterOptions = {}): Adapter {
   return {
     name: 'bun',
     target: 'node',
+    supports: ['ssr', 'ssg', 'csr', 'isr', 'ppr', 'api'],
     build(ctx: BuildContext): AdapterOutput {
       validateBuildContext(ctx, 'bunAdapter')
       return {
@@ -48,6 +58,15 @@ export function bunAdapter(options: BunAdapterOptions = {}): Adapter {
         assetsDir: `${ctx.outDir}/assets`,
         ...clientBuildOutput(ctx),
         artifacts: [
+          // Standalone server: compiled route registry + handler runtime
+          {
+            kind: 'function',
+            path: 'deploy/bun/server',
+            handlerSource: standaloneServerSource(),
+          },
+          // Static publish directory served by the standalone server. An
+          // API-only app has no prerendered pages; the server still runs.
+          { kind: 'static-site', path: 'deploy/bun/public', optional: true },
           {
             kind: 'file',
             path: 'deploy/bun/start.mjs',
@@ -57,7 +76,13 @@ export function bunAdapter(options: BunAdapterOptions = {}): Adapter {
             kind: 'file',
             path: 'deploy/bun/README.md',
             contents:
-              '# Ruvyxa Bun deployment\n\nRun `bun .ruvyxa/deploy/bun/start.mjs` from the application root after installing production dependencies.\n',
+              '# Ruvyxa Bun deployment\n\n' +
+              'Standalone (no ruvyxa runtime dependency):\n\n' +
+              '```bash\nbun .ruvyxa/deploy/bun/server/index.mjs\n```\n\n' +
+              'Honors `PORT` (default 3000) and `HOST` (default 0.0.0.0). Copy the\n' +
+              '`deploy/bun/` directory anywhere Bun runs and use the same command.\n\n' +
+              'Alternative, using the installed ruvyxa CLI:\n\n' +
+              '```bash\nbun .ruvyxa/deploy/bun/start.mjs\n```\n',
           },
         ],
       }
