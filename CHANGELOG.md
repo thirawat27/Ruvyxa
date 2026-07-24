@@ -156,10 +156,10 @@ disappeared the moment a CDN or a platform bundler stood in front of the app.
   and Cloudflare (`_headers`), which both default to `max-age=0, must-revalidate` for
   publish-directory files.
 
-Known gap, unchanged: `--adapter bun` still emits only a launcher (`start.mjs` + README) that shells
-out to `ruvyxa start`, so a Bun host needs the CLI and its native binary installed. The `node`
-adapter is the one that produces a self-contained directory — Bun runs it unchanged
-(`bun .ruvyxa/deploy/node/server/index.mjs`).
+Compatibility note: `deploy/bun/start.mjs` remains a launcher for projects that intentionally use
+the installed CLI workflow. For a self-contained Bun deployment, use the server emitted at
+`deploy/bun/server/index.mjs`; it shares the standalone server source with the Node adapter and does
+not require the Ruvyxa CLI or native binary at runtime.
 
 ## v1.0.19 (2026-07-23)
 

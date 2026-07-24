@@ -433,28 +433,45 @@ if ($SkipAdapters) {
 } else {
     Write-Section "BUILD TARGETS / ADAPTERS"
 
-    # `--target` selects the server runtime the bundle is emitted for; `edge`
-    # and `static` in particular have their own code paths and must not regress.
-    foreach ($target in @("node", "bun", "edge", "static")) {
-        Test-Cli "build --target $target" @("build", "--target", $target)
+    # `--target` selects the public build target. Bun is a deployment adapter,
+    # not a standalone --target value; bunAdapter() emits a Node-compatible
+    # self-contained server and is covered in the adapter matrix below.
+    $targetExpectations = @(
+        @{ Name = "node";   Supported = $true }
+        @{ Name = "edge";   Supported = $false; ExpectedCode = "RUV3201" }
+        @{ Name = "static"; Supported = $false; ExpectedCode = "RUV3201" }
+    )
+    foreach ($expectation in $targetExpectations) {
+        $label = "build --target $($expectation.Name)"
+        if ($expectation.Supported) {
+            Test-Cli $label @("build", "--target", $expectation.Name)
+            continue
+        }
+
+        Write-Host "--- $label ---" -ForegroundColor Yellow
+        $output = Invoke-Native -Arguments @("build", "--target", $expectation.Name, "--root", $App) | Out-String
+        $exit = $script:LastNativeExitCode
+        if ($exit -ne 0 -and $output -match $expectation.ExpectedCode) {
+            Write-Ok "$label -> $($expectation.ExpectedCode) realtime deployment guard"
+        } else {
+            Write-Fail "$label expected $($expectation.ExpectedCode)`n$output"
+        }
+        Write-Host ""
     }
 
     # `--adapter` picks the deploy shape without editing ruvyxa.config. Each
-    # adapter declares the strategies it can deploy via `Adapter.supports`, and
-    # the runner rejects routes outside that set with RUV2202 before building.
-    # The demo app exercises every strategy, so an adapter that cannot host all
-    # of them is *expected* to fail -- asserting the expected outcome catches
-    # both a regression that breaks a working adapter and one that silently
-    # stops enforcing a platform limit.
+    # adapter declares the strategies it can deploy via `Adapter.supports`.
+    # The demo app also enables native realtime, which is intentionally limited
+    # to self-hosted Node/Bun adapters. Non-self-hosted adapters therefore stop
+    # at RUV3201 before their route-strategy checks; their emitted artifacts are
+    # covered by the focused adapter package tests.
     $adapterExpectations = @(
         @{ Name = "node";       Supported = $true }
         @{ Name = "bun";        Supported = $true }
-        @{ Name = "vercel";     Supported = $true }
-        @{ Name = "netlify";    Supported = $true }
-        # No writable prerender cache on a Worker asset binding, so no ISR/PPR.
-        @{ Name = "cloudflare"; Supported = $false; Unsupported = @("/isr-page", "/ppr-page") }
-        # A static publish directory has no server at all.
-        @{ Name = "static";     Supported = $false; Unsupported = @("/api/health", "/blog/[slug]", "/isr-page") }
+        @{ Name = "vercel";     Supported = $false; ExpectedCode = "RUV3201" }
+        @{ Name = "netlify";    Supported = $false; ExpectedCode = "RUV3201" }
+        @{ Name = "cloudflare"; Supported = $false; ExpectedCode = "RUV3201" }
+        @{ Name = "static";     Supported = $false; ExpectedCode = "RUV3201" }
     )
     foreach ($expectation in $adapterExpectations) {
         $label = "build --adapter $($expectation.Name)"
@@ -465,6 +482,12 @@ if ($SkipAdapters) {
         if ($expectation.Supported) {
             if ($exit -eq 0) { Write-Ok $label }
             else { Write-Fail "$label exit $exit`n$output" }
+        } elseif ($expectation.ExpectedCode) {
+            if ($exit -ne 0 -and $output -match $expectation.ExpectedCode) {
+                Write-Ok "$label -> $($expectation.ExpectedCode) realtime deployment guard"
+            } else {
+                Write-Fail "$label expected $($expectation.ExpectedCode)`n$output"
+            }
         } elseif ($exit -eq 0) {
             Write-Fail "$label unexpectedly succeeded; RUV2202 should reject $($expectation.Unsupported -join ', ')"
         } elseif ($output -notmatch "RUV2202") {
