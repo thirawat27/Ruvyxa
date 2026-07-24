@@ -133,6 +133,78 @@ describe('adapter runner', () => {
     }
   })
 
+  // A host that serves the publish directory before invoking the function
+  // (Vercel `handle: filesystem`, Netlify `preferStatic`) pins a published ISR
+  // page to its build-time snapshot forever, so the adapter can hold those
+  // pages back. Build telemetry must not become a public URL either.
+  it('keeps excluded strategies and build telemetry out of the publish directory', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-adapter-runner-'))
+    const outputDir = path.join(root, '.ruvyxa-staging')
+    try {
+      await mkdir(path.join(outputDir, 'assets'), { recursive: true })
+      await mkdir(path.join(outputDir, 'prerender', 'isr-page'), { recursive: true })
+      await mkdir(path.join(outputDir, 'prerender', 'blog', 'hello'), { recursive: true })
+      await writeFile(
+        path.join(root, 'ruvyxa.config.mjs'),
+        `export default { adapter: { build() { return { artifacts: [
+          { kind: 'static-site', path: 'deploy/site', excludeStrategies: ['isr', 'ppr'] }
+        ] } } } }`,
+      )
+      await writeFile(
+        path.join(outputDir, 'manifest.json'),
+        JSON.stringify({
+          routes: [
+            { kind: 'page', path: '/', render: { strategy: 'ssg' } },
+            { kind: 'page', path: '/isr-page', render: { strategy: 'isr' } },
+            { kind: 'page', path: '/blog/[slug]', render: { strategy: 'isr' } },
+          ],
+        }),
+      )
+      await writeFile(path.join(outputDir, 'assets', 'logo.png'), 'png-bytes')
+      await writeFile(path.join(outputDir, 'assets', '.ruvyxa-images.json'), '{"entries":[]}')
+      await writeFile(path.join(outputDir, 'prerender', 'index.html'), '<main>home</main>')
+      await writeFile(
+        path.join(outputDir, 'prerender', 'isr-page', 'index.html'),
+        '<main>isr</main>',
+      )
+      await writeFile(
+        path.join(outputDir, 'prerender', 'blog', 'hello', 'index.html'),
+        '<main>hello</main>',
+      )
+      await writeFile(
+        path.join(outputDir, 'prerender', 'manifest.json'),
+        JSON.stringify({
+          routes: [
+            { path: '/', strategy: 'ssg', htmlFile: 'index.html' },
+            { path: '/isr-page', strategy: 'isr', htmlFile: 'index.html' },
+            { path: '/blog/hello', strategy: 'isr', htmlFile: 'index.html' },
+          ],
+        }),
+      )
+
+      await runRunner(root, outputDir)
+
+      assert.equal(
+        await readFile(path.join(outputDir, 'deploy/site/index.html'), 'utf8'),
+        '<main>home</main>',
+      )
+      assert.equal(
+        await readFile(path.join(outputDir, 'deploy/site/logo.png'), 'utf8'),
+        'png-bytes',
+      )
+      for (const withheld of [
+        'deploy/site/isr-page/index.html',
+        'deploy/site/blog/hello/index.html',
+        'deploy/site/.ruvyxa-images.json',
+        'deploy/site/manifest.json',
+      ]) {
+        await assert.rejects(readFile(path.join(outputDir, withheld), 'utf8'), withheld)
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('materializes executable page and API modules instead of raw TypeScript sources', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-adapter-runner-'))
     const outputDir = path.join(root, '.ruvyxa-staging')
@@ -216,6 +288,15 @@ export default handler
       assert.match(registry, /loadRouteModule/)
       assert.match(registry, /renderPage0/)
       assert.doesNotMatch(registry, /import\(`\.\/server\/app\//)
+
+      // The manifest also ships as a module. A platform that re-bundles the
+      // function (Netlify's esbuild step) keeps only what it can resolve
+      // statically, and a sibling manifest.json read at runtime crashed the
+      // deployed function with ENOENT /var/task/manifest.json.
+      const { default: bundledManifest } = await import(
+        `${new URL(`file://${functionDir.replaceAll('\\', '/')}/manifest.mjs`).href}?t=${Date.now()}`
+      )
+      assert.deepEqual(bundledManifest.routes, manifest.routes)
     } finally {
       await rm(root, { recursive: true, force: true })
     }

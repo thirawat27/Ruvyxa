@@ -1,5 +1,10 @@
 import type { Adapter, AdapterArtifact, AdapterOutput, BuildContext } from '@ruvyxa/core'
-import { clientBuildOutput, projectRelativeOutDir, validateBuildContext } from '@ruvyxa/core'
+import {
+  clientBuildOutput,
+  headersFileContents,
+  projectRelativeOutDir,
+  validateBuildContext,
+} from '@ruvyxa/core'
 
 /**
  * Options for the Cloudflare Workers deployment adapter.
@@ -19,11 +24,23 @@ export interface CloudflareAdapterOptions {
    */
   projectConfig?: boolean
   /**
-   * Cloudflare Workers compatibility date. This determines which runtime
-   * APIs are available. Defaults to the current date at build time.
+   * Cloudflare Workers compatibility date, which pins the runtime API
+   * behavior the Worker was written against.
+   *
+   * Defaults to a fixed date this adapter is tested with, never the current
+   * date: a build-time date makes two builds of the same commit differ, and a
+   * date newer than the workerd version on the deploy machine is rejected by
+   * `wrangler`. Raise it deliberately after checking Cloudflare's changelog.
    */
   compatibilityDate?: string
 }
+
+/**
+ * Compatibility date this adapter's generated Worker is verified against.
+ *
+ * Bump only together with a check of the Workers runtime changes it opts into.
+ */
+const DEFAULT_COMPATIBILITY_DATE = '2025-09-01'
 
 /**
  * Worker fetch handler source code.
@@ -38,7 +55,9 @@ export interface CloudflareAdapterOptions {
 function workerHandlerSource(): string {
   return `import { createHandler } from './serverless-handler.mjs';
 import { loadRouteModule } from './route-modules.mjs';
-import manifest from './manifest.json';
+// A JS module, not a JSON import: import attributes for JSON are not uniformly
+// available across bundlers and Worker compatibility dates.
+import manifest from './manifest.mjs';
 
 const handler = createHandler({
   routes: manifest.routes,
@@ -54,7 +73,9 @@ const handler = createHandler({
 
 export default {
   async fetch(request, env, ctx) {
-    return handler(request);
+    // The runtime context carries waitUntil, which the shared handler uses to
+    // finish background work after the response is returned.
+    return handler(request, ctx);
   },
 };
 `
@@ -96,7 +117,7 @@ export function cloudflareAdapter(options: CloudflareAdapterOptions = {}): Adapt
     build(ctx: BuildContext): AdapterOutput {
       validateBuildContext(ctx, 'cloudflareAdapter')
 
-      const compatDate = options.compatibilityDate ?? new Date().toISOString().slice(0, 10)
+      const compatDate = options.compatibilityDate ?? DEFAULT_COMPATIBILITY_DATE
       // Config files are committed or read on other machines; never embed the
       // absolute build-machine outDir in them.
       const relativeOutDir = projectRelativeOutDir(ctx)
@@ -150,12 +171,13 @@ export function cloudflareAdapter(options: CloudflareAdapterOptions = {}): Adapt
             contents: wranglerConfig + '\n',
           },
           {
-            // Workers static assets read _headers from the asset directory;
-            // hashed client bundles live under /__ruvyxa/client/ and are
-            // immutable.
+            // Workers static assets read _headers from the asset directory.
+            // Hashed client bundles are immutable; `public/` assets otherwise
+            // inherit Cloudflare's `max-age=0, must-revalidate` default, which
+            // re-fetches every image and font on each navigation.
             kind: 'file',
             path: 'deploy/cloudflare/assets/_headers',
-            contents: '/__ruvyxa/client/*\n  Cache-Control: public, max-age=31536000, immutable\n',
+            contents: headersFileContents(),
           },
           ...(options.projectConfig === true
             ? [

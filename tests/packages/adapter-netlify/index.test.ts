@@ -47,12 +47,27 @@ describe('netlifyAdapter', () => {
         ? String(frameworksConfigArtifact.contents)
         : '{}',
     )
-    assert.deepEqual(frameworksConfig.headers, [
-      {
-        for: '/__ruvyxa/client/*',
-        values: { 'Cache-Control': 'public, max-age=31536000, immutable' },
-      },
-    ])
+    assert.deepEqual(frameworksConfig.headers[0], {
+      for: '/__ruvyxa/client/*',
+      values: { 'Cache-Control': 'public, max-age=31536000, immutable' },
+    })
+    // Public assets are not content-hashed, so they revalidate hourly rather
+    // than inheriting Netlify's per-request default. The rules deliberately
+    // skip js/css: on hosts whose `*` crosses path separators they would also
+    // match the hashed bundles and downgrade their immutable header.
+    const assetRules = frameworksConfig.headers.slice(1)
+    assert.ok(assetRules.length > 0)
+    assert.ok(
+      assetRules.every(
+        (rule: { for: string; values: Record<string, string> }) =>
+          rule.values['Cache-Control'] === 'public, max-age=3600, must-revalidate',
+      ),
+    )
+    assert.ok(assetRules.some((rule: { for: string }) => rule.for === '/*.png'))
+    assert.equal(
+      assetRules.some((rule: { for: string }) => rule.for === '/*.js'),
+      false,
+    )
 
     // Verify function artifacts share the handler source
     for (const functionPath of [
@@ -80,6 +95,21 @@ describe('netlifyAdapter', () => {
       // Netlify Functions v2 config export
       assert.match(String(functionArtifact!.handlerSource), /export const config/)
       assert.match(String(functionArtifact!.handlerSource), /preferStatic: true/)
+
+      // Netlify bundles the function with esbuild, so the manifest has to be
+      // part of the module graph. Reading a sibling manifest.json at runtime
+      // crashed the deployed function with ENOENT /var/task/manifest.json.
+      assert.match(
+        String(functionArtifact!.handlerSource),
+        /import manifest from '\.\/manifest\.mjs'/,
+      )
+      assert.doesNotMatch(String(functionArtifact!.handlerSource), /readFileSync\(manifestPath/)
+    }
+
+    // preferStatic serves a published page without invoking the function, so
+    // ISR and PPR pages must stay out of the publish directory to revalidate.
+    for (const artifact of output.artifacts?.filter((item) => item.kind === 'static-site') ?? []) {
+      assert.deepEqual(artifact.excludeStrategies, ['isr', 'ppr'])
     }
 
     // Opt-in project netlify.toml embeds project-relative paths only — the

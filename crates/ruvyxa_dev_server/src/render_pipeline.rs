@@ -25,8 +25,8 @@ use crate::html_document::{
 };
 use crate::router::{self, RadixRouter};
 use crate::static_assets::{
-    contained_public_asset, is_safe_relative_path, public_asset_links, serve_client_file,
-    serve_client_file_sync, serve_public_file, serve_public_file_sync,
+    contained_public_asset, is_safe_relative_path, is_static_asset_request, public_asset_links,
+    serve_client_file, serve_client_file_sync, serve_public_file, serve_public_file_sync,
 };
 use crate::worker_pool::{RenderActionRequest, RenderApiRequest, WorkerApiResponse};
 use crate::{
@@ -51,6 +51,20 @@ pub fn render_request(config: &ServerConfig, request_path: &str, method: &str) -
     render_request_cached(config, request_path, method)
 }
 
+/// True when an asset-shaped request survived static serving only because a
+/// dynamic route happened to capture it.
+///
+/// The client and public directories are consulted before routing, so a
+/// request such as `/logo.png` that reaches the router has no file behind it.
+/// Letting `/[lang]` answer it returns a 200 HTML document where the browser
+/// expects image bytes — a broken image rather than a diagnosable 404. Routes
+/// that spell the extension out (`/sitemap.xml`, `/api/data.json`) contain no
+/// dynamic segment and keep matching. Deploy adapters apply the same rule in
+/// `serverless-handler.mjs`, so `dev`, `start`, and every host agree.
+fn is_missing_static_asset(request_path: &str, route_path: &str) -> bool {
+    is_static_asset_request(request_path) && route_path.contains('[')
+}
+
 pub(crate) fn render_request_cached(
     config: &ServerConfig,
     request_path: &str,
@@ -71,6 +85,12 @@ pub(crate) fn render_request_cached(
             error_page("Route not found", config.watch && config.error_overlay),
         ));
     };
+    if is_missing_static_asset(request_path, &route_match.route.path) {
+        return Ok(html_response(
+            StatusCode::NOT_FOUND,
+            error_page("Asset not found", config.watch && config.error_overlay),
+        ));
+    }
 
     match route_match.route.kind {
         RouteKind::Page => {
@@ -134,6 +154,15 @@ pub(crate) async fn render_request_pooled(
             ),
         ));
     };
+    if is_missing_static_asset(request_path, &route_match.route.path) {
+        return Ok(html_response(
+            StatusCode::NOT_FOUND,
+            error_page(
+                "Asset not found",
+                state.config.watch && state.config.error_overlay,
+            ),
+        ));
+    }
 
     match route_match.route.kind {
         RouteKind::Page => {

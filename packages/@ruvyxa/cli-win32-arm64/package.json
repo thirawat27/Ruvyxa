@@ -1,6 +1,6 @@
 {
   "name": "@ruvyxa/cli-win32-arm64",
-  "version": "1.0.19",
+  "version": "1.0.20",
   "description": "Prebuilt Ruvyxa CLI binary for Windows arm64.",
   "license": "Apache-2.0",
   "type": "module",

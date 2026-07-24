@@ -99,7 +99,13 @@ async function sanitizeConfig(config) {
     'prerenderCache',
   ])
   assertKnownKeys(config.debug, 'config.debug', ['overlay', 'traces'])
-  assertKnownKeys(config.image, 'config.image', ['optimize', 'quality', 'lossless', 'workers'])
+  assertKnownKeys(config.image, 'config.image', [
+    'optimize',
+    'quality',
+    'lossless',
+    'keepOriginal',
+    'workers',
+  ])
   assertKnownKeys(config.security, 'config.security', [
     'actionLimit',
     'apiLimit',
@@ -174,6 +180,7 @@ async function sanitizeConfig(config) {
       optimize: booleanValue(config.image?.optimize),
       quality: numberValue(config.image?.quality),
       lossless: booleanValue(config.image?.lossless),
+      keepOriginal: booleanValue(config.image?.keepOriginal),
       workers: numberValue(config.image?.workers),
     }),
     security: objectValue(config.security, {
@@ -224,7 +231,13 @@ function assertConfigValueShape(config) {
     },
     render: { strategy: 'string', revalidate: 'number' },
     debug: { overlay: 'boolean', traces: 'boolean' },
-    image: { optimize: 'boolean', quality: 'number', lossless: 'boolean', workers: 'number' },
+    image: {
+      optimize: 'boolean',
+      quality: 'number',
+      lossless: 'boolean',
+      keepOriginal: 'boolean',
+      workers: 'number',
+    },
     security: {
       actionLimit: 'number',
       apiLimit: 'number',

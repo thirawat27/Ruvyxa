@@ -1,5 +1,12 @@
 import type { Adapter, AdapterOutput, BuildContext } from '@ruvyxa/core'
-import { clientBuildOutput, validateBuildContext } from '@ruvyxa/core'
+import {
+  CLIENT_BUNDLE_PREFIX,
+  clientBuildOutput,
+  IMMUTABLE_CACHE_CONTROL,
+  PUBLIC_ASSET_CACHE_CONTROL,
+  STATIC_ASSET_EXTENSIONS,
+  validateBuildContext,
+} from '@ruvyxa/core'
 
 /**
  * Options for the Node.js adapter.
@@ -22,11 +29,13 @@ function nodeServerSource(): string {
   return `import { createServer } from 'node:http';
 import { createHandler, prerenderRelativePath } from './serverless-handler.mjs';
 import { loadRouteModule } from './route-modules.mjs';
+// Imported so the directory stays deployable through any bundler that a host
+// puts in front of it, matching the serverless adapters.
+import manifest from './manifest.mjs';
 import { createReadStream, readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 
 const here = import.meta.dirname;
-const manifest = JSON.parse(readFileSync(path.join(here, 'manifest.json'), 'utf8'));
 const prerenderDir = path.join(here, 'prerender');
 const publicDir = path.resolve(here, '..', 'public');
 
@@ -99,6 +108,13 @@ function resolveStaticFile(pathname) {
   const candidates = decoded.endsWith('/')
     ? [path.join(resolved, 'index.html')]
     : [resolved, path.join(resolved, 'index.html'), resolved + '.html'];
+  // Mirror the Rust server's resolve_public_asset: a PNG/JPEG URL still
+  // resolves when the build published only the WebP output
+  // (image.keepOriginal: false), so the same markup works under \`ruvyxa start\`
+  // and under this standalone server.
+  if (/\\.(?:png|jpe?g)$/i.test(resolved)) {
+    candidates.push(resolved.replace(/\\.(?:png|jpe?g)$/i, '.webp'));
+  }
   for (const candidate of candidates) {
     try {
       const stats = statSync(candidate);
@@ -110,13 +126,29 @@ function resolveStaticFile(pathname) {
   return null;
 }
 
+const ASSET_EXTENSIONS = new Set(${JSON.stringify(STATIC_ASSET_EXTENSIONS)});
+
+// True when the last path segment names a static asset file. Matches
+// isStaticAssetPath in serverless-handler.mjs.
+function isAssetPath(pathname) {
+  const segment = pathname.slice(pathname.lastIndexOf('/') + 1);
+  const dot = segment.lastIndexOf('.');
+  if (dot <= 0 || dot === segment.length - 1) return false;
+  return ASSET_EXTENSIONS.has(segment.slice(dot + 1).toLowerCase());
+}
+
 function sendStatic(req, res, hit, pathname) {
   const contentType = MIME_TYPES[path.extname(hit.file).toLowerCase()] ?? 'application/octet-stream';
   res.statusCode = 200;
   res.setHeader('content-type', contentType);
   res.setHeader('content-length', hit.size);
-  if (pathname.startsWith('/__ruvyxa/client/')) {
-    res.setHeader('cache-control', 'public, max-age=31536000, immutable');
+  // Same cache policy the Rust server applies to the same files: hashed
+  // bundles are immutable, everything else from public/ revalidates hourly
+  // instead of on every navigation.
+  if (pathname.startsWith(${JSON.stringify(CLIENT_BUNDLE_PREFIX)})) {
+    res.setHeader('cache-control', ${JSON.stringify(IMMUTABLE_CACHE_CONTROL)});
+  } else {
+    res.setHeader('cache-control', ${JSON.stringify(PUBLIC_ASSET_CACHE_CONTROL)});
   }
   if (req.method === 'HEAD') {
     res.end();
@@ -138,10 +170,11 @@ const server = createServer(async (req, res) => {
     const url = new URL(req.url, \`http://\${req.headers.host || 'localhost'}\`);
     const isRead = req.method === 'GET' || req.method === 'HEAD';
 
-    // Hashed client bundles and static assets are served before routing.
-    // Page-shaped paths go through the handler first so ISR revalidation and
-    // dynamic routes keep working; unmatched paths fall back to static files.
-    if (isRead && url.pathname.startsWith('/__ruvyxa/')) {
+    // Hashed client bundles and asset-shaped paths are served before routing,
+    // the order the Rust server uses. Page-shaped paths go through the handler
+    // first so ISR revalidation and dynamic routes keep working; unmatched
+    // paths fall back to static files.
+    if (isRead && (url.pathname.startsWith('/__ruvyxa/') || isAssetPath(url.pathname))) {
       const hit = resolveStaticFile(url.pathname);
       if (hit) {
         sendStatic(req, res, hit, url.pathname);

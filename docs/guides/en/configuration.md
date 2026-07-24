@@ -39,7 +39,7 @@ export default config({
   render: { strategy: 'ssr', revalidate: 60 },
   cache: { routes: true, css: true, dir: '.ruvyxa/cache/bundler' },
   debug: { overlay: true, traces: false },
-  image: { optimize: true, quality: 82, lossless: false, workers: 0 },
+  image: { optimize: true, quality: 82, lossless: false, keepOriginal: true, workers: 0 },
   security: {
     actionLimit: 1024 * 1024,
     apiLimit: 10 * 1024 * 1024,
@@ -170,12 +170,20 @@ exits before responding is restarted and retried once.
 
 ### `image`
 
-| Field      | Type      | Default | Description                  |
-| ---------- | --------- | ------- | ---------------------------- |
-| `optimize` | `boolean` | `true`  | Convert PNG/JPEG to WebP     |
-| `quality`  | `number`  | `82`    | WebP quality (1–100)         |
-| `lossless` | `boolean` | `false` | Lossless WebP mode           |
-| `workers`  | `number`  | `0`     | Thread count (0 = CPU count) |
+| Field          | Type      | Default | Description                                 |
+| -------------- | --------- | ------- | ------------------------------------------- |
+| `optimize`     | `boolean` | `true`  | Convert PNG/JPEG to WebP                    |
+| `quality`      | `number`  | `82`    | WebP quality (1–100)                        |
+| `lossless`     | `boolean` | `false` | Lossless WebP mode                          |
+| `keepOriginal` | `boolean` | `true`  | Publish the source PNG/JPEG beside the WebP |
+| `workers`      | `number`  | `0`     | Thread count (0 = CPU count)                |
+
+`keepOriginal` exists because `public/` is a URL contract: a file you put there is served at the
+matching path. `ruvyxa dev` and `ruvyxa start` resolve `/logo.png` to `logo.webp` when only the WebP
+was published, but a CDN (Vercel, Netlify, Cloudflare, S3) has no such fallback, so a plain
+`<img src="/logo.png">` would 404 in production only. Keeping the original makes both URLs valid on
+every host. Use `<Image>` from `@ruvyxa/react`, which points at the WebP, to actually serve the
+smaller file; turn `keepOriginal` off only when every reference goes through `<Image>`.
 
 ### `security`
 

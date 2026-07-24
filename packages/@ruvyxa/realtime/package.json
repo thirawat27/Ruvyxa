@@ -1,6 +1,6 @@
 {
   "name": "@ruvyxa/realtime",
-  "version": "1.0.19",
+  "version": "1.0.20",
   "description": "Native action-driven WebSocket realtime transport for self-hosted Ruvyxa applications.",
   "license": "Apache-2.0",
   "type": "module",

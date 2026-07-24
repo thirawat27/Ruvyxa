@@ -1,5 +1,5 @@
 import type { Adapter, AdapterOutput, BuildContext } from '@ruvyxa/core'
-import { clientBuildOutput, validateBuildContext } from '@ruvyxa/core'
+import { clientBuildOutput, headersFileContents, validateBuildContext } from '@ruvyxa/core'
 
 /**
  * Options for the static site adapter.
@@ -56,7 +56,18 @@ export function staticAdapter(options: StaticAdapterOptions = {}): Adapter {
         entry: `${ctx.outDir}/${outputDir}`,
         assetsDir: `${ctx.outDir}/assets`,
         ...clientBuildOutput(ctx),
-        artifacts: [{ kind: 'static-site', path: outputDir }],
+        artifacts: [
+          { kind: 'static-site', path: outputDir },
+          {
+            // Hosts that read `_headers` from the publish root (Netlify,
+            // Cloudflare Pages) otherwise serve even the content-hashed client
+            // bundles with a revalidate-every-time default. Hosts that ignore
+            // the file are unaffected by its presence.
+            kind: 'file',
+            path: `${outputDir}/_headers`,
+            contents: headersFileContents(),
+          },
+        ],
       }
     },
   }

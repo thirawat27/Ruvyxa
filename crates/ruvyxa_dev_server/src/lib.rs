@@ -2514,6 +2514,27 @@ mod tests {
         );
     }
 
+    // A request that reaches routing has already missed the client and public
+    // directories, so an asset-shaped path has no file behind it. Letting
+    // `/[lang]` answer `/logo.png` returns a 200 HTML document where the
+    // browser expects image bytes. `serverless-handler.mjs` applies the same
+    // rule, so `dev`, `start`, and every deploy target agree.
+    #[test]
+    fn classifies_asset_shaped_request_paths() {
+        for asset in [
+            "/logo.png",
+            "/favicon.ico",
+            "/nested/app.CSS",
+            "/fonts/inter.woff2",
+        ] {
+            assert!(static_assets::is_static_asset_request(asset), "{asset}");
+        }
+
+        for page in ["/", "/en/docs", "/readme.md", "/blog/post.", "/.env"] {
+            assert!(!static_assets::is_static_asset_request(page), "{page}");
+        }
+    }
+
     #[test]
     fn rejects_public_assets_outside_the_configured_root() {
         let temp = tempfile::tempdir().unwrap();

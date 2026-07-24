@@ -1,6 +1,6 @@
 {
   "name": "@ruvyxa/react",
-  "version": "1.0.19",
+  "version": "1.0.20",
   "description": "React integration for Ruvyxa apps, built for SSR-first pages and browser hydration without framework noise.",
   "license": "Apache-2.0",
   "type": "module",

@@ -7,7 +7,20 @@ describe('staticAdapter', () => {
   it('returns static deployment output', async () => {
     const output = await staticAdapter().build({ root: '.', outDir: '.ruvyxa' })
 
-    assert.deepEqual(output.artifacts, [{ kind: 'static-site', path: 'static' }])
+    assert.deepEqual(
+      output.artifacts?.map(({ kind, path }) => ({ kind, path })),
+      [
+        { kind: 'static-site', path: 'static' },
+        { kind: 'file', path: 'static/_headers' },
+      ],
+    )
+
+    // Without this file even the content-hashed bundles are served with a
+    // revalidate-every-request default on hosts that read `_headers`.
+    const headers = output.artifacts?.find((artifact) => artifact.kind === 'file')
+    const contents = headers && 'contents' in headers ? String(headers.contents) : ''
+    assert.match(contents, /\/__ruvyxa\/client\/\*\n {2}Cache-Control: public, max-age=31536000/)
+    assert.match(contents, /\/\*\.png\n {2}Cache-Control: public, max-age=3600/)
 
     assert.deepEqual(
       {
@@ -38,7 +51,13 @@ describe('staticAdapter', () => {
     })
 
     assert.equal(output.entry, '.ruvyxa/deploy/public')
-    assert.deepEqual(output.artifacts, [{ kind: 'static-site', path: 'deploy/public' }])
+    assert.deepEqual(
+      output.artifacts?.map(({ kind, path }) => ({ kind, path })),
+      [
+        { kind: 'static-site', path: 'deploy/public' },
+        { kind: 'file', path: 'deploy/public/_headers' },
+      ],
+    )
   })
 
   it('rejects output paths that escape the build directory', () => {

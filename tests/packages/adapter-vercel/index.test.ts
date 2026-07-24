@@ -6,6 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
+import { staticAssetPattern } from '../../../packages/@ruvyxa/core/src/utils.ts'
 import { vercelAdapter } from '../../../packages/@ruvyxa/adapter-vercel/src/index.ts'
 
 const workspaceRoot = path.resolve(fileURLToPath(new URL('../../..', import.meta.url)))
@@ -65,8 +66,27 @@ describe('vercelAdapter', () => {
       headers: { 'cache-control': 'public, max-age=31536000, immutable' },
       continue: true,
     })
-    assert.deepEqual(config.routes[1], { handle: 'filesystem' })
-    assert.deepEqual(config.routes[2], { src: '/(.*)', dest: '/__ruvyxa_handler' })
+    // Public assets carry a revalidating cache header instead of Vercel's
+    // `max-age=0`, and `/__ruvyxa/` is excluded so the immutable header set by
+    // routes[0] is not overwritten with the shorter lifetime.
+    assert.deepEqual(config.routes[1], {
+      src: staticAssetPattern(),
+      headers: { 'cache-control': 'public, max-age=3600, must-revalidate' },
+      continue: true,
+    })
+    assert.doesNotMatch('/__ruvyxa/client/app.js', new RegExp(staticAssetPattern()))
+    assert.match('/logo.png', new RegExp(staticAssetPattern()))
+    assert.deepEqual(config.routes[2], { handle: 'filesystem' })
+    // A filesystem miss on an asset path is a 404, never a page render: this
+    // is what kept `/logo.png` returning a 200 HTML document from `/[lang]`.
+    assert.deepEqual(config.routes[3], { src: staticAssetPattern(), status: 404 })
+    assert.deepEqual(config.routes[4], { src: '/(.*)', dest: '/__ruvyxa_handler' })
+
+    // ISR and PPR pages must stay out of the publish directory, or
+    // `handle: filesystem` answers them before the function can revalidate.
+    for (const artifact of output.artifacts?.filter((item) => item.kind === 'static-site') ?? []) {
+      assert.deepEqual(artifact.excludeStrategies, ['isr', 'ppr'])
+    }
 
     // Verify function config
     const vcConfig = output.artifacts?.find(
@@ -166,6 +186,18 @@ describe('vercelAdapter', () => {
     const config = JSON.parse(vcConfig && 'contents' in vcConfig ? String(vcConfig.contents) : '{}')
     assert.equal(config.runtime, 'nodejs22.x')
     assert.equal(config.maxDuration, 30)
+    // Unset by default so Vercel's own region selection applies.
+    assert.equal('regions' in config, false)
+  })
+
+  it('pins function regions when asked, and rejects malformed region lists', () => {
+    const output = vercelAdapter({ regions: ['sin1'] }).build({ root: '.', outDir: '.ruvyxa' })
+    const vcConfig = output.artifacts?.find((a) => a.path.endsWith('.vc-config.json'))
+    const config = JSON.parse(vcConfig && 'contents' in vcConfig ? String(vcConfig.contents) : '{}')
+    assert.deepEqual(config.regions, ['sin1'])
+
+    assert.throws(() => vercelAdapter({ regions: [] }), /RUV2001/)
+    assert.throws(() => vercelAdapter({ regions: [''] }), /RUV2001/)
   })
 
   it('forwards a streamed Node request body and repeated Set-Cookie headers', async () => {
@@ -176,19 +208,23 @@ describe('vercelAdapter', () => {
       assert.ok(artifact?.handlerSource)
       await mkdir(path.join(root, 'prerender'), { recursive: true })
       await writeFile(path.join(root, 'index.mjs'), artifact.handlerSource)
+      // The handler imports the manifest as a module, the way adapter-runner
+      // emits it, so platform bundlers keep it in the deployed function.
+      const manifest = {
+        routes: [
+          {
+            id: 'app/api/echo/route',
+            kind: 'api',
+            path: '/api/echo',
+            file: 'app/api/echo/route.ts',
+            render: { strategy: 'ssr' },
+          },
+        ],
+      }
+      await writeFile(path.join(root, 'manifest.json'), JSON.stringify(manifest))
       await writeFile(
-        path.join(root, 'manifest.json'),
-        JSON.stringify({
-          routes: [
-            {
-              id: 'app/api/echo/route',
-              kind: 'api',
-              path: '/api/echo',
-              file: 'app/api/echo/route.ts',
-              render: { strategy: 'ssr' },
-            },
-          ],
-        }),
+        path.join(root, 'manifest.mjs'),
+        `export default ${JSON.stringify(manifest)}\n`,
       )
       await writeFile(
         path.join(root, 'route-modules.mjs'),

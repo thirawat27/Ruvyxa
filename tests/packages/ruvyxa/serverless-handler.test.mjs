@@ -56,6 +56,37 @@ describe('serverless handler route matching', () => {
     assert.equal(rendered.at(-1).routeId, 'docs-about')
   })
 
+  it('answers a missing static asset with 404 instead of a dynamic page render', async () => {
+    const rendered = []
+    const handler = handlerFor(
+      [
+        pageRoute('lang', '/[lang]'),
+        pageRoute('docs-catchall', '/docs/[...path]'),
+        pageRoute('sitemap', '/sitemap.xml'),
+      ],
+      rendered,
+    )
+
+    // The CDN already missed on these; rendering /[lang] for them returns a
+    // 200 HTML body where the browser expects image bytes, and bills a
+    // function invocation for every favicon request.
+    for (const assetPath of ['/logo.png', '/favicon.ico', '/docs/app.css']) {
+      const response = await handler(new Request(`http://localhost${assetPath}`))
+      assert.equal(response.status, 404, assetPath)
+    }
+    assert.deepEqual(rendered, [])
+
+    // An explicitly declared route keeps its extension-bearing path.
+    const sitemap = await handler(new Request('http://localhost/sitemap.xml'))
+    assert.equal(sitemap.status, 200)
+    assert.equal(rendered.at(-1).routeId, 'sitemap')
+
+    // Extensions outside the asset list stay ordinary parameter values.
+    const document = await handler(new Request('http://localhost/readme.md'))
+    assert.equal(document.status, 200)
+    assert.equal(rendered.at(-1).params.lang, 'readme.md')
+  })
+
   it('decodes catch-all segments like dynamic segments', async () => {
     const rendered = []
     const handler = handlerFor([pageRoute('docs', '/docs/[...path]')], rendered)

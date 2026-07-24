@@ -111,4 +111,41 @@ describe('cloudflareAdapter', () => {
     const adapter = cloudflareAdapter()
     assert.deepEqual(adapter.supports, ['ssr', 'ssg', 'csr', 'api'])
   })
+
+  // The default used to be `new Date()`, so two builds of the same commit
+  // produced different Workers, and a build machine ahead of the deploy
+  // machine's workerd emitted a compatibility date wrangler rejects.
+  it('pins a fixed default compatibility date', () => {
+    const compatibilityDate = () => {
+      const output = cloudflareAdapter().build({ root: '.', outDir: '.ruvyxa' })
+      const wrangler = output.artifacts?.find((artifact) =>
+        artifact.path.endsWith('wrangler.jsonc'),
+      )
+      return JSON.parse(wrangler && 'contents' in wrangler ? String(wrangler.contents) : '{}')
+        .compatibility_date
+    }
+
+    assert.equal(compatibilityDate(), compatibilityDate())
+    assert.match(compatibilityDate(), /^\d{4}-\d{2}-\d{2}$/)
+    // A date ahead of the deploy machine's workerd is rejected by wrangler.
+    assert.ok(compatibilityDate() <= new Date().toISOString().slice(0, 10))
+  })
+
+  it('forwards the runtime context and caches public assets', () => {
+    const output = cloudflareAdapter().build({ root: '.', outDir: '.ruvyxa' })
+
+    // waitUntil lives on the Workers execution context; dropping it stranded
+    // any background work the shared handler schedules.
+    const worker = output.artifacts?.find((artifact) => artifact.kind === 'function')
+    assert.match(
+      String(worker && 'handlerSource' in worker ? worker.handlerSource : ''),
+      /handler\(request, ctx\)/,
+    )
+
+    // Workers default static assets to `max-age=0, must-revalidate`.
+    const headers = output.artifacts?.find((artifact) => artifact.path.endsWith('_headers'))
+    const contents = headers && 'contents' in headers ? String(headers.contents) : ''
+    assert.match(contents, /\/\*\.webp\n {2}Cache-Control: public, max-age=3600, must-revalidate/)
+    assert.doesNotMatch(contents, /^\/\*\.js$/m)
+  })
 })

@@ -1,5 +1,72 @@
 # Changelog
 
+## Unreleased
+
+### Deployed Apps Now Behave Like `ruvyxa dev`
+
+Five deploy-only failures, all of the same shape: a rule that only the Rust server enforced, so it
+disappeared the moment a CDN or a platform bundler stood in front of the app.
+
+- **Fixed: the Netlify function crashed on every request** with
+  `ENOENT: no such file or directory, open '/var/task/manifest.json'`. Netlify re-bundles the
+  function with esbuild and keeps only what the module graph reaches, so the sibling `manifest.json`
+  that the handler read through `import.meta.dirname` never reached the deployed bundle. The route
+  manifest now also ships as `manifest.mjs` and every adapter imports it statically — Netlify,
+  Vercel, Cloudflare, and the standalone Node server. `included_files` cannot express this on the
+  zero-config Frameworks API path, so removing the runtime read was the only host-independent fix.
+- **Fixed: `public/` images 404'd on every static host.** Image optimization replaced
+  `public/logo.png` with `logo.webp` in the build output, and only `ruvyxa dev`/`ruvyxa start`
+  resolved the old URL to the new file. A CDN has no such fallback, so a plain
+  `<img src="/logo.png">` broke in production only. The source file is now published beside its
+  WebP; opt out with `image: { keepOriginal: false }` when every reference goes through `<Image>`.
+- **Fixed: a missing asset returned `200` with an HTML body.** With no file behind it, `/logo.png`
+  and `/favicon.ico` fell through to routing and were captured by a bare dynamic route such as
+  `/[lang]`, so browsers received a page where they expected image bytes — and every favicon request
+  paid for a serverless invocation in the function region. Asset-shaped paths now answer `404` in
+  `dev`, `start`, and every adapter; routes that declare the extension themselves (`/sitemap.xml`)
+  are unaffected.
+- **Fixed: ISR and PPR pages never revalidated on Vercel or Netlify.** Their build-time HTML was
+  published as a static file, and both hosts serve a matching static file before invoking the
+  function (`handle: filesystem`, `preferStatic`), so the page was pinned to its deploy-time
+  snapshot forever. Those pages are now withheld from the publish directory and kept inside the
+  function bundle as the first cache entry.
+- **Fixed: public assets were served with `max-age=0, must-revalidate` on Vercel**, so every
+  navigation re-fetched each image and font. They now carry `public, max-age=3600, must-revalidate`,
+  matching the header the Rust server already sent for the same files. Hashed client bundles keep
+  their immutable header.
+- `.ruvyxa-images.json` (build telemetry: source paths and byte counts) is no longer copied into the
+  publish directory.
+- Added `vercelAdapter({ regions: ['sin1'] })` to pin the serverless function near your users.
+  Static pages are served from the edge, but SSR, API routes, and ISR revalidation run in the
+  function region — `iad1` by default, a cross-continent round trip from Asia.
+
+### The Same Audit, Applied to the Remaining Targets
+
+- **Fixed (standalone Node server): `/logo.png` was answered by a page render.** The generated
+  server routed before consulting the publish directory for everything except `/__ruvyxa/`, so a
+  dynamic route captured the filename and the real file was unreachable. Asset-shaped paths are now
+  resolved first, matching the Rust server's order.
+- **Fixed (standalone Node server): public assets carried no `Cache-Control` at all**, and a
+  PNG/JPEG URL did not fall back to the published WebP the way `ruvyxa start` does — so
+  `image: { keepOriginal: false }` worked locally and 404'd in the shipped directory.
+- **Fixed (Cloudflare): the Worker's `compatibility_date` was the build date.** Two builds of the
+  same commit produced different Workers, and a build machine ahead of the deploy machine's
+  `workerd` emitted a date `wrangler` rejects. It is now a fixed, tested default; override with
+  `cloudflareAdapter({ compatibilityDate })`.
+- **Fixed (Cloudflare): the Worker dropped the execution context**, so `waitUntil` was unavailable
+  to anything the shared handler schedules in the background.
+- **Fixed (static adapter): no `_headers` file was emitted at all**, so hosts that read one (Netlify
+  drops, Cloudflare Pages) served even the content-hashed bundles with a revalidate-every-request
+  default.
+- Public-asset cache headers were extended to Netlify (`netlify.toml` and `.netlify/v1/config.json`)
+  and Cloudflare (`_headers`), which both default to `max-age=0, must-revalidate` for
+  publish-directory files.
+
+Known gap, unchanged: `--adapter bun` still emits only a launcher (`start.mjs` + README) that shells
+out to `ruvyxa start`, so a Bun host needs the CLI and its native binary installed. The `node`
+adapter is the one that produces a self-contained directory — Bun runs it unchanged
+(`bun .ruvyxa/deploy/node/server/index.mjs`).
+
 ## v1.0.19 (2026-07-23)
 
 ### Deploy Anywhere: Static Linux Binaries

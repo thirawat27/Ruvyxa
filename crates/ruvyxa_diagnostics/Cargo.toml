@@ -1,6 +1,6 @@
 [package]
 name = "ruvyxa_diagnostics"
-version = "1.0.19"
+version = "1.0.20"
 edition.workspace = true
 license.workspace = true
 repository.workspace = true

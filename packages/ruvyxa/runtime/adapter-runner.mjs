@@ -12,6 +12,7 @@ import {
   serverPlatform,
   toImportPath,
 } from './compiler.mjs'
+import { prerenderRelativePath } from './serverless-handler.mjs'
 
 const [projectRootArg, outputDirArg, adapterNameArg] = process.argv.slice(2)
 
@@ -231,6 +232,9 @@ async function materializeArtifacts(output, buildDir) {
       if (scope === 'project') await rm(destination, { recursive: true, force: true })
       await materializeStaticSite(buildDir, destination, {
         requirePrerender: artifact.optional !== true,
+        excludeStrategies: Array.isArray(artifact.excludeStrategies)
+          ? artifact.excludeStrategies
+          : [],
       })
       artifacts.push(
         scope === 'project'
@@ -339,10 +343,24 @@ async function materializeFunction(buildDir, destination, handlerSource, target)
     await cp(prerenderDir, path.join(destination, 'prerender'), { recursive: true })
   }
 
-  // Write the route manifest so the handler can do request routing
+  // Write the route manifest so the handler can do request routing.
+  //
+  // The `.mjs` copy is what handlers import. A platform bundler (Netlify's
+  // zip-it-and-ship-it, Vercel's NFT tracer, wrangler) rewrites the function
+  // into a single file and only carries along what it can resolve statically:
+  // a sibling `manifest.json` read through `readFileSync(import.meta.dirname)`
+  // is invisible to it and disappears from the deployed bundle, which crashed
+  // Netlify with `ENOENT /var/task/manifest.json`. A static import is part of
+  // the module graph on every platform. `manifest.json` is still written for
+  // inspection and for hosts that ship the directory verbatim.
   await writeFile(
     path.join(destination, 'manifest.json'),
     JSON.stringify(manifest, null, 2),
+    'utf8',
+  )
+  await writeFile(
+    path.join(destination, 'manifest.mjs'),
+    `export default ${JSON.stringify(manifest)}\n`,
     'utf8',
   )
 }
@@ -464,7 +482,11 @@ function pageRouteDefinition(pageFile, routeIndex) {
 // before the build hook runs (see `assertRoutesSupported`); a hybrid adapter
 // legitimately emits this artifact for the static layer of an app that also has
 // SSR pages and API routes served by its function artifact.
-async function materializeStaticSite(buildDir, destination, { requirePrerender = true } = {}) {
+async function materializeStaticSite(
+  buildDir,
+  destination,
+  { requirePrerender = true, excludeStrategies = [] } = {},
+) {
   const prerenderDir = path.join(buildDir, 'prerender')
   if (requirePrerender && !existsSync(prerenderDir)) {
     throw new Error('RUV2202 static adapter output requires generated prerendered pages.')
@@ -475,20 +497,73 @@ async function materializeStaticSite(buildDir, destination, { requirePrerender =
   // `/foo.png`, while hashed client bundles live under `/__ruvyxa/client/`.
   // Prerendered routes are copied last so a page wins an exact URL collision
   // in the same way routing wins before public-file fallback at runtime.
-  await copyDirectoryContents(path.join(buildDir, 'assets'), destination)
+  // `.ruvyxa-images.json` is build telemetry (source paths, byte counts) that
+  // the optimizer drops beside the images. It answers no request and must not
+  // become a public URL on the deployed site.
+  await copyDirectoryContents(
+    path.join(buildDir, 'assets'),
+    destination,
+    new Set(['.ruvyxa-images.json']),
+  )
   await copyDirectoryContents(
     path.join(buildDir, 'client'),
     path.join(destination, '__ruvyxa', 'client'),
   )
-  await copyDirectoryContents(prerenderDir, destination, new Set(['manifest.json']))
+  await copyDirectoryContents(
+    prerenderDir,
+    destination,
+    new Set(['manifest.json']),
+    await dynamicPrerenderFiles(prerenderDir, excludeStrategies),
+  )
 }
 
-async function copyDirectoryContents(source, destination, excluded = new Set()) {
+/**
+ * Relative HTML paths whose route is served by the function, not the CDN.
+ *
+ * `prerender/manifest.json` records the concrete path and strategy of every
+ * page written at build time, including the expansions of dynamic routes, so
+ * an ISR page can be held back from the publish directory without the adapter
+ * having to know which parameter values existed.
+ */
+async function dynamicPrerenderFiles(prerenderDir, strategies) {
+  if (strategies.length === 0) return new Set()
+  const manifestPath = path.join(prerenderDir, 'manifest.json')
+  if (!existsSync(manifestPath)) return new Set()
+
+  const excluded = new Set()
+  try {
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+    for (const route of manifest.routes ?? []) {
+      if (!strategies.includes(route?.strategy)) continue
+      const relative = prerenderRelativePath(route?.path)
+      if (relative !== null) excluded.add(relative)
+    }
+  } catch {
+    // A malformed prerender manifest must not drop the publish directory;
+    // publishing every page is the previous, safe behavior.
+    return new Set()
+  }
+  return excluded
+}
+
+async function copyDirectoryContents(
+  source,
+  destination,
+  excluded = new Set(),
+  excludedPaths = new Set(),
+) {
   if (!existsSync(source)) return
   await mkdir(destination, { recursive: true })
+  const filter =
+    excludedPaths.size === 0
+      ? undefined
+      : (from) => !excludedPaths.has(path.relative(source, from).split(path.sep).join('/'))
   for (const entry of await readdir(source, { withFileTypes: true })) {
     if (excluded.has(entry.name)) continue
-    await cp(path.join(source, entry.name), path.join(destination, entry.name), { recursive: true })
+    await cp(path.join(source, entry.name), path.join(destination, entry.name), {
+      recursive: true,
+      ...(filter === undefined ? {} : { filter }),
+    })
   }
 }
 

@@ -1,5 +1,13 @@
 import type { Adapter, AdapterArtifact, AdapterOutput, BuildContext } from '@ruvyxa/core'
-import { clientBuildOutput, projectRelativeOutDir, validateBuildContext } from '@ruvyxa/core'
+import {
+  CLIENT_BUNDLE_PREFIX,
+  clientBuildOutput,
+  IMMUTABLE_CACHE_CONTROL,
+  projectRelativeOutDir,
+  PUBLIC_ASSET_CACHE_CONTROL,
+  publicAssetGlobs,
+  validateBuildContext,
+} from '@ruvyxa/core'
 
 /**
  * Options for Netlify deployment.
@@ -39,12 +47,18 @@ export interface NetlifyAdapterOptions {
 function netlifyHandlerSource(): string {
   return `import { createHandler, prerenderRelativePath } from './serverless-handler.mjs';
 import { loadRouteModule } from './route-modules.mjs';
+// Netlify bundles the function with esbuild, so anything the deployed code
+// needs must be reachable through the module graph. A sibling manifest.json
+// read from import.meta.dirname is not, and never reaches /var/task.
+import manifest from './manifest.mjs';
 import { readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 
-const manifestPath = path.join(import.meta.dirname, 'manifest.json');
-const manifest = JSON.parse(readFileSync(manifestPath, 'utf8'));
+// Deploy-time prerender output is likewise dropped by the bundler unless the
+// site declares included_files. Reads are best-effort: a miss falls through to
+// an on-demand render, and Netlify serves SSG pages from the publish directory
+// before the function is ever invoked (config.preferStatic).
 const prerenderDir = path.join(import.meta.dirname, 'prerender');
 // The function bundle directory is read-only at runtime; only the platform
 // tmp directory accepts writes. ISR revalidations land there and are read
@@ -145,9 +159,24 @@ export function netlifyAdapter(options: NetlifyAdapterOptions = {}): Adapter {
 
       // Hashed client bundles are served under /__ruvyxa/client/ (see the
       // chunk manifest src fields); the immutable header must match that URL.
-      const immutableHeaderToml =
-        '[[headers]]\n  for = "/__ruvyxa/client/*"\n  [headers.values]\n' +
-        '    Cache-Control = "public, max-age=31536000, immutable"\n'
+      // `public/` assets are not hashed and otherwise inherit Netlify's
+      // revalidate-every-request default, so they get the same lifetime the
+      // Rust server sends for the same files.
+      const headerRules: Array<{ for: string; cacheControl: string }> = [
+        { for: `${CLIENT_BUNDLE_PREFIX}*`, cacheControl: IMMUTABLE_CACHE_CONTROL },
+        ...publicAssetGlobs().map((glob) => ({
+          for: glob,
+          cacheControl: PUBLIC_ASSET_CACHE_CONTROL,
+        })),
+      ]
+
+      const immutableHeaderToml = headerRules
+        .map(
+          (rule) =>
+            `[[headers]]\n  for = "${rule.for}"\n  [headers.values]\n` +
+            `    Cache-Control = "${rule.cacheControl}"\n`,
+        )
+        .join('')
 
       // Netlify.toml for the deploy directory
       const netlifyToml =
@@ -164,12 +193,10 @@ export function netlifyAdapter(options: NetlifyAdapterOptions = {}): Adapter {
       // Frameworks API deploy configuration (.netlify/v1/config.json)
       const frameworksApiConfig = JSON.stringify(
         {
-          headers: [
-            {
-              for: '/__ruvyxa/client/*',
-              values: { 'Cache-Control': 'public, max-age=31536000, immutable' },
-            },
-          ],
+          headers: headerRules.map((rule) => ({
+            for: rule.for,
+            values: { 'Cache-Control': rule.cacheControl },
+          })),
         },
         null,
         2,
@@ -189,7 +216,15 @@ export function netlifyAdapter(options: NetlifyAdapterOptions = {}): Adapter {
           // an API-only or all-SSR app has no prerendered pages; the function
           // still serves every route, so the missing prerender directory must
           // not fail the build.
-          { kind: 'static-site', path: 'deploy/netlify/publish', optional: true },
+          // `preferStatic: true` means a published page is served without ever
+          // reaching the function, so ISR/PPR pages must stay unpublished for
+          // revalidation to happen at all.
+          {
+            kind: 'static-site',
+            path: 'deploy/netlify/publish',
+            optional: true,
+            excludeStrategies: ['isr', 'ppr'],
+          },
           // Serverless function bundle
           {
             kind: 'function',

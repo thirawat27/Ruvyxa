@@ -72,10 +72,15 @@ An adapter's post-build lifecycle runs while the build is still in the staging d
 failed adapter cannot replace a previously successful `.ruvyxa/` build. Generated deploy output
 lands in `.ruvyxa/deploy/<platform>/`.
 
-Static outputs for Vercel, Netlify, and Cloudflare ship immutable cache headers
-(`Cache-Control: public, max-age=31536000, immutable`) for the content-hashed `/__ruvyxa/client/*`
-bundles via `config.json` routes, `.netlify/v1/config.json` headers, and an `_headers` file
-respectively.
+Every adapter ships the same two cache policies, expressed in whatever config the host reads
+(`config.json` routes on Vercel, `.netlify/v1/config.json` headers plus `netlify.toml` on Netlify,
+an `_headers` file on Cloudflare and the static adapter, response headers in the standalone Node
+server):
+
+- Content-hashed `/__ruvyxa/client/*` bundles — `public, max-age=31536000, immutable`.
+- Everything else from `public/` — `public, max-age=3600, must-revalidate`, the same header
+  `ruvyxa dev` and `ruvyxa start` send. Without it Vercel, Netlify, and Cloudflare all default to
+  `max-age=0, must-revalidate` and re-fetch every image and font on each navigation.
 
 ## Platform Guides
 
@@ -100,6 +105,16 @@ export default config({
 
 Pass `vercelAdapter({ projectOutput: false })` to write only under `.ruvyxa/deploy/vercel/` and
 deploy that directory manually with the “Other” preset.
+
+Static pages are served from Vercel's edge everywhere, but SSR pages, API routes, and ISR
+revalidation run in the **function region** — `iad1` (US East) unless your account says otherwise.
+If your users are far from it, pin the function closer:
+
+```ts
+export default config({
+  adapter: vercelAdapter({ regions: ['sin1'] }), // Singapore
+})
+```
 
 ### Netlify
 
@@ -198,6 +213,27 @@ rejected with `RUV2210` on Cloudflare. Use KV or Durable Objects bindings manual
 Static-only deployments (SSG/CSR pages without API or SSR routes) work everywhere. The serverless
 adapters emit both static assets and a serverless function; platforms serve static files directly
 and forward unmatched requests to the function handler.
+
+### How Requests Are Routed on a Host
+
+Every serverless adapter follows the same order, which mirrors what `ruvyxa dev` and `ruvyxa start`
+do locally:
+
+1. **Hashed client bundles** under `/__ruvyxa/client/` — served from the CDN, cached immutably.
+2. **Public assets** (everything from `public/`) — served from the CDN with
+   `public, max-age=3600, must-revalidate`.
+3. **Pre-rendered SSG/CSR pages** — served from the CDN.
+4. **Everything else** — the function handler.
+
+Two consequences worth knowing:
+
+- A request for a missing asset (`/logo.png`, `/favicon.ico`) returns **404**, never a rendered
+  page. Without that rule a bare dynamic route such as `/[lang]` captures the filename and answers
+  `200` with an HTML body, which browsers show as a broken image while billing a function invocation
+  per request. Routes that declare the extension themselves (`/sitemap.xml`) still match.
+- **ISR and PPR pages are deliberately not published as static files.** The host would serve the
+  build-time snapshot before the function is ever reached, so the page could never revalidate. The
+  deploy-time HTML still ships inside the function bundle and is used as the first cache entry.
 
 ## Troubleshooting
 

@@ -53,5 +53,20 @@ describe('nodeAdapter', () => {
     // optional so the build does not fail with RUV2202.
     const publicArtifact = artifacts?.find((artifact) => artifact.path === 'deploy/node/public')
     assert.equal(publicArtifact?.optional, true)
+
+    // The standalone server has to make the same three decisions the Rust
+    // server makes, or an app behaves differently under `ruvyxa start` than in
+    // the directory this adapter ships.
+    //
+    // 1. Asset-shaped paths are resolved before routing. Otherwise `/logo.png`
+    //    is captured by a dynamic route such as `/[lang]`, which answers 200
+    //    with an HTML body and the real file is never reached.
+    assert.match(source, /isAssetPath\(url\.pathname\)/)
+    // 2. A PNG/JPEG URL still resolves when only the WebP was published.
+    assert.match(source, /\.webp/)
+    // 3. Public assets carry a cache lifetime; only hashed bundles are
+    //    immutable.
+    assert.match(source, /public, max-age=3600, must-revalidate/)
+    assert.match(source, /public, max-age=31536000, immutable/)
   })
 })

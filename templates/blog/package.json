@@ -11,8 +11,8 @@
     "check": "ruvyxa check"
   },
   "dependencies": {
-    "@ruvyxa/react": "^1.0.19",
-    "ruvyxa": "^1.0.19",
+    "@ruvyxa/react": "^1.0.20",
+    "ruvyxa": "^1.0.20",
     "react": "^19.2.8",
     "react-dom": "^19.2.8"
   },

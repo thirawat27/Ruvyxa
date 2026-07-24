@@ -235,6 +235,34 @@ pub(crate) fn contained_public_asset(public_dir: &Path, candidate: &Path) -> Opt
     candidate.starts_with(&public_root).then_some(candidate)
 }
 
+/// Extensions that only ever name a build or public asset.
+///
+/// Restricted to images, fonts, media, and emitted web assets: none of these
+/// is a plausible value for a dynamic route parameter, so refusing them cannot
+/// swallow a real page. Mirrors `STATIC_ASSET_EXTENSIONS` in
+/// `packages/ruvyxa/runtime/serverless-handler.mjs`.
+const STATIC_ASSET_EXTENSIONS: [&str; 25] = [
+    "apng", "avif", "bmp", "css", "eot", "gif", "ico", "jpeg", "jpg", "js", "map", "mjs", "mov",
+    "mp3", "mp4", "ogg", "otf", "png", "svg", "ttf", "wav", "webm", "webp", "woff", "woff2",
+];
+
+/// True when the last path segment names a static asset file.
+///
+/// A request that reaches routing with this shape has already missed both the
+/// client bundle directory and the public directory, so the file genuinely
+/// does not exist and a dynamic route must not render a page for it.
+pub(crate) fn is_static_asset_request(request_path: &str) -> bool {
+    let segment = request_path.rsplit('/').next().unwrap_or_default();
+    let Some((name, extension)) = segment.rsplit_once('.') else {
+        return false;
+    };
+    if name.is_empty() || extension.is_empty() {
+        return false;
+    }
+    let extension = extension.to_ascii_lowercase();
+    STATIC_ASSET_EXTENSIONS.contains(&extension.as_str())
+}
+
 pub(crate) fn is_convertible_image_url(path: &Path) -> bool {
     matches!(
         path.extension()

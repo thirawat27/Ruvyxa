@@ -17,6 +17,15 @@ pub struct ImageOptimizationOptions {
     pub optimize: bool,
     pub quality: u8,
     pub lossless: bool,
+    /// Keep the original PNG/JPEG next to its WebP output.
+    ///
+    /// `public/` is a URL contract: whatever the developer puts there is
+    /// served at the matching path. Replacing `logo.png` with `logo.webp`
+    /// broke that contract everywhere except the Rust server, which quietly
+    /// resolves the old URL to the new file (`resolve_public_asset`). A CDN
+    /// has no such fallback, so every plain `<img src="/logo.png">` 404s once
+    /// the app is deployed — a failure that only ever appears in production.
+    pub keep_original: bool,
     /// Zero uses Rayon's global worker count.
     #[serde(rename = "workers")]
     pub parallelism: usize,
@@ -28,6 +37,7 @@ impl Default for ImageOptimizationOptions {
             optimize: true,
             quality: 82,
             lossless: false,
+            keep_original: true,
             parallelism: 0,
         }
     }
@@ -85,6 +95,9 @@ pub fn optimize_public_images(
 
     let sources = discover_sources(public_dir)?;
     ensure_unique_outputs(public_dir, assets_dir, &sources, options.optimize)?;
+    if options.optimize && options.keep_original {
+        ensure_unique_originals(public_dir, assets_dir, &sources)?;
+    }
     if options.optimize {
         fs::create_dir_all(cache_dir)
             .with_context(|| format!("failed to create image cache at {}", cache_dir.display()))?;
@@ -175,6 +188,30 @@ fn ensure_unique_outputs(
     Ok(())
 }
 
+fn ensure_unique_originals(
+    public_dir: &Path,
+    assets_dir: &Path,
+    sources: &[PathBuf],
+) -> anyhow::Result<()> {
+    // Originals are copied under their own names, so `Logo.png` and `logo.png`
+    // collide on a case-insensitive output directory even though neither maps
+    // onto a WebP name that `ensure_unique_outputs` already rejects.
+    let mut output_sources = HashMap::<String, &Path>::new();
+    for source in sources {
+        let output = assets_dir.join(source.strip_prefix(public_dir).unwrap_or(source));
+        let folded = output.to_string_lossy().to_lowercase();
+        if let Some(existing) = output_sources.insert(folded, source) {
+            bail!(
+                "image output collision: {} and {} both map to {}; rename one source",
+                existing.display(),
+                source.display(),
+                output.display()
+            );
+        }
+    }
+    Ok(())
+}
+
 fn process_one(
     public_dir: &Path,
     assets_dir: &Path,
@@ -199,6 +236,12 @@ fn process_one(
     let output = assets_dir.join(webp_path(relative));
     if let Some(parent) = output.parent() {
         fs::create_dir_all(parent)?;
+    }
+    // The optimized WebP is what `<Image>` and the prerendered HTML point at;
+    // the untouched source keeps every other reference to `/logo.png` working
+    // on hosts that serve the publish directory straight from a CDN.
+    if options.keep_original {
+        copy_asset(source, &unchanged_output)?;
     }
     let cache_key = cache_key(&source_data, options);
     let cached = cache_dir.join(format!("{cache_key}.webp"));
@@ -327,7 +370,7 @@ mod tests {
     use image::{ImageBuffer, Rgb, Rgba};
 
     #[test]
-    fn replaces_source_with_one_webp_and_reuses_cache() {
+    fn publishes_one_webp_beside_the_original_and_reuses_cache() {
         let temp = tempfile::tempdir().unwrap();
         let public = temp.path().join("public");
         let assets = temp.path().join("assets");
@@ -347,7 +390,10 @@ mod tests {
         .unwrap();
         assert!(source.exists());
         assert!(assets.join("hero.webp").is_file());
-        assert!(!assets.join("hero.png").exists());
+        // The original stays published: a static host has no server-side
+        // format fallback, so dropping it 404s every plain
+        // `<img src="/hero.png">` the moment the app is deployed.
+        assert!(assets.join("hero.png").is_file());
         assert_eq!(fs::read(assets.join("robots.txt")).unwrap(), b"hello");
         assert_eq!(first.optimized_images, 1);
         assert_eq!(first.cache_hits, 0);
@@ -362,6 +408,22 @@ mod tests {
         )
         .unwrap();
         assert_eq!(second.cache_hits, 1);
+
+        // Opting out trades that compatibility for the smaller publish
+        // directory, and must then actually drop the source.
+        fs::remove_dir_all(&assets).unwrap();
+        optimize_public_images(
+            &public,
+            &assets,
+            &cache,
+            &ImageOptimizationOptions {
+                keep_original: false,
+                ..ImageOptimizationOptions::default()
+            },
+        )
+        .unwrap();
+        assert!(assets.join("hero.webp").is_file());
+        assert!(!assets.join("hero.png").exists());
     }
 
     #[test]

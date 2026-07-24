@@ -118,6 +118,22 @@ export function createHandler(options) {
 
     const { route, params } = match
 
+    // A missing static file must not be answered by a page render. The Rust
+    // server resolves public files before routing, so `/logo.png` never
+    // reaches the router there; in a deploy the CDN checks the filesystem
+    // first and then hands the miss to this function, where a bare dynamic
+    // segment such as `/[lang]` happily captures `logo.png` and returns a 200
+    // HTML document. Browsers then show a broken image, and every favicon or
+    // asset miss costs a function invocation. Explicitly declared routes
+    // (`/sitemap.xml`, `/api/data.json`) still match — only dynamic segments
+    // are refused.
+    if (isStaticAssetPath(pathname) && hasDynamicSegment(route.path)) {
+      return new Response('Not Found', {
+        status: 404,
+        headers: { 'content-type': 'text/plain; charset=utf-8' },
+      })
+    }
+
     // Check platform support for the route's strategy
     const strategy = route.kind === 'api' ? 'api' : route.render.strategy
     if (!supportedStrategies.includes(strategy)) {
@@ -319,6 +335,57 @@ export function prerenderRelativePath(pathname) {
   }
 
   return segments.length === 0 ? 'index.html' : `${segments.join('/')}/index.html`
+}
+
+// ─── Static Asset Paths ─────────────────────────────────────────────────────
+
+/**
+ * Extensions that only ever name a build or public asset. Kept to images,
+ * fonts, media, and emitted web assets: these are never a plausible value for
+ * a dynamic route parameter, so refusing them cannot swallow a real page.
+ * Mirrors `is_static_asset_request` in `crates/ruvyxa_dev_server/src/static_assets.rs`.
+ */
+const STATIC_ASSET_EXTENSIONS = new Set([
+  'apng',
+  'avif',
+  'bmp',
+  'css',
+  'eot',
+  'gif',
+  'ico',
+  'jpeg',
+  'jpg',
+  'js',
+  'map',
+  'mjs',
+  'mov',
+  'mp3',
+  'mp4',
+  'ogg',
+  'otf',
+  'png',
+  'svg',
+  'ttf',
+  'wav',
+  'webm',
+  'webp',
+  'woff',
+  'woff2',
+])
+
+/** True when the last path segment names a static asset file. */
+export function isStaticAssetPath(pathname) {
+  if (typeof pathname !== 'string') return false
+  const lastSlash = pathname.lastIndexOf('/')
+  const segment = lastSlash === -1 ? pathname : pathname.slice(lastSlash + 1)
+  const dot = segment.lastIndexOf('.')
+  if (dot <= 0 || dot === segment.length - 1) return false
+  return STATIC_ASSET_EXTENSIONS.has(segment.slice(dot + 1).toLowerCase())
+}
+
+/** True when the route pattern contains a dynamic, catch-all, or optional segment. */
+function hasDynamicSegment(routePath) {
+  return typeof routePath === 'string' && routePath.includes('[')
 }
 
 // ─── Route Matching ─────────────────────────────────────────────────────────

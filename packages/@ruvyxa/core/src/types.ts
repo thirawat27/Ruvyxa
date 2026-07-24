@@ -81,6 +81,13 @@ export interface ImageConfig {
   quality?: number
   /** Use lossless WebP encoding; `quality` then controls encoder effort. @default false */
   lossless?: boolean
+  /**
+   * Publish the original PNG/JPEG next to its WebP output so a plain
+   * `<img src="/logo.png">` keeps working on static hosts, which have no
+   * server-side format fallback. Turn off only when every image reference goes
+   * through `<Image>` and the smaller publish directory matters. @default true
+   */
+  keepOriginal?: boolean
   /** Image conversion workers. Zero selects the available CPU count. @default 0 */
   workers?: number
 }
@@ -395,6 +402,18 @@ export interface AdapterArtifact {
    * @default false
    */
   optional?: boolean
+  /**
+   * For `static-site` artifacts: rendering strategies whose pre-rendered
+   * pages must stay out of the publish directory.
+   *
+   * A host that serves a matching static file before invoking the function
+   * (Vercel's `handle: filesystem`, Netlify's `preferStatic`) would otherwise
+   * pin an ISR page to its build-time snapshot forever — the function that
+   * owns revalidation is never reached, silently turning ISR and PPR into SSG.
+   * The deploy-time HTML still ships inside the function bundle, which reads
+   * it as the pre-revalidation cache entry.
+   */
+  excludeStrategies?: string[]
 }
 
 export interface Adapter {
