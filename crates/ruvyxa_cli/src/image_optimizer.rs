@@ -26,10 +26,25 @@ pub struct ImageOptimizationOptions {
     /// has no such fallback, so every plain `<img src="/logo.png">` 404s once
     /// the app is deployed — a failure that only ever appears in production.
     pub keep_original: bool,
+    /// Target widths for responsive `srcset` variants, in pixels.
+    ///
+    /// For each source the optimizer emits `<name>-<w>w.webp` at every width in
+    /// this list that is strictly smaller than the image's intrinsic width. The
+    /// `<Image>` component in `@ruvyxa/react` builds its `srcset` from the same
+    /// list ([`DEFAULT_VARIANT_WIDTHS`]) and the same naming convention, so
+    /// every URL it emits maps to a file produced here — the browser never
+    /// requests a variant that was not built.
+    pub variant_widths: Vec<u32>,
     /// Zero uses Rayon's global worker count.
     #[serde(rename = "workers")]
     pub parallelism: usize,
 }
+
+/// Default responsive breakpoints, matching `DEFAULT_DEVICE_WIDTHS` in
+/// `packages/@ruvyxa/react/src/image.tsx`. The two MUST stay identical: the
+/// build emits these widths and the component references them at render time.
+/// `tests/packages/react/image-variants.test.mjs` asserts the lists agree.
+pub const DEFAULT_VARIANT_WIDTHS: [u32; 8] = [640, 750, 828, 1080, 1200, 1920, 2048, 3840];
 
 impl Default for ImageOptimizationOptions {
     fn default() -> Self {
@@ -38,6 +53,7 @@ impl Default for ImageOptimizationOptions {
             quality: 82,
             lossless: false,
             keep_original: true,
+            variant_widths: DEFAULT_VARIANT_WIDTHS.to_vec(),
             parallelism: 0,
         }
     }
@@ -63,6 +79,17 @@ pub struct ImageManifestEntry {
     pub source_bytes: u64,
     pub output_bytes: u64,
     pub cache_hit: bool,
+    /// Responsive downscaled outputs, smallest width first. Empty when the
+    /// image is narrower than every configured breakpoint.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variants: Vec<ImageVariant>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ImageVariant {
+    pub width: u32,
+    pub output: String,
 }
 
 struct Conversion {
@@ -73,6 +100,7 @@ struct Conversion {
     source_bytes: u64,
     output_bytes: u64,
     cache_hit: bool,
+    variants: Vec<ImageVariant>,
 }
 
 /// Copy public assets and convert PNG/JPEG files to one WebP output each.
@@ -135,6 +163,7 @@ pub fn optimize_public_images(
             source_bytes: conversion.source_bytes,
             output_bytes: conversion.output_bytes,
             cache_hit: conversion.cache_hit,
+            variants: conversion.variants,
         });
     }
 
@@ -250,7 +279,7 @@ fn process_one(
     if cache_hit {
         materialize_cached(&cached, &output)?;
     } else {
-        let encoded = encode_webp(decoded, options)?;
+        let encoded = encode_webp(decoded.clone(), options)?;
         write_cache_entry(&cached, &encoded)?;
         materialize_cached(&cached, &output)?;
     }
@@ -258,6 +287,15 @@ fn process_one(
     let output_bytes = fs::metadata(&output)
         .with_context(|| format!("failed to inspect image output {}", output.display()))?
         .len();
+    let variants = emit_variants(
+        &decoded,
+        width,
+        relative,
+        assets_dir,
+        cache_dir,
+        &source_data,
+        options,
+    )?;
     Ok(Some(Conversion {
         source: source.to_path_buf(),
         output,
@@ -266,7 +304,64 @@ fn process_one(
         source_bytes: source_data.len() as u64,
         output_bytes,
         cache_hit,
+        variants,
     }))
+}
+
+/// Emit a downscaled WebP for every configured breakpoint narrower than the
+/// intrinsic width.
+///
+/// Widths at or above the intrinsic size are skipped: upscaling only inflates
+/// bytes for no visual gain, and the full-size WebP already covers the top of
+/// the `srcset`. Each variant is content-addressed by the source bytes, quality
+/// options, and target width so re-runs and shared sources hit the cache.
+fn emit_variants(
+    decoded: &DynamicImage,
+    intrinsic_width: u32,
+    relative: &Path,
+    assets_dir: &Path,
+    cache_dir: &Path,
+    source_data: &[u8],
+    options: &ImageOptimizationOptions,
+) -> anyhow::Result<Vec<ImageVariant>> {
+    let mut widths: Vec<u32> = options
+        .variant_widths
+        .iter()
+        .copied()
+        .filter(|width| *width > 0 && *width < intrinsic_width)
+        .collect();
+    widths.sort_unstable();
+    widths.dedup();
+
+    let (_, intrinsic_height) = decoded.dimensions();
+    let mut variants = Vec::with_capacity(widths.len());
+    for width in widths {
+        // Preserve aspect ratio; a zero height would make the encoder reject
+        // the buffer on extreme aspect ratios.
+        let height = ((width as u64 * intrinsic_height as u64) / intrinsic_width.max(1) as u64)
+            .max(1) as u32;
+        let variant_relative = variant_path(relative, width);
+        let output = assets_dir.join(&variant_relative);
+        if let Some(parent) = output.parent() {
+            fs::create_dir_all(parent)?;
+        }
+
+        let cache_key = variant_cache_key(source_data, options, width);
+        let cached = cache_dir.join(format!("{cache_key}.webp"));
+        if !cached.is_file() {
+            let resized =
+                decoded.resize_exact(width, height, image::imageops::FilterType::Lanczos3);
+            let encoded = encode_webp(resized, options)?;
+            write_cache_entry(&cached, &encoded)?;
+        }
+        materialize_cached(&cached, &output)?;
+
+        variants.push(ImageVariant {
+            width,
+            output: relative_url(assets_dir, &output),
+        });
+    }
+    Ok(variants)
 }
 
 fn copy_asset(source: &Path, output: &Path) -> anyhow::Result<()> {
@@ -354,6 +449,30 @@ fn webp_path(source: &Path) -> PathBuf {
     source.with_extension("webp")
 }
 
+/// Filename for a responsive variant: `hero.png` at width 640 → `hero-640w.webp`.
+///
+/// Mirrors `variantUrl()` in `packages/@ruvyxa/react/src/image.tsx`, so the URL
+/// the component renders is exactly the file written here.
+fn variant_path(source: &Path, width: u32) -> PathBuf {
+    let stem = source
+        .file_stem()
+        .map(|stem| stem.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let file_name = format!("{stem}-{width}w.webp");
+    match source.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent.join(file_name),
+        _ => PathBuf::from(file_name),
+    }
+}
+
+fn variant_cache_key(source: &[u8], options: &ImageOptimizationOptions, width: u32) -> String {
+    let mut hash = blake3::Hasher::new();
+    hash.update(&[options.quality.clamp(1, 100), u8::from(options.lossless)]);
+    hash.update(&width.to_le_bytes());
+    hash.update(source);
+    hash.finalize().to_hex().to_string()
+}
+
 fn relative_url(root: &Path, path: &Path) -> String {
     format!(
         "/{}",
@@ -424,6 +543,67 @@ mod tests {
         .unwrap();
         assert!(assets.join("hero.webp").is_file());
         assert!(!assets.join("hero.png").exists());
+    }
+
+    #[test]
+    fn emits_responsive_variants_below_the_intrinsic_width() {
+        let temp = tempfile::tempdir().unwrap();
+        let public = temp.path().join("public");
+        let assets = temp.path().join("assets");
+        let cache = temp.path().join("cache");
+        fs::create_dir(&public).unwrap();
+        // 1000px wide: breakpoints 640 and 750 are below it, 828+ are not.
+        ImageBuffer::from_pixel(1000, 500, Rgb([10u8, 20, 30]))
+            .save(public.join("hero.jpg"))
+            .unwrap();
+
+        let report = optimize_public_images(
+            &public,
+            &assets,
+            &cache,
+            &ImageOptimizationOptions::default(),
+        )
+        .unwrap();
+
+        // Full-size WebP plus a downscaled file per breakpoint under 1000px.
+        assert!(assets.join("hero.webp").is_file());
+        assert!(assets.join("hero-640w.webp").is_file());
+        assert!(assets.join("hero-750w.webp").is_file());
+        assert!(assets.join("hero-828w.webp").is_file());
+        // A breakpoint at or above the intrinsic width would only upscale.
+        assert!(!assets.join("hero-1080w.webp").exists());
+
+        let entry = &report.entries[0];
+        let widths: Vec<u32> = entry.variants.iter().map(|variant| variant.width).collect();
+        assert_eq!(widths, vec![640, 750, 828]);
+        assert_eq!(entry.variants[0].output, "/hero-640w.webp");
+        // A downscaled variant preserves aspect ratio (1000x500 → 640x320).
+        let decoded = image::open(assets.join("hero-640w.webp")).unwrap();
+        assert_eq!(decoded.dimensions(), (640, 320));
+    }
+
+    #[test]
+    fn narrow_images_get_no_variants() {
+        let temp = tempfile::tempdir().unwrap();
+        let public = temp.path().join("public");
+        let assets = temp.path().join("assets");
+        fs::create_dir(&public).unwrap();
+        // Narrower than every breakpoint: no variant should be emitted.
+        ImageBuffer::from_pixel(320, 200, Rgb([1u8, 2, 3]))
+            .save(public.join("icon.png"))
+            .unwrap();
+
+        let report = optimize_public_images(
+            &public,
+            &assets,
+            &temp.path().join("cache"),
+            &ImageOptimizationOptions::default(),
+        )
+        .unwrap();
+
+        assert!(report.entries[0].variants.is_empty());
+        assert!(assets.join("icon.webp").is_file());
+        assert!(!assets.join("icon-640w.webp").exists());
     }
 
     #[test]

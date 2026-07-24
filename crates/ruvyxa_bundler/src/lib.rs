@@ -190,6 +190,7 @@ pub fn bundle_shared_route_modules(
         request_path: "/__ruvyxa/shared".to_string(),
         target: BundleTarget::Client,
         options,
+        specials: RouteSpecials::default(),
     };
     let graph = resolver::resolve_graph_with_hooks(
         &entry_source,
@@ -528,6 +529,7 @@ mod tests {
                 emit_chunk_manifest: true,
                 ..Default::default()
             },
+            specials: RouteSpecials::default(),
         }
     }
 

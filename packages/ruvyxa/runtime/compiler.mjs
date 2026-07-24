@@ -71,6 +71,45 @@ export function collectLayouts(appDir, routeDir) {
   return layouts
 }
 
+/** File names of the special files a segment may declare, by kind. */
+const SPECIAL_FILES = { error: 'error.tsx', loading: 'loading.tsx', notFound: 'not-found.tsx' }
+
+/**
+ * Resolve the special files that apply to the route at `routeDir`.
+ *
+ * Each kind resolves nearest-wins: walking from the app root down to the route
+ * directory, the deepest segment that declares the file owns it — the same
+ * rule Next.js uses for `error.tsx` / `loading.tsx` / `not-found.tsx`. Returns
+ * `{ error, loading, notFound }` with an absolute path or `null` per kind.
+ *
+ * The Rust build path mirrors this in `resolve_route_specials`
+ * (`crates/ruvyxa_cli/src/main.rs`); keep the file names and the deepest-wins
+ * rule in step.
+ */
+export function collectSpecials(appDir, routeDir) {
+  const specials = { error: null, loading: null, notFound: null }
+
+  const dirs = [appDir]
+  const relative = path.relative(appDir, routeDir)
+  if (relative && !relative.startsWith('..')) {
+    let current = appDir
+    for (const segment of relative.split(path.sep)) {
+      if (!segment) continue
+      current = path.join(current, segment)
+      dirs.push(current)
+    }
+  }
+
+  for (const dir of dirs) {
+    for (const [kind, fileName] of Object.entries(SPECIAL_FILES)) {
+      const candidate = path.join(dir, fileName)
+      if (existsSync(candidate)) specials[kind] = candidate
+    }
+  }
+
+  return specials
+}
+
 export async function compileBundle(options) {
   return (await compileBundleWithMetadata(options)).outfile
 }

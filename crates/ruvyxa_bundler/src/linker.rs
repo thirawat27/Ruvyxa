@@ -1502,6 +1502,7 @@ mod tests {
             request_path: "/".to_string(),
             target: BundleTarget::Client,
             options: crate::BundleOptions::default(),
+            specials: crate::RouteSpecials::default(),
         };
         let module = CompiledModule {
             path: entry,
@@ -1559,6 +1560,7 @@ mod tests {
             request_path: "/".to_string(),
             target: BundleTarget::Client,
             options: crate::BundleOptions::default(),
+            specials: crate::RouteSpecials::default(),
         };
         let module = CompiledModule {
             path,
@@ -1588,6 +1590,7 @@ mod tests {
             request_path: "/".to_string(),
             target: BundleTarget::Client,
             options: crate::BundleOptions::default(),
+            specials: crate::RouteSpecials::default(),
         };
         let modules = vec![
             CompiledModule {
@@ -1625,6 +1628,7 @@ mod tests {
             request_path: "/".to_string(),
             target: BundleTarget::Client,
             options: crate::BundleOptions::default(),
+            specials: crate::RouteSpecials::default(),
         };
         let module = CompiledModule {
             path: page,
@@ -1661,6 +1665,7 @@ export default function Layout({ children }) {
             request_path: "/".to_string(),
             target: BundleTarget::Ssr,
             options: crate::BundleOptions::default(),
+            specials: crate::RouteSpecials::default(),
         };
         let module = CompiledModule {
             path: entry.clone(),

@@ -588,7 +588,18 @@ async function installFakeReact(root) {
     `export function createElement(type, props, ...children) {
       return { type, props: { ...(props ?? {}), children: children.length > 1 ? children : children[0] } }
     }
-    export default { createElement }
+    export function createContext(defaultValue) {
+      const context = { _currentValue: defaultValue }
+      context.Provider = function Provider(props) { return props.children }
+      context.Consumer = function Consumer(props) { return props.children(context._currentValue) }
+      return context
+    }
+    export class Component {
+      constructor(props) { this.props = props; this.state = null }
+      setState(next) { this.state = { ...(this.state ?? {}), ...next } }
+    }
+    export function Suspense(props) { return props.children }
+    export default { createElement, createContext, Component, Suspense }
     `,
   )
   await writeFile(

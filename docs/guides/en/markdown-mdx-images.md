@@ -84,12 +84,13 @@ export default function Home() {
 `Image` converts local PNG/JPEG assets to WebP during a production build when image optimisation is
 enabled.
 
-| Config           | Default | Description                         |
-| ---------------- | ------- | ----------------------------------- |
-| `image.optimize` | `true`  | Enable / disable image optimization |
-| `image.quality`  | `82`    | WebP quality (1–100)                |
-| `image.lossless` | `false` | Lossless mode                       |
-| `image.workers`  | `0`     | Thread count (0 = auto = CPU count) |
+| Config                | Default          | Description                                    |
+| --------------------- | ---------------- | ---------------------------------------------- |
+| `image.optimize`      | `true`           | Enable / disable image optimization            |
+| `image.quality`       | `82`             | WebP quality (1–100)                           |
+| `image.lossless`      | `false`          | Lossless mode                                  |
+| `image.variantWidths` | `[640, …, 3840]` | Responsive breakpoints; `[]` disables variants |
+| `image.workers`       | `0`              | Thread count (0 = auto = CPU count)            |
 
 ```ts
 // ruvyxa.config.ts
@@ -104,6 +105,20 @@ export default config({
 ```
 
 Remote URLs are **not** transformed — only local assets under `public/`.
+
+### Responsive images
+
+Give `<Image>` a `sizes` hint and it emits a `srcset` so the browser downloads an image scaled to
+the device, not the full-resolution source:
+
+```tsx
+<Image src="/hero.png" alt="" width={1600} height={900} sizes="100vw" />
+```
+
+The build writes a `hero-<w>w.webp` at each breakpoint in `image.variantWidths` narrower than the
+source, and `<Image>` references exactly those files — capped at the intrinsic `width`, so the
+browser never requests a variant that was not built. A custom `loader`, `unoptimized`, or a
+remote/SVG source leaves the author's markup untouched.
 
 ### Image Best Practices
 

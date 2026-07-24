@@ -141,6 +141,53 @@ Folders beginning with `_` or `@` are never routed. Use them for co-located help
 app/blog/_components/PostCard.tsx   → not a route; import it from your pages
 ```
 
+## Client-side navigation
+
+A plain `<a href>` always works and triggers a full page load. To navigate between routes without
+reloading the document, use `<Link>` from `@ruvyxa/react`:
+
+```tsx
+import { Link } from '@ruvyxa/react'
+
+export default function Nav() {
+  return (
+    <nav>
+      <Link href="/">Home</Link>
+      <Link href="/blog/hello" prefetch="viewport">
+        Hello
+      </Link>
+    </nav>
+  )
+}
+```
+
+`<Link>` renders a real `<a href>`, so it stays crawlable and works before hydration or with
+JavaScript disabled — the soft navigation is a progressive enhancement. Modifier-clicks, new-tab
+clicks, `target`, and `download` fall through to the browser untouched. Prefetch warms the target
+bundle ahead of the click: `"hover"` (the default) on pointer or focus, `"viewport"` when the link
+scrolls into view, or `false` to disable.
+
+Read and control the current route with hooks:
+
+```tsx
+import { useRouter, usePathname, useParams, useSearchParams } from '@ruvyxa/react'
+
+function Example() {
+  const router = useRouter() // push / replace / back / forward / refresh / prefetch, plus `pending`
+  const pathname = usePathname() // "/blog/hello"
+  const params = useParams() // { slug: "hello" }
+  const query = useSearchParams() // URLSearchParams
+
+  return <button onClick={() => router.push('/about')}>About</button>
+}
+```
+
+`useSearchParams` returns an empty set during server rendering and the real query string after
+hydration — routing that must be identical in the server HTML belongs in the path, not the query.
+
+A URL no client route owns (an API route, a redirect, a rewrite) falls back to a full document load,
+so navigation never silently does nothing.
+
 ## Validation catches mistakes at build time
 
 Ruvyxa rejects ambiguous route shapes instead of guessing, including dynamic siblings such as `[id]`

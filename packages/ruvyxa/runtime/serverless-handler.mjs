@@ -535,6 +535,28 @@ function escapeRegex(str) {
   return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
+/**
+ * Match a request path against a route table, exposed for cross-implementation
+ * testing.
+ *
+ * `@ruvyxa/react`'s `createRouteMatcher` is a deliberate port of the matcher
+ * above, so a link click and a page reload resolve the same URL to the same
+ * route and params. `tests/packages/react/route-match.test.mjs` drives one
+ * shared case table through both this function and the client matcher and
+ * asserts they never disagree. It is not part of the handler's runtime path.
+ */
+export function resolveRouteForTesting(routes, pathname) {
+  const compiled = routes
+    .map((route) => ({
+      ...route,
+      pattern: compilePattern(route.path),
+      specificity: routeSpecificity(route.path),
+    }))
+    .sort((left, right) => compareSpecificity(left.specificity, right.specificity))
+  const matched = matchRoute(compiled, normalizeMatchPath(pathname))
+  return matched ? { path: matched.route.path, params: matched.params } : null
+}
+
 // ─── Response Normalization ─────────────────────────────────────────────────
 
 function normalizeResponse(result) {

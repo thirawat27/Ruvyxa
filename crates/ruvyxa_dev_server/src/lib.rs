@@ -67,7 +67,10 @@ use html_document::{
     client_hydration_script, compose_document, dev_diagnostic_overlay, hmr_client_script,
     prebuilt_client_assets,
 };
-use html_document::{dev_error_overlay, error_response, plain_error_page, public_internal_error};
+use html_document::{
+    dev_error_overlay, error_response, plain_error_page, public_internal_error,
+    url_encode_component,
+};
 
 mod plugin_bridge;
 #[cfg(test)]
@@ -691,6 +694,7 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
     let mut app = Router::new()
         .route("/__ruvyxa/hmr", get(hmr_ws))
         .route("/__ruvyxa/client", get(client_bundle))
+        .route("/__ruvyxa/client/route-manifest.json", get(client_manifest))
         .route(
             "/__ruvyxa/action",
             post(action_endpoint).layer(DefaultBodyLimit::max(config.action_body_limit_bytes)),
@@ -796,6 +800,7 @@ fn dependency_warmup_routes(
         .map(|route| worker_pool::WarmupRoute {
             page_file: route.file.display().to_string(),
             app_dir: config.app_dir.display().to_string(),
+            route_path: route.path.clone(),
         })
         .collect()
 }
@@ -1192,6 +1197,49 @@ struct RuntimeTrace {
 struct TraceAssets {
     public_dir: String,
     app_dir: String,
+}
+
+/// Serve the client route table so the browser router can match and load
+/// routes without a document load, the same as a production build.
+///
+/// Production publishes this file to `/__ruvyxa/client/route-manifest.json`;
+/// the dev server has no such static file, so it synthesizes an equivalent from
+/// the live route manifest. Each page route points at the on-demand bundle
+/// endpoint keyed by its pattern — the generated bundle registers itself under
+/// that pattern, which is what `@ruvyxa/react`'s router looks up.
+async fn client_manifest(State(state): State<Arc<AppState>>) -> Response {
+    let routes = match state.runtime_cache.router(&state.config).await {
+        Ok((manifest, _)) => manifest
+            .routes
+            .iter()
+            .filter(|route| route.kind == RouteKind::Page && route.render.hydrate)
+            .map(|route| {
+                serde_json::json!({
+                    "path": route.path,
+                    "src": format!(
+                        "/__ruvyxa/client?path={}",
+                        url_encode_component(&route.path)
+                    ),
+                })
+            })
+            .collect::<Vec<_>>(),
+        Err(error) => {
+            error!(%error, "client manifest request failed");
+            Vec::new()
+        }
+    };
+
+    let body = serde_json::json!({ "routes": routes }).to_string();
+    let mut response = body.into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json; charset=utf-8"),
+    );
+    // Never cache: routes appear and disappear as files are added during dev.
+    response
+        .headers_mut()
+        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    with_security_headers(response)
 }
 
 async fn client_bundle(

@@ -80,6 +80,12 @@ pub enum WorkerRequest {
         page_file: String,
         #[serde(rename = "requestPath")]
         request_path: String,
+        /// Route pattern (`/blog/[slug]`), not the concrete URL. It keys the
+        /// worker's bundle cache and the browser's client-route registry, so a
+        /// per-URL value would make every dynamic request a cache miss and
+        /// register a route the client router can never look up.
+        #[serde(rename = "routePath")]
+        route_path: String,
         params: RouteParams,
     },
     #[serde(rename = "api")]
@@ -142,6 +148,12 @@ pub enum WorkerRequest {
         page_file: String,
         #[serde(rename = "requestPath")]
         request_path: String,
+        /// Route pattern (`/blog/[slug]`), not the concrete URL. It keys the
+        /// worker's bundle cache and the browser's client-route registry, so a
+        /// per-URL value would make every dynamic request a cache miss and
+        /// register a route the client router can never look up.
+        #[serde(rename = "routePath")]
+        route_path: String,
         params: RouteParams,
     },
     #[serde(rename = "invalidate")]
@@ -167,6 +179,12 @@ pub enum WorkerRequest {
         page_file: String,
         #[serde(rename = "requestPath")]
         request_path: String,
+        /// Route pattern (`/blog/[slug]`), not the concrete URL. It keys the
+        /// worker's bundle cache and the browser's client-route registry, so a
+        /// per-URL value would make every dynamic request a cache miss and
+        /// register a route the client router can never look up.
+        #[serde(rename = "routePath")]
+        route_path: String,
         params: RouteParams,
         /// "full" | "ppr" — controls whether to wait for all content or just the shell.
         mode: String,
@@ -225,6 +243,9 @@ impl WorkerRequest {
 pub struct WarmupRoute {
     pub page_file: String,
     pub app_dir: String,
+    /// Route pattern, so warmup compiles the exact bundle a later request asks
+    /// for. A mismatched key would leave the warm module unused.
+    pub route_path: String,
 }
 
 /// Route metadata passed to build-time parameter discovery.
@@ -1166,6 +1187,7 @@ impl NodeWorkerPool {
         app_dir: &Path,
         page_file: &Path,
         request_path: &str,
+        route_path: &str,
         params: &RouteParams,
     ) -> Result<WorkerResponse> {
         let request = WorkerRequest::Ssr {
@@ -1174,6 +1196,7 @@ impl NodeWorkerPool {
             app_dir: app_dir.display().to_string(),
             page_file: page_file.display().to_string(),
             request_path: request_path.to_string(),
+            route_path: route_path.to_string(),
             params: params.clone(),
         };
         self.send(request).await
@@ -1232,6 +1255,7 @@ impl NodeWorkerPool {
         app_dir: &Path,
         page_file: &Path,
         request_path: &str,
+        route_path: &str,
         params: &RouteParams,
     ) -> Result<WorkerResponse> {
         let request = WorkerRequest::Client {
@@ -1240,18 +1264,21 @@ impl NodeWorkerPool {
             app_dir: app_dir.display().to_string(),
             page_file: page_file.display().to_string(),
             request_path: request_path.to_string(),
+            route_path: route_path.to_string(),
             params: params.clone(),
         };
         self.send(request).await
     }
 
     /// Pre-render a page (SSG/ISR background revalidation).
+    #[allow(clippy::too_many_arguments)]
     pub async fn render_ssg(
         &self,
         project_root: &Path,
         app_dir: &Path,
         page_file: &Path,
         request_path: &str,
+        route_path: &str,
         params: &RouteParams,
         mode: &str,
     ) -> Result<WorkerResponse> {
@@ -1260,6 +1287,7 @@ impl NodeWorkerPool {
             app_dir,
             page_file,
             request_path,
+            route_path,
             params,
             mode,
             false,
@@ -1271,12 +1299,14 @@ impl NodeWorkerPool {
     ///
     /// Production builds historically used one Node process per path. Retaining
     /// import isolation avoids exposing mutable page-module state across paths.
+    #[allow(clippy::too_many_arguments)]
     pub async fn render_ssg_isolated(
         &self,
         project_root: &Path,
         app_dir: &Path,
         page_file: &Path,
         request_path: &str,
+        route_path: &str,
         params: &RouteParams,
         mode: &str,
     ) -> Result<WorkerResponse> {
@@ -1285,6 +1315,7 @@ impl NodeWorkerPool {
             app_dir,
             page_file,
             request_path,
+            route_path,
             params,
             mode,
             true,
@@ -1299,6 +1330,7 @@ impl NodeWorkerPool {
         app_dir: &Path,
         page_file: &Path,
         request_path: &str,
+        route_path: &str,
         params: &RouteParams,
         mode: &str,
         fresh: bool,
@@ -1309,6 +1341,7 @@ impl NodeWorkerPool {
             app_dir: app_dir.display().to_string(),
             page_file: page_file.display().to_string(),
             request_path: request_path.to_string(),
+            route_path: route_path.to_string(),
             params: params.clone(),
             mode: mode.to_string(),
             fresh,

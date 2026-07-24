@@ -30,12 +30,14 @@ import { createInterface } from 'node:readline'
 
 import {
   clearCompilerCache,
+  collectSpecials,
   compileBundleWithMetadata,
   invalidateCompilerCache,
   runtimeAliases,
   serverPlatform,
   toImportPath,
 } from './compiler.mjs'
+import { clientEntrySource, nodeSsrEntrySource } from './entry-templates.mjs'
 
 // --- Configuration ---
 const MAX_BUNDLE_CACHE_ENTRIES = positiveIntegerEnv('RUVYXA_CACHE_MAX_ENTRIES', 256)
@@ -393,7 +395,18 @@ async function handleWarmup(request) {
           const layouts = route.appDir
             ? collectLayouts(route.appDir, path.dirname(route.pageFile))
             : []
-          const { outfile } = await bundleSsrModule(resolvedRoot, route.pageFile, layouts)
+          const specials = route.appDir
+            ? collectSpecials(route.appDir, path.dirname(route.pageFile))
+            : null
+          // Warmup must produce the same bundle a real request will ask for,
+          // or the cache key differs and the warm module is never reused.
+          const { outfile } = await bundleSsrModule(
+            resolvedRoot,
+            route.pageFile,
+            layouts,
+            route.routePath || '/',
+            specials,
+          )
           await importModule(outfile, false)
           warmed++
         }
@@ -415,13 +428,22 @@ async function handleWarmup(request) {
 
 // --- SSR Handler ---
 async function handleSsr(request) {
-  const { projectRoot, appDir, pageFile, requestPath, params } = request
+  const { projectRoot, appDir, pageFile, requestPath, params, routePath } = request
 
   const resolvedRoot = path.resolve(projectRoot || process.cwd())
   ensureReactDeps(resolvedRoot)
 
   const layouts = collectLayouts(appDir, path.dirname(pageFile))
-  const { outfile, freshBuild } = await bundleSsrModule(resolvedRoot, pageFile, layouts)
+  const specials = collectSpecials(appDir, path.dirname(pageFile))
+  // The route pattern, not the concrete URL: it keys the client-side route
+  // registry, and a per-URL key would make every dynamic request a cache miss.
+  const { outfile, freshBuild } = await bundleSsrModule(
+    resolvedRoot,
+    pageFile,
+    layouts,
+    routePath || requestPath,
+    specials,
+  )
   const mod = await importModule(outfile, freshBuild)
   const html = await mod.render({ path: requestPath, params: params || {} })
 
@@ -448,17 +470,20 @@ async function handleSsgCoalesced(request) {
 // Renders a page at build time (or for ISR background revalidation).
 // mode: "full" = wait for all content, "ppr" = shell only (Suspense fallbacks).
 async function handleSsg(request) {
-  const { projectRoot, appDir, pageFile, requestPath, params, mode, fresh } = request
+  const { projectRoot, appDir, pageFile, requestPath, params, mode, fresh, routePath } = request
 
   const resolvedRoot = path.resolve(projectRoot || process.cwd())
   ensureReactDeps(resolvedRoot)
 
   const layouts = collectLayouts(appDir, path.dirname(pageFile))
+  const specials = collectSpecials(appDir, path.dirname(pageFile))
   const { outfile, freshBuild, dependencyHash, inputs } = await bundleSsgModule(
     resolvedRoot,
     pageFile,
     layouts,
     mode || 'full',
+    routePath || requestPath,
+    specials,
   )
   const mod = await importModule(outfile, freshBuild || fresh)
   const html = await mod.render({ path: requestPath, params: params || {} })
@@ -811,16 +836,19 @@ function realtimeRouteChannel(pathname) {
 
 // --- Client Bundle Handler ---
 async function handleClient(request) {
-  const { projectRoot, appDir, pageFile, requestPath, params } = request
+  const { projectRoot, appDir, pageFile, requestPath, params, routePath } = request
 
   const resolvedRoot = path.resolve(projectRoot || process.cwd())
   const layouts = collectLayouts(appDir, path.dirname(pageFile))
+  const specials = collectSpecials(appDir, path.dirname(pageFile))
   const { outfile } = await bundleClientModule(
     resolvedRoot,
     pageFile,
     layouts,
     requestPath,
     JSON.stringify(params || {}),
+    routePath || requestPath,
+    specials,
   )
   const script = await readFile(outfile, 'utf8')
 
@@ -913,10 +941,32 @@ function pushIfExists(collection, file) {
   }
 }
 
+// Turn a `collectSpecials` result into the import statements and component
+// identifiers a generated entry needs. Absent kinds contribute nothing, so a
+// route with no special files produces exactly the bundle it did before.
+const SPECIAL_BINDINGS = [
+  ['error', 'RouteError', 'errorName'],
+  ['loading', 'RouteLoading', 'loadingName'],
+  ['notFound', 'RouteNotFound', 'notFoundName'],
+]
+
+function specialEntryParts(specials) {
+  const imports = []
+  const names = { errorName: null, loadingName: null, notFoundName: null }
+  for (const [kind, ident, nameKey] of SPECIAL_BINDINGS) {
+    const file = specials?.[kind]
+    if (file) {
+      imports.push(`import ${ident} from ${JSON.stringify(toImportPath(file))}`)
+      names[nameKey] = ident
+    }
+  }
+  return { imports, names }
+}
+
 // --- Bundle functions now return { outfile, freshBuild } ---
 // freshBuild=true means V8 module cache needs busting
 
-async function bundleSsrModule(projectRoot, pageFile, layouts) {
+async function bundleSsrModule(projectRoot, pageFile, layouts, routePath = '/', specials = null) {
   const cacheDir = path.join(projectRoot, '.ruvyxa', 'cache', 'ssr')
   await ensureDir(cacheDir)
 
@@ -928,49 +978,18 @@ async function bundleSsrModule(projectRoot, pageFile, layouts) {
     wrappers.push(`Layout${index}`)
   })
 
-  const moduleCode = `
-import React from "react"
-import * as ReactDomServer from "react-dom/server"
-import { Writable } from "node:stream"
-${imports.join('\n')}
+  const { imports: specialImports, names } = specialEntryParts(specials)
+  imports.push(...specialImports)
 
-export async function render(ctx) {
-  let tree = React.createElement(Page, { params: ctx.params ?? {}, requestPath: ctx.path })
-  for (const Layout of [${wrappers.join(', ')}].reverse()) {
-    tree = React.createElement(Layout, null, tree)
-  }
-
-  if (typeof ReactDomServer.renderToPipeableStream !== "function") {
-    return "<!doctype html>" + ReactDomServer.renderToString(tree)
-  }
-
-  return new Promise((resolve, reject) => {
-    const chunks = []
-    const writable = new Writable({
-      write(chunk, encoding, callback) {
-        chunks.push(chunk)
-        callback()
-      },
-    })
-
-    const { pipe } = ReactDomServer.renderToPipeableStream(tree, {
-      onAllReady() {
-        pipe(writable)
-        writable.on("finish", () => {
-          const html = Buffer.concat(chunks).toString("utf8")
-          resolve(html.trimStart().toLowerCase().startsWith("<!doctype") ? html : "<!doctype html>" + html)
-        })
-      },
-      onShellError(error) {
-        reject(error)
-      },
-      onError(error) {
-        if (process.env.RUVYXA_DEBUG) console.error("[ssr stream error]", error)
-      },
-    })
+  const moduleCode = nodeSsrEntrySource({
+    imports,
+    pageName: 'Page',
+    layoutNames: wrappers,
+    routePath,
+    readyEvent: 'onAllReady',
+    tolerateStreamErrors: true,
+    ...names,
   })
-}
-`
 
   const hash = createHash('sha256').update(moduleCode).update(pageFile).digest('hex').slice(0, 16)
   const outfile = path.join(cacheDir, `${hash}.mjs`)
@@ -1058,7 +1077,15 @@ async function bundleActionModule(projectRoot, actionFile) {
   })
 }
 
-async function bundleClientModule(projectRoot, pageFile, layouts, requestPath, paramsJson) {
+async function bundleClientModule(
+  projectRoot,
+  pageFile,
+  layouts,
+  requestPath,
+  paramsJson,
+  routePath = requestPath,
+  specials = null,
+) {
   const cacheDir = path.join(projectRoot, '.ruvyxa', 'cache', 'client')
   await ensureDir(cacheDir)
 
@@ -1070,25 +1097,18 @@ async function bundleClientModule(projectRoot, pageFile, layouts, requestPath, p
     wrappers.push(`Layout${index}`)
   })
 
-  const moduleCode = `
-import React from "react"
-import { hydrateRoot } from "react-dom/client"
-${imports.join('\n')}
+  const { imports: specialImports, names } = specialEntryParts(specials)
+  imports.push(...specialImports)
 
-const params = globalThis.__RUVYXA_ROUTE_PARAMS__ ?? ${paramsJson}
-const currentRequestPath = globalThis.__RUVYXA_REQUEST_PATH__ ?? ${JSON.stringify(requestPath)}
-let tree = React.createElement(Page, { params, requestPath: currentRequestPath })
-for (const Layout of [${wrappers.join(', ')}].reverse()) {
-  tree = React.createElement(Layout, null, tree)
-}
-
-if (globalThis.__RUVYXA_ROOT__) {
-  globalThis.__RUVYXA_ROOT__.render(tree)
-} else {
-  globalThis.__RUVYXA_ROOT__ = hydrateRoot(document, tree)
-}
-window.__RUVYXA_HYDRATED = true
-`
+  const moduleCode = clientEntrySource({
+    imports,
+    pageName: 'Page',
+    layoutNames: wrappers,
+    routePath,
+    requestPathLiteral: JSON.stringify(requestPath),
+    paramsLiteral: paramsJson,
+    ...names,
+  })
 
   const hash = createHash('sha256').update(moduleCode).update(pageFile).digest('hex').slice(0, 16)
   const outfile = path.join(cacheDir, `${hash}.js`)
@@ -1118,7 +1138,14 @@ window.__RUVYXA_HYDRATED = true
 
 // --- SSG Bundle ---
 // Bundles a page for static generation. mode controls onShellReady vs onAllReady.
-async function bundleSsgModule(projectRoot, pageFile, layouts, mode) {
+async function bundleSsgModule(
+  projectRoot,
+  pageFile,
+  layouts,
+  mode,
+  routePath = '/',
+  specials = null,
+) {
   const cacheDir = path.join(projectRoot, '.ruvyxa', 'cache', 'ssg')
   await ensureDir(cacheDir)
 
@@ -1130,51 +1157,20 @@ async function bundleSsgModule(projectRoot, pageFile, layouts, mode) {
     wrappers.push(`Layout${index}`)
   })
 
-  const readyEvent = mode === 'ppr' ? 'onShellReady' : 'onAllReady'
+  const { imports: specialImports, names } = specialEntryParts(specials)
+  imports.push(...specialImports)
 
-  const moduleCode = `
-import React from "react"
-import * as ReactDomServer from "react-dom/server"
-import { Writable } from "node:stream"
-${imports.join('\n')}
-
-export async function render(ctx) {
-  let tree = React.createElement(Page, { params: ctx.params ?? {}, requestPath: ctx.path })
-  for (const Layout of [${wrappers.join(', ')}].reverse()) {
-    tree = React.createElement(Layout, null, tree)
-  }
-
-  if (typeof ReactDomServer.renderToPipeableStream !== "function") {
-    return "<!doctype html>" + ReactDomServer.renderToString(tree)
-  }
-
-  return new Promise((resolve, reject) => {
-    const chunks = []
-    const writable = new Writable({
-      write(chunk, encoding, callback) {
-        chunks.push(chunk)
-        callback()
-      },
-    })
-
-    const { pipe } = ReactDomServer.renderToPipeableStream(tree, {
-      ${readyEvent}() {
-        pipe(writable)
-        writable.on("finish", () => {
-          const html = Buffer.concat(chunks).toString("utf8")
-          resolve(html.trimStart().toLowerCase().startsWith("<!doctype") ? html : "<!doctype html>" + html)
-        })
-      },
-      onShellError(error) {
-        reject(error)
-      },
-      onError(error) {
-        ${mode === 'ppr' ? '// PPR: non-fatal streaming errors for dynamic slots' : 'reject(error)'}
-      },
-    })
+  const moduleCode = nodeSsrEntrySource({
+    imports,
+    pageName: 'Page',
+    layoutNames: wrappers,
+    routePath,
+    // A partial prerender commits the static shell as soon as it is ready and
+    // lets the dynamic slots stream in behind their Suspense boundaries.
+    readyEvent: mode === 'ppr' ? 'onShellReady' : 'onAllReady',
+    tolerateStreamErrors: mode === 'ppr',
+    ...names,
   })
-}
-`
 
   const hash = createHash('sha256')
     .update(moduleCode)

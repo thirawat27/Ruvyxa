@@ -2,6 +2,14 @@ packages:
   - 'packages/*'
   - 'packages/@ruvyxa/*'
   - 'examples/*'
+# Force a single physical React across the workspace. @ruvyxa/react declares
+# react/react-dom as peers, so a published app dedupes to the app's copy; inside
+# this monorepo two versions can otherwise coexist in the store, which loads two
+# React instances into a server render and breaks hooks with an "invalid hook
+# call". A real install is unaffected — this only pins the workspace's copies.
+overrides:
+  react: 19.2.8
+  react-dom: 19.2.8
 allowBuilds:
   # Dart Sass uses this optional native watcher only for its CLI watch mode. Ruvyxa calls the
   # compile API directly, so keep the install deterministic without executing its build script.

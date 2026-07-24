@@ -8,10 +8,12 @@ import {
   cacheFileName,
   compileBundle,
   collectLayouts,
+  collectSpecials,
   runtimeAliases,
   serverPlatform,
   toImportPath,
 } from './compiler.mjs'
+import { routeBoundaryPrelude, routeContextPrelude, routeTreeFunction } from './entry-templates.mjs'
 import { prerenderRelativePath } from './serverless-handler.mjs'
 
 const [projectRootArg, outputDirArg, adapterNameArg] = process.argv.slice(2)
@@ -376,6 +378,13 @@ async function materializeRouteModules(manifest, destination, target) {
     const renderer = target === 'edge' ? 'react-dom/server.browser' : 'react-dom/server'
     imports.push('import React from "react"')
     imports.push(`import * as ReactDomServer from ${JSON.stringify(renderer)}`)
+    // One binding for the whole registry: every route definition below shares
+    // it, and a second `const`/`class` in the same module would not parse. The
+    // boundary class is emitted unconditionally on the server registry (its
+    // cost is a few unused lines when no route declares error/not-found, and
+    // this keeps a single definition site instead of a per-route guard).
+    definitions.push(routeContextPrelude())
+    definitions.push(routeBoundaryPrelude())
   }
 
   for (const [index, route] of routes.entries()) {
@@ -395,7 +404,7 @@ async function materializeRouteModules(manifest, destination, target) {
       continue
     }
 
-    const page = pageRouteDefinition(routeFile, index)
+    const page = pageRouteDefinition(routeFile, index, route.path ?? '/')
     imports.push(...page.imports)
     definitions.push(page.definition)
     records.push(`  ${JSON.stringify(route.id)}: { render: ${page.renderName} }`)
@@ -444,11 +453,13 @@ function resolveProjectRouteFile(routeFile, routeId) {
   return resolved
 }
 
-function pageRouteDefinition(pageFile, routeIndex) {
+function pageRouteDefinition(pageFile, routeIndex, routePath = '/') {
   const appDir = path.join(projectRoot, 'app')
   const layouts = collectLayouts(appDir, path.dirname(pageFile))
+  const specials = collectSpecials(appDir, path.dirname(pageFile))
   const pageName = `Page${routeIndex}`
   const renderName = `renderPage${routeIndex}`
+  const treeName = `buildTree${routeIndex}`
   const imports = [`import ${pageName} from ${JSON.stringify(toImportPath(pageFile))}`]
   const wrappers = []
   layouts.forEach((layoutFile, index) => {
@@ -457,11 +468,30 @@ function pageRouteDefinition(pageFile, routeIndex) {
     wrappers.push(layoutName)
   })
 
-  const definition = `async function ${renderName}(ctx) {
-  let tree = React.createElement(${pageName}, { params: ctx.params ?? {}, requestPath: ctx.path })
-  for (const Layout of [${wrappers.join(', ')}].reverse()) {
-    tree = React.createElement(Layout, null, tree)
+  // Unique identifiers per route: every page shares one registry module, so
+  // reusing `RouteError` across routes would collide.
+  const specialNames = { errorName: null, loadingName: null, notFoundName: null }
+  for (const [kind, ident, nameKey] of [
+    ['error', `RouteError${routeIndex}`, 'errorName'],
+    ['loading', `RouteLoading${routeIndex}`, 'loadingName'],
+    ['notFound', `RouteNotFound${routeIndex}`, 'notFoundName'],
+  ]) {
+    if (specials[kind]) {
+      imports.push(`import ${ident} from ${JSON.stringify(toImportPath(specials[kind]))}`)
+      specialNames[nameKey] = ident
+    }
   }
+
+  const definition = `${routeTreeFunction({
+    name: treeName,
+    pageName,
+    layoutNames: wrappers,
+    routePath,
+    ...specialNames,
+  })}
+
+async function ${renderName}(ctx) {
+  const tree = ${treeName}(ctx)
 
   let html
   if (typeof ReactDomServer.renderToReadableStream === "function") {

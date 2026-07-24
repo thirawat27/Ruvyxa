@@ -83,12 +83,13 @@ export default function Home() {
 
 `Image` แปลงไฟล์ PNG/JPEG ในเครื่องเป็น WebP ระหว่าง production build เมื่อเปิด image optimization:
 
-| Config           | Default | คำอธิบาย                            |
-| ---------------- | ------- | ----------------------------------- |
-| `image.optimize` | `true`  | เปิด / ปิด image optimization       |
-| `image.quality`  | `82`    | คุณภาพ WebP (1–100)                 |
-| `image.lossless` | `false` | โหมด lossless                       |
-| `image.workers`  | `0`     | จำนวน thread (0 = auto = CPU count) |
+| Config                | Default          | คำอธิบาย                                               |
+| --------------------- | ---------------- | ------------------------------------------------------ |
+| `image.optimize`      | `true`           | เปิด / ปิด image optimization                          |
+| `image.quality`       | `82`             | คุณภาพ WebP (1–100)                                    |
+| `image.lossless`      | `false`          | โหมด lossless                                          |
+| `image.variantWidths` | `[640, …, 3840]` | breakpoint สำหรับ responsive; `[]` ปิดการสร้าง variant |
+| `image.workers`       | `0`              | จำนวน thread (0 = auto = CPU count)                    |
 
 ```ts
 // ruvyxa.config.ts
@@ -103,6 +104,20 @@ export default config({
 ```
 
 Remote URLs **จะไม่ถูก**แปลง — เฉพาะ local assets ภายใต้ `public/` เท่านั้น
+
+### รูปภาพแบบ responsive
+
+ใส่ `sizes` ให้ `<Image>` แล้วมันจะสร้าง `srcset` ให้ เบราว์เซอร์จะโหลดรูปขนาดที่เหมาะกับอุปกรณ์
+ไม่ใช่ไฟล์ต้นฉบับความละเอียดเต็ม:
+
+```tsx
+<Image src="/hero.png" alt="" width={1600} height={900} sizes="100vw" />
+```
+
+ตอน build จะเขียนไฟล์ `hero-<w>w.webp` ที่แต่ละ breakpoint ใน `image.variantWidths`
+ที่แคบกว่าต้นฉบับ และ `<Image>` อ้างถึงไฟล์เหล่านั้นพอดี — จำกัดที่ `width` จริงของรูป
+เบราว์เซอร์จึงไม่ร้องขอ variant ที่ไม่ได้ถูกสร้าง หากใช้ `loader` เอง, `unoptimized` หรือ source
+ที่เป็น remote/SVG จะปล่อย markup ไว้ตามเดิม
 
 ### Image Best Practices
 

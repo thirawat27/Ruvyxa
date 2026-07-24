@@ -2,6 +2,53 @@
 
 ## v1.0.20 (2026-07-24)
 
+### Client-Side Navigation
+
+Ruvyxa route bundles already knew how to re-render into an existing React root; what was missing was
+the half that decides _when_ to do so. That half now ships in `@ruvyxa/react`.
+
+- **`<Link>` navigates without a document load.** It renders a real `<a href>`, so it stays
+  crawlable, middle-clickable, and functional before hydration or with JavaScript off; the soft
+  navigation is a progressive enhancement on top. Modifier-clicks, non-primary buttons, `target`,
+  and `download` all fall through to the browser. Prefetch is configurable (`hover` by default,
+  `viewport`, or off) and warms the target bundle with `modulepreload` — without executing it, so a
+  prefetch can never register a tree built from the wrong parameters.
+- **New hooks: `useRouter`, `usePathname`, `useParams`, `useSearchParams`, `useSelectedRoute`.**
+  `useRouter` exposes `push`/`replace`/`back`/`forward`/`refresh`/`prefetch` and a `pending` flag
+  for a route whose bundle is still loading. The routing context is created on `globalThis` so a
+  generated entry can provide it without importing `@ruvyxa/react` — an app may render plain React
+  pages and never install the package.
+- **The browser matcher is a verified port of the server's.** `createRouteMatcher` in
+  `@ruvyxa/react` shares one case table with the serverless handler's matcher
+  (`tests/packages/react/route-match.test.mjs`), so a link click and a reload of the same URL always
+  resolve to the same route and params, including static-over-dynamic precedence, catch-all
+  decoding, and trailing-slash normalization.
+- **The build publishes a lean `route-manifest.json`** the router fetches on first navigation —
+  `{ path, src, sharedChunks }` per page route only. It deliberately is not `manifest.json`, which
+  is a build report carrying absolute source paths that must never reach a browser. The dev server
+  synthesizes the same shape at `/__ruvyxa/client/route-manifest.json`, so soft navigation works in
+  development too. A missing manifest or an unmatched URL falls back to a full document load.
+
+### Shared Route Composition
+
+- **One source now composes every route's element tree.** The page-in-layouts-in-routing-context
+  tree was re-implemented in five places (the Rust bundler, the dev server's SSR/SSG/client
+  bundlers, the one-shot renderer, and the serverless registry). Composition now lives in
+  `runtime/entry-templates.mjs` with a Rust mirror in `bundler/output.rs`, asserted equivalent by
+  `tests/packages/ruvyxa/entry-templates.test.mjs`. A change to how routes are wrapped is a
+  single-file change again, which is what makes the routing context reach the browser identically on
+  every render path.
+
+### Responsive Images
+
+- **`<Image sizes=…>` now emits a real `srcset`.** For each public PNG/JPEG the build writes a
+  downscaled `name-<w>w.webp` at every breakpoint narrower than the source, and `<Image>` builds its
+  `srcset` from the same width list (`DEFAULT_DEVICE_WIDTHS`, matched to the optimizer's
+  `DEFAULT_VARIANT_WIDTHS` and asserted equal in `tests/packages/react/image-variants.test.mjs`).
+  The set is capped at the intrinsic width, so the browser never requests a variant the build did
+  not produce. Configure the breakpoints with `images.variantWidths`; an empty array disables
+  variants. A custom `loader`, `unoptimized`, or a remote/SVG source opts out untouched.
+
 ### Security: Open Redirect in the `redirects()` Plugin
 
 - **Fixed: a wildcard redirect rule could send visitors to another origin.** The matched remainder

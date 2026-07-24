@@ -2024,6 +2024,7 @@ async fn render_prerender_job(
                         app_dir,
                         Path::new(route_file),
                         &job.render_path,
+                        &job.route_path,
                         &job.params,
                         mode,
                     )
@@ -3153,6 +3154,8 @@ fn emit_client_bundles_with_runtime(
         }
     }
 
+    write_client_route_manifest(client_dir, &routes)?;
+
     if build.emit_chunk_manifest.unwrap_or(false) {
         fs::write(
             client_dir.join("chunk-manifest.json"),
@@ -3432,6 +3435,8 @@ fn client_bundle_input(
         .iter()
         .filter_map(|layout_path| resolve_layout_file(&root, &app_dir, layout_path))
         .collect();
+    let route_dir = entry.parent().unwrap_or(&app_dir).to_path_buf();
+    let specials = resolve_route_specials(&app_dir, &route_dir);
 
     Ok(BundleInput {
         entry,
@@ -3440,6 +3445,7 @@ fn client_bundle_input(
         layouts,
         request_path: route.path.clone(),
         target: BundleTarget::Client,
+        specials,
         options: BundleOptions {
             minify: build.minify.unwrap_or(true),
             source_map: build.sourcemap.unwrap_or(false),
@@ -3452,6 +3458,44 @@ fn client_bundle_input(
                 == ruvyxa_bundler::SplitStrategy::Route,
         },
     })
+}
+
+/// Resolve the special files (`error.tsx` / `loading.tsx` / `not-found.tsx`)
+/// that apply to a route, nearest-wins from the app root down to `route_dir`.
+///
+/// Mirrors `collectSpecials` in `packages/ruvyxa/runtime/compiler.mjs` — the
+/// dev server and adapters discover these from the filesystem the same way, so
+/// a built client bundle composes the identical boundary a dev render does.
+fn resolve_route_specials(app_dir: &Path, route_dir: &Path) -> ruvyxa_bundler::RouteSpecials {
+    let mut specials = ruvyxa_bundler::RouteSpecials::default();
+
+    let mut dirs = vec![app_dir.to_path_buf()];
+    if let Ok(relative) = route_dir.strip_prefix(app_dir) {
+        let mut current = app_dir.to_path_buf();
+        for component in relative.components() {
+            if let std::path::Component::Normal(segment) = component {
+                current.push(segment);
+                dirs.push(current.clone());
+            }
+        }
+    }
+
+    for dir in dirs {
+        let error = dir.join("error.tsx");
+        if error.is_file() {
+            specials.error = Some(error);
+        }
+        let loading = dir.join("loading.tsx");
+        if loading.is_file() {
+            specials.loading = Some(loading);
+        }
+        let not_found = dir.join("not-found.tsx");
+        if not_found.is_file() {
+            specials.not_found = Some(not_found);
+        }
+    }
+
+    specials
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3580,6 +3624,42 @@ fn emit_shared_route_chunk(
         modules,
         routes,
     })
+}
+
+/// Emit the lean route table the browser router fetches for soft navigation.
+///
+/// `manifest.json` is a build report: it carries absolute source paths, module
+/// lists, byte counts, and per-route chunk graphs — none of which the browser
+/// needs, and the absolute paths of which should never be shipped to clients.
+/// This sibling file exposes only `{ path, src, sharedChunks: [{ src }] }` per
+/// page route, so `@ruvyxa/react`'s router downloads kilobytes, not the full
+/// build manifest. The dev server synthesizes the same shape at
+/// `/__ruvyxa/client/route-manifest.json`.
+fn write_client_route_manifest(
+    client_dir: &Path,
+    routes: &[serde_json::Value],
+) -> std::io::Result<()> {
+    let lean = routes
+        .iter()
+        .filter_map(|route| {
+            let path = route.get("path")?.as_str()?;
+            let src = route.get("src")?.as_str()?;
+            let shared = route
+                .get("sharedChunks")
+                .and_then(|chunks| chunks.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|chunk| chunk.get("src").and_then(|src| src.as_str()))
+                .map(|src| serde_json::json!({ "src": src }))
+                .collect::<Vec<_>>();
+            Some(serde_json::json!({ "path": path, "src": src, "sharedChunks": shared }))
+        })
+        .collect::<Vec<_>>();
+
+    fs::write(
+        client_dir.join("route-manifest.json"),
+        serde_json::to_vec(&serde_json::json!({ "routes": lean }))?,
+    )
 }
 
 fn shared_route_chunk_manifest(chunk: &SharedRouteChunk) -> serde_json::Value {

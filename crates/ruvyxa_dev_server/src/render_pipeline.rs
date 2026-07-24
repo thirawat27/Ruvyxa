@@ -248,6 +248,7 @@ async fn render_page_ssg(
             &state.config.app_dir,
             &route.file,
             request_path,
+            &route.path,
             params,
             "full",
         )
@@ -339,6 +340,7 @@ async fn render_isr_background(
             &state.config.app_dir,
             &route.file,
             request_path,
+            &route.path,
             params,
             "full",
         )
@@ -514,6 +516,7 @@ async fn render_page_ppr(
             &state.config.app_dir,
             &route.file,
             request_path,
+            &route.path,
             params,
             "ppr",
         )
@@ -592,6 +595,7 @@ pub(crate) async fn render_page_pooled(
             &state.config.app_dir,
             &route.file,
             request_path,
+            &route.path,
             params,
         )
         .await?;
@@ -737,6 +741,7 @@ pub(crate) async fn render_client_bundle_pooled(
             &state.config.app_dir,
             &route_match.route.file,
             request_path,
+            &route_match.route.path,
             &route_match.params,
         )
         .await?;

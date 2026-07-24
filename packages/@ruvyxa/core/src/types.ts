@@ -88,6 +88,14 @@ export interface ImageConfig {
    * through `<Image>` and the smaller publish directory matters. @default true
    */
   keepOriginal?: boolean
+  /**
+   * Responsive breakpoint widths, in pixels. For each public PNG/JPEG the build
+   * emits a downscaled `name-<w>w.webp` at every width narrower than the source,
+   * and `<Image sizes=...>` builds its `srcset` from the same list. Override to
+   * tune the breakpoints; an empty array disables variant generation.
+   * @default [640, 750, 828, 1080, 1200, 1920, 2048, 3840]
+   */
+  variantWidths?: number[]
   /** Image conversion workers. Zero selects the available CPU count. @default 0 */
   workers?: number
 }

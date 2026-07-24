@@ -80,6 +80,19 @@ impl Default for BundleOptions {
     }
 }
 
+/// Special files that wrap a route's page, à la Next.js.
+///
+/// Each field is the nearest `error.tsx` / `loading.tsx` / `not-found.tsx`
+/// walking up from the route directory to the app root, or `None` when the
+/// route has no such file in scope. `Default` (all `None`) is the common case
+/// and keeps the many test constructors terse.
+#[derive(Debug, Clone, Default)]
+pub struct RouteSpecials {
+    pub error: Option<PathBuf>,
+    pub loading: Option<PathBuf>,
+    pub not_found: Option<PathBuf>,
+}
+
 /// Input descriptor for a single bundle job.
 #[derive(Debug, Clone)]
 pub struct BundleInput {
@@ -90,6 +103,7 @@ pub struct BundleInput {
     pub request_path: String,
     pub target: BundleTarget,
     pub options: BundleOptions,
+    pub specials: RouteSpecials,
 }
 
 /// Statistics emitted alongside a completed bundle.
