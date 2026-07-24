@@ -1,5 +1,16 @@
 # Changelog
 
+## v1.0.21 (2026-07-24)
+
+### Packaging Fix
+
+- **Fixed: `ruvyxa build` failed with `ERR_MODULE_NOT_FOUND` for `entry-templates.mjs`.** The
+  `runtime/entry-templates.mjs` module — which `worker-pool.mjs` imports to compose route element
+  trees — was missing from the `"files"` array in `packages/ruvyxa/package.json`. Published tarballs
+  and local installs therefore never included it, causing the Node worker pool health check to crash
+  immediately on `ruvyxa build` and `ruvyxa dev`. The file is now listed alongside the other runtime
+  modules.
+
 ## v1.0.20 (2026-07-24)
 
 ### Client-Side Navigation
@@ -1691,3 +1702,8 @@ The following commits occurred before the v1.0.0 tag and represent the initial p
 | `v1.0.14` | 2026-07-16 | Minor      |
 | `v1.0.15` | 2026-07-18 | Minor      |
 | `v1.0.16` | 2026-07-20 | Minor      |
+| `v1.0.17` | 2026-07-22 | Minor      |
+| `v1.0.18` | 2026-07-22 | Patch      |
+| `v1.0.19` | 2026-07-23 | Patch      |
+| `v1.0.20` | 2026-07-24 | Minor      |
+| `v1.0.21` | 2026-07-24 | Patch      |

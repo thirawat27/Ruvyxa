@@ -1,6 +1,6 @@
 {
   "name": "ruvyxa",
-  "version": "1.0.20",
+  "version": "1.0.21",
   "description": "The Ruvyxa CLI and runtime for building, validating, serving, and shipping production-minded web applications.",
   "license": "Apache-2.0",
   "type": "module",
@@ -19,6 +19,7 @@
     "runtime/api-renderer.mjs",
     "runtime/compiler.mjs",
     "runtime/config-renderer.mjs",
+    "runtime/entry-templates.mjs",
     "runtime/plugin-runtime.mjs",
     "runtime/serverless-handler.mjs",
     "runtime/ssr-renderer.mjs",
