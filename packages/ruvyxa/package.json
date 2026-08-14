@@ -115,7 +115,7 @@
     "build": "node scripts/sync-route-match.mjs --check && tsc -p tsconfig.json",
     "sync:route-match": "node scripts/sync-route-match.mjs",
     "check": "tsc -p tsconfig.check.json",
-    "test": "node --test \"../../tests/packages/ruvyxa/**/*.test.mjs\"",
+    "test": "pnpm run build && node --test \"../../tests/packages/ruvyxa/**/*.test.mjs\"",
     "format": "tsc -p tsconfig.check.json",
     "prepack": "pnpm run build && node scripts/prepare-native-binary.mjs"
   }
