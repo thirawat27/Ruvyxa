@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 
 const workspaceRoot = path.resolve(fileURLToPath(new URL('../../..', import.meta.url)))
 const handlerModule = path.join(workspaceRoot, 'packages/ruvyxa/runtime/serverless-handler.mjs')
-const coreServerModule = path.join(workspaceRoot, 'packages/@ruvyxa/core/src/server.ts')
+const coreServerModule = path.join(workspaceRoot, 'packages/@ruvyxa/core/dist/server.js')
 
 const { createHandler, prerenderRelativePath } = await import(
   `file://${handlerModule.replaceAll('\\', '/')}`
