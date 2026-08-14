@@ -141,6 +141,77 @@ fn reject_case_colliding_css_modules(graph: &[ResolvedModule], input: &BundleInp
     Ok(())
 }
 
+/// Every file extension this bundler knows how to turn into a module.
+///
+/// Mirrors `MODULE_KIND_EXTENSIONS` in
+/// `packages/ruvyxa/runtime/compiler.mjs` — the two module graphs must agree on
+/// which files are compilable, or a build passes on one path and fails on the
+/// other.
+const MODULE_KIND_EXTENSIONS: &[&str] = &[
+    "ts", "tsx", "js", "jsx", "mts", "cts", "mjs", "cjs", "md", "mdx", "json", "css", "scss",
+    "sass",
+];
+
+/// Compile a JSON file into a module the linker's CommonJS wrapper can host.
+///
+/// The document becomes one string literal parsed at runtime rather than an
+/// inline object literal, so no JSON text can be misread as code. Mirrors
+/// `compileJsonModuleSource()` in `packages/ruvyxa/runtime/compiler.mjs`.
+fn compile_json_module(source: &str, path: &Path) -> Result<String> {
+    let trimmed = source.strip_prefix('\u{feff}').unwrap_or(source);
+    let value: serde_json::Value = serde_json::from_str(trimmed).map_err(|error| {
+        BundleError::Compiler(format!(
+            "RUV1805 Invalid JSON module {}: {error}",
+            path.display()
+        ))
+    })?;
+    let serialized = serde_json::to_string(&value)
+        .map_err(|error| BundleError::Compiler(format!("{}: {error}", path.display())))?;
+    let literal = serde_json::to_string(&serialized)
+        .map_err(|error| BundleError::Compiler(format!("{}: {error}", path.display())))?;
+
+    let mut js = format!("module.exports = JSON.parse({literal});\n");
+    // The linker reads `<module>.default ?? <module>`, so an object gets a
+    // non-enumerable self-reference to make a default import the whole document
+    // — but never when the document has its own `default` key, because
+    // overwriting it would change data the application can read.
+    let attach_default = match &value {
+        serde_json::Value::Object(map) => !map.contains_key("default"),
+        serde_json::Value::Array(_) => true,
+        _ => false,
+    };
+    if attach_default {
+        js.push_str(
+            "Object.defineProperty(module.exports, 'default', { value: module.exports, configurable: true });\n",
+        );
+    }
+    Ok(js)
+}
+
+/// Reject a resolved file whose extension has no compilation path, by name.
+///
+/// Without this the file reaches the JavaScript transform and Oxc reports a
+/// syntax error inside a dependency the application never wrote.
+fn reject_unsupported_module_kind(ext: &str, path: &Path) -> Result<()> {
+    if ext.is_empty()
+        || MODULE_KIND_EXTENSIONS
+            .iter()
+            .any(|known| ext.eq_ignore_ascii_case(known))
+    {
+        return Ok(());
+    }
+    Err(BundleError::Compiler(format!(
+        "RUV1806 cannot compile {} (.{ext}): Ruvyxa compiles {}. \
+         Add the package to `build.external` if it must load this file at runtime.",
+        path.display(),
+        MODULE_KIND_EXTENSIONS
+            .iter()
+            .map(|known| format!(".{known}"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    )))
+}
+
 fn compile_module(
     module: &ResolvedModule,
     input: &BundleInput,
@@ -166,6 +237,21 @@ fn compile_module(
                 js,
                 module.deps.clone(),
                 module.dependency_aliases.clone(),
+                false,
+                false,
+            ),
+            hook_source_map: None,
+        });
+    }
+
+    if ext.eq_ignore_ascii_case("json") {
+        let js = compile_json_module(&module.source, &module.path)?;
+        return Ok(CompiledModuleOutput {
+            module: CompiledModule::new(
+                module.path.clone(),
+                js,
+                Vec::new(),
+                BTreeMap::new(),
                 false,
                 false,
             ),
@@ -206,6 +292,11 @@ fn compile_module(
             hook_source_map,
         });
     }
+
+    // Everything that reaches here is about to be parsed as JavaScript. Anything
+    // whose extension says otherwise is named as unsupported now, rather than
+    // surfacing later as a syntax error in a dependency.
+    reject_unsupported_module_kind(ext, &module.path)?;
 
     let transform_plan = ast::parse_module(&source);
     let has_jsx = matches!(ext, "tsx" | "jsx") || transform_plan.has_jsx;
@@ -712,5 +803,66 @@ mod tests {
         let out = transform(src, true).unwrap();
         assert!(!out.contains(": { params"));
         assert!(out.contains("React.createElement(\"main\""));
+    }
+
+    /// Regression: a JSON dependency used to reach the JavaScript transform and
+    /// fail as a syntax error inside someone else's package.
+    #[test]
+    fn compiles_json_into_a_commonjs_module() {
+        let js = compile_json_module(
+            r#"{ "name": "fake-sdk", "version": "4.2.1" }"#,
+            Path::new("fake-sdk/package.json"),
+        )
+        .unwrap();
+
+        assert!(js.contains("module.exports = JSON.parse("));
+        assert!(js.contains("Object.defineProperty(module.exports, 'default'"));
+        // The payload travels as one string literal, so nothing inside it can be
+        // parsed as code.
+        assert!(js.contains(r#"\"version\":\"4.2.1\""#), "{js}");
+    }
+
+    #[test]
+    fn leaves_a_documents_own_default_key_alone() {
+        let js = compile_json_module(r#"{ "default": "mine" }"#, Path::new("keyed.json")).unwrap();
+        assert!(
+            !js.contains("Object.defineProperty"),
+            "overwriting a `default` key would change data the application reads: {js}"
+        );
+    }
+
+    #[test]
+    fn a_json_scalar_needs_no_default_self_reference() {
+        let js = compile_json_module("42", Path::new("scalar.json")).unwrap();
+        assert!(!js.contains("Object.defineProperty"), "{js}");
+        assert!(js.contains("JSON.parse(\"42\")"), "{js}");
+    }
+
+    #[test]
+    fn invalid_json_is_a_json_diagnostic() {
+        let error = compile_json_module("{ \"a\": }", Path::new("broken.json"))
+            .expect_err("malformed JSON must not compile");
+        let message = error.to_string();
+        assert!(message.contains("RUV1805"), "{message}");
+        assert!(message.contains("broken.json"), "{message}");
+    }
+
+    #[test]
+    fn an_uncompilable_module_kind_is_named_rather_than_parsed() {
+        let error = reject_unsupported_module_kind("node", Path::new("native.node"))
+            .expect_err("a native addon has no compilation path");
+        let message = error.to_string();
+        assert!(message.contains("RUV1806"), "{message}");
+        assert!(message.contains("native.node"), "{message}");
+    }
+
+    #[test]
+    fn known_module_kinds_and_extensionless_entries_pass_through() {
+        for ext in MODULE_KIND_EXTENSIONS {
+            reject_unsupported_module_kind(ext, Path::new("module")).unwrap();
+        }
+        // A package entry point without an extension is JavaScript by Node's
+        // own rules.
+        reject_unsupported_module_kind("", Path::new("bin/cli")).unwrap();
     }
 }

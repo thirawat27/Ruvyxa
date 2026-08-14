@@ -2,6 +2,50 @@
 
 ## v1.0.30 (2026-08-13)
 
+### Global CSS runs through the project's PostCSS chain
+
+If the project root has a PostCSS configuration, Ruvyxa now runs that plugin chain over every
+collected global stylesheet, in `ruvyxa dev` and `ruvyxa build` alike, on one code path. A Tailwind
+CSS v4 project needs `postcss.config.mjs` and `@tailwindcss/postcss` and nothing framework-specific;
+before this, the stylesheet was emitted with `@import "tailwindcss"` still in it, which a browser
+cannot resolve, so the page rendered with browser defaults while the markup carried correct class
+names.
+
+- Recognised at the project root: `postcss.config.{mjs,js,cjs,ts,mts,cts,json}`,
+  `.postcssrc.{mjs,js,cjs,json}`, `.postcssrc`.
+- Ruvyxa names no plugin of its own. The config's plugins are resolved from the project's
+  `node_modules`, in the array, `{ name: options }`, or function-of-context form.
+- Plugins run per stylesheet entry, after this pipeline inlines local `@import`s, with `from` set to
+  the real entry path so content globs resolve where the author expects.
+- Files a plugin reads become watch inputs, so a dev edit that only changes class names regenerates
+  the stylesheet. The config file itself is one too.
+- A plugin failure fails the build (`RUV1406`) and a config that cannot be loaded fails with
+  `RUV1405`. Ruvyxa does not fall back to untransformed CSS, because that ships an unstyled page.
+- **A project with no PostCSS config is unaffected.** A stylesheet importing `tailwindcss` without a
+  PostCSS config still falls back to `@tailwindcss/cli` when that is installed.
+
+### JSON is a module kind, in both module graphs
+
+Resolution answers which file, not which language. Without that split, a JSON file reached through
+`require('./package.json')` — the shape `gaxios` uses, and through it `google-auth-library` and
+`@google/genai` — was handed to the JavaScript transform, and every adapter build that bundled such
+an SDK failed with a syntax error pointing inside a package the application never wrote.
+
+- `import`/`require` of a `.json` file now compiles to data in the serverless/server graph
+  (`runtime/compiler.mjs`) and the client graph (`ruvyxa_bundler`). A default import receives the
+  whole document, as in Node; `require()` receives it unchanged, including a document with its own
+  `default` key.
+- The document is never scanned for imports and never folded for `NODE_ENV`, so a string value that
+  looks like code stays a string value.
+- Invalid JSON reports `RUV1805` naming the file and parse position, instead of an unrelated
+  JavaScript syntax error.
+- A resolved file whose extension has no compilation path — `.node`, `.wasm`, a binary asset —
+  reports `RUV1806` naming the file, its extension, and the import that reached it, with
+  `build.external` as the remedy.
+
+Serverless adapters share one `bundlePackages: true` call site, so this covers every platform target
+rather than the one that reported the failure.
+
 ### Real-time collaboration
 
 Ruvyxa now ships collaboration rooms as a native transport rather than an integration you assemble.

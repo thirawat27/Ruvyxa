@@ -8,6 +8,28 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 const JS_EXTENSIONS = ['', '.ts', '.tsx', '.js', '.jsx', '.mts', '.mjs', '.md', '.mdx']
 export const MDX_COMPONENT_EXTENSIONS = ['.tsx', '.ts', '.jsx', '.js', '.mts', '.mjs']
 const ASSET_EXTENSIONS = new Set(['.css', '.scss', '.sass', '.less'])
+/// Every file extension this compiler knows how to turn into a module. A
+/// resolved file outside this set has no compilation path, so it is rejected by
+/// name instead of being handed to the JavaScript transform, which would report
+/// the mismatch as an unrelated syntax error in someone else's package.
+/// An empty extension stays allowed: package entry points without one are
+/// JavaScript by Node's own rules.
+const MODULE_KIND_EXTENSIONS = new Set([
+  '.ts',
+  '.tsx',
+  '.js',
+  '.jsx',
+  '.mts',
+  '.cts',
+  '.mjs',
+  '.cjs',
+  '.md',
+  '.mdx',
+  '.json',
+  '.css',
+  '.scss',
+  '.sass',
+])
 const COMPILER_CACHE_MAX_ENTRIES = 512
 const compilerCache = (globalThis.__RUVYXA_COMPILER_CACHE__ ??= {
   sources: new Map(),
@@ -359,13 +381,20 @@ async function visitModule(context) {
 
   if (byKey.has(key)) return byKey.get(key)
 
-  const styleModule = isCssModuleFile(filePath)
-    ? await compileStyleModuleSource(source, filePath, root)
-    : null
-  const contentModule = styleModule
-    ? null
-    : await compileContentSource(source, filePath, root, markdownConfig)
-  const compiledSource = styleModule?.source ?? contentModule.source
+  // Classify the module kind before anything reads the source as JavaScript.
+  // Resolution answers "which file", not "which language"; without this split a
+  // JSON file reached through `require('./package.json')` was handed straight to
+  // the JavaScript transform.
+  const jsonModule = isJsonModuleFile(filePath) ? compileJsonModuleSource(source, filePath) : null
+  const styleModule =
+    !jsonModule && isCssModuleFile(filePath)
+      ? await compileStyleModuleSource(source, filePath, root)
+      : null
+  const contentModule =
+    jsonModule || styleModule
+      ? null
+      : await compileContentSource(source, filePath, root, markdownConfig)
+  const compiledSource = jsonModule?.source ?? styleModule?.source ?? contentModule.source
   const id = `__m${modules.length}`
   const module = {
     id,
@@ -374,11 +403,19 @@ async function visitModule(context) {
     source: compiledSource,
     baseDir,
     deps: new Map(),
-    assetInputs: styleModule?.inputs ?? contentModule.inputs,
+    assetInputs: jsonModule ? [] : (styleModule?.inputs ?? contentModule.inputs),
     jsxRuntime,
   }
   byKey.set(key, module)
   modules.push(module)
+
+  // A JSON module is data. It has no dependencies to walk, no client boundary to
+  // check, and must never reach the JavaScript transform, so its compiled source
+  // is also its transformed source.
+  if (jsonModule) {
+    module.transformedSource = compiledSource
+    return module
+  }
 
   if (platform === 'browser') {
     checkClientBoundary(root, filePath, compiledSource)
@@ -409,6 +446,7 @@ async function visitModule(context) {
         bundlePackages ||
         bundleDependencies)
     ) {
+      assertSupportedModuleKind(resolved, specifier, filePath || sourcefile)
       const depSource = await readSourceFile(resolved)
       const dep = await visitModule({
         key: resolved,
@@ -968,6 +1006,56 @@ function isCssModuleSpecifier(specifier) {
 
 function isCssModuleFile(file) {
   return typeof file === 'string' && isCssModuleSpecifier(file)
+}
+
+function isJsonModuleFile(file) {
+  return typeof file === 'string' && /\.json(?:[?#].*)?$/i.test(file)
+}
+
+/// Reject a resolved file whose extension has no compilation path.
+///
+/// The alternative is what this replaces: the file reaches the JavaScript
+/// transform and Oxc reports a syntax error inside a dependency the application
+/// never wrote, with no indication of which import pulled it in.
+function assertSupportedModuleKind(resolved, specifier, importer) {
+  const extension = path.extname(resolved).toLowerCase()
+  if (!extension || MODULE_KIND_EXTENSIONS.has(extension)) return
+  throw new Error(
+    `RUV1806 cannot compile '${resolved}' (${extension}) imported as '${specifier}' from ${importer}: ` +
+      `Ruvyxa compiles ${[...MODULE_KIND_EXTENSIONS].join(', ')}. ` +
+      `Add the package to \`build.external\` if it must load this file at runtime.`,
+  )
+}
+
+/// Compile a JSON file into a module the linker's CommonJS wrapper can host.
+///
+/// The document is emitted as one string literal parsed at runtime rather than
+/// as an inline object literal: no JSON text can then be misread as code, and a
+/// large manifest parses faster than the equivalent literal.
+function compileJsonModuleSource(source, file) {
+  let value
+  try {
+    value = JSON.parse(source.charCodeAt(0) === 0xfeff ? source.slice(1) : source)
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    throw new Error(`RUV1805 Invalid JSON module ${file}: ${detail}`)
+  }
+
+  const lines = [`module.exports = JSON.parse(${JSON.stringify(JSON.stringify(value))});`]
+  // Node hands a default import the whole document. The linker reads
+  // `<module>.default ?? <module>`, so attach the self-reference — but never
+  // when the document has its own `default` key, because overwriting it would
+  // change data the application can read through `require()`.
+  if (
+    value !== null &&
+    typeof value === 'object' &&
+    !Object.prototype.hasOwnProperty.call(value, 'default')
+  ) {
+    lines.push(
+      `Object.defineProperty(module.exports, 'default', { value: module.exports, configurable: true });`,
+    )
+  }
+  return { source: `${lines.join('\n')}\n` }
 }
 
 async function compileStyleModuleSource(source, file, root) {

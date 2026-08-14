@@ -27,6 +27,21 @@ npm run test:parity
 | `RUV3201`                                      | Native realtime was built for an unsupported target/adapter.                                     | Deploy long-lived Node/Bun output, or remove realtime.                                          |
 | Actions/API reject a body                      | Body exceeds configured action/API limit or input parser throws.                                 | Review `security.actionLimit`/`apiLimit`; validate and return a safe application error.         |
 | Cache seems stale                              | The entry is inside TTL/SWR or another process has its own memory cache.                         | Use `invalidateCache`, inspect strategy, and use shared infrastructure for multi-instance data. |
+| `RUV1405`                                      | A PostCSS config was found, but a plugin or `postcss` itself could not be loaded.                | Install the packages the config names, or remove them from it.                                  |
+| `RUV1406`                                      | A PostCSS plugin threw, or a stylesheet has a syntax error the chain rejected.                   | Fix the reported plugin/stylesheet error; the build will not emit untransformed CSS.            |
+| `RUV1805`                                      | An imported `.json` file is not valid JSON.                                                      | The message names the file and the parse position; fix the document.                            |
+| `RUV1806`                                      | An import resolved to a file kind Ruvyxa does not compile (`.node`, `.wasm`, a binary asset).    | Add the package to `build.external` so the runtime loads the file instead of the bundler.       |
+
+**Page renders with browser defaults while class names are correct.** The global stylesheet reached
+the browser untransformed. Check for `@import "tailwindcss"` in the served CSS: a project using
+Tailwind v4 needs a PostCSS config at the project root and `postcss` installed. See
+[PostCSS and Tailwind CSS](06-ui-navigation-metadata-and-assets.md#postcss-and-tailwind-css).
+
+**An adapter build fails inside a package you did not write.** An SDK reads a JSON file, a native
+addon, or another non-JavaScript asset that the deployment bundle has to carry. JSON is compiled as
+data; anything else reports `RUV1806` naming the file and the import that reached it. Serverless
+adapters bundle route dependencies into the function, so the failure appears under
+`ruvyxa build --adapter <name>` and not under a plain `ruvyxa build`.
 
 ## Common questions
 

@@ -24,10 +24,34 @@ pub struct StyleCollection {
 }
 
 /// Collect imported and explicitly configured global stylesheet entries.
+///
+/// Runs the project's PostCSS chain in development mode. Use
+/// [`collect_styles_for_build`] for production output.
 pub fn collect_styles(root: &Path, app_dir: &Path, entries: &[PathBuf]) -> Result<StyleCollection> {
+    collect_styles_in_mode(root, app_dir, entries, false)
+}
+
+/// [`collect_styles`] with PostCSS plugins told they are running a production
+/// build, which is what selects a plugin's production behavior — minification,
+/// dead-rule removal, `NODE_ENV`-conditional plugin lists.
+pub fn collect_styles_for_build(
+    root: &Path,
+    app_dir: &Path,
+    entries: &[PathBuf],
+) -> Result<StyleCollection> {
+    collect_styles_in_mode(root, app_dir, entries, true)
+}
+
+fn collect_styles_in_mode(
+    root: &Path,
+    app_dir: &Path,
+    entries: &[PathBuf],
+    production: bool,
+) -> Result<StyleCollection> {
     let root = absolute_path(root)?;
     let app_dir = absolute_path(app_dir)?;
     let tsconfig = TsConfigPaths::load(&root);
+    let postcss = crate::PostcssRunner::detect(&root, production)?;
     let mut scripts = VecDeque::new();
     let mut style_seeds = Vec::new();
 
@@ -72,8 +96,31 @@ pub fn collect_styles(root: &Path, app_dir: &Path, entries: &[PathBuf]) -> Resul
     }
 
     let mut walk = StyleWalk::new(&root, &tsconfig);
+    walk.postcss = postcss.is_some();
     for style in style_seeds {
+        // PostCSS runs per entry, over the CSS that entry contributed once its
+        // local `@import`s are inlined. Per entry rather than per file, because a
+        // plugin chain applied to every imported partial would run Tailwind once
+        // per partial; over the whole collection would lose the entry path that
+        // plugins resolve their content globs against.
+        let start = walk.css.len();
         append_style(&mut walk, &style)?;
+        let Some(runner) = &postcss else { continue };
+        if walk.css.len() == start {
+            continue;
+        }
+        let transformed = runner.run(&walk.css[start..], &style)?;
+        walk.css.truncate(start);
+        walk.css.push_str(&transformed.css);
+        walk.css.push('\n');
+        for dependency in transformed.dependencies {
+            walk.record_file(dependency);
+        }
+    }
+    if let Some(runner) = &postcss {
+        // The configuration itself is a build input: changing the plugin list
+        // has to invalidate the stylesheet in development.
+        walk.record_file(runner.config_file().to_path_buf());
     }
 
     Ok(StyleCollection {
@@ -102,6 +149,9 @@ struct StyleWalk<'a> {
     sass_walked: BTreeSet<PathBuf>,
     files: Vec<PathBuf>,
     css: String,
+    /// Whether the caller runs a PostCSS chain over each entry afterwards. The
+    /// built-in Tailwind CLI shortcut stands down when it does.
+    postcss: bool,
 }
 
 impl<'a> StyleWalk<'a> {
@@ -114,6 +164,7 @@ impl<'a> StyleWalk<'a> {
             sass_walked: BTreeSet::new(),
             files: Vec::new(),
             css: String::new(),
+            postcss: false,
         }
     }
 
@@ -231,7 +282,11 @@ fn append_style(walk: &mut StyleWalk<'_>, file: &Path) -> Result<()> {
     }
 
     let source = fs::read_to_string(&file)?;
-    if imports_tailwind(&source) {
+    // The Tailwind CLI path predates the PostCSS stage and stays for projects
+    // that install `@tailwindcss/cli` without a PostCSS config. A project with a
+    // config gets Tailwind through its own `@tailwindcss/postcss` plugin, and
+    // running both would compile the stylesheet twice.
+    if !walk.postcss && imports_tailwind(&source) {
         let compiled = compile_tailwind_css(root, &file)?;
         walk.css.push_str(&compiled);
         walk.css.push('\n');
@@ -1139,5 +1194,103 @@ mod tests {
                 .iter()
                 .any(|file| file.ends_with("_tokens.scss"))
         );
+    }
+
+    /// A project fixture inside the repository.
+    ///
+    /// The PostCSS stage resolves `postcss` and every plugin from the *project*,
+    /// walking up from its root — the same resolution an installed application
+    /// gets. A fixture in the OS temp directory would find nothing.
+    fn in_repo_project(label: &str) -> tempfile::TempDir {
+        let target = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../target")
+            .canonicalize()
+            .expect("the cargo target directory exists during a test run");
+        tempfile::Builder::new()
+            .prefix(&format!("ruvyxa-postcss-{label}-"))
+            .tempdir_in(target)
+            .unwrap()
+    }
+
+    /// The reported incident, end to end: a project declares PostCSS, and the
+    /// collected global stylesheet reaches the document transformed.
+    #[test]
+    fn a_declared_postcss_chain_transforms_the_collected_stylesheet() {
+        let temp = in_repo_project("runs");
+        let root = temp.path();
+        let app = root.join("app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(app.join("layout.tsx"), "import './globals.css'").unwrap();
+        // `@import "theme.css"` is inlined by this pipeline before PostCSS runs,
+        // so the plugin must see the partial's rules too.
+        fs::write(
+            app.join("globals.css"),
+            "@import \"./theme.css\";\n.from { color: red }\n",
+        )
+        .unwrap();
+        fs::write(app.join("theme.css"), ".from-theme { color: blue }\n").unwrap();
+        fs::write(
+            root.join("postcss.config.mjs"),
+            "export default {\n  plugins: [{\n    postcssPlugin: 'rename',\n    \
+             Rule(rule) { rule.selector = rule.selector.replace('.from', '.renamed') },\n  }],\n}\n",
+        )
+        .unwrap();
+
+        let collection = collect_styles(root, &app, &[]).unwrap();
+
+        assert!(collection.css.contains(".renamed"), "{}", collection.css);
+        assert!(
+            collection.css.contains(".renamed-theme"),
+            "an inlined @import must reach the plugin chain: {}",
+            collection.css
+        );
+        assert!(!collection.css.contains(".from "), "{}", collection.css);
+        assert!(
+            collection
+                .files
+                .iter()
+                .any(|file| file.ends_with("postcss.config.mjs")),
+            "the config is a build input, so a plugin change must invalidate the stylesheet"
+        );
+    }
+
+    /// A project with no PostCSS configuration must get exactly the pipeline it
+    /// had before this stage existed.
+    #[test]
+    fn a_project_without_postcss_is_left_alone() {
+        let temp = in_repo_project("absent");
+        let root = temp.path();
+        let app = root.join("app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(app.join("layout.tsx"), "import './globals.css'").unwrap();
+        fs::write(app.join("globals.css"), ".from { color: red }\n").unwrap();
+
+        let collection = collect_styles(root, &app, &[]).unwrap();
+
+        assert_eq!(collection.css.trim(), ".from { color: red }");
+    }
+
+    /// A plugin failure stops the build. Emitting the untransformed stylesheet
+    /// instead is what shipped an unstyled page to production.
+    #[test]
+    fn a_failing_plugin_fails_the_collection_rather_than_emitting_raw_css() {
+        let temp = in_repo_project("fails");
+        let root = temp.path();
+        let app = root.join("app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(app.join("layout.tsx"), "import './globals.css'").unwrap();
+        fs::write(app.join("globals.css"), ".a { color: red }\n").unwrap();
+        fs::write(
+            root.join("postcss.config.mjs"),
+            "export default { plugins: [{ postcssPlugin: 'explode', \
+             Once() { throw new Error('plugin exploded') } }] }\n",
+        )
+        .unwrap();
+
+        let error = collect_styles(root, &app, &[])
+            .expect_err("a plugin failure must not be swallowed into raw CSS");
+        let message = error.to_string();
+        assert!(message.contains("RUV1406"), "{message}");
+        assert!(message.contains("plugin exploded"), "{message}");
     }
 }

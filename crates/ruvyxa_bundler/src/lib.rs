@@ -566,6 +566,57 @@ mod tests {
         assert!(output.code.contains("const styles"));
     }
 
+    /// The client half of the JSON module-kind contract. `compiler.mjs` covers
+    /// the server and serverless graphs; this covers the Rust graph, which
+    /// resolves `.json` by exact path just as readily.
+    #[test]
+    fn bundles_a_json_import_as_data_rather_than_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = ruvyxa_diagnostics::normalized_canonical_path(temp.path());
+        let app = root.join("app");
+        fs::create_dir_all(&app).unwrap();
+        let page = app.join("page.tsx");
+        fs::write(
+            &page,
+            "import config from './config.json'; export default function Page() { return <main>{config.title}</main>; }",
+        )
+        .unwrap();
+        // A value that would be a syntax error if the file were parsed as
+        // JavaScript, and a string that would be read as an import if the
+        // document were scanned for specifiers.
+        fs::write(
+            app.join("config.json"),
+            r#"{ "title": "Ruvyxa", "note": "require('./missing.json')" }"#,
+        )
+        .unwrap();
+
+        let output = bundle(client_input(&root, &app, page, Vec::new(), "/")).unwrap();
+
+        assert!(output.code.contains("JSON.parse("), "{}", output.code);
+        assert!(output.code.contains("Ruvyxa"));
+    }
+
+    #[test]
+    fn a_malformed_json_import_names_the_json_file() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = ruvyxa_diagnostics::normalized_canonical_path(temp.path());
+        let app = root.join("app");
+        fs::create_dir_all(&app).unwrap();
+        let page = app.join("page.tsx");
+        fs::write(
+            &page,
+            "import config from './config.json'; export default function Page() { return <main>{config.title}</main>; }",
+        )
+        .unwrap();
+        fs::write(app.join("config.json"), "{ \"title\": }").unwrap();
+
+        let error = bundle(client_input(&root, &app, page, Vec::new(), "/"))
+            .expect_err("malformed JSON must not bundle");
+        let message = error.to_string();
+        assert!(message.contains("RUV1805"), "{message}");
+        assert!(message.contains("config.json"), "{message}");
+    }
+
     #[test]
     fn bundle_context_reuses_graph_cache_across_routes() {
         let temp = tempfile::tempdir().unwrap();

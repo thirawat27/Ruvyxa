@@ -19,6 +19,7 @@
     "runtime/api-renderer.mjs",
     "runtime/compiler.mjs",
     "runtime/config-renderer.mjs",
+    "runtime/css-runner.mjs",
     "runtime/entry-templates.mjs",
     "runtime/plugin-runtime.mjs",
     "runtime/request-context.mjs",
@@ -95,7 +96,7 @@
     "@ruvyxa/adapter-static": "workspace:^",
     "@ruvyxa/adapter-vercel": "workspace:^",
     "@ruvyxa/core": "workspace:^",
-    "oxc-transform": "0.143.0",
+    "oxc-transform": "0.144.0",
     "remark-gfm": "^4.0.1",
     "sass": "^1.102.0",
     "yaml": "^2.9.0"

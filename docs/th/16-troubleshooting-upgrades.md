@@ -27,6 +27,21 @@ npm run test:parity
 | `RUV3201`                                     | native realtime build สำหรับ target/adapter ที่ไม่รองรับ                                      | deploy long-lived Node/Bun output หรือเอา realtime ออก                                      |
 | action/API ปฏิเสธ body                        | body เกิน action/API limit ที่ตั้ง หรือ input parser throw                                    | ดู `security.actionLimit`/`apiLimit`; validate และคืน application error ที่ปลอดภัย          |
 | cache ดูเก่า                                  | entry ยังใน TTL/SWR หรืออีก process มี memory cache ของตน                                     | ใช้ `invalidateCache`, ตรวจ strategy และใช้ shared infrastructure สำหรับข้อมูลหลาย instance |
+| `RUV1405`                                     | พบ PostCSS config แต่โหลด plugin หรือตัว `postcss` เองไม่ได้                                  | ติดตั้ง package ที่ config ระบุ หรือเอาออกจาก config                                        |
+| `RUV1406`                                     | PostCSS plugin throw หรือ stylesheet มี syntax error ที่ chain ปฏิเสธ                         | แก้ error ของ plugin/stylesheet ที่รายงาน build จะไม่ปล่อย CSS ที่ยังไม่ transform ออกไป    |
+| `RUV1805`                                     | ไฟล์ `.json` ที่ import ไม่ใช่ JSON ที่ถูกต้อง                                                | ข้อความระบุไฟล์และตำแหน่งที่ parse ไม่ผ่าน ให้แก้เอกสารนั้น                                 |
+| `RUV1806`                                     | import resolve ไปยังไฟล์ชนิดที่ Ruvyxa ไม่ compile (`.node`, `.wasm`, binary asset)           | เพิ่ม package นั้นใน `build.external` ให้ runtime โหลดไฟล์แทน bundler                       |
+
+**หน้าแสดงด้วย browser default ทั้งที่ class name ถูกต้อง** global stylesheet ถึง browser
+โดยยังไม่ถูก transform ให้ตรวจว่ามี `@import "tailwindcss"` เหลืออยู่ใน CSS ที่เสิร์ฟหรือไม่
+โปรเจกต์ที่ใช้ Tailwind v4 ต้องมี PostCSS config ที่ project root และติดตั้ง `postcss` ดู
+[PostCSS และ Tailwind CSS](06-ui-navigation-metadata-and-assets.md#postcss-และ-tailwind-css)
+
+**adapter build ล้มเหลวข้างใน package ที่คุณไม่ได้เขียน** SDK อ่านไฟล์ JSON, native addon หรือ asset
+อื่นที่ไม่ใช่ JavaScript ซึ่ง deployment bundle ต้องพาไปด้วย JSON จะถูก compile เป็น data
+ส่วนชนิดอื่นจะรายงาน `RUV1806` พร้อมชื่อไฟล์และ import ที่พาไปถึง serverless adapter จะ bundle
+dependency ของ route เข้า function ปัญหาจึงเห็นตอน `ruvyxa build --adapter <name>` แต่ไม่เห็นตอน
+`ruvyxa build` ธรรมดา
 
 ## คำถามที่พบบ่อย
 

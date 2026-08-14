@@ -1040,6 +1040,13 @@ pub(crate) fn copy_style_sources(
         if relative.starts_with("node_modules") {
             continue;
         }
+        // A style collection records watch inputs as well as stylesheets, and a
+        // PostCSS plugin may report a whole directory as one — Tailwind reports
+        // the trees it scans for class names that way. Those belong in the watch
+        // set, not in the copied server sources.
+        if !file.is_file() {
+            continue;
+        }
         let target = server_dir.join(relative);
         if target == file {
             continue;

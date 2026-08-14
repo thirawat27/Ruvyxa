@@ -168,7 +168,7 @@ pub(crate) fn prepare_build_assets(
     let started = Instant::now();
     let (styles, images) = std::thread::scope(|scope| -> anyhow::Result<_> {
         let styles = scope.spawn(|| match style_entries {
-            Some(entries) => ruvyxa_dev_server::collect_styles(root, app_dir, entries),
+            Some(entries) => ruvyxa_dev_server::collect_styles_for_build(root, app_dir, entries),
             None => Ok(ruvyxa_dev_server::StyleCollection::default()),
         });
         let app_copy = scope.spawn(|| copy_dir_all(app_dir, &server_dir.join("app")));

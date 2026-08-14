@@ -140,6 +140,54 @@ list project-relative files/directories in `css.entries`. The runtime recognizes
 dependency; use styles that your build can resolve and run `npm run check` after changing
 boundaries.
 
+### PostCSS and Tailwind CSS
+
+If the project root has a PostCSS configuration, Ruvyxa runs your plugin chain over every collected
+global stylesheet — in `ruvyxa dev` and `ruvyxa build` alike, on the same code path, so the two
+produce the same CSS.
+
+Recognized filenames, in this order: `postcss.config.mjs`, `postcss.config.js`,
+`postcss.config.cjs`, `postcss.config.ts`, `postcss.config.mts`, `postcss.config.cts`,
+`postcss.config.json`, `.postcssrc.mjs`, `.postcssrc.js`, `.postcssrc.cjs`, `.postcssrc.json`,
+`.postcssrc`.
+
+Ruvyxa names no plugin of its own. Whatever the config declares is what runs, resolved from your
+`node_modules`. Tailwind CSS v4 needs nothing framework-specific:
+
+```js
+// postcss.config.mjs
+export default { plugins: { '@tailwindcss/postcss': {} } }
+```
+
+```css
+/* app/globals.css */
+@import 'tailwindcss';
+```
+
+```bash
+npm install -D postcss tailwindcss @tailwindcss/postcss
+```
+
+Details worth knowing:
+
+- **Plugins run per stylesheet entry, after local `@import`s are inlined.** A partial pulled in with
+  `@import "./theme.css"` reaches the plugin chain as part of its entry.
+- **The config declares the shape you already know.** A plugin array, a `{ name: options }` map, or
+  a function of `{ mode }` — `mode` is `production` during `ruvyxa build` and `development` during
+  `ruvyxa dev`.
+- **Files your plugins read become watch inputs.** Tailwind reports the templates it scanned for
+  class names, so editing a component in dev regenerates the stylesheet.
+- **A plugin failure fails the build.** Ruvyxa does not fall back to untransformed CSS: an
+  unresolved `@import "tailwindcss"` reaching a browser renders the page with browser defaults,
+  which looks like a styling bug rather than a build failure. See `RUV1405` and `RUV1406` in
+  [Troubleshooting](16-troubleshooting-upgrades.md).
+- **A project with no PostCSS config is unaffected.** The CSS pipeline behaves exactly as it did
+  before. A stylesheet that imports `tailwindcss` without a PostCSS config still falls back to
+  `@tailwindcss/cli` when that is installed.
+
+Do not add a separate Tailwind CLI script alongside a PostCSS config. Two build pipelines over one
+stylesheet disagree about live reload, asset manifests, and where errors are reported.
+
 **Previous:** [Data, actions, and API routes](05-data-actions-api.md) · **Next:**
 [Configuration and environment](07-configuration.md)
 

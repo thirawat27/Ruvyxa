@@ -1836,6 +1836,30 @@ fn copies_external_style_sources_into_server_output() {
     );
 }
 
+/// A style collection carries watch inputs as well as stylesheets, and a PostCSS
+/// plugin may report a whole directory as one — Tailwind reports the trees it
+/// scans for class names that way. Copying a directory as a file failed the
+/// whole build with a bare `Access is denied` on Windows.
+#[test]
+fn skips_directory_watch_inputs_when_copying_style_sources() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let scanned = root.join("app");
+    let source = root.join("styles/theme.css");
+    let server = root.join("output/server");
+    std::fs::create_dir_all(&scanned).unwrap();
+    std::fs::create_dir_all(source.parent().unwrap()).unwrap();
+    std::fs::write(&source, ":root { color-scheme: dark; }").unwrap();
+
+    copy_style_sources(root, &server, &[scanned, source]).unwrap();
+
+    assert!(server.join("styles/theme.css").is_file());
+    assert!(
+        !server.join("app").exists(),
+        "a directory watch input must not be copied into the server output"
+    );
+}
+
 #[test]
 fn parses_top_level_commands_case_insensitively() {
     let cli = Cli::try_parse_from(normalized_cli_args(os_args([

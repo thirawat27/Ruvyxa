@@ -1284,7 +1284,16 @@ pub(crate) fn resolve_graph_with_incremental(
                     None => cache.read_source(dep_path)?,
                 };
                 let load_source_map = loaded.and_then(|output| output.map);
-                let source = if target == BundleTarget::Client
+                // A JSON module is data, not code: it is never rewritten and
+                // never scanned for imports. Folding `process.env.NODE_ENV` into
+                // it, or reading `require(` out of one of its string values,
+                // would corrupt the document or invent dependencies.
+                let is_json = matches!(
+                    dep_path.extension().and_then(|extension| extension.to_str()),
+                    Some(extension) if extension.eq_ignore_ascii_case("json")
+                );
+                let source = if !is_json
+                    && target == BundleTarget::Client
                     && dep_path
                         .components()
                         .any(|component| component.as_os_str() == "node_modules")
@@ -1346,7 +1355,7 @@ pub(crate) fn resolve_graph_with_incremental(
                     None
                 };
 
-                let dependencies = if is_external {
+                let dependencies = if is_external || is_json {
                     ResolvedDependencies::default()
                 } else if let Some(reused) = reusable_dependencies {
                     reused

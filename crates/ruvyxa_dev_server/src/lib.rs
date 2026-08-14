@@ -138,8 +138,11 @@ pub(crate) use response::{
 mod hmr_tracker;
 pub use hmr_tracker::{HmrEventType, HmrTracker, HmrUpdate};
 
+mod postcss;
+pub use postcss::PostcssRunner;
+
 mod style;
-pub use style::{StyleCollection, collect_styles, minify_css};
+pub use style::{StyleCollection, collect_styles, collect_styles_for_build, minify_css};
 
 pub mod process;
 

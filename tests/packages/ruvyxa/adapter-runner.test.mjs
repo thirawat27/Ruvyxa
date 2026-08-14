@@ -335,6 +335,93 @@ export default handler
     }
   })
 
+  /// The reported serverless incident, at the layer where it happened.
+  ///
+  /// Adapters bundle route dependencies into the deployed function
+  /// (`bundlePackages: true`). An SDK that reads its own version through
+  /// `require('../package.json')` — the shape `gaxios` uses, and through it
+  /// `google-auth-library` and `@google/genai` — sent that JSON file to the
+  /// JavaScript transform and failed every adapter build that touched it.
+  ///
+  /// There is one `bundlePackages: true` call site, so this covers every
+  /// platform target rather than the one that reported the failure.
+  it('bundles an API route SDK that reads its own package.json into the function', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-adapter-runner-'))
+    const outputDir = path.join(root, '.ruvyxa-staging')
+    const functionDir = path.join(outputDir, 'deploy', 'function')
+    try {
+      await installFakeReact(root)
+      await mkdir(path.join(root, 'app', 'api', 'version'), { recursive: true })
+      await mkdir(path.join(outputDir, 'prerender'), { recursive: true })
+
+      const sdkDir = path.join(root, 'node_modules', 'fake-sdk', 'build', 'cjs', 'src')
+      await mkdir(sdkDir, { recursive: true })
+      await writeFile(
+        path.join(root, 'node_modules', 'fake-sdk', 'package.json'),
+        JSON.stringify({ name: 'fake-sdk', version: '4.2.1', main: 'build/cjs/src/index.cjs' }),
+      )
+      await writeFile(
+        path.join(sdkDir, 'index.cjs'),
+        "const pkg = require('../../../package.json')\n" +
+          'module.exports = { userAgent: `fake-sdk/${pkg.version}` }\n',
+      )
+
+      await writeFile(
+        path.join(root, 'app', 'layout.tsx'),
+        `export default function Layout({ children }) { return <body>{children}</body> }`,
+      )
+      await writeFile(
+        path.join(root, 'app', 'api', 'version', 'route.ts'),
+        `import sdk from 'fake-sdk'
+        export async function GET() { return Response.json({ agent: sdk.userAgent }) }`,
+      )
+
+      const manifest = {
+        routes: [
+          {
+            id: 'app/api/version/route',
+            kind: 'api',
+            path: '/api/version',
+            file: 'app/api/version/route.ts',
+            layoutChain: ['app/layout'],
+            render: { strategy: 'ssr' },
+          },
+        ],
+      }
+      await writeFile(path.join(outputDir, 'manifest.json'), JSON.stringify(manifest))
+
+      const handlerSource = `import { createHandler } from './serverless-handler.mjs'
+import { loadRouteModule } from './route-modules.mjs'
+const routes = ${JSON.stringify(manifest.routes)}
+const handler = createHandler({ routes, importPage: loadRouteModule, importApi: loadRouteModule })
+export default handler
+`
+      await writeFile(
+        path.join(root, 'ruvyxa.config.mjs'),
+        `export default { adapter: { build() { return {
+          target: 'node',
+          artifacts: [{ kind: 'function', path: 'deploy/function', handlerSource: ${JSON.stringify(handlerSource)} }]
+        } } } }`,
+      )
+
+      await runRunner(root, outputDir)
+
+      const { default: handler } = await import(
+        `${new URL(`file://${functionDir.replaceAll('\\', '/')}/index.mjs`).href}?t=${Date.now()}`
+      )
+      const response = await handler(new Request('http://localhost/api/version'))
+      assert.equal(response.status, 200)
+      assert.deepEqual(await response.json(), { agent: 'fake-sdk/4.2.1' })
+
+      // The JSON travels as data inside the function, not as a sibling file the
+      // platform would have to ship separately.
+      const registry = await readFile(path.join(functionDir, 'route-modules.mjs'), 'utf8')
+      assert.match(registry, /JSON\.parse\(/)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('materializes allowlisted project-scope artifacts at the project root', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-adapter-runner-'))
     const outputDir = path.join(root, '.ruvyxa-staging')

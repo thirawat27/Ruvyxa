@@ -136,6 +136,54 @@ imported project CSS อาจอยู่นอก `app/` ได้ หาก�
 ให้ใส่ file/directory แบบ project-relative ใน `css.entries` runtime รู้จัก Sass เป็น package
 dependency ให้ใช้ style ที่ build resolve ได้ และรัน `npm run check` หลังเปลี่ยน boundary
 
+### PostCSS และ Tailwind CSS
+
+ถ้า project root มี PostCSS configuration Ruvyxa จะรัน plugin chain ของคุณกับ global stylesheet
+ทุกไฟล์ที่เก็บรวบรวมได้ — ทั้งใน `ruvyxa dev` และ `ruvyxa build` ผ่าน code path เดียวกัน ผลลัพธ์ CSS
+จึงตรงกัน
+
+ชื่อไฟล์ config ที่รองรับ ตามลำดับนี้: `postcss.config.mjs`, `postcss.config.js`,
+`postcss.config.cjs`, `postcss.config.ts`, `postcss.config.mts`, `postcss.config.cts`,
+`postcss.config.json`, `.postcssrc.mjs`, `.postcssrc.js`, `.postcssrc.cjs`, `.postcssrc.json`,
+`.postcssrc`
+
+Ruvyxa ไม่ hard-code plugin ใดไว้เอง config ประกาศอะไร สิ่งนั้นคือสิ่งที่รัน โดย resolve จาก
+`node_modules` ของโปรเจกต์ Tailwind CSS v4 จึงไม่ต้องใช้อะไรที่เฉพาะกับ framework:
+
+```js
+// postcss.config.mjs
+export default { plugins: { '@tailwindcss/postcss': {} } }
+```
+
+```css
+/* app/globals.css */
+@import 'tailwindcss';
+```
+
+```bash
+npm install -D postcss tailwindcss @tailwindcss/postcss
+```
+
+รายละเอียดที่ควรรู้:
+
+- **plugin รันต่อหนึ่ง stylesheet entry หลังจาก `@import` ภายในโปรเจกต์ถูก inline แล้ว** partial ที่
+  ดึงเข้ามาด้วย `@import "./theme.css"` จึงผ่าน plugin chain ไปพร้อมกับ entry ของมัน
+- **config รองรับรูปแบบที่คุ้นเคยอยู่แล้ว** ทั้ง array ของ plugin, object แบบ `{ name: options }`
+  หรือ function ที่รับ `{ mode }` โดย `mode` เป็น `production` ตอน `ruvyxa build` และ `development`
+  ตอน `ruvyxa dev`
+- **ไฟล์ที่ plugin อ่านจะกลายเป็น watch input** Tailwind รายงาน template ที่มันสแกนหา class name
+  การแก้ component ตอน dev จึง regenerate stylesheet ให้
+- **plugin ที่ล้มเหลวจะทำให้ build ล้มเหลว** Ruvyxa ไม่ fallback ไปใช้ CSS ที่ยังไม่ transform เพราะ
+  `@import "tailwindcss"` ที่หลุดถึง browser จะทำให้หน้าแสดงด้วย browser default ซึ่งดูเหมือน bug
+  ของ style มากกว่า build ที่ล้มเหลว ดู `RUV1405` และ `RUV1406` ใน
+  [Troubleshooting](16-troubleshooting-upgrades.md)
+- **โปรเจกต์ที่ไม่มี PostCSS config ไม่ได้รับผลกระทบ** CSS pipeline ทำงานเหมือนเดิมทุกประการ
+  stylesheet ที่ import `tailwindcss` โดยไม่มี PostCSS config ยัง fallback ไปใช้ `@tailwindcss/cli`
+  ได้เมื่อติดตั้งไว้
+
+อย่าเพิ่ม script Tailwind CLI แยกควบคู่กับ PostCSS config การมี build pipeline สองชุดกับ stylesheet
+เดียวจะทำให้ live reload, asset manifest และตำแหน่งที่รายงาน error ไม่สอดคล้องกัน
+
 **ก่อนหน้า:** [ข้อมูล, action และ API route](05-data-actions-api.md) · **ถัดไป:**
 [Configuration และ environment](07-configuration.md)
 
