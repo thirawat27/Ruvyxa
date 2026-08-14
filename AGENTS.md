@@ -69,12 +69,14 @@ cargo run -p ruvyxa_cli -- test:parity --root examples/demo
   fails on a stale copy. The Rust router cannot share the module, so both languages are held to
   `tests/fixtures/route-match-conformance.json` — add a case there before changing match behavior.
 - Rust shared behavior needs Rust tests near the changed crate.
-- Runtime/config/package behavior needs Node tests under `tests/packages/**`. TypeScript suites are
-  compiled by `tsc -p tsconfig.test.json` into `.test-build/packages/<suite>/` and run from there,
-  so they are type-checked and never rely on a runtime that strips types. Import the package under
-  test through its built `dist/*.js` — a `src/*.ts` import would be compiled into `.test-build/` as
-  a second copy, and any module that resolves its own `import.meta.url` (adapter `package.json`
-  reads, the `create-ruvyxa` template lookup) would then resolve against the wrong directory. Use
+- Runtime/config/package behavior needs Node tests under `tests/packages/**`. TypeScript suites go
+  through `scripts/test-package.mjs <suite>`, which compiles them with `tsc -p tsconfig.test.json`
+  into `.test-build/packages/<suite>/` and runs that output, so they are type-checked and never rely
+  on a runtime that strips types. A new suite needs a `tsconfig.test.json` in its package (extending
+  `tsconfig.test-base.json`) and a `test` script calling that runner. Import the package under test
+  through its built `dist/*.js` — a `src/*.ts` import would be compiled into `.test-build/` as a
+  second copy, and any module that resolves its own `import.meta.url` (adapter `package.json` reads,
+  the `create-ruvyxa` template lookup) would then resolve against the wrong directory. Use
   `repoPath()` from `tests/repo-root.ts` to reach a repository file rather than walking up from
   `import.meta.url`.
 - Template changes should stay package-manager neutral and must match

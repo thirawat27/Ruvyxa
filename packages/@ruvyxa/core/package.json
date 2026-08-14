@@ -52,7 +52,7 @@
   "scripts": {
     "build": "node -e \"require('fs').rmSync('dist',{recursive:true,force:true})\" && tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
-    "test": "pnpm run build && tsc -p tsconfig.test.json && node --test \"../../../.test-build/packages/core/**/*.test.js\"",
+    "test": "pnpm run build && node ../../../scripts/test-package.mjs core",
     "format": "tsc -p tsconfig.json --noEmit",
     "prepack": "pnpm run build"
   }

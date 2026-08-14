@@ -35,7 +35,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.check.json",
-    "test": "pnpm run build && tsc -p tsconfig.test.json && node --test \"../../../.test-build/packages/adapter-vercel/**/*.test.js\"",
+    "test": "pnpm run build && node ../../../scripts/test-package.mjs adapter-vercel",
     "format": "tsc -p tsconfig.check.json",
     "prepack": "pnpm run build"
   }

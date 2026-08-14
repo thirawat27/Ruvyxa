@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { readdirSync, readFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync } from 'node:fs'
 import { describe, it } from 'node:test'
 
 import {
@@ -120,7 +120,7 @@ describe('Ruvyxa CLI platforms', () => {
   // can would make CI green on a Node the framework claims to support but
   // never exercises.
   it('runs the TypeScript suites as compiled JavaScript, on no experimental runtime flag', () => {
-    for (const workflow of ['ci.yml', 'release.yml', 'security.yml']) {
+    for (const workflow of readdirSync(new URL('../../../.github/workflows/', import.meta.url))) {
       const contents = readFileSync(
         new URL(`../../../.github/workflows/${workflow}`, import.meta.url),
         'utf8',
@@ -128,12 +128,27 @@ describe('Ruvyxa CLI platforms', () => {
       assert.doesNotMatch(contents, /--experimental-/, workflow)
     }
 
-    for (const [name, manifest] of testedPackages()) {
+    // The runner is what keeps `node --test` pointed at compiled output, so a
+    // package that grew a suite of its own has to go through it too.
+    const runner = readFileSync(
+      new URL('../../../scripts/test-package.mjs', import.meta.url),
+      'utf8',
+    )
+    assert.match(runner, /tsconfig\.test\.json/)
+    assert.match(runner, /\.test\.js/)
+    assert.doesNotMatch(runner, /--experimental-/)
+    assert.doesNotMatch(runner, /\.test\.ts/)
+
+    let compiledSuites = 0
+    for (const [name, manifest] of workspacePackages()) {
       const script = manifest.scripts?.test
-      if (!script?.includes('.test-build/')) continue
-      assert.match(script, /tsc -p tsconfig\.test\.json/, name)
+      if (!script) continue
       assert.doesNotMatch(script, /\.test\.ts/, name)
+      if (!script.includes('test-package.mjs')) continue
+      assert.match(script, /scripts\/test-package\.mjs [\w-]+$/, name)
+      compiledSuites += 1
     }
+    assert.ok(compiledSuites > 0, 'no package runs a compiled TypeScript suite')
   })
 
   it('does not publish an Intel macOS binary package', () => {
@@ -153,20 +168,34 @@ function readJson(relativePath) {
   return JSON.parse(readFileSync(new URL(relativePath, import.meta.url), 'utf8'))
 }
 
-/** Every workspace package manifest, as `[name, manifest]` pairs. */
-function testedPackages() {
+/**
+ * Every workspace package manifest, as `[directory, manifest]` pairs.
+ *
+ * Directories without a manifest are skipped rather than read: `packages/` also
+ * holds whatever the package manager and prepack steps leave behind, and that
+ * set differs between a developer checkout and a CI runner.
+ */
+function workspacePackages() {
   const packagesDir = new URL('../../../packages/', import.meta.url)
-  const entries = []
+  const directories = []
   for (const entry of readdirSync(packagesDir, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue
-    const nested = entry.name.startsWith('@')
-      ? readdirSync(new URL(`${entry.name}/`, packagesDir), { withFileTypes: true })
-          .filter((child) => child.isDirectory())
-          .map((child) => `${entry.name}/${child.name}`)
-      : [entry.name]
-    for (const directory of nested) {
-      entries.push([directory, readJson(`../../../packages/${directory}/package.json`)])
+    if (!entry.isDirectory() || entry.name === 'node_modules') continue
+    if (!entry.name.startsWith('@')) {
+      directories.push(entry.name)
+      continue
+    }
+    for (const child of readdirSync(new URL(`${entry.name}/`, packagesDir), {
+      withFileTypes: true,
+    })) {
+      if (child.isDirectory() && child.name !== 'node_modules') {
+        directories.push(`${entry.name}/${child.name}`)
+      }
     }
   }
-  return entries
+
+  return directories
+    .filter((directory) =>
+      existsSync(new URL(`../../../packages/${directory}/package.json`, import.meta.url)),
+    )
+    .map((directory) => [directory, readJson(`../../../packages/${directory}/package.json`)])
 }

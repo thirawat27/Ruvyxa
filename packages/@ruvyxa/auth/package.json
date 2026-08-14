@@ -46,7 +46,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.check.json",
-    "test": "pnpm run build && tsc -p tsconfig.test.json && node --test \"../../../.test-build/packages/auth/**/*.test.js\"",
+    "test": "pnpm run build && node ../../../scripts/test-package.mjs auth",
     "format": "tsc -p tsconfig.check.json",
     "prepack": "pnpm run build"
   }
