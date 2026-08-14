@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { config, type RuvyxaConfig } from '../../../packages/@ruvyxa/core/src/config.ts'
+import { config, type RuvyxaConfig } from '../../../packages/@ruvyxa/core/dist/config.js'
 import {
   definePlugin,
   withResponseHeader,
@@ -9,7 +9,7 @@ import {
   type PluginHttpRequestRegistration,
   type PluginHttpResponseRegistration,
   type PluginRegistrationApi,
-} from '../../../packages/@ruvyxa/core/src/plugin.ts'
+} from '../../../packages/@ruvyxa/core/dist/plugin.js'
 
 function registrationApi(
   onRequest: (value: PluginHttpRequestRegistration | PluginHttpRequestHandler) => void,

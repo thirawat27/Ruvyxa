@@ -4,15 +4,15 @@ import { mkdir, mkdtemp, readFile, readdir, rm, utimes, writeFile } from 'node:f
 import { tmpdir } from 'node:os'
 import { join, relative } from 'node:path'
 
+import { repoPath } from '../../repo-root.ts'
 import {
   STARTER_TEMPLATES,
   createRuvyxaApp,
   detectPackageManager,
 } from '../../../packages/create-ruvyxa/dist/index.js'
 
-const frameworkVersion = JSON.parse(
-  await readFile(new URL('../../../package.json', import.meta.url), 'utf8'),
-).version as string
+const frameworkVersion = JSON.parse(await readFile(repoPath('package.json'), 'utf8'))
+  .version as string
 
 const starterScripts = {
   dev: 'ruvyxa dev',

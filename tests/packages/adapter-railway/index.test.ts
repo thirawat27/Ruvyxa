@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { railway } from '../../../packages/@ruvyxa/adapter-railway/src/index.ts'
+import { railway } from '../../../packages/@ruvyxa/adapter-railway/dist/index.js'
 
 describe('railway', () => {
   it('produces a standalone full-stack deployment and safe Railway config', async () => {

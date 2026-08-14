@@ -35,7 +35,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.check.json",
-    "test": "node --test \"../../../tests/packages/adapter-node/**/*.test.ts\"",
+    "test": "pnpm run build && tsc -p tsconfig.test.json && node --test \"../../../.test-build/packages/adapter-node/**/*.test.js\"",
     "format": "tsc -p tsconfig.check.json",
     "prepack": "pnpm run build"
   }

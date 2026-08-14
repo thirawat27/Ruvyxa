@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { static as staticOutput } from '../../../packages/@ruvyxa/adapter-static/src/index.ts'
+import { static as staticOutput } from '../../../packages/@ruvyxa/adapter-static/dist/index.js'
 
 describe('static', () => {
   it('returns static deployment output', async () => {

@@ -9,7 +9,7 @@ import {
   loader,
   notFound,
   redirect,
-} from '../../../packages/@ruvyxa/core/src/server.ts'
+} from '../../../packages/@ruvyxa/core/dist/server.js'
 
 describe('server API', () => {
   beforeEach(() => {

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { render } from '../../../packages/@ruvyxa/adapter-render/src/index.ts'
+import { render } from '../../../packages/@ruvyxa/adapter-render/dist/index.js'
 
 describe('render', () => {
   it('produces a standalone full-stack deployment and Render Blueprint', async () => {

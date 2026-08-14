@@ -5,6 +5,7 @@ target/
 
 # Build output
 dist/
+.test-build/
 .ruvyxa/
 .ruvyxa-*/
 .ruvyxa/cache/

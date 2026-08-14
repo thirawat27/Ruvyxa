@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { cloudflare } from '../../../packages/@ruvyxa/adapter-cloudflare/src/index.ts'
+import { cloudflare } from '../../../packages/@ruvyxa/adapter-cloudflare/dist/index.js'
 
 describe('cloudflare', () => {
   it('returns edge deployment output with worker function', async () => {
@@ -115,9 +115,9 @@ describe('cloudflare', () => {
   // The default used to be `new Date()`, so two builds of the same commit
   // produced different Workers, and a build machine ahead of the deploy
   // machine's workerd emitted a compatibility date wrangler rejects.
-  it('pins a fixed default compatibility date', () => {
-    const compatibilityDate = () => {
-      const output = cloudflare().build({ root: '.', outDir: '.ruvyxa' })
+  it('pins a fixed default compatibility date', async () => {
+    const compatibilityDate = async () => {
+      const output = await cloudflare().build({ root: '.', outDir: '.ruvyxa' })
       const wrangler = output.artifacts?.find((artifact) =>
         artifact.path.endsWith('wrangler.jsonc'),
       )
@@ -125,14 +125,14 @@ describe('cloudflare', () => {
         .compatibility_date
     }
 
-    assert.equal(compatibilityDate(), compatibilityDate())
-    assert.match(compatibilityDate(), /^\d{4}-\d{2}-\d{2}$/)
+    assert.equal(await compatibilityDate(), await compatibilityDate())
+    assert.match(await compatibilityDate(), /^\d{4}-\d{2}-\d{2}$/)
     // A date ahead of the deploy machine's workerd is rejected by wrangler.
-    assert.ok(compatibilityDate() <= new Date().toISOString().slice(0, 10))
+    assert.ok((await compatibilityDate()) <= new Date().toISOString().slice(0, 10))
   })
 
-  it('forwards the runtime context and caches public assets', () => {
-    const output = cloudflare().build({ root: '.', outDir: '.ruvyxa' })
+  it('forwards the runtime context and caches public assets', async () => {
+    const output = await cloudflare().build({ root: '.', outDir: '.ruvyxa' })
 
     // waitUntil lives on the Workers execution context; dropping it stranded
     // any background work the shared handler schedules.
@@ -149,8 +149,8 @@ describe('cloudflare', () => {
     assert.doesNotMatch(contents, /^\/\*\.js$/m)
   })
 
-  it('embeds validated edge middleware, i18n, and on-demand image wiring', () => {
-    const output = cloudflare().build({
+  it('embeds validated edge middleware, i18n, and on-demand image wiring', async () => {
+    const output = await cloudflare().build({
       root: '.',
       outDir: '.ruvyxa',
       buildInfo: {

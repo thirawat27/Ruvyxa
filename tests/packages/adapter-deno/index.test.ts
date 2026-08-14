@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { deno } from '../../../packages/@ruvyxa/adapter-deno/src/index.ts'
+import { deno } from '../../../packages/@ruvyxa/adapter-deno/dist/index.js'
 
 describe('deno', () => {
   it('returns a self-contained Deno deployment', async () => {

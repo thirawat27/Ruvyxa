@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { bun } from '../../../packages/@ruvyxa/adapter-bun/src/index.ts'
+import { bun } from '../../../packages/@ruvyxa/adapter-bun/dist/index.js'
 
 describe('bun', () => {
   it('returns bun deployment output', async () => {

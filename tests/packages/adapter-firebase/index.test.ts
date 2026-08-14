@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { firebase } from '../../../packages/@ruvyxa/adapter-firebase/src/index.ts'
+import { firebase } from '../../../packages/@ruvyxa/adapter-firebase/dist/index.js'
 
 describe('firebase', () => {
   it('emits Hosting, Functions v2, cache, and rewrite artifacts', async () => {

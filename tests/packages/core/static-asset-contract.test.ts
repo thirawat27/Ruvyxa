@@ -1,30 +1,20 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { describe, it } from 'node:test'
 
+import { repoPath } from '../../repo-root.ts'
 import {
   FALLBACK_CONTENT_TYPE,
   STATIC_ASSET_EXTENSIONS,
   STATIC_CONTENT_TYPES,
-} from '../../../packages/@ruvyxa/core/src/utils.ts'
+} from '../../../packages/@ruvyxa/core/dist/utils.js'
 const standaloneServerText = readFileSync(
-  path.join(
-    path.dirname(fileURLToPath(import.meta.url)),
-    '../../../packages/@ruvyxa/core/src/standalone-server.ts',
-  ),
+  repoPath('packages/@ruvyxa/core/src/standalone-server.ts'),
   'utf8',
 )
 
 const fixture = JSON.parse(
-  readFileSync(
-    path.join(
-      path.dirname(fileURLToPath(import.meta.url)),
-      '../../fixtures/static-asset-conformance.json',
-    ),
-    'utf8',
-  ),
+  readFileSync(repoPath('tests/fixtures/static-asset-conformance.json'), 'utf8'),
 ) as {
   contentTypes: Record<string, string>
   fallbackContentType: string

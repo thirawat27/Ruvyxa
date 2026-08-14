@@ -27,7 +27,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.json --noEmit",
-    "test": "pnpm run build && node --test \"../../tests/packages/create-ruvyxa/**/*.test.ts\"",
+    "test": "pnpm run build && tsc -p tsconfig.test.json && node --test \"../../.test-build/packages/create-ruvyxa/**/*.test.js\"",
     "format": "tsc -p tsconfig.json --noEmit",
     "prepack": "pnpm run build && node scripts/prepare-template.mjs"
   },

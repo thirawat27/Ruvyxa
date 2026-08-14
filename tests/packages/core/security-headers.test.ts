@@ -1,22 +1,15 @@
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
-import path from 'node:path'
-import { fileURLToPath } from 'node:url'
 import { describe, it } from 'node:test'
 
+import { repoPath } from '../../repo-root.ts'
 import {
   DEFAULT_SECURITY_HEADERS,
   headersFileContents,
-} from '../../../packages/@ruvyxa/core/src/utils.ts'
+} from '../../../packages/@ruvyxa/core/dist/utils.js'
 
 const fixture = JSON.parse(
-  readFileSync(
-    path.join(
-      path.dirname(fileURLToPath(import.meta.url)),
-      '../../fixtures/security-headers-conformance.json',
-    ),
-    'utf8',
-  ),
+  readFileSync(repoPath('tests/fixtures/security-headers-conformance.json'), 'utf8'),
 ) as { headers: Record<string, string> }
 
 /**

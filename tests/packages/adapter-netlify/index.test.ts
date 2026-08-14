@@ -1,7 +1,8 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { netlify } from '../../../packages/@ruvyxa/adapter-netlify/src/index.ts'
+import type { AdapterArtifact } from '../../../packages/@ruvyxa/core/dist/types.js'
+import { netlify } from '../../../packages/@ruvyxa/adapter-netlify/dist/index.js'
 
 describe('netlify', () => {
   it('returns serverless deployment output with function artifacts', async () => {
@@ -74,37 +75,33 @@ describe('netlify', () => {
       'deploy/netlify/functions/ruvyxa-handler',
       '.netlify/v1/functions/ruvyxa-handler',
     ]) {
-      const functionArtifact = output.artifacts?.find(
+      const functionArtifact: AdapterArtifact | undefined = (output.artifacts ?? []).find(
         (artifact) => artifact.kind === 'function' && artifact.path === functionPath,
       )
       assert.ok(functionArtifact, functionPath)
-      assert.ok('handlerSource' in functionArtifact!)
-      assert.match(String(functionArtifact!.handlerSource), /createHandler/)
-      assert.match(String(functionArtifact!.handlerSource), /loadRouteModule/)
-      assert.doesNotMatch(String(functionArtifact!.handlerSource), /\.\/server\/app/)
-      assert.match(String(functionArtifact!.handlerSource), /export default/)
+      const handlerSource =
+        'handlerSource' in functionArtifact ? String(functionArtifact.handlerSource) : ''
+      assert.notEqual(handlerSource, '', functionPath)
+      assert.match(handlerSource, /createHandler/)
+      assert.match(handlerSource, /loadRouteModule/)
+      assert.doesNotMatch(handlerSource, /\.\/server\/app/)
+      assert.match(handlerSource, /export default/)
 
       // The ISR cache reads and writes files by request path, so it must go
       // through the shared containment helper rather than joining the raw
       // pathname onto the cache directory.
-      assert.match(String(functionArtifact!.handlerSource), /prerenderRelativePath/)
-      assert.doesNotMatch(String(functionArtifact!.handlerSource), /ISR cache write failures/)
-      assert.doesNotMatch(
-        String(functionArtifact!.handlerSource),
-        /path\.join\(prerenderDir, pathname/,
-      )
+      assert.match(handlerSource, /prerenderRelativePath/)
+      assert.doesNotMatch(handlerSource, /ISR cache write failures/)
+      assert.doesNotMatch(handlerSource, /path\.join\(prerenderDir, pathname/)
       // Netlify Functions v2 config export
-      assert.match(String(functionArtifact!.handlerSource), /export const config/)
-      assert.match(String(functionArtifact!.handlerSource), /preferStatic: true/)
+      assert.match(handlerSource, /export const config/)
+      assert.match(handlerSource, /preferStatic: true/)
 
       // Netlify bundles the function with esbuild, so the manifest has to be
       // part of the module graph. Reading a sibling manifest.json at runtime
       // crashed the deployed function with ENOENT /var/task/manifest.json.
-      assert.match(
-        String(functionArtifact!.handlerSource),
-        /import manifest from '\.\/manifest\.mjs'/,
-      )
-      assert.doesNotMatch(String(functionArtifact!.handlerSource), /readFileSync\(manifestPath/)
+      assert.match(handlerSource, /import manifest from '\.\/manifest\.mjs'/)
+      assert.doesNotMatch(handlerSource, /readFileSync\(manifestPath/)
     }
 
     // preferStatic serves a published page without invoking the function, so

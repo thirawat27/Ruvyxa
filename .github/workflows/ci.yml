@@ -39,8 +39,6 @@ jobs:
     name: Test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 60
-    env:
-      NODE_OPTIONS: '--experimental-strip-types'
     strategy:
       fail-fast: false
       matrix:

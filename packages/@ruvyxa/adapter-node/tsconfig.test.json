@@ -1,0 +1,4 @@
+{
+  "extends": "../../../tsconfig.test-base.json",
+  "include": ["../../../tests/packages/adapter-node/**/*.test.ts"]
+}

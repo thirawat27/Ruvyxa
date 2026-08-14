@@ -112,10 +112,28 @@ describe('Ruvyxa CLI platforms', () => {
     assert.match(ciWorkflow, /toolchain: 1\.96\.0/)
     assert.match(ciWorkflow, /node: '22\.13\.0'/)
     assert.match(ciWorkflow, /node-version: \$\{\{ matrix\.node \}\}/)
-    assert.match(
-      ciWorkflow,
-      /^  test:[\s\S]*?^    env:\s+^      NODE_OPTIONS: '--experimental-strip-types'/m,
-    )
+  })
+
+  // TypeScript test sources are compiled by `tsc` before `node --test` runs
+  // them, so the suite never depends on a runtime that can strip types. Node
+  // 22.13 — the floor declared above — cannot, and an unflagged release that
+  // can would make CI green on a Node the framework claims to support but
+  // never exercises.
+  it('runs the TypeScript suites as compiled JavaScript, on no experimental runtime flag', () => {
+    for (const workflow of ['ci.yml', 'release.yml', 'security.yml']) {
+      const contents = readFileSync(
+        new URL(`../../../.github/workflows/${workflow}`, import.meta.url),
+        'utf8',
+      )
+      assert.doesNotMatch(contents, /--experimental-/, workflow)
+    }
+
+    for (const [name, manifest] of testedPackages()) {
+      const script = manifest.scripts?.test
+      if (!script?.includes('.test-build/')) continue
+      assert.match(script, /tsc -p tsconfig\.test\.json/, name)
+      assert.doesNotMatch(script, /\.test\.ts/, name)
+    }
   })
 
   it('does not publish an Intel macOS binary package', () => {
@@ -133,4 +151,22 @@ function escapeRegExp(value) {
 
 function readJson(relativePath) {
   return JSON.parse(readFileSync(new URL(relativePath, import.meta.url), 'utf8'))
+}
+
+/** Every workspace package manifest, as `[name, manifest]` pairs. */
+function testedPackages() {
+  const packagesDir = new URL('../../../packages/', import.meta.url)
+  const entries = []
+  for (const entry of readdirSync(packagesDir, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue
+    const nested = entry.name.startsWith('@')
+      ? readdirSync(new URL(`${entry.name}/`, packagesDir), { withFileTypes: true })
+          .filter((child) => child.isDirectory())
+          .map((child) => `${entry.name}/${child.name}`)
+      : [entry.name]
+    for (const directory of nested) {
+      entries.push([directory, readJson(`../../../packages/${directory}/package.json`)])
+    }
+  }
+  return entries
 }

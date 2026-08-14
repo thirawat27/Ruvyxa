@@ -63,7 +63,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.check.json",
-    "test": "pnpm run build && node --test \"../../../tests/packages/realtime/**/*.test.ts\"",
+    "test": "pnpm run build && tsc -p tsconfig.test.json && node --test \"../../../.test-build/packages/realtime/**/*.test.js\"",
     "format": "tsc -p tsconfig.check.json",
     "prepack": "pnpm run build"
   },

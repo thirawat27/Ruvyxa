@@ -1,8 +1,8 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { definePlugin } from '../../../packages/@ruvyxa/core/src/plugin.ts'
-import { createPluginHarness } from '../../../packages/@ruvyxa/core/src/plugin-harness.ts'
+import { definePlugin } from '../../../packages/@ruvyxa/core/dist/plugin.js'
+import { createPluginHarness } from '../../../packages/@ruvyxa/core/dist/plugin-harness.js'
 
 describe('plugin test harness', () => {
   it('runs response hooks scoped by their match patterns', async () => {
@@ -61,6 +61,7 @@ describe('plugin test harness', () => {
 
     assert.equal(harness.routes.length, 1)
     const hit = await harness.route('/_health')
+    assert.ok(hit)
     assert.deepEqual(await hit.json(), { ok: true })
     assert.equal(await harness.route('/_health', { method: 'POST' }), undefined)
     assert.equal(await harness.route('/missing'), undefined)
@@ -116,7 +117,7 @@ describe('plugin test harness', () => {
     const plugin = definePlugin({
       name: 'analytics',
       head: { tag: 'script', attrs: { src: 'https://cdn.example/a.js', defer: true } },
-      diagnostics: { level: 'warn', message: 'sampling is on' },
+      diagnostics: { level: 'warning', code: 'AN001', message: 'sampling is on' },
     })
 
     const harness = await createPluginHarness(plugin)
@@ -124,8 +125,9 @@ describe('plugin test harness', () => {
     assert.deepEqual(harness.head, [
       { tag: 'script', attrs: { src: 'https://cdn.example/a.js', defer: true } },
     ])
-    assert.equal(harness.diagnostics[0].plugin, 'analytics')
-    assert.equal(harness.diagnostics[0].message, 'sampling is on')
+    assert.equal(harness.diagnostics[0]?.plugin, 'analytics')
+    assert.equal(harness.diagnostics[0]?.level, 'warning')
+    assert.equal(harness.diagnostics[0]?.message, 'sampling is on')
   })
 
   it('applies several plugins in configuration order', async () => {

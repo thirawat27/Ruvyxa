@@ -17,14 +17,14 @@ import { execFile } from 'node:child_process'
 import { mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+import { pathToFileURL } from 'node:url'
 import { promisify } from 'node:util'
+
+import { repoPath } from '../../repo-root.ts'
 
 const run = promisify(execFile)
 
-const binPath = fileURLToPath(
-  new URL('../../../packages/create-ruvyxa/bin/create-ruvyxa.js', import.meta.url),
-)
+const binPath = repoPath('packages/create-ruvyxa/bin/create-ruvyxa.js')
 
 /**
  * Run the bin with a faked TTY, returning everything it wrote to stdout.

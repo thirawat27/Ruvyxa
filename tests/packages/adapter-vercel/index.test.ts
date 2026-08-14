@@ -4,12 +4,13 @@ import { Readable } from 'node:stream'
 import { copyFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
-import { fileURLToPath, pathToFileURL } from 'node:url'
+import { pathToFileURL } from 'node:url'
 
-import { staticAssetPattern } from '../../../packages/@ruvyxa/core/src/utils.ts'
-import { vercel } from '../../../packages/@ruvyxa/adapter-vercel/src/index.ts'
+import { repoRoot } from '../../repo-root.ts'
+import { staticAssetPattern } from '../../../packages/@ruvyxa/core/dist/utils.js'
+import { vercel } from '../../../packages/@ruvyxa/adapter-vercel/dist/index.js'
 
-const workspaceRoot = path.resolve(fileURLToPath(new URL('../../..', import.meta.url)))
+const workspaceRoot = repoRoot
 
 describe('vercel', () => {
   it('returns serverless deployment output with function artifacts', async () => {
@@ -137,9 +138,9 @@ describe('vercel', () => {
 
     // Verify projectOutput: false disables project-scope artifacts
     assert.deepEqual(
-      vercel({ projectOutput: false })
-        .build({ root: '.', outDir: '.ruvyxa' })
-        .artifacts?.map(({ path }) => path),
+      (
+        await vercel({ projectOutput: false }).build({ root: '.', outDir: '.ruvyxa' })
+      ).artifacts?.map(({ path }) => path),
       [
         'deploy/vercel/.vercel/output/static',
         'deploy/vercel/.vercel/output/functions/__ruvyxa_handler.func',
@@ -178,8 +179,8 @@ describe('vercel', () => {
     assert.deepEqual(adapter.supports, ['ssr', 'ssg', 'csr', 'isr', 'ppr', 'api'])
   })
 
-  it('allows custom runtime and maxDuration', () => {
-    const output = vercel({ runtime: 'nodejs22.x', maxDuration: 30 }).build({
+  it('allows custom runtime and maxDuration', async () => {
+    const output = await vercel({ runtime: 'nodejs22.x', maxDuration: 30 }).build({
       root: '.',
       outDir: '.ruvyxa',
     })
@@ -191,8 +192,8 @@ describe('vercel', () => {
     assert.equal('regions' in config, false)
   })
 
-  it('pins function regions when asked, and rejects malformed region lists', () => {
-    const output = vercel({ regions: ['sin1'] }).build({ root: '.', outDir: '.ruvyxa' })
+  it('pins function regions when asked, and rejects malformed region lists', async () => {
+    const output = await vercel({ regions: ['sin1'] }).build({ root: '.', outDir: '.ruvyxa' })
     const vcConfig = output.artifacts?.find((a) => a.path.endsWith('.vc-config.json'))
     const config = JSON.parse(vcConfig && 'contents' in vcConfig ? String(vcConfig.contents) : '{}')
     assert.deepEqual(config.regions, ['sin1'])
@@ -201,9 +202,9 @@ describe('vercel', () => {
     assert.throws(() => vercel({ regions: [''] }), /RUV2001/)
   })
 
-  it('emits a Web-standard Edge Function with validated runtime policy', () => {
+  it('emits a Web-standard Edge Function with validated runtime policy', async () => {
     const adapter = vercel({ edge: true, regions: ['sin1'], projectOutput: false })
-    const output = adapter.build({
+    const output = await adapter.build({
       root: '.',
       outDir: '.ruvyxa',
       buildInfo: {
@@ -235,8 +236,8 @@ describe('vercel', () => {
     assert.throws(() => vercel({ edge: true, maxDuration: 30 }), /RUV2001/)
   })
 
-  it('configures Vercel native same-origin image optimization on demand', () => {
-    const output = vercel({ projectOutput: false }).build({
+  it('configures Vercel native same-origin image optimization on demand', async () => {
+    const output = await vercel({ projectOutput: false }).build({
       root: '.',
       outDir: '.ruvyxa',
       buildInfo: {
@@ -265,7 +266,7 @@ describe('vercel', () => {
   it('forwards streamed requests, repeated Set-Cookie headers, and binary responses', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-vercel-handler-'))
     try {
-      const output = vercel({ projectOutput: false }).build({ root, outDir: '.ruvyxa' })
+      const output = await vercel({ projectOutput: false }).build({ root, outDir: '.ruvyxa' })
       const artifact = output.artifacts?.find((item) => item.kind === 'function')
       assert.ok(artifact?.handlerSource)
       await mkdir(path.join(root, 'prerender'), { recursive: true })
@@ -330,14 +331,14 @@ describe('vercel', () => {
         method: 'POST',
         headers: { host: 'localhost', 'content-type': 'text/plain' },
       })
-      const headers = new Map()
-      let body
+      const headers = new Map<string, unknown>()
+      let body: Buffer | string | undefined
       const response = {
         statusCode: 0,
-        setHeader(name, value) {
+        setHeader(name: string, value: unknown) {
           headers.set(name, value)
         },
-        end(value) {
+        end(value: Buffer | string) {
           body = value
         },
       }
@@ -345,6 +346,7 @@ describe('vercel', () => {
       await handler(request, response)
 
       assert.equal(response.statusCode, 200)
+      assert.ok(body !== undefined)
       assert.equal(Buffer.from(body).toString(), 'streamed-payload')
       assert.deepEqual(headers.get('set-cookie'), ['first=1; Path=/', 'second=2; Path=/'])
 
@@ -357,6 +359,7 @@ describe('vercel', () => {
       })
       body = undefined
       await handler(parsedRequest, response)
+      assert.ok(body !== undefined)
       assert.equal(Buffer.from(body).toString(), '{"parsed":true}')
 
       const binaryRequest = Readable.from([])
@@ -367,6 +370,7 @@ describe('vercel', () => {
       })
       body = undefined
       await handler(binaryRequest, response)
+      assert.ok(body !== undefined)
       assert.deepEqual(Buffer.from(body), Buffer.from([0, 128, 255, 65]))
     } finally {
       await rm(root, { recursive: true, force: true })

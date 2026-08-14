@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
-import { aws } from '../../../packages/@ruvyxa/adapter-aws/src/index.ts'
+import { aws } from '../../../packages/@ruvyxa/adapter-aws/dist/index.js'
 
 describe('aws', () => {
   it('emits an Amplify Hosting static and compute deployment bundle', async () => {
