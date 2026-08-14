@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.0.30 (2026-08-13)
+## v1.0.30 (2026-08-14)
 
 ### Global CSS runs through the project's PostCSS chain
 
