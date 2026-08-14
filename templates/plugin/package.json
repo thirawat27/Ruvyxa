@@ -19,10 +19,10 @@
     "prepublishOnly": "npm test"
   },
   "peerDependencies": {
-    "ruvyxa": "^1.0.29"
+    "ruvyxa": "^1.0.30"
   },
   "devDependencies": {
-    "ruvyxa": "^1.0.29",
+    "ruvyxa": "^1.0.30",
     "typescript": "^7.0.2"
   },
   "engines": {
