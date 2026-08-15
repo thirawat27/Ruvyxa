@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## v1.0.31 (2026-08-15)
 
 ### Node.js 24 LTS production baseline
 
@@ -85,6 +85,155 @@ a single panic while the lock was held made every later join, presence update, w
 panic in turn — peers could not even leave a room. Nothing under that lock spans two fields, so the
 state behind a poisoned lock is as valid as the state behind a healthy one; the registry now
 recovers the guard and keeps serving.
+
+### HMR gained lanes, versions, and a browser client that stops reloading for everything
+
+Development dependency tracking is now kept per lane. `HmrTracker` maintains file-to-route reverse
+dependencies separately for the manifest, server, client, and action lanes, so a change to a server
+module no longer invalidates client work that does not depend on it, and a server action carries its
+own dependency set.
+
+The wire protocol is versioned. Every message names `ruvyxa.hmr`, carries a monotonic `sequence`,
+affected module and route identifiers, and one of `partial`, `restart`, or `issues`. The inline
+browser client rejects any message whose sequence it has already applied, so a superseded update can
+never land after the one that replaced it. A CSS change now replaces the affected stylesheet in
+place rather than reloading; anything that cannot be proven safe still falls back to a full reload,
+which remains the correct answer rather than a failure.
+
+`tests/fixtures/hmr-contract.json` records the message shape and the stale-message policy, replayed
+against the payload builder so a field or event rename cannot pass unnoticed.
+
+The superseded pre-versioning fixture, `hmr-legacy-contract.json`, has been removed. It described a
+wire shape (`css-update`, `component-update`, `full-reload`) that the versioned protocol replaced,
+nothing in either language replayed it, and the skew it claimed to guard against cannot occur: the
+browser client is a string inlined into the HTML by the same dev-server process that sends the
+messages, so client and server always ship together.
+
+### Build artifacts have one identity, dependency, and eviction contract
+
+`ruvyxa_bundler` gained an internal artifact task graph. Compiler output, resolved edges, chunk
+plans, and emitted artifacts keep living in their own caches; the graph gives them one typed
+identity (`ArtifactKey`, derived from length-framed, name-sorted semantic inputs so callers cannot
+change a key by iterating a map in a different order), one lifecycle (`Building`, `Ready`, `Failed`,
+`Cancelled`), dependency edges, generation-scoped cancellation, and atomic persistence. A graph hit
+is never treated as artifact bytes: callers still validate and load the owning cache entry, and a
+corrupt or incompatible manifest is a plain cache miss.
+
+Two builders that publish different content for one semantic key now fail closed rather than letting
+whichever finished last win, and an artifact that completes after its generation was invalidated is
+rejected as stale.
+
+A shared cache budget sits over the compiler, resolver, and artifact caches, with the same
+hysteresis policy implemented in Rust and in the worker runtime and held to
+`tests/fixtures/cache-budget-contract.json`. Memory pressure never changes output semantics — the
+worst legal result is a slower rebuild — and an artifact owned by an in-flight build is pinned by
+its state and its dependency edges for as long as the build holds it.
+
+`ruvyxa bench` gained reproducible cold-build, warm-build, and first-route scenarios that clone
+project inputs into a private temporary workspace with its own cache, and verify that cold and warm
+builds emit the same artifacts before publishing any timing.
+
+### `import.meta.glob`
+
+The resolver expands literal `import.meta.glob` calls at compile time, so the bundler analyses,
+chunks, caches, and invalidates every match. Patterns and options must be compile-time literals;
+anything else is a diagnostic rather than a runtime fallback, and a pattern that escapes the project
+root is rejected.
+
+Both module graphs expand it, and getting them to agree exposed three defects:
+
+- **Eager matches were unusable outside the Rust bundler.** Eager lowering emitted
+  `require(specifier)`. The Rust linker rewrites `require()` into a bundled binding, so it worked
+  there; the JavaScript compiler has no such pass, so the call reached an ES module and threw
+  `require is not defined` at runtime. Eager matches now lower to hoisted namespace imports in both
+  graphs, which is also what puts them in the static dependency graph as documented.
+- **Generated imports had nowhere safe to go.** Appending them left the linker's rewritten `const`
+  binding in the temporal dead zone of every earlier use; prepending them displaced a `'use client'`
+  directive, which is only a directive while it is the first statement and silently becomes a plain
+  string expression otherwise — taking the whole server/client boundary check with it. They are now
+  inserted after the directive prologue, computed by one helper per language.
+- **The two graphs ordered keys differently.** Rust sorted matches by code units and JavaScript by
+  `localeCompare`, so `B.ts` came first in one and `a.ts` in the other; `localeCompare` also varies
+  with the host ICU locale, so the same project did not build the same way on two machines. Both now
+  compare code units.
+
+`tests/fixtures/glob-contract.json` is at schema version 2 and is replayed by both languages.
+Version 1 declared only cases with zero or one match, so it asserted the word "deterministic"
+without ever exercising an order — which is why the ordering split survived. It now pins key order,
+eager lowering, and the scanning rules, with a case whose filenames differ by more than case so it
+also runs on case-insensitive filesystems.
+
+### One source scanner on the JavaScript side
+
+`packages/ruvyxa/runtime/scanner.mjs` is now the only JavaScript-side source scanner, ported from
+`crates/ruvyxa_bundler/src/ast.rs`.
+
+Glob expansion had shipped its own walk over the source, and it did not know about regular
+expressions. A literal such as `/['"]/` starts a string skip that runs to the next quote anywhere in
+the file, so a `import.meta.glob` call after one was never seen — and the failure was silent:
+`import.meta.glob(...)` was emitted verbatim into the output instead of raising a diagnostic. This
+is the same failure class that was fixed at the root in Rust by making `ast.rs` the only byte
+scanner; the JavaScript graph had never had the equivalent, so every new text transform there
+started by writing a second scanner.
+
+The shared module handles comments, strings, template literals and their interpolations, and regular
+expressions together, including the character-class state that decides where `/[/"']/` ends. Route
+any new JavaScript-side text walk through it.
+
+### `paths` now honour a `baseUrl` inherited through `extends`
+
+TypeScript resolves `compilerOptions.paths` against the effective `baseUrl`, including one inherited
+from an extended configuration, and falls back to the declaring file's directory only when no
+`baseUrl` is in effect. Both Ruvyxa resolvers used the declaring file's directory unconditionally,
+so a base config that supplied `baseUrl` had it silently ignored by any child that declared `paths`
+— and because both graphs were wrong in the same direction, no parity fixture caught it. The editor
+and the type checker resolved those imports one way and the bundler another.
+
+`tests/fixtures/path-alias-contract.json` gained the case, replayed in both languages.
+
+The pattern-precedence tiebreak in the JavaScript resolver also moved from `localeCompare` to code
+units, matching `alias_pattern_order` in Rust. This one was not reachable — two patterns of equal
+specificity can never both match one specifier, because equal literal prefix and suffix lengths
+force the patterns to be identical — but it is one less locale-dependent comparison in a resolver.
+
+### Cache eviction is no longer quadratic
+
+Evicting artifacts rescanned every record in the graph to pick each next candidate. Measured in
+release mode on one machine, evicting a full graph took 8.75ms at 500 records, 194.75ms at 2,000,
+and **4.41 seconds at 8,000** — work that lands precisely when the process is already short on
+memory.
+
+Eligible records are now kept in a priority-ordered set that is repaired incrementally: only the
+dependencies of an evicted record can newly become eligible. The same three sizes now take 0.83ms,
+4.38ms, and 20.59ms, and eviction order is unchanged — discarded work first, then least-valuable
+ready artifacts, ties broken by artifact key.
+
+Eviction also now measures the same quantity the budget controller accounts for. It compared a
+target derived from evictable bytes against a total that included the pinned closure of an in-flight
+build, so a build holding a large pinned closure made up the difference by discarding healthy
+`Ready` artifacts — rebuilds the budget never asked for.
+
+`ArtifactTaskGraph::evictable_bytes` replaces a full `stats()` call on the per-route budget path,
+which had been recomputing dependency-edge totals, state counters, and a second residency pass that
+no caller of that number reads.
+
+### Unused-code detection is a release gate
+
+`pnpm check:unused` runs Knip across the JavaScript and TypeScript workspaces and fails on unused
+files, exports, types, and dependencies. `pnpm release:validate` runs it too.
+
+Ruvyxa loads a great deal of code by convention rather than by import — `app/` routes, `plugins/`,
+`ruvyxa.config.ts`, the `runtime/*.mjs` modules the Rust CLI resolves by path, and adapters resolved
+from a `@ruvyxa/adapter-${name}` template string. `knip.json` declares those, which took the report
+from 102 false positives to zero. A dependency audit against it found no genuinely unused
+dependency.
+
+It immediately found one real defect: `@ruvyxa/core` exported `SiteConfig` as public API while its
+`sitemap` and `robots` fields were typed `SiteSitemapConfig` and `SiteRobotsConfig`, neither of
+which was re-exported. Consumers received a public type referencing names they could not import.
+`SiteSitemapConfig`, `SiteRobotsConfig`, and `SiteRobotsRule` are now part of the public surface.
+
+Knip must stay on version 6 or newer; version 5 crashes against this repository's TypeScript 7.
 
 ## v1.0.30 (2026-08-14)
 

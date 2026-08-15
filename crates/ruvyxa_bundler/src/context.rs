@@ -150,7 +150,7 @@ impl BundleContext {
                     .graph_cache
                     .stats()
                     .disposable_bytes
-                    .saturating_add(self.artifacts.stats().evictable_bytes);
+                    .saturating_add(self.artifacts.evictable_bytes());
                 let compile_target = action.target_bytes.saturating_sub(fixed_bytes);
                 let compiler_evictions = self.compile_cache.evict_memory_to(compile_target);
                 self.cache_budget
@@ -181,7 +181,7 @@ impl BundleContext {
         self.compile_cache
             .memory_resident_bytes()
             .saturating_add(self.graph_cache.stats().disposable_bytes)
-            .saturating_add(self.artifacts.stats().evictable_bytes)
+            .saturating_add(self.artifacts.evictable_bytes())
     }
 }
 
