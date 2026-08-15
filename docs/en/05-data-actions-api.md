@@ -32,6 +32,34 @@ Cache durations accept a positive integer plus `ms`, `s`, `m`, `h`, or `d`.
 `invalidateCache('products')` removes `products` and keys beginning `products:`; no argument clears
 the complete process cache. Call `cacheStats()` to obtain `{ size, maxEntries }`.
 
+## Public Flight payloads
+
+A page can opt into a version-bound public payload by exporting `flight`. The function receives only
+the canonical path and route params, and must return JSON-safe data. Client components read the
+matched payload with `useFlight<T>()` from `@ruvyxa/react`. Ruvyxa rejects Flight requests with
+cookies or authorization and falls back to a full navigation when the request fails or the browser
+artifact version does not match.
+
+```ts
+// app/products/[id]/page.tsx
+import type { FlightHandler } from 'ruvyxa/server'
+
+export const flight: FlightHandler = async ({ params }) => ({
+  productId: params.id,
+  summary: 'Public product details',
+})
+```
+
+Add a leading `'use cache'` module directive when this public payload may be cached. The directive
+requires a `flight` export, uses Ruvyxa's bounded cache with a deterministic route/parameter key,
+and is rejected by static-only adapters. Reading private request state from a cached producer fails
+closed; authenticated data belongs in an API route or server action.
+
+The transport endpoint is internal (`/__ruvyxa/flight`); call it through Ruvyxa navigation rather
+than treating it as a general API. Production builds emit the concise `references.json`,
+`actions.json`, and `flight.json` manifests. Their contract names are stable; numeric compatibility
+is carried separately by `schemaVersion`, `protocolVersion`, and route `artifactVersion` fields.
+
 ## Server actions
 
 Build an action with `action.input(schema).handler(handler)`. The schema only needs a synchronous

@@ -34,6 +34,16 @@ export const ACTION_CONTENT_TYPES = Object.freeze([
   'application/x-www-form-urlencoded',
 ])
 
+/** Stable content-bound action module identity shared with the native host. */
+export function actionReferenceId(routeId, source) {
+  let hash = 0xcbf29ce484222325n
+  for (const byte of new TextEncoder().encode(`${routeId}\0${source}`)) {
+    hash ^= BigInt(byte)
+    hash = BigInt.asUintN(64, hash * 0x100000001b3n)
+  }
+  return `a_${hash.toString(16).padStart(16, '0')}`
+}
+
 /** Most channels one action may name, matching the Rust validator. */
 const MAX_REALTIME_CHANNELS = 16
 /** Longest realtime channel name. */

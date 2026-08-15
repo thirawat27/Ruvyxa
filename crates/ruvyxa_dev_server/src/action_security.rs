@@ -1,6 +1,7 @@
 //! Server-action request validation: origin/fetch-metadata checks, payload
 //! parsing, and the per-key rate limiter.
 
+use std::collections::BTreeMap;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
@@ -8,6 +9,68 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 
 use crate::{ActionQuery, ServerConfig};
+
+const ACTION_NONCE_TTL: Duration = Duration::from_secs(600);
+const ACTION_NONCE_MAX_ENTRIES: usize = 10_000;
+
+/// Process-local replay protection for version-bound action requests.
+#[derive(Debug, Default)]
+pub(crate) struct ActionReplayGuard {
+    entries: BTreeMap<String, Instant>,
+}
+
+impl ActionReplayGuard {
+    pub(crate) fn consume(
+        &mut self,
+        headers: &HeaderMap,
+        action_reference: &str,
+    ) -> Result<(), &'static str> {
+        let nonce = headers
+            .get("x-ruvyxa-action-nonce")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or_default();
+        if !(16..=128).contains(&nonce.len())
+            || !nonce.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'~' | b'-')
+            })
+        {
+            return Err("Versioned action requests require a valid replay nonce");
+        }
+        let now = Instant::now();
+        self.entries.retain(|_, expires| *expires > now);
+        let key = format!("{action_reference}:{nonce}");
+        if self.entries.contains_key(&key) {
+            return Err("Action request replayed");
+        }
+        self.entries.insert(key, now + ACTION_NONCE_TTL);
+        while self.entries.len() > ACTION_NONCE_MAX_ENTRIES {
+            if let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, expires)| **expires)
+                .map(|(key, _)| key.clone())
+            {
+                self.entries.remove(&oldest);
+            }
+        }
+        Ok(())
+    }
+}
+
+pub fn action_reference_id(route_id: &str, source: &str) -> String {
+    let mut hash = 0xcbf29ce484222325_u64;
+    for byte in route_id
+        .as_bytes()
+        .iter()
+        .copied()
+        .chain(std::iter::once(0))
+        .chain(source.as_bytes().iter().copied())
+    {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("a_{hash:016x}")
+}
 
 /// One trusted reverse-proxy address, expressed as a network prefix.
 ///
@@ -514,6 +577,29 @@ fn is_trusted_proxy_ip(config: &ServerConfig, ip: IpAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn action_reference_and_nonce_replay_contract_is_stable() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tests/fixtures/action-contract.json"))
+                .unwrap();
+        assert_eq!(
+            action_reference_id(
+                fixture["routeId"].as_str().unwrap(),
+                fixture["source"].as_str().unwrap(),
+            ),
+            fixture["expected"].as_str().unwrap()
+        );
+
+        let mut guard = ActionReplayGuard::default();
+        let mut headers = HeaderMap::new();
+        headers.insert("x-ruvyxa-action-nonce", "0123456789abcdef".parse().unwrap());
+        assert!(guard.consume(&headers, "a_0123456789abcdef").is_ok());
+        assert_eq!(
+            guard.consume(&headers, "a_0123456789abcdef"),
+            Err("Action request replayed")
+        );
+    }
 
     fn ip(value: &str) -> IpAddr {
         value.parse().expect("test address must parse")

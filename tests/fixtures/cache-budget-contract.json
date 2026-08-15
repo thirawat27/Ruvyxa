@@ -1,0 +1,14 @@
+{
+  "contract": "ruvyxa.cache-budget",
+  "schemaVersion": 1,
+  "hardLimitBytes": 1000,
+  "softRatio": 0.8,
+  "targetRatio": 0.65,
+  "observations": [
+    { "residentBytes": 799, "level": "none", "toFreeBytes": 149, "stopSpeculation": false },
+    { "residentBytes": 800, "level": "soft", "toFreeBytes": 150, "stopSpeculation": false },
+    { "residentBytes": 700, "level": "soft", "toFreeBytes": 50, "stopSpeculation": false },
+    { "residentBytes": 650, "level": "none", "toFreeBytes": 0, "stopSpeculation": false },
+    { "residentBytes": 1000, "level": "hard", "toFreeBytes": 350, "stopSpeculation": true }
+  ]
+}

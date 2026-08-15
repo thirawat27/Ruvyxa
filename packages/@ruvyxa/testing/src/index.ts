@@ -91,6 +91,8 @@ export interface MockCacheCall {
   key: string
   ttl?: string
   swr?: string
+  tags: readonly string[]
+  scope: 'deployment' | 'request'
   hit: boolean
 }
 
@@ -107,6 +109,8 @@ export function mockCache(seed: Readonly<Record<string, unknown>> = {}): MockCac
   const callable = (key: string): CacheBuilder => {
     let ttl: string | undefined
     let swr: string | undefined
+    let tags: readonly string[] = []
+    let scope: 'deployment' | 'request' = 'deployment'
     const builder: CacheBuilder = {
       ttl(value) {
         ttl = value
@@ -116,12 +120,20 @@ export function mockCache(seed: Readonly<Record<string, unknown>> = {}): MockCac
         swr = value
         return builder
       },
+      tags(...values) {
+        tags = [...new Set(values)].sort()
+        return builder
+      },
+      scope(value) {
+        scope = value
+        return builder
+      },
       async get<T>(producer: () => T | Promise<T>) {
-        const hit = values.has(key)
-        calls.push({ key, ttl, swr, hit })
+        const hit = scope === 'deployment' && values.has(key)
+        calls.push({ key, ttl, swr, tags, scope, hit })
         if (hit) return values.get(key) as T
         const value = await producer()
-        values.set(key, value)
+        if (scope === 'deployment') values.set(key, value)
         return value
       },
     }

@@ -107,6 +107,56 @@ impl ModuleAst {
     }
 }
 
+/// Whether a module declares a directly named runtime export.
+///
+/// This deliberately recognizes declaration exports only. Re-export forms
+/// require resolving another module and are not safe to advertise as a local
+/// runtime capability until that graph edge is proven.
+pub fn has_named_runtime_export(source: &str, ast: &ModuleAst, name: &str) -> bool {
+    if name.is_empty()
+        || !name
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$')
+    {
+        return false;
+    }
+    let mut offset = 0;
+    while let Some(found) = source[offset..].find("export") {
+        let index = offset + found;
+        offset = index + "export".len();
+        if !ast.is_code_offset(index) || !is_identifier_boundary(source, index, "export".len()) {
+            continue;
+        }
+        let declaration = source[offset..].trim_start();
+        let declaration = declaration.strip_prefix("async ").unwrap_or(declaration);
+        for prefix in ["function ", "const ", "let ", "var ", "class "] {
+            if let Some(rest) = declaration.strip_prefix(prefix)
+                && is_export_name(rest, name)
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn is_identifier_boundary(source: &str, start: usize, length: usize) -> bool {
+    let before = source.as_bytes().get(start.saturating_sub(1));
+    let after = source.as_bytes().get(start + length);
+    !before.is_some_and(|byte| is_identifier_byte(*byte))
+        && !after.is_some_and(|byte| is_identifier_byte(*byte))
+}
+
+fn is_export_name(rest: &str, name: &str) -> bool {
+    rest.strip_prefix(name)
+        .and_then(|remaining| remaining.as_bytes().first())
+        .is_none_or(|byte| !is_identifier_byte(*byte))
+}
+
+fn is_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$'
+}
+
 /// Parse source into the facts the bundler needs.
 pub fn parse_module(source: &str) -> ModuleAst {
     let mut ast = ModuleAst::default();

@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import {
   copyFile,
   mkdir,
@@ -27,6 +28,7 @@ import {
   toImportPath,
 } from '../../../packages/ruvyxa/runtime/compiler.mjs'
 import { createFixtureWorkspace } from './fixture-workspace.mjs'
+import { loadTsconfigPaths, resolveTsconfigPath } from '../../../packages/ruvyxa/runtime/paths.mjs'
 
 const workspaceRoot = path.resolve(fileURLToPath(new URL('../../..', import.meta.url)))
 const exampleRoot = path.join(workspaceRoot, 'examples/demo')
@@ -36,6 +38,196 @@ const fixtureWorkspace = await createFixtureWorkspace('ruvyxa-compiler-tests-', 
 after(() => rm(fixtureWorkspace, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }))
 
 describe('runtime compiler', () => {
+  it('runs the React Compiler only when explicitly enabled and remains deterministic', async (t) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-react-compiler-'))
+    t.after(() => rm(root, { recursive: true, force: true }))
+    const source = `export function Counter({ count }: { count: number }) {
+      return <span>{count}</span>
+    }`
+    const baselineFile = path.join(root, 'baseline.js')
+    const compiledFile = path.join(root, 'compiled.js')
+    const repeatedFile = path.join(root, 'compiled-again.js')
+
+    await compileBundleWithMetadata({
+      projectRoot: root,
+      entrySource: source,
+      sourcefile: 'app/Counter.tsx',
+      outfile: baselineFile,
+      platform: 'browser',
+    })
+    await compileBundleWithMetadata({
+      projectRoot: root,
+      entrySource: source,
+      sourcefile: 'app/Counter.tsx',
+      outfile: compiledFile,
+      platform: 'browser',
+      reactCompiler: true,
+    })
+    await compileBundleWithMetadata({
+      projectRoot: root,
+      entrySource: source,
+      sourcefile: 'app/Counter.tsx',
+      outfile: repeatedFile,
+      platform: 'browser',
+      reactCompiler: true,
+    })
+
+    const baseline = await readFile(baselineFile, 'utf8')
+    const compiled = await readFile(compiledFile, 'utf8')
+    assert.doesNotMatch(baseline, /react\/compiler-runtime/)
+    assert.match(compiled, /react\/compiler-runtime/)
+    const withoutMapUrl = (value) => value.replace(/^\/\/# sourceMappingURL=.*$/m, '')
+    assert.equal(withoutMapUrl(await readFile(repeatedFile, 'utf8')), withoutMapUrl(compiled))
+    const sourceMap = JSON.parse(await readFile(`${compiledFile}.map`, 'utf8'))
+    assert.ok(sourceMap.sources.some((sourceName) => sourceName.endsWith('app/Counter.tsx')))
+  })
+
+  it('expands import.meta.glob lazily and eagerly with aliases and stable inputs', async (t) => {
+    const contract = JSON.parse(
+      await readFile(path.join(workspaceRoot, 'tests/fixtures/glob-contract.json')),
+    )
+    assert.equal(contract.contract, 'ruvyxa.glob')
+    assert.equal(contract.schemaVersion, 1)
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-glob-'))
+    t.after(() => rm(root, { recursive: true, force: true }))
+    await mkdir(path.join(root, 'posts', 'nested'), { recursive: true })
+    await mkdir(path.join(root, 'content.v1'), { recursive: true })
+    await writeFile(path.join(root, 'posts', 'one.ts'), "export const value = 'one'\n")
+    await writeFile(path.join(root, 'posts', 'nested', 'two.ts'), "export const value = 'two'\n")
+    await writeFile(path.join(root, 'content.v1', 'version.ts'), "export const value = 'v1'\n")
+    await mkdir(path.join(root, 'posts', 'node_modules'), { recursive: true })
+    await writeFile(path.join(root, 'posts', 'node_modules', 'hidden.ts'), 'throw new Error()\n')
+    await writeFile(
+      path.join(root, 'tsconfig.json'),
+      JSON.stringify({ compilerOptions: { paths: { '@/*': ['./*'] } } }),
+    )
+    const outfile = path.join(root, '.ruvyxa', 'glob.mjs')
+    const result = await compileBundleWithMetadata({
+      projectRoot: root,
+      entrySource: `
+        export const lazy = import.meta.glob('./posts/**/*.ts')
+        export const eager = import.meta.glob('./posts/*.ts', { eager: true })
+        export const aliased = import.meta.glob('@/posts/*.ts')
+        export const dottedDirectory = import.meta.glob('./content.v1/*.ts')
+      `,
+      outfile,
+      bundlePackages: true,
+    })
+    const output = await readFile(outfile, 'utf8')
+    assert.doesNotMatch(output, /import\.meta\.glob/)
+    assert.match(output, /posts\/nested\/two/)
+    assert.match(output, /posts\/one/)
+    assert.ok(result.inputs.includes('posts'))
+    assert.ok(result.inputs.includes('content.v1'))
+  })
+
+  it('rejects dynamic and root-escaping import.meta.glob patterns', async (t) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-glob-invalid-'))
+    t.after(() => rm(root, { recursive: true, force: true }))
+    await assert.rejects(
+      compileBundleWithMetadata({
+        projectRoot: root,
+        entrySource: "const pattern = './*.ts'; export default import.meta.glob(pattern)",
+        outfile: path.join(root, '.ruvyxa', 'dynamic.mjs'),
+      }),
+      /RUV1810.*string literal/,
+    )
+    await assert.rejects(
+      compileBundleWithMetadata({
+        projectRoot: root,
+        entrySource: "export default import.meta.glob('../*.ts')",
+        outfile: path.join(root, '.ruvyxa', 'escape.mjs'),
+      }),
+      /RUV1810.*escapes the project root/,
+    )
+  })
+
+  it('expands import.meta.glob inside a template interpolation without touching template text', async (t) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-glob-template-'))
+    t.after(() => rm(root, { recursive: true, force: true }))
+    await writeFile(path.join(root, 'post.ts'), "export const value = 'post'\n")
+    const outfile = path.join(root, '.ruvyxa', 'template.mjs')
+    await compileBundleWithMetadata({
+      projectRoot: root,
+      entrySource:
+        "export const value = `literal import.meta.glob('./ignored/*.ts') ${Object.keys(import.meta.glob('./*.ts')).length}`",
+      outfile,
+      bundlePackages: true,
+    })
+    const output = await readFile(outfile, 'utf8')
+    assert.match(output, /literal import\.meta\.glob/)
+    assert.match(output, /post\.ts/)
+  })
+
+  it('replays inherited tsconfig path aliases and fingerprints every config input', async (t) => {
+    const fixture = JSON.parse(
+      await readFile(path.join(workspaceRoot, 'tests/fixtures/path-alias-contract.json'), 'utf8'),
+    )
+    assert.equal(fixture.contract, 'ruvyxa.path-alias')
+    assert.equal(fixture.schemaVersion, 1)
+    const parent = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-tsconfig-paths-'))
+    const root = path.join(parent, 'project')
+    t.after(() => rm(parent, { recursive: true, force: true }))
+    for (const [relative, source] of Object.entries({ ...fixture.files, ...fixture.configs })) {
+      const file = path.join(root, relative)
+      await mkdir(path.dirname(file), { recursive: true })
+      await writeFile(file, source)
+    }
+    for (const [relative, source] of Object.entries(fixture.outsideFiles)) {
+      const file = path.join(parent, relative)
+      await mkdir(path.dirname(file), { recursive: true })
+      await writeFile(file, source)
+    }
+
+    const model = loadTsconfigPaths(root)
+    for (const expected of fixture.cases) {
+      const resolved = resolveTsconfigPath(model, expected.specifier, resolveFixtureFile)
+      const actual = resolved ? path.relative(root, resolved).replaceAll('\\', '/') : null
+      assert.equal(actual, expected.expected, expected.name)
+    }
+
+    const outfile = path.join(root, '.ruvyxa', 'alias-entry.mjs')
+    const result = await compileBundleWithMetadata({
+      projectRoot: root,
+      entrySource: "import { value } from '@/button'; export default value",
+      outfile,
+      bundlePackages: true,
+    })
+    const output = await readFile(outfile, 'utf8')
+    assert.match(output, /exact/)
+    assert.deepEqual(
+      result.fingerprintInputs.filter((file) => file.includes('tsconfig')),
+      ['config/tsconfig.base.json', 'tsconfig.json'],
+    )
+    assert.deepEqual(
+      result.inputs.filter((file) => file.includes('tsconfig')),
+      ['config/tsconfig.base.json', 'tsconfig.json'],
+    )
+  })
+
+  it('parses JSONC trailing commas without changing comma-brace text in alias targets', async (t) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-tsconfig-jsonc-'))
+    t.after(() => rm(root, { recursive: true, force: true }))
+    await mkdir(path.join(root, 'src'), { recursive: true })
+    await writeFile(path.join(root, 'src', 'comma,}.ts'), 'export const value = 1\n')
+    await writeFile(
+      path.join(root, 'tsconfig.json'),
+      `{
+        // This comma belongs to the string and must survive JSONC parsing.
+        "compilerOptions": {
+          "paths": { "@value": ["./src/comma,}.ts",], },
+        },
+      }`,
+    )
+
+    const model = loadTsconfigPaths(root)
+    assert.equal(model.problem, null)
+    assert.equal(
+      resolveTsconfigPath(model, '@value', resolveFixtureFile),
+      path.join(root, 'src', 'comma,}.ts'),
+    )
+  })
+
   /// The host parses this process's stdout as NDJSON, so every exit has to be
   /// one. `fail()` is async and only exits once its line is written; calling it
   /// without `await` let execution reach `path.resolve(undefined)` on the next
@@ -2249,6 +2441,7 @@ export const marker = 'reached'
       await writeFile(
         path.join(root, 'ruvyxa.config.ts'),
         `export default {
+          reactCompiler: true,
           build: { prerenderCache: false },
           render: { strategy: 'isr', revalidate: 90 },
           middleware: {
@@ -2260,6 +2453,7 @@ export const marker = 'reached'
       )
 
       const config = await runJson(configRenderer, [root], {})
+      assert.equal(config.config.reactCompiler, true)
       assert.deepEqual(config.config.render, {
         strategy: 'isr',
         revalidate: 90,
@@ -2430,6 +2624,22 @@ export const marker = 'reached'
     })
   })
 })
+
+function resolveFixtureFile(candidate) {
+  for (const file of [
+    candidate,
+    `${candidate}.ts`,
+    `${candidate}.tsx`,
+    path.join(candidate, 'index.ts'),
+  ]) {
+    try {
+      if (existsSync(file)) return path.resolve(file)
+    } catch {
+      // Keep probing deterministic candidates.
+    }
+  }
+  return null
+}
 
 /** Spawn a runtime script and report exactly what it wrote, ok or not. */
 function runRaw(script, args) {

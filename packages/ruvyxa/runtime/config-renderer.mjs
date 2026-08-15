@@ -93,6 +93,7 @@ async function sanitizeConfig(config) {
     'outDir',
     'runtime',
     'react',
+    'reactCompiler',
     'typescript',
     'typedRoutes',
     'css',
@@ -278,6 +279,7 @@ async function sanitizeConfig(config) {
     outDir: stringValue(config.outDir),
     runtime: stringValue(config.runtime),
     react: booleanValue(config.react),
+    reactCompiler: booleanValue(config.reactCompiler),
     typedRoutes: booleanValue(config.typedRoutes),
     css: objectValue(config.css, {
       entries: stringArrayValue(config.css?.entries),
@@ -395,6 +397,7 @@ function assertConfigValueShape(config) {
     outDir: 'string',
     runtime: 'string',
     react: 'boolean',
+    reactCompiler: 'boolean',
     typedRoutes: 'boolean',
     typescript: { strict: 'boolean' },
     css: { entries: 'string[]' },

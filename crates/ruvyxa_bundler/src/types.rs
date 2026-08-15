@@ -147,6 +147,12 @@ pub struct ChunkManifest {
     pub source_map_file: Option<String>,
     pub size_bytes: usize,
     pub dynamic_imports: Vec<DynamicImportChunk>,
+    /// Deterministically ordered files expanded from `import.meta.glob` calls.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub glob_matches: Vec<String>,
+    /// Canonical lane ownership consumed by version-bound runtime protocols.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reference_manifest: Option<crate::reference_manifest::ReferenceManifest>,
 }
 
 /// A dynamic import split point.

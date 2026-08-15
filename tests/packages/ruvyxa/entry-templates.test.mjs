@@ -103,6 +103,26 @@ describe('entry-templates route composition', () => {
     assert.match(source, /renderToPipeableStream/)
   })
 
+  it('exports Flight only when a page module namespace is supplied', () => {
+    const plain = nodeSsrEntrySource({
+      imports: ['import Page from "./page.js"'],
+      pageName: 'Page',
+      layoutNames: [],
+      routePath: '/',
+    })
+    const flight = nodeSsrEntrySource({
+      imports: ['import Page, * as PageModule from "./page.js"'],
+      pageName: 'Page',
+      pageModuleName: 'PageModule',
+      layoutNames: [],
+      routePath: '/',
+    })
+
+    assert.doesNotMatch(plain, /export async function flight/)
+    assert.match(flight, /export async function flight\(ctx\)/)
+    assert.match(flight, /return PageModule\.flight\(ctx\)/)
+  })
+
   it('partial-prerender mode commits the shell early and tolerates slot errors', () => {
     const ppr = nodeSsrEntrySource({
       imports: [],

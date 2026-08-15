@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { spawn } from 'node:child_process'
@@ -7,6 +7,10 @@ import { createInterface } from 'node:readline'
 import test, { after } from 'node:test'
 
 import { createFixtureWorkspace } from './fixture-workspace.mjs'
+import {
+  CachePressureController,
+  LruCache,
+} from '../../../packages/ruvyxa/runtime/cache-budget.mjs'
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..')
 const workerScript = path.join(repoRoot, 'packages/ruvyxa/runtime/worker-pool.mjs')
@@ -14,6 +18,49 @@ const fixtureWorkspace = await createFixtureWorkspace(
   'ruvyxa-worker-tests-',
   path.join(repoRoot, 'examples/demo'),
 )
+
+test('cache pressure uses the shared hysteresis contract and reports eviction reasons', async () => {
+  const fixture = JSON.parse(
+    await readFile(path.join(repoRoot, 'tests/fixtures/cache-budget-contract.json'), 'utf8'),
+  )
+  assert.equal(fixture.contract, 'ruvyxa.cache-budget')
+  assert.equal(fixture.schemaVersion, 1)
+  const pressure = new CachePressureController(fixture)
+
+  for (const expected of fixture.observations) {
+    assert.deepEqual(pressure.observe(expected.residentBytes), {
+      level: expected.level,
+      targetBytes: Math.floor(fixture.hardLimitBytes * fixture.targetRatio),
+      toFreeBytes: expected.toFreeBytes,
+      stopSpeculation: expected.stopSpeculation,
+    })
+  }
+  pressure.recordEviction('bundle', 2)
+  pressure.recordEviction('compilerSweep')
+
+  assert.deepEqual(pressure.snapshot(1_000).evictions, { bundle: 2, compilerSweep: 1 })
+})
+
+test('cache pressure rejects invalid budgets and observations', () => {
+  assert.throws(() => new CachePressureController({ hardLimitBytes: 0 }), TypeError)
+  const pressure = new CachePressureController({ hardLimitBytes: 1_000 })
+  assert.throws(() => pressure.observe(-1), TypeError)
+  assert.throws(() => pressure.recordEviction('bundle', -1), TypeError)
+})
+
+test('cache pressure eviction skips entries pinned by active work', () => {
+  const cache = new LruCache(3)
+  cache.set('oldest', 1)
+  cache.set('pinned', 2)
+  cache.set('newest', 3)
+
+  assert.deepEqual(cache.evictOldest(new Set(['oldest', 'pinned'])), {
+    key: 'newest',
+    value: 3,
+  })
+  assert.equal(cache.has('oldest'), true)
+  assert.equal(cache.has('pinned'), true)
+})
 after(() => rm(fixtureWorkspace, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }))
 
 /// Spawns one worker with a request/response helper and registers cleanup on `t`.
@@ -92,6 +139,9 @@ test('uses safe worker defaults when numeric environment values are invalid', as
   assert.equal(response.ok, true)
   assert.equal(response.workerRequestTimeoutMs, 30_000)
   assert.equal(response.memoryPressureThresholdMb, 512)
+  assert.equal(response.cacheBudget.hardLimitBytes, 512 * 1024 * 1024)
+  assert.equal(response.cacheBudget.softLimitBytes, Math.floor(512 * 1024 * 1024 * 0.8))
+  assert.equal(response.compilerCache.maxEntries, 512)
   assert.equal(response.maxQueuedRequests, response.maxConcurrentRequests * 4)
 })
 

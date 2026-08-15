@@ -256,6 +256,16 @@ impl HmrTracker {
             if let Some(routes) = state.file_to_routes.get(&normalized) {
                 affected_routes.extend(routes.iter().cloned());
             }
+            // Compile-time globs register their stable watch directory. A new
+            // matching file has no file-level edge yet, so ancestor ownership
+            // is the only way to invalidate the glob owner on additions and
+            // renames. This is intentionally conservative within that watched
+            // directory; the next graph build re-expands the exact pattern.
+            for ancestor in normalized.ancestors().skip(1) {
+                if let Some(routes) = state.file_to_routes.get(ancestor) {
+                    affected_routes.extend(routes.iter().cloned());
+                }
+            }
         }
 
         // If a layout changed, all routes using that layout are affected.
@@ -417,6 +427,22 @@ mod tests {
         // Changing Button only affects "/".
         let update = tracker.compute_update(std::slice::from_ref(&button));
         assert_eq!(update.affected_routes, vec!["/"]);
+    }
+
+    #[test]
+    fn watched_glob_directory_invalidates_on_a_new_descendant() {
+        let tracker = HmrTracker::new();
+        tracker.register_client_route(
+            "/content",
+            &[
+                PathBuf::from("/app/content"),
+                PathBuf::from("/app/page.tsx"),
+            ],
+        );
+
+        let update = tracker.compute_update(&[PathBuf::from("/app/content/new/post.ts")]);
+        assert_eq!(update.affected_routes, vec!["/content"]);
+        assert!(!update.full_reload);
     }
 
     #[test]

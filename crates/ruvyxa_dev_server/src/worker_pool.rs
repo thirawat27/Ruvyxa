@@ -119,6 +119,23 @@ pub enum WorkerRequest {
         /// Request method, uppercased.
         method: String,
     },
+    #[serde(rename = "flight")]
+    Flight {
+        id: String,
+        #[serde(rename = "projectRoot")]
+        project_root: String,
+        #[serde(rename = "appDir")]
+        app_dir: String,
+        #[serde(rename = "pageFile")]
+        page_file: String,
+        #[serde(rename = "requestPath")]
+        request_path: String,
+        #[serde(rename = "routePath")]
+        route_path: String,
+        params: RouteParams,
+        #[serde(rename = "artifactVersion")]
+        artifact_version: String,
+    },
     #[serde(rename = "api")]
     Api {
         id: String,
@@ -195,7 +212,12 @@ pub enum WorkerRequest {
         params: RouteParams,
     },
     #[serde(rename = "invalidate")]
-    Invalidate { id: String, paths: Vec<String> },
+    Invalidate {
+        id: String,
+        paths: Vec<String>,
+        #[serde(rename = "traceId", skip_serializing_if = "Option::is_none")]
+        trace_id: Option<String>,
+    },
     #[serde(rename = "ping")]
     Ping { id: String },
     #[serde(rename = "warmup")]
@@ -248,6 +270,7 @@ impl WorkerRequest {
     fn id(&self) -> &str {
         match self {
             Self::Ssr { id, .. }
+            | Self::Flight { id, .. }
             | Self::Api { id, .. }
             | Self::Action { id, .. }
             | Self::Client { id, .. }
@@ -272,6 +295,7 @@ impl WorkerRequest {
         matches!(
             self,
             Self::Ssr { .. }
+                | Self::Flight { .. }
                 | Self::Ssg { .. }
                 | Self::StaticParams { .. }
                 | Self::Client { .. }
@@ -318,6 +342,8 @@ pub struct WorkerResponse {
     /// Framed API response discriminator. Absent for the legacy one-message protocol.
     pub frame: Option<String>,
     pub html: Option<String>,
+    /// Encoded `ruvyxa.flight` envelope for a public navigation request.
+    pub flight: Option<String>,
     pub script: Option<String>,
     pub status: Option<u16>,
     pub headers: Option<BTreeMap<String, String>>,
@@ -912,10 +938,15 @@ impl Worker {
     /// and never panics outside a runtime, so the file watcher can drive it
     /// directly. Errors describe this worker alone, letting the pool keep
     /// invalidating its siblings.
-    fn try_queue_invalidation(&self, paths: &[String]) -> std::result::Result<(), String> {
+    fn try_queue_invalidation(
+        &self,
+        paths: &[String],
+        trace_id: Option<&str>,
+    ) -> std::result::Result<(), String> {
         let request = WorkerRequest::Invalidate {
             id: next_request_id(),
             paths: paths.to_vec(),
+            trace_id: trace_id.map(str::to_string),
         };
         let line = serde_json::to_string(&request)
             .map_err(|error| format!("invalidation serialization failed: {error}"))?;
@@ -1013,6 +1044,17 @@ pub struct RenderSsrRequest<'a> {
     /// Ordered request headers, for `cookies()` and `headers()`.
     pub headers: &'a [(String, String)],
     pub method: &'a str,
+}
+
+/// One public Flight render, bound to the client artifact requesting it.
+pub(crate) struct RenderFlightRequest<'a> {
+    pub project_root: &'a Path,
+    pub app_dir: &'a Path,
+    pub page_file: &'a Path,
+    pub request_path: &'a str,
+    pub route_path: &'a str,
+    pub params: &'a RouteParams,
+    pub artifact_version: &'a str,
 }
 
 pub(crate) struct RenderApiRequest<'a> {
@@ -1320,7 +1362,7 @@ impl NodeWorkerPool {
     /// it in a live worker would duplicate that state, while ordinary bundle invalidation
     /// cannot undo registrations from a deleted file. Build every replacement first, swap
     /// the pool atomically, then let requests already admitted by the old generation drain.
-    pub(crate) async fn recycle_for_instrumentation_change(&self) -> Result<usize> {
+    pub(crate) async fn recycle(&self) -> Result<usize> {
         let worker_count = self
             .workers
             .read()
@@ -1346,7 +1388,7 @@ impl NodeWorkerPool {
                 Ok(std::mem::replace(&mut *workers, replacements))
             }
             Ok(_) => Err((
-                "Worker pool size changed during instrumentation recycle".to_string(),
+                "Worker pool size changed during recycle".to_string(),
                 replacements,
             )),
             Err(_) => Err(("Worker pool lock poisoned".to_string(), replacements)),
@@ -1470,6 +1512,7 @@ impl NodeWorkerPool {
             .map(|_| WorkerRequest::Invalidate {
                 id: next_request_id(),
                 paths: paths.clone(),
+                trace_id: None,
             })
             .collect();
 
@@ -1506,6 +1549,7 @@ impl NodeWorkerPool {
     pub fn invalidate_from_watcher(
         &self,
         paths: Vec<String>,
+        trace_id: Option<&str>,
     ) -> std::result::Result<usize, String> {
         let workers = self
             .workers
@@ -1514,7 +1558,7 @@ impl NodeWorkerPool {
         let mut queued = 0;
         let mut failures = Vec::new();
         for (worker_index, worker) in workers.iter().enumerate() {
-            match worker.try_queue_invalidation(&paths) {
+            match worker.try_queue_invalidation(&paths, trace_id) {
                 Ok(()) => queued += 1,
                 Err(error) => failures.push(format!("worker {worker_index}: {error}")),
             }
@@ -1609,6 +1653,23 @@ impl NodeWorkerPool {
             method: page.method.to_ascii_uppercase(),
         };
         self.send(request).await
+    }
+
+    pub(crate) async fn render_flight(
+        &self,
+        page: RenderFlightRequest<'_>,
+    ) -> Result<WorkerResponse> {
+        self.send(WorkerRequest::Flight {
+            id: next_request_id(),
+            project_root: page.project_root.display().to_string(),
+            app_dir: page.app_dir.display().to_string(),
+            page_file: page.page_file.display().to_string(),
+            request_path: page.request_path.to_string(),
+            route_path: page.route_path.to_string(),
+            params: page.params.clone(),
+            artifact_version: page.artifact_version.to_string(),
+        })
+        .await
     }
 
     pub(crate) async fn render_api(&self, api: RenderApiRequest<'_>) -> Result<WorkerApiResponse> {
@@ -2214,7 +2275,10 @@ mod tests {
             stub_worker(Some(healthy_tx)),
         ]);
 
-        let result = pool.invalidate_from_watcher(vec!["/project/app/page.tsx".to_string()]);
+        let result = pool.invalidate_from_watcher(
+            vec!["/project/app/page.tsx".to_string()],
+            Some("0123456789abcdef0123456789abcdef"),
+        );
 
         let error = result.expect_err("a failed worker must still surface an error");
         assert!(
@@ -2228,6 +2292,7 @@ mod tests {
             .expect("worker after the failing one must still be invalidated");
         assert!(queued.contains("invalidate"));
         assert!(queued.contains("/project/app/page.tsx"));
+        assert!(queued.contains("0123456789abcdef0123456789abcdef"));
         assert!(
             queued.ends_with('\n'),
             "protocol frames are newline-delimited"
@@ -2244,7 +2309,7 @@ mod tests {
         ]);
 
         let queued = pool
-            .invalidate_from_watcher(vec!["/project/app/page.tsx".to_string()])
+            .invalidate_from_watcher(vec!["/project/app/page.tsx".to_string()], None)
             .expect("healthy workers must not report an error");
 
         assert_eq!(queued, 2);
@@ -2260,7 +2325,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn instrumentation_change_replaces_the_process_generation() {
+    async fn recycle_replaces_the_process_generation() {
         let temp = tempfile::tempdir().unwrap();
         let worker_script = temp.path().join("worker.mjs");
         std::fs::write(
@@ -2285,9 +2350,9 @@ mod tests {
         };
 
         let replaced = pool
-            .recycle_for_instrumentation_change()
+            .recycle()
             .await
-            .expect("instrumentation recycle must start a new worker generation");
+            .expect("recycle must start a new worker generation");
         assert_eq!(replaced, 1);
         let replacement = pool.workers.read().unwrap()[0].clone();
         assert!(!Arc::ptr_eq(&original, &replacement));

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
-import { mkdtemp, readFile, rm, writeFile, mkdir } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { describe, it } from 'node:test'
@@ -10,6 +10,107 @@ const workspaceRoot = path.resolve(fileURLToPath(new URL('../../..', import.meta
 const adapterRunner = path.join(workspaceRoot, 'packages/ruvyxa/runtime/adapter-runner.mjs')
 
 describe('adapter runner', () => {
+  it('replays the official adapter capability matrix through inspection', async () => {
+    const contract = JSON.parse(
+      await readFile(path.join(workspaceRoot, 'tests/fixtures/adapter-contract.json'), 'utf8'),
+    )
+    assert.equal(contract.contract, 'ruvyxa.adapter')
+    assert.equal(contract.schemaVersion, 1)
+
+    for (const expected of contract.adapters) {
+      const root = await mkdtemp(path.join(os.tmpdir(), `ruvyxa-${expected.name}-inspect-`))
+      const outputDir = path.join(root, '.ruvyxa-staging')
+      try {
+        await mkdir(outputDir, { recursive: true })
+        const result = await runRunner(root, outputDir, expected.name, {
+          RUVYXA_ADAPTER_RUNNER_MODE: 'inspect',
+        })
+        assert.deepEqual(result.result, expected, expected.name)
+      } finally {
+        await rm(root, { recursive: true, force: true })
+      }
+    }
+  })
+
+  it('rejects every unsupported official adapter capability with the shared diagnostic', async () => {
+    const contract = JSON.parse(
+      await readFile(path.join(workspaceRoot, 'tests/fixtures/adapter-contract.json'), 'utf8'),
+    )
+    const capabilities = ['ssr', 'ssg', 'csr', 'isr', 'ppr', 'api']
+
+    for (const adapter of contract.adapters) {
+      for (const capability of capabilities.filter((item) => !adapter.supports.includes(item))) {
+        const root = await mkdtemp(path.join(os.tmpdir(), `ruvyxa-${adapter.name}-${capability}-`))
+        const outputDir = path.join(root, '.ruvyxa-staging')
+        try {
+          await mkdir(outputDir, { recursive: true })
+          const route =
+            capability === 'api'
+              ? { id: 'app/api/fixture/route', kind: 'api', path: '/api/fixture' }
+              : {
+                  id: 'app/fixture/page',
+                  kind: 'page',
+                  path: '/fixture',
+                  render: { strategy: capability },
+                }
+          await writeFile(
+            path.join(outputDir, 'manifest.json'),
+            JSON.stringify({ routes: [route] }),
+          )
+
+          const result = await runRunnerResult(root, outputDir, adapter.name)
+          assert.equal(result.exitCode, 1, `${adapter.name}:${capability}`)
+          assert.match(
+            result.parsed.message,
+            new RegExp(contract.unsupportedDiagnostics.route),
+            `${adapter.name}:${capability}`,
+          )
+        } finally {
+          await rm(root, { recursive: true, force: true })
+        }
+      }
+    }
+  })
+
+  it('materializes root-contained artifacts for every official adapter', async () => {
+    const contract = JSON.parse(
+      await readFile(path.join(workspaceRoot, 'tests/fixtures/adapter-contract.json'), 'utf8'),
+    )
+
+    for (const adapter of contract.adapters) {
+      const root = await mkdtemp(path.join(os.tmpdir(), `ruvyxa-${adapter.name}-artifacts-`))
+      const outputDir = path.join(root, '.ruvyxa-staging')
+      try {
+        await mkdir(path.join(outputDir, 'assets'), { recursive: true })
+        await mkdir(path.join(outputDir, 'client'), { recursive: true })
+        await mkdir(path.join(outputDir, 'prerender'), { recursive: true })
+        await writeFile(path.join(outputDir, 'assets', 'logo.svg'), '<svg/>')
+        await writeFile(path.join(outputDir, 'client', 'app.js'), 'export {}')
+        await writeFile(path.join(outputDir, 'prerender', 'index.html'), '<main>home</main>')
+        await writeFile(path.join(outputDir, 'manifest.json'), JSON.stringify({ routes: [] }))
+
+        const result = await runRunner(root, outputDir, adapter.name)
+        assert.ok(result.result.length > 0, `${adapter.name} emitted no artifact descriptors`)
+        for (const artifact of result.result) {
+          const base = artifact.scope === 'project' ? root : outputDir
+          const resolved = path.resolve(base, artifact.path)
+          assert.ok(
+            resolved === base || resolved.startsWith(base + path.sep),
+            `${adapter.name}:${artifact.path} escaped its scope`,
+          )
+          await stat(resolved)
+          if (artifact.kind === 'function') {
+            await readFile(path.join(resolved, 'index.mjs'), 'utf8')
+            await readFile(path.join(resolved, 'serverless-handler.mjs'), 'utf8')
+            await readFile(path.join(resolved, 'manifest.mjs'), 'utf8')
+          }
+        }
+      } finally {
+        await rm(root, { recursive: true, force: true })
+      }
+    }
+  })
+
   it('inspects adapter capabilities without materializing declared artifacts', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-adapter-runner-'))
     const outputDir = path.join(root, '.ruvyxa-staging')

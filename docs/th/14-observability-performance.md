@@ -28,6 +28,14 @@ telemetry sink ของคุณ ไม่ใช่ metrics/tracing backend ท
 `npm run analyze:html` สำหรับ local build/route analysis page และ `npm run trace -- /` เพื่อตรวจ
 route manifest entry
 
+สำหรับ correlated trace ระหว่างพัฒนา ให้เปิด `debug.traces` แล้วรัน `ruvyxa dev` response เดิมจาก
+`/__ruvyxa/trace?path=/docs` ยังใช้ตรวจ route หนึ่งรายการ ส่วน `/__ruvyxa/trace?kind=edits`
+ใช้ดูประวัติ edit ภายใน process ที่มีขอบเขต หรือเติม `path=` เพื่อกรอง ตามไฟล์ที่เปลี่ยนแบบ
+project-relative แต่ละ edit ใช้ `traceId` เดียวตลอด graph classification, cache invalidation, worker
+invalidation/replacement, HMR broadcast และการรับใน browser การตอบรับจาก browser รับเฉพาะ
+same-origin, จำกัดขนาด และเปิดเฉพาะเมื่อ watch mode กับ `debug.traces` ทำงานพร้อมกัน trace response
+ใช้ `no-store` และเป็น diagnostic ไม่ใช่ telemetry backend แบบถาวร
+
 ## `instrumentation.ts`
 
 ไฟล์ชื่อ `instrumentation.ts` (หรือ `.js`/`.mjs`) ที่รากโปรเจกต์จะถูกรันหนึ่งครั้งต่อหนึ่ง process
@@ -89,6 +97,12 @@ queued, limit ที่ตั้งไว้, rejection สะสม, retained m
 ไม่กลับเป็นศูนย์หรือ rejection เพิ่มต่อเนื่อง แสดงว่าเกิด saturation ก่อนเพิ่ม limit ให้วัด CPU,
 heap, tail latency และ rejection rate ร่วมกัน เพราะ queue ที่ใหญ่ขึ้นรับ burst ได้นานขึ้น แต่จะเก็บ
 request body มากขึ้นและเพิ่มเวลารอด้วย
+
+snapshot เดียวกันมี `cacheBudget` และ `compilerCache` โดย `cacheBudget` รายงาน hard, soft และ
+hysteresis-target bytes, heap pressure ปัจจุบัน, pressure event และ eviction counter แยกตาม owner
+`RUVYXA_MEMORY_LIMIT_MB` กำหนด hard limit ของ worker (ค่าเริ่มต้น 512 MiB) soft pressure จะ evict
+LRU bundle entry ที่ไม่ถูก pin และล้าง derived module/compiler memory ส่วน hard pressure จะหยุด
+speculative warmup เพิ่มด้วย key ที่มี active build lock จะไม่เป็น candidate สำหรับ eviction
 
 ## ข้อควรระวังเรื่อง cache และ concurrency
 

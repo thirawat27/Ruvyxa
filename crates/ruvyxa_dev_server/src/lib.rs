@@ -7,6 +7,7 @@ use std::future::IntoFuture;
 use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
@@ -55,10 +56,10 @@ pub use env_file::project_env;
 
 mod action_security;
 use action_security::{
-    ActionRateLimiter, action_rate_limit_key, hmr_origin_is_cross_site, validate_action_payload,
-    validate_action_request,
+    ActionRateLimiter, ActionReplayGuard, action_rate_limit_key, hmr_origin_is_cross_site,
+    validate_action_payload, validate_action_request,
 };
-pub use action_security::{IpPrefix, TrustedProxies};
+pub use action_security::{IpPrefix, TrustedProxies, action_reference_id};
 #[cfg(test)]
 use action_security::{
     action_content_type_is_supported, action_fetch_site_is_cross_site, action_origin_is_cross_site,
@@ -80,6 +81,7 @@ use port_binding::{PORT_FALLBACK_SCAN_LIMIT, port_conflict_diagnostic};
 
 mod html_document;
 mod i18n;
+mod trace;
 #[cfg(test)]
 use html_document::{
     client_hydration_script, compose_document, dev_diagnostic_overlay, hmr_client_script,
@@ -111,6 +113,7 @@ use static_assets::public_asset_links;
 use static_assets::{is_safe_relative_path, resolve_public_asset};
 
 mod worker_pool;
+use worker_pool::RenderFlightRequest;
 pub use worker_pool::{NodeWorkerPool, StaticParamSegment, StaticParamsRoute};
 
 mod render_pipeline;
@@ -524,6 +527,7 @@ struct AppState {
     reload_tx: broadcast::Sender<String>,
     runtime_cache: Arc<RuntimeCache>,
     action_limiter: Arc<Mutex<ActionRateLimiter>>,
+    action_replays: Arc<Mutex<ActionReplayGuard>>,
     worker_pool: Arc<NodeWorkerPool>,
     render_cache: Arc<RenderCache>,
     isr_revalidating: render_pipeline::IsrRevalidationSet,
@@ -533,6 +537,7 @@ struct AppState {
     presence: Option<PresenceRuntime>,
     devtools: Arc<DevToolsMetrics>,
     dynamic_image_cache: Arc<DynamicImageCache>,
+    edit_traces: Arc<trace::TraceStore>,
 }
 
 #[derive(Clone)]
@@ -554,10 +559,11 @@ struct PresenceRuntime {
 /// Framework endpoints registered on the router before the plugin realtime
 /// route. Must stay in sync with the `Router::new()` chain in [`serve`];
 /// registering a realtime transport on one of these would panic in axum.
-const RESERVED_FRAMEWORK_ROUTES: [&str; 7] = [
+const RESERVED_FRAMEWORK_ROUTES: [&str; 8] = [
     "/__ruvyxa/hmr",
     "/__ruvyxa/client",
     "/__ruvyxa/action",
+    "/__ruvyxa/flight",
     "/__ruvyxa/trace",
     "/__ruvyxa/devtools",
     "/__ruvyxa/devtools/data",
@@ -1005,6 +1011,7 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
             config.action_rate_limit_max,
             config.action_rate_limit_window,
         ))),
+        action_replays: Arc::new(Mutex::new(ActionReplayGuard::default())),
         worker_pool: worker_pool.clone(),
         render_cache,
         isr_revalidating: Arc::new(std::sync::Mutex::new(HashSet::new())),
@@ -1014,6 +1021,7 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
         presence,
         devtools: Arc::new(DevToolsMetrics::default()),
         dynamic_image_cache: Arc::new(DynamicImageCache::default()),
+        edit_traces: Arc::new(trace::TraceStore::default()),
     };
 
     let _watcher = if config.watch {
@@ -1028,6 +1036,7 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
                 render_cache: watcher_render_cache,
                 hmr_tracker: state.hmr_tracker.clone(),
                 plugin_runtime: state.plugin_runtime.clone(),
+                edit_traces: state.edit_traces.clone(),
                 tokio_handle: tokio::runtime::Handle::current(),
             },
         )?)
@@ -1043,12 +1052,18 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
         .route("/__ruvyxa/client", get(client_bundle))
         .route("/__ruvyxa/hydration-loader.js", get(hydration_loader))
         .route("/__ruvyxa/client/route-manifest.json", get(client_manifest))
+        .route("/__ruvyxa/flight", get(flight_endpoint))
         .route("/__ruvyxa/image", get(dynamic_image_endpoint))
         .route(
             "/__ruvyxa/action",
             post(action_endpoint).layer(DefaultBodyLimit::max(config.action_body_limit_bytes)),
         )
-        .route("/__ruvyxa/trace", get(trace_endpoint));
+        .route(
+            "/__ruvyxa/trace",
+            get(trace_endpoint)
+                .post(trace_ack_endpoint)
+                .layer(DefaultBodyLimit::max(1_024)),
+        );
     if config.watch {
         app = app
             .route("/__ruvyxa/devtools", get(devtools_dashboard))
@@ -1256,6 +1271,7 @@ struct WatcherRuntime {
     render_cache: Arc<RenderCache>,
     hmr_tracker: Arc<HmrTracker>,
     plugin_runtime: Option<Arc<PluginHost>>,
+    edit_traces: Arc<trace::TraceStore>,
     tokio_handle: tokio::runtime::Handle,
 }
 
@@ -1282,6 +1298,7 @@ fn start_watcher(
         render_cache,
         hmr_tracker,
         plugin_runtime,
+        edit_traces,
         tokio_handle,
     } = runtime;
     let root = root.to_path_buf();
@@ -1340,8 +1357,64 @@ fn start_watcher(
                     .iter()
                     .map(|path| path.display().to_string())
                     .collect();
-                let worker_result = (!instrumentation_changed)
-                    .then(|| worker_pool.invalidate_from_watcher(path_strings.clone()));
+                let hmr_paths = paths
+                    .iter()
+                    .map(|path| {
+                        path.strip_prefix(&root)
+                            .unwrap_or(path)
+                            .to_string_lossy()
+                            .replace('\\', "/")
+                    })
+                    .collect::<Vec<_>>();
+                let trace_id = trace::edit_id(&hmr_paths);
+                let trace_kind = hmr_update_kind(&hmr_update, &hmr_paths);
+                edit_traces.start(
+                    &trace_id,
+                    &hmr_paths,
+                    &hmr_update.affected_routes,
+                    trace_kind,
+                );
+                edit_traces.record(
+                    &trace_id,
+                    "cache",
+                    if hmr_update.full_reload {
+                        "all route and render caches invalidated"
+                    } else {
+                        "affected route and style caches invalidated"
+                    },
+                );
+                info!(
+                    trace_id = %trace_id,
+                    files = hmr_paths.len(),
+                    routes = hmr_update.affected_routes.len(),
+                    "HMR edit accepted"
+                );
+                let worker_result = (!instrumentation_changed).then(|| {
+                    worker_pool.invalidate_from_watcher(path_strings.clone(), Some(&trace_id))
+                });
+                match &worker_result {
+                    Some(Ok(workers)) => {
+                        edit_traces.record(
+                            &trace_id,
+                            "worker",
+                            format!("queued invalidation for {workers} workers"),
+                        );
+                    }
+                    Some(Err(error)) => {
+                        edit_traces.record(
+                            &trace_id,
+                            "worker",
+                            format!("invalidation failed: {error}"),
+                        );
+                    }
+                    None => {
+                        edit_traces.record(
+                            &trace_id,
+                            "worker",
+                            "instrumentation change requires recycle",
+                        );
+                    }
+                }
                 if worker_result.as_ref().is_some_and(|result| result.is_err()) {
                     hmr_update.full_reload = true;
                     hmr_update.event_type = HmrEventType::FullReload;
@@ -1356,33 +1429,111 @@ fn start_watcher(
                     });
                 }
 
-                // Send targeted HMR payload with affected routes.
-                let payload = serde_json::json!({
-                    "type": hmr_update.event_type.as_str(),
-                    "paths": path_strings,
-                    "affectedRoutes": hmr_update.affected_routes,
-                    "fullReload": hmr_update.full_reload,
-                })
-                .to_string();
                 if instrumentation_changed {
                     let recycle_pool = Arc::clone(&worker_pool);
                     let recycle_reload = reload_tx.clone();
+                    let restart_payload = hmr_payload(
+                        &hmr_update,
+                        &hmr_paths,
+                        &trace_id,
+                        config.debug_traces,
+                        None,
+                    );
+                    let issue_update = hmr_update.clone();
+                    let issue_paths = hmr_paths.clone();
+                    let issue_trace = trace_id.clone();
+                    let trace_store = Arc::clone(&edit_traces);
+                    let trace_ack = config.debug_traces;
                     tokio_handle.spawn(async move {
-                        match recycle_pool.recycle_for_instrumentation_change().await {
+                        let payload = match recycle_pool.recycle().await {
                             Ok(workers) => {
-                                info!(workers, "recycled workers after instrumentation change")
+                                info!(workers, "recycled workers after instrumentation change");
+                                trace_store.record(
+                                    &issue_trace,
+                                    "worker",
+                                    format!("recycled {workers} workers"),
+                                );
+                                restart_payload
                             }
                             Err(error) => {
-                                warn!(%error, "worker recycle after instrumentation change failed")
+                                warn!(%error, "worker recycle after instrumentation change failed");
+                                trace_store.record(
+                                    &issue_trace,
+                                    "worker",
+                                    format!("recycle failed: {error}"),
+                                );
+                                hmr_payload(
+                                    &issue_update,
+                                    &issue_paths,
+                                    &issue_trace,
+                                    trace_ack,
+                                    Some((
+                                        "RUV1707",
+                                        "Worker restart failed; restart the development server.",
+                                    )),
+                                )
                             }
-                        }
+                        };
                         let _ = recycle_reload.send(payload);
+                        trace_store.record(&issue_trace, "hmr", "message broadcast");
+                    });
+                } else if let Some(Err(error)) = worker_result {
+                    warn!(%error, "worker invalidation failed; recycling workers");
+                    let recycle_pool = Arc::clone(&worker_pool);
+                    let recycle_reload = reload_tx.clone();
+                    let issue_update = hmr_update.clone();
+                    let issue_paths = hmr_paths.clone();
+                    let issue_trace = trace_id.clone();
+                    let trace_store = Arc::clone(&edit_traces);
+                    let trace_ack = config.debug_traces;
+                    tokio_handle.spawn(async move {
+                        let issue = match recycle_pool.recycle().await {
+                            Ok(workers) => {
+                                info!(workers, "recycled workers after invalidation failure");
+                                trace_store.record(
+                                    &issue_trace,
+                                    "worker",
+                                    format!("recycled {workers} workers"),
+                                );
+                                (
+                                    "RUV1706",
+                                    "Worker cache invalidation failed; workers were restarted.",
+                                )
+                            }
+                            Err(error) => {
+                                warn!(%error, "worker recycle after invalidation failure failed");
+                                trace_store.record(
+                                    &issue_trace,
+                                    "worker",
+                                    format!("recycle failed: {error}"),
+                                );
+                                (
+                                    "RUV1707",
+                                    "Worker restart failed; restart the development server.",
+                                )
+                            }
+                        };
+                        let payload = hmr_payload(
+                            &issue_update,
+                            &issue_paths,
+                            &issue_trace,
+                            trace_ack,
+                            Some(issue),
+                        );
+                        let _ = recycle_reload.send(payload);
+                        trace_store.record(&issue_trace, "hmr", "message broadcast");
                     });
                 } else {
+                    // Send targeted HMR payload with affected routes.
+                    let payload = hmr_payload(
+                        &hmr_update,
+                        &hmr_paths,
+                        &trace_id,
+                        config.debug_traces,
+                        None,
+                    );
                     let _ = reload_tx.send(payload);
-                    if let Some(Err(error)) = worker_result {
-                        warn!(%error, "worker invalidation failed; browser full reload requested");
-                    }
+                    edit_traces.record(&trace_id, "hmr", "message broadcast");
                 }
             }
             Err(error) => {
@@ -1405,6 +1556,71 @@ fn start_watcher(
     }
 
     Ok(watcher)
+}
+
+/// Serialize the HMR wire message in one place so the watcher, browser runtime,
+/// and shared contract fixture cannot drift independently.
+static NEXT_HMR_SEQUENCE: AtomicU64 = AtomicU64::new(1);
+
+fn hmr_update_kind(update: &HmrUpdate, paths: &[String]) -> &'static str {
+    if update.full_reload {
+        return "restart";
+    }
+    match update.event_type {
+        HmrEventType::CssUpdate => "css",
+        HmrEventType::ComponentUpdate => {
+            let server_route = paths.iter().any(|path| {
+                path.split('/').any(|segment| segment == "server")
+                    || path.ends_with("/action.ts")
+                    || path.ends_with("/action.js")
+                    || path.ends_with("/route.ts")
+                    || path.ends_with("/route.js")
+            });
+            if server_route {
+                "server-route"
+            } else {
+                "client-boundary"
+            }
+        }
+        HmrEventType::FullReload => "restart",
+    }
+}
+
+fn hmr_payload(
+    update: &HmrUpdate,
+    paths: &[String],
+    trace_id: &str,
+    trace_ack: bool,
+    issue: Option<(&'static str, &'static str)>,
+) -> String {
+    let sequence = NEXT_HMR_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let (message_type, kind) = if issue.is_some() {
+        ("issues", "issues")
+    } else {
+        let kind = hmr_update_kind(update, paths);
+        if kind == "restart" {
+            ("restart", kind)
+        } else {
+            ("partial", kind)
+        }
+    };
+    let mut payload = serde_json::json!({
+        "protocol": "ruvyxa.hmr",
+        "protocolVersion": 1,
+        "sequence": sequence,
+        "traceId": trace_id,
+        "traceAck": trace_ack,
+        "type": message_type,
+        "kind": kind,
+        "modules": paths,
+        "paths": paths,
+        "affectedRoutes": update.affected_routes,
+        "fullReload": update.full_reload,
+    });
+    if let Some((code, message)) = issue {
+        payload["issues"] = serde_json::json!([{ "code": code, "message": message }]);
+    }
+    payload.to_string()
 }
 
 fn watch_paths(config: &ServerConfig) -> Vec<PathBuf> {
@@ -1761,6 +1977,12 @@ struct ClientBundleQuery {
 }
 
 #[derive(Debug, Deserialize)]
+struct FlightQuery {
+    path: String,
+    artifact: String,
+}
+
+#[derive(Debug, Deserialize)]
 struct DynamicImageQuery {
     src: String,
     #[serde(rename = "w")]
@@ -1773,11 +1995,31 @@ struct DynamicImageQuery {
 pub(crate) struct ActionQuery {
     pub(crate) path: String,
     pub(crate) name: String,
+    #[serde(default)]
+    pub(crate) id: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 struct TraceQuery {
-    path: String,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    kind: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+#[serde(deny_unknown_fields)]
+struct TraceAck {
+    trace_id: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EditTraceResponse {
+    contract: &'static str,
+    schema_version: u32,
+    traces: Vec<trace::EditTrace>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1808,20 +2050,36 @@ struct TraceAssets {
 /// that pattern, which is what `@ruvyxa/react`'s router looks up.
 async fn client_manifest(State(state): State<Arc<AppState>>) -> Response {
     let routes = match state.runtime_cache.router(&state.config).await {
-        Ok((manifest, _)) => manifest
-            .routes
-            .iter()
-            .filter(|route| route.kind == RouteKind::Page && route.render.hydrate)
-            .map(|route| {
-                serde_json::json!({
+        Ok((manifest, _)) => {
+            let eligible = manifest
+                .routes
+                .iter()
+                .filter(|route| route.kind == RouteKind::Page && route.render.hydrate)
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut entries = Vec::with_capacity(eligible.len());
+            for route in eligible {
+                let Ok(script) = render_client_bundle_pooled(&state, &route.path).await else {
+                    continue;
+                };
+                let artifact = &blake3::hash(script.html.as_bytes()).to_hex()[..16];
+                let source = tokio::fs::read_to_string(&route.file)
+                    .await
+                    .unwrap_or_default();
+                let module = ruvyxa_bundler::ast::parse_module(&source);
+                entries.push(serde_json::json!({
                     "path": route.path,
                     "src": format!(
                         "/__ruvyxa/client?path={}",
                         url_encode_component(&route.path)
                     ),
-                })
-            })
-            .collect::<Vec<_>>(),
+                    "artifactVersion": artifact,
+                    "flight": ruvyxa_bundler::ast::has_named_runtime_export(&source, &module, "flight"),
+                    "cache": ruvyxa_bundler::reference_manifest::has_module_directive(&source, "use cache"),
+                }));
+            }
+            entries
+        }
         Err(error) => {
             error!(%error, "client manifest request failed");
             Vec::new()
@@ -1839,6 +2097,141 @@ async fn client_manifest(State(state): State<Arc<AppState>>) -> Response {
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     with_security_headers(response)
+}
+
+/// Serve the same public Flight contract in dev/start that deployment adapters expose.
+async fn flight_endpoint(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<FlightQuery>,
+    headers: HeaderMap,
+) -> Response {
+    if headers.contains_key(header::AUTHORIZATION) || headers.contains_key(header::COOKIE) {
+        return with_security_headers(
+            (
+                StatusCode::FORBIDDEN,
+                "Flight requests must not include private request state",
+            )
+                .into_response(),
+        );
+    }
+    if headers
+        .get("x-ruvyxa-flight")
+        .and_then(|value| value.to_str().ok())
+        != Some("1")
+    {
+        return with_security_headers(
+            (
+                StatusCode::BAD_REQUEST,
+                "Flight requests require the Ruvyxa navigation header",
+            )
+                .into_response(),
+        );
+    }
+    if query.artifact.len() != 16
+        || !query
+            .artifact
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
+    {
+        return with_security_headers(
+            (
+                StatusCode::BAD_REQUEST,
+                "Flight request has an invalid artifact",
+            )
+                .into_response(),
+        );
+    }
+    let request_path = match canonical_request_path(&query.path) {
+        Ok(path) => path,
+        Err(_) => {
+            return with_security_headers(
+                (
+                    StatusCode::BAD_REQUEST,
+                    "Flight request has an invalid route",
+                )
+                    .into_response(),
+            );
+        }
+    };
+    let (manifest, router) = match state.runtime_cache.router(&state.config).await {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            error!(%error, "Flight route snapshot failed");
+            return with_security_headers(StatusCode::INTERNAL_SERVER_ERROR.into_response());
+        }
+    };
+    let Some(route_match) = router.find(&manifest, &request_path) else {
+        return with_security_headers(StatusCode::NOT_FOUND.into_response());
+    };
+    if route_match.route.kind != RouteKind::Page {
+        return with_security_headers(StatusCode::NOT_FOUND.into_response());
+    }
+    let source = tokio::fs::read_to_string(&route_match.route.file)
+        .await
+        .unwrap_or_default();
+    let module = ruvyxa_bundler::ast::parse_module(&source);
+    if !ruvyxa_bundler::ast::has_named_runtime_export(&source, &module, "flight") {
+        return with_security_headers(
+            (
+                StatusCode::NOT_IMPLEMENTED,
+                "This route does not expose a Flight payload",
+            )
+                .into_response(),
+        );
+    }
+    let script = match render_client_bundle_pooled(&state, &route_match.route.path).await {
+        Ok(script) => script,
+        Err(error) => {
+            error!(%error, path = %request_path, "Flight client artifact failed");
+            return with_security_headers(StatusCode::INTERNAL_SERVER_ERROR.into_response());
+        }
+    };
+    let current_artifact = &blake3::hash(script.html.as_bytes()).to_hex()[..16];
+    if current_artifact != query.artifact {
+        return with_security_headers(
+            (StatusCode::CONFLICT, "Flight artifact is stale or invalid").into_response(),
+        );
+    }
+    let response = state
+        .worker_pool
+        .render_flight(RenderFlightRequest {
+            project_root: &state.config.root,
+            app_dir: &state.config.app_dir,
+            page_file: &route_match.route.file,
+            request_path: &request_path,
+            route_path: &route_match.route.path,
+            params: &route_match.params,
+            artifact_version: current_artifact,
+        })
+        .await;
+    match response {
+        Ok(response) if response.ok => {
+            let Some(payload) = response.flight else {
+                return with_security_headers(StatusCode::INTERNAL_SERVER_ERROR.into_response());
+            };
+            let mut response = payload.into_response();
+            response.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("application/vnd.ruvyxa.flight+json; charset=utf-8"),
+            );
+            response.headers_mut().insert(
+                header::CACHE_CONTROL,
+                HeaderValue::from_static("private, no-store"),
+            );
+            response
+                .headers_mut()
+                .insert(header::VARY, HeaderValue::from_static("x-ruvyxa-flight"));
+            with_security_headers(response)
+        }
+        Ok(response) => {
+            error!(code = ?response.code, message = ?response.message, path = %request_path, "Flight render failed");
+            with_security_headers(StatusCode::INTERNAL_SERVER_ERROR.into_response())
+        }
+        Err(error) => {
+            error!(%error, path = %request_path, "Flight worker failed");
+            with_security_headers(StatusCode::INTERNAL_SERVER_ERROR.into_response())
+        }
+    }
 }
 
 async fn client_bundle(
@@ -2017,6 +2410,57 @@ async fn action_endpoint(
         );
     }
 
+    if let Some(provided_reference) = query.id.as_deref() {
+        let (manifest, router) = match state.runtime_cache.route_snapshot(&state.config).await {
+            Ok(snapshot) => snapshot,
+            Err(error) => {
+                error!(%error, "action reference route snapshot failed");
+                return with_security_headers(
+                    (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error").into_response(),
+                );
+            }
+        };
+        let Some(route_match) = router.find(&manifest, &query.path) else {
+            return with_security_headers(
+                (StatusCode::NOT_FOUND, "Route not found for action").into_response(),
+            );
+        };
+        let Some(action_file) = render_pipeline::action_file_for(route_match.route) else {
+            return with_security_headers(
+                (StatusCode::NOT_FOUND, "Route action file was not found").into_response(),
+            );
+        };
+        let source = match tokio::fs::read_to_string(&action_file).await {
+            Ok(source) => source,
+            Err(error) => {
+                error!(%error, file = %action_file.display(), "action reference source read failed");
+                return with_security_headers(
+                    (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error").into_response(),
+                );
+            }
+        };
+        if action_reference_id(&route_match.route.id, &source) != provided_reference {
+            return with_security_headers(
+                (StatusCode::CONFLICT, "Action reference is stale or invalid").into_response(),
+            );
+        }
+        let replay = state
+            .action_replays
+            .lock()
+            .map_err(|_| "Action replay protection is unavailable")
+            .and_then(|mut guard| guard.consume(&headers, provided_reference));
+        if let Err(message) = replay {
+            let status = if message == "Action request replayed" {
+                StatusCode::CONFLICT
+            } else if message == "Action replay protection is unavailable" {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                StatusCode::BAD_REQUEST
+            };
+            return with_security_headers((status, message).into_response());
+        }
+    }
+
     let action_started = Instant::now();
     let (response, action_error) = match render_server_action_pooled(
         &state,
@@ -2118,19 +2562,82 @@ async fn trace_endpoint(
     if !debug_traces_enabled(&state.config) {
         return with_security_headers(StatusCode::NOT_FOUND.into_response());
     }
-    let response =
-        match runtime_trace_cached(&state.config, &state.runtime_cache, &query.path).await {
-            Ok(trace) => json_response(StatusCode::OK, &trace),
-            Err(error) => {
-                error!(%error, path = %query.path, "runtime trace request failed");
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("console.error({:?});", error.to_string()),
-                )
-                    .into_response()
-            }
+    if query.kind.as_deref() == Some("edits") {
+        let snapshot = EditTraceResponse {
+            contract: "ruvyxa.edit-trace",
+            schema_version: 1,
+            traces: state.edit_traces.snapshot(query.path.as_deref()),
         };
+        let mut response = json_response(StatusCode::OK, &snapshot);
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        return with_security_headers(response);
+    }
+    if query.kind.is_some() {
+        return with_security_headers(
+            (StatusCode::BAD_REQUEST, "Unknown trace kind").into_response(),
+        );
+    }
+    let Some(path) = query.path.as_deref() else {
+        return with_security_headers(
+            (StatusCode::BAD_REQUEST, "Trace path is required").into_response(),
+        );
+    };
+    let response = match runtime_trace_cached(&state.config, &state.runtime_cache, path).await {
+        Ok(trace) => json_response(StatusCode::OK, &trace),
+        Err(error) => {
+            error!(%error, path, "runtime trace request failed");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                format!("console.error({:?});", error.to_string()),
+            )
+                .into_response()
+        }
+    };
     with_security_headers(response)
+}
+
+async fn trace_ack_endpoint(
+    State(state): State<Arc<AppState>>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<SocketAddr>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    if !debug_traces_enabled(&state.config) {
+        return with_security_headers(StatusCode::NOT_FOUND.into_response());
+    }
+    if hmr_origin_is_cross_site(&headers, &state.config, peer.ip()) {
+        return with_security_headers(
+            (
+                StatusCode::FORBIDDEN,
+                "Cross-origin trace acknowledgement blocked",
+            )
+                .into_response(),
+        );
+    }
+    let acknowledgement = match serde_json::from_slice::<TraceAck>(&body) {
+        Ok(value) if valid_trace_id(&value.trace_id) => value,
+        _ => {
+            return with_security_headers(
+                (StatusCode::BAD_REQUEST, "Invalid trace acknowledgement").into_response(),
+            );
+        }
+    };
+    if !state
+        .edit_traces
+        .record(&acknowledgement.trace_id, "browser", "message received")
+    {
+        return with_security_headers(StatusCode::NOT_FOUND.into_response());
+    }
+    with_security_headers(StatusCode::NO_CONTENT.into_response())
+}
+
+fn valid_trace_id(value: &str) -> bool {
+    value.len() == 32
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn debug_traces_enabled(config: &ServerConfig) -> bool {
@@ -2649,6 +3156,71 @@ mod tests {
     }
 
     #[test]
+    fn hmr_payload_matches_the_shared_wire_contract() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tests/fixtures/hmr-contract.json"))
+                .unwrap();
+        assert_eq!(fixture["protocol"], "ruvyxa.hmr");
+        assert_eq!(fixture["protocolVersion"], 1);
+        assert_eq!(fixture["fallback"], "reload");
+        let required_fields = fixture["requiredFields"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|field| field.as_str().unwrap())
+            .collect::<BTreeSet<_>>();
+
+        for event in fixture["messages"].as_array().unwrap() {
+            let (event_type, full_reload, path) = match event["event"].as_str().unwrap() {
+                "css" => (HmrEventType::CssUpdate, false, "app/global.css"),
+                "client" => (HmrEventType::ComponentUpdate, false, "app/Button.tsx"),
+                "server" => (HmrEventType::ComponentUpdate, false, "app/server/data.ts"),
+                "structural" => (HmrEventType::FullReload, true, "app/layout.tsx"),
+                "failure" => (HmrEventType::FullReload, true, "app/page.tsx"),
+                kind => panic!("unknown fixture HMR event: {kind}"),
+            };
+            let update = HmrUpdate {
+                affected_routes: vec!["/docs".to_string()],
+                full_reload,
+                changed_files: vec![PathBuf::from(path)],
+                event_type,
+            };
+            let payload: serde_json::Value = serde_json::from_str(&hmr_payload(
+                &update,
+                &[path.to_string()],
+                "0123456789abcdef0123456789abcdef",
+                false,
+                (event["event"] == "failure").then_some((
+                    "RUV1706",
+                    "Worker cache invalidation failed; workers were restarted.",
+                )),
+            ))
+            .unwrap();
+            let actual_fields: BTreeSet<&str> = payload
+                .as_object()
+                .unwrap()
+                .keys()
+                .map(String::as_str)
+                .collect();
+            assert!(required_fields.is_subset(&actual_fields));
+            assert_eq!(payload["protocol"], fixture["protocol"]);
+            assert_eq!(payload["protocolVersion"], fixture["protocolVersion"]);
+            assert_eq!(payload["traceId"], "0123456789abcdef0123456789abcdef");
+            assert_eq!(payload["type"], event["type"]);
+            assert_eq!(payload["kind"], event["kind"]);
+            if event["event"] == "failure" {
+                assert_eq!(payload["issues"][0]["code"], "RUV1706");
+                assert_eq!(payload["fullReload"], true);
+            }
+            assert!(
+                payload["sequence"]
+                    .as_u64()
+                    .is_some_and(|sequence| sequence > 0)
+            );
+        }
+    }
+
+    #[test]
     fn blocks_cross_origin_action_requests() {
         let mut headers = HeaderMap::new();
         headers.insert(header::HOST, HeaderValue::from_static("localhost:3000"));
@@ -2871,6 +3443,7 @@ mod tests {
                 &ActionQuery {
                     path: "/todos".to_string(),
                     name: "create".to_string(),
+                    id: None,
                 },
                 &config,
             ),
@@ -2886,6 +3459,7 @@ mod tests {
         let query = ActionQuery {
             path: "/todos".to_string(),
             name: "create".to_string(),
+            id: None,
         };
         let peer: SocketAddr = "10.0.0.9:5000".parse().unwrap();
         let mut config = ServerConfig::dev(".", "localhost", 3000);
@@ -2915,6 +3489,7 @@ mod tests {
         let query = ActionQuery {
             path: "/todos".to_string(),
             name: "create".to_string(),
+            id: None,
         };
         let peer: SocketAddr = "10.0.0.9:5000".parse().unwrap();
         let mut config = ServerConfig::dev(".", "localhost", 3000);
@@ -4049,6 +4624,25 @@ mod tests {
         let mut production = ServerConfig::production(".", "localhost", 3000);
         production.debug_traces = true;
         assert!(!debug_traces_enabled(&production));
+    }
+
+    #[test]
+    fn trace_acknowledgements_require_lowercase_w3c_ids() {
+        assert!(valid_trace_id("0123456789abcdef0123456789abcdef"));
+        assert!(!valid_trace_id("0123456789ABCDEF0123456789ABCDEF"));
+        assert!(!valid_trace_id("0123456789abcdef"));
+        assert!(!valid_trace_id("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"));
+
+        assert!(
+            serde_json::from_str::<TraceAck>(r#"{"traceId":"0123456789abcdef0123456789abcdef"}"#)
+                .is_ok()
+        );
+        assert!(
+            serde_json::from_str::<TraceAck>(
+                r#"{"traceId":"0123456789abcdef0123456789abcdef","extra":true}"#
+            )
+            .is_err()
+        );
     }
 
     #[tokio::test]

@@ -23,6 +23,7 @@ import {
 } from './entry-templates.mjs'
 import { createPluginRegistry } from './plugin-http.mjs'
 import { HANDLER_RUNTIME_FILES, prerenderRelativePath } from './serverless-handler.mjs'
+import { actionReferenceId } from './action-runtime.mjs'
 
 const [projectRootArg, outputDirArg, adapterNameArg] = process.argv.slice(2)
 const runnerMode = process.env.RUVYXA_ADAPTER_RUNNER_MODE ?? 'build'
@@ -183,6 +184,15 @@ async function assertCapabilitiesSupported(adapter, buildDir, config) {
   // production. Deciding it here turns a silent runtime hole into a build
   // failure that names the feature and the target.
   const dynamic = supported.has('ssr') || supported.has('api')
+
+  const flightRoutes = (manifest.routes ?? []).filter((route) => route.flight === true)
+  if (flightRoutes.length > 0 && !dynamic) {
+    throw new Error(
+      `RUV2204 adapter ${adapterName} publishes a static site and cannot serve Flight, ` +
+        `but ${flightRoutes.map((route) => route.path).join(', ')} opt in. ` +
+        'Remove the flight export, or build with an adapter that runs a server.',
+    )
+  }
 
   const actionRoutes = (manifest.routes ?? []).filter(
     (route) => route.kind !== 'api' && actionFileFor(route),
@@ -563,6 +573,10 @@ async function materializeRouteModules(manifest, destination, target) {
     const renderer = target === 'edge' ? 'react-dom/server.browser' : 'react-dom/server'
     imports.push('import React from "react"')
     imports.push(`import * as ReactDomServer from ${JSON.stringify(renderer)}`)
+    if (routes.some((route) => route?.flight === true && route?.cache === true)) {
+      imports.push('import { cache as __ruvyxaCache } from "@ruvyxa/core/server"')
+      definitions.push(flightCachePrelude())
+    }
     // One binding for the whole registry: every route definition below shares
     // it, and a second `const`/`class` in the same module would not parse. The
     // boundary class is emitted unconditionally on the server registry (its
@@ -597,13 +611,16 @@ async function materializeRouteModules(manifest, destination, target) {
       continue
     }
 
-    const page = pageRouteDefinition(routeFile, index, route.path ?? '/')
+    const page = pageRouteDefinition(routeFile, index, route.path ?? '/', route.cache === true)
     imports.push(...page.imports)
     definitions.push(page.definition)
-    records.push(`  ${JSON.stringify(route.id)}: { render: ${page.renderName} }`)
+    records.push(
+      `  ${JSON.stringify(route.id)}: { render: ${page.renderName}, flight: ${page.flightName} }`,
+    )
 
     const actionFile = actionFileFor(route)
     if (actionFile) {
+      route.actionReferenceId = actionReferenceId(route.id, await readFile(actionFile, 'utf8'))
       const alias = `ActionModule${index}`
       imports.push(`import * as ${alias} from ${JSON.stringify(toImportPath(actionFile))}`)
       actionRecords.push(`  ${JSON.stringify(route.id)}: ${alias}`)
@@ -691,6 +708,7 @@ async function compileRegistry(entrySource, outfile, target) {
     outfile,
     platform: target === 'edge' ? 'browser' : serverPlatform(),
     bundlePackages: true,
+    reactCompiler: projectConfig?.reactCompiler === true,
     aliases: runtimeAliases(runtimeDir),
   })
 }
@@ -801,14 +819,20 @@ function resolveProjectRouteFile(routeFile, routeId) {
   return resolved
 }
 
-function pageRouteDefinition(pageFile, routeIndex, routePath = '/') {
+function pageRouteDefinition(pageFile, routeIndex, routePath = '/', cacheFlight = false) {
   const appDir = path.join(projectRoot, 'app')
   const layouts = collectLayouts(appDir, path.dirname(pageFile))
   const specials = collectSpecials(appDir, path.dirname(pageFile))
   const pageName = `Page${routeIndex}`
+  const moduleName = `PageModule${routeIndex}`
   const renderName = `renderPage${routeIndex}`
   const treeName = `buildTree${routeIndex}`
-  const imports = [`import ${pageName} from ${JSON.stringify(toImportPath(pageFile))}`]
+  const flightName = cacheFlight
+    ? `flightPage${routeIndex}`
+    : `typeof ${moduleName}.flight === 'function' ? ${moduleName}.flight : null`
+  const imports = [
+    `import ${pageName}, * as ${moduleName} from ${JSON.stringify(toImportPath(pageFile))}`,
+  ]
   const wrappers = []
   layouts.forEach((layoutFile, index) => {
     const layoutName = `Layout${routeIndex}_${index}`
@@ -836,6 +860,9 @@ function pageRouteDefinition(pageFile, routeIndex, routePath = '/') {
   )
   imports.push(...metaImports)
 
+  const cachedFlight = cacheFlight
+    ? `\n\nasync function ${flightName}(ctx) {\n  return __ruvyxaCache(__ruvyxaFlightKey(${JSON.stringify(routePath)}, ctx)).get(() => ${moduleName}.flight(ctx))\n}`
+    : ''
   const definition = `${routeTreeFunction({
     name: treeName,
     pageName,
@@ -859,8 +886,16 @@ async function ${renderName}(ctx) {
   }
   const document = html.trimStart().toLowerCase().startsWith("<!doctype") ? html : "<!doctype html>" + html
   return __ruvyxaApplyLang(document, __ruvyxaResolveMeta([${metaNames.join(', ')}], ctx).lang)
+}${cachedFlight}`
+  return { imports, definition, renderName, moduleName, flightName }
+}
+
+/** Deterministic, collision-free key material for a cached Flight producer. */
+function flightCachePrelude() {
+  return `function __ruvyxaFlightKey(route, ctx) {
+  const params = Object.fromEntries(Object.entries(ctx.params ?? {}).sort(([left], [right]) => left.localeCompare(right)))
+  return "flight:" + JSON.stringify([route, ctx.path, params])
 }`
-  return { imports, definition, renderName }
 }
 
 // Copies the pre-rendered pages and client assets into a publish directory.

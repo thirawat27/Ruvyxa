@@ -106,6 +106,9 @@ globalThis.__RUVYXA_REQUEST_CONTEXT__ = {
   peek() {
     return storage.getStore() ?? null
   },
+  wasRead() {
+    return storage.getStore()?.used === true
+  },
 }
 
 /**

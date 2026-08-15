@@ -50,6 +50,7 @@ pub(crate) fn analyze_client_bundle(
         &config.plugins,
         config.javascript_runtime(),
         config.markdown_enabled(),
+        config.react_compiler.unwrap_or(false),
     )?;
     let client_manifest = emit_client_bundles_with_session(
         root,

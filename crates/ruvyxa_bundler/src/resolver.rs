@@ -70,6 +70,10 @@ pub struct ResolvedModule {
     pub deps: Vec<PathBuf>,
     /// Exact source specifier to resolved path bindings, including plugin aliases.
     pub dependency_aliases: BTreeMap<String, PathBuf>,
+    /// Directories whose membership affects compile-time glob expansion.
+    pub watch_paths: Vec<PathBuf>,
+    /// Files materialized by compile-time glob expansion.
+    pub glob_matches: Vec<PathBuf>,
     /// Whether this module is part of `node_modules` (external).
     pub is_external: bool,
 }
@@ -97,8 +101,7 @@ struct CachedSource {
 /// Fingerprints for the two resolver configuration files we support.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct TsConfigFingerprint {
-    tsconfig: Option<SourceFingerprint>,
-    jsconfig: Option<SourceFingerprint>,
+    files: Vec<(PathBuf, Option<[u8; 32]>)>,
 }
 
 /// Parsed resolver configuration and the file state it was derived from.
@@ -147,6 +150,18 @@ pub struct ResolveGraphCache {
     /// Production builds operate on one immutable input snapshot and can skip
     /// repeated metadata checks after the first source read.
     stable_snapshot: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolveCacheStats {
+    pub resolution_entries: usize,
+    pub source_entries: usize,
+    pub dependency_entries: usize,
+    pub configuration_entries: usize,
+    pub package_entries: usize,
+    pub resident_bytes: u64,
+    pub disposable_bytes: u64,
 }
 
 /// Entry-point fields of one `package.json`.
@@ -265,14 +280,15 @@ impl ResolveGraphCache {
         {
             return entry.paths.clone();
         }
-        let fingerprint = tsconfig_fingerprint(project_root);
-        if let Some(entry) = self.tsconfigs.get(project_root)
-            && entry.fingerprint == fingerprint
-        {
-            return entry.paths.clone();
+        if let Some(entry) = self.tsconfigs.get(project_root) {
+            let fingerprint = tsconfig_fingerprint(project_root, &entry.paths.config_files);
+            if entry.fingerprint == fingerprint {
+                return entry.paths.clone();
+            }
         }
 
         let paths = TsConfigPaths::load(project_root);
+        let fingerprint = tsconfig_fingerprint(project_root, &paths.config_files);
         self.tsconfigs.insert(
             project_root.to_path_buf(),
             CachedTsConfig {
@@ -339,6 +355,115 @@ impl ResolveGraphCache {
         self.dependencies.len()
     }
 
+    /// Content fingerprint of every tsconfig/jsconfig file that contributes to
+    /// the effective resolver model, including inherited package/local files.
+    pub fn configuration_hash(&self, project_root: &Path) -> String {
+        let config = self.tsconfig_paths(project_root);
+        let mut hasher = blake3::Hasher::new();
+        for file in &config.config_files {
+            let path = file.to_string_lossy().replace('\\', "/");
+            hasher.update(&(path.len() as u64).to_le_bytes());
+            hasher.update(path.as_bytes());
+            let source = fs::read(file).unwrap_or_default();
+            hasher.update(&(source.len() as u64).to_le_bytes());
+            hasher.update(&source);
+        }
+        hasher.finalize().to_hex().to_string()
+    }
+
+    /// Approximate bytes owned by resolver cache keys and values.
+    pub fn stats(&self) -> ResolveCacheStats {
+        let resolution_bytes = self
+            .resolutions
+            .iter()
+            .map(|entry| {
+                let ((base, specifier), resolved) = entry.pair();
+                base.len() as u64
+                    + specifier.len() as u64
+                    + resolved
+                        .as_ref()
+                        .map(|path| path.as_os_str().len() as u64)
+                        .unwrap_or(0)
+            })
+            .sum::<u64>();
+        let source_bytes = self
+            .sources
+            .iter()
+            .map(|entry| entry.key().as_os_str().len() as u64 + entry.value().source.len() as u64)
+            .sum::<u64>();
+        let dependency_bytes = self
+            .dependencies
+            .iter()
+            .map(|entry| {
+                entry.key().base_dir.len() as u64
+                    + 34
+                    + entry
+                        .value()
+                        .iter()
+                        .map(|path| path.as_os_str().len() as u64)
+                        .sum::<u64>()
+            })
+            .sum::<u64>();
+        let configuration_bytes = self
+            .tsconfigs
+            .iter()
+            .map(|entry| {
+                entry.key().as_os_str().len() as u64
+                    + entry.value().paths.config_dir.as_os_str().len() as u64
+                    + entry
+                        .value()
+                        .paths
+                        .paths
+                        .iter()
+                        .map(|(alias, targets)| {
+                            alias.len() as u64
+                                + targets
+                                    .iter()
+                                    .map(|target| target.len() as u64)
+                                    .sum::<u64>()
+                        })
+                        .sum::<u64>()
+            })
+            .sum::<u64>();
+        let package_bytes = self
+            .package_json
+            .iter()
+            .map(|entry| entry.key().as_os_str().len() as u64)
+            .sum::<u64>();
+        ResolveCacheStats {
+            resolution_entries: self.resolutions.len(),
+            source_entries: self.sources.len(),
+            dependency_entries: self.dependencies.len(),
+            configuration_entries: self.tsconfigs.len(),
+            package_entries: self.package_json.len(),
+            resident_bytes: resolution_bytes
+                .saturating_add(source_bytes)
+                .saturating_add(dependency_bytes)
+                .saturating_add(configuration_bytes)
+                .saturating_add(package_bytes),
+            disposable_bytes: resolution_bytes
+                .saturating_add(dependency_bytes)
+                .saturating_add(configuration_bytes)
+                .saturating_add(package_bytes),
+        }
+    }
+
+    /// Drop rebuildable resolver derivations while retaining source snapshots.
+    /// Returns the number of entries removed.
+    pub fn evict_disposable(&self) -> u64 {
+        let evicted = self
+            .resolutions
+            .len()
+            .saturating_add(self.dependencies.len())
+            .saturating_add(self.tsconfigs.len())
+            .saturating_add(self.package_json.len()) as u64;
+        self.resolutions.clear();
+        self.dependencies.clear();
+        self.tsconfigs.clear();
+        self.package_json.clear();
+        evicted
+    }
+
     /// Drop cached entries for specific file paths.
     ///
     /// The only cache that outlives a single read is the [`Self::for_build`]
@@ -353,27 +478,32 @@ impl ResolveGraphCache {
             self.package_json.remove(path);
             // Remove any resolution entries that resolved to this path.
             self.resolutions.retain(|_, v| v.as_ref() != Some(path));
-            self.tsconfigs.retain(|root, _| {
-                path != &root.join("tsconfig.json") && path != &root.join("jsconfig.json")
+            self.tsconfigs.retain(|root, entry| {
+                path != &root.join("tsconfig.json")
+                    && path != &root.join("jsconfig.json")
+                    && !entry.paths.config_files.contains(path)
             });
         }
         self.dependencies.clear();
     }
 }
 
-fn tsconfig_fingerprint(project_root: &Path) -> TsConfigFingerprint {
-    let fingerprint = |name: &str| {
-        fs::metadata(project_root.join(name))
-            .ok()
-            .map(|metadata| SourceFingerprint {
-                modified: metadata.modified().ok(),
-                len: metadata.len(),
-            })
-    };
-
+fn tsconfig_fingerprint(project_root: &Path, config_files: &[PathBuf]) -> TsConfigFingerprint {
+    let mut files = BTreeSet::from([
+        project_root.join("tsconfig.json"),
+        project_root.join("jsconfig.json"),
+    ]);
+    files.extend(config_files.iter().cloned());
     TsConfigFingerprint {
-        tsconfig: fingerprint("tsconfig.json"),
-        jsconfig: fingerprint("jsconfig.json"),
+        files: files
+            .into_iter()
+            .map(|path| {
+                let fingerprint = fs::read(&path)
+                    .ok()
+                    .map(|source| *blake3::hash(&source).as_bytes());
+                (path, fingerprint)
+            })
+            .collect(),
     }
 }
 
@@ -391,6 +521,11 @@ pub struct TsConfigPaths {
     pub base_url: Option<PathBuf>,
     /// Path alias mappings, e.g. `"@/*" → ["./src/*"]`.
     pub paths: Vec<(String, Vec<String>)>,
+    /// Base directory for each declaration in `paths`.
+    path_bases: Vec<PathBuf>,
+    /// Every configuration file whose contents formed this effective model.
+    config_files: Vec<PathBuf>,
+    project_root: PathBuf,
 }
 
 /// A `tsconfig.json` that exists but could not be read as JSONC.
@@ -429,25 +564,15 @@ impl TsConfigPaths {
 
         let mut problem = None;
         for path in &candidates {
-            let Ok(content) = fs::read_to_string(path) else {
+            if !path.is_file() {
                 continue;
-            };
-            match parse_jsonc(&content) {
-                Ok(value) => {
-                    if let Some(config) = paths_from_value(&value, project_root) {
-                        return (config, None);
-                    }
-                }
-                // Keep looking: a broken `tsconfig.json` beside a valid
-                // `jsconfig.json` should still resolve through the one that
-                // parses. The first failure is what gets reported if neither does.
-                Err(error) => {
-                    problem.get_or_insert_with(|| TsConfigProblem {
-                        path: path.clone(),
-                        message: error.to_string(),
-                    });
-                }
             }
+            let mut visiting = BTreeSet::new();
+            let (config, config_problem) = load_config_chain(path, project_root, &mut visiting);
+            if !config.paths.is_empty() || config.base_url.is_some() || config_problem.is_none() {
+                return (config, config_problem);
+            }
+            problem = config_problem;
         }
 
         (TsConfigPaths::default(), problem)
@@ -458,35 +583,35 @@ impl TsConfigPaths {
     /// Returns `Some(absolute_path)` if an alias matches and the target file
     /// exists, `None` otherwise.
     pub fn resolve(&self, specifier: &str) -> Option<PathBuf> {
+        if is_reserved_alias_specifier(specifier) {
+            return None;
+        }
         // 1. Try exact path aliases.
-        for (pattern, targets) in &self.paths {
-            let pattern_without_star = pattern.trim_end_matches('*');
-            let is_wildcard = pattern.ends_with('*');
-
-            let suffix = if is_wildcard {
-                specifier.strip_prefix(pattern_without_star)
-            } else if specifier == pattern {
-                Some("")
-            } else {
-                None
-            };
+        let mut indices = (0..self.paths.len()).collect::<Vec<_>>();
+        indices.sort_by(|left, right| {
+            alias_pattern_order(&self.paths[*left].0, &self.paths[*right].0)
+        });
+        for index in indices {
+            let (pattern, targets) = &self.paths[index];
+            let suffix = match_alias_pattern(pattern, specifier);
 
             if let Some(suffix) = suffix {
                 for target in targets {
-                    let target_without_star = target.trim_end_matches('*');
-                    let candidate_str = format!("{target_without_star}{suffix}");
+                    let candidate_str = target.replacen('*', suffix, 1);
 
                     let target = Path::new(&candidate_str);
                     let candidate = if target.is_absolute() {
                         target.to_path_buf()
                     } else {
-                        self.base_url
-                            .as_ref()
+                        self.path_bases
+                            .get(index)
                             .unwrap_or(&self.config_dir)
                             .join(target)
                     };
 
-                    if let Some(resolved) = resolve_file_candidate(&candidate) {
+                    if let Some(resolved) = resolve_file_candidate(&candidate)
+                        && path_is_inside(&resolved, &self.project_root)
+                    {
                         return Some(resolved);
                     }
                 }
@@ -499,13 +624,247 @@ impl TsConfigPaths {
             && let Some(base) = &self.base_url
         {
             let candidate = base.join(specifier);
-            if let Some(resolved) = resolve_file_candidate(&candidate) {
+            if let Some(resolved) = resolve_file_candidate(&candidate)
+                && path_is_inside(&resolved, &self.project_root)
+            {
                 return Some(resolved);
             }
         }
 
         None
     }
+
+    pub(crate) fn resolve_glob_pattern(&self, pattern: &str) -> Option<PathBuf> {
+        if is_reserved_alias_specifier(pattern) {
+            return None;
+        }
+        let mut indices = (0..self.paths.len()).collect::<Vec<_>>();
+        indices.sort_by(|left, right| {
+            alias_pattern_order(&self.paths[*left].0, &self.paths[*right].0)
+        });
+        for index in indices {
+            let (alias, targets) = &self.paths[index];
+            if let Some(suffix) = match_alias_pattern(alias, pattern)
+                && let Some(target) = targets.first()
+            {
+                let target = PathBuf::from(target.replacen('*', suffix, 1));
+                return Some(if target.is_absolute() {
+                    target
+                } else {
+                    self.path_bases
+                        .get(index)
+                        .unwrap_or(&self.config_dir)
+                        .join(target)
+                });
+            }
+        }
+        self.base_url.as_ref().map(|base| base.join(pattern))
+    }
+}
+
+fn load_config_chain(
+    config_path: &Path,
+    project_root: &Path,
+    visiting: &mut BTreeSet<PathBuf>,
+) -> (TsConfigPaths, Option<TsConfigProblem>) {
+    let config_path = config_path.to_path_buf();
+    let cycle_key = ruvyxa_diagnostics::normalized_canonical_path(&config_path);
+    if !visiting.insert(cycle_key.clone()) {
+        return (
+            empty_tsconfig(project_root),
+            Some(TsConfigProblem {
+                path: config_path,
+                message: "cyclic tsconfig/jsconfig extends chain".to_string(),
+            }),
+        );
+    }
+    let content = match fs::read_to_string(&config_path) {
+        Ok(content) => content,
+        Err(error) => {
+            visiting.remove(&cycle_key);
+            return (
+                empty_tsconfig(project_root),
+                Some(TsConfigProblem {
+                    path: config_path,
+                    message: format!("cannot read extended configuration: {error}"),
+                }),
+            );
+        }
+    };
+    let value = match parse_jsonc(&content) {
+        Ok(value) => value,
+        Err(error) => {
+            visiting.remove(&cycle_key);
+            return (
+                empty_tsconfig(project_root),
+                Some(TsConfigProblem {
+                    path: config_path,
+                    message: error.to_string(),
+                }),
+            );
+        }
+    };
+    let config_dir = config_path.parent().unwrap_or(project_root);
+    let mut problem = None;
+    let mut effective = value
+        .get("extends")
+        .and_then(serde_json::Value::as_str)
+        .map(|specifier| {
+            if let Some(parent) = resolve_extends_config(specifier, config_dir) {
+                let (parent, parent_problem) = load_config_chain(&parent, project_root, visiting);
+                problem = parent_problem;
+                parent
+            } else {
+                problem = Some(TsConfigProblem {
+                    path: config_path.clone(),
+                    message: format!("cannot resolve extended configuration `{specifier}`"),
+                });
+                empty_tsconfig(project_root)
+            }
+        })
+        .unwrap_or_else(|| empty_tsconfig(project_root));
+
+    if let Some(compiler_options) = value.get("compilerOptions") {
+        if let Some(base_url) = compiler_options
+            .get("baseUrl")
+            .and_then(serde_json::Value::as_str)
+        {
+            let base_url = Path::new(base_url);
+            effective.base_url = Some(if base_url.is_absolute() {
+                base_url.to_path_buf()
+            } else {
+                config_dir.join(base_url)
+            });
+        }
+        if let Some(paths) = compiler_options
+            .get("paths")
+            .and_then(serde_json::Value::as_object)
+        {
+            effective.paths.clear();
+            effective.path_bases.clear();
+            let declaration_base = compiler_options
+                .get("baseUrl")
+                .and_then(serde_json::Value::as_str)
+                .map(Path::new)
+                .map(|base| {
+                    if base.is_absolute() {
+                        base.to_path_buf()
+                    } else {
+                        config_dir.join(base)
+                    }
+                })
+                .unwrap_or_else(|| config_dir.to_path_buf());
+            for (pattern, targets) in paths {
+                let targets = targets
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(serde_json::Value::as_str)
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>();
+                effective.paths.push((pattern.clone(), targets));
+                effective.path_bases.push(declaration_base.clone());
+            }
+        }
+    }
+    effective.config_dir = config_dir.to_path_buf();
+    effective.project_root = project_root.to_path_buf();
+    effective.config_files.push(config_path);
+    effective.config_files.sort();
+    effective.config_files.dedup();
+    visiting.remove(&cycle_key);
+    (effective, problem)
+}
+
+fn empty_tsconfig(project_root: &Path) -> TsConfigPaths {
+    TsConfigPaths {
+        config_dir: project_root.to_path_buf(),
+        base_url: None,
+        paths: Vec::new(),
+        path_bases: Vec::new(),
+        config_files: Vec::new(),
+        project_root: project_root.to_path_buf(),
+    }
+}
+
+fn resolve_extends_config(specifier: &str, config_dir: &Path) -> Option<PathBuf> {
+    let path = Path::new(specifier);
+    if path.is_absolute() || specifier.starts_with('.') {
+        return config_file_candidate(&config_dir.join(path));
+    }
+
+    let mut current = Some(config_dir);
+    while let Some(directory) = current {
+        let package_candidate = directory.join("node_modules").join(path);
+        if let Some(candidate) = config_file_candidate(&package_candidate) {
+            return Some(candidate);
+        }
+        if package_candidate.is_dir()
+            && let Ok(package_source) = fs::read_to_string(package_candidate.join("package.json"))
+            && let Ok(package) = serde_json::from_str::<serde_json::Value>(&package_source)
+        {
+            let entry = package
+                .get("tsconfig")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("tsconfig.json");
+            if let Some(candidate) = config_file_candidate(&package_candidate.join(entry)) {
+                return Some(candidate);
+            }
+        }
+        current = directory.parent();
+    }
+    None
+}
+
+fn config_file_candidate(path: &Path) -> Option<PathBuf> {
+    [
+        path.to_path_buf(),
+        path.with_extension("json"),
+        path.join("tsconfig.json"),
+    ]
+    .into_iter()
+    .find(|candidate| candidate.is_file())
+}
+
+fn alias_pattern_order(left: &str, right: &str) -> std::cmp::Ordering {
+    let rank = |pattern: &str| {
+        let wildcard = pattern.find('*');
+        (
+            wildcard.is_none(),
+            wildcard.unwrap_or(pattern.len()),
+            wildcard.map_or(0, |index| pattern.len().saturating_sub(index + 1)),
+            pattern.len(),
+        )
+    };
+    rank(right).cmp(&rank(left)).then_with(|| left.cmp(right))
+}
+
+fn match_alias_pattern<'a>(pattern: &str, specifier: &'a str) -> Option<&'a str> {
+    let Some(star) = pattern.find('*') else {
+        return (pattern == specifier).then_some("");
+    };
+    if pattern[star + 1..].contains('*') {
+        return None;
+    }
+    let (prefix, remainder) = pattern.split_at(star);
+    let suffix = &remainder[1..];
+    specifier
+        .strip_prefix(prefix)
+        .and_then(|value| value.strip_suffix(suffix))
+}
+
+fn is_reserved_alias_specifier(specifier: &str) -> bool {
+    matches!(specifier, "react" | "react-dom" | "ruvyxa")
+        || specifier.starts_with("react/")
+        || specifier.starts_with("react-dom/")
+        || specifier.starts_with("ruvyxa/")
+        || specifier.starts_with("@ruvyxa/")
+}
+
+fn path_is_inside(path: &Path, project_root: &Path) -> bool {
+    project_root.as_os_str().is_empty()
+        || ruvyxa_diagnostics::normalized_canonical_path(path)
+            .starts_with(ruvyxa_diagnostics::normalized_canonical_path(project_root))
 }
 
 /// Minimally parse tsconfig.json to extract `compilerOptions.baseUrl` and
@@ -521,8 +880,19 @@ fn parse_jsonc(content: &str) -> std::result::Result<serde_json::Value, serde_js
 ///
 /// `None` means the file declares no compiler options at all, which is a valid
 /// config rather than a failure — the caller keeps looking at the next candidate.
+#[cfg(test)]
 fn paths_from_value(value: &serde_json::Value, project_root: &Path) -> Option<TsConfigPaths> {
+    paths_from_value_at(value, &project_root.join("tsconfig.json"), project_root)
+}
+
+#[cfg(test)]
+fn paths_from_value_at(
+    value: &serde_json::Value,
+    config_path: &Path,
+    project_root: &Path,
+) -> Option<TsConfigPaths> {
     let compiler_options = value.get("compilerOptions")?;
+    let config_dir = config_path.parent().unwrap_or(project_root);
 
     let base_url = compiler_options
         .get("baseUrl")
@@ -532,11 +902,12 @@ fn paths_from_value(value: &serde_json::Value, project_root: &Path) -> Option<Ts
             if p.is_absolute() {
                 p.to_path_buf()
             } else {
-                project_root.join(p)
+                config_dir.join(p)
             }
         });
 
     let mut paths: Vec<(String, Vec<String>)> = Vec::new();
+    let mut path_bases = Vec::new();
 
     if let Some(paths_obj) = compiler_options.get("paths").and_then(|v| v.as_object()) {
         for (pattern, targets) in paths_obj {
@@ -547,14 +918,18 @@ fn paths_from_value(value: &serde_json::Value, project_root: &Path) -> Option<Ts
                     .map(ToString::to_string)
                     .collect();
                 paths.push((pattern.clone(), target_strs));
+                path_bases.push(base_url.clone().unwrap_or_else(|| config_dir.to_path_buf()));
             }
         }
     }
 
     Some(TsConfigPaths {
-        config_dir: project_root.to_path_buf(),
+        config_dir: config_dir.to_path_buf(),
         base_url,
         paths,
+        path_bases,
+        config_files: vec![config_path.to_path_buf()],
+        project_root: project_root.to_path_buf(),
     })
 }
 
@@ -1248,6 +1623,8 @@ pub(crate) fn resolve_graph_with_incremental(
             load_source_map: None,
             deps: entry_deps.paths.clone(),
             dependency_aliases: entry_deps.aliases,
+            watch_paths: Vec::new(),
+            glob_matches: Vec::new(),
             is_external: false,
         },
     );
@@ -1313,6 +1690,21 @@ pub(crate) fn resolve_graph_with_incremental(
                         .and_then(|extension| extension.to_str()),
                     Some("md" | "mdx")
                 );
+                let glob_expansion = if is_json || is_content || is_external {
+                    crate::glob_import::GlobExpansion {
+                        source,
+                        ..Default::default()
+                    }
+                } else {
+                    let resolve_base = dep_path.parent().unwrap_or(&project_root);
+                    crate::glob_import::expand_import_meta_glob(
+                        &source,
+                        resolve_base,
+                        &project_root,
+                        |pattern| tsconfig.resolve_glob_pattern(pattern),
+                    )?
+                };
+                let source = glob_expansion.source;
                 let compiled_content = if is_content {
                     if let Some(output) =
                         build_hooks.compile_content(&source, dep_path, &hook_context)?
@@ -1339,7 +1731,8 @@ pub(crate) fn resolve_graph_with_incremental(
                 // the paths while defaulting the aliases to empty would make a
                 // warm build resolve differently from a cold one, so an entry
                 // that never recorded aliases is resolved fresh instead.
-                let reusable_dependencies = if target == BundleTarget::Client
+                let reusable_dependencies = if glob_expansion.watch_roots.is_empty()
+                    && target == BundleTarget::Client
                     && build_hooks.host_count() == 0
                 {
                     incremental.and_then(|cache| {
@@ -1404,6 +1797,8 @@ pub(crate) fn resolve_graph_with_incremental(
                         load_source_map,
                         deps: dependencies.paths,
                         dependency_aliases: dependencies.aliases,
+                        watch_paths: glob_expansion.watch_roots,
+                        glob_matches: glob_expansion.matches,
                         is_external,
                     },
                 ))
@@ -2074,6 +2469,111 @@ export default function Card() { return <div className={cn("card")} /> }"#,
                 &components.join("Button.tsx")
             ))
         );
+    }
+
+    #[test]
+    fn replays_tsconfig_path_conformance_fixture() {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Fixture {
+            contract: String,
+            schema_version: u32,
+            files: BTreeMap<String, String>,
+            configs: BTreeMap<String, String>,
+            outside_files: BTreeMap<String, String>,
+            cases: Vec<Case>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Case {
+            name: String,
+            specifier: String,
+            expected: Option<String>,
+        }
+        let fixture: Fixture = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/path-alias-contract.json"
+        ))
+        .unwrap();
+        assert_eq!(fixture.contract, "ruvyxa.path-alias");
+        assert_eq!(fixture.schema_version, 1);
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("project");
+        for (relative, source) in fixture.files.into_iter().chain(fixture.configs) {
+            let file = root.join(relative);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, source).unwrap();
+        }
+        for (relative, source) in fixture.outside_files {
+            let file = temp.path().join(relative);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, source).unwrap();
+        }
+
+        let config = TsConfigPaths::load(&root);
+        let canonical_root = ruvyxa_diagnostics::normalized_canonical_path(&root);
+        for case in fixture.cases {
+            let actual = config.resolve(&case.specifier).map(|path| {
+                path.strip_prefix(&canonical_root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            });
+            assert_eq!(actual, case.expected, "{}", case.name);
+        }
+        assert_eq!(config.config_files.len(), 2);
+    }
+
+    #[test]
+    fn local_aliases_survive_a_missing_or_cyclic_parent_with_a_diagnostic() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("src/value.ts"), "export const value = 1;").unwrap();
+        fs::write(
+            root.join("tsconfig.json"),
+            r#"{"extends":"./missing.json","compilerOptions":{"paths":{"@/*":["./src/*"]}}}"#,
+        )
+        .unwrap();
+        let (missing, problem) = TsConfigPaths::load_reporting(root);
+        assert!(problem.is_some());
+        assert!(missing.resolve("@/value").is_some());
+
+        fs::write(
+            root.join("tsconfig.json"),
+            r#"{"extends":"./base.json","compilerOptions":{"paths":{"@/*":["./src/*"]}}}"#,
+        )
+        .unwrap();
+        fs::write(root.join("base.json"), r#"{"extends":"./tsconfig.json"}"#).unwrap();
+        let (cyclic, problem) = TsConfigPaths::load_reporting(root);
+        assert!(
+            problem
+                .unwrap()
+                .message
+                .contains("cyclic tsconfig/jsconfig extends chain")
+        );
+        assert!(cyclic.resolve("@/value").is_some());
+    }
+
+    #[test]
+    fn inherited_configuration_content_participates_in_the_resolver_fingerprint() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        fs::write(root.join("tsconfig.json"), r#"{"extends":"./base.json"}"#).unwrap();
+        fs::write(
+            root.join("base.json"),
+            r#"{"compilerOptions":{"paths":{"@/*":["./src/*"]}}}"#,
+        )
+        .unwrap();
+        let cache = ResolveGraphCache::new();
+        let first = cache.configuration_hash(root);
+
+        fs::write(
+            root.join("base.json"),
+            r#"{/* changed */"compilerOptions":{"paths":{"@/*":["./src/*"]}}}"#,
+        )
+        .unwrap();
+        let second = cache.configuration_hash(root);
+
+        assert_ne!(first, second);
     }
 
     #[test]

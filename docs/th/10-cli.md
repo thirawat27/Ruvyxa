@@ -165,6 +165,28 @@ ruvyxa build --server-only --target bun --adapter node
 
 flag นี้เป็น opt-in `ruvyxa build` ที่ไม่ใส่ flag ยังทำงานเหมือนเดิมทุกประการ
 
+## Baseline สำหรับ production build ที่ทำซ้ำได้
+
+ใช้ baseline mode ก่อนและหลังแก้ compiler, cache, chunking, HMR หรือ adapter:
+
+```bash
+npm run bench -- --baseline --samples 3 --json
+```
+
+แต่ละ sample ทำงานในสำเนาโปรเจกต์ชั่วคราวใต้ `.ruvyxa/bench/` และมี cache ของตัวเอง โดยวัด 7
+scenario ตามลำดับ dependency: cold build, warm build, first production route, CSS edit,
+client-boundary edit, server-route edit และ leaf-route edit การแก้ทั้งหมด syntax-safe
+และอยู่ภายในสำเนาเท่านั้น โหมดนี้ไม่แก้ ไม่ลบ และไม่ warm source หรือ build cache ของโปรเจกต์จริง
+จากนั้นลบ temporary workspace เมื่อจบ แต่ละ sample
+
+รายงานใช้ contract ชื่อคงที่ `ruvyxa.build-bench` และแยกเวอร์ชันไว้ใน `schemaVersion: 1` พร้อม cache
+observation ของแต่ละ scenario และจะเขียนผลเมื่อ cold/warm output ผ่าน semantic artifact-equivalence
+check แล้วเท่านั้น timestamp, cache counter และ timing field เป็น telemetry จึงถูก normalize
+ระหว่างตรวจ ส่วน deployed code, asset และ manifest ยังอยู่ใน proof ครบ รายงานยังมี
+`peakResidentBytes`, edit files, cache observations และจำนวน HMR `reloadFallbacks`; budget ที่อยู่ใน
+fixture จะปฏิเสธผลที่ทำให้เข้าใจผิดหรือเกินขอบเขต ผู้ใช้ `bench --json` แบบเดิมยังได้ array shape
+เดิม เพราะ baseline mode เป็น opt-in
+
 ## Application loop ที่แนะนำ
 
 รันจาก root ของ application ที่สร้างแล้ว ไม่ใช่จาก framework monorepo นี้:

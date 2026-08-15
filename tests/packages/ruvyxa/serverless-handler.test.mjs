@@ -12,6 +12,9 @@ const { createHandler, prerenderRelativePath } = await import(
   `file://${handlerModule.replaceAll('\\', '/')}`
 )
 const { revalidatePath } = await import(`file://${coreServerModule.replaceAll('\\', '/')}`)
+const { actionReferenceId } = await import(
+  `file://${path.join(workspaceRoot, 'packages/ruvyxa/runtime/action-runtime.mjs').replaceAll('\\', '/')}`
+)
 const revalidationConformance = JSON.parse(
   readFileSync(path.join(workspaceRoot, 'tests/fixtures/revalidation-conformance.json'), 'utf8'),
 )
@@ -34,6 +37,46 @@ function handlerFor(routes, rendered) {
 }
 
 describe('serverless request body limits', () => {
+  it('binds versioned action references and rejects nonce replay', async () => {
+    const fixture = JSON.parse(
+      readFileSync(path.join(workspaceRoot, 'tests/fixtures/action-contract.json'), 'utf8'),
+    )
+    assert.equal(actionReferenceId(fixture.routeId, fixture.source), fixture.expected)
+    const submit = async (input) => input
+    submit.ruvyxa = { kind: 'action' }
+    const route = {
+      ...pageRoute(fixture.routeId, '/target'),
+      actionReferenceId: fixture.expected,
+    }
+    const handler = createHandler({
+      routes: [route],
+      importPage: async () => ({}),
+      importApi: async () => ({}),
+      importAction: async () => ({ submit }),
+    })
+    const invoke = (id, nonce) =>
+      handler(
+        new Request(
+          `http://localhost/__ruvyxa/action?path=/target&name=submit&id=${encodeURIComponent(id)}`,
+          {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              host: 'localhost',
+              origin: 'http://localhost',
+              'sec-fetch-site': 'same-origin',
+              'x-ruvyxa-action-nonce': nonce,
+            },
+            body: '{}',
+          },
+        ),
+      )
+
+    assert.equal((await invoke(fixture.expected, '0123456789abcdef')).status, 200)
+    assert.equal((await invoke(fixture.expected, '0123456789abcdef')).status, 409)
+    assert.equal((await invoke('a_0000000000000000', 'fedcba9876543210')).status, 409)
+  })
+
   it('stops reading a lengthless action body at the action limit', async () => {
     const chunk = new TextEncoder().encode('abc')
     const chunkCount = 100

@@ -31,17 +31,26 @@ CLI ตรวจ Vercel, Netlify, Cloudflare, Railway, Render และ AWS จ�
 
 ## แผนที่ capability และ artifact
 
-| Adapter          | Target และ route ที่รองรับ                           | Generated handoff                                                                     |
-| ---------------- | ---------------------------------------------------- | ------------------------------------------------------------------------------------- |
-| Node             | Node; SSR, SSG, CSR, ISR, PPR, API                   | standalone server และ static directory แบบ optional                                   |
-| Bun              | Bun/Node-compatible; SSR, SSG, CSR, ISR, PPR, API    | standalone Bun server และ static directory แบบ optional                               |
-| Deno             | Deno; SSR, SSG, CSR, ISR, PPR, API                   | standalone Deno server และ static directory แบบ optional                              |
-| Static           | Static; SSG และ CSR เท่านั้น                         | static publish directory และ `_headers` SSR, ISR, PPR, API route จะไม่ผ่าน validation |
-| Vercel           | Serverless หรือ edge; route strategy และ API ทั้งหมด | Vercel Build Output API static/function artifact                                      |
-| Netlify          | Serverless; route strategy และ API ทั้งหมด           | publish directory, handler function, deploy config, Frameworks API artifact           |
-| Cloudflare       | Edge; route strategy และ API ทั้งหมด                 | Worker, asset directory, Wrangler config, header                                      |
-| Railway / Render | Node; route strategy และ API ทั้งหมด                 | standalone server, public directory แบบ optional, generated project config            |
-| Firebase / AWS   | Serverless; route strategy และ API ทั้งหมด           | Hosting/static พร้อม generated function/compute bundle และ provider config            |
+ตารางนี้สร้างจาก adapter release contract โดยตรง และ `pnpm release:validate` จะปฏิเสธเมื่อเอกสาร
+drift
+
+<!-- adapter-matrix:start -->
+
+| Adapter    | Target     | Runtime | Route ที่รองรับ              |
+| ---------- | ---------- | ------- | ---------------------------- |
+| AWS        | serverless | node    | SSR, SSG, CSR, ISR, PPR, API |
+| Bun        | node       | bun     | SSR, SSG, CSR, ISR, PPR, API |
+| Cloudflare | edge       | edge    | SSR, SSG, CSR, API           |
+| Deno       | node       | deno    | SSR, SSG, CSR, ISR, PPR, API |
+| Firebase   | serverless | node    | SSR, SSG, CSR, ISR, PPR, API |
+| Netlify    | serverless | node    | SSR, SSG, CSR, ISR, PPR, API |
+| Node       | node       | node    | SSR, SSG, CSR, ISR, PPR, API |
+| Railway    | node       | node    | SSR, SSG, CSR, ISR, PPR, API |
+| Render     | node       | node    | SSR, SSG, CSR, ISR, PPR, API |
+| Static     | static     | static  | SSG, CSR                     |
+| Vercel     | serverless | node    | SSR, SSG, CSR, ISR, PPR, API |
+
+<!-- adapter-matrix:end -->
 
 native realtime ต้องใช้ long-lived Node/Bun output มันใช้ได้กับ Node, Bun, Railway และ Render
 แต่ปฏิเสธ Deno, AWS, Cloudflare, Firebase, Netlify, static และ Vercel ดู

@@ -32,6 +32,12 @@ export interface RouteManifestEntry {
   sharedChunks?: Array<{ src: string }>
   /** Render strategy, when the manifest records one. */
   strategy?: string
+  /** Canonical server/client artifact required by soft navigation. */
+  artifactVersion?: string
+  /** This route has opted into a public, version-bound Flight payload. */
+  flight?: boolean
+  /** The route's Flight producer uses the bounded deployment cache contract. */
+  cache?: boolean
 }
 
 /** A successful match of a URL against a route. */

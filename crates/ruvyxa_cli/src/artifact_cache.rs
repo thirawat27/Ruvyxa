@@ -29,9 +29,14 @@ use crate::*;
 const WORKER_RUNTIME_FILES: &[&str] = &[
     "worker-pool.mjs",
     "worker-admission.mjs",
+    "cache-budget.mjs",
+    "glob.mjs",
     "request-context.mjs",
     "compiler.mjs",
+    "paths.mjs",
     "entry-templates.mjs",
+    "flight.mjs",
+    "react-compiler.mjs",
 ];
 
 pub(crate) fn content_hash(input: &str) -> String {

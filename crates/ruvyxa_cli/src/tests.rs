@@ -1470,6 +1470,7 @@ export default config({
         &config.plugins,
         config.javascript_runtime(),
         config.markdown_enabled(),
+        config.react_compiler.unwrap_or(false),
     )
     .unwrap();
     let client_manifest = emit_client_bundles_with_session(
@@ -1643,7 +1644,8 @@ register({ build }) {
     }];
 
     let session =
-        TypeScriptPluginBuildSession::new(root, &plugins, JavaScriptRuntime::Node, false).unwrap();
+        TypeScriptPluginBuildSession::new(root, &plugins, JavaScriptRuntime::Node, false, false)
+            .unwrap();
     session
         .run_complete(&out_dir, &serde_json::json!({ "routes": 1 }))
         .unwrap();
@@ -1688,7 +1690,8 @@ register({ build }) {
         head: Vec::new(),
     }];
     let session =
-        TypeScriptPluginBuildSession::new(root, &plugins, JavaScriptRuntime::Node, false).unwrap();
+        TypeScriptPluginBuildSession::new(root, &plugins, JavaScriptRuntime::Node, false, false)
+            .unwrap();
 
     session.run_start(&out_dir).unwrap();
     let context = ruvyxa_bundler::hooks::BuildHookContext {
@@ -1717,6 +1720,36 @@ register({ build }) {
         std::fs::read_to_string(out_dir.join("plugin-phase.txt")).unwrap(),
         "transformed"
     );
+}
+
+#[test]
+fn production_session_runs_opt_in_react_compiler_before_oxc() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    std::fs::write(
+        root.join("ruvyxa.config.mjs"),
+        "export default { reactCompiler: true }\n",
+    )
+    .unwrap();
+
+    let session =
+        TypeScriptPluginBuildSession::new(root, &[], JavaScriptRuntime::Node, false, true).unwrap();
+    let context = ruvyxa_bundler::hooks::BuildHookContext {
+        project_root: root.to_path_buf(),
+        importer: None,
+        target: ruvyxa_bundler::BundleTarget::Client,
+    };
+    let transformed = ruvyxa_bundler::hooks::BuildHooks::transform(
+        session.bridge().unwrap(),
+        "export function Counter({ count }) { return <span>{count}</span> }",
+        &root.join("Counter.tsx"),
+        &context,
+    )
+    .unwrap()
+    .unwrap();
+
+    assert!(transformed.code.contains("react/compiler-runtime"));
+    assert!(transformed.map.is_some());
 }
 
 #[test]

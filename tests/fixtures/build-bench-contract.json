@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "methodologyId": "ruvyxa.build-bench",
+  "description": "Reproducible production-build scenarios used before incremental-engine, cache, HMR, adapter, and operability changes are admitted.",
+  "why": "A repeated build is not automatically cold or warm, and editing a real project during measurement risks corrupting user work. The baseline clones project inputs into an ignored temporary workspace for every sample, gives that workspace a private cache, and verifies that cold and warm builds emit the same semantic artifacts before publishing timings.",
+  "budgets": {
+    "maxScenarioMs": 300000,
+    "maxPeakResidentBytes": 2147483648,
+    "maxReloadFallbacksPerSample": 3
+  },
+  "scenarios": [
+    {
+      "id": "cold-build",
+      "cacheState": "empty",
+      "mutation": "none",
+      "proof": "The sample starts with a newly created private cache directory."
+    },
+    {
+      "id": "warm-build",
+      "cacheState": "reused",
+      "mutation": "none",
+      "proof": "The second build reuses the first build's cache and must emit the same semantic artifact fingerprint."
+    },
+    {
+      "id": "first-route",
+      "cacheState": "built",
+      "mutation": "none",
+      "proof": "The first static page route is rendered through the production server configuration after the warm build."
+    },
+    {
+      "id": "css-edit-build",
+      "cacheState": "reused",
+      "mutation": "css-source",
+      "proof": "A syntax-safe marker is appended to a stylesheet inside the disposable workspace."
+    },
+    {
+      "id": "client-edit-build",
+      "cacheState": "reused",
+      "mutation": "client-source",
+      "proof": "A syntax-safe marker is appended to a client-boundary source, or the selected page source when no explicit boundary exists."
+    },
+    {
+      "id": "server-edit-build",
+      "cacheState": "reused",
+      "mutation": "server-source",
+      "proof": "A syntax-safe marker is appended to a server/action/API source, or the selected page source when no narrower server file exists."
+    },
+    {
+      "id": "leaf-edit-build",
+      "cacheState": "reused",
+      "mutation": "leaf-source",
+      "proof": "A syntax-safe marker is appended only inside the disposable workspace before the third build."
+    }
+  ]
+}

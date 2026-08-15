@@ -34,6 +34,8 @@ pub(crate) struct ProjectConfig {
     /// without deciding what it should mean first.
     #[serde(rename = "react")]
     pub(crate) _react: Option<serde_json::Value>,
+    /// Opt-in stable React Compiler transform for production module builds.
+    pub(crate) react_compiler: Option<bool>,
     /// Accepted and read by nothing, for the same reason as `_react`. Note the
     /// config renderer does not even forward `typescript`, so this is always
     /// `None` in practice — type checking is `tsc`'s job against the project's

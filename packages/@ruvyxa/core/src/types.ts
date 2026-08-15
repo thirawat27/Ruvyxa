@@ -13,6 +13,12 @@ export interface RuvyxaConfig {
    */
   react?: boolean
   /**
+   * Run the stable React Compiler in inference mode before Ruvyxa's Oxc
+   * transform for production builds. Disabled unless explicitly enabled.
+   * @default false
+   */
+  reactCompiler?: boolean
+  /**
    * Accepted and ignored.
    *
    * @deprecated Nothing reads this. TypeScript is compiled by the bundler,

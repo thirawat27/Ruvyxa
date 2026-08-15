@@ -31,6 +31,7 @@ import {
   type RouteManifestEntry,
   type RouteParams,
 } from '@ruvyxa/core/route-match'
+import type { FlightValue } from '@ruvyxa/core/server'
 
 import type { RouteHref } from './route-types.js'
 
@@ -50,6 +51,8 @@ export interface RouteContextValue {
   params: RouteParams
   /** The matched route pattern, e.g. `/blog/[slug]`. */
   route: string
+  /** Public server-component data for this exact route artifact, when enabled. */
+  flight?: FlightValue
 }
 
 /** Options accepted by the imperative navigation methods. */
@@ -97,7 +100,9 @@ interface RouterGlobals {
    * so this is what makes the initial route addressable.
    */
   __RUVYXA_ROUTE_PATTERN__?: string
+  __RUVYXA_ROUTE_ARTIFACTS__?: Record<string, string>
   __RUVYXA_ROUTE_MANIFEST__?: { routes?: RouteManifestEntry[] }
+  __RUVYXA_FLIGHT__?: FlightValue
   __RUVYXA_ROUTER_INSTANCE__?: RouterInstance
 }
 
@@ -111,6 +116,16 @@ const globals = globalThis as unknown as RouterGlobals
  * to browsers. `route-manifest.json` holds only `{ path, src, sharedChunks }`.
  */
 const MANIFEST_URL = '/__ruvyxa/client/route-manifest.json'
+const FLIGHT_URL = '/__ruvyxa/flight'
+const FLIGHT_PROTOCOL = 'ruvyxa.flight'
+const FLIGHT_PROTOCOL_VERSION = 1
+const FLIGHT_BYTE_LIMIT = 1024 * 1024
+const FLIGHT_CACHE_LIMIT = 16
+
+interface FlightEntry {
+  controller: AbortController
+  promise: Promise<FlightValue>
+}
 
 /** Internal navigation singleton shared by the routing hooks and `<Link>`. */
 export interface RouterInstance {
@@ -167,6 +182,8 @@ function createRouter(): RouterInstance {
   let pendingNavigationId: number | null = null
   // Guards against a slow first navigation overwriting a faster later one.
   let navigationId = 0
+  let navigationAbort: AbortController | null = null
+  const flightCache = new Map<string, FlightEntry>()
 
   const initialPathname = globals.__RUVYXA_REQUEST_PATH__ ?? fallbackPathname()
 
@@ -181,6 +198,7 @@ function createRouter(): RouterInstance {
     // page served by an older bundle still reports something usable.
     route:
       globals.__RUVYXA_ROUTE_PATTERN__ ?? match(initialPathname)?.route.path ?? initialPathname,
+    flight: globals.__RUVYXA_FLIGHT__,
   }
   // Cached so `getSnapshot` for `useSyncExternalStore` returns a stable string
   // between navigations; reading `location.search` per call is stable too, but
@@ -268,7 +286,12 @@ function createRouter(): RouterInstance {
     entry: RouteManifestEntry,
     context: RouteContextValue,
   ): Promise<boolean> {
-    if (globals.__RUVYXA_ROUTES__?.[context.route]) return true
+    if (globals.__RUVYXA_ROUTES__?.[context.route]) {
+      return (
+        !entry.artifactVersion ||
+        globals.__RUVYXA_ROUTE_ARTIFACTS__?.[context.route] === entry.artifactVersion
+      )
+    }
     if (!entry.src) return false
     globals.__RUVYXA_ROUTE_PARAMS__ = context.params
     globals.__RUVYXA_REQUEST_PATH__ = context.pathname
@@ -277,7 +300,62 @@ function createRouter(): RouterInstance {
     } catch {
       return false
     }
+    if (
+      entry.artifactVersion &&
+      globals.__RUVYXA_ROUTE_ARTIFACTS__?.[context.route] !== entry.artifactVersion
+    ) {
+      return false
+    }
     return Boolean(globals.__RUVYXA_ROUTES__?.[context.route])
+  }
+
+  function flightKey(entry: RouteManifestEntry, pathname: string): string | null {
+    return entry.flight && entry.artifactVersion ? `${entry.artifactVersion}:${pathname}` : null
+  }
+
+  function startFlight(entry: RouteManifestEntry, pathname: string): FlightEntry | null {
+    const key = flightKey(entry, pathname)
+    if (!key) return null
+    const cached = flightCache.get(key)
+    if (cached) {
+      flightCache.delete(key)
+      flightCache.set(key, cached)
+      return cached
+    }
+
+    while (flightCache.size >= FLIGHT_CACHE_LIMIT) {
+      const oldest = flightCache.entries().next().value as [string, FlightEntry] | undefined
+      if (!oldest) break
+      oldest[1].controller.abort()
+      flightCache.delete(oldest[0])
+    }
+
+    const controller = new AbortController()
+    const requestUrl = new URL(FLIGHT_URL, window.location.origin)
+    requestUrl.searchParams.set('path', pathname)
+    requestUrl.searchParams.set('artifact', entry.artifactVersion!)
+    const promise = fetch(requestUrl, {
+      credentials: 'omit',
+      headers: { 'x-ruvyxa-flight': '1' },
+      signal: controller.signal,
+    })
+      .then(async (response) => {
+        if (!response.ok) throw new Error(`Flight request failed with status ${response.status}`)
+        const declaredLength = Number(response.headers.get('content-length') ?? '0')
+        if (declaredLength > FLIGHT_BYTE_LIMIT) throw new Error('Flight payload is too large')
+        const payload = await response.text()
+        if (new TextEncoder().encode(payload).byteLength > FLIGHT_BYTE_LIMIT) {
+          throw new Error('Flight payload is too large')
+        }
+        return decodeFlight(payload, entry.artifactVersion!, pathname)
+      })
+      .catch((error: unknown) => {
+        flightCache.delete(key)
+        throw error
+      })
+    const flight = { controller, promise }
+    flightCache.set(key, flight)
+    return flight
   }
 
   function hardNavigate(url: URL, replace: boolean): void {
@@ -297,6 +375,8 @@ function createRouter(): RouterInstance {
 
     const historyMode = options.history ?? (options.replace ? 'replace' : 'push')
     const id = ++navigationId
+    navigationAbort?.abort()
+    navigationAbort = null
     if (pendingNavigationId !== null) pendingNavigationId = id
 
     await ensureManifest()
@@ -317,10 +397,19 @@ function createRouter(): RouterInstance {
       route: matched.route.path,
     }
 
-    if (!globals.__RUVYXA_ROUTES__?.[context.route]) {
+    const flight = startFlight(matched.route, context.pathname)
+    navigationAbort = flight?.controller ?? null
+
+    const staleArtifact =
+      Boolean(matched.route.artifactVersion) &&
+      globals.__RUVYXA_ROUTE_ARTIFACTS__?.[context.route] !== matched.route.artifactVersion
+    if (!globals.__RUVYXA_ROUTES__?.[context.route] || staleArtifact) {
       pendingNavigationId = id
       emit()
-      const loaded = await loadRoute(matched.route, context)
+      const [loaded, flightValue] = await Promise.all([
+        loadRoute(matched.route, context),
+        flight?.promise,
+      ]).catch(() => [false, undefined] as const)
       if (id !== navigationId) return
       pendingNavigationId = null
       if (!loaded) {
@@ -328,7 +417,26 @@ function createRouter(): RouterInstance {
         hardNavigate(url, historyMode === 'replace')
         return
       }
+      if (flight && flightValue === undefined) {
+        emit()
+        hardNavigate(url, historyMode === 'replace')
+        return
+      }
+      context.flight = flightValue
     } else {
+      if (flight) {
+        pendingNavigationId = id
+        emit()
+        try {
+          context.flight = await flight.promise
+        } catch {
+          if (id !== navigationId) return
+          pendingNavigationId = null
+          emit()
+          hardNavigate(url, historyMode === 'replace')
+          return
+        }
+      }
       pendingNavigationId = null
     }
 
@@ -373,6 +481,9 @@ function createRouter(): RouterInstance {
     void ensureManifest().then(() => {
       const matched = match(url.pathname)
       if (!matched?.route.src) return
+      const pathname = canonicalRoutePath(url.pathname)
+      if (pathname === null) return
+      if (matched.route.flight) void startFlight(matched.route, pathname)?.promise.catch(() => {})
       if (globals.__RUVYXA_ROUTES__?.[matched.route.path]) return
       // `modulepreload` warms the network and the module graph without
       // executing the bundle, so a prefetch cannot register a tree factory
@@ -425,6 +536,49 @@ function createRouter(): RouterInstance {
     prefetch,
     refresh,
   }
+}
+
+function decodeFlight(payload: string, artifactVersion: string, pathname: string): FlightValue {
+  const envelope: unknown = JSON.parse(payload)
+  if (!isRecord(envelope)) throw new Error('Flight payload must be an object')
+  if (
+    envelope.protocol !== FLIGHT_PROTOCOL ||
+    envelope.protocolVersion !== FLIGHT_PROTOCOL_VERSION ||
+    envelope.manifestVersion !== artifactVersion ||
+    envelope.route !== pathname
+  ) {
+    throw new Error('Flight payload does not match the requested route artifact')
+  }
+  assertFlightValue(envelope.tree, 0, { count: 0 })
+  return envelope.tree as FlightValue
+}
+
+function assertFlightValue(value: unknown, depth: number, state: { count: number }): void {
+  state.count += 1
+  if (state.count > 10_000 || depth > 64) throw new Error('Flight payload exceeds its value limit')
+  if (
+    value === null ||
+    typeof value === 'string' ||
+    typeof value === 'boolean' ||
+    (typeof value === 'number' && Number.isFinite(value))
+  ) {
+    return
+  }
+  if (Array.isArray(value)) {
+    for (const child of value) assertFlightValue(child, depth + 1, state)
+    return
+  }
+  if (!isRecord(value)) throw new Error('Flight payload contains an unsupported value')
+  for (const [key, child] of Object.entries(value)) {
+    if (key === '__proto__' || key === 'prototype' || key === 'constructor') {
+      throw new Error('Flight payload contains an unsafe object key')
+    }
+    assertFlightValue(child, depth + 1, state)
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === 'object' && !Array.isArray(value)
 }
 
 /**

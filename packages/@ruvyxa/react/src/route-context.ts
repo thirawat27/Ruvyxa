@@ -19,6 +19,7 @@ import {
 } from './router.js'
 import type { RouteHref } from './route-types.js'
 import type { RouteParams } from '@ruvyxa/core/route-match'
+import type { FlightValue } from '@ruvyxa/core/server'
 
 const CONTEXT_KEY = '__RUVYXA_ROUTE_CONTEXT__'
 
@@ -78,6 +79,16 @@ export function useSearchParams(): URLSearchParams {
 /** The matched route pattern, e.g. `/blog/[slug]`. */
 export function useSelectedRoute(): string {
   return useRouteContext().route
+}
+
+/**
+ * Read the public server-component payload attached to the current soft navigation.
+ *
+ * The value is absent on routes that do not export `flight`, and on the first
+ * server-rendered document unless the host supplied an inline payload.
+ */
+export function useFlight<T extends FlightValue = FlightValue>(): T | undefined {
+  return useRouteContext().flight as T | undefined
 }
 
 /**

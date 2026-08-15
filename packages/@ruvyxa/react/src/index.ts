@@ -25,6 +25,7 @@ export {
   RouteContext,
   useParams,
   usePathname,
+  useFlight,
   useRouteContext,
   useRouter,
   useSearchParams,

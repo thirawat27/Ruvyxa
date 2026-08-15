@@ -1,0 +1,8 @@
+{
+  "contract": "ruvyxa.action",
+  "schemaVersion": 1,
+  "routeId": "route_todos",
+  "source": "export const create = 1\n",
+  "expected": "a_4ec84a2fc14e2577",
+  "nonce": { "minLength": 16, "maxLength": 128, "ttlSeconds": 600, "maxEntries": 10000 }
+}

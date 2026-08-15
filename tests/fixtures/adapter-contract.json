@@ -1,0 +1,87 @@
+{
+  "contract": "ruvyxa.adapter",
+  "schemaVersion": 1,
+  "adapters": [
+    {
+      "name": "aws",
+      "target": "serverless",
+      "runtime": "node",
+      "platform": "aws",
+      "supports": ["ssr", "ssg", "csr", "isr", "ppr", "api"]
+    },
+    {
+      "name": "bun",
+      "target": "node",
+      "runtime": "bun",
+      "platform": "bun",
+      "supports": ["ssr", "ssg", "csr", "isr", "ppr", "api"]
+    },
+    {
+      "name": "cloudflare",
+      "target": "edge",
+      "runtime": "edge",
+      "platform": "cloudflare",
+      "supports": ["ssr", "ssg", "csr", "api"]
+    },
+    {
+      "name": "deno",
+      "target": "node",
+      "runtime": "deno",
+      "platform": "deno",
+      "supports": ["ssr", "ssg", "csr", "isr", "ppr", "api"]
+    },
+    {
+      "name": "firebase",
+      "target": "serverless",
+      "runtime": "node",
+      "platform": "firebase",
+      "supports": ["ssr", "ssg", "csr", "isr", "ppr", "api"]
+    },
+    {
+      "name": "netlify",
+      "target": "serverless",
+      "runtime": "node",
+      "platform": "netlify",
+      "supports": ["ssr", "ssg", "csr", "isr", "ppr", "api"]
+    },
+    {
+      "name": "node",
+      "target": "node",
+      "runtime": "node",
+      "platform": "node",
+      "supports": ["ssr", "ssg", "csr", "isr", "ppr", "api"]
+    },
+    {
+      "name": "railway",
+      "target": "node",
+      "runtime": "node",
+      "platform": "railway",
+      "supports": ["ssr", "ssg", "csr", "isr", "ppr", "api"]
+    },
+    {
+      "name": "render",
+      "target": "node",
+      "runtime": "node",
+      "platform": "render",
+      "supports": ["ssr", "ssg", "csr", "isr", "ppr", "api"]
+    },
+    {
+      "name": "static",
+      "target": "static",
+      "runtime": "static",
+      "platform": "static",
+      "supports": ["ssg", "csr"]
+    },
+    {
+      "name": "vercel",
+      "target": "serverless",
+      "runtime": "node",
+      "platform": "vercel",
+      "supports": ["ssr", "ssg", "csr", "isr", "ppr", "api"]
+    }
+  ],
+  "unsupportedDiagnostics": {
+    "route": "RUV2202",
+    "runtimeFeature": "RUV2204"
+  }
+}

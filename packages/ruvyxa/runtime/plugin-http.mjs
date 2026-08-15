@@ -30,6 +30,7 @@ export const RESERVED_FRAMEWORK_PATHS = Object.freeze([
   '/__ruvyxa/hmr',
   '/__ruvyxa/client',
   '/__ruvyxa/action',
+  '/__ruvyxa/flight',
   '/__ruvyxa/trace',
   '/__ruvyxa/devtools',
   '/__ruvyxa/devtools/data',

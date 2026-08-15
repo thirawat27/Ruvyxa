@@ -85,6 +85,14 @@ documents: [ARCHITECTURE.md](ARCHITECTURE.md), [CHANGELOG.md](CHANGELOG.md),
   edges and reuse unchanged client resolution work on warm builds. The graph is namespaced by the
   evaluated config dependency hash; build hooks bypass edge reuse so plugin resolution stays
   correct. Compiled output remains content-addressed under the configured build cache.
+- **Typed artifact task graph** — resolve, transform, analysis, chunk-plan, emit, source-map, and
+  manifest records share explicit dependency edges and generation-scoped completion. Records are
+  persisted atomically beside the build cache; corrupt or incompatible metadata rebuilds normally,
+  and `RUVYXA_DISABLE_ARTIFACT_CACHE=1` provides a correctness-preserving temporary bypass.
+- **Coordinated cache pressure** — compiler memory, resolver derivations, and artifact metadata use
+  one soft/hard hysteresis policy (`RUVYXA_BUILD_CACHE_MEMORY_MB`, 256 MiB default). Worker caches
+  apply the same policy under `RUVYXA_MEMORY_LIMIT_MB` (512 MiB default), skip pinned build keys,
+  stop speculative warmups at the hard limit, and expose pressure/eviction counters.
 - **plugin pipeline** — one `definePlugin({ name, register })` registry provides grouped HTTP,
   build, dev, diagnostic, and native sockets through a versioned Node/Bun/Deno subprocess. AST-based
   import/export extraction and CommonJS detection for npm dependencies.
@@ -676,7 +684,7 @@ Fourteen commands. Project commands accept `--root <dir>` (default `.`) and
 | `ruvyxa adds <flow…>`         | Scaffold a `form`, `data-table`, or `auth` flow                                 | `--force`                                                              |
 | `ruvyxa doctor`               | Project health plus deploy-target inspection                                    | `--target`, `--adapter`, `--json`                                      |
 | `ruvyxa trace <route>`        | Inspect one route manifest entry                                                | —                                                                      |
-| `ruvyxa bench`                | Benchmark route discovery, analysis, validation, and production builds          | `--runtime`, `--samples <n>` (default 3), `--json`                     |
+| `ruvyxa bench`                | Benchmark route discovery, analysis, validation, and production builds          | `--runtime`, `--samples <n>` (default 3), `--json`, `--baseline`       |
 | `ruvyxa test:parity`          | Compare dev/prod routes and smoke-render page routes                            | —                                                                      |
 | `ruvyxa plugin create <name>` | Scaffold a publishable plugin package                                           | `--dir`                                                                |
 | `ruvyxa clean`                | Remove `.ruvyxa/` build output                                                  | —                                                                      |
@@ -690,6 +698,14 @@ Command and flag spellings are normalized before parsing, so `--root=x`, `--serv
 `test-parity`, and an em-dashed `—root` all resolve to their canonical form. Run
 `ruvyxa help <command>` for the built-in reference. There is no `--version` flag; `ruvyxa doctor`
 reports the resolved version.
+
+Use `ruvyxa bench --baseline --json` for the production baseline. Each sample copies project inputs
+into an ignored temporary workspace and measures cold/warm builds, first-route rendering, and
+CSS/client/server/leaf edit classes. Results use the stable `ruvyxa.build-bench` contract with a
+separate `schemaVersion: 1`, plus peak resident memory and HMR reload-fallback counts. The command
+refuses to publish timings unless cold and warm builds have the same semantic artifact set;
+cache/timing telemetry is excluded from that comparison, while deployed code, assets, and manifests
+remain part of it. The ordinary `bench --json` array is unchanged for existing consumers.
 
 ### Verified end to end
 

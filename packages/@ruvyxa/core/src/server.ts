@@ -4,6 +4,29 @@ export interface LoaderContext {
   cache: typeof cache
 }
 
+/** Values a Flight route may send to the browser. */
+export type FlightValue =
+  | null
+  | boolean
+  | number
+  | string
+  | readonly FlightValue[]
+  | { readonly [key: string]: FlightValue }
+
+/** Public, path-only context passed to a page's optional `flight` export. */
+export interface FlightContext {
+  path: string
+  params: Record<string, string | string[] | undefined>
+}
+
+/**
+ * A public server-component payload producer.
+ *
+ * The runtime refuses Flight requests that carry cookies or authorization, so
+ * this function must derive its result solely from public route inputs.
+ */
+export type FlightHandler = (context: FlightContext) => FlightValue | Promise<FlightValue>
+
 export interface ActionContext<TInput> {
   input: TInput
   request: Request
@@ -118,6 +141,10 @@ export interface CacheBuilder {
   ttl(value: string): CacheBuilder
   /** Set stale-while-revalidate window (serves stale data while refreshing in background). */
   swr(value: string): CacheBuilder
+  /** Attach invalidation tags. Tags are deployment-local and bounded. */
+  tags(...values: string[]): CacheBuilder
+  /** Keep the value only for this request instead of sharing it across requests. */
+  scope(value: 'deployment' | 'request'): CacheBuilder
   /** Retrieve or compute a value. Producer errors are isolated and don't crash the server. */
   get<T>(producer: () => T | Promise<T>): Promise<T>
 }
@@ -127,6 +154,7 @@ export interface CacheEntry {
   expiresAt: number
   staleUntil: number
   refreshing: boolean
+  tags: readonly string[]
 }
 
 interface PendingCacheWrite {
@@ -212,6 +240,12 @@ class CacheStore {
       if (key === keyOrPrefix || key.startsWith(keyOrPrefix + ':')) {
         this.delete(key)
       }
+    }
+  }
+
+  invalidateTag(tag: string): void {
+    for (const [key, entry] of this.#entries) {
+      if (entry.tags.includes(tag)) this.delete(key)
     }
   }
 
@@ -333,6 +367,52 @@ function invalidCacheDuration(value: string): Error {
   )
 }
 
+function validateCacheTag(tag: string): string {
+  if (typeof tag !== 'string' || !/^[A-Za-z0-9:._/-]{1,128}$/.test(tag)) {
+    throw new TypeError(
+      'cache tag must use 1-128 letters, digits, colon, dot, underscore, slash, or dash',
+    )
+  }
+  return tag
+}
+
+function assertSharedCachePrivacy(): void {
+  if (host()?.wasRead?.()) {
+    throw new Error(
+      "RUV1840 shared cache producer read request state; use cache().scope('request') or pass an explicit safe partition key",
+    )
+  }
+}
+
+function assertCacheSerializable(value: unknown): void {
+  const ancestors = new Set<object>()
+  const visit = (current: unknown, depth: number): void => {
+    if (depth > 64) throw new TypeError('RUV1841 cache value nesting exceeds 64 levels')
+    if (
+      current === null ||
+      typeof current === 'string' ||
+      typeof current === 'boolean' ||
+      (typeof current === 'number' && Number.isFinite(current))
+    ) {
+      return
+    }
+    if (typeof current !== 'object') {
+      throw new TypeError(`RUV1841 cache cannot serialize ${typeof current}`)
+    }
+    if (ancestors.has(current)) throw new TypeError('RUV1841 cache cannot serialize cyclic values')
+    const prototype = Object.getPrototypeOf(current)
+    if (!Array.isArray(current) && prototype !== Object.prototype && prototype !== null) {
+      throw new TypeError('RUV1841 cache accepts only arrays and plain objects')
+    }
+    ancestors.add(current)
+    for (const child of Array.isArray(current) ? current : Object.values(current)) {
+      visit(child, depth + 1)
+    }
+    ancestors.delete(current)
+  }
+  visit(value, 0)
+}
+
 /**
  * Create a cache builder for the given key.
  *
@@ -344,8 +424,13 @@ function invalidCacheDuration(value: string): Error {
  * ```
  */
 export function cache(key: string): CacheBuilder {
+  if (typeof key !== 'string' || key.length > 8192) {
+    throw new TypeError('cache() key must contain at most 8192 characters')
+  }
   let ttlMs = 60_000 // default 60 seconds
   let swrMs = 0 // default: no stale-while-revalidate
+  let tags: string[] = []
+  let scope: 'deployment' | 'request' = 'deployment'
 
   return {
     ttl(value: string) {
@@ -356,7 +441,29 @@ export function cache(key: string): CacheBuilder {
       swrMs = parseTtl(value)
       return this
     },
+    tags(...values: string[]) {
+      if (values.length > 32) throw new TypeError('cache().tags() accepts at most 32 tags')
+      tags = [...new Set(values.map(validateCacheTag))].sort()
+      return this
+    },
+    scope(value: 'deployment' | 'request') {
+      if (value !== 'deployment' && value !== 'request') {
+        throw new TypeError('cache().scope() must be "deployment" or "request"')
+      }
+      scope = value
+      return this
+    },
     async get<T>(producer: () => T | Promise<T>): Promise<T> {
+      if (scope === 'request') {
+        const context = host()?.peek?.()
+        if (!context) throw new Error('request-scoped cache used outside a request')
+        context.cache ??= new Map<string, unknown>()
+        if (context.cache.has(key)) return context.cache.get(key) as T
+        const value = await producer()
+        assertCacheSerializable(value)
+        context.cache.set(key, value)
+        return value
+      }
       const now = Date.now()
       const cached = cacheStore.get(key)
 
@@ -373,6 +480,8 @@ export function cache(key: string): CacheBuilder {
           const refresh = cacheStore.runSingleFlight(key, async (writeToken) => {
             try {
               const value = await producer()
+              assertSharedCachePrivacy()
+              assertCacheSerializable(value)
               const populatedAt = Date.now()
               const committed = cacheStore.commitWrite(
                 key,
@@ -382,6 +491,7 @@ export function cache(key: string): CacheBuilder {
                   expiresAt: populatedAt + ttlMs,
                   staleUntil: populatedAt + ttlMs + swrMs,
                   refreshing: false,
+                  tags,
                 },
                 cached,
               )
@@ -407,12 +517,15 @@ export function cache(key: string): CacheBuilder {
       const pending = cacheStore.runSingleFlight<T>(key, async (writeToken) => {
         try {
           const value = await producer()
+          assertSharedCachePrivacy()
+          assertCacheSerializable(value)
           const populatedAt = Date.now()
           cacheStore.commitWrite(key, writeToken, {
             value,
             expiresAt: populatedAt + ttlMs,
             staleUntil: populatedAt + ttlMs + swrMs,
             refreshing: false,
+            tags,
           })
           return value
         } catch (error) {
@@ -436,6 +549,11 @@ export function cache(key: string): CacheBuilder {
  */
 export function invalidateCache(keyOrPrefix?: string): void {
   cacheStore.invalidate(keyOrPrefix)
+}
+
+/** Invalidate deployment-cache entries carrying one exact tag. */
+export function revalidateTag(tag: string): void {
+  cacheStore.invalidateTag(validateCacheTag(tag))
 }
 
 /**
@@ -511,6 +629,8 @@ export interface RequestContext {
    * silently dropped. `cookies().set()` reports that rather than pretending.
    */
   setCookies?: string[]
+  /** Values isolated to this request by `cache().scope('request')`. */
+  cache?: Map<string, unknown>
 }
 
 /** The seam a host installs on `globalThis`. */
@@ -528,6 +648,8 @@ export interface RequestContextHost {
    * fallback.
    */
   peek?(): RequestContext | null
+  /** Whether this request has read cookies, headers, or draft state. */
+  wasRead?(): boolean
 }
 
 const CONTEXT_KEY = '__RUVYXA_REQUEST_CONTEXT__'
@@ -642,10 +764,9 @@ export function draftMode(): DraftMode {
  * HTML the build wrote to disk, which is the document that would otherwise keep
  * being served.
  *
- * There is no `revalidateTag()`. In Next.js a tag labels a `fetch()` cache
- * entry, and Ruvyxa has no fetch cache for one to label — supporting tags would
- * mean inventing a page-level tag declaration and a tag-to-route index, which
- * is a design decision rather than an addition to this one.
+ * This invalidates documents by URL. Use `revalidateTag()` instead when the
+ * cached function was labelled through `cache(...).tags(...)`; tag
+ * invalidation deliberately does not imply a route/document invalidation.
  *
  * @example
  * ```ts

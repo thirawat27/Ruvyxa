@@ -22,6 +22,8 @@ use ruvyxa_dev_server::serve;
 mod add;
 mod analyzer_html;
 mod artifact_cache;
+#[path = "bench.rs"]
+mod benchmark;
 mod build;
 mod build_output;
 mod cli_args;
@@ -45,6 +47,7 @@ mod ui;
 pub(crate) use add::*;
 pub(crate) use analyzer_html::*;
 pub(crate) use artifact_cache::*;
+pub(crate) use benchmark::*;
 pub(crate) use build::*;
 pub(crate) use build_output::*;
 pub(crate) use cli_args::*;
@@ -392,6 +395,13 @@ struct BenchArgs {
 
     #[arg(long)]
     json: bool,
+
+    /// Measure isolated cold, warm, and leaf-edit production builds.
+    ///
+    /// Each sample runs in a disposable project copy with a private cache, so
+    /// the benchmark never deletes or warms the application's real cache.
+    #[arg(long)]
+    baseline: bool,
 }
 
 #[derive(Debug, Parser)]

@@ -28,6 +28,15 @@ foundation for your telemetry sink, not a complete metrics/tracing backend. In a
 application, `npm run analyze:html` provides a local build/route analysis page; `npm run trace -- /`
 inspects a route manifest entry.
 
+For correlated development traces, enable `debug.traces` and run `ruvyxa dev`. The existing
+`/__ruvyxa/trace?path=/docs` response continues to inspect one route. Use
+`/__ruvyxa/trace?kind=edits` to inspect the bounded process-local edit history, or add `path=` to
+filter it by a project-relative changed file. Each edit carries one `traceId` across graph
+classification, cache invalidation, worker invalidation/replacement, HMR broadcast, and browser
+receipt. The browser acknowledgement is same-origin, size-bounded, and available only while both
+watch mode and `debug.traces` are enabled. Trace responses are `no-store`; they are diagnostics, not
+a durable telemetry backend.
+
 ## `instrumentation.ts`
 
 A file named `instrumentation.ts` (or `.js`/`.mjs`) at the project root is run once per server
@@ -89,6 +98,12 @@ their configured limits, cumulative rejections, retained module URLs, and cache 
 stays non-zero or a rising rejection count indicates saturation. Measure CPU, heap, tail latency,
 and rejection rate together before raising a bound: a larger queue absorbs a longer burst but also
 retains request bodies and increases wait time.
+
+The same snapshot includes `cacheBudget` and `compilerCache`. `cacheBudget` reports hard, soft, and
+hysteresis-target bytes, current heap pressure, pressure events, and eviction counters by owner.
+`RUVYXA_MEMORY_LIMIT_MB` sets the worker hard limit (512 MiB by default). Soft pressure evicts
+unpinned LRU bundle entries and clears derived module/compiler memory; hard pressure additionally
+stops speculative warmups. Keys with active build locks are not eviction candidates.
 
 ## Cache and concurrency cautions
 

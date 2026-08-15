@@ -1,0 +1,30 @@
+{
+  "contract": "ruvyxa.path-alias",
+  "schemaVersion": 1,
+  "files": {
+    "src/exact.ts": "export const value = 'exact'",
+    "src/wild/card.ts": "export const value = 'wild'",
+    "src/fallback/icon.ts": "export const value = 'fallback'",
+    "src/scoped/button.ts": "export const value = 'scoped'",
+    "src/fake-react.ts": "export const value = 'forbidden'"
+  },
+  "configs": {
+    "config/tsconfig.base.json": "{\n  // inherited aliases\n  \"compilerOptions\": {\n    \"paths\": {\n      \"@/button\": [\"../src/exact.ts\"],\n      \"@/*\": [\"../src/wild/*\"],\n      \"@ui/*\": [\"../missing/*\", \"../src/fallback/*\"],\n      \"@pkg/*/test\": [\"../src/scoped/*\"],\n      \"react\": [\"../src/fake-react.ts\"],\n      \"@escape/*\": [\"../../outside/*\"],\n    },\n  },\n}",
+    "tsconfig.json": "{ \"extends\": \"./config/tsconfig.base.json\" }"
+  },
+  "outsideFiles": {
+    "outside/secret.ts": "export const secret = true"
+  },
+  "cases": [
+    { "name": "exact beats wildcard", "specifier": "@/button", "expected": "src/exact.ts" },
+    { "name": "wildcard", "specifier": "@/card", "expected": "src/wild/card.ts" },
+    { "name": "ordered fallback", "specifier": "@ui/icon", "expected": "src/fallback/icon.ts" },
+    {
+      "name": "suffix wildcard",
+      "specifier": "@pkg/button/test",
+      "expected": "src/scoped/button.ts"
+    },
+    { "name": "reserved framework dependency", "specifier": "react", "expected": null },
+    { "name": "root escape", "specifier": "@escape/secret", "expected": null }
+  ]
+}

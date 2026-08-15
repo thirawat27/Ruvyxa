@@ -4,7 +4,6 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createRequire, isBuiltin } from 'node:module'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-
 const JS_EXTENSIONS = ['', '.ts', '.tsx', '.js', '.jsx', '.mts', '.mjs', '.md', '.mdx']
 export const MDX_COMPONENT_EXTENSIONS = ['.tsx', '.ts', '.jsx', '.js', '.mts', '.mjs']
 const ASSET_EXTENSIONS = new Set(['.css', '.scss', '.sass', '.less'])
@@ -161,14 +160,17 @@ export async function compileBundleWithMetadata({
   minify = false,
   sourceMap = true,
   jsxRuntime = process.env.RUVYXA_JSX_RUNTIME ?? 'automatic',
+  reactCompiler = false,
   markdownConfig,
 }) {
+  const { loadTsconfigPaths } = await loadCompilerSupport()
   const normalizedJsxRuntime = normalizeJsxRuntime(jsxRuntime)
   const root = path.resolve(projectRoot)
   const modules = []
   const byKey = new Map()
   const externals = new Map()
   const externalSet = new Set(external)
+  const tsconfigPaths = loadTsconfigPaths(root)
   const entryKey = sourcefile
 
   await visitModule({
@@ -188,7 +190,9 @@ export async function compileBundleWithMetadata({
     bundleAliasDependencies,
     bundleDependencies: false,
     jsxRuntime: normalizedJsxRuntime,
+    reactCompiler,
     markdownConfig,
+    tsconfigPaths,
   })
 
   const linked = linkModules(modules, externals, { minify, outfile, sourceMap })
@@ -205,8 +209,8 @@ export async function compileBundleWithMetadata({
     // changes on every rebuild retains one module graph per rebuild for the
     // life of the process.
     contentHash: createHash('sha256').update(linked.code).digest('hex').slice(0, 16),
-    dependencyHash: await fingerprintProjectInputs(root, modules),
-    inputs: projectInputPaths(root, modules),
+    dependencyHash: await fingerprintProjectInputs(root, modules, tsconfigPaths.files),
+    inputs: projectInputPaths(root, modules, tsconfigPaths.files),
     // Every file whose contents feed `dependencyHash`, so a caller can decide
     // whether a cached result is still valid without recompiling to find out.
     // Built from the same two sources the hash is, so the list can never claim
@@ -214,6 +218,7 @@ export async function compileBundleWithMetadata({
     fingerprintInputs: [
       ...projectModulePaths(root, modules),
       ...existingManifestFiles(root),
+      ...tsconfigPaths.files.map((file) => path.relative(root, file).replaceAll('\\', '/')),
     ].sort(),
   }
 }
@@ -231,19 +236,44 @@ export function cacheFileName(parts, extension) {
   return `${hash.digest('hex').slice(0, 16)}.${extension}`
 }
 
-function projectInputPaths(root, modules) {
+/** Match one leading module directive after BOM, whitespace, and comments. */
+export function hasModuleDirective(source, expected) {
+  let index = source.charCodeAt(0) === 0xfeff ? 1 : 0
+  while (index < source.length) {
+    while (/\s/.test(source[index] ?? '')) index += 1
+    if (source.startsWith('//', index)) {
+      const end = source.indexOf('\n', index + 2)
+      index = end === -1 ? source.length : end + 1
+      continue
+    }
+    if (source.startsWith('/*', index)) {
+      const end = source.indexOf('*/', index + 2)
+      if (end === -1) return false
+      index = end + 2
+      continue
+    }
+    break
+  }
+  const quote = source[index]
+  if (quote !== '"' && quote !== "'") return false
+  const end = source.indexOf(quote, index + 1)
+  return end !== -1 && source.slice(index + 1, end) === expected
+}
+
+function projectInputPaths(root, modules, configurationFiles = []) {
   return [
     ...new Set(
-      modules.flatMap((module) =>
-        [module.filePath, ...(module.assetInputs || [])]
-          .filter((file) => file && isWithinProject(root, file))
-          .map((file) => path.relative(root, file).replaceAll('\\', '/')),
-      ),
+      [
+        ...modules.flatMap((module) => [module.filePath, ...(module.assetInputs || [])]),
+        ...configurationFiles,
+      ]
+        .filter((file) => file && isWithinProject(root, file))
+        .map((file) => path.relative(root, file).replaceAll('\\', '/')),
     ),
   ].sort()
 }
 
-async function fingerprintProjectInputs(root, modules) {
+async function fingerprintProjectInputs(root, modules, configurationFiles = []) {
   const hash = createHash('sha256')
   const projectModules = modules
     .filter((module) => module.filePath && isWithinProject(root, module.filePath))
@@ -264,6 +294,14 @@ async function fingerprintProjectInputs(root, modules) {
     const file = path.join(root, fileName)
     if (!existsSync(file)) continue
     hash.update(fileName)
+    hash.update('\0')
+    hash.update(await readFile(file))
+    hash.update('\0')
+  }
+
+  for (const file of configurationFiles) {
+    if (!existsSync(file)) continue
+    hash.update(path.relative(root, file).replaceAll('\\', '/'))
     hash.update('\0')
     hash.update(await readFile(file))
     hash.update('\0')
@@ -359,6 +397,7 @@ export function runtimeAliases(runtimeDir = path.dirname(fileURLToPath(import.me
 }
 
 async function visitModule(context) {
+  const { expandImportMetaGlob, resolveTsconfigPath } = await loadCompilerSupport()
   const {
     key,
     filePath,
@@ -376,7 +415,9 @@ async function visitModule(context) {
     bundleAliasDependencies,
     bundleDependencies,
     jsxRuntime,
+    reactCompiler,
     markdownConfig,
+    tsconfigPaths,
   } = context
 
   if (byKey.has(key)) return byKey.get(key)
@@ -395,16 +436,26 @@ async function visitModule(context) {
       ? null
       : await compileContentSource(source, filePath, root, markdownConfig)
   const compiledSource = jsonModule?.source ?? styleModule?.source ?? contentModule.source
+  const contentFile = ['.md', '.mdx'].includes(path.extname(filePath ?? '').toLowerCase())
+  const globExpansion =
+    jsonModule || styleModule || contentFile
+      ? { source: compiledSource, inputs: [] }
+      : await expandImportMetaGlob(compiledSource, baseDir, root, tsconfigPaths)
   const id = `__m${modules.length}`
   const module = {
     id,
     key,
     filePath,
-    source: compiledSource,
+    sourceName:
+      filePath ?? (sourcefile.startsWith('ruvyxa:') ? sourcefile : path.resolve(root, sourcefile)),
+    source: globExpansion.source,
     baseDir,
     deps: new Map(),
-    assetInputs: jsonModule ? [] : (styleModule?.inputs ?? contentModule.inputs),
+    assetInputs: jsonModule
+      ? []
+      : [...(styleModule?.inputs ?? contentModule.inputs), ...globExpansion.inputs],
     jsxRuntime,
+    reactCompiler,
   }
   byKey.set(key, module)
   modules.push(module)
@@ -418,7 +469,7 @@ async function visitModule(context) {
   }
 
   if (platform === 'browser') {
-    checkClientBoundary(root, filePath, compiledSource)
+    checkClientBoundary(root, filePath, module.source)
   }
 
   // Inspect the transformed module so automatic JSX helper imports are linked
@@ -431,9 +482,13 @@ async function visitModule(context) {
     if (isAssetSpecifier(specifier) && !isCssModuleSpecifier(specifier)) continue
 
     const resolvedAlias = aliases[specifier]
+    const resolvedTsconfig = resolvedAlias
+      ? null
+      : resolveTsconfigPath(tsconfigPaths, specifier, resolveFile)
     const resolved = resolvedAlias
       ? resolveFile(path.resolve(resolvedAlias))
-      : (resolveLocalSpecifier(baseDir, specifier) ??
+      : (resolvedTsconfig ??
+        resolveLocalSpecifier(baseDir, specifier) ??
         (platform === 'browser' || bundlePackages || bundleDependencies
           ? resolvePackage(baseDir, specifier)
           : null))
@@ -466,7 +521,9 @@ async function visitModule(context) {
         bundleDependencies:
           bundleDependencies || (bundleAliasDependencies && Boolean(resolvedAlias)),
         jsxRuntime,
+        reactCompiler,
         markdownConfig,
+        tsconfigPaths,
       })
       module.deps.set(specifier, dep)
       continue
@@ -510,10 +567,9 @@ function linkModules(modules, externals, { minify, outfile, sourceMap }) {
 
   for (const module of orderModulesByDependencies(modules)) {
     const rewritten = rewrittenModules.get(module.id)
-    const sourceIndex =
-      sourceMap && module.filePath
-        ? sourceMapIndex(mapSources, module.filePath, module.source)
-        : null
+    const sourceIndex = sourceMap
+      ? sourceMapIndex(mapSources, module.sourceName, module.source)
+      : null
 
     push(`const ${module.id} = (() => {`)
     push(`  const __exports = {};`)
@@ -613,7 +669,9 @@ function collectLinkedExportNames(moduleId, rewrittenModules, seen = new Set()) 
 }
 
 function sourceMapIndex(mapSources, filePath, source) {
-  const normalized = toImportPath(filePath)
+  const normalized = String(filePath).startsWith('ruvyxa:')
+    ? String(filePath)
+    : toImportPath(filePath)
   if (!mapSources.has(normalized)) {
     mapSources.set(normalized, { index: mapSources.size, source })
   }
@@ -673,6 +731,7 @@ function rewriteModule(module) {
     module.key,
     createHash('sha256').update(module.source).digest('hex'),
     module.jsxRuntime,
+    module.reactCompiler ? 'react-compiler-v1' : 'baseline',
     [...module.deps.entries()]
       .map(([specifier, dep]) => `${specifier}:${dep.external ? dep.alias : dep.id}`)
       .join('|'),
@@ -695,7 +754,7 @@ function rewriteModule(module) {
     const line = (codeLines[sourceLine] ?? '').trim()
     if (!line) {
       lines.push(rawLine)
-      lineMap.push(sourceLine)
+      lineMap.push(module.transformLineMap?.[sourceLine] ?? sourceLine)
       continue
     }
 
@@ -703,7 +762,7 @@ function rewriteModule(module) {
       const rewritten = rewriteImport(rawLine.trim(), module)
       if (rewritten) {
         lines.push(rewritten)
-        lineMap.push(sourceLine)
+        lineMap.push(module.transformLineMap?.[sourceLine] ?? sourceLine)
       }
       continue
     }
@@ -723,7 +782,7 @@ function rewriteModule(module) {
         .replace(/^export\s+default\s+/, '')
         .replace(/;$/, '')
       lines.push(`__exports.default = ${rewriteDynamicImports(expression, module)};`)
-      lineMap.push(sourceLine)
+      lineMap.push(module.transformLineMap?.[sourceLine] ?? sourceLine)
       sourceLine = endLine
       continue
     }
@@ -732,13 +791,13 @@ function rewriteModule(module) {
       const result = rewriteExport(rawLine.trim(), module, exported, reExportAll)
       if (result) {
         lines.push(result)
-        lineMap.push(sourceLine)
+        lineMap.push(module.transformLineMap?.[sourceLine] ?? sourceLine)
       }
       continue
     }
 
     lines.push(rewriteCommonJsRequires(rewriteDynamicImports(rawLine, module), module))
-    lineMap.push(sourceLine)
+    lineMap.push(module.transformLineMap?.[sourceLine] ?? sourceLine)
   }
 
   for (const item of exported) {
@@ -1797,16 +1856,26 @@ function transformModuleSource(module) {
     .update('\0')
     .update(module.jsxRuntime)
     .update('\0')
+    .update(module.reactCompiler ? 'react-compiler-v1' : 'baseline')
+    .update('\0')
     .update(module.source)
     .digest('hex')
   const cached = compilerCache.transforms.get(transformKey)
-  if (cached) return cached
+  if (cached) {
+    if (typeof cached === 'string') return cached
+    module.transformLineMap = cached.lineMap
+    return cached.code
+  }
   const { transformSync } = createRequire(
     path.join(path.dirname(fileURLToPath(import.meta.url)), '__ruvyxa-transform.cjs'),
   )('oxc-transform')
-  const result = transformSync(filename, module.source, {
+  const reactCompiled = module.reactCompiler
+    ? compilerSupport.transformWithReactCompiler(module.source, filename)
+    : null
+  const result = transformSync(filename, reactCompiled?.code ?? module.source, {
     lang,
     sourceType: 'module',
+    sourcemap: true,
     target: 'esnext',
     typescript: {
       onlyRemoveTypeImports: false,
@@ -1828,8 +1897,60 @@ function transformModuleSource(module) {
     const detail = result.errors.map((error) => error.message).join('; ')
     throw new Error(`RUV1802 Oxc transform failed for ${filename}: ${detail}`)
   }
-  setBoundedCacheEntry(compilerCache.transforms, transformKey, result.code)
+  module.transformLineMap = composeLineMaps(result.map, reactCompiled?.rawMap)
+  setBoundedCacheEntry(compilerCache.transforms, transformKey, {
+    code: result.code,
+    lineMap: module.transformLineMap,
+  })
   return result.code
+}
+
+function composeLineMaps(outerMap, innerMap) {
+  if (!outerMap) return undefined
+  const outerLines = firstOriginalLineByGeneratedLine(outerMap)
+  if (!innerMap) return outerLines
+  const innerLines = firstOriginalLineByGeneratedLine(innerMap)
+  return outerLines.map((line) => (line === null ? null : (innerLines[line] ?? null)))
+}
+
+function firstOriginalLineByGeneratedLine(map) {
+  const { eachMapping, TraceMap } = compilerSupport
+  const lines = []
+  eachMapping(new TraceMap(map), (mapping) => {
+    const generated = mapping.generatedLine - 1
+    if (lines[generated] === undefined && mapping.originalLine !== null) {
+      lines[generated] = mapping.originalLine - 1
+    }
+  })
+  return lines.map((line) => line ?? null)
+}
+
+let compilerSupport
+let compilerSupportPromise
+
+/**
+ * Load compile-only helpers on demand. Utilities such as `runtimeAliases()` are
+ * intentionally usable from an isolated runtime directory without resolving
+ * the compiler's package dependencies or sibling implementation modules.
+ */
+async function loadCompilerSupport() {
+  compilerSupportPromise ??= Promise.all([
+    import('@jridgewell/trace-mapping'),
+    import('./paths.mjs'),
+    import('./glob.mjs'),
+    import('./react-compiler.mjs'),
+  ]).then(([traceMapping, paths, glob, reactCompiler]) => {
+    compilerSupport = {
+      eachMapping: traceMapping.eachMapping,
+      TraceMap: traceMapping.TraceMap,
+      loadTsconfigPaths: paths.loadTsconfigPaths,
+      resolveTsconfigPath: paths.resolveTsconfigPath,
+      expandImportMetaGlob: glob.expandImportMetaGlob,
+      transformWithReactCompiler: reactCompiler.transformWithReactCompiler,
+    }
+    return compilerSupport
+  })
+  return compilerSupportPromise
 }
 
 function normalizeJsxRuntime(value) {

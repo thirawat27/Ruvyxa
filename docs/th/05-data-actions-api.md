@@ -31,6 +31,33 @@ export const products = loader(async ({ cache }) =>
 `products` และ key ที่ขึ้นต้นด้วย `products:`; หากไม่ส่ง argument จะล้าง cache ทั้ง process เรียก
 `cacheStats()` เพื่อได้ `{ size, maxEntries }`
 
+## Public Flight payload
+
+page สามารถ export `flight` เพื่อส่งข้อมูลสาธารณะที่ผูกกับ artifact version ได้ function นี้รับเฉพาะ
+canonical path และ route params และต้องคืนข้อมูลที่ serialize เป็น JSON ได้ Client component อ่าน
+payload ของ route ปัจจุบันผ่าน `useFlight<T>()` จาก `@ruvyxa/react` เมื่อ request ล้มเหลวหรือ
+artifact version ไม่ตรงกัน browser จะ fallback ไป navigation แบบเต็มหน้า
+
+```ts
+// app/products/[id]/page.tsx
+import type { FlightHandler } from 'ruvyxa/server'
+
+export const flight: FlightHandler = async ({ params }) => ({
+  productId: params.id,
+  summary: 'Public product details',
+})
+```
+
+ใส่ module directive `'use cache'` ไว้บรรทัดต้นเมื่อ public payload นี้ cache ได้ directive
+นี้ต้องมี `flight` export, ใช้ bounded cache ของ Ruvyxa กับ key จาก route และ params แบบ
+deterministic และใช้ กับ static-only adapter ไม่ได้ การอ่าน private request state จาก producer ที่
+cache ไว้จะ fail closed; ข้อมูล authenticated ควรใช้ API route หรือ server action
+
+endpoint `/__ruvyxa/flight` เป็น transport ภายในและปฏิเสธ request ที่มี cookie หรือ authorization
+production build สร้าง manifest ชื่อสั้น `references.json`, `actions.json` และ `flight.json` โดยชื่อ
+contract คงที่ ส่วน compatibility number แยกอยู่ใน `schemaVersion`, `protocolVersion` และ
+`artifactVersion`
+
 ## Server action
 
 สร้าง action ด้วย `action.input(schema).handler(handler)` schema ต้องมี synchronous `parse(value)`

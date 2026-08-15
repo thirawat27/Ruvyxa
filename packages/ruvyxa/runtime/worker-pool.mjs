@@ -39,14 +39,19 @@ import {
   clearCompilerCache,
   collectSpecials,
   compileBundleWithMetadata,
+  compilerCacheStats,
+  hasModuleDirective,
   INSTRUMENTATION_FILES,
   invalidateCompilerCache,
   runtimeAliases,
   serverPlatform,
   toImportPath,
 } from './compiler.mjs'
+import { cache as serverCache } from '@ruvyxa/core/server'
 import { clientEntrySource, metaSourceImports, nodeSsrEntrySource } from './entry-templates.mjs'
 import { WorkerAdmissionController } from './worker-admission.mjs'
+import { CachePressureController, LruCache } from './cache-budget.mjs'
+import { encodeFlightPayload } from './flight.mjs'
 
 // --- Configuration ---
 const MAX_BUNDLE_CACHE_ENTRIES = positiveIntegerEnv('RUVYXA_CACHE_MAX_ENTRIES', 256)
@@ -57,6 +62,9 @@ const WORKER_REQUEST_TIMEOUT_MS = positiveIntegerEnv(
   MAX_NODE_TIMEOUT_MS,
 )
 const MEMORY_PRESSURE_THRESHOLD_MB = positiveIntegerEnv('RUVYXA_MEMORY_LIMIT_MB', 512)
+const memoryPressure = new CachePressureController({
+  hardLimitBytes: MEMORY_PRESSURE_THRESHOLD_MB * 1024 * 1024,
+})
 const API_STREAM_CHUNK_BYTES = 64 * 1024
 
 /**
@@ -87,63 +95,14 @@ const MAX_QUEUED_REQUESTS = positiveIntegerEnv(
 )
 const runtimeDir = path.dirname(fileURLToPath(import.meta.url))
 
-// --- LRU Cache ---
-class LRUCache {
-  #max
-  #map = new Map()
-
-  constructor(max) {
-    this.#max = max
-  }
-
-  get(key) {
-    if (!this.#map.has(key)) return undefined
-    const value = this.#map.get(key)
-    this.#map.delete(key)
-    this.#map.set(key, value)
-    return value
-  }
-
-  set(key, value) {
-    let evicted
-    if (this.#map.has(key)) {
-      this.#map.delete(key)
-    } else if (this.#map.size >= this.#max) {
-      const evictedKey = this.#map.keys().next().value
-      evicted = { key: evictedKey, value: this.#map.get(evictedKey) }
-      this.#map.delete(evictedKey)
-    }
-    this.#map.set(key, value)
-    return evicted
-  }
-
-  has(key) {
-    return this.#map.has(key)
-  }
-
-  delete(key) {
-    const value = this.#map.get(key)
-    this.#map.delete(key)
-    return value
-  }
-
-  clear() {
-    this.#map.clear()
-  }
-
-  get size() {
-    return this.#map.size
-  }
-
-  keys() {
-    return this.#map.keys()
-  }
-}
-
 // --- State ---
-const bundleCache = new LRUCache(MAX_BUNDLE_CACHE_ENTRIES)
+const bundleCache = new LruCache(MAX_BUNDLE_CACHE_ENTRIES)
 // Cache key -> normalized absolute project files used to build that bundle.
 const bundleInputs = new Map()
+// Cache key -> input paths that were directories when the bundle was built.
+// Keeping this fact separately makes deletion/rename invalidation reliable:
+// by the time the watcher reports a deletion, stat() can no longer classify it.
+const bundleInputDirectories = new Map()
 // Cache key -> hash of the normalized dependency path set. This is distinct
 // from emitted-code `bundleVersions`: HMR graph ownership changes only when
 // membership changes, even if an edit changes output bytes (or tree-shakes to
@@ -158,7 +117,7 @@ const buildLocks = new Map()
 // Performance: Module import cache — avoids re-parsing JS on every request.
 // Key: `<outfile>?<version>`, Value: imported module object.
 // A rebuild that changes the emitted code changes the version and misses here.
-const moduleCache = new LRUCache(MAX_BUNDLE_CACHE_ENTRIES)
+const moduleCache = new LruCache(MAX_BUNDLE_CACHE_ENTRIES)
 
 // Performance: Track directories already created to skip mkdir syscalls.
 const createdDirs = new Set()
@@ -222,20 +181,29 @@ process.on('SIGTERM', () => shutdown('SIGTERM'))
 process.on('SIGINT', () => shutdown('SIGINT'))
 
 // --- Memory Pressure Monitor ---
-const memoryCheckInterval = setInterval(() => {
-  const heapMB = process.memoryUsage().heapUsed / 1024 / 1024
-  if (heapMB > MEMORY_PRESSURE_THRESHOLD_MB) {
-    const evictCount = Math.ceil(bundleCache.size / 2)
-    const keys = bundleCache.keys()
-    for (let i = 0; i < evictCount; i++) {
-      const { value, done } = keys.next()
-      if (done) break
-      deleteBundleCacheEntry(value)
-    }
-    moduleCache.clear()
-    clearCompilerCache()
+function enforceWorkerCacheBudget() {
+  const heapUsed = process.memoryUsage().heapUsed
+  const pressure = memoryPressure.observe(heapUsed)
+  if (pressure.level === 'none') return pressure
+
+  const protectedKeys = new Set(buildLocks.keys())
+  const fraction = Math.min(1, pressure.toFreeBytes / Math.max(heapUsed, 1))
+  const requested = Math.max(1, Math.ceil(bundleCache.size * fraction))
+  let bundleEvictions = 0
+  for (let index = 0; index < requested; index++) {
+    const evicted = bundleCache.evictOldest(protectedKeys)
+    if (!evicted) break
+    deleteBundleCacheEntry(evicted.key, evicted.value)
+    bundleEvictions++
   }
-}, 30_000)
+  memoryPressure.recordEviction('bundle', bundleEvictions)
+  memoryPressure.recordEviction('module', moduleCache.clear())
+  clearCompilerCache()
+  memoryPressure.recordEviction('compilerSweep')
+  return pressure
+}
+
+const memoryCheckInterval = setInterval(enforceWorkerCacheBudget, 30_000)
 memoryCheckInterval.unref()
 
 // --- Request Processing ---
@@ -314,6 +282,8 @@ async function dispatchRequest(request) {
   switch (request.type) {
     case 'ssr':
       return handleSsrCoalesced(request)
+    case 'flight':
+      return handleFlight(request)
     case 'ssg':
       return handleSsgCoalesced(request)
     case 'staticParams':
@@ -325,6 +295,9 @@ async function dispatchRequest(request) {
     case 'client':
       return handleClient(request)
     case 'warmup':
+      if (enforceWorkerCacheBudget().stopSpeculation) {
+        return { ok: true, warmed: 0, skipped: 'memory-pressure' }
+      }
       return handleWarmup(request)
     case 'ping':
       return {
@@ -340,9 +313,11 @@ async function dispatchRequest(request) {
         coalesceMapSize: renderCoalesceMap.size,
         workerRequestTimeoutMs: WORKER_REQUEST_TIMEOUT_MS,
         memoryPressureThresholdMb: MEMORY_PRESSURE_THRESHOLD_MB,
+        cacheBudget: memoryPressure.snapshot(process.memoryUsage().heapUsed),
+        compilerCache: compilerCacheStats(),
       }
     case 'invalidate':
-      return { ok: true, ...invalidateBundleCache(request.paths) }
+      return { ok: true, traceId: request.traceId, ...invalidateBundleCache(request.paths) }
     default:
       return { ok: false, code: 'RUV1700', message: `Unknown request type: ${request.type}` }
   }
@@ -716,6 +691,53 @@ async function handleSsr(request) {
     inputsVersion,
     inputs,
   }
+}
+
+/** Render one public, version-bound Flight payload through the SSR module graph. */
+async function handleFlight(request) {
+  const { projectRoot, appDir, pageFile, requestPath, params, routePath, artifactVersion } = request
+  const resolvedRoot = path.resolve(projectRoot || process.cwd())
+  await ensureInstrumentation(resolvedRoot)
+  ensureReactDeps(resolvedRoot)
+  const layouts = collectLayouts(appDir, path.dirname(pageFile))
+  const specials = collectSpecials(appDir, path.dirname(pageFile))
+  const { outfile, version, inputsVersion, inputs } = await bundleSsrModule(
+    resolvedRoot,
+    pageFile,
+    layouts,
+    routePath || requestPath,
+    specials,
+  )
+  const mod = await importModule(outfile, version)
+  const context = requestContext({ method: 'GET', url: requestPath, headerPairs: [] })
+  const source = await readFile(pageFile, 'utf8')
+  const usesCache = hasModuleDirective(source, 'use cache')
+  const produce = () => mod.flight({ path: requestPath, params: params || {} })
+  const tree = await runWithRequestContext(context, () =>
+    usesCache
+      ? serverCache(flightCacheKey(routePath || requestPath, requestPath, params)).get(produce)
+      : produce(),
+  )
+  if (usedRequestContext(context)) {
+    throw new Error('RUV1840 Flight payload read private request state')
+  }
+  return {
+    ok: true,
+    flight: encodeFlightPayload({
+      manifestVersion: artifactVersion,
+      route: requestPath,
+      tree,
+    }),
+    inputsVersion,
+    inputs,
+  }
+}
+
+function flightCacheKey(routePath, requestPath, params) {
+  const sortedParams = Object.fromEntries(
+    Object.entries(params || {}).sort(([left], [right]) => left.localeCompare(right)),
+  )
+  return `flight:${JSON.stringify([routePath, requestPath, sortedParams])}`
 }
 
 // --- SSG Handler with Request Coalescing ---
@@ -1206,6 +1228,7 @@ function invalidateBundleCache(paths) {
     const invalidated = bundleCache.size
     bundleCache.clear()
     bundleInputs.clear()
+    bundleInputDirectories.clear()
     bundleInputVersions.clear()
     bundleFingerprints.clear()
     bundleVersions.clear()
@@ -1220,7 +1243,12 @@ function invalidateBundleCache(paths) {
     const entryMatches = normalizedPaths.some((changedPath) =>
       key.replaceAll('\\', '/').includes(changedPath),
     )
-    const dependencyMatches = normalizedPaths.some((changedPath) => inputs.has(changedPath))
+    const directories = bundleInputDirectories.get(key) ?? new Set()
+    const dependencyMatches = normalizedPaths.some(
+      (changedPath) =>
+        inputs.has(changedPath) ||
+        [...directories].some((input) => changedPath.startsWith(`${input}/`)),
+    )
     if (entryMatches || dependencyMatches) {
       deleteBundleCacheEntry(key)
       invalidated++
@@ -1244,6 +1272,7 @@ function cacheBundle(cacheKey, outfile, projectRoot, inputs, dependencyHash, con
   const evicted = bundleCache.set(cacheKey, outfile)
   if (evicted) {
     bundleInputs.delete(evicted.key)
+    bundleInputDirectories.delete(evicted.key)
     bundleInputVersions.delete(evicted.key)
     bundleFingerprints.delete(evicted.key)
     dropModuleCacheEntries(evicted.key, evicted.value)
@@ -1254,6 +1283,18 @@ function cacheBundle(cacheKey, outfile, projectRoot, inputs, dependencyHash, con
     (inputs ?? []).map((input) => normalizeAbsolutePath(path.join(projectRoot, input))),
   )
   bundleInputs.set(cacheKey, normalizedInputs)
+  bundleInputDirectories.set(
+    cacheKey,
+    new Set(
+      [...normalizedInputs].filter((input) => {
+        try {
+          return statSync(input).isDirectory()
+        } catch {
+          return false
+        }
+      }),
+    ),
+  )
   bundleInputVersions.set(
     cacheKey,
     createHash('sha256')
@@ -1264,9 +1305,10 @@ function cacheBundle(cacheKey, outfile, projectRoot, inputs, dependencyHash, con
   if (dependencyHash) bundleFingerprints.set(cacheKey, dependencyHash)
 }
 
-function deleteBundleCacheEntry(cacheKey) {
-  const outfile = bundleCache.delete(cacheKey)
+function deleteBundleCacheEntry(cacheKey, knownOutfile) {
+  const outfile = knownOutfile ?? bundleCache.delete(cacheKey)
   bundleInputs.delete(cacheKey)
+  bundleInputDirectories.delete(cacheKey)
   bundleInputVersions.delete(cacheKey)
   bundleFingerprints.delete(cacheKey)
   buildLocks.delete(cacheKey)
@@ -1345,7 +1387,7 @@ async function bundleSsrModule(projectRoot, pageFile, layouts, routePath = '/', 
   const cacheDir = path.join(projectRoot, '.ruvyxa', 'cache', 'ssr')
   await ensureDir(cacheDir)
 
-  const imports = [`import Page from ${JSON.stringify(toImportPath(pageFile))}`]
+  const imports = [`import Page, * as PageModule from ${JSON.stringify(toImportPath(pageFile))}`]
   const wrappers = []
 
   layouts.forEach((layoutFile, index) => {
@@ -1364,6 +1406,7 @@ async function bundleSsrModule(projectRoot, pageFile, layouts, routePath = '/', 
   const moduleCode = nodeSsrEntrySource({
     imports,
     pageName: 'Page',
+    pageModuleName: 'PageModule',
     layoutNames: wrappers,
     routePath,
     readyEvent: 'onAllReady',

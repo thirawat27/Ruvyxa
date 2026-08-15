@@ -475,11 +475,77 @@ pub(crate) fn hmr_client_script() -> &'static str {
 (() => {
   const protocol = location.protocol === "https:" ? "wss" : "ws";
   const socket = new WebSocket(`${protocol}://${location.host}/__ruvyxa/hmr`);
-  socket.addEventListener("message", (event) => {
-    // A clean page load keeps the browser's ESM module graph and React root in sync.
-    // This also covers route, CSS, and imported-module changes consistently.
-    JSON.parse(event.data);
-    location.reload();
+  let lastSequence = 0;
+  const reload = () => location.reload();
+  const acknowledgeTrace = (message) => {
+    if (message.traceAck !== true) return;
+    void fetch('/__ruvyxa/trace', {
+      method: 'POST',
+      cache: 'no-store',
+      credentials: 'same-origin',
+      keepalive: true,
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ traceId: message.traceId }),
+    }).catch(() => {});
+  };
+  const applyCss = async (sequence) => {
+    let applied = false;
+    for (const link of document.querySelectorAll('link[rel="stylesheet"][href]')) {
+      const url = new URL(link.href, location.href);
+      url.searchParams.set('__ruvyxa_hmr', String(sequence));
+      link.href = url.href;
+      applied = true;
+    }
+    const current = document.querySelector('style[data-ruvyxa-css]');
+    if (current) {
+      const response = await fetch(location.href, { cache: 'no-store', credentials: 'same-origin' });
+      if (!response.ok) return false;
+      if (sequence !== lastSequence) return false;
+      const next = new DOMParser().parseFromString(await response.text(), 'text/html')
+        .querySelector('style[data-ruvyxa-css]');
+      if (!next) return false;
+      if (sequence !== lastSequence) return false;
+      current.textContent = next.textContent;
+      applied = true;
+    }
+    return applied;
+  };
+  socket.addEventListener("message", async (event) => {
+    let message;
+    try { message = JSON.parse(event.data); } catch { reload(); return; }
+    if (message.protocol !== 'ruvyxa.hmr' || message.protocolVersion !== 1 ||
+        !/^[a-f0-9]{32}$/.test(message.traceId) ||
+        !Number.isSafeInteger(message.sequence)) {
+      reload(); return;
+    }
+    if (message.sequence <= lastSequence) return;
+    lastSequence = message.sequence;
+    try { performance.mark(`ruvyxa:hmr:${message.traceId}:received`); } catch {}
+    acknowledgeTrace(message);
+    if (message.type === 'issues') {
+      console.error('[ruvyxa] HMR issues', message.issues ?? []);
+      if (message.fullReload) reload();
+      return;
+    }
+    if (message.type === 'partial' && message.kind === 'css') {
+      try { if (await applyCss(message.sequence)) return; } catch {}
+      reload(); return;
+    }
+    if (message.type === 'partial' && message.kind === 'server-route') {
+      const route = globalThis.__RUVYXA_ROUTE_PATTERN__ ?? location.pathname;
+      if (Array.isArray(message.affectedRoutes) && !message.affectedRoutes.includes(route)) return;
+    }
+    if (message.type === 'partial' && message.kind === 'client-boundary') {
+      const refresh = globalThis.__RUVYXA_HMR_REFRESH__;
+      try {
+        if (typeof refresh === 'function' && await refresh(message) === true) return;
+      } catch (error) {
+        console.error('[ruvyxa] client refresh boundary failed', error);
+      }
+    }
+    // Client-boundary patching is promoted only when the runtime can prove an
+    // accepted refresh boundary. Until then correctness wins.
+    reload();
   });
 })();
 </script>"#
@@ -845,6 +911,20 @@ pub(crate) fn escape_html(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hmr_client_rejects_stale_sequences_and_applies_css_without_reload() {
+        let script = hmr_client_script();
+        assert!(script.contains("ruvyxa.hmr"));
+        assert!(script.contains("message.sequence <= lastSequence"));
+        assert!(script.contains("ruvyxa:hmr:${message.traceId}:received"));
+        assert!(script.contains("if (message.traceAck !== true) return"));
+        assert!(script.contains("body: JSON.stringify({ traceId: message.traceId })"));
+        assert!(script.contains("if (message.fullReload) reload()"));
+        assert!(script.contains("style[data-ruvyxa-css]"));
+        assert!(script.contains("await applyCss(message.sequence)"));
+        assert!(script.contains("location.reload()"));
+    }
 
     #[test]
     fn ascii_case_search_matches_and_keeps_original_indices() {

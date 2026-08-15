@@ -166,6 +166,28 @@ files, because the atomic commit replaces the complete set of named build output
 
 The flag is opt-in. `ruvyxa build` without it is unchanged.
 
+## Reproducible production-build baseline
+
+Use the baseline mode before and after changing compiler, cache, chunking, HMR, or adapter behavior:
+
+```bash
+npm run bench -- --baseline --samples 3 --json
+```
+
+Every sample runs in a disposable project copy under `.ruvyxa/bench/` with its own cache. It
+measures seven scenarios in dependency order: cold build, warm build, first production route, CSS
+edit, client-boundary edit, server-route edit, and a leaf-route edit. All mutations are syntax-safe
+and remain inside the copy. The real project source and build cache are never edited, deleted, or
+warmed by this mode. Temporary workspaces are removed after each sample.
+
+The report uses the stable `ruvyxa.build-bench` contract with `schemaVersion: 1` and includes
+per-scenario cache observations. It is written only after the cold and warm outputs pass a semantic
+artifact-equivalence check. Build timestamps, cache counters, and timing fields are telemetry and
+are normalized for that check; deployed code, assets, and manifests are not. The report also records
+`peakResidentBytes`, edit files, cache observations, and HMR `reloadFallbacks`; fixture-owned
+budgets reject misleading or unsafe results. Existing consumers of the ordinary `bench --json`
+result keep receiving the original array shape because baseline mode is opt-in.
+
 ## Recommended application loop
 
 Run this from the root of a generated application, not from this framework monorepo:

@@ -18,8 +18,8 @@
  *
  * ISR/PPR behavior depends on platform capabilities passed via options.
  *
- * The only imports this file is allowed to carry are the siblings
- * `route-match.mjs`, `request-context.mjs`, and `action-runtime.mjs`, which
+ * The only imports this file is allowed to carry are the sibling runtime
+ * modules listed in `HANDLER_RUNTIME_FILES`, which
  * `adapter-runner.mjs` copies into the function bundle next to this file.
  * Everything else must stay inlined: a deployed function directory resolves no
  * bare specifiers.
@@ -33,6 +33,7 @@ import {
   usedRequestContext,
 } from './request-context.mjs'
 import { canonicalRoutePath, createCanonicalRouteMatcher } from './route-match.mjs'
+import { encodeFlightPayload, publicFlightError } from './flight.mjs'
 
 const MAX_REVALIDATIONS_PER_REQUEST = 64
 const MAX_REVALIDATION_PATH_LENGTH = 2_048
@@ -40,6 +41,7 @@ const MAX_PENDING_PATH_REVALIDATIONS = 1_024
 
 /** Endpoint the framework's own server actions are posted to. */
 const ACTION_PATH = '/__ruvyxa/action'
+const FLIGHT_PATH = '/__ruvyxa/flight'
 
 /** Defaults matching `ruvyxa build`'s validated `security` block. */
 const DEFAULT_API_BODY_LIMIT = 10 * 1024 * 1024
@@ -62,7 +64,7 @@ const DEFAULT_ACTION_RATE_WINDOW_SECONDS = 60
  * @property {RouteEntry[]} routes - Build manifest routes
  * @property {string} buildDir - Absolute path to the build output directory
  * @property {string} [basePath] - Optional base path prefix
- * @property {(routeId: string) => Promise<{render: (ctx: object) => Promise<string>}>} importPage
+ * @property {(routeId: string) => Promise<{render: (ctx: object) => Promise<string>, flight?: (ctx: object) => Promise<unknown>}>} importPage
  *   Import a pre-compiled page module. Adapters supply this to abstract away
  *   platform-specific module resolution.
  * @property {(routeId: string) => Promise<Record<string, Function>>} importApi
@@ -116,6 +118,7 @@ export const HANDLER_RUNTIME_FILES = Object.freeze([
   'route-match.mjs',
   'request-context.mjs',
   'action-runtime.mjs',
+  'flight.mjs',
 ])
 
 /** Security defaults shared with the native and standalone runtimes. */
@@ -168,6 +171,7 @@ export function createHandler(options) {
   }
   const trustedProxies = parseTrustedProxies(security?.trustedProxyIps)
   const actionBuckets = new Map()
+  const actionNonces = new Map()
   const pendingRevalidations = new Map()
   /**
    * Generation claims for URLs `revalidatePath()` named, waiting for a
@@ -342,6 +346,10 @@ export function createHandler(options) {
       return handleServerAction(request, url)
     }
 
+    if (pathname === FLIGHT_PATH) {
+      return handleFlight(request, url)
+    }
+
     const match = matchRoute(pathname)
     if (!match) {
       const redirect = localeRedirect(request, pathname, basePath, matchRoute, i18n)
@@ -423,6 +431,83 @@ export function createHandler(options) {
     return normalizeResponse(result)
   }
 
+  /**
+   * Serve a public, version-bound server-component data payload.
+   *
+   * A page opts in by exporting `flight(context)`. Its result must satisfy the
+   * same bounded JSON contract as every other Flight payload. The endpoint is
+   * deliberately unavailable to authenticated or cookie-bearing requests:
+   * prefetching must never become a channel for private request state.
+   */
+  async function handleFlight(request, url) {
+    if (request.method !== 'GET') {
+      return new Response('Method Not Allowed', {
+        status: 405,
+        headers: { allow: 'GET', 'content-type': 'text/plain; charset=utf-8' },
+      })
+    }
+    if (request.headers.has('authorization') || request.headers.has('cookie')) {
+      return textResponse(403, 'Flight requests must not include private request state')
+    }
+    if (request.headers.get('x-ruvyxa-flight') !== '1') {
+      return textResponse(400, 'Flight requests require the Ruvyxa navigation header')
+    }
+
+    const requestedPath = url.searchParams.get('path') ?? ''
+    const requestedArtifact = url.searchParams.get('artifact') ?? ''
+    const pathname = canonicalRoutePath(requestedPath)
+    if (pathname === null || !/^[a-f0-9]{16}$/.test(requestedArtifact)) {
+      return textResponse(400, 'Flight request has an invalid route or artifact')
+    }
+    const match = matchRoute(pathname)
+    if (!match || match.route.kind !== 'page')
+      return textResponse(404, 'Flight route was not found')
+    if (match.route.artifactVersion !== requestedArtifact) {
+      return textResponse(409, 'Flight artifact is stale or invalid')
+    }
+
+    try {
+      const module = await importPage(match.route.id)
+      if (typeof module.flight !== 'function') {
+        return textResponse(501, 'This route does not expose a Flight payload')
+      }
+      const context = requestContext({
+        headerPairs: [...request.headers],
+        method: request.method,
+        url: pathname,
+      })
+      const tree = await runWithRequestContext(context, () =>
+        module.flight({ path: pathname, params: match.params ?? {} }),
+      )
+      if (usedRequestContext(context)) {
+        return textResponse(403, 'Flight payload read private request state')
+      }
+      const payload = encodeFlightPayload({
+        manifestVersion: requestedArtifact,
+        route: pathname,
+        tree,
+      })
+      return new Response(payload, {
+        headers: {
+          'content-type': 'application/vnd.ruvyxa.flight+json; charset=utf-8',
+          'cache-control': 'private, no-store',
+          vary: 'x-ruvyxa-flight',
+        },
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      console.error(`[ruvyxa] Flight render ${pathname} failed:`, message)
+      return new Response(publicFlightError(error, pathname), {
+        status: 500,
+        headers: {
+          'content-type': 'application/vnd.ruvyxa.flight+json; charset=utf-8',
+          'cache-control': 'private, no-store',
+          vary: 'x-ruvyxa-flight',
+        },
+      })
+    }
+  }
+
   /** Apply the `revalidatePath()` calls a handler made, with the shared bounds. */
   function recordRevalidations(revalidations) {
     if (revalidations.length > MAX_REVALIDATIONS_PER_REQUEST) {
@@ -474,6 +559,7 @@ export function createHandler(options) {
 
     const targetPath = url.searchParams.get('path') ?? ''
     const actionName = url.searchParams.get('name') ?? ''
+    const actionReference = url.searchParams.get('id')
     if (actionName === '' || !targetPath.startsWith('/')) {
       return textResponse(400, 'Action request must name a target path and an action')
     }
@@ -516,6 +602,13 @@ export function createHandler(options) {
       if (match.route.kind !== 'page') {
         return textResponse(405, 'Actions can only target page routes')
       }
+      if (actionReference !== null) {
+        if (actionReference !== match.route.actionReferenceId) {
+          return textResponse(409, 'Action reference is stale or invalid')
+        }
+        const nonceRejection = consumeActionNonce(request.headers, actionReference)
+        if (nonceRejection) return nonceRejection
+      }
 
       const module = await importAction(match.route.id)
       if (!module) {
@@ -542,6 +635,22 @@ export function createHandler(options) {
       // as the native server does outside dev.
       return textResponse(500, 'Internal Server Error')
     }
+  }
+
+  function consumeActionNonce(headers, actionReference) {
+    const nonce = headers.get('x-ruvyxa-action-nonce') ?? ''
+    if (!/^[A-Za-z0-9._~-]{16,128}$/.test(nonce)) {
+      return textResponse(400, 'Versioned action requests require a valid replay nonce')
+    }
+    const now = Date.now()
+    for (const [key, expires] of actionNonces) {
+      if (expires <= now) actionNonces.delete(key)
+    }
+    const key = `${actionReference}:${nonce}`
+    if (actionNonces.has(key)) return textResponse(409, 'Action request replayed')
+    actionNonces.set(key, now + 10 * 60 * 1000)
+    while (actionNonces.size > 10_000) actionNonces.delete(actionNonces.keys().next().value)
+    return null
   }
 
   /**

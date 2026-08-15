@@ -1,0 +1,31 @@
+{
+  "contract": "ruvyxa.glob",
+  "schemaVersion": 1,
+  "ignoredDirectories": [".git", ".ruvyxa", "dist", "node_modules", "target"],
+  "cases": [
+    {
+      "name": "lazy relative nested matches",
+      "pattern": "./posts/**/*.ts",
+      "eager": false,
+      "expected": ["./posts/nested/two.ts"]
+    },
+    {
+      "name": "eager relative matches",
+      "pattern": "./posts/*.ts",
+      "eager": true,
+      "expected": ["./posts/one.ts"]
+    },
+    {
+      "name": "alias matches",
+      "pattern": "@/posts/*.ts",
+      "eager": false,
+      "expected": ["./posts/one.ts"]
+    },
+    {
+      "name": "empty matches",
+      "pattern": "./missing/*.ts",
+      "eager": false,
+      "expected": []
+    }
+  ]
+}

@@ -81,5 +81,19 @@ output into place. The artifact cache fingerprints relevant inputs and can reuse
 HTML when `build.prerenderCache` is enabled (the default). Static adapters require generated
 prerendered pages.
 
+The bundler also persists a typed artifact task graph for source, resolve, transform, analysis,
+chunk-plan, emit, source-map, and manifest computations. Keys include the evaluated configuration
+namespace and semantic inputs; dependency edges make affected work explicit. Artifact bytes remain
+owned by the existing content-addressed caches, so graph metadata is never accepted as output by
+itself. Corrupt, cancelled, or incompatible records are rebuilt and published atomically only after
+completion. For release rollback diagnosis, set `RUVYXA_DISABLE_ARTIFACT_CACHE=1`; this bypasses the
+task graph without disabling the correctness path or changing emitted artifacts.
+
+Build caches share a soft/hard memory-pressure policy. At pressure, resolver derivations are dropped
+first, followed by persisted artifact metadata and least-recently-used compiler memory; source
+snapshots and in-flight artifact dependency closures stay pinned. The default native build cache
+hard limit is 256 MiB and can be changed with `RUVYXA_BUILD_CACHE_MEMORY_MB`. Eviction changes
+latency only: a 1-byte test budget is required to emit the same output as a large budget.
+
 **Previous:** [CLI reference](10-cli.md) · **Next:**
 [Development and testing](12-development-testing.md)

@@ -1,0 +1,24 @@
+{
+  "protocol": "ruvyxa.hmr",
+  "protocolVersion": 1,
+  "requiredFields": [
+    "affectedRoutes",
+    "kind",
+    "modules",
+    "protocol",
+    "protocolVersion",
+    "sequence",
+    "traceAck",
+    "traceId",
+    "type"
+  ],
+  "messages": [
+    { "event": "css", "type": "partial", "kind": "css" },
+    { "event": "client", "type": "partial", "kind": "client-boundary" },
+    { "event": "server", "type": "partial", "kind": "server-route" },
+    { "event": "structural", "type": "restart", "kind": "restart" },
+    { "event": "failure", "type": "issues", "kind": "issues" }
+  ],
+  "stalePolicy": "reject-sequence-less-than-or-equal-to-last-applied",
+  "fallback": "reload"
+}

@@ -43,6 +43,7 @@ npm run adds -- auth              # Scaffold an @ruvyxa/auth flow
 npm run doctor                    # Check project health and environment
 npm run trace -- <path>           # Inspect route matching
 npm run bench                     # Benchmark discovery, validation, builds
+npm run bench -- --baseline       # Isolated build, route, and edit-class baseline
 npm run test:parity               # Dev/prod route parity check
 npm run clean                     # Remove .ruvyxa/ output
 ```
@@ -51,6 +52,12 @@ Human-facing commands print the same compact TUI style used by the native server
 fields, status labels, and color only on real terminals. Use `check` as the app-level production
 readiness gate. Structured commands such as `analyze`, `trace`, and `bench --json` remain
 machine-readable.
+
+`bench --baseline --json` emits the stable `ruvyxa.build-bench` contract with `schemaVersion: 1`. It
+clones project inputs into a disposable workspace per sample and measures cold/warm builds, first
+route rendering, CSS/client/server/leaf edits, peak resident memory, and HMR reload fallbacks. It
+verifies cold/warm semantic artifact equivalence before reporting; the application's real source and
+cache are untouched.
 
 During `npm run dev`, open `/__ruvyxa/devtools` for the registered route tree, render-cache state,
 Server Action timings, bundle metrics, and server uptime. The endpoint is development-only and its

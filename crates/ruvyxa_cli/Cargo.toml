@@ -41,7 +41,7 @@ walkdir.workspace = true
 # `src/host_resources.rs`). Both crates are already in the dependency graph
 # through transitive deps, so neither adds to the shipped binary's build.
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61.2", features = ["Win32_System_SystemInformation"] }
+windows-sys = { version = "0.61.2", features = ["Win32_System_ProcessStatus", "Win32_System_SystemInformation", "Win32_System_Threading"] }
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
 libc = "0.2.189"

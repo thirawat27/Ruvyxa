@@ -80,5 +80,20 @@ SSG/ISR/PPR route ที่เข้าเกณฑ์, สร้าง site dis
 เข้าที่ artifact cache fingerprint input ที่เกี่ยวข้องและ reuse final prerendered HTML ได้เมื่อเปิด
 `build.prerenderCache` (ค่าเริ่มต้น) static adapter ต้องการ prerendered page ที่สร้างแล้ว
 
+bundler ยัง persist typed artifact task graph สำหรับ computation ขั้น source, resolve, transform,
+analysis, chunk-plan, emit, source-map และ manifest โดย key รวม evaluated configuration namespace
+และ semantic input ส่วน dependency edge ระบุงานที่ได้รับผลกระทบอย่างชัดเจน bytes ของ artifact ยังมี
+cache แบบ content-addressed เดิมเป็นเจ้าของ ดังนั้น metadata ของ graph เพียงอย่างเดียวจะไม่ถูก
+ใช้เป็น output record ที่เสียหาย ถูกยกเลิก หรือเข้ากันไม่ได้จะ rebuild ตามปกติ และ publish แบบ
+atomic หลังทำงานเสร็จเท่านั้น เมื่อต้องวิเคราะห์ release rollback ให้ตั้ง
+`RUVYXA_DISABLE_ARTIFACT_CACHE=1`; ค่านี้ bypass task graph โดยไม่ปิด correctness path หรือเปลี่ยน
+artifact ที่ emit
+
+build cache ใช้ memory-pressure policy แบบ soft/hard ร่วมกัน เมื่อเกิด pressure ระบบจะทิ้ง resolver
+derivation ก่อน ตามด้วย persisted artifact metadata และ compiler memory ที่เป็น LRU ส่วน source
+snapshot และ dependency closure ของ artifact ที่กำลังทำงานจะถูก pin ไว้ hard limit เริ่มต้น ของ
+native build cache คือ 256 MiB และเปลี่ยนได้ด้วย `RUVYXA_BUILD_CACHE_MEMORY_MB` การ evict
+เปลี่ยนได้เฉพาะ latency โดย test บังคับให้ budget ขนาด 1 byte ต้อง emit output เดียวกับ budget ใหญ่
+
 **ก่อนหน้า:** [CLI reference](10-cli.md) · **ถัดไป:**
 [Development และ testing](12-development-testing.md)

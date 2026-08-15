@@ -1,0 +1,12 @@
+{
+  "protocolVersion": 0,
+  "description": "Legacy development HMR message shape captured before the structured partial/restart/issues protocol was introduced.",
+  "why": "The server classified CSS, component, and structural updates while the browser reloaded for every message. Phase 3 must migrate both sides together; this fixture prevents an unversioned field or event rename from silently breaking the current fallback path.",
+  "requiredFields": ["affectedRoutes", "fullReload", "paths", "type"],
+  "events": [
+    { "kind": "css", "wireType": "css-update", "fullReload": false },
+    { "kind": "component", "wireType": "component-update", "fullReload": false },
+    { "kind": "structural", "wireType": "full-reload", "fullReload": true }
+  ],
+  "browserFallback": "reload"
+}

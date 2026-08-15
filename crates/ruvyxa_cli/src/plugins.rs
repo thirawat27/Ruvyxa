@@ -221,8 +221,9 @@ impl TypeScriptPluginBuildSession {
         plugins: &[BuildPluginConfig],
         runtime: JavaScriptRuntime,
         content_compiler_enabled: bool,
+        react_compiler_enabled: bool,
     ) -> anyhow::Result<Self> {
-        if plugins.is_empty() && !content_compiler_enabled {
+        if plugins.is_empty() && !content_compiler_enabled && !react_compiler_enabled {
             return Ok(Self { bridge: None });
         }
 
@@ -467,24 +468,32 @@ pub(crate) fn bundle_context_for_build(
     cache_dir: &Path,
     plugin_session: &TypeScriptPluginBuildSession,
 ) -> anyhow::Result<ruvyxa_bundler::BundleContext> {
+    let artifact_graph_enabled = !matches!(
+        std::env::var("RUVYXA_DISABLE_ARTIFACT_CACHE").as_deref(),
+        Ok("1" | "true")
+    );
     let compile_cache = ruvyxa_bundler::cache::CompileCache::at_dir_with_namespace(
         cache_dir,
         true,
         config_dependency_hash,
     );
     let Some(bridge) = plugin_session.bridge() else {
-        return Ok(ruvyxa_bundler::BundleContext::for_build(
+        return Ok(ruvyxa_bundler::BundleContext::for_build_with_artifacts(
             compile_cache,
             ruvyxa_bundler::resolver::ResolveGraphCache::for_build(),
             cache_dir,
             config_dependency_hash,
+            artifact_graph_enabled,
         ));
     };
 
-    Ok(ruvyxa_bundler::BundleContext::with_build_hooks(
+    Ok(ruvyxa_bundler::BundleContext::with_build_hooks_for_build(
         compile_cache,
         ruvyxa_bundler::resolver::ResolveGraphCache::for_build(),
         ruvyxa_bundler::incremental::IncrementalGraphCache::disabled(),
         ruvyxa_bundler::hooks::BuildHookPipeline::new(vec![Arc::new(bridge.clone())]),
+        cache_dir,
+        config_dependency_hash,
+        artifact_graph_enabled,
     ))
 }

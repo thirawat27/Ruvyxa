@@ -26,18 +26,34 @@ describe('@ruvyxa/testing', () => {
     assert.deepEqual(
       await cache('users')
         .ttl('5m')
+        .tags('team', 'users', 'team')
         .get(() => ['fresh']),
       ['seed'],
     )
     assert.deepEqual(
       await cache('posts')
         .swr('1m')
+        .scope('request')
         .get(() => ['fresh']),
       ['fresh'],
     )
     assert.deepEqual(cache.calls, [
-      { key: 'users', ttl: '5m', swr: undefined, hit: true },
-      { key: 'posts', ttl: undefined, swr: '1m', hit: false },
+      {
+        key: 'users',
+        ttl: '5m',
+        swr: undefined,
+        tags: ['team', 'users'],
+        scope: 'deployment',
+        hit: true,
+      },
+      {
+        key: 'posts',
+        ttl: undefined,
+        swr: '1m',
+        tags: [],
+        scope: 'request',
+        hit: false,
+      },
     ])
   })
 })

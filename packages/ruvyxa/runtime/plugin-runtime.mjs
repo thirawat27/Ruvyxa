@@ -22,6 +22,7 @@ import {
   matchesPatterns,
   unsupportedReturn,
 } from './plugin-http.mjs'
+import { transformWithReactCompiler } from './react-compiler.mjs'
 
 const [projectRootArg, mode] = process.argv.slice(2)
 
@@ -35,6 +36,7 @@ console.log = console.info = console.debug = (...args) => console.error(...args)
 
 const projectRoot = path.resolve(projectRootArg)
 const runtimeDir = path.dirname(fileURLToPath(import.meta.url))
+let reactCompilerEnabled = false
 
 try {
   const registry = await loadRegistry(projectRoot)
@@ -76,6 +78,7 @@ async function loadRegistry(root) {
 
   const mod = await import(pathToFileURL(outfile).href + `?t=${Date.now()}`)
   const config = mod.default ?? {}
+  reactCompilerEnabled = config.reactCompiler === true
   const configuredPlugins = Array.isArray(config.plugins) ? config.plugins : []
   const contentPlugin = await configuredContentPlugin(root, configFile, config)
   return createPluginRegistry({
@@ -208,6 +211,14 @@ async function runBuildTransform(registry, payload) {
   let code = String(payload.code ?? '')
   let map
   let changed = false
+  if (reactCompilerEnabled) {
+    const compiled = transformWithReactCompiler(code, String(payload.id ?? ''))
+    if (compiled) {
+      code = compiled.code
+      map = compiled.map
+      changed = true
+    }
+  }
   const base = buildContext(registry, payload)
   for (const entry of registry.buildTransform) {
     const context = Object.freeze({ ...base, code, id: String(payload.id ?? '') })

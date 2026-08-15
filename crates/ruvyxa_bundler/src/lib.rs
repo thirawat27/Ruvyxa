@@ -22,19 +22,27 @@
 //!                   (chunk manifest + HTML preload hints)
 //! ```
 
+#[path = "task_graph.rs"]
+pub mod artifact_graph;
 pub mod ast;
 pub mod atomic_file;
 pub mod boundary;
 pub mod cache;
+#[path = "cache_budget.rs"]
+pub mod cache_budget;
 pub mod chunking;
 pub mod compiler;
 pub mod content;
 pub mod context;
+#[path = "glob.rs"]
+mod glob_import;
 pub mod hooks;
 pub mod incremental;
 pub mod linker;
 pub mod minifier;
 pub mod output;
+#[path = "references.rs"]
+pub mod reference_manifest;
 pub mod resolver;
 pub mod sourcemap;
 pub mod style_module;
@@ -51,6 +59,7 @@ use crate::chunking::{
 };
 use crate::hooks::BuildHookPipeline;
 use crate::resolver::ResolveGraphCache;
+use artifact_graph::{ArtifactDependency, ArtifactKey, ArtifactKind, ArtifactTaskGraph};
 pub use context::BundleContext;
 pub use types::*;
 
@@ -69,6 +78,10 @@ pub struct PreparedBundle {
     static_modules: Vec<compiler::CompiledModule>,
     graph_module_count: usize,
     prepare_duration: Duration,
+    artifact_graph: ArtifactTaskGraph,
+    chunk_plan_key: ArtifactKey,
+    watch_paths: BTreeSet<PathBuf>,
+    glob_matches: BTreeSet<PathBuf>,
 }
 
 impl PreparedBundle {
@@ -92,7 +105,13 @@ impl PreparedBundle {
             .iter()
             .filter(|module| !module.is_external)
             .map(|module| module.path.clone())
+            .chain(self.watch_paths.iter().cloned())
             .collect()
+    }
+
+    /// Versioned canonical module ownership for transport and action consumers.
+    pub fn reference_manifest(&self) -> Result<reference_manifest::ReferenceManifest> {
+        reference_manifest::build_reference_manifest(&self.compiled, &self.input.project_root)
     }
 }
 
@@ -130,19 +149,25 @@ pub fn bundle_with_shared_modules(
         context.graph_cache(),
         context.incremental(),
         context.build_hooks(),
+        context.artifacts(),
     )?;
-    bundle_prepared(&prepared, shared_modules)
+    let output = bundle_prepared(&prepared, shared_modules)?;
+    context.enforce_cache_budget();
+    Ok(output)
 }
 
 /// Resolve and compile a route once so it can be inspected and emitted later.
 pub fn prepare_bundle(input: BundleInput, context: &BundleContext) -> Result<PreparedBundle> {
-    prepare_bundle_with_parts(
+    let prepared = prepare_bundle_with_parts(
         input,
         context.compile_cache(),
         context.graph_cache(),
         context.incremental(),
         context.build_hooks(),
-    )
+        context.artifacts(),
+    )?;
+    context.enforce_cache_budget();
+    Ok(prepared)
 }
 
 /// Emit a previously prepared route while reading selected modules from a
@@ -301,6 +326,7 @@ fn prepare_bundle_with_parts(
     graph_cache: &ResolveGraphCache,
     incremental: &incremental::IncrementalGraphCache,
     build_hooks: &BuildHookPipeline,
+    artifacts: &ArtifactTaskGraph,
 ) -> Result<PreparedBundle> {
     let started = Instant::now();
 
@@ -319,14 +345,148 @@ fn prepare_bundle_with_parts(
         input.options.jsx_runtime,
         Some(incremental),
     )?;
+    let resolver_configuration_hash = graph_cache.configuration_hash(&input.project_root);
+
+    let mut resolve_keys = Vec::with_capacity(graph.len());
+    for module in &graph {
+        let path = stable_path(&module.path);
+        let source_key = artifacts.key(
+            ArtifactKind::Source,
+            [
+                ("path", path.as_bytes()),
+                ("source", module.source.as_bytes()),
+                (
+                    "loadedContent",
+                    module
+                        .compiled_content
+                        .as_deref()
+                        .unwrap_or_default()
+                        .as_bytes(),
+                ),
+                (
+                    "loadSourceMap",
+                    module
+                        .load_source_map
+                        .as_deref()
+                        .unwrap_or_default()
+                        .as_bytes(),
+                ),
+            ],
+        );
+        let source_hash = content_hash_parts([
+            module.source.as_bytes(),
+            module
+                .compiled_content
+                .as_deref()
+                .unwrap_or_default()
+                .as_bytes(),
+            module
+                .load_source_map
+                .as_deref()
+                .unwrap_or_default()
+                .as_bytes(),
+        ]);
+        publish_artifact(
+            artifacts,
+            source_key.clone(),
+            BTreeSet::new(),
+            source_hash.clone(),
+        )?;
+
+        let dependency_fingerprint = module
+            .deps
+            .iter()
+            .map(|dependency| stable_path(dependency))
+            .chain(
+                module
+                    .dependency_aliases
+                    .iter()
+                    .map(|(alias, path)| format!("{alias}={}", stable_path(path))),
+            )
+            .collect::<Vec<_>>()
+            .join("\n");
+        let resolve_key = artifacts.key(
+            ArtifactKind::Resolve,
+            [
+                ("source", source_key.identity.as_bytes()),
+                ("target", format!("{:?}", input.target).as_bytes()),
+                (
+                    "jsxRuntime",
+                    format!("{:?}", input.options.jsx_runtime).as_bytes(),
+                ),
+                ("resolverConfig", resolver_configuration_hash.as_bytes()),
+                ("resolvedDependencies", dependency_fingerprint.as_bytes()),
+            ],
+        );
+        let resolve_hash = content_hash_parts([dependency_fingerprint.as_bytes()]);
+        publish_artifact(
+            artifacts,
+            resolve_key.clone(),
+            BTreeSet::from([ArtifactDependency::new(source_key, Some(source_hash))]),
+            resolve_hash.clone(),
+        )?;
+        resolve_keys.push(resolve_key);
+    }
+
+    let watch_paths = graph
+        .iter()
+        .flat_map(|module| module.watch_paths.iter().cloned())
+        .collect();
+    let glob_matches = graph
+        .iter()
+        .flat_map(|module| module.glob_matches.iter().cloned())
+        .collect();
 
     // 3. Compile each module (strip TS types, transform JSX).
     let (compiled, hook_source_maps) =
         compiler::compile_graph_with_hooks_and_maps(&graph, &input, compile_cache, build_hooks)?;
 
+    let options_fingerprint = serde_json::to_vec(&input.options).map_err(|error| {
+        BundleError::Compiler(format!("cannot fingerprint bundle options: {error}"))
+    })?;
+    let mut transform_dependencies = BTreeSet::new();
+    for (module, resolve_key) in compiled.iter().zip(&resolve_keys) {
+        let transform_key = artifacts.key(
+            ArtifactKind::Transform,
+            [
+                ("resolve", resolve_key.identity.as_bytes()),
+                ("options", options_fingerprint.as_slice()),
+            ],
+        );
+        let output_hash = content_hash_parts([
+            module.js.as_bytes(),
+            hook_source_maps
+                .get(&module.path)
+                .map(String::as_bytes)
+                .unwrap_or_default(),
+        ]);
+        publish_artifact(
+            artifacts,
+            transform_key.clone(),
+            BTreeSet::from([ArtifactDependency::new(resolve_key.clone(), None)]),
+            output_hash.clone(),
+        )?;
+        transform_dependencies.insert(ArtifactDependency::new(transform_key, Some(output_hash)));
+    }
+
     // 4. Enforce server/client boundaries.
     let mut diagnostics = Vec::new();
     boundary::check(&compiled, &input, &mut diagnostics)?;
+    let transform_closure = dependency_fingerprint(&transform_dependencies);
+    let analyze_key = artifacts.key(
+        ArtifactKind::Analyze,
+        [
+            ("entry", entry_label.as_bytes()),
+            ("target", format!("{:?}", input.target).as_bytes()),
+            ("dependencies", transform_closure.as_bytes()),
+        ],
+    );
+    publish_artifact(
+        artifacts,
+        analyze_key.clone(),
+        transform_dependencies.clone(),
+        content_hash_parts([format!("{diagnostics:?}").as_bytes()]),
+    )?;
 
     // 5. Plan client dynamic chunks before linking. The entry bundle follows only static edges so
     // dynamic modules are evaluated only when their generated ESM import runs.
@@ -346,6 +506,34 @@ fn prepare_bundle_with_parts(
     } else {
         compiled.clone()
     };
+    let chunk_plan = dynamic_import_files
+        .iter()
+        .map(|(path, file)| format!("{}={file}", stable_path(path)))
+        .chain(
+            static_modules
+                .iter()
+                .map(|module| stable_path(&module.path)),
+        )
+        .collect::<Vec<_>>()
+        .join("\n");
+    let mut chunk_dependencies = transform_dependencies;
+    chunk_dependencies.insert(ArtifactDependency::new(analyze_key, None));
+    let chunk_closure = dependency_fingerprint(&chunk_dependencies);
+    let chunk_plan_key = artifacts.key(
+        ArtifactKind::ChunkPlan,
+        [
+            ("entry", entry_label.as_bytes()),
+            ("route", input.request_path.as_bytes()),
+            ("options", options_fingerprint.as_slice()),
+            ("dependencies", chunk_closure.as_bytes()),
+        ],
+    );
+    publish_artifact(
+        artifacts,
+        chunk_plan_key.clone(),
+        chunk_dependencies,
+        content_hash_parts([chunk_plan.as_bytes()]),
+    )?;
 
     Ok(PreparedBundle {
         input,
@@ -356,6 +544,10 @@ fn prepare_bundle_with_parts(
         static_modules,
         graph_module_count: graph.len(),
         prepare_duration: started.elapsed(),
+        artifact_graph: artifacts.clone(),
+        chunk_plan_key,
+        watch_paths,
+        glob_matches,
     })
 }
 
@@ -369,6 +561,7 @@ fn emit_prepared_bundle(
     let hook_source_maps = &prepared.hook_source_maps;
     let dynamic_import_files = &prepared.dynamic_import_files;
     let static_modules = &prepared.static_modules;
+    let reference_manifest = prepared.reference_manifest()?;
     let split_dynamic_imports =
         input.target == BundleTarget::Client && input.options.emit_chunk_manifest;
     let linked_modules = static_modules
@@ -384,12 +577,19 @@ fn emit_prepared_bundle(
 
     // 6. Link modules into a single concatenated script. This also detects circular dependencies
     // and returns an error.
-    let linked = linker::link_parallel_with_dynamic_imports_and_shared_modules(
+    let mut linked = linker::link_parallel_with_dynamic_imports_and_shared_modules(
         &linked_modules,
         input,
         dynamic_import_files,
         shared_modules,
     )?;
+    if input.target == BundleTarget::Client {
+        linked.push_str(&format!(
+            "\n;(globalThis.__RUVYXA_ROUTE_ARTIFACTS__ ||= {{}})[{}] = {};\n",
+            output::js_string(&input.request_path),
+            output::js_string(&reference_manifest.artifact_version),
+        ));
+    }
 
     // 7. Optionally tree-shake, then minify. Tree-shaking is controlled
     // independently from whitespace/identifier minification.
@@ -462,7 +662,11 @@ fn emit_prepared_bundle(
                 .collect();
 
             let dynamic_imports = dynamic_import_chunks(compiled, dynamic_import_files);
-
+            let glob_matches = prepared
+                .glob_matches
+                .iter()
+                .map(|path| path.display().to_string().replace('\\', "/"))
+                .collect();
             Some(ChunkManifest {
                 bundle_id,
                 route: input.request_path.clone(),
@@ -471,6 +675,8 @@ fn emit_prepared_bundle(
                 source_map_file: sm_file,
                 size_bytes: code.len(),
                 dynamic_imports,
+                glob_matches,
+                reference_manifest: Some(reference_manifest.clone()),
             })
         } else {
             None
@@ -500,14 +706,129 @@ fn emit_prepared_bundle(
         cache_hits,
     };
 
-    Ok(BundleOutput {
+    let output = BundleOutput {
         code,
         source_map,
         diagnostics: prepared.diagnostics.clone(),
         stats,
         chunk_manifest,
         chunks,
-    })
+    };
+    publish_emitted_artifacts(prepared, shared_modules, &output)?;
+    Ok(output)
+}
+
+fn publish_emitted_artifacts(
+    prepared: &PreparedBundle,
+    shared_modules: &BTreeSet<PathBuf>,
+    output: &BundleOutput,
+) -> Result<()> {
+    let shared = shared_modules
+        .iter()
+        .map(|path| stable_path(path))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let emit_key = prepared.artifact_graph.key(
+        ArtifactKind::Emit,
+        [
+            ("plan", prepared.chunk_plan_key.identity.as_bytes()),
+            ("sharedModules", shared.as_bytes()),
+        ],
+    );
+    let chunks = serde_json::to_vec(&output.chunks).map_err(|error| {
+        BundleError::Compiler(format!("cannot fingerprint output chunks: {error}"))
+    })?;
+    let emit_hash = content_hash_parts([output.code.as_bytes(), chunks.as_slice()]);
+    publish_artifact(
+        &prepared.artifact_graph,
+        emit_key.clone(),
+        BTreeSet::from([ArtifactDependency::new(
+            prepared.chunk_plan_key.clone(),
+            None,
+        )]),
+        emit_hash.clone(),
+    )?;
+
+    if let Some(source_map) = &output.source_map {
+        let key = prepared.artifact_graph.key(
+            ArtifactKind::SourceMap,
+            [("emit", emit_key.identity.as_bytes())],
+        );
+        publish_artifact(
+            &prepared.artifact_graph,
+            key,
+            BTreeSet::from([ArtifactDependency::new(
+                emit_key.clone(),
+                Some(emit_hash.clone()),
+            )]),
+            content_hash_parts([source_map.as_bytes()]),
+        )?;
+    }
+    if let Some(manifest) = &output.chunk_manifest {
+        let manifest = serde_json::to_vec(manifest).map_err(|error| {
+            BundleError::Compiler(format!("cannot fingerprint chunk manifest: {error}"))
+        })?;
+        let key = prepared.artifact_graph.key(
+            ArtifactKind::Manifest,
+            [("emit", emit_key.identity.as_bytes())],
+        );
+        publish_artifact(
+            &prepared.artifact_graph,
+            key,
+            BTreeSet::from([ArtifactDependency::new(emit_key, Some(emit_hash))]),
+            content_hash_parts([manifest.as_slice()]),
+        )?;
+    }
+    Ok(())
+}
+
+fn publish_artifact(
+    graph: &ArtifactTaskGraph,
+    key: ArtifactKey,
+    dependencies: BTreeSet<ArtifactDependency>,
+    content_hash: String,
+) -> Result<bool> {
+    let kind = key.kind;
+    graph
+        .publish(key, dependencies, content_hash)
+        .map_err(|error| {
+            BundleError::Compiler(format!("artifact graph rejected {kind:?} output: {error}"))
+        })
+}
+
+fn content_hash_parts<'a>(parts: impl IntoIterator<Item = &'a [u8]>) -> String {
+    let mut hasher = blake3::Hasher::new();
+    for part in parts {
+        hasher.update(&(part.len() as u64).to_le_bytes());
+        hasher.update(part);
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+fn dependency_fingerprint(dependencies: &BTreeSet<ArtifactDependency>) -> String {
+    let mut hasher = blake3::Hasher::new();
+    for dependency in dependencies {
+        hash_artifact_part(&mut hasher, dependency.key.kind.as_str().as_bytes());
+        hash_artifact_part(&mut hasher, dependency.key.identity.as_bytes());
+        hash_artifact_part(
+            &mut hasher,
+            dependency
+                .content_hash
+                .as_deref()
+                .unwrap_or_default()
+                .as_bytes(),
+        );
+    }
+    hasher.finalize().to_hex().to_string()
+}
+
+fn hash_artifact_part(hasher: &mut blake3::Hasher, part: &[u8]) {
+    hasher.update(&(part.len() as u64).to_le_bytes());
+    hasher.update(part);
+}
+
+fn stable_path(path: &std::path::Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
 #[cfg(test)]
@@ -694,6 +1015,165 @@ mod tests {
         bundle_with_context(client_input(&root, &app, page, Vec::new(), "/"), &second).unwrap();
 
         assert!(second.incremental().edge_hits() >= 2);
+        assert!(second.artifacts().stats().hits >= 1);
+        assert!(second.artifacts().stats().ready >= 1);
+    }
+
+    #[test]
+    fn leaf_edit_reuses_unaffected_artifacts_and_preserves_clean_output() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = ruvyxa_diagnostics::normalized_canonical_path(temp.path());
+        let app = root.join("app");
+        fs::create_dir_all(&app).unwrap();
+        let shared = app.join("shared.ts");
+        let first_page = app.join("first.tsx");
+        let second_page = app.join("second.tsx");
+        fs::write(&shared, "export const label = 'stable';").unwrap();
+        fs::write(
+            &first_page,
+            "import { label } from './shared'; export default function First() { return <main>{label}</main>; }",
+        )
+        .unwrap();
+        fs::write(
+            &second_page,
+            "import { label } from './shared'; export default function Second() { return <main>{label}</main>; }",
+        )
+        .unwrap();
+
+        let cold_context = BundleContext::new(&root);
+        let cold_first = bundle_with_context(
+            client_input(&root, &app, first_page.clone(), Vec::new(), "/first"),
+            &cold_context,
+        )
+        .unwrap();
+        let cold_second = bundle_with_context(
+            client_input(&root, &app, second_page.clone(), Vec::new(), "/second"),
+            &cold_context,
+        )
+        .unwrap();
+        cold_context.save_incremental().unwrap();
+
+        fs::write(
+            &first_page,
+            "import { label } from './shared'; export default function First() { return <main>{label}-edited</main>; }",
+        )
+        .unwrap();
+        let edit_context = BundleContext::new(&root);
+        let edited_first = bundle_with_context(
+            client_input(&root, &app, first_page, Vec::new(), "/first"),
+            &edit_context,
+        )
+        .unwrap();
+        let warm_second = bundle_with_context(
+            client_input(&root, &app, second_page, Vec::new(), "/second"),
+            &edit_context,
+        )
+        .unwrap();
+        let stats = edit_context.artifacts().stats();
+
+        assert_ne!(edited_first.code, cold_first.code);
+        assert_eq!(warm_second.code, cold_second.code);
+        assert!(
+            stats.hits > 0,
+            "the unchanged dependency lane must be reused"
+        );
+        assert!(
+            stats.misses > 0,
+            "the edited dependency lane must be rebuilt"
+        );
+    }
+
+    #[test]
+    fn small_and_large_cache_budgets_emit_identical_output_and_pin_active_tasks() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = ruvyxa_diagnostics::normalized_canonical_path(temp.path());
+        let app = root.join("app");
+        fs::create_dir_all(&app).unwrap();
+        let page = app.join("page.tsx");
+        fs::write(
+            &page,
+            "export default function Page() { return <main>budget</main>; }",
+        )
+        .unwrap();
+        let input = client_input(&root, &app, page, Vec::new(), "/");
+
+        let large = BundleContext::new(&root).with_test_cache_budget(
+            cache_budget::CacheBudget::new(1024 * 1024, 0.8, 0.65).unwrap(),
+        );
+        let expected = bundle_with_context(input.clone(), &large).unwrap();
+
+        let small = BundleContext::new(&root)
+            .with_test_cache_budget(cache_budget::CacheBudget::new(1, 0.8, 0.65).unwrap());
+        let active_key = small
+            .artifacts()
+            .key(ArtifactKind::Emit, [("fixture", b"pinned".as_slice())]);
+        let active = small
+            .artifacts()
+            .begin(active_key.clone(), BTreeSet::new())
+            .unwrap();
+        let actual = bundle_with_context(input, &small).unwrap();
+        let budget = small.cache_budget_snapshot();
+
+        assert_eq!(actual.code, expected.code);
+        assert_eq!(actual.source_map, expected.source_map);
+        assert_eq!(
+            small.artifacts().record(&active_key).unwrap().state,
+            artifact_graph::ArtifactState::Building,
+            "budget enforcement must not evict an in-flight artifact"
+        );
+        assert!(
+            budget.evictions.values().sum::<u64>() > 0,
+            "the tiny budget must exercise an eviction path"
+        );
+        assert!(
+            budget.resident_bytes <= budget.target_bytes,
+            "evictable cache memory must return below the hysteresis target"
+        );
+        drop(active);
+    }
+
+    #[test]
+    fn repeated_route_edits_stay_within_the_shared_cache_budget() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = ruvyxa_diagnostics::normalized_canonical_path(temp.path());
+        let app = root.join("app");
+        fs::create_dir_all(&app).unwrap();
+        let page = app.join("page.tsx");
+        let input = client_input(&root, &app, page.clone(), Vec::new(), "/");
+        let context = BundleContext::new(&root)
+            .with_test_cache_budget(cache_budget::CacheBudget::new(4 * 1024, 0.8, 0.65).unwrap());
+        let mut last = None;
+
+        for edit in 0..24 {
+            let marker = "x".repeat(edit + 1);
+            fs::write(
+                &page,
+                format!(
+                    "export default function Page() {{ return <main>edit-{edit}-{marker}</main>; }}"
+                ),
+            )
+            .unwrap();
+            let output = bundle_with_context(input.clone(), &context).unwrap();
+            let budget = context.cache_budget_snapshot();
+            assert!(
+                budget.resident_bytes <= budget.target_bytes,
+                "edit {edit} left {} evictable bytes above target {}",
+                budget.resident_bytes,
+                budget.target_bytes
+            );
+            last = Some(output);
+        }
+
+        let clean = bundle_with_context(input, &BundleContext::new(&root)).unwrap();
+        assert_eq!(last.unwrap().code, clean.code);
+        assert!(
+            context
+                .cache_budget_snapshot()
+                .evictions
+                .values()
+                .sum::<u64>()
+                > 0
+        );
     }
 
     /// A reused dependency entry must reproduce the cold build exactly,
@@ -946,6 +1426,58 @@ mod tests {
         )));
         assert!(!out.code.contains("const label = \"Lazy\";"));
         assert!(out.chunks[0].code.contains("const label = \"Lazy\";"));
+    }
+
+    #[test]
+    fn import_meta_glob_expands_lazy_eager_and_alias_patterns_deterministically() {
+        let contract: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tests/fixtures/glob-contract.json"))
+                .unwrap();
+        assert_eq!(contract["contract"], "ruvyxa.glob");
+        assert_eq!(contract["schemaVersion"], 1);
+        let dir = tempfile::tempdir().unwrap();
+        let root = ruvyxa_diagnostics::normalized_canonical_path(dir.path());
+        let app = root.join("app");
+        std::fs::create_dir_all(app.join("posts/nested")).unwrap();
+        std::fs::write(app.join("posts/one.ts"), "export const value = 'one';").unwrap();
+        std::fs::write(
+            app.join("posts/nested/two.ts"),
+            "export const value = 'two';",
+        )
+        .unwrap();
+        std::fs::create_dir_all(app.join("posts/node_modules")).unwrap();
+        std::fs::write(
+            app.join("posts/node_modules/hidden.ts"),
+            "throw new Error('must stay ignored')",
+        )
+        .unwrap();
+        std::fs::write(
+            root.join("tsconfig.json"),
+            r#"{"compilerOptions":{"paths":{"@/*":["./app/*"]}}}"#,
+        )
+        .unwrap();
+        let page = app.join("page.ts");
+        std::fs::write(
+            &page,
+            r#"
+export const lazy = import.meta.glob('./posts/**/*.ts');
+export const eager = import.meta.glob('./posts/*.ts', { eager: true });
+export const aliased = import.meta.glob('@/posts/*.ts');
+export default function Page() { return null }
+"#,
+        )
+        .unwrap();
+
+        let input = client_input(&root, &app, page, vec![], "/");
+        let output = bundle(input).unwrap();
+        let manifest = output.chunk_manifest.unwrap();
+        assert_eq!(manifest.glob_matches.len(), 2, "{manifest:?}");
+        // The aliased lazy edge resolves to the same module that the eager
+        // glob already pulled into the static graph, so only the nested module
+        // remains a split point.
+        assert_eq!(manifest.dynamic_imports.len(), 1);
+        assert!(output.code.contains("./posts/one.ts"));
+        assert!(output.code.contains("one"));
     }
 
     #[test]

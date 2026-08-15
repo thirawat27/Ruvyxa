@@ -33,17 +33,25 @@ during release testing.
 
 ## Capability and artifact map
 
-| Adapter          | Target and supported routes                       | Generated handoff                                                                   |
-| ---------------- | ------------------------------------------------- | ----------------------------------------------------------------------------------- |
-| Node             | Node; SSR, SSG, CSR, ISR, PPR, API                | Standalone server and optional static directory.                                    |
-| Bun              | Bun/Node-compatible; SSR, SSG, CSR, ISR, PPR, API | Standalone Bun server and optional static directory.                                |
-| Deno             | Deno; SSR, SSG, CSR, ISR, PPR, API                | Standalone Deno server and optional static directory.                               |
-| Static           | Static; SSG and CSR only                          | Static publish directory and `_headers`. SSR, ISR, PPR, API routes fail validation. |
-| Vercel           | Serverless or edge; all route strategies and API  | Vercel Build Output API static/function artifacts.                                  |
-| Netlify          | Serverless; all route strategies and API          | Publish directory, handler function, deploy config, Frameworks API artifacts.       |
-| Cloudflare       | Edge; all route strategies and API                | Worker, asset directory, Wrangler config, headers.                                  |
-| Railway / Render | Node; all route strategies and API                | Standalone server, optional public directory, generated project config.             |
-| Firebase / AWS   | Serverless; all route strategies and API          | Hosting/static plus generated function/compute bundle and provider config.          |
+This table is generated from the adapter release contract; `pnpm release:validate` rejects drift.
+
+<!-- adapter-matrix:start -->
+
+| Adapter    | Target     | Runtime | Supported routes             |
+| ---------- | ---------- | ------- | ---------------------------- |
+| AWS        | serverless | node    | SSR, SSG, CSR, ISR, PPR, API |
+| Bun        | node       | bun     | SSR, SSG, CSR, ISR, PPR, API |
+| Cloudflare | edge       | edge    | SSR, SSG, CSR, API           |
+| Deno       | node       | deno    | SSR, SSG, CSR, ISR, PPR, API |
+| Firebase   | serverless | node    | SSR, SSG, CSR, ISR, PPR, API |
+| Netlify    | serverless | node    | SSR, SSG, CSR, ISR, PPR, API |
+| Node       | node       | node    | SSR, SSG, CSR, ISR, PPR, API |
+| Railway    | node       | node    | SSR, SSG, CSR, ISR, PPR, API |
+| Render     | node       | node    | SSR, SSG, CSR, ISR, PPR, API |
+| Static     | static     | static  | SSG, CSR                     |
+| Vercel     | serverless | node    | SSR, SSG, CSR, ISR, PPR, API |
+
+<!-- adapter-matrix:end -->
 
 Native realtime requires long-lived Node/Bun output. It permits Node, Bun, Railway, and Render but
 rejects Deno, AWS, Cloudflare, Firebase, Netlify, static, and Vercel. See

@@ -9,6 +9,7 @@ import {
   loader,
   notFound,
   redirect,
+  revalidateTag,
 } from '../../../packages/@ruvyxa/core/dist/server.js'
 
 describe('server API', () => {
@@ -74,6 +75,55 @@ describe('server API', () => {
 describe('cache', () => {
   beforeEach(() => {
     invalidateCache()
+  })
+
+  it('invalidates exact tags and rejects non-serializable deployment values', async () => {
+    let calls = 0
+    const read = () =>
+      cache('tagged')
+        .tags('posts')
+        .get(() => ({ value: ++calls }))
+    assert.deepEqual(await read(), { value: 1 })
+    assert.deepEqual(await read(), { value: 1 })
+    revalidateTag('posts')
+    assert.deepEqual(await read(), { value: 2 })
+    await assert.rejects(
+      cache('bad-value').get(() => new Date()),
+      /RUV1841/,
+    )
+  })
+
+  it('fails shared writes after request state reads and isolates request scope', async () => {
+    const globalRecord = globalThis as typeof globalThis & {
+      __RUVYXA_REQUEST_CONTEXT__?: {
+        peek(): { cache?: Map<string, unknown> }
+        wasRead(): boolean
+      }
+    }
+    const previous = globalRecord.__RUVYXA_REQUEST_CONTEXT__
+    let context: { cache?: Map<string, unknown> } = {}
+    globalRecord.__RUVYXA_REQUEST_CONTEXT__ = {
+      peek: () => context,
+      wasRead: () => true,
+    }
+    try {
+      await assert.rejects(
+        cache('private').get(() => 'secret'),
+        /RUV1840/,
+      )
+      let calls = 0
+      const read = () =>
+        cache('request-value')
+          .scope('request')
+          .get(() => ++calls)
+      assert.equal(await read(), 1)
+      assert.equal(await read(), 1)
+      context = {}
+      assert.equal(await read(), 2)
+    } finally {
+      if (previous) globalRecord.__RUVYXA_REQUEST_CONTEXT__ = previous
+      else delete globalRecord.__RUVYXA_REQUEST_CONTEXT__
+    }
   })
 
   it('caches values and returns them on subsequent calls', async () => {

@@ -10,7 +10,7 @@
 //! so a failed or interrupted build leaves the previous `dist/` intact rather
 //! than a half-written one that `start` would serve.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
@@ -219,11 +219,27 @@ pub(crate) fn prepare_build_assets(
 }
 
 pub(crate) async fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> {
+    build_with_cache_override(args, show_summary, None).await
+}
+
+/// Run a production build with an optional isolated artifact-cache directory.
+///
+/// Normal CLI builds pass `None` and retain the configured cache contract. The
+/// benchmark harness supplies a private directory so a cold sample never
+/// deletes, warms, or otherwise changes the application's real build cache.
+pub(crate) async fn build_with_cache_override(
+    args: BuildArgs,
+    show_summary: bool,
+    cache_directory: Option<&Path>,
+) -> anyhow::Result<()> {
     let started = Instant::now();
     let config = load_project_config(&args.root)?;
     let target = config.build_target(args.target);
     let app_dir = args.root.join(config.app_dir());
     let out_dir = args.root.join(config.out_dir());
+    let build_cache_directory = cache_directory
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| build_cache_dir(&args.root, &config.cache));
 
     if show_summary {
         print_tui_header("Build");
@@ -278,6 +294,7 @@ pub(crate) async fn build_with_output(args: BuildArgs, show_summary: bool) -> an
         &config.plugins,
         config.javascript_runtime(),
         config.markdown_enabled(),
+        config.react_compiler.unwrap_or(false),
     )?;
     plugin_session.run_start(&out_dir)?;
     let staging_dir = create_build_staging_dir(&out_dir).with_context(|| {
@@ -290,7 +307,7 @@ pub(crate) async fn build_with_output(args: BuildArgs, show_summary: bool) -> an
     let server_dir = staging_dir.join("server");
     let client_dir = staging_dir.join("client");
     let assets_dir = staging_dir.join("assets");
-    let image_cache_dir = build_cache_dir(&args.root, &config.cache).join("images");
+    let image_cache_dir = build_cache_directory.join("images");
     let style_entries = (!args.server_only).then(|| config.style_entries(&args.root));
     // `public/` is a URL contract for an API-only service too, so its files are
     // still staged. What is skipped is the browser-facing part: WebP conversion
@@ -340,7 +357,7 @@ pub(crate) async fn build_with_output(args: BuildArgs, show_summary: bool) -> an
                     &config.plugins,
                     RuvyxaBuildCache {
                         dependency_hash: &config.config_dependency_hash,
-                        directory: &build_cache_dir(&args.root, &config.cache),
+                        directory: &build_cache_directory,
                     },
                     &plugin_session,
                 )
@@ -422,6 +439,8 @@ pub(crate) async fn build_with_output(args: BuildArgs, show_summary: bool) -> an
             client_dir.join("manifest.json"),
             serde_json::to_string(&client_manifest)?,
         )?;
+        attach_client_artifacts(&staging_dir.join("manifest.json"), &client_manifest)?;
+        write_render_manifests(&staging_dir, &manifest, &client_manifest)?;
     }
     let client_bundles = client_manifest
         .get("routes")
@@ -456,7 +475,7 @@ pub(crate) async fn build_with_output(args: BuildArgs, show_summary: bool) -> an
             &config.build,
             RuvyxaBuildCache {
                 dependency_hash: &config.config_dependency_hash,
-                directory: &build_cache_dir(&args.root, &config.cache),
+                directory: &build_cache_directory,
             },
             config.javascript_runtime(),
             show_summary,
@@ -656,6 +675,163 @@ pub(crate) async fn build_with_output(args: BuildArgs, show_summary: bool) -> an
         print_route_size_table(&manifest, &client_manifest);
         print_success_banner_at("Built into", Some(&out_dir), started.elapsed());
     }
+    Ok(())
+}
+
+/// Copy the browser artifact identity into the deployment route manifest.
+///
+/// Adapters read this manifest when building their function registry. Keeping
+/// the identity beside the route makes every server-side protocol compare the
+/// exact client artifact the browser can navigate to, rather than a mutable
+/// build counter or a path-derived guess.
+fn attach_client_artifacts(
+    manifest_path: &Path,
+    client_manifest: &serde_json::Value,
+) -> anyhow::Result<()> {
+    let artifacts = client_manifest
+        .get("routes")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|route| Some((route.get("path")?.as_str()?, route)))
+        .collect::<BTreeMap<_, _>>();
+    if artifacts.is_empty() {
+        return Ok(());
+    }
+
+    let mut manifest: serde_json::Value = serde_json::from_slice(&fs::read(manifest_path)?)?;
+    let Some(routes) = manifest
+        .get_mut("routes")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        anyhow::bail!("route manifest has no routes array")
+    };
+    for route in routes {
+        let Some(path) = route.get("path").and_then(serde_json::Value::as_str) else {
+            continue;
+        };
+        if let Some(client) = artifacts.get(path) {
+            if let Some(artifact_version) = client
+                .get("artifactVersion")
+                .and_then(serde_json::Value::as_str)
+            {
+                route["artifactVersion"] = serde_json::Value::String(artifact_version.to_string());
+            }
+            route["flight"] = serde_json::Value::Bool(
+                client
+                    .get("flight")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+            );
+            route["cache"] = serde_json::Value::Bool(
+                client
+                    .get("cache")
+                    .and_then(serde_json::Value::as_bool)
+                    .unwrap_or(false),
+            );
+        }
+    }
+    fs::write(manifest_path, serde_json::to_vec(&manifest)?)?;
+    Ok(())
+}
+
+/// Emit the concise server-side contracts consumed by tooling and adapters.
+///
+/// File names stay short and domain-specific; schema versions live inside the
+/// payload so a future schema does not force every deployment path to rename.
+fn write_render_manifests(
+    out_dir: &Path,
+    routes: &RouteManifest,
+    client: &serde_json::Value,
+) -> anyhow::Result<()> {
+    let client_routes = client
+        .get("routes")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+
+    let mut modules = BTreeMap::<String, serde_json::Value>::new();
+    for route in &client_routes {
+        for module in route
+            .pointer("/chunkManifest/referenceManifest/modules")
+            .and_then(serde_json::Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            if let Some(id) = module.get("id").and_then(serde_json::Value::as_str) {
+                modules
+                    .entry(id.to_string())
+                    .or_insert_with(|| module.clone());
+            }
+        }
+    }
+    let module_values = modules.into_values().collect::<Vec<_>>();
+    let reference_version = &blake3::hash(&serde_json::to_vec(&module_values)?).to_hex()[..16];
+    write_contract(
+        &out_dir.join("references.json"),
+        serde_json::json!({
+            "contract": "ruvyxa.references",
+            "schemaVersion": 1,
+            "artifactVersion": reference_version,
+            "modules": module_values,
+        }),
+    )?;
+
+    let mut actions = Vec::new();
+    for route in routes
+        .routes
+        .iter()
+        .filter(|route| route.kind != ruvyxa_graph::RouteKind::Api)
+    {
+        let Some(parent) = route.file.parent() else {
+            continue;
+        };
+        let Some(file) = [parent.join("action.ts"), parent.join("action.js")]
+            .into_iter()
+            .find(|file| file.is_file())
+        else {
+            continue;
+        };
+        let source = fs::read_to_string(&file)?;
+        actions.push(serde_json::json!({
+            "route": route.path,
+            "routeId": route.id,
+            "referenceId": ruvyxa_dev_server::action_reference_id(&route.id, &source),
+        }));
+    }
+    write_contract(
+        &out_dir.join("actions.json"),
+        serde_json::json!({
+            "contract": "ruvyxa.actions",
+            "schemaVersion": 1,
+            "routes": actions,
+        }),
+    )?;
+
+    let flights = client_routes
+        .iter()
+        .filter(|route| route.get("flight").and_then(serde_json::Value::as_bool) == Some(true))
+        .map(|route| {
+            serde_json::json!({
+                "route": route.get("path").and_then(serde_json::Value::as_str).unwrap_or("/"),
+                "artifactVersion": route.get("artifactVersion").and_then(serde_json::Value::as_str),
+                "cache": route.get("cache").and_then(serde_json::Value::as_bool).unwrap_or(false),
+            })
+        })
+        .collect::<Vec<_>>();
+    write_contract(
+        &out_dir.join("flight.json"),
+        serde_json::json!({
+            "contract": "ruvyxa.flight",
+            "schemaVersion": 1,
+            "routes": flights,
+        }),
+    )?;
+    Ok(())
+}
+
+fn write_contract(path: &Path, value: serde_json::Value) -> anyhow::Result<()> {
+    fs::write(path, serde_json::to_vec(&value)?)?;
     Ok(())
 }
 

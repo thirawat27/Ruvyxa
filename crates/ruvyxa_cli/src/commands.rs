@@ -222,7 +222,7 @@ pub(crate) fn analyze(args: AnalyzeArgs) -> anyhow::Result<()> {
 }
 
 /// Writes machine-readable output without treating a downstream closed pipe as a CLI failure.
-fn write_machine_report(report: &str) -> anyhow::Result<()> {
+pub(crate) fn write_machine_report(report: &str) -> anyhow::Result<()> {
     write_machine_report_to(&mut std::io::stdout().lock(), report)
 }
 
@@ -587,6 +587,10 @@ pub(crate) fn trace(args: TraceArgs) -> anyhow::Result<()> {
 }
 
 pub(crate) async fn bench(args: BenchArgs) -> anyhow::Result<()> {
+    if args.baseline {
+        return run_baseline_benchmark(&args).await;
+    }
+
     let started = Instant::now();
     let samples = args.samples.max(1);
     let root = args.root;
@@ -642,7 +646,7 @@ pub(crate) async fn bench(args: BenchArgs) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, Clone, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BenchmarkResult {
     pub(crate) name: String,
@@ -1037,6 +1041,7 @@ fn describe_project_plugins(
         &config.plugins,
         config.javascript_runtime(),
         config.markdown_enabled(),
+        false,
     )?;
     let Some(bridge) = session.bridge() else {
         return Ok(None);

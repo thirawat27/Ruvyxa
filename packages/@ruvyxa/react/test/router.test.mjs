@@ -59,6 +59,7 @@ function withGlobals(values, run) {
     '__RUVYXA_ROUTE_PARAMS__',
     '__RUVYXA_REQUEST_PATH__',
     '__RUVYXA_ROUTE_PATTERN__',
+    '__RUVYXA_ROUTE_ARTIFACTS__',
     '__RUVYXA_ROUTER_INSTANCE__',
   ]
   const previous = new Map(
@@ -66,13 +67,20 @@ function withGlobals(values, run) {
   )
   for (const key of keys) delete globalThis[key]
   Object.assign(globalThis, values)
-  try {
-    return run()
-  } finally {
+  const restore = () => {
     for (const key of keys) delete globalThis[key]
     for (const [key, descriptor] of previous) {
       if (descriptor) Object.defineProperty(globalThis, key, descriptor)
     }
+  }
+  try {
+    const result = run()
+    if (result && typeof result.then === 'function') return result.finally(restore)
+    restore()
+    return result
+  } catch (error) {
+    restore()
+    throw error
   }
 }
 
@@ -222,6 +230,32 @@ describe('client router prefetch hints', () => {
 })
 
 describe('client router navigation state', () => {
+  it('falls back to a document navigation when a cached route artifact is stale', async () => {
+    const assigned = []
+    await withGlobals(
+      {
+        window: {
+          ...browserWindow('/'),
+          location: {
+            ...browserWindow('/').location,
+            assign: (href) => assigned.push(href),
+          },
+        },
+        __RUVYXA_ROUTES__: { '/stale': () => null },
+        __RUVYXA_ROUTE_ARTIFACTS__: { '/stale': 'old' },
+        __RUVYXA_ROOT__: { render() {} },
+        __RUVYXA_ROUTE_MANIFEST__: {
+          routes: [{ path: '/stale', src: '/chunks/stale.js', artifactVersion: 'current' }],
+        },
+      },
+      async () => {
+        const router = getRouterInstance()
+        await router.navigate('/stale')
+        assert.equal(assigned.length, 1)
+      },
+    )
+  })
+
   it('keeps pending true when a stale route load finishes before the current navigation', async () => {
     const keys = [
       'window',

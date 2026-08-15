@@ -145,6 +145,7 @@ pub(crate) fn emit_client_bundles(
         plugins,
         ruvyxa_dev_server::JavaScriptRuntime::Node,
         false,
+        false,
     )?;
     emit_client_bundles_with_session(
         root,
@@ -381,8 +382,27 @@ pub(crate) fn emit_client_bundles_with_session(
             "treeShaken": build.tree_shaking.unwrap_or(true),
             "chunkStrategy": build.split_strategy.as_deref().unwrap_or("route")
         });
+        let source = fs::read_to_string(&bundle.entry).unwrap_or_default();
+        let module = ruvyxa_bundler::ast::parse_module(&source);
+        let has_flight = ruvyxa_bundler::ast::has_named_runtime_export(&source, &module, "flight");
+        let uses_cache =
+            ruvyxa_bundler::reference_manifest::has_module_directive(&source, "use cache");
+        if uses_cache && !has_flight {
+            anyhow::bail!(
+                "RUV1842 {} declares 'use cache' without exporting flight(context); Ruvyxa cache directives apply to the public Flight producer",
+                bundle.entry.display()
+            );
+        }
+        route_info["flight"] = serde_json::Value::Bool(has_flight);
+        route_info["cache"] = serde_json::Value::Bool(uses_cache);
 
         if let Some(chunk_manifest) = bundle.chunk_manifest {
+            if let Some(version) = chunk_manifest
+                .pointer("/referenceManifest/artifactVersion")
+                .and_then(serde_json::Value::as_str)
+            {
+                route_info["artifactVersion"] = serde_json::Value::String(version.to_string());
+            }
             route_info["chunkManifest"] = chunk_manifest;
         }
         route_info["chunks"] = serde_json::Value::Array(
@@ -463,11 +483,13 @@ pub(crate) fn emit_client_bundles_with_session(
     }
 
     let bundle_budget = bundle_budget_report(&routes);
+    let cache_budget = bundle_context.enforce_cache_budget();
     // Persist only after every route artifact has been emitted successfully;
     // a failed batch leaves the previous dependency graph intact.
     bundle_context
         .save_incremental()
         .context("failed to persist incremental module graph")?;
+    let artifact_graph = bundle_context.artifacts().stats();
 
     Ok(serde_json::json!({
         "chunkStrategy": build.split_strategy.as_deref().unwrap_or("route"),
@@ -495,7 +517,11 @@ pub(crate) fn emit_client_bundles_with_session(
             "compileEntries": bundle_context.compile_cache().entry_count(),
             "compileBytes": bundle_context.compile_cache().total_bytes(),
             "graphHits": bundle_context.incremental().edge_hits(),
-            "graphModules": bundle_context.incremental().current_module_count()
+            "graphModules": bundle_context.incremental().current_module_count(),
+            "artifactGraph": artifact_graph,
+            "budget": cache_budget,
+            "compiler": bundle_context.compile_cache().stats(),
+            "resolver": bundle_context.graph_cache().stats()
         },
         "routes": routes
     }))
@@ -983,7 +1009,7 @@ pub(crate) fn emit_shared_route_chunk(
 /// `manifest.json` is a build report: it carries absolute source paths, module
 /// lists, byte counts, and per-route chunk graphs — none of which the browser
 /// needs, and the absolute paths of which should never be shipped to clients.
-/// This sibling file exposes only `{ path, src, sharedChunks: [{ src }] }` per
+/// This sibling file exposes only `{ path, src, sharedChunks, artifactVersion }` per
 /// page route, so `@ruvyxa/react`'s router downloads kilobytes, not the full
 /// build manifest. The dev server synthesizes the same shape at
 /// `/__ruvyxa/client/route-manifest.json`.
@@ -1004,7 +1030,22 @@ pub(crate) fn write_client_route_manifest(
                 .filter_map(|chunk| chunk.get("src").and_then(|src| src.as_str()))
                 .map(|src| serde_json::json!({ "src": src }))
                 .collect::<Vec<_>>();
-            Some(serde_json::json!({ "path": path, "src": src, "sharedChunks": shared }))
+            let artifact_version = route
+                .get("chunkManifest")
+                .and_then(|manifest| manifest.get("referenceManifest"))
+                .and_then(|manifest| manifest.get("artifactVersion"))
+                .and_then(|version| version.as_str());
+            let mut entry = serde_json::json!({
+                "path": path,
+                "src": src,
+                "sharedChunks": shared,
+                "flight": route.get("flight").and_then(|value| value.as_bool()).unwrap_or(false),
+                "cache": route.get("cache").and_then(|value| value.as_bool()).unwrap_or(false)
+            });
+            if let Some(artifact_version) = artifact_version {
+                entry["artifactVersion"] = serde_json::Value::String(artifact_version.to_string());
+            }
+            Some(entry)
         })
         .collect::<Vec<_>>();
 

@@ -73,6 +73,7 @@ struct MemoryCache {
     entries: HashMap<String, MemEntry>,
     /// `last_used` generation -> cache key. Exactly one slot per entry.
     recency: BTreeMap<u64, String>,
+    resident_bytes: u64,
 }
 
 impl MemoryCache {
@@ -96,31 +97,75 @@ impl MemoryCache {
             self.evict_lru();
         }
         let last_used = next_generation();
+        let entry_bytes = cache_entry_bytes(&key, &value);
         if let Some(previous) = self
             .entries
             .insert(key.clone(), MemEntry { value, last_used })
         {
             self.recency.remove(&previous.last_used);
+            self.resident_bytes = self
+                .resident_bytes
+                .saturating_sub(cache_entry_bytes(&key, &previous.value));
         }
+        self.resident_bytes = self.resident_bytes.saturating_add(entry_bytes);
         self.recency.insert(last_used, key);
     }
 
-    fn evict_lru(&mut self) {
-        if let Some((_, lru_key)) = self.recency.pop_first() {
-            self.entries.remove(&lru_key);
+    fn evict_lru(&mut self) -> bool {
+        if let Some((_, lru_key)) = self.recency.pop_first()
+            && let Some(entry) = self.entries.remove(&lru_key)
+        {
+            self.resident_bytes = self
+                .resident_bytes
+                .saturating_sub(cache_entry_bytes(&lru_key, &entry.value));
+            return true;
         }
+        false
     }
 
     fn remove(&mut self, key: &str) {
         if let Some(entry) = self.entries.remove(key) {
             self.recency.remove(&entry.last_used);
+            self.resident_bytes = self
+                .resident_bytes
+                .saturating_sub(cache_entry_bytes(key, &entry.value));
         }
     }
 
     fn clear(&mut self) {
         self.entries.clear();
         self.recency.clear();
+        self.resident_bytes = 0;
     }
+
+    fn evict_until_bytes(&mut self, target_bytes: u64) -> u64 {
+        let mut evicted = 0_u64;
+        while self.resident_bytes > target_bytes && self.evict_lru() {
+            evicted = evicted.saturating_add(1);
+        }
+        evicted
+    }
+}
+
+fn cache_entry_bytes(key: &str, value: &str) -> u64 {
+    (key.len() as u64).saturating_add(value.len() as u64)
+}
+
+#[derive(Debug, Default)]
+struct CacheTelemetry {
+    hits: AtomicU64,
+    misses: AtomicU64,
+    evictions: AtomicU64,
+}
+
+#[derive(Debug, Clone, Copy, Default, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CompileCacheStats {
+    pub memory_entries: usize,
+    pub resident_bytes: u64,
+    pub hits: u64,
+    pub misses: u64,
+    pub evictions: u64,
 }
 
 /// On-disk compilation cache with an in-process LRU memory layer.
@@ -135,6 +180,7 @@ pub struct CompileCache {
     namespace: String,
     /// Process-local hot cache shared by cloned cache handles.
     memory: Arc<Mutex<MemoryCache>>,
+    telemetry: Arc<CacheTelemetry>,
 }
 
 /// Cache lookup result.
@@ -171,6 +217,7 @@ impl CompileCache {
             enabled,
             namespace: namespace.into(),
             memory: Arc::new(Mutex::new(MemoryCache::default())),
+            telemetry: Arc::new(CacheTelemetry::default()),
         }
     }
 
@@ -181,6 +228,7 @@ impl CompileCache {
             enabled: false,
             namespace: String::new(),
             memory: Arc::new(Mutex::new(MemoryCache::default())),
+            telemetry: Arc::new(CacheTelemetry::default()),
         }
     }
 
@@ -207,6 +255,7 @@ impl CompileCache {
         );
 
         if !self.enabled {
+            self.telemetry.misses.fetch_add(1, Ordering::Relaxed);
             return CacheLookup::Miss(key);
         }
 
@@ -214,6 +263,7 @@ impl CompileCache {
         if let Ok(mut memory) = self.memory.lock()
             && let Some(value) = memory.touch(&key)
         {
+            self.telemetry.hits.fetch_add(1, Ordering::Relaxed);
             return CacheLookup::Hit(value.to_string());
         }
 
@@ -222,9 +272,13 @@ impl CompileCache {
         match fs::read_to_string(&path) {
             Ok(cached_js) => {
                 self.insert_to_memory(key, cached_js.clone());
+                self.telemetry.hits.fetch_add(1, Ordering::Relaxed);
                 CacheLookup::Hit(cached_js)
             }
-            Err(_) => CacheLookup::Miss(key),
+            Err(_) => {
+                self.telemetry.misses.fetch_add(1, Ordering::Relaxed);
+                CacheLookup::Miss(key)
+            }
         }
     }
 
@@ -380,6 +434,38 @@ impl CompileCache {
     /// Return the current number of entries in the memory cache.
     pub fn memory_entry_count(&self) -> usize {
         self.memory.lock().map(|m| m.len()).unwrap_or(0)
+    }
+
+    /// Approximate resident bytes owned by the in-process cache layer.
+    pub fn memory_resident_bytes(&self) -> u64 {
+        self.memory
+            .lock()
+            .map(|memory| memory.resident_bytes)
+            .unwrap_or(0)
+    }
+
+    /// Evict least-recently-used memory entries until `target_bytes` is met.
+    /// Disk artifacts remain available, so this can only make a later lookup slower.
+    pub fn evict_memory_to(&self, target_bytes: u64) -> u64 {
+        let evicted = self
+            .memory
+            .lock()
+            .map(|mut memory| memory.evict_until_bytes(target_bytes))
+            .unwrap_or(0);
+        self.telemetry
+            .evictions
+            .fetch_add(evicted, Ordering::Relaxed);
+        evicted
+    }
+
+    pub fn stats(&self) -> CompileCacheStats {
+        CompileCacheStats {
+            memory_entries: self.memory_entry_count(),
+            resident_bytes: self.memory_resident_bytes(),
+            hits: self.telemetry.hits.load(Ordering::Relaxed),
+            misses: self.telemetry.misses.load(Ordering::Relaxed),
+            evictions: self.telemetry.evictions.load(Ordering::Relaxed),
+        }
     }
 }
 
@@ -609,6 +695,35 @@ mod tests {
             recency_len, 1,
             "one resident entry must hold exactly one recency slot"
         );
+    }
+
+    #[test]
+    fn byte_budget_evicts_lru_entries_without_removing_disk_artifacts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = CompileCache::at_dir(tmp.path(), true);
+        let first_source = "export const first = 'a';";
+        let second_source = "export const second = 'bbbbbbbb';";
+        let first_key = match cache.lookup(first_source, false) {
+            CacheLookup::Miss(key) => key,
+            CacheLookup::Hit(_) => unreachable!(),
+        };
+        cache.store(&first_key, "compiled-first");
+        let second_key = match cache.lookup(second_source, false) {
+            CacheLookup::Miss(key) => key,
+            CacheLookup::Hit(_) => unreachable!(),
+        };
+        cache.store(&second_key, "compiled-second");
+        assert!(cache.memory_resident_bytes() > 0);
+
+        let evicted = cache.evict_memory_to(0);
+
+        assert_eq!(evicted, 2);
+        assert_eq!(cache.memory_resident_bytes(), 0);
+        assert_eq!(cache.stats().evictions, 2);
+        assert!(matches!(
+            cache.lookup(first_source, false),
+            CacheLookup::Hit(_)
+        ));
     }
 
     #[test]

@@ -383,7 +383,7 @@ fn route_tree_function(
         format!("__ruvyxaMetaElement(__ruvyxaResolveMeta([{meta_names}], ctx)), ")
     };
     lines.push(format!(
-        "  return React.createElement(__ruvyxaRouteContext.Provider, {{\n    value: {{ pathname: ctx.path, params: ctx.params ?? {{}}, route: {route_path_literal} }},\n  }}, {meta_child}tree);"
+        "  return React.createElement(__ruvyxaRouteContext.Provider, {{\n    value: {{ pathname: ctx.path, params: ctx.params ?? {{}}, route: {route_path_literal}, flight: ctx.flight }},\n  }}, {meta_child}tree);"
     ));
     format!("function __ruvyxaTree(ctx) {{\n{}\n}}", lines.join("\n"))
 }
@@ -475,7 +475,7 @@ mod tests {
             "{source}"
         );
         assert!(
-            source.contains(r#"route: "/a\";globalThis.pwned=1;\"" },"#),
+            source.contains(r#"route: "/a\";globalThis.pwned=1;\"", flight: ctx.flight },"#),
             "{source}"
         );
     }
@@ -704,7 +704,7 @@ mod tests {
             assert!(source.contains(ROUTE_CONTEXT_PRELUDE), "{source}");
             assert!(
                 source.contains(
-                    r#"value: { pathname: ctx.path, params: ctx.params ?? {}, route: "/" },"#
+                    r#"value: { pathname: ctx.path, params: ctx.params ?? {}, route: "/", flight: ctx.flight },"#
                 ),
                 "{source}"
             );

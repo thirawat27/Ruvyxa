@@ -264,6 +264,7 @@ export function routeContextPrelude() {
  * @param {object} options
  * @param {string} options.name Function name to declare.
  * @param {string} options.pageName Identifier the page component is bound to.
+ * @param {string|null} [options.pageModuleName] Namespace containing an optional Flight export.
  * @param {string[]} options.layoutNames Layout identifiers, root-to-leaf.
  * @param {string} options.routePath Route pattern, e.g. `/blog/[slug]`.
  * @param {string|null} [options.errorName] `error.tsx` component identifier.
@@ -277,6 +278,7 @@ export function routeContextPrelude() {
 export function routeTreeFunction({
   name,
   pageName,
+  pageModuleName = null,
   layoutNames,
   routePath,
   metaNames = [],
@@ -311,7 +313,7 @@ export function routeTreeFunction({
       ? `${META_ELEMENT_LOCAL}(${META_RESOLVE_LOCAL}([${metaNames.join(', ')}], ctx)), `
       : ''
   lines.push(`  return React.createElement(${ROUTE_CONTEXT_LOCAL}.Provider, {
-    value: { pathname: ctx.path, params: ctx.params ?? {}, route: ${JSON.stringify(routePath)} },
+    value: { pathname: ctx.path, params: ctx.params ?? {}, route: ${JSON.stringify(routePath)}, flight: ctx.flight },
   }, ${metaChild}tree)`)
   return `function ${name}(ctx) {\n${lines.join('\n')}\n}`
 }
@@ -351,7 +353,7 @@ export function routeRecoveryFunction({ layoutNames, routePath, notFoundName }) 
     tree = React.createElement(Layout, null, tree)
   }
   return React.createElement(${ROUTE_CONTEXT_LOCAL}.Provider, {
-    value: { pathname: ctx.path, params: ctx.params ?? {}, route: ${JSON.stringify(routePath)} },
+    value: { pathname: ctx.path, params: ctx.params ?? {}, route: ${JSON.stringify(routePath)}, flight: ctx.flight },
   }, tree)
 }`
 }
@@ -450,6 +452,7 @@ window.__RUVYXA_HYDRATED = true
 export function nodeSsrEntrySource({
   imports,
   pageName,
+  pageModuleName = null,
   layoutNames,
   routePath,
   readyEvent = 'onAllReady',
@@ -477,6 +480,9 @@ export function nodeSsrEntrySource({
   const recovery = serverRecovers
     ? `\n${routeRecoveryFunction({ layoutNames, routePath, notFoundName })}\n`
     : ''
+  const flight = pageModuleName
+    ? `\nexport async function flight(ctx) {\n  if (typeof ${pageModuleName}.flight !== "function") throw new Error("RUV1830 route does not export flight(context)")\n  return ${pageModuleName}.flight(ctx)\n}\n`
+    : ''
 
   return `import React from "react"
 import * as ReactDomServer from "react-dom/server"
@@ -491,6 +497,7 @@ export async function render(ctx) {
   const html = await __ruvyxaRenderDocument(ctx)
   return ${applyLang}
 }
+${flight}
 
 async function __ruvyxaRenderDocument(ctx) {
   const tree = __ruvyxaTree(ctx)

@@ -33,6 +33,17 @@
       "note": "Server actions. This is the endpoint whose absence from createHandler broke every deployed form."
     },
     {
+      "path": "/__ruvyxa/flight",
+      "reserved": true,
+      "native": "always",
+      "serverless": "dispatch",
+      "probe": {
+        "method": "GET",
+        "query": "path=/&artifact=0000000000000000"
+      },
+      "note": "Public, version-bound Flight navigation payloads. Invalid or stale requests fail before ordinary route matching."
+    },
+    {
       "path": "/__ruvyxa/trace",
       "reserved": true,
       "native": "dev",
