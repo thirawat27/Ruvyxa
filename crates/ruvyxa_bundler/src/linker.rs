@@ -561,28 +561,70 @@ fn rewrite_commonjs_requires_with_state(
     importer: &str,
 ) -> String {
     let mut out = String::with_capacity(line.len());
+    rewrite_requires_in_range(
+        line,
+        0,
+        line.len(),
+        deps,
+        in_block_comment,
+        drop_unresolved,
+        importer,
+        &mut out,
+    );
+    out
+}
+
+/// Rewrite `require()` calls in `line[start..end]`, appending to `out`.
+///
+/// Ranged rather than whole-line so a template literal's `${…}` interpolations
+/// can be walked with the same pass that walks the statement around them.
+#[allow(clippy::too_many_arguments)]
+fn rewrite_requires_in_range(
+    line: &str,
+    start: usize,
+    end: usize,
+    deps: &DepIndex<'_>,
+    in_block_comment: &mut bool,
+    drop_unresolved: bool,
+    importer: &str,
+    out: &mut String,
+) {
     let bytes = line.as_bytes();
-    let mut index = 0;
+    let mut index = start;
     let mut previous_significant: Option<usize> = None;
 
-    while index < bytes.len() {
-        // Strings, comments, template literals, and regular expressions are
-        // copied through untouched. The decision lives in `ast` so this pass
-        // and the dynamic-import pass below cannot disagree about where a
-        // literal ends — which is how a regex holding `/*` or a quote used to
-        // hide every `require()` that followed it.
-        if let Some(after) =
+    while index < end {
+        // Strings, comments, and regular expressions are copied through
+        // untouched; a template's interpolations are walked. The decision lives
+        // in `ast` so this pass and the dynamic-import pass below cannot
+        // disagree about where a literal ends — which is how a regex holding
+        // `/*` or a quote used to hide every `require()` that followed it.
+        if let Some(found) =
             crate::ast::skip_non_code(bytes, index, previous_significant, in_block_comment)
         {
-            out.push_str(&line[index..after]);
-            previous_significant = Some(index);
-            index = after;
+            index = copy_non_code(line, index, end, found, out, |code_start, code_end, out| {
+                // A comment cannot escape an interpolation, so the nested walk
+                // starts with its own state rather than borrowing this one.
+                let mut nested = false;
+                rewrite_requires_in_range(
+                    line,
+                    code_start,
+                    code_end,
+                    deps,
+                    &mut nested,
+                    drop_unresolved,
+                    importer,
+                    out,
+                );
+            });
+            previous_significant = Some(index.saturating_sub(1));
             continue;
         }
 
         if bytes[index..].starts_with(b"require")
             && is_import_boundary(bytes, index)
             && let Some((specifier, after_call)) = require_call(line, index + "require".len())
+            && after_call <= end
         {
             if let Some(dep_path) = deps.resolve(&specifier) {
                 out.push_str(&module_id(dep_path));
@@ -612,10 +654,51 @@ fn rewrite_commonjs_requires_with_state(
         if !bytes[index].is_ascii_whitespace() {
             previous_significant = Some(index);
         }
-        push_next_char(line, &mut out, &mut index);
+        push_next_char(line, out, &mut index);
     }
+}
 
-    out
+/// Copy a non-code construct into `out` and return the index after it.
+///
+/// Template literals are copied text-first: everything outside `${…}` is data,
+/// and each interpolation is handed to `rewrite_code` so the caller's own pass
+/// runs inside it. Both rewriters need exactly this, and both need it to agree.
+fn copy_non_code(
+    line: &str,
+    index: usize,
+    limit: usize,
+    found: crate::ast::NonCode,
+    out: &mut String,
+    mut rewrite_code: impl FnMut(usize, usize, &mut String),
+) -> usize {
+    match found {
+        crate::ast::NonCode::Opaque { end } => {
+            let end = end.min(limit).max(index);
+            out.push_str(&line[index..end]);
+            end
+        }
+        crate::ast::NonCode::Template {
+            end,
+            interpolations,
+        } => {
+            let end = end.min(limit).max(index);
+            let mut cursor = index;
+            for (code_start, code_end) in interpolations {
+                // An interpolation that runs past this range belongs to a
+                // literal the caller did not hand us; stop rather than reach
+                // outside it.
+                if code_start >= end || code_start < cursor {
+                    break;
+                }
+                out.push_str(&line[cursor..code_start]);
+                let code_end = code_end.min(end).max(code_start);
+                rewrite_code(code_start, code_end, out);
+                cursor = code_end;
+            }
+            out.push_str(&line[cursor..end]);
+            end
+        }
+    }
 }
 
 /// Escape a value for embedding in a double-quoted JavaScript string literal.
@@ -655,23 +738,57 @@ fn rewrite_dynamic_imports(
     in_block_comment: &mut bool,
 ) -> String {
     let mut out = String::with_capacity(line.len());
+    rewrite_dynamic_imports_in_range(
+        line,
+        0,
+        line.len(),
+        deps,
+        dynamic_import_files,
+        in_block_comment,
+        &mut out,
+    );
+    out
+}
+
+/// Rewrite dynamic `import()` calls in `line[start..end]`, appending to `out`.
+#[allow(clippy::too_many_arguments)]
+fn rewrite_dynamic_imports_in_range(
+    line: &str,
+    start: usize,
+    end: usize,
+    deps: &DepIndex<'_>,
+    dynamic_import_files: &BTreeMap<PathBuf, String>,
+    in_block_comment: &mut bool,
+    out: &mut String,
+) {
     let bytes = line.as_bytes();
-    let mut index = 0;
+    let mut index = start;
     let mut previous_significant: Option<usize> = None;
 
-    while index < bytes.len() {
-        if let Some(after) =
+    while index < end {
+        if let Some(found) =
             crate::ast::skip_non_code(bytes, index, previous_significant, in_block_comment)
         {
-            out.push_str(&line[index..after]);
-            previous_significant = Some(index);
-            index = after;
+            index = copy_non_code(line, index, end, found, out, |code_start, code_end, out| {
+                let mut nested = false;
+                rewrite_dynamic_imports_in_range(
+                    line,
+                    code_start,
+                    code_end,
+                    deps,
+                    dynamic_import_files,
+                    &mut nested,
+                    out,
+                );
+            });
+            previous_significant = Some(index.saturating_sub(1));
             continue;
         }
 
         if bytes[index..].starts_with(b"import")
             && is_import_boundary(bytes, index)
             && let Some((specifier, after_call)) = dynamic_import_call(line, index + "import".len())
+            && after_call <= end
             && let Some(dep_path) = deps.resolve(&specifier)
         {
             if let Some(file_name) = dynamic_import_files.get(dep_path) {
@@ -693,10 +810,8 @@ fn rewrite_dynamic_imports(
         if !bytes[index].is_ascii_whitespace() {
             previous_significant = Some(index);
         }
-        push_next_char(line, &mut out, &mut index);
+        push_next_char(line, out, &mut index);
     }
-
-    out
 }
 
 fn is_import_boundary(bytes: &[u8], index: usize) -> bool {
@@ -2383,6 +2498,57 @@ mod tests {
         assert!(
             rewritten.contains("Promise.resolve("),
             "import() after a regex literal must still be rewritten: {rewritten}"
+        );
+    }
+
+    #[test]
+    fn a_require_inside_a_template_interpolation_is_rewritten() {
+        // `${…}` is code, not template text. Skipping the template whole left a
+        // bare `require()` in a browser bundle, which is a ReferenceError at
+        // load — the same failure an unresolved require produces, but silent at
+        // build time because nothing was looking inside the literal.
+        let deps = [PathBuf::from("/app/node_modules/example/index.js")];
+        let index = DepIndex::without_aliases(&deps);
+        let expected = module_id(Path::new("/app/node_modules/example/index.js"));
+        let mut in_block_comment = false;
+
+        let rewritten = rewrite_commonjs_requires_with_state(
+            "const banner = `built with ${require(\"example\").name}`;",
+            &index,
+            &mut in_block_comment,
+            false,
+            "<test>",
+        );
+        assert!(
+            rewritten.contains(&expected),
+            "require() inside an interpolation must be rewritten: {rewritten}"
+        );
+        assert!(
+            rewritten.starts_with("const banner = `built with ${"),
+            "the surrounding template text is preserved: {rewritten}"
+        );
+    }
+
+    #[test]
+    fn template_text_that_looks_like_code_is_left_alone() {
+        // The other half: text outside `${…}` is data even when it reads like a
+        // call, and a nested template must not be mistaken for the end of the
+        // outer one.
+        let deps = [PathBuf::from("/app/node_modules/example/index.js")];
+        let index = DepIndex::without_aliases(&deps);
+        let mut in_block_comment = false;
+
+        let source = "const doc = `see require(\"example\") and ${inner(`${nested}`)} end`;";
+        let rewritten = rewrite_commonjs_requires_with_state(
+            source,
+            &index,
+            &mut in_block_comment,
+            false,
+            "<test>",
+        );
+        assert_eq!(
+            rewritten, source,
+            "template text and nested templates stay untouched"
         );
     }
 

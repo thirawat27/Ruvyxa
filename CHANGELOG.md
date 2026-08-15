@@ -62,6 +62,12 @@ strings, template literals, and regular expressions together — the combination
 own documentation says the decision requires. Neither pass carries a private walk any more, and
 `advance_char`, which existed only to serve them, is gone.
 
+The same walk also reached a third defect. A template literal used to be skipped whole, so
+`` `built with ${require("pkg").name}` `` kept its `require()` — while the dependency scanner, which
+does read `${…}` as code, had already put `pkg` in the graph. The module was bundled and the call
+site still said `require`, which is a `ReferenceError` in a browser bundle. Interpolations are now
+walked by the pass that walks the statement around them; template _text_ is still data.
+
 ### A panic no longer ends collaboration for the life of the process
 
 `CollabRegistry` took its lock with `.expect("collab registry poisoned")` at all five call sites, so

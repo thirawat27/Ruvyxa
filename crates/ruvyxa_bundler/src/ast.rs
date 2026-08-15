@@ -821,6 +821,19 @@ fn is_quote(byte: u8) -> bool {
     matches!(byte, b'"' | b'\'' | b'`')
 }
 
+/// What [`skip_non_code`] found at an offset that is not plain code.
+pub(crate) enum NonCode {
+    /// Text to copy through unchanged, resuming at `end`.
+    Opaque { end: usize },
+    /// A template literal. Its text is data, but each `${…}` range is code and
+    /// must still be walked — [`mask_range`] recurses into them for the same
+    /// reason.
+    Template {
+        end: usize,
+        interpolations: Vec<(usize, usize)>,
+    },
+}
+
 /// Skip the non-code construct at `index`, or return `None` when it is code.
 ///
 /// Exists for consumers that rewrite text a line at a time and therefore cannot
@@ -840,26 +853,28 @@ fn is_quote(byte: u8) -> bool {
 /// comment tracking, so this function does all four rather than exporting the
 /// regex test on its own.
 ///
-/// A template literal is skipped whole, including its `${…}` interpolations.
-/// That matches the previous behaviour — a `require()` inside an interpolation
-/// was never rewritten — and failing to rewrite is safe where mis-skipping is
-/// not.
+/// A template literal reports its `${…}` ranges rather than being skipped
+/// whole. Those ranges are code — [`scan_code`] already reads imports out of
+/// them — so a linker that skipped them left a bare `require()` at a call site
+/// whose module the graph had already bundled: the dependency was present and
+/// the call still said `require`, which is a `ReferenceError` in a browser
+/// bundle.
 pub(crate) fn skip_non_code(
     bytes: &[u8],
     index: usize,
     previous_significant: Option<usize>,
     in_block_comment: &mut bool,
-) -> Option<usize> {
+) -> Option<NonCode> {
     if *in_block_comment {
         let mut cursor = index;
         while cursor + 1 < bytes.len() {
             if bytes[cursor] == b'*' && bytes[cursor + 1] == b'/' {
                 *in_block_comment = false;
-                return Some(cursor + 2);
+                return Some(NonCode::Opaque { end: cursor + 2 });
             }
             cursor += 1;
         }
-        return Some(bytes.len());
+        return Some(NonCode::Opaque { end: bytes.len() });
     }
 
     if is_comment_start(bytes, index) {
@@ -873,19 +888,27 @@ pub(crate) fn skip_non_code(
         if block && !closed {
             *in_block_comment = true;
         }
-        return Some(after);
+        return Some(NonCode::Opaque { end: after });
     }
 
     if bytes[index] == b'`' {
-        return Some(template_literal(bytes, index).0);
+        let (end, interpolations) = template_literal(bytes, index);
+        return Some(NonCode::Template {
+            end,
+            interpolations,
+        });
     }
 
     if is_quote(bytes[index]) {
-        return Some(skip_string(bytes, index));
+        return Some(NonCode::Opaque {
+            end: skip_string(bytes, index),
+        });
     }
 
     if bytes[index] == b'/' && regex_can_start(bytes, previous_significant) {
-        return Some(skip_regex_literal(bytes, index));
+        return Some(NonCode::Opaque {
+            end: skip_regex_literal(bytes, index),
+        });
     }
 
     None
