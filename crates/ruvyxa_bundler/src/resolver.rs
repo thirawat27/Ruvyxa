@@ -742,17 +742,15 @@ fn load_config_chain(
         {
             effective.paths.clear();
             effective.path_bases.clear();
-            let declaration_base = compiler_options
-                .get("baseUrl")
-                .and_then(serde_json::Value::as_str)
-                .map(Path::new)
-                .map(|base| {
-                    if base.is_absolute() {
-                        base.to_path_buf()
-                    } else {
-                        config_dir.join(base)
-                    }
-                })
+            // TypeScript resolves `paths` against the effective `baseUrl` —
+            // including one inherited through `extends` — and only falls back to
+            // the declaring config's directory when no `baseUrl` is in effect.
+            // `effective.base_url` already holds local-over-inherited above, so
+            // reading it here is what keeps a base config's `baseUrl` from being
+            // silently ignored by a child that declares `paths`.
+            let declaration_base = effective
+                .base_url
+                .clone()
                 .unwrap_or_else(|| config_dir.to_path_buf());
             for (pattern, targets) in paths {
                 let targets = targets
@@ -2520,6 +2518,59 @@ export default function Card() { return <div className={cn("card")} /> }"#,
             assert_eq!(actual, case.expected, "{}", case.name);
         }
         assert_eq!(config.config_files.len(), 2);
+    }
+
+    /// A `baseUrl` inherited through `extends` must anchor the child's `paths`.
+    ///
+    /// This is the half of TypeScript's merge rule both Ruvyxa graphs used to
+    /// get wrong in the same direction: they anchored `paths` to the directory
+    /// of the config that declared them, ignoring an inherited `baseUrl`. The
+    /// two agreed with each other, so no parity fixture caught it, while the
+    /// editor and the type checker resolved these imports somewhere else.
+    #[test]
+    fn inherited_base_url_anchors_child_path_aliases() {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Fixture {
+            inherited_base_url: Scenario,
+        }
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct Scenario {
+            files: BTreeMap<String, String>,
+            configs: BTreeMap<String, String>,
+            cases: Vec<Case>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Case {
+            name: String,
+            specifier: String,
+            expected: Option<String>,
+        }
+        let fixture: Fixture = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/path-alias-contract.json"
+        ))
+        .unwrap();
+        let scenario = fixture.inherited_base_url;
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("project");
+        for (relative, source) in scenario.files.into_iter().chain(scenario.configs) {
+            let file = root.join(relative);
+            fs::create_dir_all(file.parent().unwrap()).unwrap();
+            fs::write(file, source).unwrap();
+        }
+
+        let config = TsConfigPaths::load(&root);
+        let canonical_root = ruvyxa_diagnostics::normalized_canonical_path(&root);
+        for case in scenario.cases {
+            let actual = config.resolve(&case.specifier).map(|path| {
+                path.strip_prefix(&canonical_root)
+                    .unwrap()
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            });
+            assert_eq!(actual, case.expected, "{}", case.name);
+        }
     }
 
     #[test]

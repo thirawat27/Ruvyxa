@@ -2,35 +2,48 @@ import { existsSync } from 'node:fs'
 import { readdir } from 'node:fs/promises'
 import path from 'node:path'
 import { resolveTsconfigGlobPattern } from './paths.mjs'
+import { directivePrologueEnd, findInCode } from './scanner.mjs'
 
 const IGNORED_DIRECTORIES = new Set(['.git', '.ruvyxa', 'dist', 'node_modules', 'target'])
+const MARKER = 'import.meta.glob'
 
 /** Expand literal import.meta.glob calls before Oxc runs. */
 export async function expandImportMetaGlob(source, importerDir, projectRoot, tsconfigPaths) {
   const replacements = []
+  const hoistedImports = []
   const inputs = new Set()
   const matches = new Set()
+  let callIndex = 0
   for (const call of findCalls(source)) {
     const unresolved = call.pattern.startsWith('.')
       ? path.join(importerDir, call.pattern)
       : resolveTsconfigGlobPattern(tsconfigPaths, call.pattern)
     if (!unresolved) throw globError(`cannot resolve pattern ${JSON.stringify(call.pattern)}`)
+    // Resolve the whole pattern, not just its static prefix, so a `..` segment
+    // after a wildcard is rejected here exactly as the Rust resolver rejects it.
     const absolutePattern = path.resolve(unresolved)
-    if (!isWithin(projectRoot, staticPrefix(absolutePattern))) {
+    if (!isWithin(projectRoot, absolutePattern)) {
       throw globError(`pattern ${JSON.stringify(call.pattern)} escapes the project root`)
     }
     const watchRoot = findWatchRoot(absolutePattern, projectRoot)
     inputs.add(watchRoot)
     const files = await collectFiles(watchRoot, absolutePattern)
-    const entries = files.map((file) => {
+    const entries = files.map((file, matchIndex) => {
       matches.add(file)
       const specifier = relativeSpecifier(importerDir, file)
-      const value = call.eager
-        ? `require(${JSON.stringify(specifier)})`
-        : `() => import(${JSON.stringify(specifier)})`
-      return `${JSON.stringify(specifier)}: ${value}`
+      if (!call.eager) {
+        return `${JSON.stringify(specifier)}: () => import(${JSON.stringify(specifier)})`
+      }
+      // Eager matches must enter the static dependency graph, so they lower to
+      // a real namespace import rather than a `require()` call: `require` is
+      // undefined in an ES module and only the Rust linker rewrites it, which
+      // made eager globs throw at runtime on this graph.
+      const binding = `__ruvyxaGlob${callIndex}_${matchIndex}`
+      hoistedImports.push(`import * as ${binding} from ${JSON.stringify(specifier)}`)
+      return `${JSON.stringify(specifier)}: ${binding}`
     })
     replacements.push({ start: call.start, end: call.end, value: `{${entries.join(', ')}}` })
+    callIndex += 1
   }
 
   let expanded = source
@@ -38,57 +51,37 @@ export async function expandImportMetaGlob(source, importerDir, projectRoot, tsc
     expanded =
       expanded.slice(0, replacement.start) + replacement.value + expanded.slice(replacement.end)
   }
-  return { source: expanded, inputs: [...inputs].sort(), matches: [...matches].sort() }
+  if (hoistedImports.length > 0) {
+    // Insert after the directive prologue: above it would demote a
+    // `'use client'` directive to a plain string, and below every use would put
+    // the linker's rewritten `const` binding in the temporal dead zone.
+    const insertAt = directivePrologueEnd(expanded)
+    expanded = `${expanded.slice(0, insertAt)}\n${hoistedImports.join('\n')}\n${expanded.slice(insertAt)}`
+  }
+  return {
+    source: expanded,
+    inputs: [...inputs].sort(compareBySlashedPath),
+    matches: [...matches].sort(compareBySlashedPath),
+  }
 }
 
 function findCalls(source) {
-  const calls = []
-  scanCode(source, 0, calls, false)
-  return calls
+  return findInCode(source, MARKER).map((index) => parseCall(source, index))
 }
 
-function scanCode(source, start, calls, stopAtClosingBrace) {
-  const marker = 'import.meta.glob'
-  let index = start
-  let braceDepth = 0
-  while (index < source.length) {
-    const character = source[index]
-    if (character === '/' && source[index + 1] === '/') {
-      index = source.indexOf('\n', index + 2)
-      if (index < 0) break
-    } else if (character === '/' && source[index + 1] === '*') {
-      const end = source.indexOf('*/', index + 2)
-      index = end < 0 ? source.length : end + 2
-    } else if (character === '"' || character === "'") {
-      index = skipString(source, index)
-    } else if (character === '`') {
-      index = scanTemplate(source, index, calls)
-    } else if (character === '{') {
-      braceDepth += 1
-      index += 1
-    } else if (character === '}' && stopAtClosingBrace) {
-      if (braceDepth === 0) return index + 1
-      braceDepth -= 1
-      index += 1
-    } else if (source.startsWith(marker, index)) {
-      const parsed = parseCall(source, index)
-      calls.push(parsed)
-      index = parsed.end
-    } else index += 1
-  }
-  return index
-}
-
-function scanTemplate(source, start, calls) {
-  let index = start + 1
-  while (index < source.length) {
-    if (source[index] === '\\') index += 2
-    else if (source[index] === '`') return index + 1
-    else if (source[index] === '$' && source[index + 1] === '{') {
-      index = scanCode(source, index + 2, calls, true)
-    } else index += 1
-  }
-  return index
+/**
+ * Order paths by their slash-normalized code units.
+ *
+ * This must stay a plain code-unit comparison. `localeCompare` sorts `a.ts`
+ * before `B.ts` while the Rust expander's `String` ordering sorts `B.ts` first,
+ * so the two graphs generated different glob key orders — and `localeCompare`
+ * additionally varies with the host ICU locale, which made builds
+ * irreproducible across machines.
+ */
+function compareBySlashedPath(left, right) {
+  const leftPath = slash(left)
+  const rightPath = slash(right)
+  return leftPath < rightPath ? -1 : leftPath > rightPath ? 1 : 0
 }
 
 function parseCall(source, start) {
@@ -144,7 +137,7 @@ async function collectFiles(root, absolutePattern) {
       else if (entry.isFile() && globMatches(pattern, slash(file))) files.push(file)
     }
   }
-  return files.sort((left, right) => slash(left).localeCompare(slash(right)))
+  return files.sort(compareBySlashedPath)
 }
 
 function globMatches(pattern, value, patternIndex = 0, valueIndex = 0) {
@@ -206,16 +199,6 @@ function staticPrefix(pattern) {
 function relativeSpecifier(directory, file) {
   const relative = slash(path.relative(directory, file))
   return relative.startsWith('.') ? relative : `./${relative}`
-}
-
-function skipString(source, start) {
-  const quote = source[start]
-  let index = start + 1
-  while (index < source.length) {
-    if (source[index] === '\\') index += 2
-    else if (source[index++] === quote) break
-  }
-  return index
 }
 
 function skipWhitespace(source, start) {

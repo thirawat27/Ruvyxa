@@ -1,0 +1,20 @@
+{
+  "$schema": "https://unpkg.com/knip@5/schema.json",
+  "workspaces": {
+    ".": {
+      "entry": ["scripts/*.mjs", "tests/**/*.test.{mjs,ts}"],
+      "project": ["scripts/**/*.mjs", "tests/**/*.{mjs,ts}"]
+    },
+    "packages/ruvyxa": {
+      "entry": ["runtime/*.mjs"]
+    },
+    "examples/demo": {
+      "entry": ["ruvyxa.config.ts", "instrumentation.ts", "app/**/*.{ts,tsx}", "plugins/**/*.ts"],
+      "project": ["**/*.{ts,tsx}"]
+    }
+  },
+  "ignoreDependencies": ["@ruvyxa/adapter-.*", "oxc-transform"],
+  "ignoreBinaries": ["pwsh", "readelf"],
+  "tags": ["-@public"],
+  "exclude": ["duplicates", "optionalPeerDependencies"]
+}

@@ -167,6 +167,42 @@ pub fn has_module_directive(source: &str, expected: &str) -> bool {
     directive(source) == Some(expected)
 }
 
+/// Byte offset just past the module's directive prologue.
+///
+/// Generated top-level statements must be inserted here. Not at the very start,
+/// because `'use client'` is only a directive while it is the first statement in
+/// the module — anything placed above it silently demotes it to a plain string
+/// expression and the whole server/client boundary check stops seeing it. Not at
+/// the end either, because the linker rewrites imports into `const` bindings at
+/// their original position rather than hoisting them, so a trailing import is in
+/// the temporal dead zone for every earlier use.
+pub fn directive_prologue_end(source: &str) -> usize {
+    let mut offset = source.len() - source.trim_start_matches('\u{feff}').len();
+    loop {
+        let rest = &source[offset..];
+        let trimmed = skip_leading_trivia(rest);
+        let after_trivia = offset + (rest.len() - trimmed.len());
+        let Some(quote) = trimmed.chars().next().filter(|c| *c == '\'' || *c == '"') else {
+            return offset;
+        };
+        let body_start = after_trivia + quote.len_utf8();
+        let Some(end) = source[body_start..].find(quote) else {
+            return offset;
+        };
+        // A raw newline means this was never a directive string.
+        if source[body_start..body_start + end].contains('\n') {
+            return offset;
+        }
+        let mut next = body_start + end + quote.len_utf8();
+        let tail = &source[next..];
+        let spaces = tail.len() - tail.trim_start_matches([' ', '\t']).len();
+        if source[next + spaces..].starts_with(';') {
+            next += spaces + 1;
+        }
+        offset = next;
+    }
+}
+
 fn skip_leading_trivia(mut source: &str) -> &str {
     loop {
         source = source.trim_start();

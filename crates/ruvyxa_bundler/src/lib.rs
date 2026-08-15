@@ -1132,6 +1132,24 @@ mod tests {
         drop(active);
     }
 
+    /// A long edit session stays inside the cache budget and keeps producing
+    /// byte-identical output.
+    ///
+    /// The invariant asserted per edit is the **hard limit**, not the hysteresis
+    /// target. Those are different promises, and asserting the wrong one made
+    /// this test environment-dependent: [`CacheBudget::observe`] deliberately
+    /// leaves residency alone in the `[target, soft)` band when no pressure has
+    /// been entered yet, because that band is what stops a build from evicting
+    /// on every trivial fluctuation. Residency landing in that band is correct
+    /// behaviour, but the old assertion read it as a failure, so the test passed
+    /// or failed on whether artifact-graph metadata — roughly 135 bytes per
+    /// record and per dependency edge — happened to land under 2662 bytes on a
+    /// given machine. It had a 173-byte margin locally and none in CI.
+    ///
+    /// What the controller does guarantee, and what this now checks, is that
+    /// residency never exceeds the hard limit, that sustained editing genuinely
+    /// drives it into pressure, and that eviction under pressure never changes
+    /// the emitted bytes.
     #[test]
     fn repeated_route_edits_stay_within_the_shared_cache_budget() {
         let temp = tempfile::tempdir().unwrap();
@@ -1156,23 +1174,32 @@ mod tests {
             let output = bundle_with_context(input.clone(), &context).unwrap();
             let budget = context.cache_budget_snapshot();
             assert!(
-                budget.resident_bytes <= budget.target_bytes,
-                "edit {edit} left {} evictable bytes above target {}",
+                budget.resident_bytes <= budget.hard_limit_bytes,
+                "edit {edit} left {} resident bytes above the hard limit {}",
                 budget.resident_bytes,
-                budget.target_bytes
+                budget.hard_limit_bytes
             );
             last = Some(output);
         }
 
+        // Memory pressure must never change output semantics: the worst legal
+        // result of eviction is a slower rebuild.
         let clean = bundle_with_context(input, &BundleContext::new(&root)).unwrap();
         assert_eq!(last.unwrap().code, clean.code);
+
+        let budget = context.cache_budget_snapshot();
         assert!(
-            context
-                .cache_budget_snapshot()
-                .evictions
-                .values()
-                .sum::<u64>()
-                > 0
+            budget.evictions.values().sum::<u64>() > 0,
+            "24 edits under a 4 KiB budget must exercise eviction"
+        );
+        // Residency is only ever sampled after enforcement has already run, so
+        // the in-build peak is not observable from here. `pressure_events` is
+        // the counter that records the controller actually entering pressure,
+        // and it is the honest way to prove the budget was under test rather
+        // than merely never approached.
+        assert!(
+            budget.pressure_events > 0,
+            "the fixture never entered cache pressure, so it proves nothing about eviction"
         );
     }
 
@@ -1434,7 +1461,7 @@ mod tests {
             serde_json::from_str(include_str!("../../../tests/fixtures/glob-contract.json"))
                 .unwrap();
         assert_eq!(contract["contract"], "ruvyxa.glob");
-        assert_eq!(contract["schemaVersion"], 1);
+        assert_eq!(contract["schemaVersion"], 2);
         let dir = tempfile::tempdir().unwrap();
         let root = ruvyxa_diagnostics::normalized_canonical_path(dir.path());
         let app = root.join("app");

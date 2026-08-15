@@ -30,6 +30,7 @@
     "runtime/request-context.mjs",
     "runtime/react-compiler.mjs",
     "runtime/route-match.mjs",
+    "runtime/scanner.mjs",
     "runtime/serverless-handler.mjs",
     "runtime/ssr-renderer.mjs",
     "runtime/paths.mjs",

@@ -49,9 +49,19 @@ pnpm -r build
 pnpm -r check
 pnpm -r test
 pnpm format:check
+pnpm check:unused
 pnpm release:validate
 pnpm pack:smoke
 ```
+
+`pnpm check:unused` runs Knip over the JavaScript/TypeScript workspaces and fails on unused files,
+exports, types, and dependencies. `pnpm release:validate` runs it too, so it gates a release. Ruvyxa
+loads a lot of code by convention rather than by import — `app/` routes, `plugins/`,
+`ruvyxa.config.ts`, the `runtime/*.mjs` modules the Rust CLI resolves by path, and adapters resolved
+from a `@ruvyxa/adapter-${name}` template string — so `knip.json` declares those as entry points or
+ignored dependencies. When a new runtime module or dynamically loaded package reports as unused, add
+it there rather than deleting it; check for a dynamic or path-based loader first. Knip must stay on
+version 6 or newer: version 5 crashes against this repository's TypeScript 7.
 
 For demo behavior changes, also run:
 

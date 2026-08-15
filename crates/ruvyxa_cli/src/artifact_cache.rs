@@ -31,6 +31,9 @@ const WORKER_RUNTIME_FILES: &[&str] = &[
     "worker-admission.mjs",
     "cache-budget.mjs",
     "glob.mjs",
+    // glob.mjs delegates every source scan here, so a scanner change alters
+    // what expansion emits and must invalidate prerendered output with it.
+    "scanner.mjs",
     "request-context.mjs",
     "compiler.mjs",
     "paths.mjs",

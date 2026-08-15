@@ -1,6 +1,7 @@
 {
   "contract": "ruvyxa.glob",
-  "schemaVersion": 1,
+  "schemaVersion": 2,
+  "why": "The Rust bundler and the JavaScript compiler each expand import.meta.glob. Both must produce the same matches, the same key order, and the same lowering, or a route behaves differently in dev, SSG, and production. Version 1 of this fixture only ever declared cases with zero or one match, so it asserted the word 'deterministic' without ever exercising an order, and the two implementations silently disagreed.",
   "ignoredDirectories": [".git", ".ruvyxa", "dist", "node_modules", "target"],
   "cases": [
     {
@@ -27,5 +28,34 @@
       "eager": false,
       "expected": []
     }
-  ]
+  ],
+  "ordering": {
+    "why": "Keys are ordered by slash-normalized code units, never by locale collation. localeCompare orders 'beta.ts' before 'Gamma.ts' and varies with the host ICU locale; code-unit order puts every uppercase initial first and is identical on every machine. These names differ by more than case so the fixture also runs on case-insensitive filesystems.",
+    "directory": "ordered",
+    "files": ["Alpha.ts", "Gamma.ts", "beta.ts", "delta.ts"],
+    "pattern": "./ordered/*.ts",
+    "expectedKeyOrder": [
+      "./ordered/Alpha.ts",
+      "./ordered/Gamma.ts",
+      "./ordered/beta.ts",
+      "./ordered/delta.ts"
+    ],
+    "rejectedLocaleOrder": [
+      "./ordered/Alpha.ts",
+      "./ordered/beta.ts",
+      "./ordered/delta.ts",
+      "./ordered/Gamma.ts"
+    ]
+  },
+  "lowering": {
+    "why": "An eager match must enter the static dependency graph as a namespace import. Emitting require() only worked in the Rust linker, which rewrites it; on the JavaScript graph the same text reached an ES module and threw 'require is not defined'.",
+    "eager": "import * as <binding> from <specifier>",
+    "lazy": "() => import(<specifier>)",
+    "forbiddenInOutput": ["require("]
+  },
+  "scanning": {
+    "why": "import.meta.glob occurrences inside strings, comments, template text, and regular-expression literals are not calls. A regex literal containing a quote, such as /['\"]/, is the case that blinded a hand-written scanner: it starts a string skip that runs to the next quote anywhere in the file and swallows the real call.",
+    "mustExpandAfter": "const quoted = /['\"]/g",
+    "mustNotExpandInside": ["line comment", "block comment", "string literal", "template text"]
+  }
 }

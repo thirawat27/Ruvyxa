@@ -100,6 +100,7 @@ export interface FrameStream {
  * `render` replaces whatever the previous `render` wrote. `finish` leaves the
  * last frame on screen and moves past it, so ordinary output continues below.
  */
+/** @public — the declared return type of `createFrame`, so callers can name it. */
 export interface Frame {
   render(lines: readonly string[]): void
   /** Draw one last frame (or keep the current one) and release the region. */

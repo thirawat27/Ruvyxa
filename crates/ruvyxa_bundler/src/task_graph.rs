@@ -453,15 +453,24 @@ impl ArtifactTaskGraph {
     /// Compact unowned leaf records until the graph fits `target_bytes`.
     /// Building records and their dependency closure remain pinned by state and
     /// dependent edges. Eviction can therefore only turn a hit into a rebuild.
+    ///
+    /// `target_bytes` is compared against the same quantity the budget
+    /// controller accounts for — [`ArtifactGraphStats::evictable_bytes`], which
+    /// excludes pinned records. Measuring every record here instead would count
+    /// bytes eviction is forbidden to reclaim, so a build holding a large pinned
+    /// closure would evict healthy `Ready` artifacts to make up the difference
+    /// and turn them into rebuilds that the budget never actually required.
     pub fn evict_to_bytes(&self, target_bytes: u64) -> u64 {
         if !self.enabled {
             return 0;
         }
         let mut inner = self.lock();
+        let protected = protected_artifacts(&inner);
         let mut resident = inner
             .records
-            .values()
-            .map(artifact_record_bytes)
+            .iter()
+            .filter(|(key, _)| !protected.contains(*key))
+            .map(|(_, record)| artifact_record_bytes(record))
             .sum::<u64>();
         let mut evicted = 0_u64;
         while resident > target_bytes {
@@ -966,5 +975,54 @@ mod tests {
         assert_eq!(graph.evict_to_bytes(0), 2);
         assert_eq!(graph.stats().records, 0);
         assert_eq!(graph.stats().evictions, 3);
+    }
+
+    /// Eviction must budget against the same bytes the controller accounts for.
+    ///
+    /// `enforce_cache_budget` measures the graph as `evictable_bytes`, which
+    /// excludes the pinned closure of an in-flight build, and then asks this
+    /// method to reach a target derived from that number. Measuring every record
+    /// here instead counted pinned bytes that eviction is forbidden to reclaim,
+    /// so a build holding a large pinned closure made up the difference by
+    /// discarding healthy `Ready` artifacts — rebuilds the budget never asked
+    /// for. Reaching a target already satisfied must therefore evict nothing.
+    #[test]
+    fn eviction_targets_evictable_bytes_and_ignores_pinned_closure_size() {
+        let temp = tempfile::tempdir().unwrap();
+        let graph = ArtifactTaskGraph::at_dir(temp.path(), "test", true);
+        let pinned_source = key(ArtifactKind::Source, "pinned-source");
+        let building = key(ArtifactKind::Transform, "in-flight");
+        let spare = key(ArtifactKind::Emit, "spare");
+        graph
+            .publish(pinned_source.clone(), BTreeSet::new(), "source")
+            .unwrap();
+        graph
+            .publish(spare.clone(), BTreeSet::new(), "spare")
+            .unwrap();
+        let task = graph
+            .begin(
+                building.clone(),
+                BTreeSet::from([ArtifactDependency::new(pinned_source.clone(), None)]),
+            )
+            .unwrap();
+
+        // The controller's view of the graph excludes the pinned closure.
+        let evictable = graph.stats().evictable_bytes;
+        assert!(evictable > 0, "the spare artifact must be evictable");
+        assert!(
+            evictable < graph.stats().resident_bytes,
+            "the pinned closure must not count as evictable"
+        );
+
+        // Asking for a target the graph already meets must cost nothing.
+        assert_eq!(
+            graph.evict_to_bytes(evictable),
+            0,
+            "an already-satisfied budget must not discard a healthy artifact"
+        );
+        assert!(graph.record(&spare).is_some());
+        assert!(graph.record(&pinned_source).is_some());
+
+        drop(task);
     }
 }

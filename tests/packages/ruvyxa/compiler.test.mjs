@@ -29,6 +29,7 @@ import {
 } from '../../../packages/ruvyxa/runtime/compiler.mjs'
 import { createFixtureWorkspace } from './fixture-workspace.mjs'
 import { loadTsconfigPaths, resolveTsconfigPath } from '../../../packages/ruvyxa/runtime/paths.mjs'
+import { expandImportMetaGlob } from '../../../packages/ruvyxa/runtime/glob.mjs'
 
 const workspaceRoot = path.resolve(fileURLToPath(new URL('../../..', import.meta.url)))
 const exampleRoot = path.join(workspaceRoot, 'examples/demo')
@@ -87,7 +88,7 @@ describe('runtime compiler', () => {
       await readFile(path.join(workspaceRoot, 'tests/fixtures/glob-contract.json')),
     )
     assert.equal(contract.contract, 'ruvyxa.glob')
-    assert.equal(contract.schemaVersion, 1)
+    assert.equal(contract.schemaVersion, 2)
     const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-glob-'))
     t.after(() => rm(root, { recursive: true, force: true }))
     await mkdir(path.join(root, 'posts', 'nested'), { recursive: true })
@@ -119,6 +120,84 @@ describe('runtime compiler', () => {
     assert.match(output, /posts\/one/)
     assert.ok(result.inputs.includes('posts'))
     assert.ok(result.inputs.includes('content.v1'))
+  })
+
+  // Replays the ordering, lowering, and scanning halves of the shared glob
+  // contract against the same fixture the Rust expander replays, so the two
+  // module graphs cannot drift. Each assertion here corresponds to a defect the
+  // previous version of this suite could not see.
+  it('replays the cross-language glob ordering, lowering, and scanning contract', async (t) => {
+    const contract = JSON.parse(
+      await readFile(path.join(workspaceRoot, 'tests/fixtures/glob-contract.json')),
+    )
+    assert.equal(contract.contract, 'ruvyxa.glob')
+    assert.equal(contract.schemaVersion, 2)
+    const { ordering, lowering, scanning } = contract
+
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-glob-contract-'))
+    t.after(() => rm(root, { recursive: true, force: true }))
+    await mkdir(path.join(root, ordering.directory), { recursive: true })
+    for (const file of ordering.files) {
+      await writeFile(path.join(root, ordering.directory, file), 'export const value = 1\n')
+    }
+
+    // Keys follow code-unit order. localeCompare would produce
+    // ordering.rejectedLocaleOrder, which is what this graph used to emit.
+    const lazy = await expandImportMetaGlob(
+      `export const all = import.meta.glob('${ordering.pattern}')\n`,
+      root,
+      root,
+      {},
+    )
+    const keys = [...lazy.source.matchAll(/"([^"]+)":/g)].map((match) => match[1])
+    assert.deepEqual(keys, ordering.expectedKeyOrder)
+    assert.notDeepEqual(keys, ordering.rejectedLocaleOrder)
+
+    // Eager matches lower to hoisted namespace imports, never to require().
+    const eager = await expandImportMetaGlob(
+      `export const all = import.meta.glob('${ordering.pattern}', { eager: true })\n`,
+      root,
+      root,
+      {},
+    )
+    for (const forbidden of lowering.forbiddenInOutput) {
+      assert.ok(
+        !eager.source.includes(forbidden),
+        `eager lowering must not emit ${forbidden}: ${eager.source}`,
+      )
+    }
+    assert.match(eager.source, /import \* as __ruvyxaGlob0_0 from/)
+
+    // A 'use client' directive must stay the first statement in the module.
+    const directive = await expandImportMetaGlob(
+      `'use client'\nexport const all = import.meta.glob('${ordering.pattern}', { eager: true })\n`,
+      root,
+      root,
+      {},
+    )
+    assert.ok(
+      directive.source.trimStart().startsWith("'use client'"),
+      `generated imports must not displace the directive prologue: ${directive.source}`,
+    )
+
+    // A regex literal containing a quote must not hide the call after it.
+    const scanned = await expandImportMetaGlob(
+      `${scanning.mustExpandAfter}\nexport const all = import.meta.glob('${ordering.pattern}')\n`,
+      root,
+      root,
+      {},
+    )
+    assert.doesNotMatch(scanned.source, /import\.meta\.glob/)
+
+    // Occurrences that are not calls must be left completely alone.
+    const inert = [
+      `// import.meta.glob('${ordering.pattern}')`,
+      `/* import.meta.glob('${ordering.pattern}') */`,
+      `const text = "import.meta.glob('${ordering.pattern}')"`,
+      "const template = `import.meta.glob('./x/*.ts')`",
+    ].join('\n')
+    const untouched = await expandImportMetaGlob(`${inert}\n`, root, root, {})
+    assert.equal(untouched.source, `${inert}\n`)
   })
 
   it('rejects dynamic and root-escaping import.meta.glob patterns', async (t) => {
@@ -203,6 +282,35 @@ describe('runtime compiler', () => {
       result.inputs.filter((file) => file.includes('tsconfig')),
       ['config/tsconfig.base.json', 'tsconfig.json'],
     )
+  })
+
+  // A `baseUrl` inherited through `extends` must anchor the child's `paths`.
+  // Both Ruvyxa graphs used to anchor them to the directory of the config that
+  // declared them instead, ignoring the inherited `baseUrl`. The two agreed
+  // with each other, so no parity fixture caught it, while the editor and the
+  // type checker resolved these imports somewhere else entirely.
+  it('anchors child path aliases to a baseUrl inherited through extends', async (t) => {
+    const fixture = JSON.parse(
+      await readFile(path.join(workspaceRoot, 'tests/fixtures/path-alias-contract.json'), 'utf8'),
+    )
+    const scenario = fixture.inheritedBaseUrl
+    const root = path.join(
+      await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-inherited-base-')),
+      'project',
+    )
+    t.after(() => rm(path.dirname(root), { recursive: true, force: true }))
+    for (const [relative, source] of Object.entries({ ...scenario.files, ...scenario.configs })) {
+      const file = path.join(root, relative)
+      await mkdir(path.dirname(file), { recursive: true })
+      await writeFile(file, source)
+    }
+
+    const model = loadTsconfigPaths(root)
+    for (const expected of scenario.cases) {
+      const resolved = resolveTsconfigPath(model, expected.specifier, resolveFixtureFile)
+      const actual = resolved ? path.relative(root, resolved).replaceAll('\\', '/') : null
+      assert.equal(actual, expected.expected, expected.name)
+    }
   })
 
   it('parses JSONC trailing commas without changing comma-brace text in alias targets', async (t) => {

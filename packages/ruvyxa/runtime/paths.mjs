@@ -89,8 +89,13 @@ function loadConfig(file, projectRoot, visiting) {
     if (typeof options.baseUrl === 'string')
       model.baseUrl = path.resolve(directory, options.baseUrl)
     if (options.paths && typeof options.paths === 'object' && !Array.isArray(options.paths)) {
-      const declarationBase =
-        typeof options.baseUrl === 'string' ? path.resolve(directory, options.baseUrl) : directory
+      // TypeScript resolves `paths` against the effective `baseUrl` — including
+      // one inherited through `extends` — and only falls back to the declaring
+      // config's directory when no `baseUrl` is in effect. `model.baseUrl`
+      // already holds local-over-inherited above, so reading it here is what
+      // keeps a base config's `baseUrl` from being silently ignored by a child
+      // that declares `paths`.
+      const declarationBase = model.baseUrl ?? directory
       model.paths = Object.entries(options.paths).map(([pattern, targets]) => ({
         pattern,
         targets: Array.isArray(targets)
@@ -141,22 +146,38 @@ function configCandidate(candidate) {
   return null
 }
 
+/**
+ * Order alias declarations from most to least specific.
+ *
+ * TypeScript probes the most specific matching pattern first, so an exact
+ * pattern must outrank a wildcard before either is tried as a file.
+ *
+ * The final tiebreak compares code units rather than using `localeCompare`,
+ * matching `alias_pattern_order` in the Rust resolver. Two patterns of equal
+ * specificity can never both match one specifier — equal literal prefix and
+ * suffix lengths force the patterns to be identical — so this only decides a
+ * stable order. Keeping it locale-independent means the two graphs sort a
+ * config the same way on every machine.
+ */
 function comparePatterns(left, right) {
-  const rank = ({ pattern }) => {
-    const star = pattern.indexOf('*')
-    return [
-      star < 0 ? 1 : 0,
-      star < 0 ? pattern.length : star,
-      star < 0 ? 0 : pattern.length - star - 1,
-      pattern.length,
-    ]
+  const leftSpecificity = patternSpecificity(left.pattern)
+  const rightSpecificity = patternSpecificity(right.pattern)
+  for (let index = 0; index < leftSpecificity.length; index++) {
+    if (leftSpecificity[index] !== rightSpecificity[index]) {
+      return rightSpecificity[index] - leftSpecificity[index]
+    }
   }
-  const a = rank(left)
-  const b = rank(right)
-  for (let index = 0; index < a.length; index++) {
-    if (a[index] !== b[index]) return b[index] - a[index]
-  }
-  return left.pattern.localeCompare(right.pattern)
+  if (left.pattern === right.pattern) return 0
+  return left.pattern < right.pattern ? -1 : 1
+}
+
+/** Specificity components, most significant first. A higher value wins. */
+function patternSpecificity(pattern) {
+  const star = pattern.indexOf('*')
+  const isExact = star < 0
+  const literalPrefixLength = isExact ? pattern.length : star
+  const literalSuffixLength = isExact ? 0 : pattern.length - star - 1
+  return [isExact ? 1 : 0, literalPrefixLength, literalSuffixLength, pattern.length]
 }
 
 function matchPattern(pattern, specifier) {

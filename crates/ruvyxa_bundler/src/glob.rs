@@ -22,9 +22,11 @@ pub(crate) fn expand_import_meta_glob(
     const MARKER: &str = "import.meta.glob";
     let ast = ast::parse_module(source);
     let mut replacements = Vec::new();
+    let mut hoisted_imports: Vec<String> = Vec::new();
     let mut all_matches = Vec::new();
     let mut watch_roots = Vec::new();
     let mut cursor = 0;
+    let mut call_index = 0usize;
 
     while let Some(relative) = source[cursor..].find(MARKER) {
         let start = cursor + relative;
@@ -54,12 +56,20 @@ pub(crate) fn expand_import_meta_glob(
 
         let entries = matches
             .iter()
-            .map(|file| {
+            .enumerate()
+            .map(|(match_index, file)| {
                 let specifier = relative_specifier(importer_dir, file);
                 let key = serde_json::to_string(&specifier).expect("path string serializes");
                 let import = serde_json::to_string(&specifier).expect("path string serializes");
                 if parsed.eager {
-                    format!("{key}: require({import})")
+                    // Eager matches belong in the static dependency graph, so
+                    // they lower to a namespace import rather than a
+                    // `require()` call. `require` is undefined in an ES module
+                    // and only this crate's linker rewrites it, so emitting it
+                    // made eager globs throw at runtime on the JavaScript graph.
+                    let binding = format!("__ruvyxaGlob{call_index}_{match_index}");
+                    hoisted_imports.push(format!("import * as {binding} from {import}"));
+                    format!("{key}: {binding}")
                 } else {
                     format!("{key}: () => import({import})")
                 }
@@ -70,13 +80,22 @@ pub(crate) fn expand_import_meta_glob(
         all_matches.extend(matches);
         watch_roots.push(watch_root);
         cursor = parsed.end;
+        call_index += 1;
     }
 
     let mut expanded = source.to_string();
     for (start, end, replacement) in replacements.into_iter().rev() {
         expanded.replace_range(start..end, &replacement);
     }
-    all_matches.sort();
+    if !hoisted_imports.is_empty() {
+        // Insert after the directive prologue: above it would demote a
+        // `'use client'` directive to a plain string, and below every use would
+        // put the linker's rewritten `const` binding in the temporal dead zone.
+        // One import per line keeps the line-based linker able to see them.
+        let insert_at = crate::reference_manifest::directive_prologue_end(&expanded);
+        expanded.insert_str(insert_at, &format!("\n{}\n", hoisted_imports.join("\n")));
+    }
+    all_matches.sort_by_key(|path| slash(path));
     all_matches.dedup();
     watch_roots.sort();
     watch_roots.dedup();
@@ -347,6 +366,126 @@ mod tests {
             relative_specifier(&root.join("features/blog"), &root.join("shared/post.ts")),
             "../../shared/post.ts"
         );
+    }
+
+    /// The ordering and lowering halves of the cross-language glob contract.
+    ///
+    /// This replays `tests/fixtures/glob-contract.json` directly rather than
+    /// asserting a hand-written expectation, so the Rust expander and the
+    /// JavaScript expander in `packages/ruvyxa/runtime/glob.mjs` cannot drift.
+    #[test]
+    fn replays_the_cross_language_ordering_and_lowering_contract() {
+        let contract: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tests/fixtures/glob-contract.json"))
+                .unwrap();
+        assert_eq!(contract["contract"], "ruvyxa.glob");
+        assert_eq!(contract["schemaVersion"], 2);
+        let ordering = &contract["ordering"];
+
+        let root = temp_directory("ordering-contract");
+        let directory = root.join(ordering["directory"].as_str().unwrap());
+        fs::create_dir_all(&directory).unwrap();
+        for file in ordering["files"].as_array().unwrap() {
+            fs::write(
+                directory.join(file.as_str().unwrap()),
+                "export const value = 1;",
+            )
+            .unwrap();
+        }
+
+        let pattern = ordering["pattern"].as_str().unwrap();
+        let expansion = expand_import_meta_glob(
+            &format!("export const all = import.meta.glob('{pattern}');"),
+            &root,
+            &root,
+            |_| None,
+        )
+        .unwrap();
+
+        let expected: Vec<String> = ordering["expectedKeyOrder"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap().to_string())
+            .collect();
+        let actual = expected
+            .iter()
+            .map(|key| {
+                expansion
+                    .source
+                    .find(&format!("\"{key}\""))
+                    .unwrap_or_else(|| panic!("missing key {key} in {}", expansion.source))
+            })
+            .collect::<Vec<_>>();
+        let mut sorted = actual.clone();
+        sorted.sort_unstable();
+        assert_eq!(
+            actual, sorted,
+            "glob keys must follow code-unit order, not locale order: {}",
+            expansion.source
+        );
+
+        // Eager matches lower to namespace imports; `require(` must never appear.
+        let eager = expand_import_meta_glob(
+            &format!("export const all = import.meta.glob('{pattern}', {{ eager: true }});"),
+            &root,
+            &root,
+            |_| None,
+        )
+        .unwrap();
+        for forbidden in contract["lowering"]["forbiddenInOutput"]
+            .as_array()
+            .unwrap()
+        {
+            assert!(
+                !eager.source.contains(forbidden.as_str().unwrap()),
+                "eager lowering must not emit {}: {}",
+                forbidden,
+                eager.source
+            );
+        }
+        assert!(
+            eager.source.contains("import * as __ruvyxaGlob0_0 from"),
+            "eager lowering must hoist a namespace import: {}",
+            eager.source
+        );
+
+        // A `'use client'` directive must stay the first statement in the
+        // module: generated imports placed above it would demote it to a plain
+        // string and the server/client boundary check would stop seeing it.
+        let directive = expand_import_meta_glob(
+            &format!(
+                "'use client'\nexport const all = import.meta.glob('{pattern}', {{ eager: true }});"
+            ),
+            &root,
+            &root,
+            |_| None,
+        )
+        .unwrap();
+        assert!(
+            directive.source.trim_start().starts_with("'use client'"),
+            "generated imports must not displace the directive prologue: {}",
+            directive.source
+        );
+        assert!(
+            crate::reference_manifest::has_module_directive(&directive.source, "use client"),
+            "the expanded module must still declare its client boundary: {}",
+            directive.source
+        );
+
+        // A regex literal containing a quote must not hide the call after it.
+        let guarded = format!(
+            "{}\nexport const all = import.meta.glob('{pattern}');",
+            contract["scanning"]["mustExpandAfter"].as_str().unwrap()
+        );
+        let scanned = expand_import_meta_glob(&guarded, &root, &root, |_| None).unwrap();
+        assert!(
+            !scanned.source.contains("import.meta.glob"),
+            "a regex literal must not hide a later glob call: {}",
+            scanned.source
+        );
+
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

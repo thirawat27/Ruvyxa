@@ -26,5 +26,22 @@
     },
     { "name": "reserved framework dependency", "specifier": "react", "expected": null },
     { "name": "root escape", "specifier": "@escape/secret", "expected": null }
-  ]
+  ],
+  "inheritedBaseUrl": {
+    "why": "TypeScript resolves `paths` against the effective `baseUrl`, including one inherited through `extends`, and falls back to the declaring config's directory only when no `baseUrl` is in effect. Both Ruvyxa graphs used the declaring config's directory unconditionally, so a base config that supplied `baseUrl` silently repointed every alias the child declared. The two implementations agreed with each other and disagreed with TypeScript, which meant the editor and the type checker resolved these imports one way and the bundler another.",
+    "files": {
+      "app/widgets/panel.ts": "export const value = 'panel'"
+    },
+    "configs": {
+      "config/tsconfig.base.json": "{ \"compilerOptions\": { \"baseUrl\": \"../app\" } }",
+      "tsconfig.json": "{ \"extends\": \"./config/tsconfig.base.json\", \"compilerOptions\": { \"paths\": { \"@w/*\": [\"./widgets/*\"] } } }"
+    },
+    "cases": [
+      {
+        "name": "child paths resolve against the inherited baseUrl",
+        "specifier": "@w/panel",
+        "expected": "app/widgets/panel.ts"
+      }
+    ]
+  }
 }
