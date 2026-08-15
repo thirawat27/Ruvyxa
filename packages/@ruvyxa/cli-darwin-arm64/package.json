@@ -24,6 +24,6 @@
     "prepack": "node ../../ruvyxa/scripts/prepare-platform-package.mjs"
   },
   "engines": {
-    "node": ">=22.13.0"
+    "node": ">=24.19.0"
   }
 }

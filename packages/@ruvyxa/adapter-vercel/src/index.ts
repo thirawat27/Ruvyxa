@@ -28,7 +28,7 @@ export interface VercelAdapterOptions {
   projectOutput?: boolean
   /**
    * Node.js runtime version for serverless functions.
-   * @default 'nodejs20.x'
+   * @default 'nodejs24.x'
    */
   runtime?: string
   /**
@@ -300,7 +300,7 @@ export function vercel(options: VercelAdapterOptions = {}): Adapter {
     build(ctx: BuildContext): AdapterOutput {
       validateBuildContext(ctx, 'vercelAdapter')
       const functionsDir = options.functionsDir ?? `${ctx.outDir}/functions`
-      const runtime = options.runtime ?? 'nodejs20.x'
+      const runtime = options.runtime ?? 'nodejs24.x'
       const maxDuration = options.maxDuration ?? 10
       const edge = options.edge === true
       const runtimePolicy = runtimeBuildPolicy(ctx)

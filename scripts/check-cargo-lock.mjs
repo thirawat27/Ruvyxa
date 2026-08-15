@@ -2,7 +2,6 @@ import { spawnSync } from 'node:child_process'
 
 const result = spawnSync('cargo', ['metadata', '--locked', '--no-deps', '--format-version', '1'], {
   stdio: ['ignore', 'ignore', 'inherit'],
-  shell: process.platform === 'win32',
 })
 
 if (result.error) {

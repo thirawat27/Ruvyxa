@@ -23,7 +23,6 @@ const platform = currentPlatform()
 const build = spawnSync('cargo', ['build', '--release', '-p', 'ruvyxa_cli'], {
   cwd: repoRoot,
   stdio: 'inherit',
-  shell: process.platform === 'win32',
 })
 
 if (build.status !== 0) {

@@ -15,7 +15,7 @@
 
 <p align="center">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square" alt="License" />
-  <img src="https://img.shields.io/badge/node-%3E%3D22.13-blue?style=flat-square" alt="Node 22.13+" />
+  <img src="https://img.shields.io/badge/node-%3E%3D24.19-blue?style=flat-square" alt="Node 24.19+" />
   <img src="https://img.shields.io/badge/rust-1.96%2B-orange?style=flat-square" alt="Rust 1.96+" />
   <img src="https://img.shields.io/badge/pnpm-11%2B-yellow?style=flat-square" alt="pnpm 11+" />
   <img src="https://img.shields.io/badge/TypeScript-7%2B-blue?style=flat-square" alt="TypeScript 7+" />
@@ -270,9 +270,9 @@ documents: [ARCHITECTURE.md](ARCHITECTURE.md), [CHANGELOG.md](CHANGELOG.md),
 
 | Use case                | Requirement                                                                                      |
 | ----------------------- | ------------------------------------------------------------------------------------------------ |
-| Building an app         | Node.js **22.13+** (Bun can run SSR instead). No Rust toolchain needed — the CLI ships prebuilt. |
+| Building an app         | Node.js **24.19+** (Bun can run SSR instead). No Rust toolchain needed — the CLI ships prebuilt. |
 | Supported CLI platforms | `win32-x64`, `win32-arm64`, `linux-x64`, `linux-arm64`, `darwin-arm64`                           |
-| Building the framework  | Node.js 22.13+, pnpm 11+, Rust 1.96+ (edition 2024)                                              |
+| Building the framework  | Node.js 24.19+, pnpm 11+, Rust 1.96+ (edition 2024)                                              |
 
 The `ruvyxa` npm package resolves one `@ruvyxa/cli-<platform>` optional dependency that carries the
 prebuilt native binary, so `npm install` is all that is required to get a working `ruvyxa` command.

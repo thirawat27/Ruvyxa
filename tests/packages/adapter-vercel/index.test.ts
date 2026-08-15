@@ -104,7 +104,7 @@ describe('vercel', () => {
     const funcConfig = JSON.parse(
       vcConfig && 'contents' in vcConfig ? String(vcConfig.contents) : '{}',
     )
-    assert.equal(funcConfig.runtime, 'nodejs20.x')
+    assert.equal(funcConfig.runtime, 'nodejs24.x')
     assert.equal(funcConfig.handler, 'index.mjs')
     assert.equal(funcConfig.maxDuration, 10)
 

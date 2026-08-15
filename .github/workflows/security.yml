@@ -51,6 +51,6 @@ jobs:
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
-          node-version: 22.13.0
+          node-version: 24.19.0
       - name: Audit production dependencies
         run: pnpm audit --prod --audit-level low

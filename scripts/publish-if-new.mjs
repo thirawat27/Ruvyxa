@@ -1,11 +1,9 @@
 #!/usr/bin/env node
 import { readdirSync, readFileSync, statSync } from 'node:fs'
-import { join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
 
 const args = process.argv.slice(2)
-const pnpmBin = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm'
-const npmBin = process.platform === 'win32' ? 'npm.cmd' : 'npm'
 const dryRun = args.includes('--dry-run')
 const packageNames = args.filter((arg) => arg !== '--dry-run')
 
@@ -29,6 +27,17 @@ const packages = new Map(
   }),
 )
 
+function spawnPackageManager(manager, args, options) {
+  if (process.platform === 'win32') {
+    const cli =
+      manager === 'npm'
+        ? resolve(dirname(process.execPath), 'node_modules', 'npm', 'bin', 'npm-cli.js')
+        : resolve(dirname(process.execPath), 'node_modules', 'corepack', 'dist', `${manager}.js`)
+    return spawnSync(process.execPath, [cli, ...args], options)
+  }
+  return spawnSync(manager, args, options)
+}
+
 for (const name of packageNames) {
   const pkg = packages.get(name)
   if (!pkg) {
@@ -47,12 +56,11 @@ for (const name of packageNames) {
     continue
   }
 
-  const publish = spawnSync(
-    pnpmBin,
+  const publish = spawnPackageManager(
+    'pnpm',
     ['--filter', name, 'publish', '--access', 'public', '--no-git-checks'],
     {
       stdio: 'inherit',
-      shell: process.platform === 'win32',
     },
   )
 
@@ -65,9 +73,8 @@ async function npmPackageExists(name, version) {
   const spec = `${name}@${version}`
 
   for (let attempt = 1; attempt <= 3; attempt++) {
-    const view = spawnSync(npmBin, ['view', spec, 'version'], {
+    const view = spawnPackageManager('npm', ['view', spec, 'version'], {
       encoding: 'utf8',
-      shell: process.platform === 'win32',
     })
 
     if (view.status === 0) return true

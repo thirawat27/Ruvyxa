@@ -12,8 +12,8 @@ importers:
   .:
     devDependencies:
       '@types/node':
-        specifier: 22.13.0
-        version: 22.13.0
+        specifier: 24.13.3
+        version: 24.13.3
       postcss:
         specifier: ^8.5.26
         version: 8.5.26
@@ -74,8 +74,8 @@ importers:
         version: link:../core
     devDependencies:
       '@types/node':
-        specifier: 22.13.0
-        version: 22.13.0
+        specifier: 24.13.3
+        version: 24.13.3
 
   packages/@ruvyxa/adapter-bun:
     dependencies:
@@ -144,8 +144,8 @@ importers:
         version: link:../core
     devDependencies:
       '@types/node':
-        specifier: 22.13.0
-        version: 22.13.0
+        specifier: 24.13.3
+        version: 24.13.3
 
   packages/@ruvyxa/cli-darwin-arm64: {}
 
@@ -166,8 +166,8 @@ importers:
         version: link:../core
     devDependencies:
       '@types/node':
-        specifier: 22.13.0
-        version: 22.13.0
+        specifier: 24.13.3
+        version: 24.13.3
 
   packages/@ruvyxa/react:
     dependencies:
@@ -195,8 +195,8 @@ importers:
         version: 19.2.8
     devDependencies:
       '@types/node':
-        specifier: 22.13.0
-        version: 22.13.0
+        specifier: 24.13.3
+        version: 24.13.3
       '@types/react':
         specifier: ^19.2.18
         version: 19.2.18
@@ -210,8 +210,8 @@ importers:
   packages/create-ruvyxa:
     devDependencies:
       '@types/node':
-        specifier: 22.13.0
-        version: 22.13.0
+        specifier: 24.13.3
+        version: 24.13.3
 
   packages/ruvyxa:
     dependencies:
@@ -268,8 +268,8 @@ importers:
         version: 2.9.0
     devDependencies:
       '@types/node':
-        specifier: 22.13.0
-        version: 22.13.0
+        specifier: 24.13.3
+        version: 24.13.3
     optionalDependencies:
       '@ruvyxa/cli-darwin-arm64':
         specifier: workspace:^
@@ -645,10 +645,10 @@ packages:
         integrity: sha512-GsCCIZDE/p3i96vtEqx+7dBUGXrc7zeSK3wwPHIaRThS+9OhWIXRqzs4d6k1SVU8g91DrNRWxWUGhp5KXQb2VA==,
       }
 
-  '@types/node@22.13.0':
+  '@types/node@24.13.3':
     resolution:
       {
-        integrity: sha512-ClIbNe36lawluuvq3+YYhnIN2CELi+6q8NpnM7PYp4hBn/TatfboPgVSm2rwKRfnV2M+Ty9GWDFI64KEe+kysA==,
+        integrity: sha512-Dh8vAsV36ig5wa9OX4pXvMc9D3Veibfw2wix0CUwYODLD8nkj9UsLjASr49nPg+2eKzxhBV+v7L8pXvT4e639Q==,
       }
 
   '@types/react-dom@19.2.4':
@@ -1675,10 +1675,10 @@ packages:
     engines: { node: '>=16.20.0' }
     hasBin: true
 
-  undici-types@6.20.0:
+  undici-types@7.18.2:
     resolution:
       {
-        integrity: sha512-Ny6QZ2Nju20vw1SRHe3d9jVu6gJ+4e3+MMpqu7pqE5HT6WsTSlce++GQmK5UXS8mzV8DSYHrQH+Xrf2jVcuKNg==,
+        integrity: sha512-AsuCzffGHJybSaRrmr5eHr81mwJU3kjw6M+uprWvCXiNeN9SOGwQ3Jn8jb8m3Z6izVgknn1R0FTCEAP2QrLY/w==,
       }
 
   unified@11.0.5:
@@ -1920,9 +1920,9 @@ snapshots:
 
   '@types/ms@2.1.0': {}
 
-  '@types/node@22.13.0':
+  '@types/node@24.13.3':
     dependencies:
-      undici-types: 6.20.0
+      undici-types: 7.18.2
 
   '@types/react-dom@19.2.4(@types/react@19.2.18)':
     dependencies:
@@ -2796,7 +2796,7 @@ snapshots:
       '@typescript/typescript-win32-arm64': 7.0.2
       '@typescript/typescript-win32-x64': 7.0.2
 
-  undici-types@6.20.0: {}
+  undici-types@7.18.2: {}
 
   unified@11.0.5:
     dependencies:

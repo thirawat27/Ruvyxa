@@ -10,7 +10,7 @@ to submit changes.
 ### Prerequisites
 
 - [Rust](https://rustup.rs/) (1.96+)
-- [Node.js](https://nodejs.org/) (22+)
+- [Node.js](https://nodejs.org/) (24.19+ LTS)
 - [pnpm](https://pnpm.io/) (11+)
 
 ### Clone and Install

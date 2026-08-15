@@ -41,6 +41,6 @@
     "@ruvyxa/adapter-cloudflare": "workspace:^"
   },
   "engines": {
-    "node": ">=22.13.0"
+    "node": ">=24.19.0"
   }
 }

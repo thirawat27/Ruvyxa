@@ -3820,15 +3820,15 @@ snapshot forever instead of revalidating.
 
 ```json
 {
-  "runtime": "nodejs20.x",
+  "runtime": "nodejs24.x",
   "handler": "index.mjs",
   "maxDuration": 30,
   "launcherType": "Nodejs"
 }
 ```
 
-Default runtime is `nodejs20.x`, not an older LTS. There is no `shouldAddHelpers` field. The edge
-target (`--target edge`) instead writes `{ runtime: "edge", entrypoint: "index.mjs" }`.
+Default runtime is `nodejs24.x`. There is no `shouldAddHelpers` field. The edge target
+(`--target edge`) instead writes `{ runtime: "edge", entrypoint: "index.mjs" }`.
 
 ---
 
@@ -3866,7 +3866,7 @@ from older Wrangler versions. `worker/index.mjs` is an ES module exporting `fetc
 #### Dockerfile
 
 ```dockerfile
-FROM node:22-alpine
+FROM node:24-alpine
 WORKDIR /app
 COPY .ruvyxa/deploy/node/ .
 EXPOSE 3000

@@ -7,6 +7,8 @@ const expectedVersion = rootPkg.version
 const expectedLicense = rootPkg.license
 const requiredRuntimeNodeEngine = rootPkg.engines?.node
 const requiredRuntimeNodeVersion = requiredRuntimeNodeEngine.replace(/^>=/, '')
+const requiredRuntimeNodeMajor = requiredRuntimeNodeVersion.split('.')[0]
+const workspaceNodeTypesVersion = rootPkg.devDependencies?.['@types/node']
 const repoUrl = 'git+https://github.com/thirawat27/ruvyxa.git'
 const packageDirs = [
   'packages/ruvyxa',
@@ -19,8 +21,16 @@ const packageDirs = [
 const failures = []
 
 check(
-  rootPkg.devDependencies?.['@types/node'] === requiredRuntimeNodeVersion,
-  `workspace @types/node must equal the engines.node floor (${requiredRuntimeNodeVersion})`,
+  workspaceNodeTypesVersion?.split('.')[0] === requiredRuntimeNodeMajor,
+  `workspace @types/node must match the engines.node major (${requiredRuntimeNodeMajor})`,
+)
+check(
+  readFileSync('.node-version', 'utf8').trim() === requiredRuntimeNodeMajor,
+  `.node-version must track the engines.node major (${requiredRuntimeNodeMajor})`,
+)
+check(
+  readFileSync('.nvmrc', 'utf8').trim() === requiredRuntimeNodeVersion,
+  `.nvmrc must equal the engines.node floor (${requiredRuntimeNodeVersion})`,
 )
 
 for (const dir of packageDirs) {
@@ -50,8 +60,8 @@ for (const dir of packageDirs) {
   const nodeTypes = pkg.devDependencies?.['@types/node']
   if (nodeTypes !== undefined) {
     check(
-      nodeTypes === requiredRuntimeNodeVersion,
-      `${pkg.name} @types/node must equal the engines.node floor (${requiredRuntimeNodeVersion})`,
+      nodeTypes === workspaceNodeTypesVersion,
+      `${pkg.name} @types/node must match the workspace version (${workspaceNodeTypesVersion})`,
     )
   }
   // A published declaration map points at `src/`, so `src` must be in the
@@ -149,7 +159,7 @@ console.log(`Validated ${crateDirs.length} Rust crate manifests for ${expectedVe
 // promising the two stay in sync" rule the repo already applies to template
 // mirrors and conformance fixtures.
 const readme = readFileSync('README.md', 'utf8')
-// `22.13.0` in a manifest is written `22.13` in prose and badges.
+// A full manifest floor such as `24.19.0` is written `24.19` in prose and badges.
 const [major, minor] = requiredRuntimeNodeVersion.split('.')
 const displayFloor = `${major}.${minor}`
 

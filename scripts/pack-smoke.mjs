@@ -15,7 +15,6 @@ import { arch, platform } from 'node:process'
 import { setTimeout as sleep } from 'node:timers/promises'
 
 const destination = '.npm-pack'
-const pnpmBin = process.platform === 'win32' ? 'pnpm.cmd' : 'pnpm'
 const currentPlatformPackage = `@ruvyxa/cli-${platform}-${arch}`
 const packages = [
   '@ruvyxa/core',
@@ -41,6 +40,16 @@ const packages = [
 ]
 
 const ruvyxaRuntimeSource = resolve('packages/ruvyxa/runtime')
+const corepackPnpm = resolve(dirname(process.execPath), 'node_modules/corepack/dist/pnpm.js')
+
+/** Run pnpm without routing structured arguments through a command shell on Windows. */
+function execPnpm(args, options = {}) {
+  if (process.platform === 'win32') {
+    assert(existsSync(corepackPnpm), `Node installation is missing Corepack pnpm: ${corepackPnpm}`)
+    return execFileSync(process.execPath, [corepackPnpm, ...args], options)
+  }
+  return execFileSync('pnpm', args, options)
+}
 
 /**
  * Follow local ESM dependencies from the runtime entrypoints that the native
@@ -93,10 +102,8 @@ for (const pkg of packages) {
     pkg.replaceAll('@', '').replaceAll('/', '-'),
   )
   mkdirSync(packageDestination, { recursive: true })
-  execFileSync(pnpmBin, ['--filter', pkg, 'pack', '--pack-destination', packageDestination], {
+  execPnpm(['--filter', pkg, 'pack', '--pack-destination', packageDestination], {
     stdio: 'inherit',
-    // Windows exposes pnpm through a .cmd shim; Node requires shell dispatch for that shim.
-    shell: process.platform === 'win32',
   })
   const tarballs = readdirSync(packageDestination).filter((file) => file.endsWith('.tgz'))
   assert(tarballs.length === 1, `${pkg} should produce exactly one tarball`)
@@ -361,27 +368,23 @@ writeFileSync(
   ].join('\n'),
 )
 
-execFileSync(pnpmBin, ['install', '--no-lockfile'], {
+execPnpm(['install', '--no-lockfile'], {
   cwd: extracted,
   stdio: 'inherit',
-  shell: process.platform === 'win32',
 })
 for (const starter of starters) {
-  execFileSync(pnpmBin, ['run', 'typecheck'], {
+  execPnpm(['run', 'typecheck'], {
     cwd: `${extracted}/scaffolded-${starter}`,
     stdio: 'inherit',
-    shell: process.platform === 'win32',
   })
 }
-execFileSync(pnpmBin, ['run', 'test'], {
+execPnpm(['run', 'test'], {
   cwd: pluginSmokeDir,
   stdio: 'inherit',
-  shell: process.platform === 'win32',
 })
-execFileSync(pnpmBin, ['exec', 'ruvyxa', 'check', '--root', '.'], {
+execPnpm(['exec', 'ruvyxa', 'check', '--root', '.'], {
   cwd: `${extracted}/scaffolded-minimal`,
   stdio: 'inherit',
-  shell: process.platform === 'win32',
 })
 const packedManifest = JSON.parse(
   readFileSync(`${extracted}/scaffolded-minimal/.ruvyxa/assets/content.json`, 'utf8'),

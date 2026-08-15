@@ -51,7 +51,7 @@ export function firebase(options: FirebaseAdapterOptions = {}): Adapter {
             {
               source: '.ruvyxa/deploy/firebase/functions',
               codebase: 'ruvyxa',
-              runtime: 'nodejs22',
+              runtime: 'nodejs24',
             },
           ],
           hosting: {
@@ -89,7 +89,7 @@ export function firebase(options: FirebaseAdapterOptions = {}): Adapter {
           private: true,
           type: 'module',
           main: 'index.mjs',
-          engines: { node: '22' },
+          engines: { node: '24' },
           dependencies: { 'firebase-functions': '^7.3.0' },
         },
         null,

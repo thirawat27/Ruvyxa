@@ -44,15 +44,15 @@ jobs:
       matrix:
         include:
           - os: ubuntu-latest
-            node: '22.13.0'
+            node: '24.19.0'
           - os: ubuntu-24.04-arm
-            node: '22'
+            node: '24.19.0'
           - os: macos-latest
-            node: '22'
+            node: '24.19.0'
           - os: windows-latest
-            node: '22'
+            node: '24.19.0'
           - os: windows-11-arm
-            node: '22'
+            node: '24.19.0'
 
     steps:
       - uses: actions/checkout@v7

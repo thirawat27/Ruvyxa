@@ -106,17 +106,18 @@ describe('Ruvyxa CLI platforms', () => {
     )
 
     assert.match(workspaceManifest, /rust-version = "1\.96"/)
-    assert.equal(workspacePackage.engines.node, '>=22.13.0')
+    assert.equal(workspacePackage.engines.node, '>=24.19.0')
     assert.equal(workspacePackage.packageManager, 'pnpm@11.21.0')
-    assert.equal(ruvyxaPackage.engines.node, '>=22.13.0')
+    assert.equal(ruvyxaPackage.engines.node, '>=24.19.0')
     assert.match(ciWorkflow, /toolchain: 1\.96\.0/)
-    assert.match(ciWorkflow, /node: '22\.13\.0'/)
+    assert.match(ciWorkflow, /node: '24\.19\.0'/)
+    assert.equal([...ciWorkflow.matchAll(/node: '24\.19\.0'/g)].length, 5)
     assert.match(ciWorkflow, /node-version: \$\{\{ matrix\.node \}\}/)
   })
 
   // TypeScript test sources are compiled by `tsc` before `node --test` runs
   // them, so the suite never depends on a runtime that can strip types. Node
-  // 22.13 — the floor declared above — cannot, and an unflagged release that
+  // 24.19 — the floor declared above — cannot, and an unflagged release that
   // can would make CI green on a Node the framework claims to support but
   // never exercises.
   it('runs the TypeScript suites as compiled JavaScript, on no experimental runtime flag', () => {

@@ -24,12 +24,12 @@
     "publish:dry-run": "pnpm -r --filter './packages/**' publish --access public --dry-run"
   },
   "devDependencies": {
-    "@types/node": "22.13.0",
+    "@types/node": "24.13.3",
     "postcss": "^8.5.26",
     "prettier": "3.9.6",
     "typescript": "^7.0.2"
   },
   "engines": {
-    "node": ">=22.13.0"
+    "node": ">=24.19.0"
   }
 }

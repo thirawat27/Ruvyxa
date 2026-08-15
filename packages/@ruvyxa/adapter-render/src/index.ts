@@ -43,7 +43,7 @@ export function render(options: RenderAdapterOptions = {}): Adapter {
         '    startCommand: node .ruvyxa/deploy/render/server/index.mjs\n' +
         '    envVars:\n' +
         '      - key: NODE_VERSION\n' +
-        '        value: 22.13.0\n'
+        '        value: ">=24.19.0 <25"\n'
 
       return {
         name: 'render',

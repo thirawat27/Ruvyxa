@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### Node.js 24 LTS production baseline
+
+- Raised the root, published package, demo, and starter-template Node.js minimum to `>=24.19.0`.
+- Decoupled `@types/node` patch numbering from the runtime floor while keeping every package on the
+  same latest Node 24 type contract (`24.13.3`).
+- CI now verifies Node.js 24.19.0 across every supported operating system; security and release jobs
+  use the same exact version.
+- AWS Amplify, Firebase, Render, and Vercel deployment output now defaults to the Node.js 24 line.
+  Render constrains automatic updates to `>=24.19.0 <25` so patch updates do not cross a major.
+
 ### Server actions, plugin HTTP hooks, and `security` reach deployed builds
 
 Ruvyxa has two request hosts: the Axum server behind `ruvyxa dev` and `ruvyxa start`, and

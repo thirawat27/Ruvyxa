@@ -15,7 +15,7 @@ type AmplifyRuntime = 'nodejs20.x' | 'nodejs22.x' | 'nodejs24.x'
 
 /** Options for AWS Amplify Hosting deployments. */
 export interface AwsAdapterOptions {
-  /** Amplify compute runtime. @default "nodejs22.x" */
+  /** Amplify compute runtime. @default "nodejs24.x" */
   runtime?: AmplifyRuntime
   /**
    * Emit the project-root `.amplify-hosting/` deployment bundle Amplify discovers.
@@ -26,7 +26,7 @@ export interface AwsAdapterOptions {
 
 /** Create an AWS Amplify Hosting static-plus-compute adapter for Ruvyxa. */
 export function aws(options: AwsAdapterOptions = {}): Adapter {
-  const runtime = options.runtime ?? 'nodejs22.x'
+  const runtime = options.runtime ?? 'nodejs24.x'
   const frameworkVersion = packageVersion()
 
   return {

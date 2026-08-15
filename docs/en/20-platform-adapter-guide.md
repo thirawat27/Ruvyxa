@@ -124,8 +124,9 @@ node .ruvyxa/deploy/render/server/index.mjs
 ```
 
 Railway's generated config uses Railpack and `ON_FAILURE` with 10 retries. Render's Blueprint
-creates a Node `22.13.0` web service. Both generated handlers bind `0.0.0.0` and read `PORT`. If you
-own the provider file, set `projectConfig: false` and preserve the same build/start relationship.
+selects the latest Node `24.x` release with a `>=24.19.0 <25` range. Both generated handlers bind
+`0.0.0.0` and read `PORT`. If you own the provider file, set `projectConfig: false` and preserve the
+same build/start relationship.
 
 ## Firebase and AWS Amplify Hosting
 
@@ -140,9 +141,9 @@ firebase deploy --only hosting,functions
 
 `aws()` writes the Amplify `.amplify-hosting/` static-plus-compute bundle by default at the project
 root and under `<outDir>/deploy/aws/`. Its deploy manifest routes static assets to static hosting
-and dynamic traffic to compute resource `default`. The default compute runtime is `nodejs22.x`;
-supported choices also include `nodejs20.x` and `nodejs24.x`. Set `projectOutput: false` only when
-another build system collects the deploy artifact.
+and dynamic traffic to compute resource `default`. The default compute runtime is `nodejs24.x`;
+older `nodejs20.x` and `nodejs22.x` values remain available only as explicit compatibility
+overrides. Set `projectOutput: false` only when another build system collects the deploy artifact.
 
 ## Provider handoff checklist
 

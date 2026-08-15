@@ -33,7 +33,6 @@ if (rustTarget) cargoArgs.push('--target', rustTarget)
 const build = spawnSync('cargo', cargoArgs, {
   cwd: repoRoot,
   stdio: 'inherit',
-  shell: process.platform === 'win32',
 })
 
 if (build.status !== 0) {

@@ -120,9 +120,9 @@ node .ruvyxa/deploy/railway/server/index.mjs
 node .ruvyxa/deploy/render/server/index.mjs
 ```
 
-Railway config ที่สร้างใช้ Railpack และ `ON_FAILURE` ที่มี 10 retry Render Blueprint สร้าง Node
-`22.13.0` web service handler ทั้งคู่ bind `0.0.0.0` และอ่าน `PORT` หากคุณดูแล provider file เอง
-ให้ใช้ `projectConfig: false` และคง build/start relationship เดียวกัน
+Railway config ที่สร้างใช้ Railpack และ `ON_FAILURE` ที่มี 10 retry Render Blueprint เลือก Node
+`24.x` ล่าสุดด้วยช่วง `>=24.19.0 <25` handler ทั้งคู่ bind `0.0.0.0` และอ่าน `PORT` หากคุณดูแล
+provider file เอง ให้ใช้ `projectConfig: false` และคง build/start relationship เดียวกัน
 
 ## Firebase และ AWS Amplify Hosting
 
@@ -137,8 +137,9 @@ firebase deploy --only hosting,functions
 
 `aws()` เขียน Amplify `.amplify-hosting/` static-plus-compute bundle โดยปริยายที่ project root
 และใต้ `<outDir>/deploy/aws/` deploy manifest route static asset ไป static hosting และ dynamic
-traffic ไป compute resource `default` compute runtime ปริยายคือ `nodejs22.x`; เลือก `nodejs20.x`
-หรือ `nodejs24.x` ได้ ตั้ง `projectOutput: false` เฉพาะเมื่อ build system อื่นเก็บ deploy artifact
+traffic ไป compute resource `default` compute runtime ปริยายคือ `nodejs24.x`; ค่า `nodejs20.x` และ
+`nodejs22.x` เก่ายังคงใช้ได้เมื่อกำหนด compatibility override โดยตรง ตั้ง `projectOutput: false`
+เฉพาะเมื่อ build system อื่นเก็บ deploy artifact
 
 ## Provider handoff checklist
 

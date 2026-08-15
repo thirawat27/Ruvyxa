@@ -39,7 +39,7 @@ describe('firebase', () => {
         function: { functionId: 'webApp', region: 'asia-east1', pinTag: true },
       },
     ])
-    assert.equal(config.functions[0].runtime, 'nodejs22')
+    assert.equal(config.functions[0].runtime, 'nodejs24')
     assert.equal(config.hosting.headers[0].headers[0].value, 'public, max-age=31536000, immutable')
 
     const handler = output.artifacts?.find((artifact) => artifact.kind === 'function')
@@ -57,7 +57,7 @@ describe('firebase', () => {
     const packageJson = JSON.parse(
       packageArtifact && 'contents' in packageArtifact ? String(packageArtifact.contents) : '{}',
     )
-    assert.equal(packageJson.engines.node, '22')
+    assert.equal(packageJson.engines.node, '24')
     assert.equal(packageJson.dependencies['firebase-functions'], '^7.3.0')
   })
 

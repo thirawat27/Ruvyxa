@@ -4,7 +4,6 @@ import { spawnSync } from 'node:child_process'
 
 const commandOptions = {
   encoding: 'utf8',
-  shell: process.platform === 'win32',
 }
 
 function runGit(args) {

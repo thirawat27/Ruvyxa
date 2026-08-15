@@ -5,7 +5,7 @@ import { aws } from '../../../packages/@ruvyxa/adapter-aws/dist/index.js'
 
 describe('aws', () => {
   it('emits an Amplify Hosting static and compute deployment bundle', async () => {
-    const adapter = aws({ runtime: 'nodejs24.x' })
+    const adapter = aws()
     const output = await adapter.build({ root: '.', outDir: '.ruvyxa' })
 
     assert.equal(output.platform, 'aws')

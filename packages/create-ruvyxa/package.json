@@ -19,7 +19,7 @@
   },
   "homepage": "https://github.com/thirawat27/ruvyxa#readme",
   "engines": {
-    "node": ">=22.13.0"
+    "node": ">=24.19.0"
   },
   "publishConfig": {
     "access": "public"
@@ -32,6 +32,6 @@
     "prepack": "pnpm run build && node scripts/prepare-template.mjs"
   },
   "devDependencies": {
-    "@types/node": "22.13.0"
+    "@types/node": "24.13.3"
   }
 }

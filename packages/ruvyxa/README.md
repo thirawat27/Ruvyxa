@@ -4,7 +4,7 @@ CLI, runtime bridge, and public framework entrypoints for Ruvyxa apps.
 
 ## Install
 
-Node.js 22.13 or later is required by the native Oxc transformer and pnpm 11.
+Ruvyxa requires Node.js 24.19 or later. The framework workspace uses pnpm 11.
 
 ```bash
 npm install ruvyxa react react-dom
