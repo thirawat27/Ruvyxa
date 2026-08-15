@@ -563,47 +563,20 @@ fn rewrite_commonjs_requires_with_state(
     let mut out = String::with_capacity(line.len());
     let bytes = line.as_bytes();
     let mut index = 0;
+    let mut previous_significant: Option<usize> = None;
 
     while index < bytes.len() {
-        if *in_block_comment {
-            if bytes[index..].starts_with(b"*/") {
-                out.push_str("*/");
-                index += 2;
-                *in_block_comment = false;
-            } else {
-                push_next_char(line, &mut out, &mut index);
-            }
-            continue;
-        }
-
-        if bytes[index..].starts_with(b"//") {
-            out.push_str(&line[index..]);
-            break;
-        }
-        if bytes[index..].starts_with(b"/*") {
-            out.push_str("/*");
-            index += 2;
-            *in_block_comment = true;
-            continue;
-        }
-        if matches!(bytes[index], b'\'' | b'"' | b'`') {
-            let quote = bytes[index];
-            let start = index;
-            index += 1;
-            while index < bytes.len() {
-                if bytes[index] == b'\\' {
-                    index += 1;
-                    if index < bytes.len() {
-                        advance_char(line, &mut index);
-                    }
-                } else if bytes[index] == quote {
-                    index += 1;
-                    break;
-                } else {
-                    advance_char(line, &mut index);
-                }
-            }
-            out.push_str(&line[start..index]);
+        // Strings, comments, template literals, and regular expressions are
+        // copied through untouched. The decision lives in `ast` so this pass
+        // and the dynamic-import pass below cannot disagree about where a
+        // literal ends — which is how a regex holding `/*` or a quote used to
+        // hide every `require()` that followed it.
+        if let Some(after) =
+            crate::ast::skip_non_code(bytes, index, previous_significant, in_block_comment)
+        {
+            out.push_str(&line[index..after]);
+            previous_significant = Some(index);
+            index = after;
             continue;
         }
 
@@ -614,6 +587,7 @@ fn rewrite_commonjs_requires_with_state(
             if let Some(dep_path) = deps.resolve(&specifier) {
                 out.push_str(&module_id(dep_path));
                 index = after_call;
+                previous_significant = Some(index.saturating_sub(1));
                 continue;
             }
             // Unresolved require in a client bundle: replace with a runtime
@@ -630,10 +604,14 @@ fn rewrite_commonjs_requires_with_state(
                     "(function(){{throw new Error(\"RUV1610: Cannot require \\\"{escaped}\\\" in a browser bundle (imported by {importer}). The package could not be resolved from node_modules; check that it is installed.\")}})() /* require removed */"
                 ));
                 index = after_call;
+                previous_significant = Some(index.saturating_sub(1));
                 continue;
             }
         }
 
+        if !bytes[index].is_ascii_whitespace() {
+            previous_significant = Some(index);
+        }
         push_next_char(line, &mut out, &mut index);
     }
 
@@ -679,47 +657,15 @@ fn rewrite_dynamic_imports(
     let mut out = String::with_capacity(line.len());
     let bytes = line.as_bytes();
     let mut index = 0;
+    let mut previous_significant: Option<usize> = None;
 
     while index < bytes.len() {
-        if *in_block_comment {
-            if bytes[index..].starts_with(b"*/") {
-                out.push_str("*/");
-                index += 2;
-                *in_block_comment = false;
-            } else {
-                push_next_char(line, &mut out, &mut index);
-            }
-            continue;
-        }
-
-        if bytes[index..].starts_with(b"//") {
-            out.push_str(&line[index..]);
-            break;
-        }
-        if bytes[index..].starts_with(b"/*") {
-            out.push_str("/*");
-            index += 2;
-            *in_block_comment = true;
-            continue;
-        }
-        if matches!(bytes[index], b'\'' | b'\"' | b'`') {
-            let quote = bytes[index];
-            let start = index;
-            index += 1;
-            while index < bytes.len() {
-                if bytes[index] == b'\\' {
-                    index += 1;
-                    if index < bytes.len() {
-                        advance_char(line, &mut index);
-                    }
-                } else if bytes[index] == quote {
-                    index += 1;
-                    break;
-                } else {
-                    advance_char(line, &mut index);
-                }
-            }
-            out.push_str(&line[start..index]);
+        if let Some(after) =
+            crate::ast::skip_non_code(bytes, index, previous_significant, in_block_comment)
+        {
+            out.push_str(&line[index..after]);
+            previous_significant = Some(index);
+            index = after;
             continue;
         }
 
@@ -740,9 +686,13 @@ fn rewrite_dynamic_imports(
                 out.push(')');
             }
             index = after_call;
+            previous_significant = Some(index.saturating_sub(1));
             continue;
         }
 
+        if !bytes[index].is_ascii_whitespace() {
+            previous_significant = Some(index);
+        }
         push_next_char(line, &mut out, &mut index);
     }
 
@@ -784,14 +734,6 @@ fn push_next_char(line: &str, out: &mut String, index: &mut usize) {
         .expect("index always points at a char boundary");
     out.push(character);
     *index += character.len_utf8();
-}
-
-fn advance_char(line: &str, index: &mut usize) {
-    *index += line[*index..]
-        .chars()
-        .next()
-        .expect("index always points at a char boundary")
-        .len_utf8();
 }
 
 fn write_rewritten_line(out: &mut String, content: &str, indent: bool) {
@@ -2379,6 +2321,129 @@ mod tests {
         assert!(linked.contains("const example = 'require(\"example\")';"));
         assert!(linked.contains("const template = `require(\"example\")`;"));
         assert!(linked.contains("// require(\"example\") must stay documentation"));
+    }
+
+    #[test]
+    fn a_regex_literal_does_not_open_a_comment_or_a_string() {
+        // Both rewriters walk a line looking for `require(` and `import(`, and
+        // both used to track strings and comments without tracking regular
+        // expressions. These two literals are the exact inputs that broke it.
+        let deps = [PathBuf::from("/app/node_modules/example/index.js")];
+        let index = DepIndex::without_aliases(&deps);
+        let expected = module_id(Path::new("/app/node_modules/example/index.js"));
+
+        // A character class holding a slash and a star reads as `/*` to a
+        // scanner with no regex state, which turned block-comment mode on and
+        // carried it to every following line of the module.
+        let mut in_block_comment = false;
+        let rewritten = rewrite_commonjs_requires_with_state(
+            "const re = /[/*]/; const x = require(\"example\");",
+            &index,
+            &mut in_block_comment,
+            false,
+            "<test>",
+        );
+        assert!(
+            !in_block_comment,
+            "a regex literal must not leave the scanner inside a block comment"
+        );
+        assert!(
+            rewritten.contains(&expected),
+            "require() after a regex literal must still be rewritten: {rewritten}"
+        );
+        assert!(
+            rewritten.contains("/[/*]/"),
+            "the literal survives: {rewritten}"
+        );
+
+        // A regex holding a quote opened a string that never closed, hiding
+        // every require() later on the line. Minified CommonJS is one line.
+        let mut in_block_comment = false;
+        let rewritten = rewrite_commonjs_requires_with_state(
+            "const q = /\"/g; const y = require(\"example\");",
+            &index,
+            &mut in_block_comment,
+            false,
+            "<test>",
+        );
+        assert!(
+            rewritten.contains(&expected),
+            "require() after a quote-bearing regex must still be rewritten: {rewritten}"
+        );
+
+        // The same hazard on the dynamic-import pass.
+        let mut in_block_comment = false;
+        let rewritten = rewrite_dynamic_imports(
+            "const re = /[/*]/; const p = import(\"example\");",
+            &index,
+            &BTreeMap::new(),
+            &mut in_block_comment,
+        );
+        assert!(!in_block_comment, "dynamic-import pass must agree");
+        assert!(
+            rewritten.contains("Promise.resolve("),
+            "import() after a regex literal must still be rewritten: {rewritten}"
+        );
+    }
+
+    #[test]
+    fn division_after_a_value_is_not_treated_as_a_regex() {
+        // The other half of the decision: `/` after something that ends a value
+        // is division. Reading it as a regex would swallow real code, so this
+        // guards the fix from overcorrecting.
+        let deps = [PathBuf::from("/app/node_modules/example/index.js")];
+        let index = DepIndex::without_aliases(&deps);
+        let expected = module_id(Path::new("/app/node_modules/example/index.js"));
+        let mut in_block_comment = false;
+        let rewritten = rewrite_commonjs_requires_with_state(
+            "const n = total / count; const x = require(\"example\");",
+            &index,
+            &mut in_block_comment,
+            false,
+            "<test>",
+        );
+        assert!(!in_block_comment);
+        assert!(
+            rewritten.contains(&expected),
+            "division must not hide the require: {rewritten}"
+        );
+    }
+
+    #[test]
+    fn a_block_comment_still_carries_across_lines() {
+        // Regex handling must not cost the cross-line state the rewriters
+        // genuinely need: an unterminated `/*` still owns the next line.
+        let deps = [PathBuf::from("/app/node_modules/example/index.js")];
+        let index = DepIndex::without_aliases(&deps);
+        let expected = module_id(Path::new("/app/node_modules/example/index.js"));
+        let mut in_block_comment = false;
+
+        let first = rewrite_commonjs_requires_with_state(
+            "/* opening a comment",
+            &index,
+            &mut in_block_comment,
+            false,
+            "<test>",
+        );
+        assert_eq!(first, "/* opening a comment");
+        assert!(in_block_comment, "the comment is still open");
+
+        let second = rewrite_commonjs_requires_with_state(
+            "still comment: require(\"example\") */ const x = require(\"example\");",
+            &index,
+            &mut in_block_comment,
+            false,
+            "<test>",
+        );
+        assert!(!in_block_comment, "the comment closed on this line");
+        assert!(
+            second.contains("still comment: require(\"example\")"),
+            "the commented require is untouched: {second}"
+        );
+        assert!(
+            second.contains(&expected),
+            "the real require after the comment is rewritten: {second}"
+        );
     }
 
     #[test]

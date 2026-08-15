@@ -39,7 +39,7 @@ export function standaloneServerSource(options: StandaloneServerOptions = {}): s
 
   return `import { createServer } from 'node:http';
 import { createHandler, prerenderRelativePath } from './serverless-handler.mjs';
-import { loadRouteModule } from './route-modules.mjs';
+import { applyPluginHttp, loadActionModule, loadRouteModule } from './route-modules.mjs';
 // Imported so the directory stays deployable through any bundler that a host
 // puts in front of it, matching the serverless adapters.
 import manifest from './manifest.mjs';
@@ -61,6 +61,9 @@ const handler = createHandler({
   i18n: manifest.i18n,
   importPage: loadRouteModule,
   importApi: loadRouteModule,
+  importAction: loadActionModule,
+  pluginHttp: applyPluginHttp,
+  security: runtimePolicy.security,
   readPrerendered: (pathname, revalidate = 60) => {
     // prerenderRelativePath rejects any request path that cannot be mapped to a
     // location inside the selected cache root, so the cache read can never escape it.
@@ -130,11 +133,25 @@ function resolveStaticFile(pathname) {
 const ASSET_EXTENSIONS = new Set(${JSON.stringify(STATIC_ASSET_EXTENSIONS)});
 const DEFAULT_SECURITY_HEADERS = ${JSON.stringify(DEFAULT_SECURITY_HEADERS)};
 
+// \`security.headers: false\` turns these off in \`ruvyxa start\`; this server has
+// to agree, or the same project answers with different headers depending on
+// which one is serving it.
+const SECURITY_HEADERS_ENABLED = runtimePolicy.security?.headers !== false;
+
 function applySecurityHeaders(res) {
+  if (!SECURITY_HEADERS_ENABLED) return;
   for (const [name, value] of Object.entries(DEFAULT_SECURITY_HEADERS)) {
     if (!res.hasHeader(name)) res.setHeader(name, value);
   }
 }
+
+// Matches \`security.apiLimit\`. The body is buffered here before the handler
+// sees it, so the handler's own cap would arrive too late to prevent the
+// allocation — this is where the limit has to be enforced for this server.
+const REQUEST_BODY_LIMIT = Number.isInteger(runtimePolicy.security?.apiLimit)
+  && runtimePolicy.security.apiLimit > 0
+  ? runtimePolicy.security.apiLimit
+  : 10 * 1024 * 1024;
 
 // True when the last path segment names a static asset file. Matches
 // isStaticAssetPath in serverless-handler.mjs.
@@ -169,10 +186,18 @@ function sendStatic(req, res, hit, pathname) {
   createReadStream(hit.file).pipe(res);
 }
 
+class RequestBodyTooLarge extends Error {}
+
 async function readRequestBody(req) {
   const chunks = [];
+  let total = 0;
   for await (const chunk of req) {
-    chunks.push(typeof chunk === 'string' ? Buffer.from(chunk) : chunk);
+    const bytes = typeof chunk === 'string' ? Buffer.from(chunk) : chunk;
+    total += bytes.length;
+    // Stop reading rather than finish buffering and reject afterwards: the
+    // point of the limit is to bound what one request can allocate.
+    if (total > REQUEST_BODY_LIMIT) throw new RequestBodyTooLarge();
+    chunks.push(bytes);
   }
   return Buffer.concat(chunks);
 }
@@ -234,6 +259,14 @@ const server = createServer(async (req, res) => {
     // an SSR or API stream is still being produced.
     Readable.fromWeb(response.body).pipe(res);
   } catch (error) {
+    if (error instanceof RequestBodyTooLarge) {
+      if (!res.headersSent) {
+        res.statusCode = 413;
+        res.setHeader('content-type', 'text/plain; charset=utf-8');
+      }
+      res.end('Request body is too large');
+      return;
+    }
     console.error('[ruvyxa] request failed:', error instanceof Error ? error.message : error);
     if (!res.headersSent) {
       res.statusCode = 500;

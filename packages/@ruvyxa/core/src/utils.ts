@@ -169,12 +169,29 @@ export function clientBuildOutput(ctx: BuildContext): {
   }
 }
 
-/** Return the validated runtime policy serialized into build metadata. */
+function policySection(value: unknown): Readonly<Record<string, unknown>> | undefined {
+  return value && typeof value === 'object' && !Array.isArray(value)
+    ? (value as Readonly<Record<string, unknown>>)
+    : undefined
+}
+
+/**
+ * Return the validated runtime policy a deployed handler needs.
+ *
+ * Assembled explicitly rather than by returning `buildInfo.runtime` verbatim.
+ * `ruvyxa build` writes the validated `security` block as a sibling of
+ * `runtime` in `build.json`, and returning only `runtime` silently dropped it:
+ * every deployed runtime then ignored `security.apiLimit` (so a serverless
+ * function had no request body cap at all), `security.headers: false`, and
+ * `security.trustedProxyIps`, while `ruvyxa start` enforced all three. The
+ * shape of `build.json` is public and read by other tooling, so the mapping
+ * from build metadata to runtime policy belongs here — in one place both the
+ * standalone server and every serverless adapter go through.
+ */
 export function runtimeBuildPolicy(ctx: BuildContext): Readonly<Record<string, unknown>> {
-  const runtime = ctx.buildInfo?.runtime
-  return runtime && typeof runtime === 'object' && !Array.isArray(runtime)
-    ? (runtime as Readonly<Record<string, unknown>>)
-    : {}
+  const runtime = policySection(ctx.buildInfo?.runtime) ?? {}
+  const security = policySection(ctx.buildInfo?.security)
+  return security ? { ...runtime, security } : runtime
 }
 
 /**

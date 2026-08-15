@@ -1,5 +1,75 @@
 # Changelog
 
+## Unreleased
+
+### Server actions, plugin HTTP hooks, and `security` reach deployed builds
+
+Ruvyxa has two request hosts: the Axum server behind `ruvyxa dev` and `ruvyxa start`, and
+`createHandler`, which every adapter's function artifact and the generated standalone server run.
+Endpoints were added to the Axum router by hand and ported to the handler one at a time, and nothing
+checked that the two agreed. Three things had never been ported.
+
+- **Server actions.** `POST /__ruvyxa/action` existed only in the native host, so it fell through to
+  route matching and returned 404 in every deployed build — every form in the `crud` template, in
+  `examples/demo/app/todos`, and in the markup `ruvyxa add` generates. The endpoint, its CSRF and
+  payload rules, and its rate limit now run in both hosts from one implementation
+  (`runtime/action-runtime.mjs`), and `adapter-runner.mjs` compiles each route's `action.ts` into
+  the function bundle. A build without an action registry answers `501 RUV2211` rather than 404, so
+  a misconfigured deploy is distinguishable from a project that declares no action.
+- **Plugin HTTP hooks.** `plugin-runtime.mjs` is spawned only by the Rust host, so `http.onRequest`,
+  `http.onResponse`, and `http.route` did nothing once deployed — including all of `@ruvyxa/auth`,
+  whose entire surface is one `http.onRequest` registration, and the built-in
+  redirect/headers/rewrite plugins from `ruvyxa/plugins`. The registry moved to
+  `runtime/plugin-http.mjs`; the Rust host still reaches it over stdio, and a function bundle now
+  compiles it in and runs the same hooks against native `Request`/`Response` objects.
+- **`security`.** `runtimeBuildPolicy()` returned only `buildInfo.runtime`, so the validated
+  `security` block was dropped: a deployed function had **no request body limit at all**,
+  `security.headers: false` had no effect, and `security.trustedProxyIps` was unused, while
+  `ruvyxa start` enforced all three. All three are now honoured, with the body cap enforced on the
+  bytes read rather than on a `Content-Length` the platform may not provide.
+
+Two mechanisms exist so this cannot recur silently:
+
+- `tests/fixtures/framework-endpoint-conformance.json` records every framework endpoint and which
+  host must serve it, replayed by a Rust test and a Node test. Add the endpoint there first.
+- `ruvyxa check` and `ruvyxa test:parity` gained a capability axis. The route sweep compared the
+  development app directory against the built one — two inputs to the same renderer — and never
+  asked whether the other host could serve the project at all.
+
+`ruvyxa build` now fails rather than emitting a deployment that answers 404: a static adapter with a
+server action or a plugin HTTP route reports `RUV2204`. Realtime and presence need a socket upgrade
+no build artifact can perform; that reports `RUV2205` as a warning, because a deployment without
+that endpoint is still a valid deployment.
+
+Selecting a target with `--adapter <name>` now also loads `ruvyxa.config`, which is where `plugins`
+live and therefore where the function bundle's plugin registry comes from.
+
+### A regular expression no longer hides the `require()` calls after it
+
+The linker rewrites codegen output line by line, and its `require()` and dynamic-`import()` passes
+each carried their own walk over the bytes. Both knew about strings and comments; neither knew about
+regular expressions.
+
+- `/[/*]/` — a character class holding a slash and a star — read as a block-comment opener, and that
+  state is carried between lines, so **every following line of the module was swallowed as comment
+  text**. Nothing after it was rewritten.
+- `/"/g` — the shape of `str.replace(/"/g, …)` — opened a string that never closed, hiding every
+  `require()` later on the line. Minified CommonJS puts a whole module on one line, so that is every
+  require in the file.
+
+Both passes now ask `ast::skip_non_code`, alongside the crate's one scanner, which handles comments,
+strings, template literals, and regular expressions together — the combination `regex_can_start`'s
+own documentation says the decision requires. Neither pass carries a private walk any more, and
+`advance_char`, which existed only to serve them, is gone.
+
+### A panic no longer ends collaboration for the life of the process
+
+`CollabRegistry` took its lock with `.expect("collab registry poisoned")` at all five call sites, so
+a single panic while the lock was held made every later join, presence update, write, and leave
+panic in turn — peers could not even leave a room. Nothing under that lock spans two fields, so the
+state behind a poisoned lock is as valid as the state behind a healthy one; the registry now
+recovers the guard and keeps serving.
+
 ## v1.0.30 (2026-08-14)
 
 ### Global CSS runs through the project's PostCSS chain

@@ -58,7 +58,7 @@ export interface VercelAdapterOptions {
  */
 function vercelHandlerSource(runtimePolicy: unknown): string {
   return `import { createHandler, prerenderRelativePath } from './serverless-handler.mjs';
-import { loadRouteModule } from './route-modules.mjs';
+import { applyPluginHttp, loadActionModule, loadRouteModule } from './route-modules.mjs';
 // Imported, not read from disk: a platform that re-bundles the function only
 // carries files it can resolve statically (see the netlify adapter, where a
 // readFileSync of a sibling manifest.json crashed the deployed function).
@@ -99,6 +99,9 @@ const handler = createHandler({
   optimizeImage: runtimePolicy.image?.onDemand === true ? optimizeImage : undefined,
   importPage: loadRouteModule,
   importApi: loadRouteModule,
+  importAction: loadActionModule,
+  pluginHttp: applyPluginHttp,
+  security: runtimePolicy.security,
   readPrerendered: (pathname, revalidate = 60) => {
     // prerenderRelativePath rejects any request path that cannot be mapped to a
     // location inside the cache directories, so reads can never escape them.
@@ -188,7 +191,7 @@ export default async function(req, res, context) {
 /** Vercel Edge entry point: Request -> Response with no Node.js imports. */
 function vercelEdgeHandlerSource(runtimePolicy: unknown): string {
   return `import { createHandler } from './serverless-handler.mjs';
-import { loadRouteModule } from './route-modules.mjs';
+import { applyPluginHttp, loadActionModule, loadRouteModule } from './route-modules.mjs';
 import manifest from './manifest.mjs';
 
 const runtimePolicy = ${JSON.stringify(runtimePolicy ?? {})};
@@ -206,6 +209,9 @@ const handler = createHandler({
   routes: manifest.routes,
   importPage: loadRouteModule,
   importApi: loadRouteModule,
+  importAction: loadActionModule,
+  pluginHttp: applyPluginHttp,
+  security: runtimePolicy.security,
   middleware: runtimePolicy.middleware,
   i18n: manifest.i18n,
   optimizeImage: runtimePolicy.image?.onDemand === true ? optimizeImage : undefined,

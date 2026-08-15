@@ -821,6 +821,76 @@ fn is_quote(byte: u8) -> bool {
     matches!(byte, b'"' | b'\'' | b'`')
 }
 
+/// Skip the non-code construct at `index`, or return `None` when it is code.
+///
+/// Exists for consumers that rewrite text a line at a time and therefore cannot
+/// use [`masked_code`], which needs the whole source to carry block-comment
+/// state across lines: the linker's `require()` and dynamic-`import()` passes.
+/// `in_block_comment` is that state, threaded by the caller between lines.
+///
+/// Those two passes each used to carry their own copy of this walk. Both knew
+/// about strings and comments and neither knew about regular expressions, so
+/// `/[/*]/` — a character class holding a slash and a star — set
+/// `in_block_comment` and swallowed every following line of the module as
+/// comment text, and `/"/g` opened a string that never closed and hid every
+/// `require()` after it on the line. Minified CommonJS puts a whole module on
+/// one line, so that is every require in the file. The decision belongs here,
+/// with the rest of the scanner, exactly as [`regex_can_start`]'s own
+/// documentation argues: it is only correct alongside string, template, and
+/// comment tracking, so this function does all four rather than exporting the
+/// regex test on its own.
+///
+/// A template literal is skipped whole, including its `${…}` interpolations.
+/// That matches the previous behaviour — a `require()` inside an interpolation
+/// was never rewritten — and failing to rewrite is safe where mis-skipping is
+/// not.
+pub(crate) fn skip_non_code(
+    bytes: &[u8],
+    index: usize,
+    previous_significant: Option<usize>,
+    in_block_comment: &mut bool,
+) -> Option<usize> {
+    if *in_block_comment {
+        let mut cursor = index;
+        while cursor + 1 < bytes.len() {
+            if bytes[cursor] == b'*' && bytes[cursor + 1] == b'/' {
+                *in_block_comment = false;
+                return Some(cursor + 2);
+            }
+            cursor += 1;
+        }
+        return Some(bytes.len());
+    }
+
+    if is_comment_start(bytes, index) {
+        let after = skip_comment(bytes, index);
+        // `skip_comment` reports the end of the input for a block comment that
+        // never closes, which is indistinguishable from one that closes on the
+        // final two bytes. Requiring room for both delimiters separates them;
+        // `/*/` is unterminated, `/**/` is not.
+        let block = bytes.get(index + 1) == Some(&b'*');
+        let closed = after >= index + 4 && bytes[after - 2] == b'*' && bytes[after - 1] == b'/';
+        if block && !closed {
+            *in_block_comment = true;
+        }
+        return Some(after);
+    }
+
+    if bytes[index] == b'`' {
+        return Some(template_literal(bytes, index).0);
+    }
+
+    if is_quote(bytes[index]) {
+        return Some(skip_string(bytes, index));
+    }
+
+    if bytes[index] == b'/' && regex_can_start(bytes, previous_significant) {
+        return Some(skip_regex_literal(bytes, index));
+    }
+
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

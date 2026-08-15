@@ -55,7 +55,7 @@ const DEFAULT_COMPATIBILITY_DATE = '2025-09-01'
  */
 function workerHandlerSource(runtimePolicy: unknown): string {
   return `import { createHandler } from './serverless-handler.mjs';
-import { loadRouteModule } from './route-modules.mjs';
+import { applyPluginHttp, loadActionModule, loadRouteModule } from './route-modules.mjs';
 // A JS module, not a JSON import: import attributes for JSON are not uniformly
 // available across bundlers and Worker compatibility dates.
 import manifest from './manifest.mjs';
@@ -86,6 +86,9 @@ const handler = createHandler({
   optimizeImage: runtimePolicy.image?.onDemand === true ? optimizeImage : undefined,
   importPage: loadRouteModule,
   importApi: loadRouteModule,
+  importAction: loadActionModule,
+  pluginHttp: applyPluginHttp,
+  security: runtimePolicy.security,
   readPrerendered: (pathname) => {
     // In Workers, pre-rendered pages are served as static assets.
     // ISR revalidation requires KV or Durable Objects (not yet supported).

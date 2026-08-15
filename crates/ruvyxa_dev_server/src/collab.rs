@@ -14,7 +14,7 @@
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::{Duration, Instant};
 
 use serde::Deserialize;
@@ -90,6 +90,25 @@ impl CollabRegistry {
         Self::default()
     }
 
+    /// Lock the room table, recovering a poisoned mutex instead of panicking.
+    ///
+    /// Every mutation under this lock is a single map insert, remove, or
+    /// replace: there is no invariant spanning two fields that a panic could
+    /// leave half-applied, so the state behind a poisoned lock is as valid as
+    /// the state behind a healthy one. Propagating the poison instead — which
+    /// `.expect("collab registry poisoned")` did at all five call sites — turned
+    /// one panic anywhere in the module into a permanent outage: every
+    /// subsequent join, presence update, write, and leave panicked in turn, so
+    /// collaboration stayed dead for the life of the process and peers could
+    /// not even leave a room cleanly.
+    ///
+    /// The action rate limiter in `lib.rs` makes the opposite call and answers
+    /// 503, because refusing an action is safe. Refusing a `leave` is not: it
+    /// strands the peer in the room forever.
+    fn rooms(&self) -> MutexGuard<'_, HashMap<String, Room>> {
+        self.rooms.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Seat a new peer, creating the room when it is the first arrival.
     ///
     /// The welcome frame carries the full room snapshot so a late joiner never
@@ -101,7 +120,7 @@ impl CollabRegistry {
                 "Collaboration rooms use 1-128 letters, digits, colon, dot, underscore, slash, or dash",
             );
         }
-        let mut rooms = self.rooms.lock().expect("collab registry poisoned");
+        let mut rooms = self.rooms();
         if !rooms.contains_key(room_id) && rooms.len() >= MAX_ROOMS {
             return Err("Collaboration room limit reached for this server");
         }
@@ -155,7 +174,7 @@ impl CollabRegistry {
 
     /// Replace a peer's presence state and tell the room.
     pub fn update_presence(&self, room_id: &str, peer: &str, state: Value) {
-        let mut rooms = self.rooms.lock().expect("collab registry poisoned");
+        let mut rooms = self.rooms();
         let Some(room) = rooms.get_mut(room_id) else {
             return;
         };
@@ -194,7 +213,7 @@ impl CollabRegistry {
         if entries.keys().any(|key| !valid_state_key(key)) {
             return Err("Collaboration state keys are 1-128 bytes and cannot be blank");
         }
-        let mut rooms = self.rooms.lock().expect("collab registry poisoned");
+        let mut rooms = self.rooms();
         let Some(room) = rooms.get_mut(room_id) else {
             return Ok(());
         };
@@ -241,7 +260,7 @@ impl CollabRegistry {
 
     /// Remove a peer and drop the room once the last one leaves.
     pub fn leave(&self, room_id: &str, peer: &str) {
-        let mut rooms = self.rooms.lock().expect("collab registry poisoned");
+        let mut rooms = self.rooms();
         let Some(room) = rooms.get_mut(room_id) else {
             return;
         };
@@ -263,7 +282,7 @@ impl CollabRegistry {
 
     #[cfg(test)]
     fn room_count(&self) -> usize {
-        self.rooms.lock().expect("collab registry poisoned").len()
+        self.rooms().len()
     }
 }
 
@@ -355,6 +374,37 @@ mod tests {
             .iter()
             .map(|(key, value)| ((*key).to_string(), value.clone()))
             .collect()
+    }
+
+    #[test]
+    fn a_poisoned_registry_keeps_serving_rooms() {
+        // One panic while the lock was held used to end collaboration for the
+        // life of the process: every later call hit `.expect("collab registry
+        // poisoned")` and panicked in turn, so peers could not even leave.
+        let registry = CollabRegistry::new();
+        let joined = registry.join("room").expect("first join succeeds");
+
+        let poisoner = registry.clone();
+        std::thread::spawn(move || {
+            let _guard = poisoner.rooms();
+            panic!("poison the registry");
+        })
+        .join()
+        .expect_err("the spawned thread must panic");
+
+        // Every entry point still works on the state left behind.
+        registry.update_presence("room", &joined.peer, json!({"cursor": 1}));
+        registry
+            .write_state("room", &joined.peer, entries(&[("k", json!("v"))]))
+            .expect("writes still land after poisoning");
+        let second = registry.join("room").expect("joins still succeed");
+        registry.leave("room", &joined.peer);
+        registry.leave("room", &second.peer);
+        assert_eq!(
+            registry.room_count(),
+            0,
+            "the last peer leaving still drops the room"
+        );
     }
 
     fn decode(payload: &str) -> Value {

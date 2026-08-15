@@ -49,6 +49,29 @@ manifest/output และเรียก health route ที่ application ข�
   ที่ย้ายเข้าที่หลัง build สำเร็จ แต่ไม่ implement remote release orchestration หรือ database
   rollback
 
+## build ที่ deploy แล้วให้บริการอะไรบ้าง
+
+build artifact รัน request pipeline เดียวกับ `ruvyxa start` ไม่ใช่ชุดที่ถูกลดทอน:
+
+| ความสามารถ                                                          | `dev` / `start` | build ที่ deploy แล้ว |
+| ------------------------------------------------------------------- | --------------- | --------------------- |
+| page route และ API route                                            | ได้             | ได้                   |
+| server action (`POST /__ruvyxa/action`)                             | ได้             | ได้                   |
+| plugin `http.onRequest` / `onResponse` / `route`                    | ได้             | ได้                   |
+| `@ruvyxa/auth` (สร้างบน plugin HTTP hook)                           | ได้             | ได้                   |
+| on-demand image (`/__ruvyxa/image`)                                 | ได้             | ขึ้นกับ adapter       |
+| native realtime และ presence                                        | ได้             | ไม่ได้                |
+| `security.apiLimit`, `security.headers`, `security.trustedProxyIps` | ได้             | ได้                   |
+
+server action และ plugin HTTP hook ถูก compile เข้า function artifact จาก `ruvyxa.config`
+โปรเจกต์ที่ใช้ทั้งสองอย่างจึง deploy ได้โดยไม่ต้องตั้งค่าเพิ่ม ส่วน realtime และ presence ต้องการ
+socket upgrade ซึ่ง build artifact ทำไม่ได้; `ruvyxa build` จะพิมพ์ `RUV2205` พร้อมระบุ endpoint
+ที่จะหายไป และ `ruvyxa check` รายงานเรื่องเดียวกันในแถว capability parity ให้ serve
+โปรเจกต์เหล่านั้นด้วย `ruvyxa start`
+
+การเลือก adapter ที่ให้บริการสิ่งที่โปรเจกต์ใช้ไม่ได้ จะทำให้ build ล้มเหลว แทนที่จะ deploy
+เว็บที่ตอบ 404: static adapter ที่มี server action หรือ plugin HTTP route จะรายงาน `RUV2204`
+
 ## Platform limit
 
 native realtime ต้องเป็น long-lived Node/Bun build; Deno รองรับ server route ครบชุดแต่ host native

@@ -12,6 +12,12 @@ import { vercel } from '../../../packages/@ruvyxa/adapter-vercel/dist/index.js'
 
 const workspaceRoot = repoRoot
 
+// Read from the handler rather than restated here, so a new sibling reaches
+// this test the moment it reaches a real function bundle.
+const { HANDLER_RUNTIME_FILES: handlerRuntimeFiles } = (await import(
+  pathToFileURL(path.join(workspaceRoot, 'packages/ruvyxa/runtime/serverless-handler.mjs')).href
+)) as { HANDLER_RUNTIME_FILES: readonly string[] }
+
 describe('vercel', () => {
   it('returns serverless deployment output with function artifacts', async () => {
     const output = await vercel().build({ root: '.', outDir: '.ruvyxa' })
@@ -303,19 +309,19 @@ describe('vercel', () => {
           return new Response(await request.text(), { headers })
         } }
         export async function loadRouteModule() { return api }
+        // The generated registry exports these too; the Vercel handler imports
+        // all three, so a stub that omits them fails at module load.
+        export async function loadActionModule() { return null }
+        export const applyPluginHttp = undefined
         `,
       )
       // The handler and its siblings travel together: `adapter-runner.mjs`
       // copies the whole set into a function directory, because the handler
-      // imports `./route-match.mjs` and `./request-context.mjs` as siblings and
-      // a deployed function resolves no bare specifiers. Copying only the
-      // handler here would pass the test while shipping a bundle that throws on
-      // its first request.
-      for (const runtimeFile of [
-        'serverless-handler.mjs',
-        'route-match.mjs',
-        'request-context.mjs',
-      ]) {
+      // imports them as siblings and a deployed function resolves no bare
+      // specifiers. The list comes from the handler itself rather than being
+      // repeated here — a local copy passed this test while shipping a bundle
+      // that threw on its first request.
+      for (const runtimeFile of handlerRuntimeFiles) {
         await copyFile(
           path.join(workspaceRoot, 'packages/ruvyxa/runtime', runtimeFile),
           path.join(root, runtimeFile),

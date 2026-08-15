@@ -47,7 +47,7 @@ export interface NetlifyAdapterOptions {
  */
 function netlifyHandlerSource(runtimePolicy: unknown): string {
   return `import { createHandler, prerenderRelativePath } from './serverless-handler.mjs';
-import { loadRouteModule } from './route-modules.mjs';
+import { applyPluginHttp, loadActionModule, loadRouteModule } from './route-modules.mjs';
 // Netlify bundles the function with esbuild, so anything the deployed code
 // needs must be reachable through the module graph. A sibling manifest.json
 // read from import.meta.dirname is not, and never reaches /var/task.
@@ -80,6 +80,9 @@ const handler = createHandler({
   i18n: manifest.i18n,
   importPage: loadRouteModule,
   importApi: loadRouteModule,
+  importAction: loadActionModule,
+  pluginHttp: applyPluginHttp,
+  security: runtimePolicy.security,
   readPrerendered: (pathname, revalidate = 60) => {
     // prerenderRelativePath rejects any request path that cannot be mapped to a
     // location inside the cache directories, so reads can never escape them.

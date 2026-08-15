@@ -797,6 +797,8 @@ pub(crate) async fn test_parity(args: ProjectArgs) -> anyhow::Result<()> {
     );
     println!();
 
+    failures.extend(capability_parity(&args.root, &config, &dev_manifest));
+
     failures.extend(smoke_render_parity(
         &dev_server_config(
             &ServerArgs {
@@ -864,6 +866,182 @@ pub(crate) fn parity_route(manifest: &RouteManifest, route: &RouteEntry) -> Pari
         client_modules: normalize_module_paths(manifest, &route.client_modules),
         runtime: format!("{:?}", route.runtime),
     }
+}
+
+/// Framework capabilities this project uses, and whether both hosts serve them.
+///
+/// The route sweep above compares the development app directory against the
+/// built one — two inputs to the *same* Rust renderer. It never asks whether
+/// the other host, `createHandler` in `serverless-handler.mjs`, can serve the
+/// project at all, which is why server actions could work in every check and
+/// still answer 404 on every deployment: the missing endpoint was in a host the
+/// sweep did not look at.
+///
+/// This axis closes that. `tests/fixtures/framework-endpoint-conformance.json`
+/// records, per capability, whether the native host and a build artifact can
+/// serve it; anything the project uses that a build artifact cannot is reported
+/// here rather than in production.
+pub(crate) fn capability_parity(
+    root: &Path,
+    config: &ProjectConfig,
+    manifest: &RouteManifest,
+) -> Vec<String> {
+    const CONTRACT: &str =
+        include_str!("../../../tests/fixtures/framework-endpoint-conformance.json");
+    let contract: serde_json::Value = match serde_json::from_str(CONTRACT) {
+        Ok(value) => value,
+        Err(error) => {
+            return vec![format!(
+                "framework endpoint contract is unreadable: {error}"
+            )];
+        }
+    };
+
+    let mut used: Vec<(&str, String)> = Vec::new();
+    let action_routes = manifest
+        .routes
+        .iter()
+        .filter(|route| route.kind == ruvyxa_graph::RouteKind::Page)
+        .filter(|route| action_file_for_route(route).is_some())
+        .map(|route| route.path.clone())
+        .collect::<Vec<_>>();
+    if !action_routes.is_empty() {
+        used.push(("actions", action_routes.join(", ")));
+    }
+
+    match describe_project_plugins(root, config) {
+        Ok(Some(description)) => {
+            let http = &description["http"];
+            let hooks =
+                http["request"].as_u64().unwrap_or(0) + http["response"].as_u64().unwrap_or(0);
+            if hooks > 0 {
+                used.push(("pluginHttp", format!("{hooks} hook(s)")));
+            }
+            for capability in description["capabilities"].as_array().into_iter().flatten() {
+                if let Some(id) = capability["id"].as_str() {
+                    used.push((
+                        // Borrowed from the contract's own vocabulary so the
+                        // lookup below cannot drift from what is reported.
+                        if id == "realtime@1" {
+                            "realtime@1"
+                        } else {
+                            "presence@1"
+                        },
+                        capability["path"].as_str().unwrap_or("/").to_string(),
+                    ));
+                }
+            }
+        }
+        Ok(None) => {}
+        Err(error) => {
+            // Not a parity failure: a project whose plugins cannot be described
+            // has a bigger problem, and `build` reports it with full detail.
+            println!(
+                "  {} plugin capabilities not inspected: {error}",
+                label("note")
+            );
+        }
+    }
+
+    let mut failures = Vec::new();
+    let capabilities = contract["capabilities"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
+    let width = used
+        .iter()
+        .map(|(id, _)| display_width(id))
+        .max()
+        .unwrap_or(0);
+
+    for (id, detail) in &used {
+        let Some(entry) = capabilities
+            .iter()
+            .find(|candidate| candidate["id"].as_str() == Some(id))
+        else {
+            // An unlisted capability is the failure this axis exists to catch.
+            // Every known gap between the hosts is described in the contract
+            // and reviewed; one that is not has never been checked against the
+            // deployed runtime, which is exactly how server actions came to
+            // work locally and 404 everywhere else.
+            println!(
+                "  {} {}{}  {}",
+                alert_text("✗"),
+                id,
+                spaces(width, display_width(id)),
+                label("not described by the framework endpoint contract"),
+            );
+            failures.push(format!(
+                "{id} ({detail}) is not in tests/fixtures/framework-endpoint-conformance.json, \
+                 so nothing verifies that a deployed build serves it. Add it to the contract."
+            ));
+            continue;
+        };
+
+        let native = entry["nativeHost"].as_bool() != Some(false);
+        let artifact = entry["buildArtifact"].as_bool() != Some(false);
+        println!(
+            "  {} {}{}  {} {}  {} {}  {}",
+            if artifact {
+                ok_text("✓")
+            } else {
+                warn_text("!")
+            },
+            id,
+            spaces(width, display_width(id)),
+            label("native"),
+            render_mark(native),
+            label("deploy"),
+            if artifact {
+                render_mark(true)
+            } else {
+                warn_text("none")
+            },
+            label(detail),
+        );
+        if !artifact {
+            // Reported, not failed. A capability the contract already records
+            // as unavailable in a build artifact is a reviewed limitation —
+            // realtime needs a socket upgrade no build output can perform — and
+            // a project that uses it in development still deploys correctly
+            // without it.
+            println!(
+                "    {} {id} is served only by `ruvyxa start`; a deployed build will not answer {detail}",
+                label("note"),
+            );
+        }
+    }
+
+    if !used.is_empty() {
+        println!();
+    }
+    failures
+}
+
+/// The `action.ts` beside a page route, mirroring the dev server's resolution.
+fn action_file_for_route(route: &RouteEntry) -> Option<PathBuf> {
+    let directory = route.file.parent()?;
+    ["action.ts", "action.js"]
+        .into_iter()
+        .map(|name| directory.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
+/// Ask the plugin runtime what the project's plugins registered.
+fn describe_project_plugins(
+    root: &Path,
+    config: &ProjectConfig,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    let session = TypeScriptPluginBuildSession::new(
+        root,
+        &config.plugins,
+        config.javascript_runtime(),
+        config.markdown_enabled(),
+    )?;
+    let Some(bridge) = session.bridge() else {
+        return Ok(None);
+    };
+    Ok(bridge.call_runner("describe", serde_json::json!({}))?)
 }
 
 pub(crate) fn smoke_render_parity(

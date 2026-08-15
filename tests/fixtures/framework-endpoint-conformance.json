@@ -1,0 +1,94 @@
+{
+  "description": "Framework-owned endpoints and which Ruvyxa host must serve each one.",
+  "why": "Ruvyxa has two request hosts: the Axum server behind `ruvyxa dev`/`start`, and `createHandler` in packages/ruvyxa/runtime/serverless-handler.mjs, which every adapter's function artifact and the generated standalone server run. Endpoints were added to the Axum router by hand and ported to the handler one at a time, with nothing checking that the two agreed. `/__ruvyxa/image` was ported; `/__ruvyxa/action` was not, so every server action -- the crud template's forms, examples/demo/app/todos, and the markup `ruvyxa add` generates -- returned 404 on every deployed build while working locally. This table is the agreement. Add the endpoint here first; both languages replay it.",
+  "fields": {
+    "reserved": "Must appear in RESERVED_FRAMEWORK_ROUTES (crates/ruvyxa_dev_server/src/lib.rs) and RESERVED_FRAMEWORK_PATHS (packages/ruvyxa/runtime/plugin-http.mjs). A plugin that registers one of these paths panics axum, so both lists have to name the same set.",
+    "native": "Served by the Axum host. `always` in every mode, `dev` only when config.watch is set.",
+    "serverless": "How createHandler answers. `dispatch` means the path is handled before route matching and must never fall through to the generic route-miss 404. `static` means the build emits the bytes and a CDN or publish directory answers, so a function never sees it. `none` means the endpoint does not exist outside the native host.",
+    "probe": "Request the Node conformance test sends when serverless is `dispatch`."
+  },
+  "endpoints": [
+    {
+      "path": "/__ruvyxa/hmr",
+      "reserved": true,
+      "native": "dev",
+      "serverless": "none",
+      "note": "Hot-module-replacement WebSocket. Requires a persistent connection and a watcher; neither exists in a build artifact."
+    },
+    {
+      "path": "/__ruvyxa/client",
+      "reserved": true,
+      "native": "always",
+      "serverless": "static",
+      "note": "Hydration bundles. The build writes content-hashed files under /__ruvyxa/client/, so the CDN or the standalone server's publish directory answers and the function is never invoked."
+    },
+    {
+      "path": "/__ruvyxa/action",
+      "reserved": true,
+      "native": "always",
+      "serverless": "dispatch",
+      "probe": {
+        "method": "POST"
+      },
+      "note": "Server actions. This is the endpoint whose absence from createHandler broke every deployed form."
+    },
+    {
+      "path": "/__ruvyxa/trace",
+      "reserved": true,
+      "native": "dev",
+      "serverless": "none",
+      "note": "Runtime trace inspector, gated on config.debug_traces."
+    },
+    {
+      "path": "/__ruvyxa/devtools",
+      "reserved": true,
+      "native": "dev",
+      "serverless": "none",
+      "note": "Devtools dashboard."
+    },
+    {
+      "path": "/__ruvyxa/devtools/data",
+      "reserved": true,
+      "native": "dev",
+      "serverless": "none",
+      "note": "Devtools snapshot feed."
+    },
+    {
+      "path": "/__ruvyxa/image",
+      "reserved": true,
+      "native": "always",
+      "serverless": "dispatch",
+      "probe": {
+        "method": "GET",
+        "query": "src=/a.png&w=64&q=80"
+      },
+      "note": "On-demand image optimization. Adapters that cannot optimize pass no optimizer and it answers 404, but the path is still claimed before routing."
+    }
+  ],
+  "capabilities": [
+    {
+      "id": "actions",
+      "nativeHost": true,
+      "buildArtifact": true,
+      "note": "Discovered from action.ts beside a page route by action_file_for in Rust and actionFileFor in adapter-runner.mjs, which must agree on the .ts-before-.js order."
+    },
+    {
+      "id": "pluginHttp",
+      "nativeHost": true,
+      "buildArtifact": true,
+      "note": "http.onRequest / http.onResponse / http.route, including all of @ruvyxa/auth. The Rust host spawns plugin-runtime.mjs; a function bundle compiles the registry in through adapter-runner.mjs. Both build it with createPluginRegistry."
+    },
+    {
+      "id": "realtime@1",
+      "nativeHost": true,
+      "buildArtifact": false,
+      "note": "Needs a socket upgrade. `ruvyxa build` warns RUV2205 rather than failing, because a deployment without the realtime endpoint is still a valid deployment."
+    },
+    {
+      "id": "presence@1",
+      "nativeHost": true,
+      "buildArtifact": false,
+      "note": "Same constraint as realtime@1."
+    }
+  ]
+}

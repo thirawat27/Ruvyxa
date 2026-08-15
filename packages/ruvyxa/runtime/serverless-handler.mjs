@@ -19,11 +19,13 @@
  * ISR/PPR behavior depends on platform capabilities passed via options.
  *
  * The only imports this file is allowed to carry are the siblings
- * `route-match.mjs` and `request-context.mjs`, which `adapter-runner.mjs`
- * copies into the function bundle next to this file. Everything else must stay
- * inlined: a deployed function directory resolves no bare specifiers.
+ * `route-match.mjs`, `request-context.mjs`, and `action-runtime.mjs`, which
+ * `adapter-runner.mjs` copies into the function bundle next to this file.
+ * Everything else must stay inlined: a deployed function directory resolves no
+ * bare specifiers.
  */
 
+import { runAction, validateActionPayload, validateActionRequest } from './action-runtime.mjs'
 import {
   collectRevalidations,
   requestContext,
@@ -35,6 +37,15 @@ import { canonicalRoutePath, createCanonicalRouteMatcher } from './route-match.m
 const MAX_REVALIDATIONS_PER_REQUEST = 64
 const MAX_REVALIDATION_PATH_LENGTH = 2_048
 const MAX_PENDING_PATH_REVALIDATIONS = 1_024
+
+/** Endpoint the framework's own server actions are posted to. */
+const ACTION_PATH = '/__ruvyxa/action'
+
+/** Defaults matching `ruvyxa build`'s validated `security` block. */
+const DEFAULT_API_BODY_LIMIT = 10 * 1024 * 1024
+const DEFAULT_ACTION_BODY_LIMIT = 1024 * 1024
+const DEFAULT_ACTION_RATE_MAX = 600
+const DEFAULT_ACTION_RATE_WINDOW_SECONDS = 60
 
 /**
  * @typedef {Object} RouteEntry
@@ -56,6 +67,20 @@ const MAX_PENDING_PATH_REVALIDATIONS = 1_024
  *   platform-specific module resolution.
  * @property {(routeId: string) => Promise<Record<string, Function>>} importApi
  *   Import a pre-compiled API route module.
+ * @property {(routeId: string) => Promise<Record<string, Function>>} [importAction]
+ *   Import the pre-compiled `action.ts` that sits beside a page route. Omitted
+ *   when the project declares no server actions; `POST /__ruvyxa/action` then
+ *   answers 501 rather than 404, so a misconfigured deploy is distinguishable
+ *   from a project that simply has no actions.
+ * @property {(request: Request, next: (request: Request) => Promise<Response>) => Promise<Response>} [pluginHttp]
+ *   Project plugin HTTP hooks, compiled into the function bundle by
+ *   `adapter-runner.mjs`. Runs between the built-in middleware and routing,
+ *   the same position `apply_request_plugins` holds in the native server.
+ * @property {{apiLimit?: number, actionLimit?: number, headers?: boolean, sameOrigin?: boolean, fetchMeta?: boolean, trustedProxyIps?: string[], actionRateLimit?: {max?: number, window?: number}}} [security]
+ *   The validated `security` block from `build.json`. Before this existed the
+ *   deployed runtimes ignored it entirely: a function had no request body cap
+ *   at all, `security.headers: false` had no effect, and `trustedProxyIps` was
+ *   unused, while `ruvyxa start` enforced all three.
  * @property {(path: string, revalidate?: number) => string|{html: string, stale: boolean}|null} [readPrerendered]
  *   Synchronous read of a pre-rendered HTML file. ISR-capable adapters return
  *   freshness explicitly; a legacy string result is treated as stale.
@@ -74,6 +99,24 @@ const MAX_PENDING_PATH_REVALIDATIONS = 1_024
  * @property {{locales: string[], defaultLocale: string, localeParam: string, detectLocale: boolean, cookie: string}} [i18n]
  * @property {(request: Request, input: {src: string, width: number, quality: number}) => Promise<Response>} [optimizeImage]
  */
+
+/**
+ * Runtime files a function bundle must carry beside this handler.
+ *
+ * This module imports each of them as a sibling and a deployed function
+ * directory resolves no bare specifiers, so the set is a deployment contract
+ * rather than a convenience. It is exported because it had three copies —
+ * `materializeFunction` in `adapter-runner.mjs`, and the adapter tests that
+ * assemble a function directory by hand — and adding `action-runtime.mjs` to
+ * one of them produced a bundle that imported a file nobody had copied.
+ * Everything that builds a function directory reads this list.
+ */
+export const HANDLER_RUNTIME_FILES = Object.freeze([
+  'serverless-handler.mjs',
+  'route-match.mjs',
+  'request-context.mjs',
+  'action-runtime.mjs',
+])
 
 /** Security defaults shared with the native and standalone runtimes. */
 export const DEFAULT_SECURITY_HEADERS = Object.freeze({
@@ -98,14 +141,33 @@ export function createHandler(options) {
     basePath = '',
     importPage,
     importApi,
+    importAction,
+    pluginHttp,
+    security,
     readPrerendered,
     writePrerendered,
     supportedStrategies = ['ssr', 'ssg', 'csr', 'isr', 'ppr', 'api'],
-    securityHeaders = true,
     middleware,
     i18n,
     optimizeImage,
   } = options
+  // An explicit `securityHeaders` option still wins, so a caller constructing
+  // the handler directly keeps full control; otherwise the project's own
+  // `security.headers` decides, and only then the safe default.
+  const securityHeaders = options.securityHeaders ?? security?.headers ?? true
+  const apiBodyLimit = positiveInteger(security?.apiLimit) ?? DEFAULT_API_BODY_LIMIT
+  const actionPolicy = {
+    actionLimit: positiveInteger(security?.actionLimit) ?? DEFAULT_ACTION_BODY_LIMIT,
+    sameOrigin: security?.sameOrigin,
+    fetchMeta: security?.fetchMeta,
+  }
+  const actionRateLimit = {
+    max: positiveInteger(security?.actionRateLimit?.max) ?? DEFAULT_ACTION_RATE_MAX,
+    window:
+      positiveInteger(security?.actionRateLimit?.window) ?? DEFAULT_ACTION_RATE_WINDOW_SECONDS,
+  }
+  const trustedProxies = parseTrustedProxies(security?.trustedProxyIps)
+  const actionBuckets = new Map()
   const pendingRevalidations = new Map()
   /**
    * Generation claims for URLs `revalidatePath()` named, waiting for a
@@ -124,7 +186,7 @@ export function createHandler(options) {
   const forcedRevalidations = new Map()
   let nextRevalidationGeneration = 0
   let bypassPrerendered = false
-  const fetchMiddleware = createFetchMiddleware(middleware)
+  const fetchMiddleware = createFetchMiddleware(middleware, trustedProxies)
 
   function failClosedRevalidations(message) {
     if (bypassPrerendered) return
@@ -179,8 +241,40 @@ export function createHandler(options) {
   const matchRoute = createCanonicalRouteMatcher(routes)
 
   return async function handle(request, runtimeContext = {}) {
-    const response = await fetchMiddleware(request, () => dispatch(request, runtimeContext))
+    const response = await fetchMiddleware(request, () =>
+      limitThenDispatch(request, runtimeContext),
+    )
     return securityHeaders ? withDefaultSecurityHeaders(response) : response
+  }
+
+  /**
+   * Apply the request body limit, then run plugin hooks, then route.
+   *
+   * The order is the native server's: built-in middleware wraps the router,
+   * `handle_request` caps the body with `to_bytes(api_body_limit_bytes)`, and
+   * only then does `apply_request_plugins` run. Capping after the plugin stage
+   * instead would hand an `http.onRequest` hook — the socket `@ruvyxa/auth` and
+   * every project middleware is built on — a body no limit applied to, which is
+   * the one caller most likely to read it into memory.
+   */
+  async function limitThenDispatch(request, runtimeContext) {
+    const oversized = declaredBodyTooLarge(request, apiBodyLimit)
+    if (oversized) return oversized
+    const limited = limitBodyStream(request, apiBodyLimit)
+    try {
+      if (typeof pluginHttp !== 'function') return await dispatch(limited, runtimeContext)
+      return await pluginHttp(limited, (forwarded) =>
+        dispatch(forwarded ?? limited, runtimeContext),
+      )
+    } catch (error) {
+      // A plugin that read past the cap surfaces the stream error here rather
+      // than inside `dispatch`, so the same 413 has to be produced on both
+      // paths. Anything else is a plugin fault and is reported as such.
+      if (isBodyLimitError(error)) return textResponse(413, 'Request body is too large')
+      const message = error instanceof Error ? error.message : String(error)
+      console.error('[ruvyxa] Plugin HTTP middleware failed:', message)
+      return textResponse(500, 'Internal Server Error')
+    }
   }
 
   async function dispatch(request, runtimeContext = {}) {
@@ -209,6 +303,10 @@ export function createHandler(options) {
     // the same segment rules as the Rust development server.
     if (pathname === '/__ruvyxa/image') {
       return handleDynamicImage(request, runtimeContext.optimizeImage ?? optimizeImage)
+    }
+
+    if (pathname === ACTION_PATH) {
+      return handleServerAction(request, url)
     }
 
     const match = matchRoute(pathname)
@@ -252,6 +350,13 @@ export function createHandler(options) {
       }
       return await handlePage(route, request, pathname, params, runtimeContext)
     } catch (error) {
+      // A handler that read past the body cap surfaces here as a stream error.
+      // Reporting it as 413 rather than 500 keeps the answer identical to the
+      // declared-length rejection above, so a client cannot tell which of the
+      // two bounds caught it.
+      if (isBodyLimitError(error)) {
+        return textResponse(413, 'Request body is too large')
+      }
       const message = error instanceof Error ? error.message : String(error)
       console.error(`[ruvyxa] Error handling ${pathname}:`, message)
       // Log the detail server-side only: serverless is production, and the
@@ -281,13 +386,18 @@ export function createHandler(options) {
       url: new URL(request.url).pathname,
     })
     const result = await runWithRequestContext(context, () => handler({ request, params }))
-    const revalidations = collectRevalidations(context)
+    recordRevalidations(collectRevalidations(context))
+    return normalizeResponse(result)
+  }
+
+  /** Apply the `revalidatePath()` calls a handler made, with the shared bounds. */
+  function recordRevalidations(revalidations) {
     if (revalidations.length > MAX_REVALIDATIONS_PER_REQUEST) {
       failClosedRevalidations(
         `[ruvyxa] Received more than ${MAX_REVALIDATIONS_PER_REQUEST} revalidations from one request; ` +
           'bypassing prerendered artifacts for this instance.',
       )
-      return normalizeResponse(result)
+      return
     }
     for (const path of revalidations) {
       if (
@@ -300,7 +410,121 @@ export function createHandler(options) {
       }
       markForcedRevalidation(path)
     }
-    return normalizeResponse(result)
+  }
+
+  /**
+   * Serve `POST /__ruvyxa/action`.
+   *
+   * The native server exposes this endpoint from its router and validates it in
+   * `action_security.rs`. Nothing served it here, so every `<form
+   * action="/__ruvyxa/action?...">` — the shape the `crud` template, the demo,
+   * and `ruvyxa add` all generate — fell through to route matching and returned
+   * 404 in production while working under `ruvyxa dev`.
+   *
+   * The checks run in the same order as the native ones so a request accepted
+   * locally is accepted here and vice versa; they live in `action-runtime.mjs`,
+   * which documents what it tracks on the Rust side.
+   */
+  async function handleServerAction(request, url) {
+    if (request.method !== 'POST') {
+      return new Response('Method Not Allowed', {
+        status: 405,
+        headers: { allow: 'POST', 'content-type': 'text/plain; charset=utf-8' },
+      })
+    }
+    if (typeof importAction !== 'function') {
+      // Distinguishable from 404 on purpose: 404 would read as "this project
+      // has no such action", when the real cause is a function bundle built
+      // without the action registry.
+      return textResponse(501, 'RUV2211 This deployment was built without server action support.')
+    }
+
+    const targetPath = url.searchParams.get('path') ?? ''
+    const actionName = url.searchParams.get('name') ?? ''
+    if (actionName === '' || !targetPath.startsWith('/')) {
+      return textResponse(400, 'Action request must name a target path and an action')
+    }
+    const canonicalTarget = canonicalRoutePath(targetPath)
+    if (canonicalTarget === null) {
+      return textResponse(400, 'Action target path contains an unsafe encoded segment')
+    }
+
+    // Refuse on the declared length before buffering, so an oversized payload
+    // never becomes an allocation.
+    const oversized = declaredBodyTooLarge(
+      request,
+      actionPolicy.actionLimit,
+      'Action payload is too large',
+    )
+    if (oversized) return oversized
+
+    try {
+      const buffer = await request.arrayBuffer()
+      const rejected = validateActionRequest(request.headers, buffer.byteLength, actionPolicy)
+      if (rejected) return rejected
+
+      let payloadText
+      try {
+        payloadText = new TextDecoder('utf-8', { fatal: true }).decode(buffer)
+      } catch {
+        return textResponse(400, 'Action payload must be valid UTF-8')
+      }
+      const validated = validateActionPayload(request.headers, payloadText)
+      if (validated.response) return validated.response
+
+      // Rate limiting comes after validation and before the action runs, the
+      // same position the native endpoint uses: a malformed request is cheap to
+      // reject and must not consume a client's budget.
+      const limited = actionRateLimitResponse(request, canonicalTarget, actionName)
+      if (limited) return limited
+
+      const match = matchRoute(canonicalTarget)
+      if (!match) return textResponse(404, 'Route not found for action')
+      if (match.route.kind !== 'page') {
+        return textResponse(405, 'Actions can only target page routes')
+      }
+
+      const module = await importAction(match.route.id)
+      if (!module) {
+        return textResponse(404, 'Route action file was not found')
+      }
+
+      const { response, revalidate } = await runAction({
+        module,
+        actionName,
+        payload: validated.payload,
+        contentType: validated.contentType,
+        requestPath: canonicalTarget,
+        headerPairs: [...request.headers],
+      })
+      recordRevalidations(revalidate)
+      return response
+    } catch (error) {
+      if (isBodyLimitError(error)) {
+        return textResponse(413, 'Action payload is too large')
+      }
+      const message = error instanceof Error ? error.message : String(error)
+      console.error(`[ruvyxa] Server action ${actionName} on ${canonicalTarget} failed:`, message)
+      // Serverless is production: the detail stays in the platform log, exactly
+      // as the native server does outside dev.
+      return textResponse(500, 'Internal Server Error')
+    }
+  }
+
+  /**
+   * Fixed-window action rate limiter, keyed per client, path, and action.
+   *
+   * Mirrors `action_rate_limit_key`. The native limiter hashes into a fixed
+   * slot array because it must survive an address-rotating attacker on a
+   * long-lived process; a function instance is short-lived and already bounded
+   * by `MAX_TRACKED_RATE_LIMIT_KEYS`, so the simpler map used by the built-in
+   * middleware is reused here rather than adding a second scheme.
+   */
+  function actionRateLimitResponse(request, targetPath, actionName) {
+    const key = `${clientAddress(request.headers, trustedProxies)}:${targetPath}:${actionName}`
+    return consumeFixedWindow(actionBuckets, key, actionRateLimit.max, actionRateLimit.window, {
+      message: 'Action rate limit exceeded',
+    })
   }
 
   async function handlePage(route, request, pathname, params, runtimeContext) {
@@ -588,7 +812,7 @@ function escapeHtmlAttribute(value) {
 const MAX_TRACKED_RATE_LIMIT_KEYS = 10_000
 
 /** Compile validated built-in middleware into a Fetch-native wrapper. */
-function createFetchMiddleware(config) {
+function createFetchMiddleware(config, trustedProxies = []) {
   const builtin = config?.builtin
   if (!builtin || typeof builtin !== 'object') {
     return async (_request, next) => next()
@@ -611,7 +835,7 @@ function createFetchMiddleware(config) {
     if (preflight) {
       response = preflight
     } else {
-      const limited = rateLimitResponse(request, rate, buckets)
+      const limited = rateLimitResponse(request, rate, buckets, trustedProxies)
       response = limited ?? (await next())
       response = withCorsHeaders(response, request, cors)
     }
@@ -702,17 +926,38 @@ function appendVaryOrigin(headers) {
   headers.set('vary', values.join(', '))
 }
 
-function rateLimitResponse(request, rate, buckets) {
+function rateLimitResponse(request, rate, buckets, trustedProxies) {
   if (!rate) return null
   const max = Number(rate.max)
   const windowSeconds = Number(rate.window)
   if (!Number.isInteger(max) || max < 1 || !Number.isFinite(windowSeconds) || windowSeconds <= 0) {
     return new Response('Rate limit configuration error', { status: 500 })
   }
+  return consumeFixedWindow(
+    buckets,
+    rateLimitKey(request, rate.key, trustedProxies),
+    max,
+    windowSeconds,
+  )
+}
 
+/**
+ * Consume one unit from a fixed-window bucket, or return the 429 to send.
+ *
+ * The built-in `rate` middleware and the server-action endpoint both need this,
+ * and running two counters with slightly different eviction rules is how a
+ * limiter ends up enforcing two different policies depending on which door a
+ * request came through.
+ */
+function consumeFixedWindow(
+  buckets,
+  key,
+  max,
+  windowSeconds,
+  { message = 'Rate limit exceeded' } = {},
+) {
   const now = Date.now()
   const windowMs = windowSeconds * 1000
-  const key = rateLimitKey(request, rate.key)
   let bucket = buckets.get(key)
   if (bucket && now - bucket.startedAt >= windowMs) {
     buckets.delete(key)
@@ -724,10 +969,7 @@ function rateLimitResponse(request, rate, buckets) {
         if (now - tracked.startedAt >= windowMs) buckets.delete(trackedKey)
       }
       if (buckets.size >= MAX_TRACKED_RATE_LIMIT_KEYS) {
-        return new Response('Rate limit exceeded', {
-          status: 429,
-          headers: { 'content-type': 'text/plain; charset=utf-8', 'retry-after': '1' },
-        })
+        return rateLimited(message, 1)
       }
     }
     bucket = { remaining: max, startedAt: now }
@@ -737,26 +979,275 @@ function rateLimitResponse(request, rate, buckets) {
     bucket.remaining -= 1
     return null
   }
-  const retryAfter = Math.max(1, Math.ceil((windowMs - (now - bucket.startedAt)) / 1000))
-  return new Response('Rate limit exceeded', {
+  return rateLimited(message, Math.max(1, Math.ceil((windowMs - (now - bucket.startedAt)) / 1000)))
+}
+
+function rateLimited(message, retryAfterSeconds) {
+  return new Response(message, {
     status: 429,
-    headers: { 'content-type': 'text/plain; charset=utf-8', 'retry-after': String(retryAfter) },
+    headers: {
+      'content-type': 'text/plain; charset=utf-8',
+      'retry-after': String(retryAfterSeconds),
+    },
   })
 }
 
-function rateLimitKey(request, configuredKey) {
+function rateLimitKey(request, configuredKey, trustedProxies) {
   if (typeof configuredKey === 'string' && configuredKey.startsWith('header:')) {
     return request.headers.get(configuredKey.slice('header:'.length)) ?? 'unknown'
   }
-  // Edge runtimes do not expose a transport SocketAddr. These headers are set
-  // by the supported platforms at their trusted ingress; explicit `header:`
-  // remains available for custom deployments.
-  return (
-    request.headers.get('cf-connecting-ip') ??
-    request.headers.get('x-vercel-forwarded-for') ??
-    request.headers.get('x-real-ip') ??
-    'unknown'
-  )
+  return clientAddress(request.headers, trustedProxies)
+}
+
+// ─── Client Identity ────────────────────────────────────────────────────────
+
+/**
+ * Best available client address for rate limiting.
+ *
+ * Edge runtimes expose no transport peer, so the platform's own ingress header
+ * is authoritative when present: a deployed function is reachable only through
+ * that ingress, which makes it the trusted hop by construction.
+ *
+ * Failing that — a standalone server behind nginx, Traefik, or a service mesh —
+ * `X-Forwarded-For` is scanned from the right, skipping addresses listed in
+ * `security.trustedProxyIps`. Each hop appends the peer it actually saw, so
+ * rightmost entries are proxy-written while leftmost entries arrive from the
+ * client and are forgeable. Taking the leftmost entry would let one client
+ * rotate fabricated addresses straight through the limiter, which is the bug
+ * `forwarded_client_ip` in the native server exists to avoid.
+ */
+function clientAddress(headers, trustedProxies) {
+  for (const name of ['cf-connecting-ip', 'x-vercel-forwarded-for', 'true-client-ip']) {
+    const value = headers.get(name)
+    if (typeof value === 'string' && value.trim() !== '') return value.trim()
+  }
+
+  const forwarded = headers.get('x-forwarded-for') ?? headers.get('x-real-ip')
+  if (typeof forwarded !== 'string') return 'unknown'
+  // Only hops that parse as an address are considered. The header is
+  // client-writable, so returning raw text would let one caller rotate
+  // arbitrary junk through the limiter and get a fresh bucket every request —
+  // the limiter would count to one, forever.
+  const hops = forwarded
+    .split(',')
+    .map((value) => parseIpAddress(value.trim()))
+    .filter(Boolean)
+  for (let index = hops.length - 1; index >= 0; index -= 1) {
+    if (!isTrustedProxyAddress(hops[index], trustedProxies)) return formatAddress(hops[index])
+  }
+  // Every hop is a configured proxy, or none parsed. Falling back to one shared
+  // bucket limits more aggressively than the traffic warrants, which is the
+  // direction a limiter is allowed to be wrong in.
+  return 'unknown'
+}
+
+/** Stable text form of a parsed address, for use as a bucket key. */
+function formatAddress(address) {
+  if (address.length === 4) return address.join('.')
+  const hextets = []
+  for (let index = 0; index < 16; index += 2) {
+    hextets.push(((address[index] << 8) | address[index + 1]).toString(16))
+  }
+  return hextets.join(':')
+}
+
+/** Parse `security.trustedProxyIps` into matchable prefixes, skipping bad entries. */
+function parseTrustedProxies(values) {
+  if (!Array.isArray(values)) return []
+  const prefixes = []
+  for (const value of values) {
+    if (typeof value !== 'string') continue
+    const prefix = parseIpPrefix(value)
+    // `ruvyxa build` validates these, so an unparseable entry here means a
+    // handler constructed by hand. Skipping it narrows trust rather than
+    // widening it, which is the safe direction to fail.
+    if (prefix) prefixes.push(prefix)
+  }
+  return prefixes
+}
+
+function isTrustedProxyAddress(address, trustedProxies) {
+  if (isLoopbackAddress(address)) return true
+  return trustedProxies.some((prefix) => prefixContains(prefix, address))
+}
+
+/** Parse `10.0.0.0/8`, `2001:db8::/32`, or a bare address, masking host bits. */
+function parseIpPrefix(value) {
+  const text = value.trim()
+  const slash = text.indexOf('/')
+  const addressText = slash < 0 ? text : text.slice(0, slash)
+  const address = parseIpAddress(addressText)
+  if (!address) return null
+  const hostBits = address.length * 8
+  let prefixLength = hostBits
+  if (slash >= 0) {
+    const declared = text.slice(slash + 1).trim()
+    if (!/^\d{1,3}$/.test(declared)) return null
+    prefixLength = Number(declared)
+    if (prefixLength > hostBits) return null
+  }
+  return { bytes: maskAddress(address, prefixLength), prefixLength }
+}
+
+function prefixContains(prefix, address) {
+  if (address.length !== prefix.bytes.length) return false
+  const masked = maskAddress(address, prefix.prefixLength)
+  return masked.every((byte, index) => byte === prefix.bytes[index])
+}
+
+function maskAddress(address, prefixLength) {
+  const masked = new Uint8Array(address.length)
+  const wholeBytes = prefixLength >> 3
+  for (let index = 0; index < wholeBytes; index += 1) masked[index] = address[index]
+  const remainder = prefixLength & 7
+  if (remainder !== 0 && wholeBytes < address.length) {
+    masked[wholeBytes] = address[wholeBytes] & ((0xff << (8 - remainder)) & 0xff)
+  }
+  return masked
+}
+
+function isLoopbackAddress(address) {
+  if (address.length === 4) return address[0] === 127
+  return address.every((byte, index) => (index === 15 ? byte === 1 : byte === 0))
+}
+
+/**
+ * Parse an address into bytes, collapsing IPv4-mapped IPv6 to its IPv4 form.
+ *
+ * The collapse matters: a dual-stack listener reports an IPv4 peer as
+ * `::ffff:10.0.0.9`, and comparing that byte-wise against an IPv4 prefix would
+ * never match — an IPv4 proxy allowlist would silently stop working.
+ */
+function parseIpAddress(value) {
+  const address = value.includes(':') ? parseIpv6(value) : parseIpv4(value)
+  if (!address || address.length !== 16) return address
+  const mappedPrefix = address.slice(0, 10).every((byte) => byte === 0)
+  if (mappedPrefix && address[10] === 0xff && address[11] === 0xff) return address.slice(12)
+  return address
+}
+
+function parseIpv4(value) {
+  const parts = value.split('.')
+  if (parts.length !== 4) return null
+  const bytes = new Uint8Array(4)
+  for (let index = 0; index < 4; index += 1) {
+    if (!/^\d{1,3}$/.test(parts[index])) return null
+    const octet = Number(parts[index])
+    if (octet > 255) return null
+    bytes[index] = octet
+  }
+  return bytes
+}
+
+function parseIpv6(value) {
+  let text = value.trim()
+  if (text.startsWith('[') && text.endsWith(']')) text = text.slice(1, -1)
+  // A trailing dotted-quad (`::ffff:1.2.3.4`) is rewritten into two hextets so
+  // the group parser below only ever sees hexadecimal.
+  const lastColon = text.lastIndexOf(':')
+  if (lastColon >= 0 && text.slice(lastColon + 1).includes('.')) {
+    const embedded = parseIpv4(text.slice(lastColon + 1))
+    if (!embedded) return null
+    const high = ((embedded[0] << 8) | embedded[1]).toString(16)
+    const low = ((embedded[2] << 8) | embedded[3]).toString(16)
+    text = `${text.slice(0, lastColon + 1)}${high}:${low}`
+  }
+
+  const halves = text.split('::')
+  if (halves.length > 2) return null
+  const head = halves[0] === '' ? [] : halves[0].split(':')
+  let groups
+  if (halves.length === 1) {
+    groups = head
+  } else {
+    const tail = halves[1] === '' ? [] : halves[1].split(':')
+    const zeros = 8 - head.length - tail.length
+    if (zeros < 1) return null
+    groups = [...head, ...new Array(zeros).fill('0'), ...tail]
+  }
+  if (groups.length !== 8) return null
+
+  const bytes = new Uint8Array(16)
+  for (let index = 0; index < 8; index += 1) {
+    if (!/^[0-9a-fA-F]{1,4}$/.test(groups[index])) return null
+    const hextet = Number.parseInt(groups[index], 16)
+    bytes[index * 2] = hextet >> 8
+    bytes[index * 2 + 1] = hextet & 0xff
+  }
+  return bytes
+}
+
+// ─── Request Limits ─────────────────────────────────────────────────────────
+
+function positiveInteger(value) {
+  return Number.isInteger(value) && value > 0 ? value : undefined
+}
+
+/**
+ * Reject a request whose declared body length exceeds `limit`.
+ *
+ * `GET` and `HEAD` are exempt because they carry no body. This is the cheap
+ * half of the cap: it rejects before a byte is read, but only when the client
+ * declared a length. `limitBodyStream` covers the rest.
+ */
+function declaredBodyTooLarge(request, limit, message = 'Request body is too large') {
+  if (request.method === 'GET' || request.method === 'HEAD') return null
+  const declared = request.headers.get('content-length')
+  if (declared === null) return null
+  const length = Number(declared)
+  if (!Number.isFinite(length) || length < 0) {
+    return textResponse(400, 'Invalid Content-Length')
+  }
+  return length > limit ? textResponse(413, message) : null
+}
+
+/**
+ * Return an equivalent request whose body cannot yield more than `limit` bytes.
+ *
+ * `Content-Length` alone is not a cap. A chunked upload declares no length, and
+ * a `Request` a platform hands us is not required to carry the header at all —
+ * a constructed `Request` in undici does not. Enforcing on the header only
+ * would have left the deployed runtimes with no effective body limit, which is
+ * the gap this whole change exists to close, so the bytes themselves are
+ * counted as the route handler reads them.
+ *
+ * Reconstruction is attempted rather than assumed: a runtime that refuses a
+ * stream body (or `duplex`) keeps the original request and the declared-length
+ * check remains its bound. Failing to wrap must never fail the request.
+ */
+function limitBodyStream(request, limit) {
+  if (!request.body || typeof TransformStream === 'undefined') return request
+  let seen = 0
+  const limiter = new TransformStream({
+    transform(chunk, controller) {
+      seen += chunk?.byteLength ?? 0
+      if (seen > limit) {
+        controller.error(new Error(`RUV2212 Request body exceeded the ${limit} byte limit`))
+        return
+      }
+      controller.enqueue(chunk)
+    },
+  })
+  try {
+    return new Request(request, { body: request.body.pipeThrough(limiter), duplex: 'half' })
+  } catch {
+    return request
+  }
+}
+
+/** True when an error came from `limitBodyStream` rather than from user code. */
+function isBodyLimitError(error) {
+  for (let current = error, depth = 0; current && depth < 4; current = current.cause, depth += 1) {
+    if (typeof current.message === 'string' && current.message.includes('RUV2212')) return true
+  }
+  return false
+}
+
+function textResponse(status, message) {
+  return new Response(message, {
+    status,
+    headers: { 'content-type': 'text/plain; charset=utf-8' },
+  })
 }
 
 function normalizedRequestId(value) {

@@ -2227,6 +2227,73 @@ mod tests {
     use base64::Engine;
     use std::time::SystemTime;
 
+    /// Both hosts answer to the same table of framework endpoints.
+    ///
+    /// The two request hosts drifted silently once already: `/__ruvyxa/action`
+    /// lived in the axum router below and had no counterpart in
+    /// `serverless-handler.mjs`, so every deployed server action answered 404
+    /// while working under `ruvyxa dev`. Nothing compared the two lists.
+    /// `tests/fixtures/framework-endpoint-conformance.json` is now that
+    /// comparison, replayed here and by
+    /// `tests/packages/ruvyxa/framework-endpoints.test.mjs`.
+    #[test]
+    fn reserved_routes_match_the_shared_framework_endpoint_contract() {
+        let contract: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/framework-endpoint-conformance.json"
+        ))
+        .expect("the framework endpoint contract must be valid JSON");
+
+        let reserved = contract["endpoints"]
+            .as_array()
+            .expect("endpoints must be an array")
+            .iter()
+            .filter(|endpoint| endpoint["reserved"].as_bool() == Some(true))
+            .map(|endpoint| {
+                endpoint["path"]
+                    .as_str()
+                    .expect("every endpoint must have a path")
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            RESERVED_FRAMEWORK_ROUTES.to_vec(),
+            reserved,
+            "RESERVED_FRAMEWORK_ROUTES and the endpoint contract disagree; \
+             update tests/fixtures/framework-endpoint-conformance.json first"
+        );
+    }
+
+    /// Every endpoint the contract marks `native` is registered on the router.
+    ///
+    /// Read from the source of `serve` rather than by building a router: axum
+    /// exposes no way to enumerate registered paths, and a `ServerConfig` needs
+    /// a project on disk. Checking the text still catches the failure that
+    /// matters — an endpoint named by the contract that no host ever wired up.
+    #[test]
+    fn every_contract_endpoint_is_registered_on_the_native_router() {
+        let contract: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/framework-endpoint-conformance.json"
+        ))
+        .expect("the framework endpoint contract must be valid JSON");
+        let source = include_str!("lib.rs");
+
+        for endpoint in contract["endpoints"]
+            .as_array()
+            .expect("endpoints must be an array")
+        {
+            let path = endpoint["path"].as_str().expect("path must be a string");
+            if endpoint["native"].as_str().is_none() {
+                continue;
+            }
+            assert!(
+                source.contains(&format!(".route(\"{path}\""))
+                    || source.contains(&format!("\"{path}\",")),
+                "{path} is in the endpoint contract but is not registered by serve()"
+            );
+        }
+    }
+
     #[test]
     fn validates_realtime_event_metadata_and_channel_filters() {
         let payload = r#"{"version":1,"type":"action","channels":["todos"],"action":"save","path":"/todos","invalidated":[]}"#;

@@ -161,7 +161,7 @@ function firebaseHandlerSource(
 ): string {
   return `import { onRequest } from 'firebase-functions/v2/https';
 import { createHandler, prerenderRelativePath } from './serverless-handler.mjs';
-import { loadRouteModule } from './route-modules.mjs';
+import { applyPluginHttp, loadActionModule, loadRouteModule } from './route-modules.mjs';
 import manifest from './manifest.mjs';
 import { readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
 import os from 'node:os';
@@ -184,6 +184,9 @@ const handler = createHandler({
   i18n: manifest.i18n,
   importPage: loadRouteModule,
   importApi: loadRouteModule,
+  importAction: loadActionModule,
+  pluginHttp: applyPluginHttp,
+  security: runtimePolicy.security,
   readPrerendered: (pathname, revalidate = 60) => {
     const relative = prerenderRelativePath(pathname);
     if (relative === null) return null;
