@@ -73,6 +73,19 @@ module ที่ worker import เป็นทั้งเนื้อหาใ�
 [ตารางการเปลี่ยน worker pool](12-development-testing.md#worker-pool-change-matrix)
 ก่อนแก้ไฟล์เหล่านี้
 
+## HMR protocol
+
+`HmrTracker` เก็บ reverse dependency map แยกตาม lane — manifest, server, client และ action — ดังนั้น
+การแก้ไขฝั่ง server เพียงอย่างเดียวจะไม่ invalidate งานฝั่ง client ที่ไม่ได้พึ่งพามันเลย และการ
+rebuild server action จะไม่สามารถระงับ client update ของ route เดียวกันได้ WebSocket wire protocol
+(`ruvyxa.hmr`, `protocolVersion: 1`) มี version กำกับ: ทุก message มี `sequence` ที่เพิ่มขึ้นเสมอ
+และ browser client ที่ inline มากับหน้า (ไม่ใช่ bundle แยก) จะทิ้ง message ที่ sequence เคยถูก apply
+ไปแล้ว ทำให้ update ที่ถูกแทนที่ไปแล้วไม่มีทางมาถึงทีหลัง message เป็นหนึ่งใน `partial` (พร้อม
+`kind` เป็น `css`, `client-boundary` หรือ `server-route`), `restart` หรือ `issues` การอัปเดต CSS
+จะแทนที่ stylesheet ที่เกี่ยวข้องในตำแหน่งเดิมแทนการ reload ส่วนสิ่งที่ client
+พิสูจน์ความปลอดภัยไม่ได้ — รวมถึง client-boundary update ใดก็ตามที่ runtime ยังไม่ได้ลงทะเบียน
+refresh handler ไว้ — จะ fallback ไปที่ `location.reload()` ซึ่งยังคงถูกต้องไม่ใช่ความล้มเหลว
+
 ## Build lifecycle
 
 build validate config และ graph, compile route/client code, รัน build plugin hook, prerender

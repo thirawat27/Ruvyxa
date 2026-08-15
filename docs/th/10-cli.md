@@ -222,10 +222,15 @@ cargo run -p ruvyxa_cli -- check --root examples/demo
 ## Repository script
 
 root `package.json` กำหนด `build`, `check`, `test`, `prepare`, `check:cargo-lock`,
-`check:oxc-lockstep`, `format`, `format:check`, `format:staged`, `release:validate`, `release:bump`,
-`pack:smoke`, `test:full-flow` และ `publish:dry-run` TypeScript package ที่เผยแพร่กำหนด `build`,
-`check`, `test`, `format` และ `prepack` อย่างสม่ำเสมอ; ดู package manifest ที่เกี่ยวข้องสำหรับ test
-glob
+`check:oxc-lockstep`, `check:unused`, `check:template-mirrors`, `format`, `format:check`,
+`format:staged`, `release:validate`, `release:bump`, `pack:smoke`, `test:full-flow` และ
+`publish:dry-run` `check:unused` รัน [Knip](https://knip.dev) ตรวจ workspace ฝั่ง
+JavaScript/TypeScript ทั้งหมด และ fail เมื่อพบไฟล์, export, type หรือ dependency ที่ไม่ได้ใช้;
+`release:validate` ก็รันด้วย Ruvyxa โหลดโค้ดจำนวนมากตาม convention — route ใน `app/`, `plugins/`,
+`ruvyxa.config.ts`, runtime file ที่ native CLI resolve ด้วย path — `knip.json`
+จึงประกาศสิ่งเหล่านี้เป็น entry point แทนที่จะถือว่า ไม่ได้ใช้ TypeScript package ที่เผยแพร่กำหนด
+`build`, `check`, `test`, `format` และ `prepack` อย่างสม่ำเสมอ; ดู package manifest
+ที่เกี่ยวข้องสำหรับ test glob
 
 **ก่อนหน้า:** [การเชื่อมต่อ](09-integrations-auth-data-and-realtime.md) · **ถัดไป:**
 [Architecture](11-architecture.md)

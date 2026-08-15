@@ -47,6 +47,7 @@ cargo clippy --workspace --locked -- -D warnings
 pnpm -r build
 pnpm -r check
 pnpm -r test
+pnpm check:unused
 ```
 
 ### Run the Example App
@@ -140,7 +141,14 @@ cargo clippy --workspace --locked -- -D warnings
 pnpm -r build
 pnpm -r check
 pnpm -r test
+pnpm check:unused
 ```
+
+`check:unused` runs [Knip](https://knip.dev) and fails on unused files, exports, types, and
+dependencies across the JavaScript/TypeScript workspaces; `release:validate` runs it too, so it
+gates a release. If a new runtime module or dynamically loaded package reports as unused, check for
+a dynamic or path-based loader before deleting it, then declare it in `knip.json` if it is genuinely
+loaded by convention rather than by import.
 
 ### 4. Smoke test both modes
 

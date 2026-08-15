@@ -1220,6 +1220,37 @@ comments and strings, and walks template literals so `${…}` interpolations are
 Every helper it delegates to is bounded to the range being scanned, so an interpolation's scan
 cannot read into the surrounding literal text.
 
+#### `import.meta.glob`
+
+Both module graphs — `glob.rs` in the native bundler and `runtime/glob.mjs` for the JavaScript
+compiler — expand literal `import.meta.glob(pattern[, { eager }])` calls before the rest of
+compilation runs, so the result is ordinary generated source: a lazy match becomes
+`() => import(specifier)` and an eager match becomes a hoisted
+`import * as <binding> from specifier` inserted after any leading `'use client'`/`'use server'`
+directive, never a `require()` call — the eager form must enter the static dependency graph the same
+way a written import would, so it is subject to the same chunking, tree-shaking, and source-map
+handling. Pattern and option must be compile-time string/object literals; anything else is a
+diagnostic (`RUV1810`), never a runtime fallback. A pattern is resolved from the importing module
+through the same resolver as a normal specifier — including `tsconfig.json`/`jsconfig.json` aliases
+— and a match outside the project root is rejected before any file is read.
+
+Generated keys are project-relative, slash-normalized specifiers ordered by comparing UTF-8/UTF-16
+code units directly, in both languages, never `localeCompare`: locale collation orders `beta.ts`
+before `Gamma.ts` while code-unit order does not, and it also varies with the host's configured ICU
+locale, which would have made the same source produce a different key order — and therefore a
+different eager-evaluation order — on two machines. `tests/fixtures/glob-contract.json` is the
+shared contract both expanders replay, including the ordering and lowering cases above; a case with
+only zero or one match cannot exercise ordering at all, which is why the earlier version of that
+fixture did not catch the divergence.
+
+Both expanders route their source scan through one scanner per language rather than maintaining a
+private walk: `ast::parse_module`/`ast::skip_non_code` in Rust, and
+`packages/ruvyxa/runtime/scanner.mjs` — a faithful port of the same comment/string/template/regex
+state machine — on the JavaScript side. A hand-rolled walk that does not know a regular expression
+from a division is the concrete failure this avoids: `/['"]/` looks like it opens a string that runs
+to the next quote anywhere in the file, silently swallowing a real `import.meta.glob` call after it
+without raising a diagnostic.
+
 #### Markdown and MDX compilation
 
 Content routes are lowered to ordinary React ESM before dependency scanning and TypeScript/JSX
@@ -1260,6 +1291,50 @@ format instead: fields added later are `Option`, which keeps "absent" distinguis
 A reader declines to reuse an entry that predates a field it needs, and the fresh resolve rewrites
 that entry complete — so an older cache self-heals one module at a time instead of being discarded
 wholesale.
+
+#### Artifact task graph and cache budget
+
+`ArtifactTaskGraph` (`task_graph.rs`) sits over the compile cache, the incremental graph cache, and
+emitted output. It does not own artifact bytes — those stay in their existing content-addressed
+caches — it gives them one typed identity, lifecycle, and dependency contract:
+
+```rust
+pub enum ArtifactKind { Source, Resolve, Transform, Analyze, ChunkPlan, Emit, SourceMap, Manifest }
+pub enum ArtifactState { Building, Ready, Failed, Cancelled }
+
+pub struct ArtifactKey { kind: ArtifactKind, namespace: String, identity: String }
+```
+
+`ArtifactKey::from_inputs` hashes length-framed, name-sorted `(name, value)` pairs with `blake3`, so
+two callers cannot produce the same key by iterating a map in a different order. `begin`/`complete`
+are generation-scoped: a task that completes after its generation was invalidated is rejected as
+`StaleCompletion` rather than silently publishing stale content, and two builders that publish
+different bytes for the same semantic key fail closed as `NonDeterministicOutput` instead of letting
+whichever finishes last win. A graph hit is never treated as the artifact itself — every reader
+still loads and validates the owning cache entry — so a corrupt or version-mismatched manifest
+degrades to a plain cache miss, never a stale build.
+
+`CacheBudget` (`cache_budget.rs`) implements one soft/hard/target hysteresis policy shared by the
+compile cache, the resolver's graph cache, and the artifact graph, with the identical policy
+re-implemented in the JavaScript worker runtime (`runtime/cache-budget.mjs`) and held to
+`tests/fixtures/cache-budget-contract.json` so the two agree on every pressure transition. Below the
+target there is no eviction; between target and soft there is deliberately still none — a state a
+budget can sit in indefinitely without being a bug, which is why tests assert against the hard limit
+rather than the target. At or above soft, `BundleContext::enforce_cache_budget` evicts in
+correctness-preserving order: disposable resolver derivations first, then artifact-graph metadata,
+then least-recently-used compiler memory, until residency returns at or below target — or the hard
+limit stops speculative work outright. An artifact that a build still holds is pinned by its
+dependency-closure edges the same way a `Building` record is, so eviction can only turn a cache hit
+into a rebuild, never invalidate work in flight. `ArtifactTaskGraph::evict_to_bytes` keeps its
+eligible-for-eviction candidates in a priority-ordered set that is repaired incrementally as records
+are removed, rather than rescanning every record before each eviction — the difference between a
+linear and a quadratic pass at the size an eviction sweep runs.
+
+The default native build-cache hard limit is 256 MiB and is overridden with
+`RUVYXA_BUILD_CACHE_MEMORY_MB` (1–16384). `RUVYXA_DISABLE_ARTIFACT_CACHE=1` bypasses the task graph
+for release-rollback diagnosis without touching the correctness path or changing emitted bytes: a
+1-byte test budget must still emit output byte-identical to an unconstrained one, and that fixture
+is what proves eviction changes latency only.
 
 #### Durable cache writes (`atomic_file.rs`)
 
@@ -1825,15 +1900,24 @@ and binds first available.
 file event:
 
 1. Filter ignored paths
-2. `hmr_tracker.compute_update(paths)` → affected routes and event type
+2. `hmr_tracker.compute_update(paths)` → affected routes and event type, computed per lane (see
+   below)
 3. If `full_reload` or no affected routes: full invalidation (manifest + render cache)
 4. Else: selective invalidation (styles only if CSS dep changed, render cache per route)
 5. `worker_pool.invalidate_from_watcher(paths)` — queued via `try_send` (non-blocking, sync-safe)
 6. Notify plugin runtime via `plugin_runtime.notify_file_change()`
-7. Broadcast JSON payload via `reload_tx` to all connected HMR WebSocket clients
+7. `hmr_payload()` builds the versioned wire message and broadcasts it via `reload_tx` to every
+   connected HMR WebSocket client
 
 HMR WebSocket handler validates Origin (cross-site connection blocked), then streams broadcast
-messages. Payload shape: `{ type, paths, affectedRoutes, fullReload }`.
+messages. See [HMR WebSocket Protocol](#1-hmr-websocket-protocol) for the current wire shape.
+
+`HmrTracker` maintains its reverse file-to-route dependency map separately for four lanes —
+`Manifest`, `Server`, `Client`, `Action` — each with its own content version. A change reachable
+only through the server lane cannot invalidate client-only work for the same route, and a rebuilt
+server action cannot suppress a client update the same edit also produced. Both bundles for one
+route can therefore be in flight and invalidated independently without one lane's rebuild racing the
+other's.
 
 ---
 
@@ -2320,9 +2404,13 @@ The dev server uses a fixed 64-URL bound. Build pools use the configured isolate
 | Compiler cache  | Managed by `compiler.mjs`        | `invalidate`, memory pressure      |
 | ESM module URLs | **Unbounded** (see above)        | Nothing — process replacement only |
 
-A 30-second interval checks `heapUsed` against `RUVYXA_MEMORY_LIMIT_MB` (512) and, above it, evicts
-half of `bundleCache`, clears `moduleCache`, and clears the compiler cache. The timer is `unref`'d
-so it never keeps the process alive.
+A 30-second interval checks `heapUsed` against `RUVYXA_MEMORY_LIMIT_MB` (512) through the same
+`CachePressureController` (`runtime/cache-budget.mjs`) hysteresis policy the native build cache
+implements — soft pressure evicts half of `bundleCache` and clears `moduleCache`; hard pressure also
+clears the compiler cache and sets `stopSpeculation`, which gates the `warmup` worker action: a
+warmup request received while the worker is under hard pressure returns
+`{ ok: true, warmed: 0, skipped: 'memory-pressure' }` instead of doing more speculative work while
+already short on memory. The timer is `unref`'d so it never keeps the process alive.
 
 ---
 
@@ -2654,27 +2742,53 @@ ws://<host>:<port>/__ruvyxa/hmr
 
 #### Server → Client Message
 
-One message shape, broadcast via `reload_tx: broadcast::Sender<String>` (`lib.rs:1058-1064`):
+`hmr_payload()` builds one versioned message shape, broadcast via
+`reload_tx: broadcast::Sender<String>`:
 
 ```json
 {
-  "type": "component-update",
+  "protocol": "ruvyxa.hmr",
+  "protocolVersion": 1,
+  "sequence": 7,
+  "traceId": "0123456789abcdef0123456789abcdef",
+  "traceAck": false,
+  "type": "partial",
+  "kind": "client-boundary",
+  "modules": ["app/blog/[slug]/page.tsx"],
   "paths": ["app/blog/[slug]/page.tsx"],
   "affectedRoutes": ["app/blog/[slug]/page"],
   "fullReload": false
 }
 ```
 
-`type` is one of `HmrTracker`'s `HmrEventType` values (`css-update`, `component-update`,
-`full-reload`). There is no `hot` / `style-update` / `connected` / `state-sync` vocabulary and no
-server-initiated handshake message — the client opens the socket and starts receiving
-`HmrTracker::compute_update` payloads directly.
+`sequence` is a process-wide, monotonically increasing counter (`NEXT_HMR_SEQUENCE`), not a
+per-connection one. `type` is `partial`, `restart`, or `issues`; `kind` narrows a `partial` message
+to `css`, `client-boundary`, or `server-route`, and to `restart`/`issues` for those message types.
+An `issues` message additionally carries an `issues: [{ code, message }]` array. There is no `hot` /
+`style-update` / `connected` / `state-sync` vocabulary and no server-initiated handshake message —
+the client opens the socket and starts receiving `hmr_payload()` output directly.
+
+The inline browser client (`hmr_client_script`, served with the HTML, not a separate bundled file)
+tracks the highest `sequence` it has applied and silently drops any message at or below it, so a
+stale rebuild finishing after a newer one cannot regress the page. A malformed `traceId`, a
+non-monotonic `sequence`, or a JSON parse failure all fall back to `location.reload()` rather than
+attempting to interpret a message the client cannot trust. `traceAck: true` triggers a
+`POST /__ruvyxa/trace` acknowledgement carrying `traceId`, which the server can correlate with the
+edit that produced the update. `partial`/`css` swaps stylesheet `<link>` hrefs and re-fetches the
+page's inline `<style data-ruvyxa-css>` block; `partial`/`server-route` reloads only when the
+current route is in `affectedRoutes`; `partial`/`client-boundary` calls
+`globalThis.__RUVYXA_HMR_REFRESH__(message)` when the application has registered one and only
+reloads if that call is absent, throws, or does not resolve `true`. `restart` and any message the
+client cannot prove safe fall back to a full reload — the client favors correctness over retaining
+page state whenever it cannot prove an update is safe.
 
 #### Client → Server
 
 The dev server does not read incoming WebSocket frames as protocol messages — there is no
 `manifest-hash` negotiation. The Origin header is validated at connection time
-(`hmr_origin_is_cross_site`); a cross-site connection is rejected before the upgrade completes.
+(`hmr_origin_is_cross_site`); a cross-site connection is rejected before the upgrade completes. The
+one client-initiated request is the out-of-band `POST /__ruvyxa/trace` acknowledgement above, not a
+WebSocket frame.
 
 #### Realtime channel (separate from HMR)
 

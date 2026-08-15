@@ -230,5 +230,36 @@ client JavaScript รัน four release command ใน
 [Release-readiness playbook](19-release-readiness-playbook.md) แล้วเลือก artifact จาก
 [คู่มือ platform adapter](20-platform-adapter-guide.md)
 
+## 9. ประกาศชุดโมดูลที่รู้จักด้วย `import.meta.glob`
+
+```tsx
+// app/guides/page.tsx
+const lazyGuides = import.meta.glob('./guides/*.mdx')
+const eagerIcons = import.meta.glob('./icons/*.tsx', { eager: true })
+
+export default async function GuidesIndex() {
+  const slugs = Object.keys(lazyGuides).map((path) => path.split('/').pop()!.replace('.mdx', ''))
+  return (
+    <main>
+      <ul>
+        {slugs.map((slug) => (
+          <li key={slug}>{slug}</li>
+        ))}
+      </ul>
+    </main>
+  )
+}
+```
+
+pattern และ option `{ eager: true }` ต้องเป็น compile-time literal เท่านั้น — pattern ที่เป็นตัวแปร
+หรือ option ที่คำนวณจะเป็น build diagnostic ไม่ใช่ runtime fallback key ที่ generate จาก lazy match
+จะ map ไปที่ `() => import(...)` จึงไม่มีอะไรถูก evaluate จนกว่าจะมีการเรียก loader นั้น ส่วน eager
+match จะกลายเป็น static import ที่ hoist ขึ้นมาและเข้าสู่ dependency graph, chunking และ
+tree-shaking เดียวกับ `import` statement ปกติ key เป็น specifier แบบ project-relative,
+slash-normalized ที่มีลำดับ แน่นอนและไม่ขึ้นกับ locale ของเครื่อง จึง source เดียวกันได้ key
+เหมือนกันทุกเครื่อง pattern จะ resolve จากไฟล์ที่ import และ resolve ออกนอก project root ไม่ได้ —
+`import.meta.glob('../../secret/*.ts')` เป็น build error ไม่ใช่ผลลัพธ์บางส่วน alias จาก
+`tsconfig.json`/`jsconfig.json` `paths` ทำงานเหมือน กับ import ปกติ
+
 **ก่อนหน้า:** [คู่มือ platform adapter](20-platform-adapter-guide.md) · **ถัดไป:**
 [ดัชนีเอกสาร](README.md)

@@ -229,5 +229,36 @@ final minified client JavaScript. Run the four release commands in
 [Release-readiness playbook](19-release-readiness-playbook.md), then choose the artifact from
 [Platform adapter guide](20-platform-adapter-guide.md).
 
+## 9. Declare a known set of modules with `import.meta.glob`
+
+```tsx
+// app/guides/page.tsx
+const lazyGuides = import.meta.glob('./guides/*.mdx')
+const eagerIcons = import.meta.glob('./icons/*.tsx', { eager: true })
+
+export default async function GuidesIndex() {
+  const slugs = Object.keys(lazyGuides).map((path) => path.split('/').pop()!.replace('.mdx', ''))
+  return (
+    <main>
+      <ul>
+        {slugs.map((slug) => (
+          <li key={slug}>{slug}</li>
+        ))}
+      </ul>
+    </main>
+  )
+}
+```
+
+The pattern and the `{ eager: true }` option must be compile-time literals — a variable pattern or a
+computed option is a build diagnostic, not a runtime fallback. A lazy match's generated key maps to
+`() => import(...)`, so nothing under it is evaluated until a caller invokes that loader; an eager
+match becomes a hoisted static import and enters the same dependency graph, chunking, and
+tree-shaking as an ordinary `import` statement. Keys are project-relative, slash-normalized
+specifiers in a deterministic, locale-independent order, so the same source produces the same keys
+on every machine. A pattern is resolved from the importing file and cannot resolve outside the
+project root — `import.meta.glob('../../secret/*.ts')` is a build error, not a partial result.
+Aliases from `tsconfig.json`/`jsconfig.json` `paths` work the same as they do in an ordinary import.
+
 **Previous:** [Platform adapter guide](20-platform-adapter-guide.md) · **Next:**
 [Documentation index](README.md)

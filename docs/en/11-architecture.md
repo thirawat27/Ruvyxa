@@ -73,6 +73,20 @@ returns `RUV1705`; closing admission settles queued work; and stdout contains ND
 Local modules imported by the worker are both package contents and prerender cache inputs. See the
 [worker-pool change matrix](12-development-testing.md#worker-pool-change-matrix) before editing one.
 
+## HMR protocol
+
+`HmrTracker` keeps its reverse dependency map per lane — manifest, server, client, and action — so a
+server-only edit does not invalidate client work that never depended on it, and a server action
+rebuild cannot suppress a same-route client update. The WebSocket wire protocol (`ruvyxa.hmr`,
+`protocolVersion: 1`) is versioned: every message carries a monotonically increasing `sequence`, and
+the inline browser client (served with the page, not a separate bundle) drops any message whose
+sequence it has already applied, so a superseded update can never land after the one that replaced
+it. A message is one of `partial` (with `kind` `css`, `client-boundary`, or `server-route`),
+`restart`, or `issues`. A CSS update replaces the affected stylesheet in place rather than
+reloading; anything the client cannot prove safe — including any client-boundary update the runtime
+has not registered a refresh handler for — falls back to `location.reload()`, which remains correct
+rather than a failure mode.
+
 ## Build lifecycle
 
 Build validates config and graph, compiles route/client code, runs build plugin hooks, prerenders

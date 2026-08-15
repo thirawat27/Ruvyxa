@@ -225,10 +225,14 @@ CLI exposes `dev`, `build`, `check`, `start`, `preview`, `routes`, `analyze`, `a
 ## Repository scripts
 
 The root `package.json` defines `build`, `check`, `test`, `prepare`, `check:cargo-lock`,
-`check:oxc-lockstep`, `format`, `format:check`, `format:staged`, `release:validate`, `release:bump`,
-`pack:smoke`, `test:full-flow`, and `publish:dry-run`. Published TypeScript packages consistently
-define `build`, `check`, `test`, `format`, and `prepack`; consult the relevant package manifest for
-its test glob.
+`check:oxc-lockstep`, `check:unused`, `check:template-mirrors`, `format`, `format:check`,
+`format:staged`, `release:validate`, `release:bump`, `pack:smoke`, `test:full-flow`, and
+`publish:dry-run`. `check:unused` runs [Knip](https://knip.dev) across the JavaScript/TypeScript
+workspaces and fails on unused files, exports, types, and dependencies; `release:validate` runs it
+too. Ruvyxa loads a lot of code by convention — `app/` routes, `plugins/`, `ruvyxa.config.ts`,
+runtime files the native CLI resolves by path — so `knip.json` declares those as entry points rather
+than treating every one as unused. Published TypeScript packages consistently define `build`,
+`check`, `test`, `format`, and `prepack`; consult the relevant package manifest for its test glob.
 
 **Previous:** [Integrations](09-integrations-auth-data-and-realtime.md) · **Next:**
 [Architecture](11-architecture.md)
