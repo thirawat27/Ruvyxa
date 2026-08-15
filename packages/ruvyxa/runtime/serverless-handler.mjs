@@ -258,23 +258,56 @@ export function createHandler(options) {
    * the one caller most likely to read it into memory.
    */
   async function limitThenDispatch(request, runtimeContext) {
-    const oversized = declaredBodyTooLarge(request, apiBodyLimit)
-    if (oversized) return oversized
-    const limited = limitBodyStream(request, apiBodyLimit)
+    const ingress = limitRequestBody(request)
+    if (ingress.response) return ingress.response
     try {
-      if (typeof pluginHttp !== 'function') return await dispatch(limited, runtimeContext)
-      return await pluginHttp(limited, (forwarded) =>
-        dispatch(forwarded ?? limited, runtimeContext),
-      )
+      if (typeof pluginHttp !== 'function') return await dispatch(ingress.request, runtimeContext)
+      return await pluginHttp(ingress.request, async (forwarded) => {
+        const candidate = forwarded ?? ingress.request
+        if (candidate === ingress.request) return dispatch(candidate, runtimeContext)
+
+        // A plugin may forward a newly constructed Request. Reapply the same
+        // endpoint-aware boundary because that body never passed through the
+        // ingress stream above; native plugins can only forward the already
+        // bounded body serialized by the host.
+        const guarded = limitRequestBody(candidate)
+        return guarded.response ?? dispatch(guarded.request, runtimeContext)
+      })
     } catch (error) {
       // A plugin that read past the cap surfaces the stream error here rather
       // than inside `dispatch`, so the same 413 has to be produced on both
       // paths. Anything else is a plugin fault and is reported as such.
-      if (isBodyLimitError(error)) return textResponse(413, 'Request body is too large')
+      if (isBodyLimitError(error)) return textResponse(413, ingress.message)
       const message = error instanceof Error ? error.message : String(error)
       console.error('[ruvyxa] Plugin HTTP middleware failed:', message)
       return textResponse(500, 'Internal Server Error')
     }
+  }
+
+  /** Apply the endpoint-specific body policy before any body consumer. */
+  function limitRequestBody(request) {
+    const policy = requestBodyPolicy(request)
+    const response = declaredBodyTooLarge(request, policy.limit, policy.message)
+    return response
+      ? { request, response, message: policy.message }
+      : { request: limitBodyStream(request, policy.limit), response: null, message: policy.message }
+  }
+
+  /**
+   * Select the same body owner as the native router. Actions have their own
+   * Axum body layer and do not pass through the generic API fallback limit.
+   */
+  function requestBodyPolicy(request) {
+    try {
+      const pathname = stripBasePath(canonicalRequestPath(new URL(request.url).pathname), basePath)
+      if (pathname === ACTION_PATH) {
+        return { limit: actionPolicy.actionLimit, message: 'Action payload is too large' }
+      }
+    } catch {
+      // `dispatch` owns malformed-path reporting. The generic cap remains a
+      // safe ingress bound until it returns the canonical 400 response.
+    }
+    return { limit: apiBodyLimit, message: 'Request body is too large' }
   }
 
   async function dispatch(request, runtimeContext = {}) {

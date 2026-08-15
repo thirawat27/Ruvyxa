@@ -301,6 +301,48 @@ test('keeps the query target in SSR context and coalescing identity', async (t) 
   assert.match(second.html, /\/search\?q=second/)
 })
 
+test('reports the source graph used by server and client route bundles', async (t) => {
+  const projectRoot = await mkdtemp(path.join(fixtureWorkspace, 'hmr-inputs-'))
+  const appDir = path.join(projectRoot, 'app')
+  const pageFile = path.join(appDir, 'page.tsx')
+  const sharedFile = path.join(projectRoot, 'lib/shared.ts')
+  await mkdir(appDir, { recursive: true })
+  await mkdir(path.dirname(sharedFile), { recursive: true })
+  await writeFile(sharedFile, "export const label = 'tracked'\n")
+  await writeFile(
+    pageFile,
+    "import { label } from '../lib/shared.js'\nexport default function Page() { return <main>{label}</main> }\n",
+  )
+  const { request } = startWorker(t, [projectRoot])
+  const base = {
+    projectRoot,
+    appDir,
+    pageFile,
+    requestPath: '/',
+    routePath: '/',
+    params: {},
+  }
+
+  const server = await request({ ...base, type: 'ssr', method: 'GET', headerPairs: [] })
+  const client = await request({ ...base, type: 'client' })
+
+  for (const [kind, response] of [
+    ['server', server],
+    ['client', client],
+  ]) {
+    assert.equal(response.ok, true, response.message)
+    assert.ok(Array.isArray(response.inputs), `${kind} bundle did not report its inputs`)
+    assert.ok(
+      response.inputs.some((input) => path.resolve(input) === path.resolve(pageFile)),
+      `${kind} inputs omitted the route entry`,
+    )
+    assert.ok(
+      response.inputs.some((input) => path.resolve(input) === path.resolve(sharedFile)),
+      `${kind} inputs omitted a transitive dependency`,
+    )
+  }
+})
+
 test('rejects overload once the bounded admission queue is full', async (t) => {
   const projectRoot = await mkdtemp(path.join(fixtureWorkspace, 'admission-test-'))
   const appDir = path.join(projectRoot, 'app/api/slow')
@@ -437,6 +479,10 @@ test('invalidates a cached route bundle when an imported utility changes', async
   const first = await request(apiRequest)
   assert.equal(first.ok, true)
   assert.deepEqual(JSON.parse(first.body), { value: 'first' })
+  assert.ok(
+    first.inputs.some((input) => path.resolve(input) === path.resolve(utilityFile)),
+    'API response inputs omitted an imported utility',
+  )
 
   await writeFile(utilityFile, `export const value = 'second'\n`)
   const invalidation = await request({ type: 'invalidate', paths: [utilityFile] })

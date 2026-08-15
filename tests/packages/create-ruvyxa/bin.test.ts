@@ -33,7 +33,14 @@ const binPath = repoPath('packages/create-ruvyxa/bin/create-ruvyxa.js')
  * layer deep, and the captured output goes to a file rather than back through
  * stderr so no framing has to be parsed out of it.
  */
-async function runAnimated(target: string, cwd: string): Promise<string> {
+function childEnvironment(noColor: boolean): NodeJS.ProcessEnv {
+  const environment = { ...process.env }
+  delete environment.NO_COLOR
+  if (noColor) environment.NO_COLOR = '1'
+  return environment
+}
+
+async function runAnimated(target: string, cwd: string, noColor = false): Promise<string> {
   const capturePath = join(cwd, 'captured-stdout.txt')
   const bootstrapPath = join(cwd, 'bootstrap.mjs')
 
@@ -62,7 +69,7 @@ await import(${JSON.stringify(pathToFileURL(binPath).href)})
 
   // `execFile` rejects on a non-zero exit, so a `createFrame is not defined`
   // surfaces here as a rejection rather than as a silently odd assertion.
-  await run(process.execPath, [bootstrapPath], { cwd })
+  await run(process.execPath, [bootstrapPath], { cwd, env: childEnvironment(noColor) })
   return readFile(capturePath, 'utf8')
 }
 
@@ -98,6 +105,17 @@ describe('the scaffolder binary on an animating terminal', () => {
     // The cursor is hidden while animating and must be given back.
     assert.match(output, /\[\?25l/)
     assert.match(output, /\[\?25h/)
+  })
+
+  it('respects NO_COLOR even when stdout is a terminal', async (t) => {
+    const cwd = await mkdtemp(join(tmpdir(), 'create-ruvyxa-no-color-'))
+    t.after(() => rm(cwd, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }))
+
+    const output = await runAnimated('plain-app', cwd, true)
+
+    assert.ok((await readdir(cwd)).includes('plain-app'), 'the project should exist')
+    assert.match(output, /Created plain-app/)
+    assert.doesNotMatch(output, /\[/, 'NO_COLOR must suppress terminal escape sequences')
   })
 
   it('prints the completion line when there is no terminal to animate on', async (t) => {

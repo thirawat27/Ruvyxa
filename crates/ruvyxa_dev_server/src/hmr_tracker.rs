@@ -23,10 +23,23 @@ use parking_lot::RwLock;
 /// Tracks which source files affect which routes for incremental HMR.
 #[derive(Debug, Clone)]
 pub struct HmrTracker {
+    state: Arc<RwLock<HmrState>>,
+}
+
+#[derive(Debug, Default)]
+struct HmrState {
     /// Reverse map: source_file → set of route_paths that depend on it.
-    file_to_routes: Arc<RwLock<BTreeMap<PathBuf, BTreeSet<String>>>>,
-    /// Forward map: route_path → set of source_files in its graph.
-    route_to_files: Arc<RwLock<BTreeMap<String, BTreeSet<PathBuf>>>>,
+    file_to_routes: BTreeMap<PathBuf, BTreeSet<String>>,
+    /// Each bundle replaces only its own lane. A client rebuild must not erase
+    /// server-only dependencies, and a manifest refresh must preserve both.
+    route_graphs: BTreeMap<String, BTreeMap<DependencyGraph, BTreeSet<PathBuf>>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum DependencyGraph {
+    Manifest,
+    Server,
+    Client,
 }
 
 impl Default for HmrTracker {
@@ -73,17 +86,26 @@ impl HmrTracker {
     /// Create an empty tracker.
     pub fn new() -> Self {
         Self {
-            file_to_routes: Arc::new(RwLock::new(BTreeMap::new())),
-            route_to_files: Arc::new(RwLock::new(BTreeMap::new())),
+            state: Arc::new(RwLock::new(HmrState::default())),
         }
     }
 
     /// Populate tracker from a route manifest (called at startup and on manifest change).
     pub fn populate_from_manifest(&self, routes: &[ruvyxa_graph::RouteEntry]) {
-        let mut file_to_routes = self.file_to_routes.write();
-        let mut route_to_files = self.route_to_files.write();
-        file_to_routes.clear();
-        route_to_files.clear();
+        let mut state = self.state.write();
+        let live_routes = routes
+            .iter()
+            .map(|route| route.path.as_str())
+            .collect::<BTreeSet<_>>();
+        let removed = state
+            .route_graphs
+            .keys()
+            .filter(|route| !live_routes.contains(route.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        for route in removed {
+            state.remove_route(&route);
+        }
 
         for route in routes {
             let mut files = BTreeSet::new();
@@ -94,13 +116,10 @@ impl HmrTracker {
             for server_module in &route.server_modules {
                 files.insert(normalize_source_path(Path::new(server_module)));
             }
-            for file in &files {
-                file_to_routes
-                    .entry(file.clone())
-                    .or_default()
-                    .insert(route.path.clone());
+            for client_module in &route.client_modules {
+                files.insert(normalize_source_path(Path::new(client_module)));
             }
-            route_to_files.insert(route.path.clone(), files);
+            state.replace_graph(&route.path, DependencyGraph::Manifest, files);
         }
     }
 
@@ -110,33 +129,20 @@ impl HmrTracker {
     /// files contribute to its bundle. On subsequent file changes, the
     /// tracker can identify exactly which routes need re-rendering.
     pub fn register_route(&self, route_path: &str, source_files: &[PathBuf]) {
-        let mut file_to_routes = self.file_to_routes.write();
-        let mut route_to_files = self.route_to_files.write();
+        self.register_graph(route_path, DependencyGraph::Server, source_files);
+    }
 
-        // Clear previous mappings for this route (in case deps changed).
-        if let Some(old_files) = route_to_files.get(route_path) {
-            for file in old_files.iter() {
-                if let Some(routes) = file_to_routes.get_mut(file) {
-                    routes.remove(route_path);
-                    if routes.is_empty() {
-                        file_to_routes.remove(file);
-                    }
-                }
-            }
-        }
+    /// Register the browser bundle without replacing the server graph.
+    pub(crate) fn register_client_route(&self, route_path: &str, source_files: &[PathBuf]) {
+        self.register_graph(route_path, DependencyGraph::Client, source_files);
+    }
 
-        // Insert new mappings.
-        let file_set: BTreeSet<PathBuf> = source_files
+    fn register_graph(&self, route_path: &str, graph: DependencyGraph, source_files: &[PathBuf]) {
+        let files = source_files
             .iter()
             .map(|file| normalize_source_path(file))
             .collect();
-        for file in &file_set {
-            file_to_routes
-                .entry(file.clone())
-                .or_default()
-                .insert(route_path.to_string());
-        }
-        route_to_files.insert(route_path.to_string(), file_set);
+        self.state.write().replace_graph(route_path, graph, files);
     }
 
     /// Compute which routes are affected by a set of changed files.
@@ -153,7 +159,7 @@ impl HmrTracker {
             };
         }
 
-        let file_to_routes = self.file_to_routes.read();
+        let state = self.state.read();
 
         // Determine event type based on file extensions.
         let all_css = changed_paths
@@ -173,7 +179,7 @@ impl HmrTracker {
         let mut affected_routes: BTreeSet<String> = BTreeSet::new();
         for path in changed_paths {
             let normalized = normalize_source_path(path);
-            if let Some(routes) = file_to_routes.get(&normalized) {
+            if let Some(routes) = state.file_to_routes.get(&normalized) {
                 affected_routes.extend(routes.iter().cloned());
             }
         }
@@ -181,7 +187,7 @@ impl HmrTracker {
         // If a layout changed, all routes using that layout are affected.
         // If we couldn't determine specific routes, trigger full reload.
         let full_reload = has_layout_change
-            || (affected_routes.is_empty() && !all_css && !file_to_routes.is_empty());
+            || (affected_routes.is_empty() && !all_css && !state.file_to_routes.is_empty());
 
         HmrUpdate {
             affected_routes: affected_routes.into_iter().collect(),
@@ -193,18 +199,72 @@ impl HmrTracker {
 
     /// Invalidate all tracking data (called when route manifest changes).
     pub fn clear(&self) {
-        self.file_to_routes.write().clear();
-        self.route_to_files.write().clear();
+        *self.state.write() = HmrState::default();
     }
 
     /// Number of tracked files.
     pub fn tracked_file_count(&self) -> usize {
-        self.file_to_routes.read().len()
+        self.state.read().file_to_routes.len()
     }
 
     /// Number of tracked routes.
     pub fn tracked_route_count(&self) -> usize {
-        self.route_to_files.read().len()
+        self.state.read().route_graphs.len()
+    }
+}
+
+impl HmrState {
+    fn route_files(&self, route_path: &str) -> BTreeSet<PathBuf> {
+        self.route_graphs
+            .get(route_path)
+            .into_iter()
+            .flat_map(|graphs| graphs.values())
+            .flatten()
+            .cloned()
+            .collect()
+    }
+
+    fn replace_graph(
+        &mut self,
+        route_path: &str,
+        graph: DependencyGraph,
+        files: BTreeSet<PathBuf>,
+    ) {
+        let old_files = self.route_files(route_path);
+        self.route_graphs
+            .entry(route_path.to_string())
+            .or_default()
+            .insert(graph, files);
+        let new_files = self.route_files(route_path);
+        self.update_reverse_map(route_path, &old_files, &new_files);
+    }
+
+    fn remove_route(&mut self, route_path: &str) {
+        let old_files = self.route_files(route_path);
+        self.route_graphs.remove(route_path);
+        self.update_reverse_map(route_path, &old_files, &BTreeSet::new());
+    }
+
+    fn update_reverse_map(
+        &mut self,
+        route_path: &str,
+        old_files: &BTreeSet<PathBuf>,
+        new_files: &BTreeSet<PathBuf>,
+    ) {
+        for file in old_files.difference(new_files) {
+            if let Some(routes) = self.file_to_routes.get_mut(file) {
+                routes.remove(route_path);
+                if routes.is_empty() {
+                    self.file_to_routes.remove(file);
+                }
+            }
+        }
+        for file in new_files.difference(old_files) {
+            self.file_to_routes
+                .entry(file.clone())
+                .or_default()
+                .insert(route_path.to_string());
+        }
     }
 }
 
@@ -319,6 +379,63 @@ mod tests {
     }
 
     #[test]
+    fn server_and_client_graphs_replace_independently() {
+        let tracker = HmrTracker::new();
+        let old_server = PathBuf::from("/app/server-old.ts");
+        let new_server = PathBuf::from("/app/server-new.ts");
+        let client = PathBuf::from("/app/client.tsx");
+
+        tracker.register_route("/", std::slice::from_ref(&old_server));
+        tracker.register_client_route("/", std::slice::from_ref(&client));
+        tracker.register_route("/", std::slice::from_ref(&new_server));
+
+        assert!(
+            tracker
+                .compute_update(&[old_server])
+                .affected_routes
+                .is_empty()
+        );
+        assert_eq!(
+            tracker.compute_update(&[new_server]).affected_routes,
+            vec!["/"]
+        );
+        assert_eq!(tracker.compute_update(&[client]).affected_routes, vec!["/"]);
+    }
+
+    #[test]
+    fn manifest_refresh_preserves_live_bundle_graphs_and_removes_deleted_routes() {
+        let tracker = HmrTracker::new();
+        let home_server = PathBuf::from("/app/lib/home.ts");
+        let blog_server = PathBuf::from("/app/lib/blog.ts");
+        let client_module = PathBuf::from("/app/client.tsx");
+        let mut home = route_entry("/", "/app/page.tsx");
+        let blog = route_entry("/blog", "/app/blog/page.tsx");
+
+        tracker.populate_from_manifest(&[home.clone(), blog]);
+        tracker.register_route("/", std::slice::from_ref(&home_server));
+        tracker.register_route("/blog", std::slice::from_ref(&blog_server));
+
+        home.client_modules = vec![client_module.display().to_string()];
+        tracker.populate_from_manifest(&[home]);
+
+        assert_eq!(tracker.tracked_route_count(), 1);
+        assert_eq!(
+            tracker.compute_update(&[home_server]).affected_routes,
+            vec!["/"]
+        );
+        assert_eq!(
+            tracker.compute_update(&[client_module]).affected_routes,
+            vec!["/"]
+        );
+        assert!(
+            tracker
+                .compute_update(&[blog_server])
+                .affected_routes
+                .is_empty()
+        );
+    }
+
+    #[test]
     fn unknown_file_with_tracked_routes_triggers_full_reload() {
         let tracker = HmrTracker::new();
         tracker.register_route("/", &[PathBuf::from("/app/page.tsx")]);
@@ -356,5 +473,19 @@ mod tests {
         let update =
             tracker.compute_update(&[ruvyxa_diagnostics::normalized_canonical_path(&page)]);
         assert_eq!(update.affected_routes, vec!["/"]);
+    }
+
+    fn route_entry(path: &str, file: &str) -> ruvyxa_graph::RouteEntry {
+        ruvyxa_graph::RouteEntry {
+            id: format!("page:{path}"),
+            path: path.to_string(),
+            kind: ruvyxa_graph::RouteKind::Page,
+            file: PathBuf::from(file),
+            layout_chain: Vec::new(),
+            server_modules: Vec::new(),
+            client_modules: Vec::new(),
+            runtime: ruvyxa_graph::RuntimeTarget::Node,
+            render: Default::default(),
+        }
     }
 }

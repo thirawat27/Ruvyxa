@@ -684,7 +684,7 @@ async function handleSsr(request) {
   const specials = collectSpecials(appDir, path.dirname(pageFile))
   // The route pattern, not the concrete URL: it keys the client-side route
   // registry, and a per-URL key would make every dynamic request a cache miss.
-  const { outfile, version } = await bundleSsrModule(
+  const { outfile, version, inputs } = await bundleSsrModule(
     resolvedRoot,
     pageFile,
     layouts,
@@ -704,7 +704,7 @@ async function handleSsr(request) {
   // `requestScoped` tells the server this HTML belongs to one request and must
   // not enter a cache shared with other users. It is reported rather than
   // inferred: only the render knows whether it read a cookie.
-  return { ok: true, html, requestScoped: usedRequestContext(context) }
+  return { ok: true, html, requestScoped: usedRequestContext(context), inputs }
 }
 
 // --- SSG Handler with Request Coalescing ---
@@ -939,7 +939,7 @@ async function handleApi(request) {
 
   const resolvedRoot = path.resolve(projectRoot || process.cwd())
   await ensureInstrumentation(resolvedRoot)
-  const { outfile, version } = await bundleApiModule(resolvedRoot, routeFile)
+  const { outfile, version, inputs } = await bundleApiModule(resolvedRoot, routeFile)
   const mod = await importModule(outfile, version)
   const handler = mod[method.toUpperCase()]
 
@@ -991,6 +991,7 @@ async function handleApi(request) {
       headers,
       headerPairs: headerPairsResult,
       revalidate,
+      inputs,
       streamResponse: response,
     }
   }
@@ -1003,6 +1004,7 @@ async function handleApi(request) {
     headers,
     headerPairs: headerPairsResult,
     revalidate,
+    inputs,
     body,
   }
 }
@@ -1151,7 +1153,7 @@ async function handleClient(request) {
   const resolvedRoot = path.resolve(projectRoot || process.cwd())
   const layouts = collectLayouts(appDir, path.dirname(pageFile))
   const specials = collectSpecials(appDir, path.dirname(pageFile))
-  const { outfile } = await bundleClientModule(
+  const { outfile, inputs } = await bundleClientModule(
     resolvedRoot,
     pageFile,
     layouts,
@@ -1162,7 +1164,7 @@ async function handleClient(request) {
   )
   const script = await readFile(outfile, 'utf8')
 
-  return { ok: true, script }
+  return { ok: true, script, inputs }
 }
 
 // --- Bundle Cache Invalidation ---
@@ -1326,11 +1328,23 @@ async function bundleSsrModule(projectRoot, pageFile, layouts, routePath = '/', 
 
   const cacheKey = `ssr:${pageFile}:${hash}`
   const cached = bundleCache.get(cacheKey)
-  if (cached) return { outfile: cached, version: bundleVersions.get(cacheKey) }
+  if (cached) {
+    return {
+      outfile: cached,
+      version: bundleVersions.get(cacheKey),
+      inputs: [...(bundleInputs.get(cacheKey) ?? [])],
+    }
+  }
 
   return withBuildLock(cacheKey, async () => {
     const rechecked = bundleCache.get(cacheKey)
-    if (rechecked) return { outfile: rechecked, version: bundleVersions.get(cacheKey) }
+    if (rechecked) {
+      return {
+        outfile: rechecked,
+        version: bundleVersions.get(cacheKey),
+        inputs: [...(bundleInputs.get(cacheKey) ?? [])],
+      }
+    }
 
     const bundle = await compileBundleWithMetadata({
       projectRoot,
@@ -1343,7 +1357,11 @@ async function bundleSsrModule(projectRoot, pageFile, layouts, routePath = '/', 
     })
 
     cacheBundle(cacheKey, outfile, projectRoot, bundle.inputs, null, bundle.contentHash)
-    return { outfile, version: bundle.contentHash }
+    return {
+      outfile,
+      version: bundle.contentHash,
+      inputs: [...(bundleInputs.get(cacheKey) ?? [])],
+    }
   })
 }
 
@@ -1357,11 +1375,23 @@ async function bundleApiModule(projectRoot, routeFile) {
 
   const cacheKey = `api:${routeFile}:${hash}`
   const cached = bundleCache.get(cacheKey)
-  if (cached) return { outfile: cached, version: bundleVersions.get(cacheKey) }
+  if (cached) {
+    return {
+      outfile: cached,
+      version: bundleVersions.get(cacheKey),
+      inputs: [...(bundleInputs.get(cacheKey) ?? [])],
+    }
+  }
 
   return withBuildLock(cacheKey, async () => {
     const rechecked = bundleCache.get(cacheKey)
-    if (rechecked) return { outfile: rechecked, version: bundleVersions.get(cacheKey) }
+    if (rechecked) {
+      return {
+        outfile: rechecked,
+        version: bundleVersions.get(cacheKey),
+        inputs: [...(bundleInputs.get(cacheKey) ?? [])],
+      }
+    }
 
     const bundle = await compileBundleWithMetadata({
       projectRoot,
@@ -1373,7 +1403,11 @@ async function bundleApiModule(projectRoot, routeFile) {
     })
 
     cacheBundle(cacheKey, outfile, projectRoot, bundle.inputs, null, bundle.contentHash)
-    return { outfile, version: bundle.contentHash }
+    return {
+      outfile,
+      version: bundle.contentHash,
+      inputs: [...(bundleInputs.get(cacheKey) ?? [])],
+    }
   })
 }
 
@@ -1451,11 +1485,23 @@ async function bundleClientModule(
 
   const cacheKey = `client:${pageFile}:${hash}`
   const cached = bundleCache.get(cacheKey)
-  if (cached) return { outfile: cached, version: bundleVersions.get(cacheKey) }
+  if (cached) {
+    return {
+      outfile: cached,
+      version: bundleVersions.get(cacheKey),
+      inputs: [...(bundleInputs.get(cacheKey) ?? [])],
+    }
+  }
 
   return withBuildLock(cacheKey, async () => {
     const rechecked = bundleCache.get(cacheKey)
-    if (rechecked) return { outfile: rechecked, version: bundleVersions.get(cacheKey) }
+    if (rechecked) {
+      return {
+        outfile: rechecked,
+        version: bundleVersions.get(cacheKey),
+        inputs: [...(bundleInputs.get(cacheKey) ?? [])],
+      }
+    }
 
     const bundle = await compileBundleWithMetadata({
       projectRoot,
@@ -1468,7 +1514,11 @@ async function bundleClientModule(
     })
 
     cacheBundle(cacheKey, outfile, projectRoot, bundle.inputs, null, bundle.contentHash)
-    return { outfile, version: bundle.contentHash }
+    return {
+      outfile,
+      version: bundle.contentHash,
+      inputs: [...(bundleInputs.get(cacheKey) ?? [])],
+    }
   })
 }
 

@@ -33,6 +33,121 @@ function handlerFor(routes, rendered) {
   })
 }
 
+describe('serverless request body limits', () => {
+  it('stops reading a lengthless action body at the action limit', async () => {
+    const chunk = new TextEncoder().encode('abc')
+    const chunkCount = 100
+    let producedBytes = 0
+    const body = new ReadableStream({
+      pull(controller) {
+        if (producedBytes >= chunk.byteLength * chunkCount) {
+          controller.close()
+          return
+        }
+        producedBytes += chunk.byteLength
+        controller.enqueue(chunk)
+      },
+    })
+    const handler = createHandler({
+      routes: [],
+      importPage: async () => ({}),
+      importApi: async () => ({}),
+      importAction: async () => ({}),
+      security: { actionLimit: 4, apiLimit: 1024 },
+    })
+    const request = new Request('http://localhost/__ruvyxa/action?path=/target&name=submit', {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        host: 'localhost',
+        origin: 'http://localhost',
+        'sec-fetch-site': 'same-origin',
+      },
+      body,
+      duplex: 'half',
+    })
+
+    assert.equal(request.headers.has('content-length'), false)
+    const response = await handler(request)
+
+    assert.equal(response.status, 413)
+    assert.equal(await response.text(), 'Action payload is too large')
+    assert.ok(
+      producedBytes < chunk.byteLength * chunkCount,
+      `the action handler consumed all ${producedBytes} bytes before enforcing its limit`,
+    )
+  })
+
+  it('uses the action limit instead of the generic API limit for action routes', async () => {
+    const submit = async (input) => input
+    submit.ruvyxa = { kind: 'action' }
+    const handler = createHandler({
+      routes: [pageRoute('target', '/target')],
+      importPage: async () => ({}),
+      importApi: async () => ({}),
+      importAction: async () => ({ submit }),
+      security: { actionLimit: 8, apiLimit: 4 },
+    })
+    const response = await handler(
+      new Request('http://localhost/__ruvyxa/action?path=/target&name=submit', {
+        method: 'POST',
+        headers: {
+          'content-type': 'application/json',
+          host: 'localhost',
+          origin: 'http://localhost',
+          'sec-fetch-site': 'same-origin',
+        },
+        body: '"12345"',
+      }),
+    )
+
+    assert.equal(response.status, 200)
+    assert.deepEqual(await response.json(), { data: '12345', invalidated: [] })
+  })
+
+  it('reapplies the endpoint limit when a plugin forwards a new request', async () => {
+    const chunk = new TextEncoder().encode('abc')
+    let producedBytes = 0
+    const forwardedBody = new ReadableStream({
+      pull(controller) {
+        if (producedBytes >= 300) {
+          controller.close()
+          return
+        }
+        producedBytes += chunk.byteLength
+        controller.enqueue(chunk)
+      },
+    })
+    const handler = createHandler({
+      routes: [],
+      importPage: async () => ({}),
+      importApi: async () => ({}),
+      importAction: async () => ({}),
+      security: { actionLimit: 4, apiLimit: 1024 },
+      pluginHttp: (_request, next) =>
+        next(
+          new Request('http://localhost/__ruvyxa/action?path=/target&name=submit', {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              host: 'localhost',
+              origin: 'http://localhost',
+              'sec-fetch-site': 'same-origin',
+            },
+            body: forwardedBody,
+            duplex: 'half',
+          }),
+        ),
+    })
+
+    const response = await handler(new Request('http://localhost/proxy'))
+
+    assert.equal(response.status, 413)
+    assert.equal(await response.text(), 'Action payload is too large')
+    assert.ok(producedBytes < 300, 'the forwarded body bypassed the action stream limit')
+  })
+})
+
 describe('serverless handler route matching', () => {
   it('prefers static routes over dynamic and catch-all siblings', async () => {
     const rendered = []

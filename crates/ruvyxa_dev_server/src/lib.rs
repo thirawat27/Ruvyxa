@@ -566,9 +566,8 @@ const RESERVED_FRAMEWORK_ROUTES: [&str; 7] = [
 
 #[derive(Default)]
 struct RuntimeCache {
-    manifest: tokio::sync::RwLock<Option<Arc<RouteManifest>>>,
+    routes: tokio::sync::RwLock<Option<RouteCacheEntry>>,
     styles: tokio::sync::RwLock<Option<StyleCacheEntry>>,
-    router: tokio::sync::RwLock<Option<Arc<RadixRouter>>>,
     /// `<link>` tags derived from the public directory's contents.
     ///
     /// Resolved once and reused. `public_asset_links` stats the public directory
@@ -576,6 +575,24 @@ struct RuntimeCache {
     /// blocking filesystem syscall on a Tokio worker thread, per request, for an
     /// answer that only changes when the watcher invalidates this cache.
     asset_links: tokio::sync::RwLock<Option<Arc<str>>>,
+}
+
+#[derive(Clone)]
+struct RouteCacheEntry {
+    manifest: Arc<RouteManifest>,
+    router: Arc<RadixRouter>,
+}
+
+impl RouteCacheEntry {
+    fn new(manifest: RouteManifest) -> Self {
+        let manifest = Arc::new(manifest);
+        let router = Arc::new(RadixRouter::compile(&manifest));
+        Self { manifest, router }
+    }
+
+    fn pair(&self) -> (Arc<RouteManifest>, Arc<RadixRouter>) {
+        (Arc::clone(&self.manifest), Arc::clone(&self.router))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -586,11 +603,9 @@ struct StyleCacheEntry {
 
 impl RuntimeCache {
     fn with_manifest(manifest: RouteManifest) -> Self {
-        let router = RadixRouter::compile(&manifest);
         Self {
-            manifest: tokio::sync::RwLock::new(Some(Arc::new(manifest))),
+            routes: tokio::sync::RwLock::new(Some(RouteCacheEntry::new(manifest))),
             styles: tokio::sync::RwLock::new(None),
-            router: tokio::sync::RwLock::new(Some(Arc::new(router))),
             asset_links: tokio::sync::RwLock::new(None),
         }
     }
@@ -618,45 +633,47 @@ impl RuntimeCache {
         Arc::clone(cached.get_or_insert(links))
     }
 
-    async fn manifest(&self, config: &ServerConfig) -> Result<Arc<RouteManifest>> {
-        if !config.cache_route_manifest {
-            let manifest = discover_routes(discover_options(config))?;
-            observe_manifest(config, &manifest);
-            return Ok(Arc::new(manifest));
-        }
-
-        {
-            let cached = self.manifest.read().await;
-            if let Some(manifest) = cached.as_ref() {
-                return Ok(Arc::clone(manifest));
-            }
-        }
-
-        let manifest = Arc::new(discover_routes(discover_options(config))?);
-        observe_manifest(config, &manifest);
-        {
-            let mut cached = self.manifest.write().await;
-            *cached = Some(Arc::clone(&manifest));
-        }
-        {
-            let mut router_cache = self.router.write().await;
-            *router_cache = Some(Arc::new(RadixRouter::compile(&manifest)));
-        }
-
-        Ok(manifest)
-    }
-
     async fn router(
         &self,
         config: &ServerConfig,
     ) -> Result<(Arc<RouteManifest>, Arc<RadixRouter>)> {
-        let manifest = self.manifest(config).await?;
-        let router_cache = self.router.read().await;
-        let router = router_cache
-            .as_ref()
-            .map(Arc::clone)
-            .unwrap_or_else(|| Arc::new(RadixRouter::compile(&manifest)));
-        Ok((manifest, router))
+        self.route_snapshot(config).await
+    }
+
+    /// Return route discovery and matching as one generation. `RadixRouter`
+    /// stores manifest indices, so either value is meaningless without the
+    /// other and they must never be cached or refreshed independently.
+    async fn route_snapshot(
+        &self,
+        config: &ServerConfig,
+    ) -> Result<(Arc<RouteManifest>, Arc<RadixRouter>)> {
+        if !config.cache_route_manifest {
+            let entry = RouteCacheEntry::new(discover_routes(discover_options(config))?);
+            observe_manifest(config, &entry.manifest);
+            return Ok(entry.pair());
+        }
+
+        {
+            let cached = self.routes.read().await;
+            if let Some(entry) = cached.as_ref() {
+                return Ok(entry.pair());
+            }
+        }
+
+        let discovered = RouteCacheEntry::new(discover_routes(discover_options(config))?);
+        let (entry, inserted) = {
+            let mut cached = self.routes.write().await;
+            if let Some(entry) = cached.as_ref() {
+                (entry.clone(), false)
+            } else {
+                *cached = Some(discovered.clone());
+                (discovered, true)
+            }
+        };
+        if inserted {
+            observe_manifest(config, &entry.manifest);
+        }
+        Ok(entry.pair())
     }
 
     async fn styles(&self, config: &ServerConfig) -> Result<String> {
@@ -717,17 +734,15 @@ impl RuntimeCache {
 
     fn invalidate(&self) {
         // Use blocking_write for sync context (file watcher callback)
-        *self.manifest.blocking_write() = None;
+        *self.routes.blocking_write() = None;
         *self.styles.blocking_write() = None;
-        *self.router.blocking_write() = None;
         *self.asset_links.blocking_write() = None;
     }
 
     #[cfg(test)]
     async fn invalidate_async(&self) {
-        *self.manifest.write().await = None;
+        *self.routes.write().await = None;
         *self.styles.write().await = None;
-        *self.router.write().await = None;
         *self.asset_links.write().await = None;
     }
 }
@@ -925,6 +940,7 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
             &config.root,
             &watch_paths(&config),
             WatcherRuntime {
+                config: config.clone(),
                 reload_tx: state.reload_tx.clone(),
                 runtime_cache: state.runtime_cache.clone(),
                 worker_pool: watcher_pool,
@@ -1152,6 +1168,7 @@ fn local_display_url(config: &ServerConfig, address: SocketAddr) -> String {
 }
 
 struct WatcherRuntime {
+    config: ServerConfig,
     reload_tx: broadcast::Sender<String>,
     runtime_cache: Arc<RuntimeCache>,
     worker_pool: Arc<NodeWorkerPool>,
@@ -1161,12 +1178,23 @@ struct WatcherRuntime {
     tokio_handle: tokio::runtime::Handle,
 }
 
+async fn refresh_hmr_manifest(
+    config: &ServerConfig,
+    runtime_cache: &RuntimeCache,
+    hmr_tracker: &HmrTracker,
+) -> Result<()> {
+    let (manifest, _) = runtime_cache.route_snapshot(config).await?;
+    hmr_tracker.populate_from_manifest(&manifest.routes);
+    Ok(())
+}
+
 fn start_watcher(
     root: &Path,
     watch_paths: &[PathBuf],
     runtime: WatcherRuntime,
 ) -> Result<RecommendedWatcher> {
     let WatcherRuntime {
+        config,
         reload_tx,
         runtime_cache,
         worker_pool,
@@ -1201,6 +1229,17 @@ fn start_watcher(
                     // Full invalidation: manifest may have changed (new/deleted routes).
                     runtime_cache.invalidate();
                     render_cache.invalidate_all_blocking();
+                    let refresh_config = config.clone();
+                    let refresh_cache = runtime_cache.clone();
+                    let refresh_tracker = hmr_tracker.clone();
+                    tokio_handle.spawn(async move {
+                        if let Err(error) =
+                            refresh_hmr_manifest(&refresh_config, &refresh_cache, &refresh_tracker)
+                                .await
+                        {
+                            warn!(%error, "HMR route manifest refresh failed");
+                        }
+                    });
                 } else {
                     // Selective invalidation: only evict affected route caches.
                     // Refresh styles only when the current CSS dependency graph
@@ -3648,7 +3687,7 @@ mod tests {
         let config = ServerConfig::dev(temp.path(), "localhost", 3000);
         let cache = RuntimeCache::default();
 
-        assert_eq!(cache.manifest(&config).await.unwrap().routes.len(), 1);
+        assert_eq!(cache.router(&config).await.unwrap().0.routes.len(), 1);
 
         let about = app.join("about");
         std::fs::create_dir_all(&about).unwrap();
@@ -3658,9 +3697,93 @@ mod tests {
         )
         .unwrap();
 
-        assert_eq!(cache.manifest(&config).await.unwrap().routes.len(), 1);
+        assert_eq!(cache.router(&config).await.unwrap().0.routes.len(), 1);
         cache.invalidate_async().await;
-        assert_eq!(cache.manifest(&config).await.unwrap().routes.len(), 2);
+        assert_eq!(cache.router(&config).await.unwrap().0.routes.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn uncached_routes_compile_the_router_from_the_same_manifest_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        let z_route = app.join("z");
+        std::fs::create_dir_all(&z_route).unwrap();
+        std::fs::write(
+            z_route.join("page.tsx"),
+            "export default function Zed() { return <main /> }",
+        )
+        .unwrap();
+
+        let mut config = ServerConfig::dev(temp.path(), "localhost", 3000);
+        config.cache_route_manifest = false;
+        let initial = discover_routes(discover_options(&config)).unwrap();
+        let cache = RuntimeCache::with_manifest(initial);
+
+        // `/a` sorts before `/z`, shifting the original router's route index.
+        // A router compiled from the startup manifest would now return `/a`
+        // when asked to resolve `/z` against the freshly discovered manifest.
+        let a_route = app.join("a");
+        std::fs::create_dir_all(&a_route).unwrap();
+        std::fs::write(
+            a_route.join("page.tsx"),
+            "export default function A() { return <main /> }",
+        )
+        .unwrap();
+
+        let (manifest, router) = cache.router(&config).await.unwrap();
+        let matched = router.find(&manifest, "/z").unwrap();
+
+        assert_eq!(manifest.routes.len(), 2);
+        assert_eq!(matched.route.path, "/z");
+        assert!(matched.route.file.ends_with("z/page.tsx"));
+    }
+
+    #[tokio::test]
+    async fn refresh_hmr_manifest_reconciles_routes_without_losing_bundle_inputs() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        std::fs::create_dir_all(&app).unwrap();
+        let home_page = app.join("page.tsx");
+        std::fs::write(
+            &home_page,
+            "export default function Home() { return <main /> }",
+        )
+        .unwrap();
+
+        let config = ServerConfig::dev(temp.path(), "localhost", 3000);
+        let initial = discover_routes(discover_options(&config)).unwrap();
+        let cache = RuntimeCache::with_manifest(initial.clone());
+        let tracker = HmrTracker::new();
+        tracker.populate_from_manifest(&initial.routes);
+
+        let server_dependency = temp.path().join("lib").join("home-data.ts");
+        tracker.register_route("/", std::slice::from_ref(&server_dependency));
+
+        let about = app.join("about");
+        std::fs::create_dir_all(&about).unwrap();
+        let about_page = about.join("page.tsx");
+        std::fs::write(
+            &about_page,
+            "export default function About() { return <main /> }",
+        )
+        .unwrap();
+
+        cache.invalidate_async().await;
+        refresh_hmr_manifest(&config, &cache, &tracker)
+            .await
+            .unwrap();
+
+        assert_eq!(tracker.tracked_route_count(), 2);
+        assert_eq!(
+            tracker.compute_update(&[server_dependency]).affected_routes,
+            vec!["/".to_string()],
+            "refreshing route discovery must preserve a live route's worker graph"
+        );
+        assert_eq!(
+            tracker.compute_update(&[about_page]).affected_routes,
+            vec!["/about".to_string()],
+            "new routes must become targetable immediately after manifest refresh"
+        );
     }
 
     /// The favicon link is derived from a filesystem stat, and every page render

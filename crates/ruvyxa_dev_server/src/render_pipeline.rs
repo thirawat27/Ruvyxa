@@ -50,6 +50,22 @@ fn worker_request_headers(headers: &HeaderMap) -> Vec<(String, String)> {
         .collect()
 }
 
+fn register_server_hmr_inputs(state: &AppState, route_path: &str, inputs: Option<&[PathBuf]>) {
+    if state.config.watch
+        && let Some(inputs) = inputs
+    {
+        state.hmr_tracker.register_route(route_path, inputs);
+    }
+}
+
+fn register_client_hmr_inputs(state: &AppState, route_path: &str, inputs: Option<&[PathBuf]>) {
+    if state.config.watch
+        && let Some(inputs) = inputs
+    {
+        state.hmr_tracker.register_client_route(route_path, inputs);
+    }
+}
+
 /// Project-wide state for the synchronous render path, built once and reused.
 ///
 /// Rendering from a [`ServerConfig`] alone would make every call rediscover the
@@ -397,6 +413,8 @@ async fn render_page_ssg(
             .into());
     }
 
+    register_server_hmr_inputs(state, &route.path, response.inputs.as_deref());
+
     let rendered = response
         .html
         .ok_or_else(|| RuvyxaError::Message("SSG render produced no HTML".to_string()))?;
@@ -501,6 +519,8 @@ async fn render_isr_background(
             "ISR revalidation failed: {message}"
         )));
     }
+
+    register_server_hmr_inputs(state, &route.path, response.inputs.as_deref());
 
     let rendered = response
         .html
@@ -908,6 +928,8 @@ async fn render_page_ppr(
             .into());
     }
 
+    register_server_hmr_inputs(state, &route.path, response.inputs.as_deref());
+
     let rendered = response
         .html
         .ok_or_else(|| RuvyxaError::Message("PPR render produced no HTML".to_string()))?;
@@ -991,6 +1013,8 @@ async fn render_page_pooled(
             .suggest("Check the page component, its imports, and whether React dependencies are installed.")
             .into());
     }
+
+    register_server_hmr_inputs(state, &route.path, response.inputs.as_deref());
 
     // Reported by the worker when the render actually read a cookie, a header,
     // or draft mode. Such a document is one user's page: putting it in the
@@ -1108,6 +1132,8 @@ pub(crate) async fn render_api_pooled(
             .into());
     }
 
+    register_server_hmr_inputs(state, &route.path, response.inputs.as_deref());
+
     apply_revalidations(state, response.revalidate.take()).await;
 
     let status = response.status.unwrap_or(200);
@@ -1196,6 +1222,8 @@ pub(crate) async fn render_client_bundle_pooled(
                 .into(),
         );
     }
+
+    register_client_hmr_inputs(state, &route_match.route.path, response.inputs.as_deref());
 
     let script = response.script.ok_or_else(|| {
         RuvyxaError::Message("Client renderer completed without script output".to_string())
