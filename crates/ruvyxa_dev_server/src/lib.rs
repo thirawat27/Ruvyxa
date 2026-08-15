@@ -564,17 +564,68 @@ const RESERVED_FRAMEWORK_ROUTES: [&str; 7] = [
     "/__ruvyxa/image",
 ];
 
+/// Process-wide startup hooks recognised by the JavaScript compiler/runtime.
+/// Kept under a cross-language conformance test because changing one host alone
+/// makes development and deployed instrumentation disagree.
+const INSTRUMENTATION_FILES: [&str; 3] = [
+    "instrumentation.ts",
+    "instrumentation.js",
+    "instrumentation.mjs",
+];
+
 #[derive(Default)]
 struct RuntimeCache {
-    routes: tokio::sync::RwLock<Option<RouteCacheEntry>>,
-    styles: tokio::sync::RwLock<Option<StyleCacheEntry>>,
+    routes: tokio::sync::RwLock<CacheSlot<RouteCacheEntry>>,
+    styles: tokio::sync::RwLock<CacheSlot<StyleCacheEntry>>,
     /// `<link>` tags derived from the public directory's contents.
     ///
     /// Resolved once and reused. `public_asset_links` stats the public directory
     /// to decide which tags to emit, and every page render called it — a
     /// blocking filesystem syscall on a Tokio worker thread, per request, for an
     /// answer that only changes when the watcher invalidates this cache.
-    asset_links: tokio::sync::RwLock<Option<Arc<str>>>,
+    asset_links: tokio::sync::RwLock<CacheSlot<Arc<str>>>,
+}
+
+/// One independently invalidated cache generation.
+///
+/// Filesystem work intentionally runs without holding the lock. The generation
+/// prevents a result that started before a watcher invalidation from becoming
+/// the new cached value after that invalidation has already completed.
+#[derive(Debug)]
+struct CacheSlot<T> {
+    generation: u64,
+    value: Option<T>,
+}
+
+impl<T> Default for CacheSlot<T> {
+    fn default() -> Self {
+        Self {
+            generation: 0,
+            value: None,
+        }
+    }
+}
+
+impl<T> CacheSlot<T> {
+    fn with_value(value: T) -> Self {
+        Self {
+            generation: 0,
+            value: Some(value),
+        }
+    }
+
+    fn insert_if_current(&mut self, generation: u64, value: T) -> bool {
+        if self.generation != generation || self.value.is_some() {
+            return false;
+        }
+        self.value = Some(value);
+        true
+    }
+
+    fn invalidate(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        self.value = None;
+    }
 }
 
 #[derive(Clone)]
@@ -604,33 +655,39 @@ struct StyleCacheEntry {
 impl RuntimeCache {
     fn with_manifest(manifest: RouteManifest) -> Self {
         Self {
-            routes: tokio::sync::RwLock::new(Some(RouteCacheEntry::new(manifest))),
-            styles: tokio::sync::RwLock::new(None),
-            asset_links: tokio::sync::RwLock::new(None),
+            routes: tokio::sync::RwLock::new(CacheSlot::with_value(RouteCacheEntry::new(manifest))),
+            styles: tokio::sync::RwLock::new(CacheSlot::default()),
+            asset_links: tokio::sync::RwLock::new(CacheSlot::default()),
         }
     }
 
     /// Public-directory `<link>` tags, resolved on first use.
     async fn asset_links(&self, config: &ServerConfig) -> Arc<str> {
-        {
-            let cached = self.asset_links.read().await;
-            if let Some(links) = cached.as_ref() {
+        loop {
+            let generation = {
+                let cached = self.asset_links.read().await;
+                if let Some(links) = cached.value.as_ref() {
+                    return Arc::clone(links);
+                }
+                cached.generation
+            };
+
+            // The directory scan touches the filesystem, so keep it off the async
+            // worker thread like every other blocking read on this path.
+            let public_dir = config.public_dir.clone();
+            let links: Arc<str> =
+                tokio::task::spawn_blocking(move || Arc::from(public_asset_links(&public_dir)))
+                    .await
+                    .unwrap_or_else(|_| Arc::from(""));
+
+            let mut cached = self.asset_links.write().await;
+            if let Some(links) = cached.value.as_ref() {
                 return Arc::clone(links);
             }
+            if cached.insert_if_current(generation, Arc::clone(&links)) {
+                return links;
+            }
         }
-
-        // The directory scan touches the filesystem, so keep it off the async
-        // worker thread like every other blocking read on this path.
-        let public_dir = config.public_dir.clone();
-        let links: Arc<str> = tokio::task::spawn_blocking(move || public_asset_links(&public_dir))
-            .await
-            .map(Arc::from)
-            .unwrap_or_else(|_| Arc::from(""));
-
-        let mut cached = self.asset_links.write().await;
-        // A concurrent caller may have won the race; both scanned the same
-        // directory, so either value stands.
-        Arc::clone(cached.get_or_insert(links))
     }
 
     async fn router(
@@ -648,37 +705,39 @@ impl RuntimeCache {
         config: &ServerConfig,
     ) -> Result<(Arc<RouteManifest>, Arc<RadixRouter>)> {
         if !config.cache_route_manifest {
-            let entry = RouteCacheEntry::new(discover_routes(discover_options(config))?);
+            let entry = RouteCacheEntry::new(discover_routes_off_thread(config).await?);
             observe_manifest(config, &entry.manifest);
             return Ok(entry.pair());
         }
 
-        {
-            let cached = self.routes.read().await;
-            if let Some(entry) = cached.as_ref() {
-                return Ok(entry.pair());
-            }
-        }
+        loop {
+            let generation = {
+                let cached = self.routes.read().await;
+                if let Some(entry) = cached.value.as_ref() {
+                    return Ok(entry.pair());
+                }
+                cached.generation
+            };
 
-        let discovered = RouteCacheEntry::new(discover_routes(discover_options(config))?);
-        let (entry, inserted) = {
-            let mut cached = self.routes.write().await;
-            if let Some(entry) = cached.as_ref() {
-                (entry.clone(), false)
-            } else {
-                *cached = Some(discovered.clone());
-                (discovered, true)
-            }
-        };
-        if inserted {
+            let discovered = RouteCacheEntry::new(discover_routes_off_thread(config).await?);
+            let entry = {
+                let mut cached = self.routes.write().await;
+                if let Some(entry) = cached.value.as_ref() {
+                    return Ok(entry.pair());
+                }
+                if !cached.insert_if_current(generation, discovered.clone()) {
+                    continue;
+                }
+                discovered
+            };
             observe_manifest(config, &entry.manifest);
+            return Ok(entry.pair());
         }
-        Ok(entry.pair())
     }
 
     async fn styles(&self, config: &ServerConfig) -> Result<String> {
         if !config.cache_css {
-            let css = collect_styles(&config.root, &config.app_dir, &config.style_entries)?.css;
+            let css = collect_styles_off_thread(config).await?.css;
             return Ok(if config.watch {
                 css
             } else {
@@ -686,31 +745,37 @@ impl RuntimeCache {
             });
         }
 
-        {
-            let cached = self.styles.read().await;
-            if let Some(styles) = cached.as_ref() {
-                return Ok(styles.css.clone());
-            }
-        }
+        loop {
+            let generation = {
+                let cached = self.styles.read().await;
+                if let Some(styles) = cached.value.as_ref() {
+                    return Ok(styles.css.clone());
+                }
+                cached.generation
+            };
 
-        let collection = collect_styles(&config.root, &config.app_dir, &config.style_entries)?;
-        let mut styles = collection.css;
-        // Minify CSS in production mode to reduce inline style payload.
-        if !config.watch {
-            styles = style::minify_css(&styles);
-        }
-        {
-            let mut cached = self.styles.write().await;
-            *cached = Some(StyleCacheEntry {
-                css: styles.clone(),
+            let collection = collect_styles_off_thread(config).await?;
+            let mut css = collection.css;
+            // Minify CSS in production mode to reduce inline style payload.
+            if !config.watch {
+                css = style::minify_css(&css);
+            }
+            let entry = StyleCacheEntry {
+                css: css.clone(),
                 files: collection
                     .files
                     .into_iter()
                     .map(|path| normalize_cache_path(&path))
                     .collect(),
-            });
+            };
+            let mut cached = self.styles.write().await;
+            if let Some(styles) = cached.value.as_ref() {
+                return Ok(styles.css.clone());
+            }
+            if cached.insert_if_current(generation, entry) {
+                return Ok(css);
+            }
         }
-        Ok(styles)
     }
 
     /// Invalidate cached CSS only when a watched event changed a CSS source
@@ -721,30 +786,46 @@ impl RuntimeCache {
             .iter()
             .map(|path| normalize_cache_path(path))
             .collect::<BTreeSet<_>>();
-        let intersects = self
-            .styles
-            .blocking_read()
+        let mut styles = self.styles.blocking_write();
+        let intersects = styles
+            .value
             .as_ref()
             .is_some_and(|cached| !cached.files.is_disjoint(&changed));
         if intersects {
-            *self.styles.blocking_write() = None;
+            styles.invalidate();
         }
         intersects
     }
 
     fn invalidate(&self) {
         // Use blocking_write for sync context (file watcher callback)
-        *self.routes.blocking_write() = None;
-        *self.styles.blocking_write() = None;
-        *self.asset_links.blocking_write() = None;
+        self.routes.blocking_write().invalidate();
+        self.styles.blocking_write().invalidate();
+        self.asset_links.blocking_write().invalidate();
     }
 
     #[cfg(test)]
     async fn invalidate_async(&self) {
-        *self.routes.write().await = None;
-        *self.styles.write().await = None;
-        *self.asset_links.write().await = None;
+        self.routes.write().await.invalidate();
+        self.styles.write().await.invalidate();
+        self.asset_links.write().await.invalidate();
     }
+}
+
+async fn discover_routes_off_thread(config: &ServerConfig) -> Result<RouteManifest> {
+    let options = discover_options(config);
+    tokio::task::spawn_blocking(move || discover_routes(options))
+        .await
+        .map_err(|error| RuvyxaError::Message(format!("Route discovery task failed: {error}")))?
+}
+
+async fn collect_styles_off_thread(config: &ServerConfig) -> Result<StyleCollection> {
+    let root = config.root.clone();
+    let app_dir = config.app_dir.clone();
+    let entries = config.style_entries.clone();
+    tokio::task::spawn_blocking(move || collect_styles(&root, &app_dir, &entries))
+        .await
+        .map_err(|error| RuvyxaError::Message(format!("Style collection task failed: {error}")))?
 }
 
 fn normalize_cache_path(path: &Path) -> PathBuf {
@@ -1218,10 +1299,12 @@ fn start_watcher(
                 if paths.is_empty() {
                     return;
                 }
+                let instrumentation_changed = instrumentation_source_changed(&root, &paths);
 
                 // Use HmrTracker for selective invalidation.
                 let mut hmr_update = hmr_tracker.compute_update(&paths);
-                if hmr_update.full_reload {
+                if hmr_update.full_reload || instrumentation_changed {
+                    hmr_update.full_reload = true;
                     hmr_update.event_type = HmrEventType::FullReload;
                 }
                 // Selective cache invalidation based on affected routes.
@@ -1257,8 +1340,9 @@ fn start_watcher(
                     .iter()
                     .map(|path| path.display().to_string())
                     .collect();
-                let worker_result = worker_pool.invalidate_from_watcher(path_strings.clone());
-                if worker_result.is_err() {
+                let worker_result = (!instrumentation_changed)
+                    .then(|| worker_pool.invalidate_from_watcher(path_strings.clone()));
+                if worker_result.as_ref().is_some_and(|result| result.is_err()) {
                     hmr_update.full_reload = true;
                     hmr_update.event_type = HmrEventType::FullReload;
                 }
@@ -1280,9 +1364,25 @@ fn start_watcher(
                     "fullReload": hmr_update.full_reload,
                 })
                 .to_string();
-                let _ = reload_tx.send(payload);
-                if let Err(error) = worker_result {
-                    warn!(%error, "worker invalidation failed; browser full reload requested");
+                if instrumentation_changed {
+                    let recycle_pool = Arc::clone(&worker_pool);
+                    let recycle_reload = reload_tx.clone();
+                    tokio_handle.spawn(async move {
+                        match recycle_pool.recycle_for_instrumentation_change().await {
+                            Ok(workers) => {
+                                info!(workers, "recycled workers after instrumentation change")
+                            }
+                            Err(error) => {
+                                warn!(%error, "worker recycle after instrumentation change failed")
+                            }
+                        }
+                        let _ = recycle_reload.send(payload);
+                    });
+                } else {
+                    let _ = reload_tx.send(payload);
+                    if let Some(Err(error)) = worker_result {
+                        warn!(%error, "worker invalidation failed; browser full reload requested");
+                    }
                 }
             }
             Err(error) => {
@@ -1339,6 +1439,28 @@ fn ignored_watch_path(root: &Path, path: &Path) -> bool {
         || components
             .iter()
             .any(|component| matches!(component.as_ref(), ".ruvyxa" | "node_modules"))
+}
+
+fn instrumentation_source_changed(root: &Path, paths: &[PathBuf]) -> bool {
+    let root = ruvyxa_diagnostics::normalized_canonical_path(root);
+    paths.iter().any(|path| {
+        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+            return false;
+        };
+        if !INSTRUMENTATION_FILES.contains(&file_name) {
+            return false;
+        }
+        let absolute = if path.is_absolute() {
+            path.clone()
+        } else {
+            root.join(path)
+        };
+        absolute
+            .parent()
+            .map(ruvyxa_diagnostics::normalized_canonical_path)
+            .as_deref()
+            == Some(root.as_path())
+    })
 }
 
 fn plugin_watch_paths(root: &Path, paths: &[PathBuf]) -> Vec<String> {
@@ -3702,6 +3824,19 @@ mod tests {
         assert_eq!(cache.router(&config).await.unwrap().0.routes.len(), 2);
     }
 
+    #[test]
+    fn cache_slot_rejects_work_started_before_invalidation() {
+        let mut slot = CacheSlot::default();
+        let stale_generation = slot.generation;
+
+        slot.invalidate();
+
+        assert!(!slot.insert_if_current(stale_generation, "stale"));
+        assert!(slot.value.is_none());
+        assert!(slot.insert_if_current(slot.generation, "fresh"));
+        assert_eq!(slot.value, Some("fresh"));
+    }
+
     #[tokio::test]
     async fn uncached_routes_compile_the_router_from_the_same_manifest_generation() {
         let temp = tempfile::tempdir().unwrap();
@@ -3846,6 +3981,7 @@ mod tests {
                 .styles
                 .read()
                 .await
+                .value
                 .as_ref()
                 .is_some_and(|cached| cached.css.contains("navy"))
         );
@@ -3862,7 +3998,7 @@ mod tests {
         assert!(cache.styles(&config).await.unwrap().contains("teal"));
 
         cache.invalidate_async().await;
-        assert!(cache.styles.read().await.is_none());
+        assert!(cache.styles.read().await.value.is_none());
     }
 
     #[test]
@@ -4029,6 +4165,36 @@ mod tests {
         assert!(!ignored_watch_path(
             temp.path(),
             &temp.path().join("app/.ruvyxa-action-test-helper.ts")
+        ));
+    }
+
+    #[test]
+    fn instrumentation_watcher_filenames_match_the_shared_contract() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/instrumentation-files-conformance.json"
+        ))
+        .unwrap();
+        let files = fixture["files"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect::<Vec<_>>();
+
+        assert_eq!(files, INSTRUMENTATION_FILES);
+
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        for file in INSTRUMENTATION_FILES {
+            assert!(instrumentation_source_changed(root, &[root.join(file)]));
+        }
+        assert!(!instrumentation_source_changed(
+            root,
+            &[root.join("app/instrumentation.ts")]
+        ));
+        assert!(!instrumentation_source_changed(
+            root,
+            &[root.join("instrumentation.ts.bak")]
         ));
     }
 

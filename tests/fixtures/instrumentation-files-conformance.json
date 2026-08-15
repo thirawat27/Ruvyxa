@@ -1,0 +1,5 @@
+{
+  "description": "Project-root instrumentation filenames recognised by every Ruvyxa host.",
+  "why": "Development workers, deployment bundles, and the Rust file watcher independently decide when process-wide instrumentation exists. A filename accepted by only one side either drops telemetry after deployment or leaves development workers running stale global hooks.",
+  "files": ["instrumentation.ts", "instrumentation.js", "instrumentation.mjs"]
+}

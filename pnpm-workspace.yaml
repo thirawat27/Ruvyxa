@@ -35,5 +35,4 @@ minimumReleaseAgeExclude:
   - '@oxc-transform/binding-win32-arm64-msvc@0.142.0 || 0.143.0'
   - '@oxc-transform/binding-win32-ia32-msvc@0.142.0 || 0.143.0'
   - '@oxc-transform/binding-win32-x64-msvc@0.142.0 || 0.143.0'
-  - '@types/node@26.1.2'
   - oxc-transform@0.142.0 || 0.143.0

@@ -144,6 +144,11 @@ class LRUCache {
 const bundleCache = new LRUCache(MAX_BUNDLE_CACHE_ENTRIES)
 // Cache key -> normalized absolute project files used to build that bundle.
 const bundleInputs = new Map()
+// Cache key -> hash of the normalized dependency path set. This is distinct
+// from emitted-code `bundleVersions`: HMR graph ownership changes only when
+// membership changes, even if an edit changes output bytes (or tree-shakes to
+// the same output).
+const bundleInputVersions = new Map()
 const bundleFingerprints = new Map()
 // Cache key -> content hash of the emitted bundle. This is the ESM import
 // version token; see `importModule`.
@@ -684,7 +689,7 @@ async function handleSsr(request) {
   const specials = collectSpecials(appDir, path.dirname(pageFile))
   // The route pattern, not the concrete URL: it keys the client-side route
   // registry, and a per-URL key would make every dynamic request a cache miss.
-  const { outfile, version, inputs } = await bundleSsrModule(
+  const { outfile, version, inputsVersion, inputs } = await bundleSsrModule(
     resolvedRoot,
     pageFile,
     layouts,
@@ -704,7 +709,13 @@ async function handleSsr(request) {
   // `requestScoped` tells the server this HTML belongs to one request and must
   // not enter a cache shared with other users. It is reported rather than
   // inferred: only the render knows whether it read a cookie.
-  return { ok: true, html, requestScoped: usedRequestContext(context), inputs }
+  return {
+    ok: true,
+    html,
+    requestScoped: usedRequestContext(context),
+    inputsVersion,
+    inputs,
+  }
 }
 
 // --- SSG Handler with Request Coalescing ---
@@ -735,7 +746,7 @@ async function handleSsg(request) {
 
   const layouts = collectLayouts(appDir, path.dirname(pageFile))
   const specials = collectSpecials(appDir, path.dirname(pageFile))
-  const { outfile, version, dependencyHash, inputs } = await bundleSsgModule(
+  const { outfile, version, dependencyHash, inputsVersion, inputs } = await bundleSsgModule(
     resolvedRoot,
     pageFile,
     layouts,
@@ -746,7 +757,7 @@ async function handleSsg(request) {
   const mod = await importModule(outfile, fresh ? isolatedVersion(version) : version)
   const html = await mod.render({ path: requestPath, params: params || {} })
 
-  return { ok: true, html, dependencyHash, inputs }
+  return { ok: true, html, dependencyHash, inputsVersion, inputs }
 }
 
 // --- Static parameter discovery ---
@@ -939,9 +950,14 @@ async function handleApi(request) {
 
   const resolvedRoot = path.resolve(projectRoot || process.cwd())
   await ensureInstrumentation(resolvedRoot)
-  const { outfile, version, inputs } = await bundleApiModule(resolvedRoot, routeFile)
+  const { outfile, version, inputsVersion, inputs } = await bundleApiModule(resolvedRoot, routeFile)
   const mod = await importModule(outfile, version)
   const handler = mod[method.toUpperCase()]
+  const dependencyMetadata = dependencyResponseMetadata(
+    inputsVersion,
+    inputs,
+    request.knownInputsVersion,
+  )
 
   if (typeof handler !== 'function') {
     return {
@@ -949,6 +965,7 @@ async function handleApi(request) {
       status: 405,
       headers: { 'content-type': 'text/plain; charset=utf-8' },
       body: `Method ${method.toUpperCase()} is not allowed`,
+      ...dependencyMetadata,
     }
   }
 
@@ -991,7 +1008,7 @@ async function handleApi(request) {
       headers,
       headerPairs: headerPairsResult,
       revalidate,
-      inputs,
+      ...dependencyMetadata,
       streamResponse: response,
     }
   }
@@ -1004,9 +1021,14 @@ async function handleApi(request) {
     headers,
     headerPairs: headerPairsResult,
     revalidate,
-    inputs,
+    ...dependencyMetadata,
     body,
   }
+}
+
+function dependencyResponseMetadata(inputsVersion, inputs, knownInputsVersion) {
+  if (knownInputsVersion === inputsVersion) return { inputsVersion }
+  return { inputsVersion, inputs }
 }
 
 function responseHeaderPairs(response) {
@@ -1035,9 +1057,17 @@ async function handleAction(request) {
 
   const resolvedRoot = path.resolve(projectRoot || process.cwd())
   await ensureInstrumentation(resolvedRoot)
-  const { outfile, version } = await bundleActionModule(resolvedRoot, actionFile)
+  const { outfile, version, inputsVersion, inputs } = await bundleActionModule(
+    resolvedRoot,
+    actionFile,
+  )
   const mod = await importModule(outfile, version)
   const action = mod[actionName]
+  const dependencyMetadata = dependencyResponseMetadata(
+    inputsVersion,
+    inputs,
+    request.knownInputsVersion,
+  )
 
   if (typeof action !== 'function' || action.ruvyxa?.kind !== 'action') {
     return {
@@ -1047,6 +1077,7 @@ async function handleAction(request) {
       body: JSON.stringify({
         error: `Action ${actionName} was not found in ${path.basename(actionFile)}`,
       }),
+      ...dependencyMetadata,
     }
   }
 
@@ -1106,6 +1137,7 @@ async function handleAction(request) {
     headers,
     headerPairs: headerPairsResult,
     revalidate: collectRevalidations(context),
+    ...dependencyMetadata,
     body,
   }
 }
@@ -1153,7 +1185,7 @@ async function handleClient(request) {
   const resolvedRoot = path.resolve(projectRoot || process.cwd())
   const layouts = collectLayouts(appDir, path.dirname(pageFile))
   const specials = collectSpecials(appDir, path.dirname(pageFile))
-  const { outfile, inputs } = await bundleClientModule(
+  const { outfile, version, inputsVersion, inputs } = await bundleClientModule(
     resolvedRoot,
     pageFile,
     layouts,
@@ -1164,7 +1196,7 @@ async function handleClient(request) {
   )
   const script = await readFile(outfile, 'utf8')
 
-  return { ok: true, script, inputs }
+  return { ok: true, script, inputsVersion, inputs }
 }
 
 // --- Bundle Cache Invalidation ---
@@ -1174,6 +1206,7 @@ function invalidateBundleCache(paths) {
     const invalidated = bundleCache.size
     bundleCache.clear()
     bundleInputs.clear()
+    bundleInputVersions.clear()
     bundleFingerprints.clear()
     bundleVersions.clear()
     moduleCache.clear()
@@ -1211,14 +1244,22 @@ function cacheBundle(cacheKey, outfile, projectRoot, inputs, dependencyHash, con
   const evicted = bundleCache.set(cacheKey, outfile)
   if (evicted) {
     bundleInputs.delete(evicted.key)
+    bundleInputVersions.delete(evicted.key)
     bundleFingerprints.delete(evicted.key)
     dropModuleCacheEntries(evicted.key, evicted.value)
     bundleVersions.delete(evicted.key)
   }
   if (contentHash) bundleVersions.set(cacheKey, contentHash)
-  bundleInputs.set(
+  const normalizedInputs = new Set(
+    (inputs ?? []).map((input) => normalizeAbsolutePath(path.join(projectRoot, input))),
+  )
+  bundleInputs.set(cacheKey, normalizedInputs)
+  bundleInputVersions.set(
     cacheKey,
-    new Set((inputs ?? []).map((input) => normalizeAbsolutePath(path.join(projectRoot, input)))),
+    createHash('sha256')
+      .update([...normalizedInputs].sort().join('\0'))
+      .digest('hex')
+      .slice(0, 16),
   )
   if (dependencyHash) bundleFingerprints.set(cacheKey, dependencyHash)
 }
@@ -1226,10 +1267,18 @@ function cacheBundle(cacheKey, outfile, projectRoot, inputs, dependencyHash, con
 function deleteBundleCacheEntry(cacheKey) {
   const outfile = bundleCache.delete(cacheKey)
   bundleInputs.delete(cacheKey)
+  bundleInputVersions.delete(cacheKey)
   bundleFingerprints.delete(cacheKey)
   buildLocks.delete(cacheKey)
   dropModuleCacheEntries(cacheKey, outfile)
   bundleVersions.delete(cacheKey)
+}
+
+function bundleInputMetadata(cacheKey) {
+  return {
+    inputsVersion: bundleInputVersions.get(cacheKey),
+    inputs: [...(bundleInputs.get(cacheKey) ?? [])],
+  }
 }
 
 // The module cache is keyed by `<outfile>?<version>`, so a bundle eviction has
@@ -1332,7 +1381,7 @@ async function bundleSsrModule(projectRoot, pageFile, layouts, routePath = '/', 
     return {
       outfile: cached,
       version: bundleVersions.get(cacheKey),
-      inputs: [...(bundleInputs.get(cacheKey) ?? [])],
+      ...bundleInputMetadata(cacheKey),
     }
   }
 
@@ -1342,7 +1391,7 @@ async function bundleSsrModule(projectRoot, pageFile, layouts, routePath = '/', 
       return {
         outfile: rechecked,
         version: bundleVersions.get(cacheKey),
-        inputs: [...(bundleInputs.get(cacheKey) ?? [])],
+        ...bundleInputMetadata(cacheKey),
       }
     }
 
@@ -1360,7 +1409,7 @@ async function bundleSsrModule(projectRoot, pageFile, layouts, routePath = '/', 
     return {
       outfile,
       version: bundle.contentHash,
-      inputs: [...(bundleInputs.get(cacheKey) ?? [])],
+      ...bundleInputMetadata(cacheKey),
     }
   })
 }
@@ -1379,7 +1428,7 @@ async function bundleApiModule(projectRoot, routeFile) {
     return {
       outfile: cached,
       version: bundleVersions.get(cacheKey),
-      inputs: [...(bundleInputs.get(cacheKey) ?? [])],
+      ...bundleInputMetadata(cacheKey),
     }
   }
 
@@ -1389,7 +1438,7 @@ async function bundleApiModule(projectRoot, routeFile) {
       return {
         outfile: rechecked,
         version: bundleVersions.get(cacheKey),
-        inputs: [...(bundleInputs.get(cacheKey) ?? [])],
+        ...bundleInputMetadata(cacheKey),
       }
     }
 
@@ -1406,7 +1455,7 @@ async function bundleApiModule(projectRoot, routeFile) {
     return {
       outfile,
       version: bundle.contentHash,
-      inputs: [...(bundleInputs.get(cacheKey) ?? [])],
+      ...bundleInputMetadata(cacheKey),
     }
   })
 }
@@ -1421,11 +1470,23 @@ async function bundleActionModule(projectRoot, actionFile) {
 
   const cacheKey = `action:${actionFile}:${hash}`
   const cached = bundleCache.get(cacheKey)
-  if (cached) return { outfile: cached, version: bundleVersions.get(cacheKey) }
+  if (cached) {
+    return {
+      outfile: cached,
+      version: bundleVersions.get(cacheKey),
+      ...bundleInputMetadata(cacheKey),
+    }
+  }
 
   return withBuildLock(cacheKey, async () => {
     const rechecked = bundleCache.get(cacheKey)
-    if (rechecked) return { outfile: rechecked, version: bundleVersions.get(cacheKey) }
+    if (rechecked) {
+      return {
+        outfile: rechecked,
+        version: bundleVersions.get(cacheKey),
+        ...bundleInputMetadata(cacheKey),
+      }
+    }
 
     const bundle = await compileBundleWithMetadata({
       projectRoot,
@@ -1437,7 +1498,11 @@ async function bundleActionModule(projectRoot, actionFile) {
     })
 
     cacheBundle(cacheKey, outfile, projectRoot, bundle.inputs, null, bundle.contentHash)
-    return { outfile, version: bundle.contentHash }
+    return {
+      outfile,
+      version: bundle.contentHash,
+      ...bundleInputMetadata(cacheKey),
+    }
   })
 }
 
@@ -1489,7 +1554,7 @@ async function bundleClientModule(
     return {
       outfile: cached,
       version: bundleVersions.get(cacheKey),
-      inputs: [...(bundleInputs.get(cacheKey) ?? [])],
+      ...bundleInputMetadata(cacheKey),
     }
   }
 
@@ -1499,7 +1564,7 @@ async function bundleClientModule(
       return {
         outfile: rechecked,
         version: bundleVersions.get(cacheKey),
-        inputs: [...(bundleInputs.get(cacheKey) ?? [])],
+        ...bundleInputMetadata(cacheKey),
       }
     }
 
@@ -1517,7 +1582,7 @@ async function bundleClientModule(
     return {
       outfile,
       version: bundle.contentHash,
-      inputs: [...(bundleInputs.get(cacheKey) ?? [])],
+      ...bundleInputMetadata(cacheKey),
     }
   })
 }
@@ -1579,7 +1644,7 @@ async function bundleSsgModule(
       outfile: cached,
       version: bundleVersions.get(cacheKey),
       dependencyHash: bundleFingerprints.get(cacheKey),
-      inputs: [...(bundleInputs.get(cacheKey) ?? [])],
+      ...bundleInputMetadata(cacheKey),
     }
   }
 
@@ -1590,7 +1655,7 @@ async function bundleSsgModule(
         outfile: rechecked,
         version: bundleVersions.get(cacheKey),
         dependencyHash: bundleFingerprints.get(cacheKey),
-        inputs: [...(bundleInputs.get(cacheKey) ?? [])],
+        ...bundleInputMetadata(cacheKey),
       }
     }
 
@@ -1616,7 +1681,7 @@ async function bundleSsgModule(
       outfile,
       version: bundle.contentHash,
       dependencyHash: bundle.dependencyHash,
-      inputs: [...(bundleInputs.get(cacheKey) ?? [])],
+      ...bundleInputMetadata(cacheKey),
     }
   })
 }

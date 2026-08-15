@@ -146,6 +146,10 @@ pub enum WorkerRequest {
         #[serde(rename = "streamResponse")]
         stream_response: bool,
         params: RouteParams,
+        /// Graph version already owned by the Rust HMR tracker. A matching
+        /// worker may omit the otherwise repeated dependency list.
+        #[serde(rename = "knownInputsVersion", skip_serializing_if = "Option::is_none")]
+        known_inputs_version: Option<String>,
     },
     #[serde(rename = "action")]
     Action {
@@ -167,6 +171,9 @@ pub enum WorkerRequest {
         /// This additive field is ignored by older worker scripts.
         #[serde(rename = "headerPairs")]
         header_pairs: Vec<(String, String)>,
+        /// Action graph version already owned by the Rust HMR tracker.
+        #[serde(rename = "knownInputsVersion", skip_serializing_if = "Option::is_none")]
+        known_inputs_version: Option<String>,
     },
     #[serde(rename = "client")]
     Client {
@@ -343,7 +350,11 @@ pub struct WorkerResponse {
     pub revalidate: Option<Vec<String>>,
     /// Content hash of the compiled SSG dependency graph.
     pub dependency_hash: Option<String>,
-    /// Absolute source files used by the SSG bundle.
+    /// Version of the normalized dependency set in `inputs`. When the request
+    /// supplied the same known version, a current worker omits `inputs` to
+    /// avoid repeated NDJSON work.
+    pub inputs_version: Option<String>,
+    /// Absolute source files used by the compiled bundle.
     pub inputs: Option<Vec<PathBuf>>,
 }
 
@@ -1012,6 +1023,7 @@ pub(crate) struct RenderApiRequest<'a> {
     pub headers: &'a [(String, String)],
     pub body: Option<&'a [u8]>,
     pub params: &'a RouteParams,
+    pub known_inputs_version: Option<&'a str>,
 }
 
 pub(crate) struct RenderActionRequest<'a> {
@@ -1022,6 +1034,7 @@ pub(crate) struct RenderActionRequest<'a> {
     pub content_type: &'a str,
     pub request_path: &'a str,
     pub headers: &'a [(String, String)],
+    pub known_inputs_version: Option<&'a str>,
 }
 
 impl NodeWorkerPool {
@@ -1301,6 +1314,62 @@ impl NodeWorkerPool {
         true
     }
 
+    /// Replace the complete worker generation after process-wide startup code changes.
+    ///
+    /// Instrumentation installs exporters and global hooks once per process. Re-importing
+    /// it in a live worker would duplicate that state, while ordinary bundle invalidation
+    /// cannot undo registrations from a deleted file. Build every replacement first, swap
+    /// the pool atomically, then let requests already admitted by the old generation drain.
+    pub(crate) async fn recycle_for_instrumentation_change(&self) -> Result<usize> {
+        let worker_count = self
+            .workers
+            .read()
+            .map_err(|_| RuvyxaError::Message("Worker pool lock poisoned".to_string()))?
+            .len();
+        let mut replacements = Vec::with_capacity(worker_count);
+        for worker_index in 0..worker_count {
+            match Worker::spawn(&self.worker_script, &self.env, self.runtime).await {
+                Ok(worker) => replacements.push(Arc::new(worker)),
+                Err(error) => {
+                    for replacement in replacements {
+                        replacement.shutdown().await;
+                    }
+                    return Err(RuvyxaError::Message(format!(
+                        "Failed to replace Node worker {worker_index} after instrumentation change: {error}"
+                    )));
+                }
+            }
+        }
+
+        let swapped = match self.workers.write() {
+            Ok(mut workers) if workers.len() == replacements.len() => {
+                Ok(std::mem::replace(&mut *workers, replacements))
+            }
+            Ok(_) => Err((
+                "Worker pool size changed during instrumentation recycle".to_string(),
+                replacements,
+            )),
+            Err(_) => Err(("Worker pool lock poisoned".to_string(), replacements)),
+        };
+        let old_workers = match swapped {
+            Ok(workers) => workers,
+            Err((message, replacements)) => {
+                for replacement in replacements {
+                    replacement.shutdown().await;
+                }
+                return Err(RuvyxaError::Message(message));
+            }
+        };
+
+        for worker in old_workers {
+            tokio::spawn(async move {
+                worker.pending.wait_until_idle().await;
+                worker.shutdown().await;
+            });
+        }
+        Ok(worker_count)
+    }
+
     /// Pick the worker with the fewest in-flight requests.
     ///
     /// Blind round-robin ignores load, so a burst can stack several requests
@@ -1561,6 +1630,7 @@ impl NodeWorkerPool {
             body_base64,
             stream_response: true,
             params: api.params.clone(),
+            known_inputs_version: api.known_inputs_version.map(str::to_string),
         };
         let (index, worker) = self.select_worker().await?;
         let response = worker
@@ -1597,6 +1667,7 @@ impl NodeWorkerPool {
             content_type: action.content_type.to_string(),
             request_path: action.request_path.to_string(),
             header_pairs: action.headers.to_vec(),
+            known_inputs_version: action.known_inputs_version.map(str::to_string),
         };
         self.send(request).await
     }
@@ -2188,6 +2259,60 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn instrumentation_change_replaces_the_process_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        let worker_script = temp.path().join("worker.mjs");
+        std::fs::write(
+            &worker_script,
+            "import { createInterface } from 'node:readline'; createInterface({ input: process.stdin }).on('line', (line) => { const { id } = JSON.parse(line); process.stdout.write(JSON.stringify({ id, ok: true, pong: true }) + '\\n'); });",
+        )
+        .unwrap();
+
+        let original = Arc::new(
+            Worker::spawn(&worker_script, &BTreeMap::new(), JavaScriptRuntime::Node)
+                .await
+                .unwrap(),
+        );
+        let pool = NodeWorkerPool {
+            workers: StdRwLock::new(vec![Arc::clone(&original)]),
+            worker_script,
+            env: BTreeMap::new(),
+            runtime: JavaScriptRuntime::Node,
+            next_worker: AtomicU64::new(0),
+            response_timeout: std::time::Duration::from_millis(DEFAULT_WORKER_TIMEOUT_MS),
+            retained_module_urls_per_worker: None,
+        };
+
+        let replaced = pool
+            .recycle_for_instrumentation_change()
+            .await
+            .expect("instrumentation recycle must start a new worker generation");
+        assert_eq!(replaced, 1);
+        let replacement = pool.workers.read().unwrap()[0].clone();
+        assert!(!Arc::ptr_eq(&original, &replacement));
+
+        let response = pool
+            .send(WorkerRequest::Ping {
+                id: next_request_id(),
+            })
+            .await
+            .expect("replacement worker must accept requests");
+        assert_eq!(response.pong, Some(true));
+
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if original.child.lock().await.is_none() {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the drained instrumentation worker did not stop");
+        pool.shutdown().await;
+    }
+
     fn request_id_of(frame: &str) -> String {
         serde_json::from_str::<serde_json::Value>(frame.trim())
             .expect("worker frames must be valid JSON")["id"]
@@ -2261,6 +2386,7 @@ mod tests {
             body_base64: Some(base64_encode(&[0, 255, 128, 13, 10])),
             stream_response: true,
             params: BTreeMap::new(),
+            known_inputs_version: Some("graph-v1".to_string()),
         };
 
         let value = serde_json::to_value(request).unwrap();
@@ -2274,6 +2400,7 @@ mod tests {
         );
         assert_eq!(value["bodyBase64"], "AP+ADQo=");
         assert_eq!(value["streamResponse"], true);
+        assert_eq!(value["knownInputsVersion"], "graph-v1");
     }
 
     #[test]
@@ -2291,6 +2418,7 @@ mod tests {
                 ("cookie".to_string(), "a=1".to_string()),
                 ("cookie".to_string(), "b=2".to_string()),
             ],
+            known_inputs_version: Some("action-v1".to_string()),
         };
 
         let value = serde_json::to_value(request).unwrap();
@@ -2302,6 +2430,7 @@ mod tests {
             value["headerPairs"][1],
             serde_json::json!(["cookie", "a=1"])
         );
+        assert_eq!(value["knownInputsVersion"], "action-v1");
         assert_eq!(
             value["headerPairs"][2],
             serde_json::json!(["cookie", "b=2"])
@@ -2442,6 +2571,7 @@ mod tests {
             body_base64: None,
             stream_response: true,
             params: BTreeMap::new(),
+            known_inputs_version: None,
         };
 
         let response = worker
@@ -2478,6 +2608,7 @@ mod tests {
             body_base64: None,
             stream_response: true,
             params: BTreeMap::new(),
+            known_inputs_version: None,
         };
         let response = worker
             .start_api_response(&request, std::time::Duration::from_secs(2))
@@ -2517,6 +2648,7 @@ mod tests {
             body_base64: None,
             stream_response: true,
             params: BTreeMap::new(),
+            known_inputs_version: None,
         };
 
         let response = worker
@@ -2686,6 +2818,7 @@ process.stdin.resume()
                 headers: &[],
                 body: None,
                 params: &params,
+                known_inputs_version: None,
             })
             .await
             .unwrap();

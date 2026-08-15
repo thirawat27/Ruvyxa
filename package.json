@@ -24,7 +24,7 @@
     "publish:dry-run": "pnpm -r --filter './packages/**' publish --access public --dry-run"
   },
   "devDependencies": {
-    "@types/node": "^26.2.0",
+    "@types/node": "22.13.0",
     "postcss": "^8.5.26",
     "prettier": "3.9.6",
     "typescript": "^7.0.2"

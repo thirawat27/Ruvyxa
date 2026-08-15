@@ -483,15 +483,40 @@ test('invalidates a cached route bundle when an imported utility changes', async
     first.inputs.some((input) => path.resolve(input) === path.resolve(utilityFile)),
     'API response inputs omitted an imported utility',
   )
+  assert.match(first.inputsVersion, /^[a-f0-9]{16}$/)
+
+  const cached = await request({ ...apiRequest, knownInputsVersion: first.inputsVersion })
+  assert.equal(cached.inputsVersion, first.inputsVersion)
+  assert.equal(Object.hasOwn(cached, 'inputs'), false)
 
   await writeFile(utilityFile, `export const value = 'second'\n`)
   const invalidation = await request({ type: 'invalidate', paths: [utilityFile] })
   assert.equal(invalidation.ok, true)
   assert.equal(invalidation.invalidated, 1)
 
-  const second = await request(apiRequest)
+  const second = await request({ ...apiRequest, knownInputsVersion: first.inputsVersion })
   assert.equal(second.ok, true)
   assert.deepEqual(JSON.parse(second.body), { value: 'second' })
+  assert.equal(second.inputsVersion, first.inputsVersion)
+  assert.equal(Object.hasOwn(second, 'inputs'), false)
+
+  const extraFile = path.join(projectRoot, 'lib/extra.ts')
+  await writeFile(extraFile, "export const suffix = '!'\n")
+  await writeFile(
+    routeFile,
+    `import { value } from '../../../lib/value.js'
+import { suffix } from '../../../lib/extra.js'
+export function GET() { return Response.json({ value: value + suffix }) }
+`,
+  )
+  const routeInvalidation = await request({ type: 'invalidate', paths: [routeFile] })
+  assert.equal(routeInvalidation.invalidated, 1)
+  const changedGraph = await request({
+    ...apiRequest,
+    knownInputsVersion: first.inputsVersion,
+  })
+  assert.notEqual(changedGraph.inputsVersion, first.inputsVersion)
+  assert.ok(changedGraph.inputs.some((input) => path.resolve(input) === path.resolve(extraFile)))
 })
 
 test('forwards action request headers and preserves repeated response headers', async (t) => {
@@ -561,6 +586,45 @@ export const inspect = action.handler(async ({ request }) => {
       ['set-cookie', 'b=2; Path=/'],
     ],
   )
+})
+
+test('reports action transitive inputs once per host-owned graph version', async (t) => {
+  const projectRoot = await mkdtemp(path.join(fixtureWorkspace, 'action-inputs-'))
+  const actionFile = path.join(projectRoot, 'app/account/action.ts')
+  const utilityFile = path.join(projectRoot, 'lib/message.ts')
+  await mkdir(path.dirname(actionFile), { recursive: true })
+  await mkdir(path.dirname(utilityFile), { recursive: true })
+  await writeFile(utilityFile, "export const message = 'tracked action input'\n")
+  await writeFile(
+    actionFile,
+    `import { action } from 'ruvyxa/server'
+import { message } from '../../lib/message.js'
+export const inspect = action.handler(async () => ({ message }))
+`,
+  )
+
+  const { request } = startWorker(t, [projectRoot])
+  const actionRequest = {
+    type: 'action',
+    projectRoot,
+    actionFile,
+    actionName: 'inspect',
+    payloadJson: '{}',
+    contentType: 'application/json',
+    requestPath: '/account',
+    headerPairs: [],
+  }
+  const first = await request(actionRequest)
+  assert.equal(first.ok, true, first.message)
+  assert.match(first.inputsVersion, /^[a-f0-9]{16}$/)
+  assert.ok(first.inputs.some((input) => path.resolve(input) === path.resolve(utilityFile)))
+
+  const cached = await request({
+    ...actionRequest,
+    knownInputsVersion: first.inputsVersion,
+  })
+  assert.equal(cached.inputsVersion, first.inputsVersion)
+  assert.equal(Object.hasOwn(cached, 'inputs'), false)
 })
 
 test('resolves static params and isolates build-time page module state', async (t) => {

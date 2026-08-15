@@ -33,6 +33,10 @@ struct HmrState {
     /// Each bundle replaces only its own lane. A client rebuild must not erase
     /// server-only dependencies, and a manifest refresh must preserve both.
     route_graphs: BTreeMap<String, BTreeMap<DependencyGraph, BTreeSet<PathBuf>>>,
+    /// Content version last accepted for each worker-produced graph. The
+    /// version is independent per lane so an action rebuild cannot suppress a
+    /// server or client graph update for the same route.
+    graph_versions: BTreeMap<String, BTreeMap<DependencyGraph, String>>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
@@ -40,6 +44,7 @@ enum DependencyGraph {
     Manifest,
     Server,
     Client,
+    Action,
 }
 
 impl Default for HmrTracker {
@@ -132,9 +137,46 @@ impl HmrTracker {
         self.register_graph(route_path, DependencyGraph::Server, source_files);
     }
 
+    /// Register a server graph only when its dependency-set version changed.
+    pub(crate) fn register_versioned_route(
+        &self,
+        route_path: &str,
+        version: &str,
+        source_files: &[PathBuf],
+    ) {
+        self.register_versioned_graph(route_path, DependencyGraph::Server, version, source_files);
+    }
+
     /// Register the browser bundle without replacing the server graph.
     pub(crate) fn register_client_route(&self, route_path: &str, source_files: &[PathBuf]) {
         self.register_graph(route_path, DependencyGraph::Client, source_files);
+    }
+
+    pub(crate) fn register_versioned_client_route(
+        &self,
+        route_path: &str,
+        version: &str,
+        source_files: &[PathBuf],
+    ) {
+        self.register_versioned_graph(route_path, DependencyGraph::Client, version, source_files);
+    }
+
+    /// Register an action bundle without replacing the route's render graph.
+    pub(crate) fn register_versioned_action_route(
+        &self,
+        route_path: &str,
+        version: &str,
+        source_files: &[PathBuf],
+    ) {
+        self.register_versioned_graph(route_path, DependencyGraph::Action, version, source_files);
+    }
+
+    pub(crate) fn server_graph_version(&self, route_path: &str) -> Option<String> {
+        self.graph_version(route_path, DependencyGraph::Server)
+    }
+
+    pub(crate) fn action_graph_version(&self, route_path: &str) -> Option<String> {
+        self.graph_version(route_path, DependencyGraph::Action)
     }
 
     fn register_graph(&self, route_path: &str, graph: DependencyGraph, source_files: &[PathBuf]) {
@@ -142,7 +184,39 @@ impl HmrTracker {
             .iter()
             .map(|file| normalize_source_path(file))
             .collect();
-        self.state.write().replace_graph(route_path, graph, files);
+        let mut state = self.state.write();
+        state.replace_graph(route_path, graph, files);
+        state.remove_graph_version(route_path, graph);
+    }
+
+    fn register_versioned_graph(
+        &self,
+        route_path: &str,
+        graph: DependencyGraph,
+        version: &str,
+        source_files: &[PathBuf],
+    ) {
+        if self.graph_version(route_path, graph).as_deref() == Some(version) {
+            return;
+        }
+
+        let files = source_files
+            .iter()
+            .map(|file| normalize_source_path(file))
+            .collect();
+        let mut state = self.state.write();
+        if state.graph_version(route_path, graph) == Some(version) {
+            return;
+        }
+        state.replace_graph(route_path, graph, files);
+        state.set_graph_version(route_path, graph, version);
+    }
+
+    fn graph_version(&self, route_path: &str, graph: DependencyGraph) -> Option<String> {
+        self.state
+            .read()
+            .graph_version(route_path, graph)
+            .map(str::to_string)
     }
 
     /// Compute which routes are affected by a set of changed files.
@@ -214,6 +288,32 @@ impl HmrTracker {
 }
 
 impl HmrState {
+    fn graph_version(&self, route_path: &str, graph: DependencyGraph) -> Option<&str> {
+        self.graph_versions
+            .get(route_path)
+            .and_then(|versions| versions.get(&graph))
+            .map(String::as_str)
+    }
+
+    fn set_graph_version(&mut self, route_path: &str, graph: DependencyGraph, version: &str) {
+        self.graph_versions
+            .entry(route_path.to_string())
+            .or_default()
+            .insert(graph, version.to_string());
+    }
+
+    fn remove_graph_version(&mut self, route_path: &str, graph: DependencyGraph) {
+        let remove_route = if let Some(versions) = self.graph_versions.get_mut(route_path) {
+            versions.remove(&graph);
+            versions.is_empty()
+        } else {
+            false
+        };
+        if remove_route {
+            self.graph_versions.remove(route_path);
+        }
+    }
+
     fn route_files(&self, route_path: &str) -> BTreeSet<PathBuf> {
         self.route_graphs
             .get(route_path)
@@ -242,6 +342,7 @@ impl HmrState {
     fn remove_route(&mut self, route_path: &str) {
         let old_files = self.route_files(route_path);
         self.route_graphs.remove(route_path);
+        self.graph_versions.remove(route_path);
         self.update_reverse_map(route_path, &old_files, &BTreeSet::new());
     }
 
@@ -400,6 +501,60 @@ mod tests {
             vec!["/"]
         );
         assert_eq!(tracker.compute_update(&[client]).affected_routes, vec!["/"]);
+    }
+
+    #[test]
+    fn unchanged_graph_version_skips_dependency_reprocessing() {
+        let tracker = HmrTracker::new();
+        let first = PathBuf::from("/app/first.ts");
+        let impossible_same_version = PathBuf::from("/app/should-not-replace.ts");
+
+        tracker.register_versioned_route("/", "version-1", std::slice::from_ref(&first));
+        tracker.register_versioned_route(
+            "/",
+            "version-1",
+            std::slice::from_ref(&impossible_same_version),
+        );
+
+        assert_eq!(
+            tracker.server_graph_version("/").as_deref(),
+            Some("version-1")
+        );
+        assert_eq!(tracker.compute_update(&[first]).affected_routes, vec!["/"]);
+        assert!(
+            tracker
+                .compute_update(&[impossible_same_version])
+                .affected_routes
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn action_graph_replaces_independently_from_server_graph() {
+        let tracker = HmrTracker::new();
+        let server = PathBuf::from("/app/page-dependency.ts");
+        let old_action = PathBuf::from("/app/action-old.ts");
+        let new_action = PathBuf::from("/app/action-new.ts");
+
+        tracker.register_versioned_route("/", "server-1", std::slice::from_ref(&server));
+        tracker.register_versioned_action_route("/", "action-1", std::slice::from_ref(&old_action));
+        tracker.register_versioned_action_route("/", "action-2", std::slice::from_ref(&new_action));
+
+        assert_eq!(
+            tracker.action_graph_version("/").as_deref(),
+            Some("action-2")
+        );
+        assert_eq!(tracker.compute_update(&[server]).affected_routes, vec!["/"]);
+        assert!(
+            tracker
+                .compute_update(&[old_action])
+                .affected_routes
+                .is_empty()
+        );
+        assert_eq!(
+            tracker.compute_update(&[new_action]).affected_routes,
+            vec!["/"]
+        );
     }
 
     #[test]

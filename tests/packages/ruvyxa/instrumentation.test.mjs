@@ -175,10 +175,13 @@ test('the adapter runner and the worker recognise the same filenames', async () 
   const { INSTRUMENTATION_FILES } = await import(
     pathToFileUrl(path.join(repoRoot, 'packages/ruvyxa/runtime/compiler.mjs'))
   )
-  assert.deepEqual(
-    [...INSTRUMENTATION_FILES],
-    ['instrumentation.ts', 'instrumentation.js', 'instrumentation.mjs'],
+  const conformance = JSON.parse(
+    await readFile(
+      path.join(repoRoot, 'tests/fixtures/instrumentation-files-conformance.json'),
+      'utf8',
+    ),
   )
+  assert.deepEqual([...INSTRUMENTATION_FILES], conformance.files)
 
   for (const file of ['worker-pool.mjs', 'adapter-runner.mjs']) {
     const source = await readFile(path.join(repoRoot, 'packages/ruvyxa/runtime', file), 'utf8')

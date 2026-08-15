@@ -50,19 +50,56 @@ fn worker_request_headers(headers: &HeaderMap) -> Vec<(String, String)> {
         .collect()
 }
 
-fn register_server_hmr_inputs(state: &AppState, route_path: &str, inputs: Option<&[PathBuf]>) {
+fn register_server_hmr_inputs(
+    state: &AppState,
+    route_path: &str,
+    inputs_version: Option<&str>,
+    inputs: Option<&[PathBuf]>,
+) {
     if state.config.watch
         && let Some(inputs) = inputs
     {
-        state.hmr_tracker.register_route(route_path, inputs);
+        if let Some(version) = inputs_version {
+            state
+                .hmr_tracker
+                .register_versioned_route(route_path, version, inputs);
+        } else {
+            state.hmr_tracker.register_route(route_path, inputs);
+        }
     }
 }
 
-fn register_client_hmr_inputs(state: &AppState, route_path: &str, inputs: Option<&[PathBuf]>) {
+fn register_client_hmr_inputs(
+    state: &AppState,
+    route_path: &str,
+    inputs_version: Option<&str>,
+    inputs: Option<&[PathBuf]>,
+) {
     if state.config.watch
         && let Some(inputs) = inputs
     {
-        state.hmr_tracker.register_client_route(route_path, inputs);
+        if let Some(version) = inputs_version {
+            state
+                .hmr_tracker
+                .register_versioned_client_route(route_path, version, inputs);
+        } else {
+            state.hmr_tracker.register_client_route(route_path, inputs);
+        }
+    }
+}
+
+fn register_action_hmr_inputs(
+    state: &AppState,
+    route_path: &str,
+    inputs_version: Option<&str>,
+    inputs: Option<&[PathBuf]>,
+) {
+    if state.config.watch
+        && let (Some(version), Some(inputs)) = (inputs_version, inputs)
+    {
+        state
+            .hmr_tracker
+            .register_versioned_action_route(route_path, version, inputs);
     }
 }
 
@@ -413,7 +450,12 @@ async fn render_page_ssg(
             .into());
     }
 
-    register_server_hmr_inputs(state, &route.path, response.inputs.as_deref());
+    register_server_hmr_inputs(
+        state,
+        &route.path,
+        response.inputs_version.as_deref(),
+        response.inputs.as_deref(),
+    );
 
     let rendered = response
         .html
@@ -520,7 +562,12 @@ async fn render_isr_background(
         )));
     }
 
-    register_server_hmr_inputs(state, &route.path, response.inputs.as_deref());
+    register_server_hmr_inputs(
+        state,
+        &route.path,
+        response.inputs_version.as_deref(),
+        response.inputs.as_deref(),
+    );
 
     let rendered = response
         .html
@@ -928,7 +975,12 @@ async fn render_page_ppr(
             .into());
     }
 
-    register_server_hmr_inputs(state, &route.path, response.inputs.as_deref());
+    register_server_hmr_inputs(
+        state,
+        &route.path,
+        response.inputs_version.as_deref(),
+        response.inputs.as_deref(),
+    );
 
     let rendered = response
         .html
@@ -1014,7 +1066,12 @@ async fn render_page_pooled(
             .into());
     }
 
-    register_server_hmr_inputs(state, &route.path, response.inputs.as_deref());
+    register_server_hmr_inputs(
+        state,
+        &route.path,
+        response.inputs_version.as_deref(),
+        response.inputs.as_deref(),
+    );
 
     // Reported by the worker when the render actually read a cookie, a header,
     // or draft mode. Such a document is one user's page: putting it in the
@@ -1099,6 +1156,7 @@ pub(crate) async fn render_api_pooled(
     body: Option<&[u8]>,
     params: &RouteParams,
 ) -> Result<Response> {
+    let known_inputs_version = state.hmr_tracker.server_graph_version(&route.path);
     let WorkerApiResponse {
         mut response,
         body: streamed_body,
@@ -1112,6 +1170,7 @@ pub(crate) async fn render_api_pooled(
             headers,
             body,
             params,
+            known_inputs_version: known_inputs_version.as_deref(),
         })
         .await?;
 
@@ -1132,7 +1191,12 @@ pub(crate) async fn render_api_pooled(
             .into());
     }
 
-    register_server_hmr_inputs(state, &route.path, response.inputs.as_deref());
+    register_server_hmr_inputs(
+        state,
+        &route.path,
+        response.inputs_version.as_deref(),
+        response.inputs.as_deref(),
+    );
 
     apply_revalidations(state, response.revalidate.take()).await;
 
@@ -1223,7 +1287,12 @@ pub(crate) async fn render_client_bundle_pooled(
         );
     }
 
-    register_client_hmr_inputs(state, &route_match.route.path, response.inputs.as_deref());
+    register_client_hmr_inputs(
+        state,
+        &route_match.route.path,
+        response.inputs_version.as_deref(),
+        response.inputs.as_deref(),
+    );
 
     let script = response.script.ok_or_else(|| {
         RuvyxaError::Message("Client renderer completed without script output".to_string())
@@ -1267,6 +1336,9 @@ pub(crate) async fn render_server_action_pooled(
             )
     })?;
 
+    let known_inputs_version = state
+        .hmr_tracker
+        .action_graph_version(&route_match.route.path);
     let mut response = state
         .worker_pool
         .render_action(RenderActionRequest {
@@ -1277,6 +1349,7 @@ pub(crate) async fn render_server_action_pooled(
             content_type,
             request_path,
             headers: &worker_request_headers(request_headers),
+            known_inputs_version: known_inputs_version.as_deref(),
         })
         .await?;
 
@@ -1298,6 +1371,13 @@ pub(crate) async fn render_server_action_pooled(
 
         return Err(diagnostic.into());
     }
+
+    register_action_hmr_inputs(
+        state,
+        &route_match.route.path,
+        response.inputs_version.as_deref(),
+        response.inputs.as_deref(),
+    );
 
     apply_revalidations(state, response.revalidate.take()).await;
 

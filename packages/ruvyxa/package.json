@@ -104,7 +104,7 @@
     "yaml": "^2.9.0"
   },
   "devDependencies": {
-    "@types/node": "^26.2.0"
+    "@types/node": "22.13.0"
   },
   "optionalDependencies": {
     "@ruvyxa/cli-darwin-arm64": "workspace:^",

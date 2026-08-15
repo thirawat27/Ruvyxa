@@ -57,7 +57,7 @@
     "@ruvyxa/core": "workspace:^"
   },
   "devDependencies": {
-    "@types/node": "^26.2.0",
+    "@types/node": "22.13.0",
     "@types/react": "^19.2.18"
   },
   "scripts": {

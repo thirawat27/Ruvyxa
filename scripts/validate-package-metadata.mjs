@@ -6,6 +6,7 @@ const rootPkg = JSON.parse(readFileSync('package.json', 'utf8'))
 const expectedVersion = rootPkg.version
 const expectedLicense = rootPkg.license
 const requiredRuntimeNodeEngine = rootPkg.engines?.node
+const requiredRuntimeNodeVersion = requiredRuntimeNodeEngine.replace(/^>=/, '')
 const repoUrl = 'git+https://github.com/thirawat27/ruvyxa.git'
 const packageDirs = [
   'packages/ruvyxa',
@@ -16,6 +17,11 @@ const packageDirs = [
 ]
 
 const failures = []
+
+check(
+  rootPkg.devDependencies?.['@types/node'] === requiredRuntimeNodeVersion,
+  `workspace @types/node must equal the engines.node floor (${requiredRuntimeNodeVersion})`,
+)
 
 for (const dir of packageDirs) {
   const pkg = JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8'))
@@ -41,6 +47,13 @@ for (const dir of packageDirs) {
     pkg.engines?.node === requiredRuntimeNodeEngine,
     `${pkg.name} Node engine must match the framework requirement (${requiredRuntimeNodeEngine})`,
   )
+  const nodeTypes = pkg.devDependencies?.['@types/node']
+  if (nodeTypes !== undefined) {
+    check(
+      nodeTypes === requiredRuntimeNodeVersion,
+      `${pkg.name} @types/node must equal the engines.node floor (${requiredRuntimeNodeVersion})`,
+    )
+  }
   // A published declaration map points at `src/`, so `src` must be in the
   // tarball or every "go to definition" and every stack frame resolves to a
   // file that was never shipped.
@@ -136,9 +149,8 @@ console.log(`Validated ${crateDirs.length} Rust crate manifests for ${expectedVe
 // promising the two stay in sync" rule the repo already applies to template
 // mirrors and conformance fixtures.
 const readme = readFileSync('README.md', 'utf8')
-const engineFloor = requiredRuntimeNodeEngine.replace(/^>=/, '')
 // `22.13.0` in a manifest is written `22.13` in prose and badges.
-const [major, minor] = engineFloor.split('.')
+const [major, minor] = requiredRuntimeNodeVersion.split('.')
 const displayFloor = `${major}.${minor}`
 
 const badgeMatches = [...readme.matchAll(/img\.shields\.io\/badge\/node-%3E%3D([\d.]+)-/g)]
