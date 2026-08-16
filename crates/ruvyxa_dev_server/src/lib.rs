@@ -3845,10 +3845,16 @@ mod tests {
     #[test]
     fn rejects_unsafe_public_asset_paths() {
         assert!(is_safe_relative_path("images/logo.png"));
-        assert!(is_safe_relative_path("./images/logo.png"));
         assert!(!is_safe_relative_path(""));
         assert!(!is_safe_relative_path("../secret.txt"));
         assert!(!is_safe_relative_path("images\\logo.png"));
+        // A `.` segment used to be accepted here and rejected by the deployed
+        // handler's `isUnsafeSegment`, so one URL resolved differently under
+        // `ruvyxa start` than in a deployed build. Browsers normalize `.` away
+        // before sending, and no route the build emits contains one, so the two
+        // now agree on rejecting it. See
+        // `tests/fixtures/prerender-path-conformance.json`.
+        assert!(!is_safe_relative_path("./images/logo.png"));
     }
 
     #[test]

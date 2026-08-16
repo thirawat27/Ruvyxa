@@ -1,0 +1,77 @@
+{
+  "description": "Which request paths may be turned into a prerendered-document or public-asset file path. The native server decides this in `is_safe_relative_path` (crates/ruvyxa_dev_server/src/static_assets.rs) and the deployed handler in `isUnsafeSegment`/`prerenderRelativePath` (packages/ruvyxa/runtime/serverless-handler.mjs). Neither can call the other, and the rule guards a path that is written as well as read, so both replay this table.",
+  "rule": "A path is safe when every non-empty segment is not `.` or `..`, and contains no `/`, `\\`, `:`, or control character.",
+  "note": "Paths are given without a leading slash, as `is_safe_relative_path` receives them; the handler is fed the same values with a `/` prefix. The site root is deliberately absent: both callers resolve an empty path to the root document before this rule is consulted.",
+  "cases": [
+    {
+      "path": "blog/hello",
+      "safe": true,
+      "why": "ordinary nested route"
+    },
+    {
+      "path": "hello world",
+      "safe": true,
+      "why": "decoded spaces are legal in a segment"
+    },
+    {
+      "path": "ทดสอบ",
+      "safe": true,
+      "why": "non-ASCII segments are legal"
+    },
+    {
+      "path": "logo.png",
+      "safe": true,
+      "why": "ordinary public asset"
+    },
+    {
+      "path": "a.b/c-d_e",
+      "safe": true,
+      "why": "dots inside a segment are not a `.` segment"
+    },
+    {
+      "path": "..",
+      "safe": false,
+      "why": "parent traversal"
+    },
+    {
+      "path": "a/../b",
+      "safe": false,
+      "why": "parent traversal mid-path"
+    },
+    {
+      "path": "a/./b",
+      "safe": false,
+      "why": "a bare `.` segment is not a route the build emits"
+    },
+    {
+      "path": ".",
+      "safe": false,
+      "why": "current-directory segment"
+    },
+    {
+      "path": "a\\b",
+      "safe": false,
+      "why": "Windows separator inside a path"
+    },
+    {
+      "path": "foo:bar",
+      "safe": false,
+      "why": "colon names an NTFS alternate data stream on Windows; only `a:` parsed as a drive prefix, so multi-character names slipped through"
+    },
+    {
+      "path": "a:b",
+      "safe": false,
+      "why": "drive-letter form"
+    },
+    {
+      "path": "a\u0001b",
+      "safe": false,
+      "why": "control characters never name a real file"
+    },
+    {
+      "path": "ab",
+      "safe": false,
+      "why": "DEL is a control character too"
+    }
+  ]
+}

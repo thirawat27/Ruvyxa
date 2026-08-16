@@ -519,12 +519,30 @@ pub(crate) fn is_safe_relative_path(path: &str) -> bool {
     if path.is_empty() || path.contains('\\') {
         return false;
     }
+    if !Path::new(path)
+        .components()
+        .all(|component| matches!(component, std::path::Component::Normal(_)))
+    {
+        return false;
+    }
 
-    Path::new(path).components().all(|component| {
-        matches!(
-            component,
-            std::path::Component::Normal(_) | std::path::Component::CurDir
-        )
+    // Segment rules, checked explicitly rather than left to `Path::components`.
+    //
+    // The serverless handler decides the same thing in `isUnsafeSegment`, and
+    // the two disagreed: `Components` accepted `foo:bar` (only a single-letter
+    // `a:` parses as a Windows prefix), accepted control characters, and folded
+    // `.` away as `CurDir`, while the deployed handler rejected all three. That
+    // made one URL resolve differently under `ruvyxa start` than in a deployed
+    // build — and this rule guards a path that is written as well as read, so on
+    // Windows `foo:bar` names an NTFS alternate data stream. Both halves are now
+    // held to `tests/fixtures/prerender-path-conformance.json`.
+    path.split('/').all(|segment| {
+        segment.is_empty()
+            || (segment != "."
+                && segment != ".."
+                && !segment
+                    .chars()
+                    .any(|character| character == ':' || character.is_control()))
     })
 }
 
@@ -709,6 +727,34 @@ mod tests {
             .unwrap();
 
         assert_eq!(second.status(), StatusCode::NOT_MODIFIED);
+    }
+
+    /// Replay the shared cross-language path-safety table.
+    ///
+    /// The deployed handler decides this in `isUnsafeSegment`, and the two had
+    /// drifted: `Path::components` accepted `foo:bar`, accepted control
+    /// characters, and folded `.` away, while the handler rejected all three —
+    /// so one URL resolved differently under `ruvyxa start` than in a deployed
+    /// build. This rule also guards a path that is written, not only read.
+    /// `tests/packages/ruvyxa/prerender-path.test.mjs` replays the same file.
+    #[test]
+    fn matches_the_shared_cross_language_path_safety_table() {
+        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/prerender-path-conformance.json");
+        let fixture: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&fixture_path)
+                .unwrap_or_else(|error| panic!("read {}: {error}", fixture_path.display())),
+        )
+        .expect("conformance fixture is valid JSON");
+
+        let cases = fixture["cases"].as_array().expect("fixture declares cases");
+        assert!(!cases.is_empty(), "the fixture must carry cases");
+        for case in cases {
+            let path = case["path"].as_str().expect("case path");
+            let expected = case["safe"].as_bool().expect("case verdict");
+            let why = case["why"].as_str().unwrap_or("");
+            assert_eq!(is_safe_relative_path(path), expected, "{path:?} — {why}");
+        }
     }
 
     /// Replay the shared cross-language static-asset table.
