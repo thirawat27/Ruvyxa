@@ -333,8 +333,8 @@ function __ruvyxaApplyLang(html, lang) {
   const value = lang.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;");
   const attribute = /\slang\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/i;
   const tag = attribute.test(match[0])
-    ? match[0].replace(attribute, ' lang="' + value + '"')
-    : match[0].replace(/^<html/i, '<html lang="' + value + '"');
+    ? match[0].replace(attribute, () => ' lang="' + value + '"')
+    : match[0].replace(/^<html/i, () => '<html lang="' + value + '"');
   return html.slice(0, match.index) + tag + html.slice(match.index + match[0].length);
 }"#;
 

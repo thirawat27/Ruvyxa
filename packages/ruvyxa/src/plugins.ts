@@ -724,11 +724,17 @@ function injectPwaMarkup(html: string, manifestPath: string, registerPath: strin
   if (html.includes('data-ruvyxa-pwa')) return html
   const manifestTag = `<link rel="manifest" href="${escapeHtmlAttribute(manifestPath)}" data-ruvyxa-pwa>`
   const registerTag = `<script type="module" src="${escapeHtmlAttribute(registerPath)}" data-ruvyxa-pwa></script>`
+  // Replacer functions, not replacement strings. `String.replace` reads `$&`,
+  // `` $` ``, `$'`, and `$1` out of a *replacement string*, and these carry a
+  // configured path through `escapeHtmlAttribute` — which turns `&` into
+  // `&amp;` and so cannot neutralize a `$`. A `manifestPath` containing `$&`
+  // therefore substituted the matched `</head>` into its own `href` and emitted
+  // a second one. A function's return value is always literal.
   let output = html.includes('</head>')
-    ? html.replace('</head>', `${manifestTag}</head>`)
+    ? html.replace('</head>', () => `${manifestTag}</head>`)
     : `${manifestTag}${html}`
   output = output.includes('</body>')
-    ? output.replace('</body>', `${registerTag}</body>`)
+    ? output.replace('</body>', () => `${registerTag}</body>`)
     : `${output}${registerTag}`
   return output
 }

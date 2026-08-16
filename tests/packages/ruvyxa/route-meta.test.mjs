@@ -204,6 +204,23 @@ describe('html lang rewriting', () => {
     assert.match(output, /<html lang="th" data-theme="dark">/)
   })
 
+  it('treats $-substitution characters in a lang value as literal text', () => {
+    // `String.replace` reads `$&`, `` $` ``, `$'`, and `$1` out of a
+    // *replacement string*, and the escaping above turns `&` into `&amp;` — it
+    // cannot neutralize a `$`. Building the new tag by concatenation therefore
+    // let a lang value substitute the matched `<html …>` tag into itself. `lang`
+    // reaches this from a route parameter, so it is not developer-only input.
+    const { __ruvyxaApplyLang } = loadPrelude()
+
+    const replaced = __ruvyxaApplyLang('<html lang="en"><body></body></html>', '$&x')
+    assert.match(replaced, /<html lang="\$&amp;x">/)
+    assert.equal(replaced.match(/<html/g).length, 1, replaced)
+
+    const added = __ruvyxaApplyLang('<html data-theme="dark"><body></body></html>', "$'y")
+    assert.match(added, /<html lang="\$'y" data-theme="dark">/)
+    assert.equal(added.match(/<html/g).length, 1, added)
+  })
+
   it('escapes a lang value so it cannot close the attribute', () => {
     const { __ruvyxaApplyLang } = loadPrelude()
     const html = '<html lang="en"></html>'

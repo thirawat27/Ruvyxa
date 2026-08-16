@@ -618,6 +618,28 @@ describe('pwa()', () => {
     assert.equal(second, undefined)
   })
 
+  it('injects a path containing $-substitution characters literally', async () => {
+    // `String.replace` reads `$&`, `` $` ``, `$'`, and `$1` out of a
+    // *replacement string*. The injected tags carry a configured path through
+    // `escapeHtmlAttribute`, which escapes `&` and so cannot neutralize a `$`,
+    // so `$&` used to substitute the matched `</head>` into the tag's own href
+    // and emit a second one.
+    const { middleware } = register(
+      pwa({ name: 'Example', manifestPath: '/manifest$&.webmanifest', routes: ['*'] }),
+    )
+    const htmlResponse = await middleware[0].onResponse(
+      request('/'),
+      new Response('<html><head></head><body>App</body></html>', {
+        headers: { 'content-type': 'text/html; charset=utf-8' },
+      }),
+    )
+    const html = await htmlResponse.text()
+
+    assert.match(html, /href="\/manifest\$&amp;\.webmanifest"/)
+    assert.equal(html.match(/<\/head>/g).length, 1, `exactly one </head>:\n${html}`)
+    assert.equal(html.match(/<\/body>/g).length, 1, `exactly one </body>:\n${html}`)
+  })
+
   it('writes PWA files and patches matching prerendered pages', async () => {
     const { buildComplete } = register(pwa({ name: 'Example', routes: ['/docs', '/docs/*'] }))
     const context = tempBuildContext({ routes: [] })
