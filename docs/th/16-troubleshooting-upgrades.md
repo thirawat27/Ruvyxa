@@ -55,7 +55,9 @@ secret หรือ server-only computation ออกจาก client code แ�
 **อัปเกรดได้โดยไม่มี migration guide ไหม?** repository มี `CHANGELOG.md` แต่เอกสารนี้ไม่อนุมาน
 migration ราย version จากมัน ก่อนอัปเกรดให้เปรียบเทียบ export/config type แล้วรัน `npm run check`,
 `npm run build` และ `npm run test:parity` กับ app ของคุณ ใช้ `Seo.card` แทน `Seo.twitterCard`
-ซึ่งเป็น migration ที่เป็นรูปธรรม
+ซึ่งถูกถอดออกแล้ว เช่นเดียวกับ config key `react`, `typescript` และ `build.target` ที่ถูกถอดออกจาก
+`RuvyxaConfig` ด้วยเหตุผลเดียวกันคือไม่เคยมีผลต่อ behavior ใดๆ config
+เดิมที่ยังตั้งค่าเหล่านี้ยังโหลดได้ แต่ type ไม่มีให้แล้ว จึงจะเห็นตอนรัน `npm run check`
 
 **ก่อนหน้า:** [Deploy, run และ operate ใน production](15-deploy-run-and-operate.md) · **ถัดไป:**
 [Public API reference](17-public-api-reference.md)

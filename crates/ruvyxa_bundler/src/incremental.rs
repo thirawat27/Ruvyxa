@@ -311,11 +311,6 @@ impl IncrementalGraphCache {
         self.current.len()
     }
 
-    /// Check if the cache is enabled.
-    pub fn is_enabled(&self) -> bool {
-        self.enabled
-    }
-
     /// Record one fingerprint-validated dependency-edge reuse.
     pub(crate) fn record_edge_hit(&self) {
         self.edge_hits.fetch_add(1, Ordering::Relaxed);

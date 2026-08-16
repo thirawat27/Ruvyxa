@@ -1470,32 +1470,46 @@ impl NodeWorkerPool {
             }
         };
 
-        let active = {
-            let Ok(mut workers) = self.workers.write() else {
+        // `replacement` is a live child process from here on, so no path may
+        // leave this function without either installing it or shutting it down.
+        // Deciding that under the lock and acting on it after the guard drops
+        // keeps every exit through the single cleanup below — an earlier
+        // version returned straight out of this block on a poisoned lock and on
+        // a missing slot, orphaning the process it had just spawned.
+        let active = match self.workers.write() {
+            Ok(mut workers) => {
+                if workers
+                    .get(index)
+                    .is_some_and(|worker| Arc::ptr_eq(worker, failed))
+                {
+                    workers[index] = replacement.clone();
+                    Some(replacement.clone())
+                } else {
+                    // A slot that no longer holds `failed` was already replaced
+                    // by someone else; `None` means the pool shrank out from
+                    // under this index.
+                    workers.get(index).cloned()
+                }
+            }
+            Err(_) => {
                 warn!(
                     failed_worker = index,
                     "worker pool lock poisoned during replacement"
                 );
-                return None;
-            };
-            if workers
-                .get(index)
-                .is_some_and(|worker| Arc::ptr_eq(worker, failed))
-            {
-                workers[index] = replacement.clone();
-                replacement.clone()
-            } else {
-                workers.get(index)?.clone()
+                None
             }
         };
 
-        if Arc::ptr_eq(&active, &replacement) {
-            failed.shutdown().await;
-        } else {
-            replacement.shutdown().await;
+        match &active {
+            // The replacement took the slot, so the process it displaced goes.
+            Some(worker) if Arc::ptr_eq(worker, &replacement) => failed.shutdown().await,
+            // Either another worker already holds the slot or the pool could
+            // not be read. Both leave the replacement unused, so it must not
+            // outlive this call.
+            _ => replacement.shutdown().await,
         }
 
-        Some(active)
+        active
     }
 
     /// Invalidate bundle caches in all workers concurrently (called on file change).

@@ -56,7 +56,10 @@ changing the prefix.
 **Can I upgrade without a migration guide?** This repository includes `CHANGELOG.md`, but this
 documentation does not infer a version-by-version migration path from it. Before upgrading, compare
 exports/config types and run `npm run check`, `npm run build`, and `npm run test:parity` against
-your app. Treat deprecated `Seo.twitterCard` as a concrete migration: use `Seo.card`.
+your app. `Seo.twitterCard` is one concrete migration: it has been removed, so use `Seo.card`. The
+config keys `react`, `typescript`, and `build.target` are gone from `RuvyxaConfig` for the same
+reason — none of them ever selected any behaviour. A config that still sets one keeps loading, but
+the type no longer offers it, so `npm run check` is where you will see it.
 
 **Previous:** [Deploy, run, and operate in production](15-deploy-run-and-operate.md) · **Next:**
 [Public API reference](17-public-api-reference.md)

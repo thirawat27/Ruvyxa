@@ -311,6 +311,14 @@ impl CompileCache {
     }
 
     /// Invalidate (remove) a specific cache entry.
+    ///
+    /// Keys on `JsxRuntime::Classic`, matching its [`Self::lookup`] and
+    /// [`Self::cache_key`] siblings. The compile path keys on the project's
+    /// real runtime through [`Self::lookup_with_options`], and the default is
+    /// `Automatic` — so wiring this into a watcher or a build step would
+    /// compute a key nothing was ever stored under and remove nothing, quietly.
+    /// Use [`Self::cache_key_with_options_and_namespace`] and delete the file
+    /// directly if a production caller ever needs this.
     pub fn invalidate(&self, source: &str, has_jsx: bool) {
         if !self.enabled {
             return;
@@ -380,11 +388,6 @@ impl CompileCache {
     /// Return the cache directory path for diagnostics/reporting.
     pub fn cache_dir(&self) -> &Path {
         &self.cache_dir
-    }
-
-    /// Return whether the cache is enabled.
-    pub fn is_enabled(&self) -> bool {
-        self.enabled
     }
 
     /// Count the number of cached entries on disk.

@@ -591,25 +591,31 @@ impl RenderCache {
         }
     }
 
+    /// Drop every entry the predicate rejects, keeping the index and the
+    /// recency order in step. Returns how many entries were removed.
+    ///
+    /// Both guards are taken by the caller, which is the only thing that
+    /// differs between the async and blocking invalidation entry points. The
+    /// selection rule itself lives here once: it used to be written out again
+    /// in every variant, so a change to what a route key matches had to be made
+    /// in each copy or the two halves of the same operation would disagree.
+    fn retain_matching(
+        entries: &mut HashMap<Arc<str>, CacheEntry>,
+        order: &mut RecencyList,
+        discard: impl Fn(&str) -> bool,
+    ) -> usize {
+        let before = entries.len();
+        entries.retain(|key, _| !discard(key));
+        order.retain(|key| !discard(key));
+        debug_assert_eq!(entries.len(), order.len());
+        before - entries.len()
+    }
+
     /// Invalidate all entries (called on file change).
     pub async fn invalidate_all(&self) -> usize {
         let mut entries = self.entries.write().await;
-        let invalidated = entries.len();
-        entries.clear();
-        self.order.write().await.clear();
-        invalidated
-    }
-
-    /// Invalidate entries matching a prefix (e.g., a specific route path).
-    pub async fn invalidate_prefix(&self, prefix: &str) -> usize {
-        let mut entries = self.entries.write().await;
-        let before = entries.len();
-        entries.retain(|key, _| !key.starts_with(prefix));
-        self.order
-            .write()
-            .await
-            .retain(|key| !key.starts_with(prefix));
-        before - entries.len()
+        let mut order = self.order.write().await;
+        Self::retain_matching(&mut entries, &mut order, |_| true)
     }
 
     /// Drop every cached render of one concrete URL and force the next one.
@@ -694,44 +700,31 @@ impl RenderCache {
     /// Invalidate SSR/client entries belonging to a route pattern.
     pub async fn invalidate_route(&self, route_path: &str) -> usize {
         let mut entries = self.entries.write().await;
-        let before = entries.len();
-        entries.retain(|key, _| !cache_key_matches_route(key, route_path));
-        self.order
-            .write()
-            .await
-            .retain(|key| !cache_key_matches_route(key, route_path));
-        before - entries.len()
+        let mut order = self.order.write().await;
+        Self::retain_matching(&mut entries, &mut order, |key| {
+            cache_key_matches_route(key, route_path)
+        })
     }
 
     /// Blocking invalidation for use in sync contexts (file watcher).
     pub fn invalidate_all_blocking(&self) -> usize {
         let mut entries = self.entries.blocking_write();
-        let invalidated = entries.len();
-        entries.clear();
-        self.order.blocking_write().clear();
-        invalidated
-    }
-
-    /// Blocking prefix invalidation for use in sync contexts (file watcher).
-    pub fn invalidate_prefix_blocking(&self, prefix: &str) -> usize {
-        let mut entries = self.entries.blocking_write();
-        let before = entries.len();
-        entries.retain(|key, _| !key.starts_with(prefix));
-        self.order
-            .blocking_write()
-            .retain(|key| !key.starts_with(prefix));
-        before - entries.len()
+        let mut order = self.order.blocking_write();
+        Self::retain_matching(&mut entries, &mut order, |_| true)
     }
 
     /// Invalidate SSR/client entries belonging to a route pattern.
+    ///
+    /// This is the file watcher's selective path, and it already reaches the
+    /// route's `client:` entries as well as its `ssr:` ones — see
+    /// `cache_key_matches_route`. A prefix-based variant existed alongside it
+    /// and was only ever called from tests.
     pub fn invalidate_route_blocking(&self, route_path: &str) -> usize {
         let mut entries = self.entries.blocking_write();
-        let before = entries.len();
-        entries.retain(|key, _| !cache_key_matches_route(key, route_path));
-        self.order
-            .blocking_write()
-            .retain(|key| !cache_key_matches_route(key, route_path));
-        before - entries.len()
+        let mut order = self.order.blocking_write();
+        Self::retain_matching(&mut entries, &mut order, |key| {
+            cache_key_matches_route(key, route_path)
+        })
     }
 
     /// Drop an entry whose TTL has passed.
@@ -1035,16 +1028,19 @@ mod tests {
         assert_index_and_order_consistent(&cache).await;
     }
 
+    /// Route invalidation must take a route's `ssr:` and `client:` entries
+    /// together and leave every other route alone. This is what the file
+    /// watcher relies on to avoid serving a stale client bundle after an edit.
     #[tokio::test]
-    async fn test_invalidate_prefix() {
+    async fn invalidate_route_drops_both_namespaces_for_that_route_only() {
         let cache = RenderCache::new(4, 60);
         cache.put("ssr:/a".into(), "1".into()).await;
         cache.put("ssr:/b".into(), "2".into()).await;
         cache.put("client:/a".into(), "3".into()).await;
-        assert_eq!(cache.invalidate_prefix("ssr:").await, 2);
+        assert_eq!(cache.invalidate_route("/a").await, 2);
         assert_eq!(cache.get("ssr:/a").await, None);
-        assert_eq!(cache.get("ssr:/b").await, None);
-        assert_eq!(cache.get("client:/a").await, Some("3".into()));
+        assert_eq!(cache.get("client:/a").await, None);
+        assert_eq!(cache.get("ssr:/b").await, Some("2".into()));
         assert_index_and_order_consistent(&cache).await;
     }
 
@@ -1135,20 +1131,21 @@ mod tests {
         let worker_cache = Arc::clone(&cache);
         let removed = tokio::task::spawn_blocking(move || {
             worker_cache.invalidate_route_blocking("/blog/[slug]")
-                + worker_cache.invalidate_prefix_blocking("client:")
         })
         .await
         .expect("blocking invalidation task must not panic");
 
-        assert_eq!(removed, 3);
+        // Both namespaces of the matched route go; the untouched route stays.
+        assert_eq!(removed, 2);
         assert_eq!(cache.get("ssr:/about").await, Some("3".into()));
+        assert_eq!(cache.get("client:/about").await, Some("4".into()));
         assert_index_and_order_consistent(&cache).await;
 
         let worker_cache = Arc::clone(&cache);
         let removed = tokio::task::spawn_blocking(move || worker_cache.invalidate_all_blocking())
             .await
             .expect("blocking invalidation task must not panic");
-        assert_eq!(removed, 1);
+        assert_eq!(removed, 2);
         assert!(cache.order.read().await.is_empty());
         assert_index_and_order_consistent(&cache).await;
     }
@@ -1239,7 +1236,7 @@ mod tests {
                 "recently written key must stay cached"
             );
             assert_index_and_order_consistent(&cache).await;
-            cache.invalidate_prefix("client:").await;
+            cache.invalidate_route("/b").await;
             assert_index_and_order_consistent(&cache).await;
         }
 

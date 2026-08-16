@@ -101,7 +101,9 @@ cargo run -p ruvyxa_cli -- test:parity --root examples/demo
   a route-matching rule — belongs in `tests/fixtures/*-conformance.json` with a test in each
   language that replays it, not in a comment promising the two stay in sync. `env_read_is_private`
   (private env var policy), `STATIC_CONTENT_TYPES` (static asset Content-Type), and
-  `DEFAULT_SECURITY_HEADERS` all drifted silently before gaining this.
+  `DEFAULT_SECURITY_HEADERS` all drifted silently before gaining this. `env_read_is_private` was
+  listed here while `tests/fixtures/env-policy-conformance.json` did not yet exist and the rule was
+  still held by a comment alone — when this list names a fixture, check that the file is there.
 - Documentation changes should describe actual supported behavior, not intended future behavior.
 - If a check was already failing before your work, report it as baseline and do not weaken tests to
   pass.

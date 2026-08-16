@@ -455,13 +455,14 @@ cargo run -p ruvyxa_cli -- check --root examples/demo
 
 ```text
 ruvyxa/
-├── crates/            # Rust workspace (6 crates)
+├── crates/            # Rust workspace (7 crates)
 │   ├── ruvyxa_cli/        # commands, config loading, build orchestration
 │   ├── ruvyxa_bundler/    # TS/JSX compile, resolve, link, minify, source maps
 │   ├── ruvyxa_dev_server/ # axum server, HMR, worker pool, router, caches
 │   ├── ruvyxa_graph/      # route discovery, validation, render strategies
 │   ├── ruvyxa_middleware/ # Tower layers and the plugin bridge
-│   └── ruvyxa_diagnostics/# RUV#### structured errors
+│   ├── ruvyxa_diagnostics/# RUV#### structured errors
+│   └── ruvyxa_tui/        # terminal layout, progress, mascot, and theme primitives
 ├── packages/          # npm packages (see the table below)
 ├── templates/         # create-ruvyxa starters + plugin scaffold
 ├── examples/demo/     # 23-route integration fixture

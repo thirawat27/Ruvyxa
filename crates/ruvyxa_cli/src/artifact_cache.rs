@@ -123,7 +123,9 @@ pub(crate) fn prerender_context_hash(
         "styles": content_hash(styles),
         "clientAssets": client_assets,
         "jsx": build.jsx_runtime.as_deref().unwrap_or("automatic"),
-        "target": build.es_target.as_deref().unwrap_or("es2022"),
+        // `build.target` is deliberately absent: it selects no transform (see
+        // `BuildConfigOptions::_es_target`), so keying on it only forced a full
+        // rebuild that reproduced byte-identical output.
         "workerRuntime": runtime_script_hashes(root, WORKER_RUNTIME_FILES),
         "projectEnv": project_env,
         "processEnv": process_env,

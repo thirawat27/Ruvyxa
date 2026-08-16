@@ -40,8 +40,6 @@ export interface SeoProps {
    * though the prop does not.
    */
   card?: 'summary' | 'summary_large_image'
-  /** @deprecated Renamed to `card`. Still honored when `card` is absent. */
-  twitterCard?: 'summary' | 'summary_large_image'
   /** Explicit article facts used to generate Article JSON-LD. */
   article?: SeoArticle
   /** Ordered path from the site root to the current page. */
@@ -64,7 +62,6 @@ export function Seo({
   locale,
   noindex = false,
   card,
-  twitterCard,
   article,
   breadcrumbs,
   jsonLd,
@@ -93,7 +90,7 @@ export function Seo({
       {locale ? <meta property="og:locale" content={locale} /> : null}
       {image ? <meta property="og:image" content={image} /> : null}
       {image && imageAlt ? <meta property="og:image:alt" content={imageAlt} /> : null}
-      <meta name="twitter:card" content={card ?? twitterCard ?? 'summary_large_image'} />
+      <meta name="twitter:card" content={card ?? 'summary_large_image'} />
       <meta name="twitter:title" content={title} />
       {description ? <meta name="twitter:description" content={description} /> : null}
       {image ? <meta name="twitter:image" content={image} /> : null}

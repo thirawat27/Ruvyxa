@@ -955,13 +955,12 @@ pub(crate) fn inline_script_json<T: serde::Serialize + ?Sized>(
     value: &T,
     fallback: &str,
 ) -> String {
-    serde_json::to_string(value)
-        .unwrap_or_else(|_| fallback.to_string())
-        .replace('<', "\\u003c")
-        .replace('>', "\\u003e")
-        .replace('&', "\\u0026")
-        .replace('\u{2028}', "\\u2028")
-        .replace('\u{2029}', "\\u2029")
+    // Escaping is `ruvyxa_dev_server`'s, not a copy of it: the dev server and
+    // this writer put the same payload in the same `<script>` element, so a rule
+    // that lived in both could protect one and not the other.
+    ruvyxa_dev_server::safe_json_for_script(
+        &serde_json::to_string(value).unwrap_or_else(|_| fallback.to_string()),
+    )
 }
 
 #[cfg(test)]

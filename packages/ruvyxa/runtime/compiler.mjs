@@ -237,6 +237,24 @@ export function cacheFileName(parts, extension) {
 }
 
 /** Match one leading module directive after BOM, whitespace, and comments. */
+/**
+ * Whether a `process.env.NAME` read must not reach a browser bundle.
+ *
+ * The Rust bundler decides the same thing in `boundary::env_read_is_private`,
+ * and `ruvyxa_graph` calls that one rather than keeping a third copy. This is
+ * the Node half. Both are replayed against
+ * `tests/fixtures/env-policy-conformance.json`, because the rule decides which
+ * secrets may be serialized into a browser bundle and it has drifted before —
+ * it was named in `AGENTS.md` as fixture-held while no such fixture existed.
+ *
+ * @param {string} name Environment variable name, exactly as written in source.
+ * @returns {boolean} True when the read is private.
+ * @public
+ */
+export function envReadIsPrivate(name) {
+  return name !== 'NODE_ENV' && !name.startsWith('RUVYXA_PUBLIC_')
+}
+
 export function hasModuleDirective(source, expected) {
   let index = source.charCodeAt(0) === 0xfeff ? 1 : 0
   while (index < source.length) {
@@ -2046,7 +2064,7 @@ function scanPrivateEnvReads(source, start, templateExpressionDepth, names) {
 
     if (source.startsWith('process.env', index) && isEnvReadBoundary(source, index)) {
       const parsed = parsePrivateEnvName(source, index + 'process.env'.length)
-      if (parsed && parsed.name !== 'NODE_ENV' && !parsed.name.startsWith('RUVYXA_PUBLIC_')) {
+      if (parsed && envReadIsPrivate(parsed.name)) {
         names.push(parsed.name)
       }
       index = parsed?.end ?? index + 'process.env'.length

@@ -460,9 +460,14 @@ fn load_client_manifest(manifest_path: &Path) -> Option<Arc<HashMap<String, Clie
 /// U+2028/U+2029 are line terminators in JavaScript but legal raw characters in
 /// JSON, so they must be escaped too or they end the statement mid-literal.
 /// `\uXXXX` is a legal escape in a JSON string, so the decoded value is
-/// unchanged. This matches the prerender writer's `inline_script_json` in the
-/// CLI: both emit the same `<script>` payload and must agree.
-pub(crate) fn safe_json_for_script(json: &str) -> String {
+/// unchanged.
+///
+/// The CLI's prerender writer emits the same `<script>` payloads and calls this
+/// function. It used to hold a byte-identical copy of these five replacements,
+/// tied to this one by a comment promising they would stay in step — the exact
+/// arrangement `AGENTS.md` names as the thing that drifts. Escaping rules for a
+/// payload two writers embed in the same element belong in one place.
+pub fn safe_json_for_script(json: &str) -> String {
     json.replace('<', "\\u003c")
         .replace('>', "\\u003e")
         .replace('&', "\\u0026")

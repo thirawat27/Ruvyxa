@@ -81,7 +81,8 @@ Transitions API เมื่อ browser รองรับ
 
 ใช้ route `meta` export สำหรับ metadata แบบ hierarchy-aware ([Routing](04-routing-rendering.md))
 หรือใช้ `<Seo>` ใน component สำหรับ tag ต่อ render `<Seo>` สามารถสร้าง Open Graph, X card, Article
-JSON-LD, breadcrumb JSON-LD และ custom JSON-LD prop `twitterCard` ถูก deprecate และแทนด้วย `card`
+JSON-LD, breadcrumb JSON-LD และ custom JSON-LD กำหนดรูปแบบ X card ด้วย `card` ส่วน prop
+`twitterCard` เดิมถูกถอดออกแล้ว
 
 ```tsx
 import { Seo, RuvyxaErrorBoundary } from '@ruvyxa/react'

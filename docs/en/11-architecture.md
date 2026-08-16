@@ -13,6 +13,8 @@ flowchart TB
   CLI --> SERVER[ruvyxa_dev_server]
   SERVER --> MW[ruvyxa_middleware]
   CLI --> DIAG[ruvyxa_diagnostics]
+  CLI --> TUI[ruvyxa_tui]
+  SERVER --> TUI
   BUNDLER --> RT[packages/ruvyxa runtime]
   APP[Application + plugins] --> CLI
   APP --> REACT[@ruvyxa/react]
@@ -27,9 +29,10 @@ boundaries. `ruvyxa_dev_server` supplies Axum serving, routing, HMR, worker pool
 cache/pipeline, static assets, i18n, image handling, and plugin bridge/head integration.
 
 `ruvyxa_middleware` owns built-in middleware configuration/stack and plugin host behavior.
-`ruvyxa_diagnostics` holds shared diagnostic reporting. JavaScript runtime files in
-`packages/ruvyxa/runtime/` execute rendering/compiler/worker/adapters at the boundary where Rust
-invokes TypeScript/React work.
+`ruvyxa_diagnostics` holds shared diagnostic reporting. `ruvyxa_tui` owns shared terminal layout,
+progress, mascot, and theme primitives used by both the CLI and server-facing command output.
+JavaScript runtime files in `packages/ruvyxa/runtime/` execute rendering/compiler/worker/adapters at
+the boundary where Rust invokes TypeScript/React work.
 
 ## Request lifecycle
 

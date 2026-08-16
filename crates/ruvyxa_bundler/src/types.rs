@@ -38,18 +38,6 @@ pub enum SplitStrategy {
     Route,
 }
 
-/// ECMAScript target version for output.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
-#[serde(rename_all = "lowercase")]
-pub enum EsTarget {
-    Es2018,
-    Es2019,
-    Es2020,
-    #[default]
-    Es2022,
-    EsNext,
-}
-
 /// Options forwarded from `ruvyxa.config.ts`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BundleOptions {
@@ -57,7 +45,6 @@ pub struct BundleOptions {
     pub source_map: bool,
     pub tree_shaking: bool,
     pub jsx_runtime: JsxRuntime,
-    pub es_target: EsTarget,
     pub split_strategy: SplitStrategy,
     pub emit_chunk_manifest: bool,
     /// Collect a module graph for internal multi-route coordination without
@@ -72,7 +59,6 @@ impl Default for BundleOptions {
             source_map: false,
             tree_shaking: true,
             jsx_runtime: JsxRuntime::Automatic,
-            es_target: EsTarget::Es2022,
             split_strategy: SplitStrategy::Single,
             emit_chunk_manifest: false,
             collect_module_manifest: false,

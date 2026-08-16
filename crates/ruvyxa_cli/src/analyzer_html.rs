@@ -40,7 +40,7 @@ pub(crate) fn analyze_client_bundle(
         split_strategy: config.build.split_strategy.clone(),
         parallelism: config.build.parallelism,
         jsx_runtime: config.build.jsx_runtime.clone(),
-        es_target: config.build.es_target.clone(),
+        _es_target: None,
         emit_chunk_manifest: Some(true),
         prebundle_dependencies: config.build.prebundle_dependencies,
         prerender_cache: config.build.prerender_cache,

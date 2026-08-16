@@ -493,8 +493,12 @@ fn rewrite_module_into(
     let mut in_commonjs_block_comment = false;
     let module_ast = crate::ast::parse_module(source);
 
+    // Built separately from `out` so the whole rewritten body can be checked
+    // before any of it is committed to the bundle.
+    let body = &mut String::with_capacity(source.len() + 64);
+
     if declares_esm_syntax(source, &module_ast) {
-        write_rewritten_line(out, ESM_NAMESPACE_MARKER, indent);
+        write_rewritten_line(body, ESM_NAMESPACE_MARKER, indent);
     }
 
     for (line, statement_start) in lines_with_statement_offsets(source) {
@@ -503,10 +507,17 @@ fn rewrite_module_into(
         // A line whose first non-whitespace byte sits inside a string,
         // template literal, or comment is text the module means to keep, not a
         // statement to rewrite. Rewriting it edits the literal's contents.
+        let normalized = if module_ast.is_code_offset(statement_start) {
+            normalize_esm_statement(trimmed)
+        } else {
+            None
+        };
+        let statement = normalized.as_deref().unwrap_or(trimmed);
+
         let rewritten = if module_ast.is_code_offset(statement_start) {
-            try_rewrite_import(trimmed, deps, drop_external_imports)?
+            try_rewrite_import(statement, deps, drop_external_imports)?
                 .map(Rewrite::Inline)
-                .or_else(|| try_rewrite_export_statement(trimmed, deps))
+                .or_else(|| try_rewrite_export_statement(statement, deps))
         } else {
             None
         };
@@ -532,13 +543,65 @@ fn rewrite_module_into(
             drop_external_imports,
             importer,
         );
-        write_rewritten_line(out, &commonjs_rewritten, indent);
+        write_rewritten_line(body, &commonjs_rewritten, indent);
     }
 
     for assignment in pending_exports {
-        write_rewritten_line(out, &assignment, indent);
+        write_rewritten_line(body, &assignment, indent);
     }
 
+    reject_surviving_esm(body, importer)?;
+    out.push_str(body);
+    Ok(())
+}
+
+/// Fail when an ESM statement survived rewriting into the module body.
+///
+/// Every module is wrapped in an IIFE, where `import`/`export` are syntax
+/// errors. The rewriters work a line at a time, so a module that puts more than
+/// one statement on a line — which is what a minified `dist` file is —
+/// keeps its `export` and the whole bundle stops parsing in the browser. That
+/// used to happen with no build-time signal at all: the bad bytes were copied
+/// through and only the browser complained, about a generated file.
+///
+/// Naming the module here turns that into an actionable build failure. It is a
+/// guard, not the fix: linking minified ESM would mean the rewriters working on
+/// statements rather than lines.
+fn reject_surviving_esm(body: &str, module_path: &str) -> Result<()> {
+    let masked = crate::ast::masked_code(body);
+    let bytes = masked.as_bytes();
+    for (keyword, offset) in masked
+        .match_indices("export")
+        .map(|(at, _)| ("export", at))
+        .chain(masked.match_indices("import").map(|(at, _)| ("import", at)))
+    {
+        let starts_token = offset
+            .checked_sub(1)
+            .is_none_or(|before| !is_linker_identifier_byte(bytes[before]));
+        let after = offset + keyword.len();
+        let ends_token = bytes
+            .get(after)
+            .is_none_or(|byte| !is_linker_identifier_byte(*byte));
+        if !starts_token || !ends_token {
+            continue;
+        }
+        // `import(…)` and `import.meta` are expressions and are legal here.
+        if keyword == "import" {
+            let next = masked[after..]
+                .bytes()
+                .find(|byte| !byte.is_ascii_whitespace());
+            if matches!(next, Some(b'(') | Some(b'.')) {
+                continue;
+            }
+        }
+        return Err(BundleError::Compiler(format!(
+            "RUV1612 {module_path} still contains a top-level `{keyword}` after linking, \
+             so the bundle would not parse in a browser. Modules whose statements share \
+             a line are normally re-printed one statement per line before linking, which \
+             means this module could not be parsed for re-printing. Check it for syntax \
+             this build does not support, or add the package to `build.external`."
+        )));
+    }
     Ok(())
 }
 
@@ -869,6 +932,113 @@ fn write_rewritten_line(out: &mut String, content: &str, indent: bool) {
 enum Rewrite {
     Inline(String),
     Pending { line: String, assignment: String },
+}
+
+/// Give a minified ESM statement the spacing every rewriter below expects.
+///
+/// The rewriters detect statements with `starts_with("export ")` /
+/// `starts_with("import ")` and locate the specifier with `" from "`. That is a
+/// *space* test standing in for a token-boundary test, and a minifier does not
+/// emit the space: `export{a as B};` and `import{x}from"./m"` are what a
+/// package's published `dist` actually contains. `compile_module` hands `.js` /
+/// `.mjs` / `.cjs` through untouched, so those bytes reach the linker exactly as
+/// written — and, matching nothing, were copied verbatim into the module IIFE.
+/// An `export` inside a function body is a syntax error, so a single minified
+/// ESM dependency made the whole bundle fail to parse in the browser, with no
+/// build-time complaint.
+///
+/// Returns `None` when the line needs no change, so the common already-spaced
+/// path allocates nothing.
+fn normalize_esm_statement(line: &str) -> Option<String> {
+    let bytes = line.as_bytes();
+    let keyword = ["import", "export"].into_iter().find(|keyword| {
+        bytes.starts_with(keyword.as_bytes())
+            && bytes
+                .get(keyword.len())
+                .is_none_or(|byte| !is_linker_identifier_byte(*byte))
+    })?;
+
+    // Masked so a `from` inside a string or comment is not treated as the
+    // specifier separator. Blanking preserves byte offsets, so positions found
+    // here index the original line.
+    let masked = crate::ast::masked_code(line);
+
+    let mut insertions: Vec<usize> = Vec::new();
+    if bytes
+        .get(keyword.len())
+        .is_some_and(|byte| !byte.is_ascii_whitespace())
+    {
+        insertions.push(keyword.len());
+    }
+
+    // `import*as ns from…`: the namespace star is a token of its own, and the
+    // clause parser reads `*as` as one word. Only the star that opens the
+    // clause is spaced, so multiplication anywhere else in the statement is
+    // untouched.
+    let star = keyword.len()
+        + line[keyword.len()..]
+            .bytes()
+            .take_while(u8::is_ascii_whitespace)
+            .count();
+    if bytes.get(star) == Some(&b'*')
+        && bytes
+            .get(star + 1)
+            .is_some_and(|byte| is_linker_identifier_byte(*byte))
+    {
+        insertions.push(star + 1);
+    }
+
+    let mut cursor = keyword.len();
+    while let Some(found) = masked[cursor..].find("from") {
+        let at = cursor + found;
+        cursor = at + "from".len();
+        // The mask decides *where* a real `from` is; every adjacency question is
+        // asked of the original bytes. A masked string is all blanks, so asking
+        // the mask whether a space already separates `from` from its specifier
+        // always answered yes and `from"./m"` kept its missing space.
+        let starts_token = at
+            .checked_sub(1)
+            .is_none_or(|before| !is_linker_identifier_byte(bytes[before]));
+        let ends_token = bytes
+            .get(at + "from".len())
+            .is_none_or(|byte| !is_linker_identifier_byte(*byte));
+        if !starts_token || !ends_token {
+            continue;
+        }
+        if at
+            .checked_sub(1)
+            .is_some_and(|before| !bytes[before].is_ascii_whitespace())
+        {
+            insertions.push(at);
+        }
+        if bytes
+            .get(at + "from".len())
+            .is_some_and(|byte| !byte.is_ascii_whitespace())
+        {
+            insertions.push(at + "from".len());
+        }
+    }
+
+    if insertions.is_empty() {
+        return None;
+    }
+    insertions.sort_unstable();
+    // `export*from"./m"` reaches the same gap from the star rule and the `from`
+    // rule; one space is wanted, not two.
+    insertions.dedup();
+    let mut out = String::with_capacity(line.len() + insertions.len());
+    let mut previous = 0;
+    for at in insertions {
+        out.push_str(&line[previous..at]);
+        out.push(' ');
+        previous = at;
+    }
+    out.push_str(&line[previous..]);
+    Some(out)
+}
+
+fn is_linker_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$'
 }
 
 /// Try to rewrite an import statement. Returns None if the line is not an import.
@@ -1789,6 +1959,84 @@ fn extract_var_declaration_name(decl: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A minifier drops the space the rewriters used to require. These forms
+    /// must reach the same rewrite as their spaced equivalents, not be copied
+    /// verbatim into a module IIFE where `export` does not parse.
+    #[test]
+    fn minified_esm_statements_are_normalized_before_rewriting() {
+        for (minified, spaced) in [
+            ("export{a as Mini};", "export {a as Mini};"),
+            ("export*from\"./m\";", "export * from \"./m\";"),
+            ("export{a}from\"./m\";", "export {a} from \"./m\";"),
+            ("import{x}from\"./m\";", "import {x} from \"./m\";"),
+            ("import*as ns from\"./m\";", "import * as ns from \"./m\";"),
+        ] {
+            assert_eq!(
+                normalize_esm_statement(minified).as_deref(),
+                Some(spaced),
+                "{minified}"
+            );
+        }
+
+        // Already-spaced statements are left alone, so the common path does no
+        // work and no existing output shifts.
+        for spaced in [
+            "export { a as Mini };",
+            "import { x } from \"./m\";",
+            "export default function Page() {}",
+        ] {
+            assert_eq!(normalize_esm_statement(spaced), None, "{spaced}");
+        }
+
+        // A `from` inside a string is not the specifier separator.
+        assert_eq!(
+            normalize_esm_statement("export const note = \"copied from here\";"),
+            None
+        );
+    }
+
+    /// Re-spacing is only worth anything if the result then rewrites. This walks
+    /// the same two steps `rewrite_module_into` does.
+    #[test]
+    fn a_minified_named_export_rewrites_into_exports_assignments() {
+        let normalized =
+            normalize_esm_statement("export{a as Mini};").expect("the minified form needs spacing");
+        let rewritten = try_rewrite_export(&normalized, &[]);
+        assert_eq!(rewritten.as_deref(), Some("__exports.Mini = a;"));
+    }
+
+    /// The guard is what keeps a module the line-based rewriters cannot handle
+    /// out of the bundle. Several statements on one line — a minified `dist`
+    /// build — leave the `export` in place, and an `export` inside the module
+    /// IIFE is a syntax error that used to reach the browser unannounced.
+    #[test]
+    fn a_surviving_top_level_export_fails_the_link_and_names_the_module() {
+        let error = reject_surviving_esm("const a=1;export{a as Mini};", "node_modules/m/index.js")
+            .expect_err("a surviving export must fail the link");
+        let message = error.to_string();
+        assert!(message.contains("RUV1612"), "{message}");
+        assert!(message.contains("node_modules/m/index.js"), "{message}");
+    }
+
+    /// The guard must not fire on the expression forms of `import`, on rewritten
+    /// bodies, or on the words appearing in text.
+    #[test]
+    fn the_surviving_esm_guard_accepts_legal_module_bodies() {
+        for body in [
+            "const m = await import(\"./lazy.js\");",
+            "const url = import.meta.url;",
+            "__exports.Mini = a;",
+            "const exported = 1; const important = 2;",
+            "// export { a } from \"./m\"",
+            "const doc = 'export { a }';",
+        ] {
+            assert!(
+                reject_surviving_esm(body, "app/page.tsx").is_ok(),
+                "must not fire: {body}"
+            );
+        }
+    }
 
     /// Build a compiled module the way the pipeline does, so tests exercise the
     /// same construction path — including the single AST parse — as a real build.

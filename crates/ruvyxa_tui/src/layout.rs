@@ -12,7 +12,7 @@ use std::time::Duration;
 
 use chrono::Local;
 
-use crate::theme::{accent, dim, label, ok_text, paint, warn_text};
+use crate::theme::{dim, label, ok_text, paint, warn_text};
 
 /// Width of the label column in a `key: value` field line.
 pub const FIELD_LABEL_WIDTH: usize = 22;
@@ -159,10 +159,6 @@ pub fn exists_status(path: &Path) -> String {
 
 pub fn enabled_text(enabled: bool) -> &'static str {
     if enabled { "on" } else { "off" }
-}
-
-pub fn accent_count(value: usize) -> String {
-    accent(value.to_string())
 }
 
 /// A named divider that breaks a long field list into readable groups.

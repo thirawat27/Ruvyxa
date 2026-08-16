@@ -203,6 +203,38 @@ fn private_env_reads(module: &ast::ModuleAst) -> Vec<String> {
 mod tests {
     use super::*;
 
+    /// The private-env policy has two implementations — this one, which
+    /// `ruvyxa_graph` also calls, and `envReadIsPrivate` in
+    /// `packages/ruvyxa/runtime/compiler.mjs`. They decide which secrets may be
+    /// serialized into a browser bundle, they cannot share code across the
+    /// language boundary, and the rule has already drifted once.
+    ///
+    /// `tests/packages/ruvyxa/env-policy.test.mjs` replays the same file through
+    /// the Node half. A change made in one language and not the other fails here.
+    #[test]
+    fn matches_the_shared_cross_language_env_policy_table() {
+        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/env-policy-conformance.json");
+        let fixture: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&fixture_path)
+                .unwrap_or_else(|error| panic!("read {}: {error}", fixture_path.display())),
+        )
+        .expect("conformance fixture is valid JSON");
+
+        let cases = fixture["cases"].as_array().expect("fixture declares cases");
+        assert!(!cases.is_empty(), "the fixture must carry cases");
+        for case in cases {
+            let name = case["name"].as_str().expect("case name");
+            let expected = case["private"].as_bool().expect("case verdict");
+            let why = case["why"].as_str().unwrap_or("");
+            assert_eq!(
+                env_read_is_private(name),
+                expected,
+                "process.env.{name} — {why}"
+            );
+        }
+    }
+
     /// Parse then filter, the same two steps the boundary check performs.
     ///
     /// These cases predate the scanner merge and are kept whole: they are the

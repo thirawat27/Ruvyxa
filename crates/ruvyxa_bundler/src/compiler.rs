@@ -192,6 +192,87 @@ fn compile_json_module(source: &str, path: &Path) -> Result<String> {
 ///
 /// Without this the file reaches the JavaScript transform and Oxc reports a
 /// syntax error inside a dependency the application never wrote.
+/// Re-print JavaScript whose ESM statements share a line, one statement per line.
+///
+/// Returns `None` when nothing needs changing, so a well-formed dependency is
+/// not parsed at all. Also returns `None` when the source cannot be parsed or
+/// re-printed: this is an optimisation for the linker's benefit, never a reason
+/// to fail a build here. The linker's `RUV1612` guard still refuses anything
+/// that remains unlinkable, so giving up quietly cannot ship broken output.
+fn expand_multi_statement_esm(source: &str) -> Option<String> {
+    if !has_esm_statement_sharing_a_line(source) {
+        return None;
+    }
+
+    let allocator = Allocator::default();
+    let parsed = Parser::new(&allocator, source, SourceType::unambiguous()).parse();
+    if !parsed.diagnostics.is_empty() {
+        return None;
+    }
+    // Default codegen, not `minify()`: the point is the newline between
+    // statements. Legal comments are kept because a dependency's licence notice
+    // travels in one, and this is the only pass that would otherwise drop it.
+    let printed = Codegen::new()
+        .with_options(oxc::codegen::CodegenOptions {
+            comments: oxc::codegen::CommentOptions {
+                normal: false,
+                jsdoc: false,
+                annotation: true,
+                legal: oxc::codegen::LegalComment::Inline,
+            },
+            ..Default::default()
+        })
+        .build(&parsed.program)
+        .code;
+    (!printed.is_empty()).then_some(printed)
+}
+
+/// Whether any `import`/`export` statement is not the first token on its line.
+///
+/// Uses [`ast::masked_code`] so the words are only counted where they are code,
+/// and so this agrees with the linker about where text begins and ends. The
+/// expression forms `import(…)` and `import.meta` are not statements and do not
+/// need a line of their own.
+pub(crate) fn has_esm_statement_sharing_a_line(source: &str) -> bool {
+    if !source.contains("import") && !source.contains("export") {
+        return false;
+    }
+    let masked = ast::masked_code(source);
+    masked.lines().any(|line| {
+        let bytes = line.as_bytes();
+        ["export", "import"].iter().any(|keyword| {
+            line.match_indices(keyword).any(|(at, _)| {
+                let starts_token = at
+                    .checked_sub(1)
+                    .is_none_or(|before| !is_ascii_identifier_byte(bytes[before]));
+                let ends_token = bytes
+                    .get(at + keyword.len())
+                    .is_none_or(|byte| !is_ascii_identifier_byte(*byte));
+                if !starts_token || !ends_token {
+                    return false;
+                }
+                // Already the first token on this line: the linker handles it.
+                if line[..at].trim().is_empty() {
+                    return false;
+                }
+                if *keyword == "import" {
+                    let next = line[at + keyword.len()..]
+                        .bytes()
+                        .find(|byte| !byte.is_ascii_whitespace());
+                    if matches!(next, Some(b'(') | Some(b'.')) {
+                        return false;
+                    }
+                }
+                true
+            })
+        })
+    })
+}
+
+fn is_ascii_identifier_byte(byte: u8) -> bool {
+    byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'$'
+}
+
 fn reject_unsupported_module_kind(ext: &str, path: &Path) -> Result<()> {
     if ext.is_empty()
         || MODULE_KIND_EXTENSIONS
@@ -280,6 +361,19 @@ fn compile_module(
 
     // Virtual entries and plain JavaScript pass through after registered transforms.
     if matches!(ext, "js" | "mjs" | "cjs") || module.path.to_string_lossy().contains("ruvyxa:") {
+        // ...but only after its statements are given one line each. The linker
+        // rewrites ESM a line at a time, and this is the one path that reaches
+        // it without having been through codegen — a `.ts`/`.tsx` module is
+        // always re-printed by the transform below. A published `dist` build is
+        // routinely minified, so `const a=1;export{a as B};` arrived here
+        // verbatim, matched none of the linker's line patterns, and was copied
+        // into the module IIFE where `export` is a syntax error: the whole
+        // browser bundle stopped parsing, with nothing said at build time.
+        //
+        // Re-printing is skipped unless the module actually has an ESM
+        // statement sharing a line, so the overwhelmingly common well-formed
+        // dependency costs one scan and no parse.
+        let source = expand_multi_statement_esm(&source).unwrap_or(source);
         return Ok(CompiledModuleOutput {
             module: CompiledModule::new(
                 module.path.clone(),

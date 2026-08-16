@@ -70,7 +70,8 @@ ruvyxa/
 │   ├── ruvyxa_dev_server/     # Dev + production HTTP server, HMR, render cache, worker pool
 │   ├── ruvyxa_graph/          # Route discovery, validation, rendering strategy detection
 │   ├── ruvyxa_middleware/     # Tower middleware plus the TypeScript plugin host bridge
-│   └── ruvyxa_diagnostics/    # Structured error types (RUV#### codes)
+│   ├── ruvyxa_diagnostics/    # Structured error types (RUV#### codes)
+│   └── ruvyxa_tui/            # Terminal layout, progress, mascot, and theme primitives
 ├── packages/                  # TypeScript packages (npm)
 │   ├── ruvyxa/                # Main package (CLI wrapper + runtime Node scripts)
 │   ├── create-ruvyxa/         # Project scaffolding

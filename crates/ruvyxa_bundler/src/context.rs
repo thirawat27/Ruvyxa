@@ -66,23 +66,6 @@ impl BundleContext {
         }
     }
 
-    /// Create a context with explicit caches and a TypeScript build-hook host.
-    pub fn with_build_hooks(
-        compile_cache: CompileCache,
-        graph_cache: ResolveGraphCache,
-        incremental: IncrementalGraphCache,
-        build_hooks: BuildHookPipeline,
-    ) -> Self {
-        Self {
-            compile_cache,
-            graph_cache,
-            incremental,
-            artifacts: ArtifactTaskGraph::disabled(),
-            cache_budget: default_cache_budget(),
-            build_hooks,
-        }
-    }
-
     /// Create a build-hook context with a namespaced persistent artifact graph.
     /// The hook implementation and inputs must be represented by `namespace`.
     pub fn with_build_hooks_for_build(

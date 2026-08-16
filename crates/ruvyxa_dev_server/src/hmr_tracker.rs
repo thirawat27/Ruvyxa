@@ -286,7 +286,10 @@ impl HmrTracker {
         *self.state.write() = HmrState::default();
     }
 
-    /// Number of tracked files.
+    /// Number of tracked files. Test-only: `tracked_route_count` is the one the
+    /// server reports, and this exists so a test can assert the file index and
+    /// the route index stayed in step.
+    #[cfg(test)]
     pub fn tracked_file_count(&self) -> usize {
         self.state.read().file_to_routes.len()
     }

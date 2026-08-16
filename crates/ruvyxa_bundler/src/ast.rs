@@ -141,7 +141,13 @@ pub fn has_named_runtime_export(source: &str, ast: &ModuleAst, name: &str) -> bo
 }
 
 fn is_identifier_boundary(source: &str, start: usize, length: usize) -> bool {
-    let before = source.as_bytes().get(start.saturating_sub(1));
+    // `checked_sub`, not `saturating_sub`: at offset 0 there is no preceding
+    // byte, and clamping to 0 made the keyword its own left neighbour. The
+    // first byte of `export` is an identifier byte, so a module whose very
+    // first characters were `export const flight = …` failed the boundary
+    // check and its export went unseen — while the same source with one
+    // leading newline was recognized.
+    let before = start.checked_sub(1).and_then(|i| source.as_bytes().get(i));
     let after = source.as_bytes().get(start + length);
     !before.is_some_and(|byte| is_identifier_byte(*byte))
         && !after.is_some_and(|byte| is_identifier_byte(*byte))
@@ -967,6 +973,54 @@ pub(crate) fn skip_non_code(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The keyword's own position must not be treated as the byte before it.
+    /// A module that opens directly with the export — no import, no directive,
+    /// no blank line — is the case a leading-newline fixture never reaches, and
+    /// it is exactly how a small route module is written.
+    #[test]
+    fn named_runtime_export_is_found_at_the_very_start_of_a_module() {
+        for source in [
+            "export const flight = true\n",
+            "export function flight() {}\n",
+            "export async function flight() {}\n",
+            "export class flight {}\n",
+        ] {
+            let ast = parse_module(source);
+            assert!(
+                has_named_runtime_export(source, &ast, "flight"),
+                "offset-zero export must be seen: {source:?}"
+            );
+
+            // The same source one byte further in must agree, or the boundary
+            // check is position-dependent again.
+            let shifted = format!("\n{source}");
+            let shifted_ast = parse_module(&shifted);
+            assert!(
+                has_named_runtime_export(&shifted, &shifted_ast, "flight"),
+                "shifted export must be seen: {shifted:?}"
+            );
+        }
+    }
+
+    /// The boundary check still has to reject look-alikes at offset zero rather
+    /// than accept everything now that the clamp is gone.
+    #[test]
+    fn named_runtime_export_still_rejects_look_alikes() {
+        for source in [
+            "exports.flight = true\n",
+            "reexport const flight = true\n",
+            "export const flightPlan = true\n",
+            "// export const flight = true\n",
+            "const doc = 'export const flight = true'\n",
+        ] {
+            let ast = parse_module(source);
+            assert!(
+                !has_named_runtime_export(source, &ast, "flight"),
+                "must not match: {source:?}"
+            );
+        }
+    }
 
     #[test]
     fn parses_static_dynamic_and_re_export_imports() {

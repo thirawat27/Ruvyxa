@@ -4,24 +4,25 @@
 > จึงใช้ในแอปได้อย่างมั่นใจ **เริ่มจาก:** บทใดก็ได้ที่คุณต้องยืนยันความสามารถ **Checkpoint:** แยก
 > framework contract ที่รองรับออกจาก implementation detail ที่เป็นของ provider ได้
 
-หน้านี้คือ inventory ของ source ที่ใช้เขียนเอกสารชุดนี้ มันบันทึก code path
-ที่ตรวจและบทที่อธิบายพฤติกรรมที่ผู้ใช้เกี่ยวข้อง ไม่ใช่การกล่าวอ้างว่า private implementation
-ที่ไม่อยู่ในเอกสารเป็น public API
+หน้านี้จับคู่หัวข้อถาวรแต่ละส่วนกับ source tree ที่รับผิดชอบ และบทที่อธิบายพฤติกรรม
+ที่ผู้ใช้เกี่ยวข้อง implementation path คือ source of truth; นี่ไม่ใช่การกล่าวอ้างว่า private
+implementation ที่ไม่อยู่ในเอกสารเป็น public API
 
-| Inventory area         | หลักฐานที่ตรวจ                                                                                                   | เอกสาร                                                                                                                                   |
-| ---------------------- | ---------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| CLI/config/build       | `crates/ruvyxa_cli/src/main.rs`, `config.rs`, `build.rs`, `commands.rs`, `runtime_config.rs`, `prerender.rs`     | [CLI](10-cli.md), [Configuration](07-configuration.md), [Deploy และ operate](15-deploy-run-and-operate.md)                               |
-| Route graph            | `crates/ruvyxa_graph/src/lib.rs`                                                                                 | [โครงสร้างโปรเจกต์](03-project-structure.md), [Routing](04-routing-rendering.md)                                                         |
-| Bundler/boundary       | `crates/ruvyxa_bundler/src/{compiler,resolver,linker,output,boundary,style_module,cache}.rs`                     | [Architecture](11-architecture.md), [Security](13-security.md)                                                                           |
-| Dev server             | `crates/ruvyxa_dev_server/src/{lib,router,render_pipeline,render_cache,worker_pool,style,i18n,dynamic_image}.rs` | [Architecture](11-architecture.md), [Performance](14-observability-performance.md)                                                       |
-| Middleware/diagnostic  | `crates/ruvyxa_middleware/src/*`, `crates/ruvyxa_diagnostics/src/lib.rs`                                         | [Plugin](08-plugins-middleware.md), [Security](13-security.md)                                                                           |
-| Core surface           | `packages/@ruvyxa/core/src/{index,types,server,config,plugin}.ts`                                                | [ข้อมูล](05-data-actions-api.md), [Configuration](07-configuration.md), [API reference](17-public-api-reference.md)                      |
-| React surface          | `packages/@ruvyxa/react/src/*`                                                                                   | [UI และ asset](06-ui-navigation-metadata-and-assets.md), [Routing](04-routing-rendering.md), [API reference](17-public-api-reference.md) |
-| First-party plugin     | `packages/ruvyxa/src/plugins.ts`                                                                                 | [Plugin](08-plugins-middleware.md), [Observability](14-observability-performance.md)                                                     |
-| Runtime/adapter        | `packages/ruvyxa/runtime/*`, `packages/@ruvyxa/adapter-*/src/index.ts`                                           | [Architecture](11-architecture.md), [Deploy และ operate](15-deploy-run-and-operate.md)                                                   |
-| Auth/database/realtime | `packages/@ruvyxa/{auth,database,realtime}/src/*`                                                                | [การเชื่อมต่อ](09-integrations-auth-data-and-realtime.md), [Security](13-security.md)                                                    |
-| Creation/testing       | `packages/create-ruvyxa/src/*`, template, `packages/@ruvyxa/testing/src/index.ts`, test                          | [สร้าง app แรก](02-create-your-first-app.md), [Development และ testing](12-development-testing.md)                                       |
-| Demo example           | `examples/demo/app/*`, `examples/demo/plugins/*`, `examples/demo/ruvyxa.config.ts`                               | บท 03–09                                                                                                                                 |
+| Source area            | Implementation ที่รับผิดชอบ                                                                  | เอกสาร                                                                                                                                   |
+| ---------------------- | -------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
+| CLI/config/build       | `crates/ruvyxa_cli/src/*` และ `packages/ruvyxa/runtime/{config-renderer,adapter-runner}.mjs` | [CLI](10-cli.md), [Configuration](07-configuration.md), [Deploy และ operate](15-deploy-run-and-operate.md)                               |
+| Route graph            | `crates/ruvyxa_graph/src/lib.rs`                                                             | [โครงสร้างโปรเจกต์](03-project-structure.md), [Routing](04-routing-rendering.md)                                                         |
+| Bundler/boundary       | `crates/ruvyxa_bundler/src/*`                                                                | [Architecture](11-architecture.md), [Security](13-security.md)                                                                           |
+| Dev server             | `crates/ruvyxa_dev_server/src/*`                                                             | [Architecture](11-architecture.md), [Performance](14-observability-performance.md)                                                       |
+| Middleware/diagnostic  | `crates/ruvyxa_middleware/src/*`, `crates/ruvyxa_diagnostics/src/lib.rs`                     | [Plugin](08-plugins-middleware.md), [Security](13-security.md)                                                                           |
+| Terminal presentation  | `crates/ruvyxa_tui/src/*`                                                                    | [CLI](10-cli.md), [Architecture](11-architecture.md)                                                                                     |
+| Core surface           | `packages/@ruvyxa/core/src/{index,types,server,config,plugin}.ts`                            | [ข้อมูล](05-data-actions-api.md), [Configuration](07-configuration.md), [API reference](17-public-api-reference.md)                      |
+| React surface          | `packages/@ruvyxa/react/src/*`                                                               | [UI และ asset](06-ui-navigation-metadata-and-assets.md), [Routing](04-routing-rendering.md), [API reference](17-public-api-reference.md) |
+| First-party plugin     | `packages/ruvyxa/src/plugins.ts`                                                             | [Plugin](08-plugins-middleware.md), [Observability](14-observability-performance.md)                                                     |
+| Runtime/adapter        | `packages/ruvyxa/runtime/*`, `packages/@ruvyxa/adapter-*/src/index.ts`                       | [Architecture](11-architecture.md), [Deploy และ operate](15-deploy-run-and-operate.md)                                                   |
+| Auth/database/realtime | `packages/@ruvyxa/{auth,database,realtime}/src/*`                                            | [การเชื่อมต่อ](09-integrations-auth-data-and-realtime.md), [Security](13-security.md)                                                    |
+| Creation/testing       | `packages/create-ruvyxa/src/*`, template, `packages/@ruvyxa/testing/src/index.ts`, test      | [สร้าง app แรก](02-create-your-first-app.md), [Development และ testing](12-development-testing.md)                                       |
+| Demo example           | `examples/demo/app/*`, `examples/demo/plugins/*`, `examples/demo/ruvyxa.config.ts`           | บท 03–09                                                                                                                                 |
 
 ## Inventory ของ command ที่ตรวจแล้ว
 

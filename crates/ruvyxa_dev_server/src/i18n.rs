@@ -13,7 +13,13 @@ pub(crate) fn locale_redirect_path(
 ) -> Option<String> {
     let config = config?;
     if !matches!(method, "GET" | "HEAD")
-        || request_path.starts_with("/__ruvyxa")
+        // Matched as a whole segment, like the `/api` case below it. Every
+        // reserved endpoint lives under `/__ruvyxa/`, so a bare prefix test
+        // also swallowed project routes that merely start with those bytes —
+        // `/__ruvyxa-notes` is a page a project may legitimately own, and it
+        // was silently excluded from locale redirection.
+        || request_path == "/__ruvyxa"
+        || request_path.starts_with("/__ruvyxa/")
         || request_path == "/api"
         || request_path.starts_with("/api/")
         || std::path::Path::new(request_path).extension().is_some()
@@ -196,6 +202,56 @@ mod tests {
             HeaderValue::from_static("x=1; RUVYXA_LOCALE=th"),
         );
         assert_eq!(preferred_locale(&config, &headers), "th");
+    }
+
+    /// Reserved paths are excluded by whole segment, not by raw byte prefix.
+    /// A project route whose name merely begins with `/__ruvyxa` or `/api` is
+    /// the project's own page and must still be redirected to a locale.
+    #[test]
+    fn reserved_prefixes_are_excluded_by_segment_not_by_byte_prefix() {
+        let manifest = RouteManifest {
+            app_dir: PathBuf::from("app"),
+            i18n: Some(config()),
+            routes: vec![RouteEntry {
+                id: "app/[lang]/__ruvyxa-notes/page".into(),
+                path: "/[lang]/__ruvyxa-notes".into(),
+                kind: RouteKind::Page,
+                file: PathBuf::from("app/[lang]/__ruvyxa-notes/page.tsx"),
+                layout_chain: vec![],
+                server_modules: vec![],
+                client_modules: vec![],
+                runtime: ruvyxa_graph::RuntimeTarget::Node,
+                render: Default::default(),
+            }],
+        };
+        let router = RadixRouter::compile(&manifest);
+        let headers = HeaderMap::new();
+
+        assert_eq!(
+            locale_redirect_path(
+                Some(&config()),
+                &manifest,
+                &router,
+                "/__ruvyxa-notes",
+                "GET",
+                &headers
+            ),
+            Some("/en/__ruvyxa-notes".to_string()),
+            "a project page is not a reserved endpoint just because it shares a byte prefix"
+        );
+
+        // The real reserved namespace still opts out.
+        assert_eq!(
+            locale_redirect_path(
+                Some(&config()),
+                &manifest,
+                &router,
+                "/__ruvyxa/flight",
+                "GET",
+                &headers
+            ),
+            None
+        );
     }
 
     #[test]

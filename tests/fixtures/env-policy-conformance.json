@@ -1,0 +1,38 @@
+{
+  "description": "Which `process.env.NAME` reads may reach a browser bundle. The Rust bundler (`boundary::env_read_is_private`, also used by `ruvyxa_graph`) and the Node compiler (`envReadIsPrivate` in `runtime/compiler.mjs`) each decide this independently, so both replay this table. AGENTS.md already listed this policy as fixture-held; it was not, and the rule had drifted once before.",
+  "rule": "A read is private unless the name is exactly NODE_ENV or begins with RUVYXA_PUBLIC_.",
+  "cases": [
+    {
+      "name": "NODE_ENV",
+      "private": false,
+      "why": "substituted at build time; the most ordinary line in a React app"
+    },
+    {
+      "name": "RUVYXA_PUBLIC_API_URL",
+      "private": false,
+      "why": "the documented browser-safe prefix"
+    },
+    { "name": "RUVYXA_PUBLIC_", "private": false, "why": "bare prefix still carries the opt-in" },
+    { "name": "DATABASE_URL", "private": true, "why": "ordinary secret" },
+    {
+      "name": "NODE_ENVIRONMENT",
+      "private": true,
+      "why": "NODE_ENV is exempt by exact match, not by prefix"
+    },
+    { "name": "MY_NODE_ENV", "private": true, "why": "exemption is not a substring match" },
+    { "name": "node_env", "private": true, "why": "the exemption is case-sensitive" },
+    {
+      "name": "RUVYXA_PUBLIC",
+      "private": true,
+      "why": "missing the trailing underscore is not the public prefix"
+    },
+    { "name": "PREFIX_RUVYXA_PUBLIC_X", "private": true, "why": "the prefix must start the name" },
+    { "name": "ruvyxa_public_key", "private": true, "why": "the prefix is case-sensitive" },
+    {
+      "name": "RUVYXA_SECRET",
+      "private": true,
+      "why": "a framework-looking name is not automatically public"
+    },
+    { "name": "", "private": true, "why": "an empty name is not an exemption" }
+  ]
+}

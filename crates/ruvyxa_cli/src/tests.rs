@@ -832,10 +832,6 @@ fn parses_ruvyxa_bundler_build_options() {
         ruvyxa_bundler::JsxRuntime::Automatic
     ));
     assert!(matches!(
-        parse_es_target(Some("esnext")).unwrap(),
-        ruvyxa_bundler::EsTarget::EsNext
-    ));
-    assert!(matches!(
         parse_split_strategy(Some("route")).unwrap(),
         ruvyxa_bundler::SplitStrategy::Route
     ));
@@ -917,8 +913,38 @@ fn resolves_shared_build_cache_directory() {
 #[test]
 fn rejects_invalid_ruvyxa_bundler_build_options() {
     assert!(parse_jsx_runtime(Some("runtime-x")).is_err());
-    assert!(parse_es_target(Some("es5")).is_err());
     assert!(parse_split_strategy(Some("vendor")).is_err());
+}
+
+/// `build.target` selects no transform, so it must stay *accepted* rather than
+/// validated or rejected. `deny_unknown_fields` means deleting the key would
+/// hard-fail every existing config that sets it, and validating it would go
+/// back to implying the setting takes effect. Both halves are asserted here so
+/// a future edit cannot quietly pick either one.
+#[test]
+fn build_target_is_accepted_and_reaches_no_bundle_option() {
+    let build: BuildConfigOptions =
+        serde_json::from_str(r#"{"target":"es2018","jsx":"automatic"}"#).unwrap();
+    assert_eq!(
+        build._es_target,
+        Some(serde_json::Value::String("es2018".to_string()))
+    );
+
+    // A value no ECMAScript target list contains is accepted too: an inert key
+    // has nothing to validate against.
+    let nonsense: BuildConfigOptions = serde_json::from_str(r#"{"target":"es5"}"#).unwrap();
+    assert_eq!(
+        nonsense._es_target,
+        Some(serde_json::Value::String("es5".to_string()))
+    );
+
+    // The option struct handed to the bundler carries no target at all, so
+    // there is no field for a future change to leave silently unread.
+    let options = client_bundle_options(&build).unwrap();
+    let encoded = serde_json::to_value(&options).unwrap();
+    assert!(encoded.get("es_target").is_none());
+    assert!(encoded.get("esTarget").is_none());
+    assert!(encoded.get("target").is_none());
 }
 
 #[test]
@@ -943,7 +969,7 @@ fn emit_client_bundles_writes_chunk_manifest_when_enabled() {
         split_strategy: Some("route".to_string()),
         parallelism: Some(1),
         jsx_runtime: Some("classic".to_string()),
-        es_target: Some("es2022".to_string()),
+        _es_target: None,
         emit_chunk_manifest: Some(true),
         prebundle_dependencies: Some(true),
         prerender_cache: Some(true),

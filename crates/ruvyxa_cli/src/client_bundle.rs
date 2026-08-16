@@ -497,7 +497,6 @@ pub(crate) fn emit_client_bundles_with_session(
         "sourcemap": build.sourcemap.unwrap_or(false),
         "treeShaking": build.tree_shaking.unwrap_or(true),
         "jsxRuntime": build.jsx_runtime.as_deref().unwrap_or("automatic"),
-        "esTarget": build.es_target.as_deref().unwrap_or("es2022"),
         "emitChunkManifest": build.emit_chunk_manifest.unwrap_or(false),
         "parallelism": parallelism,
         "moduleCount": total_modules,
@@ -826,7 +825,6 @@ pub(crate) fn client_bundle_input(
             source_map: build.sourcemap.unwrap_or(false),
             tree_shaking: build.tree_shaking.unwrap_or(true),
             jsx_runtime: parse_jsx_runtime(build.jsx_runtime.as_deref())?,
-            es_target: parse_es_target(build.es_target.as_deref())?,
             split_strategy: parse_split_strategy(build.split_strategy.as_deref())?,
             emit_chunk_manifest: build.emit_chunk_manifest.unwrap_or(false),
             collect_module_manifest: parse_split_strategy(build.split_strategy.as_deref())?
@@ -951,7 +949,6 @@ pub(crate) fn client_bundle_options(
         source_map: false,
         tree_shaking: false,
         jsx_runtime: parse_jsx_runtime(build.jsx_runtime.as_deref())?,
-        es_target: parse_es_target(build.es_target.as_deref())?,
         split_strategy: parse_split_strategy(build.split_strategy.as_deref())?,
         emit_chunk_manifest: false,
         collect_module_manifest: false,
@@ -1099,20 +1096,11 @@ pub(crate) fn parse_jsx_runtime(value: Option<&str>) -> anyhow::Result<ruvyxa_bu
         "classic" => Ok(ruvyxa_bundler::JsxRuntime::Classic),
         "automatic" => Ok(ruvyxa_bundler::JsxRuntime::Automatic),
         other => anyhow::bail!(
-            "RUV1601 build.jsxRuntime must be `classic` or `automatic`, got `{other}`"
-        ),
-    }
-}
-
-pub(crate) fn parse_es_target(value: Option<&str>) -> anyhow::Result<ruvyxa_bundler::EsTarget> {
-    match value.unwrap_or("es2022").to_ascii_lowercase().as_str() {
-        "es2018" => Ok(ruvyxa_bundler::EsTarget::Es2018),
-        "es2019" => Ok(ruvyxa_bundler::EsTarget::Es2019),
-        "es2020" => Ok(ruvyxa_bundler::EsTarget::Es2020),
-        "es2022" => Ok(ruvyxa_bundler::EsTarget::Es2022),
-        "esnext" => Ok(ruvyxa_bundler::EsTarget::EsNext),
-        other => anyhow::bail!(
-            "RUV1601 build.esTarget must be es2018, es2019, es2020, es2022, or esnext, got `{other}`"
+            // Name the key as a user writes it in `ruvyxa.config.ts`, not the
+            // Rust field it deserializes into. `jsx_runtime` is
+            // `#[serde(rename = "jsx")]`, so "build.jsxRuntime" sent readers
+            // looking for a key that does not exist.
+            "RUV1601 build.jsx must be `classic` or `automatic`, got `{other}`"
         ),
     }
 }
@@ -1124,7 +1112,7 @@ pub(crate) fn parse_split_strategy(
         "single" | "manual" => Ok(ruvyxa_bundler::SplitStrategy::Single),
         "route" => Ok(ruvyxa_bundler::SplitStrategy::Route),
         other => anyhow::bail!(
-            "RUV1601 build.splitStrategy must be `single`, `route`, or `manual`, got `{other}`"
+            "RUV1601 build.split must be `single`, `route`, or `manual`, got `{other}`"
         ),
     }
 }

@@ -51,8 +51,14 @@ pub(crate) fn expand_import_meta_glob(
         }
         let watch_root = glob_watch_root(&absolute_pattern, project_root);
         let mut matches = collect_matches(&absolute_pattern, &watch_root)?;
-        matches.sort_by_key(|path| slash(path));
-        matches.dedup();
+        // Sort and dedup on the *same* key. `slash` normalizes separators, so
+        // two paths that differ only by `\` vs `/` sort adjacent but are not
+        // `PathBuf`-equal — a plain `dedup()` let them both through and emitted
+        // the same specifier twice in the generated object literal.
+        // `sort_by_cached_key` also computes each key once instead of once per
+        // comparison.
+        matches.sort_by_cached_key(|path| slash(path));
+        matches.dedup_by_key(|path| slash(path));
 
         let entries = matches
             .iter()

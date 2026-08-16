@@ -91,7 +91,9 @@ use html_document::{
     dev_error_overlay, error_response, plain_error_page, public_internal_error,
     url_encode_component,
 };
-pub use html_document::{hydration_loader_source, hydration_loader_url, localize_document};
+pub use html_document::{
+    hydration_loader_source, hydration_loader_url, localize_document, safe_json_for_script,
+};
 
 mod plugin_bridge;
 #[cfg(test)]

@@ -13,6 +13,8 @@ flowchart TB
   CLI --> SERVER[ruvyxa_dev_server]
   SERVER --> MW[ruvyxa_middleware]
   CLI --> DIAG[ruvyxa_diagnostics]
+  CLI --> TUI[ruvyxa_tui]
+  SERVER --> TUI
   BUNDLER --> RT[packages/ruvyxa runtime]
   APP[Application + plugins] --> CLI
   APP --> REACT[@ruvyxa/react]
@@ -27,9 +29,10 @@ rendering intent `ruvyxa_bundler` compile TypeScript/JSX, resolve/link module, s
 asset, i18n, image handling และ plugin bridge/head integration
 
 `ruvyxa_middleware` เป็นเจ้าของ built-in middleware configuration/stack และ plugin host
-`ruvyxa_diagnostics` เก็บ diagnostic reporting ที่ใช้ร่วมกัน JavaScript runtime ใน
-`packages/ruvyxa/runtime/` ทำ rendering/compiler/worker/adapter ณ boundary ที่ Rust เรียก
-TypeScript/React
+`ruvyxa_diagnostics` เก็บ diagnostic reporting ที่ใช้ร่วมกัน ส่วน `ruvyxa_tui` เป็นเจ้าของ primitive
+สำหรับ terminal layout, progress, mascot และ theme ที่ CLI กับ command output ฝั่ง server ใช้ร่วมกัน
+JavaScript runtime ใน `packages/ruvyxa/runtime/` ทำ rendering/compiler/worker/adapter ณ boundary ที่
+Rust เรียก TypeScript/React
 
 ## Request lifecycle
 

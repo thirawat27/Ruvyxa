@@ -594,7 +594,6 @@ pub(crate) async fn build_with_cache_override(
             "treeShake": config.build.tree_shaking.unwrap_or(true),
             "split": config.build.split_strategy.as_deref().unwrap_or("route"),
             "jsx": config.build.jsx_runtime.as_deref().unwrap_or("automatic"),
-            "target": config.build.es_target.as_deref().unwrap_or("es2022"),
             "manifest": config.build.emit_chunk_manifest.unwrap_or(false),
             "warm": config.build.prebundle_dependencies.unwrap_or(true),
             "prerenderCache": config.build.prerender_cache.unwrap_or(true),

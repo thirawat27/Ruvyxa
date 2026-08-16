@@ -197,10 +197,19 @@ fn find_node_env_conditional(source: &str) -> Option<(usize, usize, String)> {
         let end = alternative
             .map(|(_, close)| close + 1)
             .unwrap_or(consequent_close + 1);
+        // The surviving branch keeps its braces and becomes a block statement.
+        //
+        // Splicing the *body* in discarded the block's lexical scope, which is
+        // not cosmetic: `let`, `const`, and `class` belong to that block, so a
+        // folded-in `const x` landed in the parent scope and collided with an
+        // outer `const x` — turning a dead-code elimination into
+        // "Identifier 'x' has already been declared" for the whole bundle. A
+        // bare block is valid JavaScript, costs nothing, spans the same bytes,
+        // and keeps the branch's bindings exactly where the author put them.
         let replacement = if condition_result {
-            source[consequent_open + 1..consequent_close].to_string()
+            source[consequent_open..=consequent_close].to_string()
         } else if let Some((open, close)) = alternative {
-            source[open + 1..close].to_string()
+            source[open..=close].to_string()
         } else {
             String::new()
         };
@@ -713,6 +722,35 @@ function checkDCE() {
         let out = fold_production_node_env(src);
         assert!(!out.contains("development only"));
         assert!(out.contains("return true"));
+    }
+
+    /// The kept branch stays a block, so its bindings stay its own.
+    ///
+    /// Splicing the body in dropped the block scope, and `let`/`const`/`class`
+    /// are bound to that block. A folded-in `const x` therefore landed beside an
+    /// outer `const x` and the bundle stopped parsing with "Identifier 'x' has
+    /// already been declared" — dead-code elimination breaking live code.
+    #[test]
+    fn node_env_folder_keeps_the_surviving_branch_in_its_own_block() {
+        let src =
+            "if (process.env.NODE_ENV === \"production\") { const x = 1; use(x); }\nconst x = 2;\n";
+        let out = fold_production_node_env(src);
+        assert!(
+            out.contains("const x = 1"),
+            "the live branch survives: {out}"
+        );
+        assert!(
+            out.trim_start().starts_with('{'),
+            "the branch keeps its block: {out}"
+        );
+        // Parsing is the real assertion: a leaked binding is a syntax error.
+        minify_javascript(&out, false).expect("the folded output must still parse");
+
+        // The `else` branch is kept the same way.
+        let with_else = "if (process.env.NODE_ENV !== \"production\") { const y = 1; } else { const y = 2; use(y); }\nconst y = 3;\n";
+        let folded = fold_production_node_env(with_else);
+        assert!(folded.contains("const y = 2"), "{folded}");
+        minify_javascript(&folded, false).expect("the folded else branch must still parse");
     }
 
     #[test]

@@ -175,8 +175,19 @@ const CACHE_MAX_ENTRIES = 1024
  * - Periodic cleanup of fully expired entries
  */
 class CacheStore {
+  /**
+   * Doubles as the recency order: a `Map` iterates in insertion order, so
+   * re-inserting a key on read or write moves it to the most-recent end and
+   * `keys().next()` is the least-recent entry.
+   *
+   * A parallel `string[]` used to carry that order. Keeping the two in step
+   * cost an `indexOf`/`splice` on every read and a full `filter` on every
+   * delete, which made `invalidateTag` — a delete per matching entry —
+   * quadratic in cache size. It also made desynchronization possible at all,
+   * which is what the eviction path had to defend against. One structure
+   * cannot drift from itself.
+   */
   #entries = new Map<string, CacheEntry>()
-  #accessOrder: string[] = []
   #pendingWrites = new Map<string, PendingCacheWrite>()
   #maxEntries: number
 
@@ -188,7 +199,8 @@ class CacheStore {
     const entry = this.#entries.get(key)
     if (entry) {
       // Move to end of access order (most recently used)
-      this.#touchAccessOrder(key)
+      this.#entries.delete(key)
+      this.#entries.set(key, entry)
     }
     return entry
   }
@@ -201,31 +213,26 @@ class CacheStore {
     // Updating an existing key does not increase the cache size. Evicting before
     // that check would discard an unrelated LRU entry on every refresh at capacity.
     while (!this.#entries.has(key) && this.#entries.size >= this.#maxEntries) {
-      if (!this.#evictOldest()) {
-        // The access order is internal bookkeeping that every write path keeps
-        // in step with `#entries`. If a future change ever breaks that, this
-        // loop would spin forever inside a request rather than fail — so an
-        // eviction that frees nothing rebuilds the order from the entries that
-        // actually exist and tries once more. Same recovery, and same reason,
-        // as `RenderCache::put` in `crates/ruvyxa_dev_server/src/render_cache.rs`.
-        this.#accessOrder = [...this.#entries.keys()]
-        if (!this.#evictOldest()) break
-      }
+      // Only an empty map frees nothing, and the loop condition cannot hold
+      // once it is empty for any `maxEntries >= 1`. The guard covers a store
+      // constructed with a capacity of zero rather than a desynchronized
+      // order, which is no longer representable.
+      if (!this.#evictOldest()) break
     }
 
+    // Delete first so a rewrite of an existing key is re-inserted at the
+    // most-recent end instead of keeping its original position.
+    this.#entries.delete(key)
     this.#entries.set(key, entry)
-    this.#touchAccessOrder(key)
   }
 
   delete(key: string): boolean {
-    this.#accessOrder = this.#accessOrder.filter((k) => k !== key)
     this.#pendingWrites.delete(key)
     return this.#entries.delete(key)
   }
 
   clear(): void {
     this.#entries.clear()
-    this.#accessOrder = []
     this.#pendingWrites.clear()
   }
 
@@ -289,9 +296,6 @@ class CacheStore {
         pruned++
       }
     }
-    if (pruned > 0) {
-      this.#accessOrder = this.#accessOrder.filter((k) => this.#entries.has(k))
-    }
     return pruned
   }
 
@@ -299,19 +303,11 @@ class CacheStore {
     return this.#entries.size
   }
 
-  #touchAccessOrder(key: string): void {
-    const idx = this.#accessOrder.indexOf(key)
-    if (idx !== -1) {
-      this.#accessOrder.splice(idx, 1)
-    }
-    this.#accessOrder.push(key)
-  }
-
   /** Evict the least recently used entry. `false` when nothing was freed. */
   #evictOldest(): boolean {
-    const oldest = this.#accessOrder.shift()
-    if (oldest === undefined) return false
-    return this.delete(oldest)
+    const oldest = this.#entries.keys().next()
+    if (oldest.done) return false
+    return this.delete(oldest.value)
   }
 }
 

@@ -82,8 +82,8 @@ browser View Transitions API when available.
 
 Use a route `meta` export for hierarchy-aware metadata ([Routing](04-routing-rendering.md)), or use
 `<Seo>` inside a component for per-render tags. `<Seo>` can emit Open Graph, X card, Article
-JSON-LD, breadcrumb JSON-LD, and custom JSON-LD. Its `twitterCard` prop is deprecated in favor of
-`card`.
+JSON-LD, breadcrumb JSON-LD, and custom JSON-LD. The X card shape is set with `card`; the former
+`twitterCard` prop has been removed.
 
 ```tsx
 import { Seo, RuvyxaErrorBoundary } from '@ruvyxa/react'

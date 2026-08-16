@@ -631,6 +631,14 @@ fn emit_prepared_bundle(
                 continue;
             }
             let source_idx = builder.add_source(&module.path, Some(&module.js));
+            // A bundled dependency is still a source in the map, so without this
+            // the emitter's `x_google_ignoreList` support never fired for a real
+            // build: the field was implemented and unit-tested, but nothing ever
+            // marked a source, so every shipped map left `node_modules` frames
+            // in the user's stack traces and step-through.
+            if is_dependency_source(&module.path) {
+                builder.add_to_ignore_list(source_idx);
+            }
             let line_count = module.js.lines().count() as u32;
             let imported_hook_map = hook_source_maps
                 .get(&module.path)
@@ -716,6 +724,16 @@ fn emit_prepared_bundle(
     };
     publish_emitted_artifacts(prepared, shared_modules, &output)?;
     Ok(output)
+}
+
+/// True when a bundled module came from an installed package rather than from
+/// the project's own sources.
+///
+/// Matched on a whole path component so a project directory that merely
+/// contains the word — `src/node_modules_notes/` — is not mistaken for one.
+fn is_dependency_source(path: &std::path::Path) -> bool {
+    path.components()
+        .any(|component| component.as_os_str() == "node_modules")
 }
 
 fn publish_emitted_artifacts(
@@ -1590,7 +1608,6 @@ export default function Page() { return null }
             source_map: false,
             tree_shaking: false,
             jsx_runtime: JsxRuntime::Automatic,
-            es_target: EsTarget::Es2022,
             split_strategy: SplitStrategy::Route,
             emit_chunk_manifest: false,
             collect_module_manifest: false,
@@ -1968,6 +1985,156 @@ export default function Page() { return null }
             !live("__exports.BarrelPicture") && !live("__exports.DEFAULT_WIDTHS"),
             "unused line-mates should still shake out:\n{}",
             output.code
+        );
+    }
+
+    /// Asserted against a real bundle's map, not against `SourceMapBuilder`
+    /// directly. The builder's `x_google_ignoreList` support was unit-tested in
+    /// `sourcemap.rs` and passed, while the one production assembly site never
+    /// called `add_to_ignore_list` — so every shipped map listed `node_modules`
+    /// sources as user code. Only a bundle-level assertion can catch that.
+    /// A published `dist` build is usually minified, which puts several
+    /// statements on one line. The linker rewrites ESM a line at a time, so
+    /// those bytes used to be copied straight into the module IIFE — and
+    /// `export` inside a function is a syntax error, so the entire browser
+    /// bundle stopped parsing with no build-time complaint at all.
+    ///
+    /// Asserted by parsing the linked output, not by matching text: the failure
+    /// this covers is "the bundle does not parse".
+    #[test]
+    fn a_minified_esm_dependency_links_into_a_parseable_bundle() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = ruvyxa_diagnostics::normalized_canonical_path(temp.path());
+        let app = root.join("app");
+        let pkg = root.join("node_modules").join("mini-pkg");
+        fs::create_dir_all(&app).unwrap();
+        fs::create_dir_all(&pkg).unwrap();
+        fs::write(
+            pkg.join("package.json"),
+            r#"{"type":"module","main":"index.js"}"#,
+        )
+        .unwrap();
+        // Exactly what a minifier emits: no spaces, several statements per line.
+        fs::write(
+            pkg.join("index.js"),
+            "const a=1;function useMini(){return a}export{a as MINI,useMini};\n",
+        )
+        .unwrap();
+
+        let page = app.join("page.tsx");
+        fs::write(
+            &page,
+            "import { MINI } from 'mini-pkg';\nexport default function Page() { return <b>{MINI}</b>; }\n",
+        )
+        .unwrap();
+
+        let mut input = client_input(&root, &app, page, vec![], "/");
+        input.options.minify = false;
+        input.options.tree_shaking = false;
+        input.options.source_map = false;
+        input.options.emit_chunk_manifest = false;
+        let output = bundle(input).expect("a minified ESM dependency must link");
+
+        assert!(
+            !output.code.contains("export{"),
+            "a raw ESM export survived into the bundle:\n{}",
+            output.code
+        );
+        assert!(
+            output.code.contains("__exports.MINI"),
+            "the dependency's export must be rewritten onto the module namespace:\n{}",
+            output.code
+        );
+        // The real assertion: the linked bundle is parseable JavaScript.
+        minifier::minify_with_options(&output.code, BundleTarget::Client, false)
+            .expect("the linked bundle must parse");
+    }
+
+    /// Well-formed sources are not re-printed, so ordinary dependencies keep
+    /// their exact bytes and pay no parse.
+    #[test]
+    fn one_statement_per_line_modules_are_left_untouched() {
+        for source in [
+            "export const a = 1;\nexport function b() {}\n",
+            "const m = await import(\"./lazy.js\");\nconst u = import.meta.url;\n",
+            "const important = 1; const exported = 2;\n",
+            "// export { a } from \"./m\"\nconst a = 1;\n",
+        ] {
+            assert!(
+                !compiler::has_esm_statement_sharing_a_line(source),
+                "must not trigger a re-print: {source:?}"
+            );
+        }
+
+        assert!(compiler::has_esm_statement_sharing_a_line(
+            "const a=1;export{a};"
+        ));
+    }
+
+    #[test]
+    fn source_maps_ignore_list_bundled_dependency_sources() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = ruvyxa_diagnostics::normalized_canonical_path(temp.path());
+        let app = root.join("app");
+        let pkg = root.join("node_modules").join("ignore-me");
+        fs::create_dir_all(&app).unwrap();
+        fs::create_dir_all(&pkg).unwrap();
+
+        fs::write(
+            pkg.join("package.json"),
+            r#"{"type":"module","main":"index.js"}"#,
+        )
+        .unwrap();
+        fs::write(
+            pkg.join("index.js"),
+            "export function Vendor(props) { return props; }\n",
+        )
+        .unwrap();
+
+        let page = app.join("page.tsx");
+        fs::write(
+            &page,
+            "import { Vendor } from 'ignore-me';\n\
+             export default function Page() { return <Vendor src=\"/x.png\" />; }\n",
+        )
+        .unwrap();
+
+        let mut input = client_input(&root, &app, page, vec![], "/");
+        input.options.tree_shaking = false;
+        input.options.emit_chunk_manifest = false;
+        let output = bundle(input).unwrap();
+
+        let map: serde_json::Value =
+            serde_json::from_str(&output.source_map.expect("source map requested")).unwrap();
+        let sources: Vec<&str> = map["sources"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|source| source.as_str().unwrap())
+            .collect();
+        let ignored: Vec<usize> = map["x_google_ignoreList"]
+            .as_array()
+            .expect("a bundle that pulls in a dependency must emit x_google_ignoreList")
+            .iter()
+            .map(|index| index.as_u64().unwrap() as usize)
+            .collect();
+
+        let vendor = sources
+            .iter()
+            .position(|source| source.contains("node_modules/ignore-me/index.js"))
+            .expect("the dependency is bundled, so it is one of the map's sources");
+        let page_source = sources
+            .iter()
+            .position(|source| source.ends_with("app/page.tsx"))
+            .expect("the route's own module is a source");
+
+        assert!(
+            ignored.contains(&vendor),
+            "the dependency source must be ignore-listed; sources={sources:?} ignored={ignored:?}"
+        );
+        assert!(
+            !ignored.contains(&page_source),
+            "the project's own module must stay steppable; sources={sources:?} ignored={ignored:?}"
         );
     }
 
