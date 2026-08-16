@@ -138,7 +138,7 @@ function ${META_LANG_LOCAL}(html, lang) {
     if (typeof resolved.title === "string") titleDepth = depth
   }
   if (template && titleDepth > templateDepth && typeof merged.title === "string") {
-    merged.title = template.replace("%s", merged.title)
+    merged.title = template.replace("%s", () => merged.title)
   }
   delete merged.titleTemplate
   return merged

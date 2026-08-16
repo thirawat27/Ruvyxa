@@ -2251,7 +2251,10 @@ async function downloadFontFiles(
     const bytes = Buffer.from(await response.arrayBuffer())
     const destination = `${publicPath}/${fileName}`
     writePublicBinaryAsset(context, destination.slice(1), bytes)
-    rewritten = rewritten.replaceAll(url, destination)
+    // Replacer function: `replaceAll` reads `$&` and friends out of a
+    // replacement string just as `replace` does, and `destination` carries the
+    // configured `publicPath`, which is not `$`-escaped.
+    rewritten = rewritten.replaceAll(url, () => destination)
   }
   return rewritten
 }

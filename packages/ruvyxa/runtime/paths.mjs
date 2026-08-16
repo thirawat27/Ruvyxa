@@ -22,7 +22,12 @@ export function resolveTsconfigPath(model, specifier, resolveFile) {
     const wildcard = matchPattern(declaration.pattern, specifier)
     if (wildcard === null) continue
     for (const target of declaration.targets) {
-      const candidate = path.resolve(declaration.base, target.replace('*', wildcard))
+      // Replacer function, so a `$&`/`` $` ``/`$'` in the matched wildcard is a
+      // literal path character rather than a substitution pattern.
+      const candidate = path.resolve(
+        declaration.base,
+        target.replace('*', () => wildcard),
+      )
       const resolved = resolveFile(candidate)
       if (resolved && isWithin(model.projectRoot, resolved)) return resolved
     }
@@ -40,7 +45,10 @@ export function resolveTsconfigGlobPattern(model, pattern) {
   for (const declaration of [...model.paths].sort(comparePatterns)) {
     const wildcard = matchPattern(declaration.pattern, pattern)
     if (wildcard === null || declaration.targets.length === 0) continue
-    const candidate = path.resolve(declaration.base, declaration.targets[0].replace('*', wildcard))
+    const candidate = path.resolve(
+      declaration.base,
+      declaration.targets[0].replace('*', () => wildcard),
+    )
     return isWithin(model.projectRoot, staticGlobPrefix(candidate)) ? candidate : null
   }
   if (model.baseUrl && !pattern.startsWith('.') && !path.isAbsolute(pattern)) {

@@ -48,6 +48,14 @@ import {
   toImportPath,
 } from './compiler.mjs'
 import { cache as serverCache } from '@ruvyxa/core/server'
+// The realtime event an action publishes is validated in one place, not two.
+// This host and `serverless-handler.mjs` both build it, and both are JavaScript
+// in this package, so the rule that decides which channel names an action may
+// address — and how far its metadata is truncated — is shared rather than
+// mirrored. The copy that used to live here spelled the same limits a different
+// way (`{1,128}` for the length check, a literal `128` for the channel cap),
+// which is the state a rule is in just before it drifts.
+import { actionRealtimeEvent } from './action-runtime.mjs'
 import { clientEntrySource, metaSourceImports, nodeSsrEntrySource } from './entry-templates.mjs'
 import { WorkerAdmissionController } from './worker-admission.mjs'
 import { CachePressureController, LruCache } from './cache-budget.mjs'
@@ -1162,42 +1170,6 @@ async function handleAction(request) {
     ...dependencyMetadata,
     body,
   }
-}
-
-function actionRealtimeEvent(action, actionName, requestPath, invalidated) {
-  const configured = action.ruvyxa?.realtime
-  if (!configured) return null
-  if (!Array.isArray(configured.channels) || configured.channels.length > 16) {
-    throw new TypeError(`Action ${actionName} has invalid realtime channel metadata`)
-  }
-  const channels = configured.channels.map((channel) => {
-    if (typeof channel !== 'string' || !/^[A-Za-z0-9:._/-]{1,128}$/.test(channel)) {
-      throw new TypeError(`Action ${actionName} has invalid realtime channel metadata`)
-    }
-    return channel
-  })
-  const pathname = new URL(requestPath, 'http://ruvyxa.local').pathname
-  return {
-    version: 1,
-    type: 'action',
-    channels: channels.length > 0 ? channels : [realtimeRouteChannel(pathname)],
-    action: actionName,
-    path: pathname.slice(0, 2048),
-    invalidated: invalidated
-      .filter((key) => typeof key === 'string' && key.length <= 256)
-      .slice(0, 64),
-  }
-}
-
-function realtimeRouteChannel(pathname) {
-  const readable = `route:${pathname}`
-  if (readable.length <= 128) return readable
-  let hash = 0xcbf29ce484222325n
-  for (const character of pathname) {
-    hash ^= BigInt(character.codePointAt(0))
-    hash = BigInt.asUintN(64, hash * 0x100000001b3n)
-  }
-  return `route-hash:${hash.toString(16).padStart(16, '0')}`
 }
 
 // --- Client Bundle Handler ---

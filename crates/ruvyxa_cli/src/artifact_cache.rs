@@ -35,6 +35,10 @@ const WORKER_RUNTIME_FILES: &[&str] = &[
     // what expansion emits and must invalidate prerendered output with it.
     "scanner.mjs",
     "request-context.mjs",
+    // The worker builds an action's realtime event from the same validated
+    // rule the deployed handler uses, so a change to those channel/size limits
+    // reaches worker output and must invalidate prerendered artifacts too.
+    "action-runtime.mjs",
     "compiler.mjs",
     "paths.mjs",
     "entry-templates.mjs",

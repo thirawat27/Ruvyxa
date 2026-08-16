@@ -81,6 +81,29 @@ describe('route metadata resolution', () => {
     assert.equal(own.titleTemplate, undefined)
   })
 
+  it('inserts a title containing $-substitution characters verbatim', () => {
+    // `template.replace("%s", title)` read `$&`, `` $` ``, `$'`, and `$$` out of
+    // the *replacement string*. A price tier written `$$` therefore rendered as
+    // a single `$`, and `$&` put the literal `%s` back into the document title —
+    // silent corruption of an ordinary field, since page titles routinely come
+    // from content rather than from source.
+    const { __ruvyxaResolveMeta } = loadPrelude()
+    const context = { path: '/p', params: {} }
+
+    for (const [title, expected] of [
+      ['Prices: $$', 'Prices: $$ | Site'],
+      ['Deal $& more', 'Deal $& more | Site'],
+      ["Get $' now", "Get $' now | Site"],
+      ['Plain', 'Plain | Site'],
+    ]) {
+      const resolved = __ruvyxaResolveMeta(
+        [{ meta: { titleTemplate: '%s | Site' } }, { meta: { title } }],
+        context,
+      )
+      assert.equal(resolved.title, expected)
+    }
+  })
+
   it('ignores modules with no meta export and non-object metadata', () => {
     const { __ruvyxaResolveMeta } = loadPrelude()
     const merged = __ruvyxaResolveMeta(
