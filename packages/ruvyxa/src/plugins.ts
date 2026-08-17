@@ -2810,7 +2810,7 @@ function manifestPagePaths(context: PluginBuildContext): string[] {
     if (routePath.includes('[')) continue
     paths.push(routePath)
   }
-  return paths.sort((a, b) => a.localeCompare(b))
+  return paths.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
 }
 
 /** Writes into the directory served as `/` by the production server and adapters. */

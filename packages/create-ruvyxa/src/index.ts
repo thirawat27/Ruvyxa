@@ -235,7 +235,7 @@ async function listProjectFiles(targetDir: string): Promise<string[]> {
     const path = relative(targetDir, resolve(entry.parentPath, entry.name))
     files.push(path.split(/[\\/]/).join('/'))
   }
-  return files.sort((a, b) => a.localeCompare(b))
+  return files.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
 }
 
 /** Keep generated output out even when a local starter was built before scaffolding. */
