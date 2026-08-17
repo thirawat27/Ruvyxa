@@ -35,7 +35,7 @@ const REQUIRED_TEMPLATE_FILES = [
 ] as const
 
 /** Characters that are invalid in directory names across platforms. */
-const INVALID_DIR_CHARS = /[<>:"|?*\x00-\x1f]/
+const INVALID_DIR_CHARS = /[<>:"|?*]|\p{Cc}/u
 
 /** Maximum directory name length (Windows has 260 char path limit). */
 const MAX_DIR_NAME_LENGTH = 128
@@ -235,7 +235,7 @@ async function listProjectFiles(targetDir: string): Promise<string[]> {
     const path = relative(targetDir, resolve(entry.parentPath, entry.name))
     files.push(path.split(/[\\/]/).join('/'))
   }
-  return files.sort()
+  return files.sort((a, b) => a.localeCompare(b))
 }
 
 /** Keep generated output out even when a local starter was built before scaffolding. */
@@ -293,7 +293,7 @@ function toPackageName(projectName: string): string {
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9._-]+/g, '-')
-    .replace(/^[._-]+|[._-]+$/g, '')
+    .replace(/(?:^[._-]+)|(?:[._-]+$)/g, '')
 
   return packageName || 'ruvyxa-app'
 }

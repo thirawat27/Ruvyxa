@@ -1810,7 +1810,7 @@ function collectContentHeadingElements(node, headings, slugCounts) {
         text
           .toLocaleLowerCase()
           .replace(/[^\p{Letter}\p{Number}]+/gu, '-')
-          .replace(/^-|-$/g, '') || 'section'
+          .replace(/(?:^-)|(?:-$)/g, '') || 'section'
       const occurrence = slugCounts.get(baseSlug) ?? 0
       slug = occurrence === 0 ? baseSlug : `${baseSlug}-${occurrence}`
       slugCounts.set(baseSlug, occurrence + 1)
@@ -1990,9 +1990,10 @@ function checkClientBoundary(root, filePath, source) {
   if (extractSpecifiers(source).some(isServerOnlySpecifier)) {
     throw new Error(`RUV1007: Server-only module imported into client bundle: ${filePath}`)
   }
-  for (const envName of privateEnvReads(source)) {
+  const envNames = privateEnvReads(source)
+  if (envNames.length > 0) {
     throw new Error(
-      `RUV1008: Private environment variable ${envName} used in client bundle: ${filePath}`,
+      `RUV1008: Private environment variable ${envNames[0]} used in client bundle: ${filePath}`,
     )
   }
 }

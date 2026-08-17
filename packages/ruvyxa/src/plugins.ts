@@ -2275,7 +2275,7 @@ function fontFileName(url: string): string {
 }
 
 function normalizeFontPublicPath(value: string): string {
-  const trimmed = `/${String(value).replace(/^\/+|\/+$/g, '')}`
+  const trimmed = `/${String(value).replace(/(?:^\/+)|(?:\/+$)/g, '')}`
   if (trimmed === '/' || /[?#]/.test(trimmed)) {
     throw new TypeError('fonts: publicPath must be a directory path such as "/fonts"')
   }
@@ -2591,7 +2591,7 @@ function isConcreteApplicationPath(value: unknown): value is string {
   return (
     typeof value === 'string' &&
     value.startsWith('/') &&
-    !/[\\?#\[\]*]|[\u0000-\u001f\u007f]/.test(value) &&
+    !/[\\?#\[\]*]|\p{Cc}/u.test(value) &&
     !value.split('/').some((segment) => segment === '.' || segment === '..')
   )
 }
@@ -2722,7 +2722,7 @@ function normalizePublicPath(value: unknown, plugin: string): string {
     value.includes('?') ||
     value.includes('#') ||
     /%(?:2f|5c)/i.test(value) ||
-    /[\u0000-\u001f\u007f]/.test(decoded) ||
+    /\p{Cc}/u.test(decoded) ||
     decoded.startsWith('//') ||
     decoded.includes('\\') ||
     decoded.split('/').some((segment) => segment === '..' || segment === '.')
@@ -2810,7 +2810,7 @@ function manifestPagePaths(context: PluginBuildContext): string[] {
     if (routePath.includes('[')) continue
     paths.push(routePath)
   }
-  return paths.sort()
+  return paths.sort((a, b) => a.localeCompare(b))
 }
 
 /** Writes into the directory served as `/` by the production server and adapters. */

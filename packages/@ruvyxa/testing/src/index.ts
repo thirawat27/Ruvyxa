@@ -121,7 +121,7 @@ export function mockCache(seed: Readonly<Record<string, unknown>> = {}): MockCac
         return builder
       },
       tags(...values) {
-        tags = [...new Set(values)].sort()
+        tags = [...new Set(values)].sort((a, b) => a.localeCompare(b))
         return builder
       },
       scope(value) {

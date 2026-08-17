@@ -439,7 +439,7 @@ export function cache(key: string): CacheBuilder {
     },
     tags(...values: string[]) {
       if (values.length > 32) throw new TypeError('cache().tags() accepts at most 32 tags')
-      tags = [...new Set(values.map(validateCacheTag))].sort()
+      tags = [...new Set(values.map(validateCacheTag))].sort((a, b) => a.localeCompare(b))
       return this
     },
     scope(value: 'deployment' | 'request') {
