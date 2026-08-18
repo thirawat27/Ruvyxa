@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.0.31 (2026-08-15)
+## v1.0.31 (2026-08-18)
 
 ### Node.js 24 LTS production baseline
 

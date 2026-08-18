@@ -1,6 +1,6 @@
 {
   "name": "@ruvyxa/adapter-deno",
-  "version": "1.0.30",
+  "version": "1.0.31",
   "description": "Self-host Ruvyxa applications on the Deno runtime.",
   "license": "Apache-2.0",
   "type": "module",

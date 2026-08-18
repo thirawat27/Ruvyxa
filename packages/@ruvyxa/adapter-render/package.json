@@ -1,6 +1,6 @@
 {
   "name": "@ruvyxa/adapter-render",
-  "version": "1.0.30",
+  "version": "1.0.31",
   "description": "Deploy full-stack Ruvyxa applications to Render with automatic detection, a Blueprint, and standalone Node output.",
   "license": "Apache-2.0",
   "type": "module",

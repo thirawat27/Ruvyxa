@@ -1,6 +1,6 @@
 {
   "name": "@ruvyxa/adapter-railway",
-  "version": "1.0.30",
+  "version": "1.0.31",
   "description": "Deploy full-stack Ruvyxa applications to Railway with automatic platform detection and standalone Node output.",
   "license": "Apache-2.0",
   "type": "module",
