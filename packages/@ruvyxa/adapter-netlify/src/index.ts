@@ -1,3 +1,5 @@
+import { readFileSync } from 'node:fs'
+
 import type { Adapter, AdapterArtifact, AdapterOutput, BuildContext } from '@ruvyxa/core'
 import {
   CLIENT_BUNDLE_PREFIX,
@@ -45,7 +47,10 @@ export interface NetlifyAdapterOptions {
  * handler using the Web-standard Request/Response API. Reads the route
  * manifest and handles SSR/API/ISR/PPR requests.
  */
-function netlifyHandlerSource(runtimePolicy: unknown): string {
+function netlifyHandlerSource(
+  runtimePolicy: unknown,
+  functionConfig: NetlifyFunctionConfig,
+): string {
   return `import { createHandler, prerenderRelativePath } from './serverless-handler.mjs';
 import { applyPluginHttp, loadActionModule, loadRouteModule } from './route-modules.mjs';
 // Netlify bundles the function with esbuild, so anything the deployed code
@@ -58,10 +63,11 @@ import path from 'node:path';
 
 const runtimePolicy = ${JSON.stringify(runtimePolicy ?? {})};
 
-// Deploy-time prerender output is likewise dropped by the bundler unless the
-// site declares included_files. Reads are best-effort: a miss falls through to
-// an on-demand render, and Netlify serves SSG pages from the publish directory
-// before the function is ever invoked (config.preferStatic).
+// Deploy-time prerender output is not part of the module graph, so it reaches
+// the bundle through the includedFiles glob in the config below. Reads stay
+// best-effort anyway: a miss falls through to an on-demand render, and Netlify
+// serves SSG pages from the publish directory before the function is ever
+// invoked (config.preferStatic).
 const prerenderDir = path.join(import.meta.dirname, 'prerender');
 // The function bundle directory is read-only at runtime; only the platform
 // tmp directory accepts writes. ISR revalidations land there and are read
@@ -115,11 +121,52 @@ export default async function(request, context) {
 }
 
 // Netlify Functions v2 config
-export const config = {
-  path: '/*',
-  preferStatic: true,
-};
+export const config = ${JSON.stringify(functionConfig, null, 2)};
 `
+}
+
+/**
+ * The Functions v2 config this adapter declares.
+ *
+ * `name` and `generator` are the Frameworks API's attribution fields: Netlify
+ * shows the name in the site UI and reads the generator to tell a
+ * framework-emitted function from a hand-written one.
+ *
+ * `includedFiles` is what carries the deploy-time prerender output into the
+ * bundle. Netlify bundles the function with esbuild, which copies only what the
+ * module graph reaches, so the HTML `readPrerendered` falls back to was being
+ * dropped. The globs resolve against the site's base directory, which is why
+ * each artifact declares its own path instead of sharing one.
+ */
+interface NetlifyFunctionConfig {
+  path: string
+  preferStatic: true
+  name: string
+  generator: string
+  includedFiles: string[]
+}
+
+/** Read the adapter package version so `generator` carries real semver. */
+function packageVersion(): string {
+  const metadata = JSON.parse(
+    readFileSync(new URL('../package.json', import.meta.url), 'utf8'),
+  ) as {
+    version?: unknown
+  }
+  if (typeof metadata.version !== 'string' || !/^\d+\.\d+\.\d+/.test(metadata.version)) {
+    throw new Error('[RUV2001] netlifyAdapter: package version must be valid semver metadata')
+  }
+  return metadata.version
+}
+
+function functionConfigFor(functionRoot: string): NetlifyFunctionConfig {
+  return {
+    path: '/*',
+    preferStatic: true,
+    name: 'Ruvyxa SSR',
+    generator: `ruvyxa/${packageVersion()}`,
+    includedFiles: [`${functionRoot}/prerender/**`],
+  }
 }
 
 /**
@@ -234,7 +281,10 @@ export function netlify(options: NetlifyAdapterOptions = {}): Adapter {
           {
             kind: 'function',
             path: 'deploy/netlify/functions/ruvyxa-handler',
-            handlerSource: netlifyHandlerSource(runtimePolicy),
+            handlerSource: netlifyHandlerSource(
+              runtimePolicy,
+              functionConfigFor('functions/ruvyxa-handler'),
+            ),
           },
           // Netlify config for the deploy directory
           {
@@ -252,7 +302,10 @@ export function netlify(options: NetlifyAdapterOptions = {}): Adapter {
                   kind: 'function',
                   path: '.netlify/v1/functions/ruvyxa-handler',
                   scope: 'project',
-                  handlerSource: netlifyHandlerSource(runtimePolicy),
+                  handlerSource: netlifyHandlerSource(
+                    runtimePolicy,
+                    functionConfigFor('.netlify/v1/functions/ruvyxa-handler'),
+                  ),
                 } satisfies AdapterArtifact,
                 {
                   kind: 'file',

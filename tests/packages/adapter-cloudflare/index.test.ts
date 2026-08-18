@@ -170,4 +170,27 @@ describe('cloudflare', () => {
     assert.match(source, /cf: \{ image:/)
     assert.doesNotMatch(source, /node:/)
   })
+
+  /**
+   * `runtime/request-context.mjs` needs `node:async_hooks` to isolate
+   * concurrent renders; without it the single-slot fallback refuses the second
+   * overlapping request that reads cookies or headers. Cloudflare puts the
+   * Node.js APIs behind `nodejs_compat` for every compatibility date before
+   * 2026-08-04, which is the range this adapter's default sits in.
+   */
+  it('enables Node.js compatibility in every wrangler config it writes', async () => {
+    const output = await cloudflare({ projectConfig: true }).build({
+      root: '/srv/app',
+      outDir: '/srv/app/.ruvyxa',
+    })
+    const wranglerArtifacts =
+      output.artifacts?.filter((artifact) => artifact.path.endsWith('wrangler.jsonc')) ?? []
+    assert.equal(wranglerArtifacts.length, 2)
+    for (const artifact of wranglerArtifacts) {
+      const config = JSON.parse(
+        artifact && 'contents' in artifact ? String(artifact.contents) : '{}',
+      )
+      assert.deepEqual(config.compatibility_flags, ['nodejs_compat'], artifact.path)
+    }
+  })
 })

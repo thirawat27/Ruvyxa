@@ -1,6 +1,7 @@
 import type { Adapter, AdapterArtifact, AdapterOutput, BuildContext } from '@ruvyxa/core'
 import {
   clientBuildOutput,
+  projectRelativeOutDir,
   runtimeBuildPolicy,
   standaloneServerSource,
   validateBuildContext,
@@ -33,6 +34,13 @@ export function render(options: RenderAdapterOptions = {}): Adapter {
     build(ctx: BuildContext): AdapterOutput {
       validateBuildContext(ctx, 'renderAdapter')
 
+      // Render runs the start command from the repository root, so the path
+      // has to be written relative to it — and derived from this build's
+      // `outDir` rather than the `.ruvyxa` default, which a project that
+      // configures `outDir` does not have.
+      const relativeOutDir = projectRelativeOutDir(ctx)
+      const serverEntry = `${relativeOutDir}/deploy/render/server/index.mjs`
+
       const renderBlueprint =
         'services:\n' +
         '  - type: web\n' +
@@ -40,7 +48,9 @@ export function render(options: RenderAdapterOptions = {}): Adapter {
         '    runtime: node\n' +
         '    plan: free\n' +
         '    buildCommand: npm run build\n' +
-        '    startCommand: node .ruvyxa/deploy/render/server/index.mjs\n' +
+        '    startCommand: node ' +
+        serverEntry +
+        '\n' +
         '    envVars:\n' +
         '      - key: NODE_VERSION\n' +
         '        value: ">=24.19.0 <25"\n'
@@ -73,7 +83,9 @@ export function render(options: RenderAdapterOptions = {}): Adapter {
               '# Ruvyxa on Render\n\n' +
               'Render auto-detects this adapter through `RENDER=true`.\n' +
               'The generated server honors `PORT` and binds to `0.0.0.0`.\n\n' +
-              '```bash\nnode .ruvyxa/deploy/render/server/index.mjs\n```\n',
+              '```bash\nnode ' +
+              serverEntry +
+              '\n```\n',
           },
           ...(options.projectConfig === false
             ? []

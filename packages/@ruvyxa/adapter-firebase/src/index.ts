@@ -3,11 +3,15 @@ import {
   CLIENT_BUNDLE_PREFIX,
   clientBuildOutput,
   IMMUTABLE_CACHE_CONTROL,
+  projectRelativeOutDir,
   PUBLIC_ASSET_CACHE_CONTROL,
   publicAssetGlobs,
   runtimeBuildPolicy,
   validateBuildContext,
 } from '@ruvyxa/core'
+
+/** Node.js runtimes Cloud Functions (2nd gen) accepts. */
+export type FirebaseRuntime = 'nodejs20' | 'nodejs22' | 'nodejs24'
 
 /** Options for Firebase Hosting and Cloud Functions deployments. */
 export interface FirebaseAdapterOptions {
@@ -15,6 +19,13 @@ export interface FirebaseAdapterOptions {
   functionName?: string
   /** Cloud Functions region colocated with Firebase Hosting. @default "us-central1" */
   region?: string
+  /**
+   * Cloud Functions runtime. Node 24 is generally available on the
+   * second-generation functions this adapter emits; the older runtimes are
+   * here for a project pinned to one.
+   * @default "nodejs24"
+   */
+  runtime?: FirebaseRuntime
   /**
    * Emit a project-root `firebase.json`. Existing configuration is never overwritten.
    * @default true
@@ -26,11 +37,18 @@ export interface FirebaseAdapterOptions {
 export function firebase(options: FirebaseAdapterOptions = {}): Adapter {
   const functionName = options.functionName ?? 'ruvyxaServer'
   const region = options.region ?? 'us-central1'
+  const runtime = options.runtime ?? 'nodejs24'
+  // The function package's `engines.node` has to name the same major as
+  // firebase.json, or the Firebase CLI rejects the deploy over the mismatch.
+  const nodeMajor = runtime.replace('nodejs', '')
 
   if (!/^[A-Za-z_$][A-Za-z0-9_$]{0,62}$/.test(functionName)) {
     throw new Error(
       '[RUV2001] firebaseAdapter: "functionName" must be a valid JavaScript identifier',
     )
+  }
+  if (!['nodejs20', 'nodejs22', 'nodejs24'].includes(runtime)) {
+    throw new Error('[RUV2001] firebaseAdapter: "runtime" must be nodejs20, nodejs22, or nodejs24')
   }
   if (!/^[a-z]+-[a-z]+\d+$/.test(region)) {
     throw new Error(
@@ -45,43 +63,57 @@ export function firebase(options: FirebaseAdapterOptions = {}): Adapter {
     build(ctx: BuildContext): AdapterOutput {
       validateBuildContext(ctx, 'firebaseAdapter')
 
-      const firebaseConfig = JSON.stringify(
-        {
-          functions: [
-            {
-              source: '.ruvyxa/deploy/firebase/functions',
-              codebase: 'ruvyxa',
-              runtime: 'nodejs24',
-            },
-          ],
-          hosting: {
-            public: '.ruvyxa/deploy/firebase/public',
-            ignore: ['firebase.json', '**/.*', '**/node_modules/**'],
-            headers: [
+      // `firebase deploy` resolves `functions.source` and `hosting.public`
+      // relative to the directory holding firebase.json. The project-root copy
+      // therefore has to name this build's `outDir` — hard-coding `.ruvyxa`
+      // pointed a project that configures `outDir` at a directory that does not
+      // exist — while the copy inside the deploy directory names its own
+      // siblings, so `firebase deploy` also works from there.
+      const relativeOutDir = projectRelativeOutDir(ctx)
+      const firebaseConfigFor = (functionsSource: string, hostingPublic: string) =>
+        JSON.stringify(
+          {
+            functions: [
               {
-                source: `${CLIENT_BUNDLE_PREFIX}**`,
-                headers: [{ key: 'Cache-Control', value: IMMUTABLE_CACHE_CONTROL }],
+                source: functionsSource,
+                codebase: 'ruvyxa',
+                runtime,
               },
-              ...publicAssetGlobs().map((glob) => ({
-                source: `**${glob}`,
-                headers: [{ key: 'Cache-Control', value: PUBLIC_ASSET_CACHE_CONTROL }],
-              })),
             ],
-            rewrites: [
-              {
-                source: '**',
-                function: {
-                  functionId: functionName,
-                  region,
-                  pinTag: true,
+            hosting: {
+              public: hostingPublic,
+              ignore: ['firebase.json', '**/.*', '**/node_modules/**'],
+              headers: [
+                {
+                  source: `${CLIENT_BUNDLE_PREFIX}**`,
+                  headers: [{ key: 'Cache-Control', value: IMMUTABLE_CACHE_CONTROL }],
                 },
-              },
-            ],
+                ...publicAssetGlobs().map((glob) => ({
+                  source: `**${glob}`,
+                  headers: [{ key: 'Cache-Control', value: PUBLIC_ASSET_CACHE_CONTROL }],
+                })),
+              ],
+              rewrites: [
+                {
+                  source: '**',
+                  function: {
+                    functionId: functionName,
+                    region,
+                    pinTag: true,
+                  },
+                },
+              ],
+            },
           },
-        },
-        null,
-        2,
+          null,
+          2,
+        )
+
+      const projectFirebaseConfig = firebaseConfigFor(
+        `${relativeOutDir}/deploy/firebase/functions`,
+        `${relativeOutDir}/deploy/firebase/public`,
       )
+      const deployFirebaseConfig = firebaseConfigFor('functions', 'public')
 
       const functionPackage = JSON.stringify(
         {
@@ -89,7 +121,7 @@ export function firebase(options: FirebaseAdapterOptions = {}): Adapter {
           private: true,
           type: 'module',
           main: 'index.mjs',
-          engines: { node: '24' },
+          engines: { node: nodeMajor },
           dependencies: { 'firebase-functions': '^7.3.0' },
         },
         null,
@@ -126,7 +158,7 @@ export function firebase(options: FirebaseAdapterOptions = {}): Adapter {
           {
             kind: 'file',
             path: 'deploy/firebase/firebase.json',
-            contents: firebaseConfig + '\n',
+            contents: deployFirebaseConfig + '\n',
           },
           {
             kind: 'file',
@@ -144,7 +176,7 @@ export function firebase(options: FirebaseAdapterOptions = {}): Adapter {
                   path: 'firebase.json',
                   scope: 'project',
                   skipIfExists: true,
-                  contents: firebaseConfig + '\n',
+                  contents: projectFirebaseConfig + '\n',
                 } satisfies AdapterArtifact,
               ]),
         ],
@@ -166,6 +198,8 @@ import manifest from './manifest.mjs';
 import { readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 
 const runtimePolicy = ${JSON.stringify(runtimePolicy ?? {})};
 
@@ -237,7 +271,16 @@ export const ${functionName} = onRequest(
     }
     const cookies = response.headers.getSetCookie?.() ?? [];
     if (cookies.length > 0) res.setHeader('set-cookie', cookies);
-    res.send(Buffer.from(await response.arrayBuffer()));
+    if (!response.body) {
+      res.end();
+      return;
+    }
+    // Piped rather than collected into one buffer, matching the standalone
+    // server and the Vercel function: a second-generation function runs on
+    // Cloud Run, which forwards bytes as they are written, so buffering only
+    // added the whole response to this instance's memory and pushed the first
+    // byte back to the last.
+    await pipeline(Readable.fromWeb(response.body), res);
   },
 );
 `

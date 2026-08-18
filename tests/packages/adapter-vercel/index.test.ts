@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { Readable } from 'node:stream'
+import { Readable, Writable } from 'node:stream'
 import { copyFile, mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -337,24 +337,36 @@ describe('vercel', () => {
         method: 'POST',
         headers: { host: 'localhost', 'content-type': 'text/plain' },
       })
-      const headers = new Map<string, unknown>()
-      let body: Buffer | string | undefined
-      const response = {
-        statusCode: 0,
-        setHeader(name: string, value: unknown) {
-          headers.set(name, value)
-        },
-        end(value: Buffer | string) {
-          body = value
-        },
+      // A real `ServerResponse` is what the platform launcher passes, and the
+      // handler now pipes into it rather than handing `end()` one buffer. The
+      // double is a Writable for the same reason: a plain object with `end`
+      // would accept a handler that cannot stream at all.
+      const createResponse = () => {
+        const chunks: Buffer[] = []
+        const headers = new Map<string, unknown>()
+        const response = Object.assign(
+          new Writable({
+            write(chunk: Buffer, _encoding: string, callback: () => void) {
+              chunks.push(Buffer.from(chunk))
+              callback()
+            },
+          }),
+          {
+            statusCode: 0,
+            setHeader(name: string, value: unknown) {
+              headers.set(name, value)
+            },
+          },
+        )
+        return { response, headers, body: () => Buffer.concat(chunks) }
       }
 
-      await handler(request, response)
+      const first = createResponse()
+      await handler(request, first.response)
 
-      assert.equal(response.statusCode, 200)
-      assert.ok(body !== undefined)
-      assert.equal(Buffer.from(body).toString(), 'streamed-payload')
-      assert.deepEqual(headers.get('set-cookie'), ['first=1; Path=/', 'second=2; Path=/'])
+      assert.equal(first.response.statusCode, 200)
+      assert.equal(first.body().toString(), 'streamed-payload')
+      assert.deepEqual(first.headers.get('set-cookie'), ['first=1; Path=/', 'second=2; Path=/'])
 
       const parsedRequest = Readable.from([])
       Object.assign(parsedRequest, {
@@ -363,10 +375,9 @@ describe('vercel', () => {
         headers: { host: 'localhost', 'content-type': 'application/json' },
         body: { parsed: true },
       })
-      body = undefined
-      await handler(parsedRequest, response)
-      assert.ok(body !== undefined)
-      assert.equal(Buffer.from(body).toString(), '{"parsed":true}')
+      const parsed = createResponse()
+      await handler(parsedRequest, parsed.response)
+      assert.equal(parsed.body().toString(), '{"parsed":true}')
 
       const binaryRequest = Readable.from([])
       Object.assign(binaryRequest, {
@@ -374,12 +385,47 @@ describe('vercel', () => {
         method: 'POST',
         headers: { host: 'localhost', 'x-binary': '1' },
       })
-      body = undefined
-      await handler(binaryRequest, response)
-      assert.ok(body !== undefined)
-      assert.deepEqual(Buffer.from(body), Buffer.from([0, 128, 255, 65]))
+      const binary = createResponse()
+      await handler(binaryRequest, binary.response)
+      assert.deepEqual(binary.body(), Buffer.from([0, 128, 255, 65]))
     } finally {
       await rm(root, { recursive: true, force: true })
     }
+  })
+
+  /**
+   * Buffering the whole response held it in the function's memory and delayed
+   * the first byte until the last one existed, which is the wrong shape for a
+   * streamed PPR shell or a large API body. The handler pipes instead, and the
+   * platform only forwards bytes early when the function config says so.
+   */
+  it('streams the response body instead of buffering it', async () => {
+    const output = await vercel().build({ root: '.', outDir: '.ruvyxa' })
+
+    const handler = output.artifacts?.find(
+      (artifact) => artifact.kind === 'function' && artifact.path.startsWith('deploy/'),
+    )
+    const source = String(handler && 'handlerSource' in handler ? handler.handlerSource : '')
+    assert.match(source, /pipeline\(Readable\.fromWeb\(response\.body\), res\)/)
+    assert.doesNotMatch(source, /Buffer\.from\(await response\.arrayBuffer\(\)\)/)
+
+    const vcConfigArtifact = output.artifacts?.find((item) => item.path.endsWith('.vc-config.json'))
+    const vcConfig = JSON.parse(
+      vcConfigArtifact && 'contents' in vcConfigArtifact ? String(vcConfigArtifact.contents) : '{}',
+    )
+    assert.equal(vcConfig.supportsResponseStreaming, true)
+    assert.equal(vcConfig.launcherType, 'Nodejs')
+  })
+
+  // An edge function returns the Response itself, so there is nothing to
+  // configure a launcher or streaming for.
+  it('keeps the edge function config to the documented edge fields', async () => {
+    const output = await vercel({ edge: true }).build({ root: '.', outDir: '.ruvyxa' })
+    const vcConfigArtifact = output.artifacts?.find((item) => item.path.endsWith('.vc-config.json'))
+    const vcConfig = JSON.parse(
+      vcConfigArtifact && 'contents' in vcConfigArtifact ? String(vcConfigArtifact.contents) : '{}',
+    )
+    assert.deepEqual(Object.keys(vcConfig).sort(), ['entrypoint', 'runtime'])
+    assert.equal(vcConfig.runtime, 'edge')
   })
 })

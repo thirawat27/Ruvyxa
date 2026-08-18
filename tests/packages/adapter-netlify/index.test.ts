@@ -95,7 +95,23 @@ describe('netlify', () => {
       assert.doesNotMatch(handlerSource, /path\.join\(prerenderDir, pathname/)
       // Netlify Functions v2 config export
       assert.match(handlerSource, /export const config/)
-      assert.match(handlerSource, /preferStatic: true/)
+      assert.match(handlerSource, /"preferStatic": true/)
+      assert.match(handlerSource, /"path": "\/\*"/)
+
+      // Framework attribution: Netlify reads `generator` to tell a
+      // framework-emitted function from a hand-written one, and shows `name`
+      // in the site UI.
+      assert.match(handlerSource, /"generator": "ruvyxa\/\d+\.\d+\.\d+/)
+      assert.match(handlerSource, /"name": "Ruvyxa SSR"/)
+
+      // The deploy-time prerender output is not in the module graph, so it
+      // only survives esbuild bundling if the config declares it. Each
+      // artifact names its own location, because the glob resolves against
+      // the site's base directory rather than the function directory.
+      assert.ok(
+        handlerSource.includes(`"${functionPath.replace('deploy/netlify/', '')}/prerender/**"`),
+        `includedFiles must cover the prerender directory of ${functionPath}`,
+      )
 
       // Netlify bundles the function with esbuild, so the manifest has to be
       // part of the module graph. Reading a sibling manifest.json at runtime

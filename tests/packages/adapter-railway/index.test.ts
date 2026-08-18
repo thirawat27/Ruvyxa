@@ -50,4 +50,13 @@ describe('railway', () => {
       false,
     )
   })
+
+  // Railway runs the start command from the repository root, so the path has
+  // to follow this build's outDir rather than the `.ruvyxa` default.
+  it('points the start command at the configured out directory', async () => {
+    const output = await railway().build({ root: '/srv/app', outDir: '/srv/app/build' })
+    const artifact = output.artifacts?.find((item) => item.path === 'railway.json')
+    const config = JSON.parse(artifact && 'contents' in artifact ? String(artifact.contents) : '{}')
+    assert.equal(config.deploy.startCommand, 'node build/deploy/railway/server/index.mjs')
+  })
 })

@@ -32,6 +32,9 @@
   "dependencies": {
     "@ruvyxa/core": "workspace:^"
   },
+  "devDependencies": {
+    "@types/node": "24.13.3"
+  },
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "check": "tsc -p tsconfig.check.json",

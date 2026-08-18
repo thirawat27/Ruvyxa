@@ -66,6 +66,8 @@ import manifest from './manifest.mjs';
 import { readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
+import { Readable } from 'node:stream';
+import { pipeline } from 'node:stream/promises';
 
 const runtimePolicy = ${JSON.stringify(runtimePolicy ?? {})};
 
@@ -182,8 +184,17 @@ export default async function(req, res, context) {
   }
   const setCookies = response.headers.getSetCookie?.() ?? [];
   if (setCookies.length > 0) res.setHeader('set-cookie', setCookies);
-  const body = Buffer.from(await response.arrayBuffer());
-  res.end(body);
+  if (!response.body) {
+    res.end();
+    return;
+  }
+  // Forwarded as it arrives rather than collected first. Buffering held the
+  // whole response in the function's memory and delayed the first byte until
+  // the last one was produced, which is exactly wrong for a streamed PPR shell
+  // or a large API response. The supportsResponseStreaming flag in
+  // .vc-config.json is the half of this that tells Vercel to pass the bytes
+  // straight through.
+  await pipeline(Readable.fromWeb(response.body), res);
 }
 `
 }
@@ -362,6 +373,10 @@ export function vercel(options: VercelAdapterOptions = {}): Adapter {
               handler: 'index.mjs',
               maxDuration,
               launcherType: 'Nodejs',
+              // The handler pipes the response body through; without this the
+              // platform waits for the function to finish before sending any
+              // of it.
+              supportsResponseStreaming: true,
               ...(options.regions === undefined ? {} : { regions: options.regions }),
             },
         null,

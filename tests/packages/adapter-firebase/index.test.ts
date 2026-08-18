@@ -50,6 +50,11 @@ describe('firebase', () => {
     assert.match(source, /prerenderRelativePath/)
     assert.doesNotMatch(source, /ISR cache write failures/)
     assert.match(source, /getSetCookie/)
+    // A second-generation function runs on Cloud Run, which forwards bytes as
+    // they are written; collecting the whole response first only cost memory
+    // and time to first byte.
+    assert.match(source, /pipeline\(Readable\.fromWeb\(response\.body\), res\)/)
+    assert.doesNotMatch(source, /res\.send\(Buffer\.from/)
 
     const packageArtifact = output.artifacts?.find((artifact) =>
       artifact.path.endsWith('functions/package.json'),
@@ -59,6 +64,41 @@ describe('firebase', () => {
     )
     assert.equal(packageJson.engines.node, '24')
     assert.equal(packageJson.dependencies['firebase-functions'], '^7.3.0')
+  })
+
+  /**
+   * `firebase deploy` resolves these paths against the directory holding
+   * firebase.json, so the project-root copy has to name the configured
+   * `outDir` and the deploy-directory copy has to name its own siblings.
+   * Both were hard-coded to `.ruvyxa`, which pointed a project that configures
+   * `outDir` at a directory that does not exist.
+   */
+  it('writes config paths for the directory each firebase.json sits in', async () => {
+    const output = await firebase().build({ root: '/srv/app', outDir: '/srv/app/build' })
+
+    const configFor = (path: string) => {
+      const artifact = output.artifacts?.find((item) => item.path === path)
+      return JSON.parse(artifact && 'contents' in artifact ? String(artifact.contents) : '{}')
+    }
+
+    const project = configFor('firebase.json')
+    assert.equal(project.hosting.public, 'build/deploy/firebase/public')
+    assert.equal(project.functions[0].source, 'build/deploy/firebase/functions')
+
+    const deployLocal = configFor('deploy/firebase/firebase.json')
+    assert.equal(deployLocal.hosting.public, 'public')
+    assert.equal(deployLocal.functions[0].source, 'functions')
+  })
+
+  it('pins the functions runtime and the package engines to one major', async () => {
+    const output = await firebase({ runtime: 'nodejs22' }).build({ root: '.', outDir: '.ruvyxa' })
+    const contentsOf = (suffix: string) => {
+      const artifact = output.artifacts?.find((item) => item.path.endsWith(suffix))
+      return JSON.parse(artifact && 'contents' in artifact ? String(artifact.contents) : '{}')
+    }
+    assert.equal(contentsOf('firebase.json').functions[0].runtime, 'nodejs22')
+    assert.equal(contentsOf('functions/package.json').engines.node, '22')
+    assert.throws(() => firebase({ runtime: 'nodejs18' as unknown as 'nodejs22' }), /runtime/)
   })
 
   it('validates function and region identifiers', () => {

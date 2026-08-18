@@ -1,6 +1,7 @@
 import type { Adapter, AdapterArtifact, AdapterOutput, BuildContext } from '@ruvyxa/core'
 import {
   clientBuildOutput,
+  projectRelativeOutDir,
   runtimeBuildPolicy,
   standaloneServerSource,
   validateBuildContext,
@@ -25,6 +26,13 @@ export function railway(options: RailwayAdapterOptions = {}): Adapter {
     build(ctx: BuildContext): AdapterOutput {
       validateBuildContext(ctx, 'railwayAdapter')
 
+      // Railway runs the start command from the repository root, so the path
+      // has to be written relative to it -- and derived from this build's
+      // `outDir` rather than the `.ruvyxa` default, which a project that
+      // configures `outDir` does not have.
+      const relativeOutDir = projectRelativeOutDir(ctx)
+      const serverEntry = `${relativeOutDir}/deploy/railway/server/index.mjs`
+
       const railwayConfig = JSON.stringify(
         {
           $schema: 'https://railway.com/railway.schema.json',
@@ -33,7 +41,7 @@ export function railway(options: RailwayAdapterOptions = {}): Adapter {
             buildCommand: 'npm run build',
           },
           deploy: {
-            startCommand: 'node .ruvyxa/deploy/railway/server/index.mjs',
+            startCommand: `node ${serverEntry}`,
             restartPolicyType: 'ON_FAILURE',
             restartPolicyMaxRetries: 10,
           },
@@ -70,7 +78,9 @@ export function railway(options: RailwayAdapterOptions = {}): Adapter {
               '# Ruvyxa on Railway\n\n' +
               'Railway auto-detects this adapter through `RAILWAY_PROJECT_ID`.\n' +
               'The generated server honors `PORT` and binds to `0.0.0.0`.\n\n' +
-              '```bash\nnode .ruvyxa/deploy/railway/server/index.mjs\n```\n',
+              '```bash\nnode ' +
+              serverEntry +
+              '\n```\n',
           },
           ...(options.projectConfig === false
             ? []

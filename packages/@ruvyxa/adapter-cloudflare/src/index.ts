@@ -44,6 +44,22 @@ export interface CloudflareAdapterOptions {
 const DEFAULT_COMPATIBILITY_DATE = '2025-09-01'
 
 /**
+ * Node.js compatibility, which this Worker genuinely depends on.
+ *
+ * `runtime/request-context.mjs` reaches for `node:async_hooks` and falls back
+ * to a single-slot store when the runtime has none. That fallback refuses a
+ * second concurrent render rather than risk serving one visitor's page to
+ * another, so on Workers every app that calls `cookies()`, `headers()`, or
+ * `draftMode()` while rendering failed as soon as two requests overlapped.
+ *
+ * Cloudflare enables the Node.js APIs without a flag only from compatibility
+ * date `2026-08-04`; between `2024-09-23` and that date they are behind
+ * `nodejs_compat`, which is the range `DEFAULT_COMPATIBILITY_DATE` sits in.
+ * The flag stays harmless once the date is raised past the cutoff.
+ */
+const COMPATIBILITY_FLAGS = ['nodejs_compat']
+
+/**
  * Worker fetch handler source code.
  *
  * This is the platform-specific entry that wraps the generic Ruvyxa serverless
@@ -154,6 +170,7 @@ export function cloudflare(options: CloudflareAdapterOptions = {}): Adapter {
           name: 'ruvyxa-app',
           main: './worker/index.mjs',
           compatibility_date: compatDate,
+          compatibility_flags: COMPATIBILITY_FLAGS,
           assets: { directory: './assets' },
         },
         null,
@@ -165,6 +182,7 @@ export function cloudflare(options: CloudflareAdapterOptions = {}): Adapter {
           name: 'ruvyxa-app',
           main: `${relativeOutDir}/deploy/cloudflare/worker/index.mjs`,
           compatibility_date: compatDate,
+          compatibility_flags: COMPATIBILITY_FLAGS,
           assets: { directory: `${relativeOutDir}/deploy/cloudflare/assets` },
         },
         null,

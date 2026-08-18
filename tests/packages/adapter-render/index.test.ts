@@ -38,4 +38,13 @@ describe('render', () => {
   it('rejects unsafe Blueprint service names', () => {
     assert.throws(() => render({ serviceName: 'bad\nname' }), /serviceName.*lowercase letters/)
   })
+
+  // Render runs the start command from the repository root, so the path has to
+  // follow this build's outDir rather than the `.ruvyxa` default.
+  it('points the start command at the configured out directory', async () => {
+    const output = await render().build({ root: '/srv/app', outDir: '/srv/app/build' })
+    const artifact = output.artifacts?.find((item) => item.path === 'render.yaml')
+    const blueprint = artifact && 'contents' in artifact ? String(artifact.contents) : ''
+    assert.match(blueprint, /startCommand: node build\/deploy\/render\/server\/index\.mjs/)
+  })
 })
