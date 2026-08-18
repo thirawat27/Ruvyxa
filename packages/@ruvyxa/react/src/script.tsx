@@ -124,7 +124,15 @@ export function injectScript(
     if (attribute === 'dangerouslySetInnerHTML') continue
     // A boolean attribute is present or absent, never `="false"`.
     if (value === false) continue
-    element.setAttribute(attributeName(attribute), value === true ? '' : String(value))
+    if (value === true) {
+      element.setAttribute(attributeName(attribute), '')
+      continue
+    }
+    // An object has no meaningful attribute form. Stringifying it would write
+    // "[object Object]" into the DOM and hide the caller's mistake behind a
+    // value that looks deliberate.
+    if (typeof value === 'object') continue
+    element.setAttribute(attributeName(attribute), String(value))
   }
   if (src) {
     element.src = src
@@ -162,7 +170,7 @@ export function Script({
   onLoad,
   onError,
   ...rest
-}: ScriptProps) {
+}: Readonly<ScriptProps>) {
   // Held in refs so a caller passing a fresh arrow function every render does
   // not re-run the effect and inject the script twice.
   const handlers = useRef({ onLoad, onError })

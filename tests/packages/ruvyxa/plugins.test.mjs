@@ -1237,7 +1237,7 @@ describe('fonts()', () => {
     // No gstatic origin survives: that request is what blocks first paint.
     assert.doesNotMatch(generated, /fonts\.gstatic\.com/)
 
-    const [fontFile] = readdirSync(path.join(context.outDir, 'assets/fonts')).filter((name) =>
+    const fontFile = readdirSync(path.join(context.outDir, 'assets/fonts')).find((name) =>
       name.endsWith('.woff2'),
     )
     assert.ok(fontFile, 'font file was written')

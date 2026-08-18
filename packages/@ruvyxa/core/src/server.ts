@@ -187,9 +187,9 @@ class CacheStore {
    * which is what the eviction path had to defend against. One structure
    * cannot drift from itself.
    */
-  #entries = new Map<string, CacheEntry>()
-  #pendingWrites = new Map<string, PendingCacheWrite>()
-  #maxEntries: number
+  readonly #entries = new Map<string, CacheEntry>()
+  readonly #pendingWrites = new Map<string, PendingCacheWrite>()
+  readonly #maxEntries: number
 
   constructor(maxEntries = CACHE_MAX_ENTRIES) {
     this.#maxEntries = maxEntries
@@ -324,7 +324,7 @@ if (typeof setInterval !== 'undefined') {
 }
 
 function parseTtl(value: string): number {
-  const match = value.match(/^(\d+)\s*(ms|s|m|h|d)$/)
+  const match = /^(\d+)\s*(ms|s|m|h|d)$/.exec(value)
   if (!match) {
     throw invalidCacheDuration(value)
   }

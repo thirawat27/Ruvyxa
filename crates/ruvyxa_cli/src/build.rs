@@ -218,6 +218,144 @@ pub(crate) fn prepare_build_assets(
     })
 }
 
+/// Print the fixed banner a summarized build opens with.
+fn print_build_header(args: &BuildArgs, target: BuildTarget, app_dir: &Path, out_dir: &Path) {
+    print_tui_header("Build");
+    print_field("target", accent(format!("{:?}", target).to_lowercase()));
+    print_field(
+        "profile",
+        accent(if args.server_only {
+            "production · server-only"
+        } else {
+            "production"
+        }),
+    );
+    print_field("root", path_text(&args.root));
+    print_field("app dir", path_text(app_dir));
+    print_field("out dir", path_text(out_dir));
+    println!();
+}
+
+/// Report raw `<img>` references that bypass the image pipeline.
+///
+/// Capped at five so a project that never adopted `<Image>` reports a problem
+/// rather than burying the rest of the build output under one per file.
+fn warn_bypassed_images(bypassed: &[crate::image_usage::RawImageUsage], keep_original: bool) {
+    for usage in bypassed.iter().take(5) {
+        if keep_original {
+            warn!(
+                "{}:{} <img src=\"{}\"> ships {} instead of the generated WebP ({}). Use <Image> from @ruvyxa/react to serve the optimized file.",
+                usage.file.display(),
+                usage.line,
+                usage.url,
+                format_bytes(usage.source_bytes as usize),
+                format_bytes(usage.webp_bytes as usize),
+            );
+        } else {
+            warn!(
+                "{}:{} <img src=\"{}\"> references an original image that is not published. Use <Image> from @ruvyxa/react or reference the generated WebP.",
+                usage.file.display(),
+                usage.line,
+                usage.url,
+            );
+        }
+    }
+    if bypassed.len() > 5 {
+        warn!(
+            "{} more raw <img> references bypass the image pipeline.",
+            bypassed.len() - 5
+        );
+    }
+}
+
+/// One-line summary of what asset preparation produced.
+fn assets_phase_detail(asset_files: usize, optimized_images: usize) -> String {
+    let mut detail = format!("{asset_files} files");
+    if optimized_images > 0 {
+        let plural = if optimized_images == 1 { "" } else { "s" };
+        detail.push_str(&format!(" · {optimized_images} optimized image{plural}"));
+    }
+    detail
+}
+
+/// One-line summary naming the adapter that ran, and how it was chosen.
+fn adapter_phase_detail(
+    args: &BuildArgs,
+    detected_adapter: &Option<(String, String)>,
+    artifact_count: usize,
+) -> String {
+    match (&args.adapter, detected_adapter) {
+        (Some(name), _) => name.clone(),
+        (None, Some((name, source))) => format!("{name} (auto via {source})"),
+        (None, None) => format!("{artifact_count} artifact(s)"),
+    }
+}
+
+/// Write `robots.txt` and `sitemap.xml` for a build that serves pages.
+///
+/// A missing site URL is a warning rather than an error: a project can build
+/// and deploy without one, it just cannot advertise absolute URLs.
+fn write_discovery_stage(
+    config: &ProjectConfig,
+    manifest: &RouteManifest,
+    prerendered_paths: &[String],
+    assets_dir: &Path,
+    site_url: Option<&str>,
+) -> anyhow::Result<()> {
+    let discovery = write_discovery_files(
+        manifest,
+        prerendered_paths,
+        assets_dir,
+        site_url,
+        &config.site,
+    )
+    .with_context(|| {
+        format!(
+            "failed to write discovery files into {}",
+            assets_dir.display()
+        )
+    })?;
+    if discovery.sitemap_needs_site_url {
+        warn!(
+            "no production site URL is configured, so sitemap.xml was not generated. Set `site.url`, RUVYXA_SITE_URL, or a supported production host URL environment variable."
+        );
+    }
+    Ok(())
+}
+
+/// Run the deploy adapter over the committed output, when one applies.
+///
+/// Returns the artifact list to record in `build.json`, or `None` when neither
+/// the config, the CLI flag, nor platform detection selected an adapter.
+fn run_adapter_stage(
+    args: &BuildArgs,
+    config: &ProjectConfig,
+    out_dir: &Path,
+    detected_adapter: &Option<(String, String)>,
+    show_summary: bool,
+) -> anyhow::Result<Option<serde_json::Value>> {
+    if config.adapter.is_none() && args.adapter.is_none() && detected_adapter.is_none() {
+        return Ok(None);
+    }
+    let phase_started = Instant::now();
+    let spinner = start_build_phase(show_summary, "adapter");
+    let named_adapter = args
+        .adapter
+        .as_deref()
+        .or_else(|| detected_adapter.as_ref().map(|(name, _)| name.as_str()));
+    let artifacts = run_adapter_runner(
+        &args.root,
+        out_dir,
+        config.javascript_runtime(),
+        named_adapter,
+    )?;
+    if show_summary {
+        let detail = adapter_phase_detail(args, detected_adapter, artifacts.len());
+        print_build_phase(spinner, "adapter", detail, phase_started.elapsed());
+    }
+    Ok(Some(serde_json::to_value(artifacts)?))
+}
+
 pub(crate) async fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> {
     build_with_cache_override(args, show_summary, None).await
 }
@@ -242,20 +380,7 @@ pub(crate) async fn build_with_cache_override(
         .unwrap_or_else(|| build_cache_dir(&args.root, &config.cache));
 
     if show_summary {
-        print_tui_header("Build");
-        print_field("target", accent(format!("{:?}", target).to_lowercase()));
-        print_field(
-            "profile",
-            accent(if args.server_only {
-                "production · server-only"
-            } else {
-                "production"
-            }),
-        );
-        print_field("root", path_text(&args.root));
-        print_field("app dir", path_text(&app_dir));
-        print_field("out dir", path_text(&out_dir));
-        println!();
+        print_build_header(&args, target, &app_dir, &out_dir);
     }
 
     let phase_started = Instant::now();
@@ -389,45 +514,10 @@ pub(crate) async fn build_with_cache_override(
     } else {
         scan_raw_image_usage(&app_dir, &image_report.entries)
     };
-    for usage in bypassed_images.iter().take(5) {
-        if image_options.keep_original {
-            warn!(
-                "{}:{} <img src=\"{}\"> ships {} instead of the generated WebP ({}). Use <Image> from @ruvyxa/react to serve the optimized file.",
-                usage.file.display(),
-                usage.line,
-                usage.url,
-                format_bytes(usage.source_bytes as usize),
-                format_bytes(usage.webp_bytes as usize),
-            );
-        } else {
-            warn!(
-                "{}:{} <img src=\"{}\"> references an original image that is not published. Use <Image> from @ruvyxa/react or reference the generated WebP.",
-                usage.file.display(),
-                usage.line,
-                usage.url,
-            );
-        }
-    }
-    if bypassed_images.len() > 5 {
-        warn!(
-            "{} more raw <img> references bypass the image pipeline.",
-            bypassed_images.len() - 5
-        );
-    }
+    warn_bypassed_images(&bypassed_images, image_options.keep_original);
 
     if show_summary {
-        let mut detail = format!("{asset_files} files");
-        if image_report.optimized_images > 0 {
-            detail.push_str(&format!(
-                " · {} optimized image{}",
-                image_report.optimized_images,
-                if image_report.optimized_images == 1 {
-                    ""
-                } else {
-                    "s"
-                }
-            ));
-        }
+        let detail = assets_phase_detail(asset_files, image_report.optimized_images);
         print_build_phase(None, "assets prepared", detail, preparation_duration);
     }
 
@@ -507,24 +597,13 @@ pub(crate) async fn build_with_cache_override(
     // artifact has none, so writing them would advertise URLs that do not exist
     // and would create an `assets/` directory for a project with no `public/`.
     if !args.server_only {
-        let discovery = write_discovery_files(
+        write_discovery_stage(
+            &config,
             &manifest,
             &prerendered_paths,
             &assets_dir,
             site_url.as_deref(),
-            &config.site,
-        )
-        .with_context(|| {
-            format!(
-                "failed to write discovery files into {}",
-                assets_dir.display()
-            )
-        })?;
-        if discovery.sitemap_needs_site_url {
-            warn!(
-                "no production site URL is configured, so sitemap.xml was not generated. Set `site.url`, RUVYXA_SITE_URL, or a supported production host URL environment variable."
-            );
-        }
+        )?;
     }
 
     // Zero-config deploys: pick the adapter from the hosting platform's build
@@ -634,28 +713,10 @@ pub(crate) async fn build_with_cache_override(
     // Adapters must snapshot the committed output after build-complete hooks:
     // first-party and application plugins can add public artifacts such as a
     // sitemap or service worker that must be present in static deploy output.
-    if config.adapter.is_some() || args.adapter.is_some() || detected_adapter.is_some() {
-        let phase_started = Instant::now();
-        let spinner = start_build_phase(show_summary, "adapter");
-        let named_adapter = args
-            .adapter
-            .as_deref()
-            .or_else(|| detected_adapter.as_ref().map(|(name, _)| name.as_str()));
-        let artifacts = run_adapter_runner(
-            &args.root,
-            &out_dir,
-            config.javascript_runtime(),
-            named_adapter,
-        )?;
-        if show_summary {
-            let detail = match (&args.adapter, &detected_adapter) {
-                (Some(name), _) => name.clone(),
-                (None, Some((name, source))) => format!("{name} (auto via {source})"),
-                (None, None) => format!("{} artifact(s)", artifacts.len()),
-            };
-            print_build_phase(spinner, "adapter", detail, phase_started.elapsed());
-        }
-        build_info["adapterArtifacts"] = serde_json::to_value(artifacts)?;
+    if let Some(artifacts) =
+        run_adapter_stage(&args, &config, &out_dir, &detected_adapter, show_summary)?
+    {
+        build_info["adapterArtifacts"] = artifacts;
     }
     build_info["timing"]["totalMs"] = serde_json::json!(duration_ms(started.elapsed()));
     fs::write(

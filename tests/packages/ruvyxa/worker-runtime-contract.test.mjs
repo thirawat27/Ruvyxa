@@ -23,7 +23,7 @@ test('worker local dependencies are packaged and included in prerender cache ide
       `packages/ruvyxa/package.json must publish runtime/${runtimeFile}`,
     )
     assert.ok(
-      artifactCacheSource.includes(`\"${runtimeFile}\"`),
+      artifactCacheSource.includes(`"${runtimeFile}"`),
       `prerender cache identity must include runtime/${runtimeFile}`,
     )
   }
@@ -41,8 +41,8 @@ async function localRuntimeGraph(entryFiles) {
     const sourcePath = path.join(runtimeDir, runtimeFile)
     const source = await readFile(sourcePath, 'utf8')
     const specifiers = [
-      ...source.matchAll(/\b(?:import|export)\s+(?:[^'\"]*?\s+from\s+)?['\"](\.[^'\"]+)['\"]/g),
-      ...source.matchAll(/\bimport\s*\(\s*['\"](\.[^'\"]+)['\"]\s*\)/g),
+      ...source.matchAll(/\b(?:import|export)\s+(?:[^'"]*?\s+from\s+)?['"](\.[^'"]+)['"]/g),
+      ...source.matchAll(/\bimport\s*\(\s*['"](\.[^'"]+)['"]\s*\)/g),
     ]
     for (const match of specifiers) {
       const dependency = path.relative(runtimeDir, path.resolve(path.dirname(sourcePath), match[1]))

@@ -57,6 +57,14 @@ const KNOWN_ADAPTER_NAMES = [
 // locations. Project-scope artifacts are limited to this allowlist so an
 // adapter can enable zero-config deploys without gaining arbitrary write
 // access to the project.
+/**
+ * Runtime a target implies when an adapter does not state one.
+ *
+ * Targets not listed here run on Node: that is the fallback a self-hosted
+ * deployment gets, and it is the only runtime guaranteed to exist.
+ */
+const DEFAULT_RUNTIME_BY_TARGET = { edge: 'edge', static: 'static' }
+
 const PROJECT_ARTIFACT_ALLOWLIST = [
   '.vercel/output',
   '.netlify/v1',
@@ -127,8 +135,7 @@ function inspectAdapter(adapter, output) {
     throw new Error('RUV2200 config.adapter.build(context) must return an output object.')
   }
   const target = output.target ?? adapter.target ?? 'unknown'
-  const runtime =
-    output.runtime ?? (target === 'edge' ? 'edge' : target === 'static' ? 'static' : 'node')
+  const runtime = output.runtime ?? DEFAULT_RUNTIME_BY_TARGET[target] ?? 'node'
   return {
     name: output.name ?? adapter.name ?? 'unknown',
     target,

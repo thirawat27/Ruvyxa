@@ -186,7 +186,8 @@ function describePostcssError(error, configFile) {
   if (!(error instanceof Error)) return `${String(error)} (from ${configFile})`
   // A `CssSyntaxError` carries the offending file and position; a plugin throw
   // usually does not. Report whichever the error actually has.
-  const location = error.file ? `${error.file}${error.line ? `:${error.line}` : ''}: ` : ''
+  const position = error.line ? `:${error.line}` : ''
+  const location = error.file ? `${error.file}${position}: ` : ''
   return `${location}${error.reason ?? error.message} (plugin chain from ${configFile})`
 }
 

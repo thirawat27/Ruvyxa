@@ -264,7 +264,6 @@ export function routeContextPrelude() {
  * @param {object} options
  * @param {string} options.name Function name to declare.
  * @param {string} options.pageName Identifier the page component is bound to.
- * @param {string|null} [options.pageModuleName] Namespace containing an optional Flight export.
  * @param {string[]} options.layoutNames Layout identifiers, root-to-leaf.
  * @param {string} options.routePath Route pattern, e.g. `/blog/[slug]`.
  * @param {string|null} [options.errorName] `error.tsx` component identifier.
@@ -278,7 +277,6 @@ export function routeContextPrelude() {
 export function routeTreeFunction({
   name,
   pageName,
-  pageModuleName = null,
   layoutNames,
   routePath,
   metaNames = [],

@@ -176,11 +176,21 @@ export async function createPluginHarness(
         },
       },
       build: {
-        onStart: (hook) => void buildHooks.start.push(hook),
-        onResolve: (hook) => void buildHooks.resolve.push(hook),
-        onLoad: (hook) => void buildHooks.load.push(hook),
-        onTransform: (hook) => void buildHooks.transform.push(hook),
-        onComplete: (hook) => void buildHooks.complete.push(hook),
+        onStart: (hook) => {
+          buildHooks.start.push(hook)
+        },
+        onResolve: (hook) => {
+          buildHooks.resolve.push(hook)
+        },
+        onLoad: (hook) => {
+          buildHooks.load.push(hook)
+        },
+        onTransform: (hook) => {
+          buildHooks.transform.push(hook)
+        },
+        onComplete: (hook) => {
+          buildHooks.complete.push(hook)
+        },
       },
       dev: {
         onFileChange(registration) {

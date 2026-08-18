@@ -82,7 +82,7 @@ export function compilePattern(routePath: string): CompiledPattern {
   for (const segment of segments) {
     const optionalCatchAll = /^\[\[\.\.\.(\w+)\]\]$/.exec(segment)
     if (optionalCatchAll) {
-      const name = optionalCatchAll[1]!
+      const name = optionalCatchAll[1]
       paramNames.push(name)
       catchAll = { name, optional: true }
       pattern += '(?:/(.*))?'
@@ -91,7 +91,7 @@ export function compilePattern(routePath: string): CompiledPattern {
 
     const requiredCatchAll = /^\[\.\.\.(\w+)\]$/.exec(segment)
     if (requiredCatchAll) {
-      const name = requiredCatchAll[1]!
+      const name = requiredCatchAll[1]
       paramNames.push(name)
       catchAll = { name, optional: false }
       pattern += '/(.+)'
@@ -100,7 +100,7 @@ export function compilePattern(routePath: string): CompiledPattern {
 
     const dynamic = /^\[(\w+)\]$/.exec(segment)
     if (dynamic) {
-      paramNames.push(dynamic[1]!)
+      paramNames.push(dynamic[1])
       pattern += '/([^/]+)'
       continue
     }
@@ -203,7 +203,7 @@ export function canonicalRoutePath(pathname: string): string | null {
 export function bindPatternParams(pattern: CompiledPattern, matched: RegExpExecArray): RouteParams {
   const params: RouteParams = {}
   for (let index = 0; index < pattern.paramNames.length; index++) {
-    const name = pattern.paramNames[index]!
+    const name = pattern.paramNames[index]
     const value = matched[index + 1]
 
     if (pattern.catchAll && name === pattern.catchAll.name) {

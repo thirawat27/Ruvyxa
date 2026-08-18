@@ -839,43 +839,67 @@ export default function RuvyxaRunner() {
       return BOSS_VARIANTS[Math.floor(Math.random() * BOSS_VARIANTS.length)].attack
     }
 
+    /**
+     * Rounds down one lane with a readable gap, then a long reload.
+     *
+     * Higher tiers add a third round, so the reload window the player relied on
+     * shrinks. A three-round volley is only fair in the high lane, where one held
+     * crouch clears the whole burst — three low rounds would demand three separate
+     * jumps inside the span of a single jump arc, which is not dodgeable at all.
+     */
+    function fireBurst(b: Boss, boost: number) {
+      if (b.burst <= 0) {
+        b.burst = b.tier >= 2 ? 3 : 2
+        b.burstHigh = b.burst >= 3 ? true : adaptiveHigh(b)
+      }
+      shots.push(makeShot(b.x, b.burstHigh ? HIGH_LANE : LOW_LANE, { vx: 5.5 + boost }))
+      b.burst--
+      b.cooldown = b.burst > 0 ? Math.max(20, 24 - b.tier) : b.fireInterval
+    }
+
+    /** Lobbed high and sinking — it settles into the standing lane, so it must be ducked. */
+    function fireDrift(b: Boss, boost: number) {
+      shots.push(makeShot(b.x, GROUND_Y - 64, { vx: 4.6 + boost, vy: 0.42, behavior: 'drift' }))
+    }
+
+    /** One round that clones itself midway: duck the leader, then jump the trailer. */
+    function fireSplit(b: Boss, boost: number) {
+      shots.push(makeShot(b.x, HIGH_LANE, { vx: 5 + boost, behavior: 'split' }))
+    }
+
+    /** Jumps between lanes while travelling, then locks in with room left to react. */
+    function fireFlicker(b: Boss, boost: number) {
+      shots.push(
+        makeShot(b.x, adaptiveHigh(b) ? HIGH_LANE : LOW_LANE, {
+          vx: 5 + boost,
+          behavior: 'flicker',
+        }),
+      )
+    }
+
+    /** Slow oversized wall — too tall to crouch under, so the only answer is a jump. */
+    function fireSlab(b: Boss, boost: number) {
+      shots.push(makeShot(b.x, GROUND_Y - 22, { vx: 3 + boost * 0.5, size: 18 }))
+    }
+
+    /**
+     * Fire the attack `pickAttack` chose.
+     *
+     * Only `burst` sets its own cooldown, because it is the one attack that fires
+     * more than once per decision; every other attack falls back to the variant's
+     * interval, which is why that assignment sits here rather than in each branch.
+     */
     function fireBoss(b: Boss) {
       const attack = pickAttack(b)
       b.attack = attack
       const boost = b.shotSpeed
       if (attack === 'burst') {
-        // Rounds down one lane with a readable gap, then a long reload. Higher tiers add
-        // a third round, so the reload window the player relied on shrinks.
-        if (b.burst <= 0) {
-          b.burst = b.tier >= 2 ? 3 : 2
-          // A three-round volley is only fair in the high lane, where one held crouch
-          // clears the whole burst. Three low rounds would demand three separate jumps
-          // inside the span of a single jump arc, which is not dodgeable at all.
-          b.burstHigh = b.burst >= 3 ? true : adaptiveHigh(b)
-        }
-        shots.push(makeShot(b.x, b.burstHigh ? HIGH_LANE : LOW_LANE, { vx: 5.5 + boost }))
-        b.burst--
-        b.cooldown = b.burst > 0 ? Math.max(20, 24 - b.tier) : b.fireInterval
-      } else if (attack === 'drift') {
-        // Lobbed high and sinking — it settles into the standing lane, so it must be ducked.
-        shots.push(makeShot(b.x, GROUND_Y - 64, { vx: 4.6 + boost, vy: 0.42, behavior: 'drift' }))
-        b.cooldown = b.fireInterval
-      } else if (attack === 'split') {
-        // One round that clones itself midway: duck the leader, then jump the trailer.
-        shots.push(makeShot(b.x, HIGH_LANE, { vx: 5 + boost, behavior: 'split' }))
-        b.cooldown = b.fireInterval
-      } else if (attack === 'flicker') {
-        // Jumps between lanes while travelling, then locks in with room left to react.
-        shots.push(
-          makeShot(b.x, adaptiveHigh(b) ? HIGH_LANE : LOW_LANE, {
-            vx: 5 + boost,
-            behavior: 'flicker',
-          }),
-        )
-        b.cooldown = b.fireInterval
+        fireBurst(b, boost)
       } else {
-        // Slow oversized wall — too tall to crouch under, so the only answer is a jump.
-        shots.push(makeShot(b.x, GROUND_Y - 22, { vx: 3 + boost * 0.5, size: 18 }))
+        if (attack === 'drift') fireDrift(b, boost)
+        else if (attack === 'split') fireSplit(b, boost)
+        else if (attack === 'flicker') fireFlicker(b, boost)
+        else fireSlab(b, boost)
         b.cooldown = b.fireInterval
       }
       b.volley++
@@ -885,6 +909,13 @@ export default function RuvyxaRunner() {
       if (!started || gameOver || won) return
       paused = !paused
       ducking = false
+    }
+
+    /** `A` is the accent cell, `K` the fixed ink cell, everything else the body color. */
+    function cellColor(cell: string, color: string, accentColor: string): string {
+      if (cell === 'A') return accentColor
+      if (cell === 'K') return INK
+      return color
     }
 
     function drawSprite(
@@ -900,7 +931,7 @@ export default function RuvyxaRunner() {
         for (let col = 0; col < line.length; col++) {
           const cell = line[col]
           if (cell === '0') continue
-          ctx!.fillStyle = cell === 'A' ? accentColor : cell === 'K' ? INK : color
+          ctx!.fillStyle = cellColor(cell, color, accentColor)
           ctx!.fillRect(x + col * scale, y + row * scale, scale, scale)
         }
       }
@@ -973,25 +1004,34 @@ export default function RuvyxaRunner() {
       }
     }
 
-    function drawScenery(theme: ReturnType<typeof resolveTheme>) {
-      // Drawn back-to-front by kind (not array order) so depth stays correct regardless
-      // of spawn sequence: sky sparkle, then clouds, skyline, hills, birds, ground grit.
+    type Theme = ReturnType<typeof resolveTheme>
+
+    function drawStars(theme: Theme) {
+      if (theme.nightLevel < 0.05) return
       for (const s of scenery) {
         if (s.kind !== 'star') continue
-        if (theme.nightLevel < 0.05) continue
         const twinkle = 0.4 + 0.6 * Math.abs(Math.sin(frame / 20 + s.x))
         ctx!.fillStyle = `rgba(255, 255, 255, ${(theme.nightLevel * twinkle).toFixed(2)})`
         ctx!.fillRect(s.x, s.y, s.size, s.size)
       }
+    }
+
+    function drawClouds(theme: Theme) {
       for (const s of scenery) {
         if (s.kind === 'cloud') drawSprite(CLOUD_SPRITE, s.x, s.y, s.size, theme.cloud)
       }
+    }
+
+    function drawTowers(theme: Theme) {
       for (const s of scenery) {
         if (s.kind !== 'tower') continue
         ctx!.fillStyle = theme.tower
         const w = Math.max(10, Math.floor(s.size * 0.55))
         ctx!.fillRect(s.x, GROUND_Y - s.size, w, s.size)
       }
+    }
+
+    function drawHills(theme: Theme) {
       for (const s of scenery) {
         if (s.kind !== 'hill') continue
         ctx!.fillStyle = theme.hill
@@ -1003,6 +1043,9 @@ export default function RuvyxaRunner() {
           ctx!.fillRect(s.x + (steps * 2 - i - 1) * stepW, GROUND_Y - h, stepW, h)
         }
       }
+    }
+
+    function drawBirds(theme: Theme) {
       for (const s of scenery) {
         if (s.kind !== 'bird') continue
         ctx!.fillStyle = theme.hill
@@ -1010,11 +1053,29 @@ export default function RuvyxaRunner() {
         ctx!.fillRect(s.x - s.size * 2, s.y + s.size, s.size, s.size)
         ctx!.fillRect(s.x + s.size * 2, s.y + s.size, s.size, s.size)
       }
+    }
+
+    function drawPebbles(theme: Theme) {
       for (const s of scenery) {
         if (s.kind !== 'pebble') continue
         ctx!.fillStyle = theme.pebble
         ctx!.fillRect(s.x, GROUND_Y + 8, s.size * PIXEL, PIXEL)
       }
+    }
+
+    /**
+     * Back-to-front by kind, not by array order.
+     *
+     * Depth has to stay correct regardless of spawn sequence, so each layer gets
+     * its own pass: sky sparkle, then clouds, skyline, hills, birds, ground grit.
+     */
+    function drawScenery(theme: Theme) {
+      drawStars(theme)
+      drawClouds(theme)
+      drawTowers(theme)
+      drawHills(theme)
+      drawBirds(theme)
+      drawPebbles(theme)
     }
 
     function endGame() {
@@ -1115,6 +1176,14 @@ export default function RuvyxaRunner() {
     }
 
     type AiAction = 'none' | 'jump' | 'duck'
+
+    /**
+     * Tie-break order when two plans score the same: do nothing, else duck, else jump.
+     *
+     * Ducking is cheaper to abandon than a committed jump arc, so it is preferred
+     * whenever both clear the threat.
+     */
+    const AI_ACTION_PREFERENCE: Record<AiAction, number> = { none: 0, duck: 1, jump: 2 }
 
     // Scratch storage for the planner's working copy. `simPool` only ever grows and its
     // objects are overwritten in place; `simView` is the array handed to the simulation.
@@ -1319,7 +1388,7 @@ export default function RuvyxaRunner() {
             const score = simulatePlan(base, action, delay, horizon, padding)
             if (score < 0) continue
             const immediate: AiAction = delay === 0 ? action : 'none'
-            const pref = immediate === 'none' ? 0 : immediate === 'duck' ? 1 : 2
+            const pref = AI_ACTION_PREFERENCE[immediate]
             if (score > bestScore || (score === bestScore && pref < bestPref)) {
               bestScore = score
               bestAction = immediate
@@ -1359,29 +1428,265 @@ export default function RuvyxaRunner() {
       }
     }
 
-    function step() {
-      if (!running) return
-      if (!paused) frame++
-      autoPilot()
+    /**
+     * Parallax rate for a scenery layer.
+     *
+     * A lookup rather than a ternary chain: the chain ordered six layers by
+     * accident of writing, and reading off which layer moved fastest meant
+     * walking every branch.
+     */
+    const PARALLAX: Record<Scenery['kind'], number> = {
+      star: 0.04,
+      tower: 0.12,
+      cloud: 0.18,
+      hill: 0.35,
+      bird: 0.6,
+      pebble: 1,
+    }
 
+    function advanceScenery() {
+      for (const s of scenery) {
+        s.x -= speed * PARALLAX[s.kind]
+        if (s.x < -80) s.x = WIDTH + Math.random() * 120
+      }
+    }
+
+    function advanceRunner() {
+      runner.vy += GRAVITY
+      if (ducking && !runner.onGround) runner.vy += 0.7
+      runner.y += runner.vy
+      if (runner.y >= GROUND_Y - 8 * PIXEL) {
+        runner.y = GROUND_Y - 8 * PIXEL
+        runner.vy = 0
+        runner.onGround = true
+      }
+    }
+
+    function regenerateAmmo() {
+      ammoTick++
+      // Refill faster during a boss fight so the player is never stuck empty.
+      if (ammoTick >= (boss ? 40 : AMMO_REGEN)) {
+        ammoTick = 0
+        ammo = Math.min(MAX_AMMO, ammo + 1)
+      }
+    }
+
+    function maybeSpawnBoss() {
+      if (boss || score < nextBossAt) return
+      // Prefer a variant the run still needs for its objective, so progress is
+      // reachable without grinding on random draws.
+      const owed = BOSS_VARIANTS.filter((v) => (bossKills[v.label] ?? 0) < WIN_BOSS_EACH)
+      const variant = pick(owed.length ? owed : BOSS_VARIANTS)
+      const tier = bossTier(score, bossesDefeated)
+      const scaled = scaleBoss(variant, tier)
+      boss = {
+        x: WIDTH + 40,
+        y: variant.spawnY,
+        hp: scaled.hp,
+        maxHp: scaled.hp,
+        t: 0,
+        cooldown: scaled.fireInterval,
+        volley: 0,
+        burst: 0,
+        burstHigh: false,
+        animation: 0,
+        sprite: variant.frames[0],
+        variant,
+        tier,
+        fireInterval: scaled.fireInterval,
+        approachSpeed: scaled.approachSpeed,
+        shotSpeed: scaled.shotSpeed,
+        attack: variant.attack,
+      }
+      dodgeDuckFrames = 0
+      dodgeAirFrames = 0
+    }
+
+    function advanceObstacles() {
+      if (!boss) {
+        nextSpawnIn--
+        if (nextSpawnIn <= 0) {
+          spawnObstacle()
+          nextSpawnIn = 60 + Math.floor(Math.random() * 45)
+        }
+      }
+
+      for (const o of obstacles) o.x -= speed
+      obstacles = obstacles.filter((o) => o.x > -40)
+    }
+
+    function advanceBoss() {
+      const active = boss
+      if (!active) return
+      const v = active.variant
+      active.t++
+      // Four-frame loop, advanced on the fixed step so every boss idles at the same tempo.
+      active.animation = (active.animation + 0.12) % v.frames.length
+      active.sprite = v.frames[Math.floor(active.animation)]
+      if (active.x > v.targetX) active.x -= active.approachSpeed
+      // Sample the runner's evasion habit for adaptiveHigh().
+      if (runner.onGround) {
+        if (ducking) dodgeDuckFrames++
+      } else dodgeAirFrames++
+      active.y = v.spawnY + Math.sin(active.t / v.bobRate) * v.bobAmplitude
+      active.cooldown--
+      if (active.cooldown <= 0) fireBoss(active)
+      const bBox = {
+        x: active.x + 4,
+        y: active.y + 4,
+        w: sprW(active.sprite) - 8,
+        h: sprH(active.sprite) - 8,
+      }
+      if (overlap(activeRunnerBox(), bBox)) endGame()
+    }
+
+    function advanceShots() {
+      const spawnedShots: Shot[] = []
+      for (const s of shots) {
+        s.t++
+        s.x -= s.vx
+        if (s.behavior === 'drift') {
+          s.y = Math.min(s.y + s.vy, GROUND_Y - 22)
+        } else if (s.behavior === 'flicker') {
+          // Stops swapping well before it arrives, so the final lane is always readable.
+          if (s.x > 220 && s.t % 26 === 0) s.y = s.y < GROUND_Y - 20 ? LOW_LANE : HIGH_LANE
+        } else if (s.behavior === 'split' && !s.split && s.x < 220) {
+          s.split = true
+          // The clone trails the parent so the pair arrives as two separate reactions.
+          spawnedShots.push(makeShot(s.x + 100, LOW_LANE, { vx: s.vx }))
+        }
+      }
+      shots = shots.concat(spawnedShots).filter((s) => s.x > -30)
+    }
+
+    /** Spend a bolt on the first obstacle it overlaps. Returns whether it was spent. */
+    function boltHitsObstacle(b: Bolt, bBox: Box): boolean {
+      for (const o of obstacles) {
+        if (o.hp > 0 && overlap(bBox, obstacleBox(o))) {
+          o.hp--
+          b.x = WIDTH + 999
+          burst(o.x + sprW(o.sprite) / 2, o.y + sprH(o.sprite) / 2, 8)
+          if (o.hp <= 0) {
+            score += 25
+            purged++
+          }
+          return true
+        }
+      }
+      return false
+    }
+
+    function defeatBoss(active: Boss) {
+      score += 150
+      burst(active.x + sprW(active.sprite) / 2, active.y + sprH(active.sprite) / 2, 24)
+      const label = active.variant.label
+      bossKills[label] = (bossKills[label] ?? 0) + 1
+      bossesDefeated++
+      boss = null
+      // The gap between fights shrinks with distance (floor 140), so bosses show
+      // up more and more often deep into a run — not just individually stronger.
+      nextBossAt = score + Math.max(140, 350 - Math.floor(score / 20_000) * 5)
+      shots = []
+    }
+
+    function boltHitsBoss(b: Bolt, bBox: Box) {
+      const active = boss
+      if (!active) return
+      const box = {
+        x: active.x,
+        y: active.y,
+        w: sprW(active.sprite),
+        h: sprH(active.sprite),
+      }
+      if (!overlap(bBox, box)) return
+      active.hp--
+      b.x = WIDTH + 999
+      burst(active.x + sprW(active.sprite) / 2, active.y + sprH(active.sprite) / 2, 12)
+      // Landing a hit buys a solid reprieve from return fire.
+      active.cooldown = Math.max(active.cooldown, 60)
+      active.burst = 0
+      if (active.hp <= 0) defeatBoss(active)
+    }
+
+    /**
+     * Advance the player's bolts and settle what each one hits.
+     *
+     * A bolt is spent by the first thing it hits, and the `continue` below is what
+     * carries that — not the `b.x = WIDTH + 999` sweep marker. The hitbox is read
+     * from a snapshot taken before these checks, so moving `b` off-screen does not
+     * stop the remaining ones. Without the explicit skip one bolt punched through
+     * an obstacle and still took a point off the boss standing behind it — bosses
+     * hold x 450-505 and obstacles cross that band on every pass, so the double
+     * hit was routine rather than a corner case.
+     */
+    function advanceBolts() {
+      for (const b of bolts) b.x += 15
+      bolts = bolts.filter((b) => b.x < WIDTH + 20)
+
+      for (const b of bolts) {
+        const bBox = { x: b.x, y: b.y, w: 10, h: 4 }
+        if (boltHitsObstacle(b, bBox)) continue
+        boltHitsBoss(b, bBox)
+      }
+      bolts = bolts.filter((b) => b.x < WIDTH + 20)
+      obstacles = obstacles.filter((o) => o.hp > 0)
+    }
+
+    function resolveRunnerCollisions() {
+      const rBox = activeRunnerBox()
+      for (const o of obstacles) {
+        if (overlap(rBox, obstacleBox(o))) endGame()
+      }
+      for (const s of shots) {
+        if (overlap(rBox, { x: s.x, y: s.y, w: s.size + 1, h: s.size + 1 })) endGame()
+      }
+    }
+
+    function advanceScoring() {
+      if (frame % 6 === 0) score++
+      if (frame % 260 === 0) speed = Math.min(speed + 0.35, MAX_SPEED)
+      if (speed >= MAX_SPEED) overclockFrames++
+      if (objectivesDone()) {
+        // Generated once, at the instant of the win — not derived from anything
+        // recoverable afterward. There is nothing here to solve; that is the point.
+        if (!won) puzzleLines = generatePuzzle()
+        won = true
+        best = Math.max(best, score)
+      }
+    }
+
+    /** One tick of world state. Draws nothing. */
+    function simulate() {
+      advanceScenery()
+      advanceRunner()
+      regenerateAmmo()
+      maybeSpawnBoss()
+      advanceObstacles()
+      advanceBoss()
+      advanceShots()
+      advanceBolts()
+      resolveRunnerCollisions()
+      advanceScoring()
+    }
+
+    function advanceParticles() {
+      for (const p of particles) {
+        p.x += p.vx
+        p.y += p.vy
+        p.vy += 0.2
+        p.life--
+      }
+      particles = particles.filter((p) => p.life > 0)
+    }
+
+    function paintBackdrop(theme: Theme) {
       ctx!.clearRect(0, 0, WIDTH, HEIGHT)
-      const theme = resolveTheme(score)
       const sky = ctx!.createLinearGradient(0, 0, 0, HEIGHT)
       sky.addColorStop(0, theme.skyTop)
       sky.addColorStop(1, theme.skyBottom)
       ctx!.fillStyle = sky
       ctx!.fillRect(0, 0, WIDTH, HEIGHT)
       drawScenery(theme)
-      // Tracks the sky's light/dark balance continuously, so the runner, boss, and
-      // shots stay readable through a theme cross-fade instead of flipping at a hard cutoff.
-      const outline = lerpColor('#171717', '#fafafa', theme.nightLevel)
-      // HUD text sitting directly on the live sky (no white backdrop behind it) needs the
-      // same treatment — a fixed dark-gray label reads fine on the day theme and nearly
-      // vanishes on the night/aurora skies. hudPrimary/hudMuted swap toward light readouts
-      // as the theme darkens; text over the paused/won white overlays stays fixed since
-      // that backdrop is bright regardless of theme.
-      const hudPrimary = outline
-      const hudMuted = lerpColor('#525252', '#d4d4d4', theme.nightLevel)
 
       ctx!.strokeStyle = theme.ground
       ctx!.lineWidth = 2
@@ -1389,214 +1694,14 @@ export default function RuvyxaRunner() {
       ctx!.moveTo(0, GROUND_Y + 2)
       ctx!.lineTo(WIDTH, GROUND_Y + 2)
       ctx!.stroke()
+    }
 
-      if (started && !gameOver && !won && !paused) {
-        for (const s of scenery) {
-          const factor =
-            s.kind === 'star'
-              ? 0.04
-              : s.kind === 'tower'
-                ? 0.12
-                : s.kind === 'cloud'
-                  ? 0.18
-                  : s.kind === 'hill'
-                    ? 0.35
-                    : s.kind === 'bird'
-                      ? 0.6
-                      : 1
-          s.x -= speed * factor
-          if (s.x < -80) s.x = WIDTH + Math.random() * 120
-        }
-
-        runner.vy += GRAVITY
-        if (ducking && !runner.onGround) runner.vy += 0.7
-        runner.y += runner.vy
-        if (runner.y >= GROUND_Y - 8 * PIXEL) {
-          runner.y = GROUND_Y - 8 * PIXEL
-          runner.vy = 0
-          runner.onGround = true
-        }
-
-        ammoTick++
-        // Refill faster during a boss fight so the player is never stuck empty.
-        if (ammoTick >= (boss ? 40 : AMMO_REGEN)) {
-          ammoTick = 0
-          ammo = Math.min(MAX_AMMO, ammo + 1)
-        }
-
-        if (!boss && score >= nextBossAt) {
-          // Prefer a variant the run still needs for its objective, so progress is
-          // reachable without grinding on random draws.
-          const owed = BOSS_VARIANTS.filter((v) => (bossKills[v.label] ?? 0) < WIN_BOSS_EACH)
-          const variant = pick(owed.length ? owed : BOSS_VARIANTS)
-          const tier = bossTier(score, bossesDefeated)
-          const scaled = scaleBoss(variant, tier)
-          boss = {
-            x: WIDTH + 40,
-            y: variant.spawnY,
-            hp: scaled.hp,
-            maxHp: scaled.hp,
-            t: 0,
-            cooldown: scaled.fireInterval,
-            volley: 0,
-            burst: 0,
-            burstHigh: false,
-            animation: 0,
-            sprite: variant.frames[0],
-            variant,
-            tier,
-            fireInterval: scaled.fireInterval,
-            approachSpeed: scaled.approachSpeed,
-            shotSpeed: scaled.shotSpeed,
-            attack: variant.attack,
-          }
-          dodgeDuckFrames = 0
-          dodgeAirFrames = 0
-        }
-
-        if (!boss) {
-          nextSpawnIn--
-          if (nextSpawnIn <= 0) {
-            spawnObstacle()
-            nextSpawnIn = 60 + Math.floor(Math.random() * 45)
-          }
-        }
-
-        for (const o of obstacles) o.x -= speed
-        obstacles = obstacles.filter((o) => o.x > -40)
-
-        // boss behaviour
-        if (boss) {
-          const v = boss.variant
-          boss.t++
-          // Four-frame loop, advanced on the fixed step so every boss idles at the same tempo.
-          boss.animation = (boss.animation + 0.12) % v.frames.length
-          boss.sprite = v.frames[Math.floor(boss.animation)]
-          if (boss.x > v.targetX) boss.x -= boss.approachSpeed
-          // Sample the runner's evasion habit for adaptiveHigh().
-          if (runner.onGround) {
-            if (ducking) dodgeDuckFrames++
-          } else dodgeAirFrames++
-          boss.y = v.spawnY + Math.sin(boss.t / v.bobRate) * v.bobAmplitude
-          boss.cooldown--
-          if (boss.cooldown <= 0) fireBoss(boss)
-          const bBox = {
-            x: boss.x + 4,
-            y: boss.y + 4,
-            w: sprW(boss.sprite) - 8,
-            h: sprH(boss.sprite) - 8,
-          }
-          if (overlap(activeRunnerBox(), bBox)) endGame()
-        }
-
-        const spawnedShots: Shot[] = []
-        for (const s of shots) {
-          s.t++
-          s.x -= s.vx
-          if (s.behavior === 'drift') {
-            s.y = Math.min(s.y + s.vy, GROUND_Y - 22)
-          } else if (s.behavior === 'flicker') {
-            // Stops swapping well before it arrives, so the final lane is always readable.
-            if (s.x > 220 && s.t % 26 === 0) s.y = s.y < GROUND_Y - 20 ? LOW_LANE : HIGH_LANE
-          } else if (s.behavior === 'split' && !s.split && s.x < 220) {
-            s.split = true
-            // The clone trails the parent so the pair arrives as two separate reactions.
-            spawnedShots.push(makeShot(s.x + 100, LOW_LANE, { vx: s.vx }))
-          }
-        }
-        shots = shots.concat(spawnedShots).filter((s) => s.x > -30)
-
-        for (const b of bolts) b.x += 15
-        bolts = bolts.filter((b) => b.x < WIDTH + 20)
-
-        // bolts vs obstacles
-        //
-        // A bolt is spent by the first thing it hits. `spent` carries that, not the
-        // `b.x = WIDTH + 999` sweep marker: the hitbox below is read from a snapshot
-        // taken before these checks, so moving `b` off-screen does not stop the
-        // remaining ones. Without an explicit flag one bolt punched through an
-        // obstacle and still took a point off the boss standing behind it — bosses
-        // hold x 450-505 and obstacles cross that band on every pass, so the double
-        // hit was routine rather than a corner case.
-        for (const b of bolts) {
-          const bBox = { x: b.x, y: b.y, w: 10, h: 4 }
-          let spent = false
-          for (const o of obstacles) {
-            if (o.hp > 0 && overlap(bBox, obstacleBox(o))) {
-              o.hp--
-              b.x = WIDTH + 999
-              spent = true
-              burst(o.x + sprW(o.sprite) / 2, o.y + sprH(o.sprite) / 2, 8)
-              if (o.hp <= 0) {
-                score += 25
-                purged++
-              }
-              break
-            }
-          }
-          if (
-            !spent &&
-            boss &&
-            overlap(bBox, { x: boss.x, y: boss.y, w: sprW(boss.sprite), h: sprH(boss.sprite) })
-          ) {
-            boss.hp--
-            b.x = WIDTH + 999
-            burst(boss.x + sprW(boss.sprite) / 2, boss.y + sprH(boss.sprite) / 2, 12)
-            // Landing a hit buys a solid reprieve from return fire.
-            boss.cooldown = Math.max(boss.cooldown, 60)
-            boss.burst = 0
-            if (boss.hp <= 0) {
-              score += 150
-              burst(boss.x + sprW(boss.sprite) / 2, boss.y + sprH(boss.sprite) / 2, 24)
-              const label = boss.variant.label
-              bossKills[label] = (bossKills[label] ?? 0) + 1
-              bossesDefeated++
-              boss = null
-              // The gap between fights shrinks with distance (floor 140), so bosses show
-              // up more and more often deep into a run — not just individually stronger.
-              nextBossAt = score + Math.max(140, 350 - Math.floor(score / 20_000) * 5)
-              shots = []
-            }
-          }
-        }
-        bolts = bolts.filter((b) => b.x < WIDTH + 20)
-        obstacles = obstacles.filter((o) => o.hp > 0)
-
-        // collisions against the runner
-        const rBox = activeRunnerBox()
-        for (const o of obstacles) {
-          if (overlap(rBox, obstacleBox(o))) endGame()
-        }
-        for (const s of shots) {
-          if (overlap(rBox, { x: s.x, y: s.y, w: s.size + 1, h: s.size + 1 })) endGame()
-        }
-
-        if (frame % 6 === 0) score++
-        if (frame % 260 === 0) speed = Math.min(speed + 0.35, MAX_SPEED)
-        if (speed >= MAX_SPEED) overclockFrames++
-        if (objectivesDone()) {
-          // Generated once, at the instant of the win — not derived from anything
-          // recoverable afterward. There is nothing here to solve; that is the point.
-          if (!won) puzzleLines = generatePuzzle()
-          won = true
-          best = Math.max(best, score)
-        }
-      }
-
-      // particles
-      if (!paused) {
-        for (const p of particles) {
-          p.x += p.vx
-          p.y += p.vy
-          p.vy += 0.2
-          p.life--
-        }
-        particles = particles.filter((p) => p.life > 0)
-      }
+    function paintParticles() {
       ctx!.fillStyle = MUTED
       for (const p of particles) ctx!.fillRect(p.x, p.y, PIXEL, PIXEL)
+    }
 
-      // entities
+    function paintEntities(outline: string) {
       for (const o of obstacles) drawSprite(o.sprite, o.x, o.y)
       if (boss) {
         drawOutline(boss.sprite, boss.x, boss.y, PIXEL, outline)
@@ -1614,21 +1719,42 @@ export default function RuvyxaRunner() {
         ctx!.fillStyle = ACCENT
         ctx!.fillRect(s.x + core, s.y + core, core, core)
       }
+    }
 
+    /** The runner's current frame: ducking wins, then airborne or pre-start, then the gait cycle. */
+    function runnerSprite(duckNow: boolean, gaitFrame: number): string[] {
+      if (duckNow) return RUNNER_DUCK
+      if (!started || !runner.onGround) return RUNNER_SPRITE
+      return RUNNER_FRAMES[gaitFrame]
+    }
+
+    function paintRunner(outline: string) {
       const duckNow = ducking && runner.onGround
       const gaitFrame = Math.floor(frame / 8) % RUNNER_FRAMES.length
-      const runSprite = duckNow
-        ? RUNNER_DUCK
-        : !started || !runner.onGround
-          ? RUNNER_SPRITE
-          : RUNNER_FRAMES[gaitFrame]
+      const runSprite = runnerSprite(duckNow, gaitFrame)
       const gaitBob =
         !duckNow && started && runner.onGround && (gaitFrame === 1 || gaitFrame === 3) ? -1 : 0
       const runnerDrawY = (duckNow ? GROUND_Y - sprH(RUNNER_DUCK) : runner.y) + gaitBob
       drawOutline(runSprite, runner.x, runnerDrawY, PIXEL, outline)
       drawSprite(runSprite, runner.x, runnerDrawY, PIXEL, SPRITE_COLOR)
+    }
 
-      // HUD
+    function paintBossBar(hudMuted: string) {
+      const active = boss
+      if (!active) return
+      const title =
+        active.tier > 0 ? `${active.variant.label} T${active.tier}` : active.variant.label
+      ctx!.fillStyle = hudMuted
+      ctx!.fillText(title, 20, 36)
+      // Boss names vary in length, so measure rather than assume a fixed bar offset.
+      const barX = 20 + Math.ceil(ctx!.measureText(title).width) + 12
+      for (let i = 0; i < active.maxHp; i++) {
+        ctx!.fillStyle = i < active.hp ? active.variant.color : FAINT
+        ctx!.fillRect(barX + i * 12, 37, 8, 10)
+      }
+    }
+
+    function paintHud(hudMuted: string) {
       ctx!.fillStyle = hudMuted
       ctx!.font = "13px 'SFMono-Regular', Consolas, monospace"
       ctx!.textBaseline = 'top'
@@ -1648,69 +1774,104 @@ export default function RuvyxaRunner() {
         ctx!.fillRect(52 + i * 12, 15, 8, 10)
       }
 
-      if (boss) {
-        const title = boss.tier > 0 ? `${boss.variant.label} T${boss.tier}` : boss.variant.label
-        ctx!.fillStyle = hudMuted
-        ctx!.fillText(title, 20, 36)
-        // Boss names vary in length, so measure rather than assume a fixed bar offset.
-        const barX = 20 + Math.ceil(ctx!.measureText(title).width) + 12
-        for (let i = 0; i < boss.maxHp; i++) {
-          ctx!.fillStyle = i < boss.hp ? boss.variant.color : FAINT
-          ctx!.fillRect(barX + i * 12, 37, 8, 10)
-        }
-      }
+      paintBossBar(hudMuted)
+    }
 
-      if (!started || gameOver) {
-        // No backdrop behind this block — it sits straight on the live sky, so it needs
-        // the same theme-aware colors as the HUD above, not the fixed INK/#525252 pair.
-        ctx!.fillStyle = hudPrimary
-        ctx!.font = "15px 'SFMono-Regular', Consolas, monospace"
-        ctx!.textAlign = 'center'
-        ctx!.fillText(
-          gameOver ? 'SYSTEM DOWN — SPACE TO RESTART' : 'PRESS SPACE OR TAP TO PLAY',
-          WIDTH / 2,
-          86,
-        )
-        ctx!.fillStyle = hudMuted
-        ctx!.font = "12px 'SFMono-Regular', Consolas, monospace"
-        ctx!.fillText('SPACE/W JUMP   S DUCK   X/ARROWS SHOOT   ESC PAUSE', WIDTH / 2, 110)
-        ctx!.fillText('ALT+T TOGGLE AI AUTOPLAY', WIDTH / 2, 126)
-      }
-      if (paused && !gameOver && !won) {
-        ctx!.fillStyle = 'rgba(255, 255, 255, 0.82)'
-        ctx!.fillRect(0, 0, WIDTH, HEIGHT)
-        ctx!.fillStyle = INK
-        ctx!.font = "18px 'SFMono-Regular', Consolas, monospace"
-        ctx!.textAlign = 'center'
-        ctx!.fillText('PAUSED', WIDTH / 2, 82)
-        ctx!.fillStyle = '#525252'
-        ctx!.font = "12px 'SFMono-Regular', Consolas, monospace"
-        ctx!.fillText('PRESS ESC TO RESUME', WIDTH / 2, 108)
-      }
-      if (won) {
-        ctx!.fillStyle = 'rgba(255, 255, 255, 0.9)'
-        ctx!.fillRect(0, 0, WIDTH, HEIGHT)
-        ctx!.fillStyle = ACCENT
-        ctx!.font = "20px 'SFMono-Regular', Consolas, monospace"
-        ctx!.textAlign = 'center'
-        ctx!.fillText('SYSTEM SECURED', WIDTH / 2, 40)
-        ctx!.fillStyle = INK
-        ctx!.font = "12px 'SFMono-Regular', Consolas, monospace"
-        ctx!.fillText(`SCORE ${score}   FRAME ${frame}`, WIDTH / 2, 64)
-        ctx!.fillStyle = '#525252'
-        ctx!.font = "11px 'SFMono-Regular', Consolas, monospace"
-        ctx!.fillText('FINAL TRANSMISSION', WIDTH / 2, 88)
-        ctx!.fillStyle = ACCENT
-        ctx!.font = "13px 'SFMono-Regular', Consolas, monospace"
-        puzzleLines.forEach((line, i) => ctx!.fillText(line, WIDTH / 2, 106 + i * 18))
-        ctx!.fillStyle = '#737373'
-        ctx!.font = "10px 'SFMono-Regular', Consolas, monospace"
-        ctx!.fillText('UNREADABLE — NO SYSTEM HAS EVER PARSED THIS', WIDTH / 2, 168)
-        ctx!.fillStyle = '#525252'
-        ctx!.font = "12px 'SFMono-Regular', Consolas, monospace"
-        ctx!.fillText('SPACE TO RUN AGAIN', WIDTH / 2, 192)
-      }
+    function paintIntroOverlay(hudPrimary: string, hudMuted: string) {
+      // No backdrop behind this block — it sits straight on the live sky, so it needs
+      // the same theme-aware colors as the HUD above, not the fixed INK/#525252 pair.
+      ctx!.fillStyle = hudPrimary
+      ctx!.font = "15px 'SFMono-Regular', Consolas, monospace"
+      ctx!.textAlign = 'center'
+      ctx!.fillText(
+        gameOver ? 'SYSTEM DOWN — SPACE TO RESTART' : 'PRESS SPACE OR TAP TO PLAY',
+        WIDTH / 2,
+        86,
+      )
+      ctx!.fillStyle = hudMuted
+      ctx!.font = "12px 'SFMono-Regular', Consolas, monospace"
+      ctx!.fillText('SPACE/W JUMP   S DUCK   X/ARROWS SHOOT   ESC PAUSE', WIDTH / 2, 110)
+      ctx!.fillText('ALT+T TOGGLE AI AUTOPLAY', WIDTH / 2, 126)
+    }
+
+    function paintPausedOverlay() {
+      ctx!.fillStyle = 'rgba(255, 255, 255, 0.82)'
+      ctx!.fillRect(0, 0, WIDTH, HEIGHT)
+      ctx!.fillStyle = INK
+      ctx!.font = "18px 'SFMono-Regular', Consolas, monospace"
+      ctx!.textAlign = 'center'
+      ctx!.fillText('PAUSED', WIDTH / 2, 82)
+      ctx!.fillStyle = '#525252'
+      ctx!.font = "12px 'SFMono-Regular', Consolas, monospace"
+      ctx!.fillText('PRESS ESC TO RESUME', WIDTH / 2, 108)
+    }
+
+    function paintWonOverlay() {
+      ctx!.fillStyle = 'rgba(255, 255, 255, 0.9)'
+      ctx!.fillRect(0, 0, WIDTH, HEIGHT)
+      ctx!.fillStyle = ACCENT
+      ctx!.font = "20px 'SFMono-Regular', Consolas, monospace"
+      ctx!.textAlign = 'center'
+      ctx!.fillText('SYSTEM SECURED', WIDTH / 2, 40)
+      ctx!.fillStyle = INK
+      ctx!.font = "12px 'SFMono-Regular', Consolas, monospace"
+      ctx!.fillText(`SCORE ${score}   FRAME ${frame}`, WIDTH / 2, 64)
+      ctx!.fillStyle = '#525252'
+      ctx!.font = "11px 'SFMono-Regular', Consolas, monospace"
+      ctx!.fillText('FINAL TRANSMISSION', WIDTH / 2, 88)
+      ctx!.fillStyle = ACCENT
+      ctx!.font = "13px 'SFMono-Regular', Consolas, monospace"
+      puzzleLines.forEach((line, i) => ctx!.fillText(line, WIDTH / 2, 106 + i * 18))
+      ctx!.fillStyle = '#737373'
+      ctx!.font = "10px 'SFMono-Regular', Consolas, monospace"
+      ctx!.fillText('UNREADABLE — NO SYSTEM HAS EVER PARSED THIS', WIDTH / 2, 168)
+      ctx!.fillStyle = '#525252'
+      ctx!.font = "12px 'SFMono-Regular', Consolas, monospace"
+      ctx!.fillText('SPACE TO RUN AGAIN', WIDTH / 2, 192)
+    }
+
+    function paintOverlays(hudPrimary: string, hudMuted: string) {
+      if (!started || gameOver) paintIntroOverlay(hudPrimary, hudMuted)
+      if (paused && !gameOver && !won) paintPausedOverlay()
+      if (won) paintWonOverlay()
       ctx!.textAlign = 'left'
+    }
+
+    /**
+     * One animation frame: advance the world, then paint it.
+     *
+     * The two halves are deliberately separate. Simulation reads and writes the
+     * closure's mutable state; painting only reads it. Interleaving them, as this
+     * function did while it was one block, meant every drawing question ("what
+     * color is the boss bar?") had to be answered by first proving where in the
+     * physics the answer was decided.
+     */
+    function step() {
+      if (!running) return
+      if (!paused) frame++
+      autoPilot()
+
+      const theme = resolveTheme(score)
+      paintBackdrop(theme)
+      // Tracks the sky's light/dark balance continuously, so the runner, boss, and
+      // shots stay readable through a theme cross-fade instead of flipping at a hard cutoff.
+      const outline = lerpColor('#171717', '#fafafa', theme.nightLevel)
+      // HUD text sitting directly on the live sky (no white backdrop behind it) needs the
+      // same treatment — a fixed dark-gray label reads fine on the day theme and nearly
+      // vanishes on the night/aurora skies. hudPrimary/hudMuted swap toward light readouts
+      // as the theme darkens; text over the paused/won white overlays stays fixed since
+      // that backdrop is bright regardless of theme.
+      const hudPrimary = outline
+      const hudMuted = lerpColor('#525252', '#d4d4d4', theme.nightLevel)
+
+      if (started && !gameOver && !won && !paused) simulate()
+      if (!paused) advanceParticles()
+
+      paintParticles()
+      paintEntities(outline)
+      paintRunner(outline)
+      paintHud(hudMuted)
+      paintOverlays(hudPrimary, hudMuted)
 
       raf = requestAnimationFrame(step)
     }
@@ -1778,14 +1939,27 @@ export default function RuvyxaRunner() {
 
   return (
     <div className="runner">
+      {/*
+        No explicit `role`. The element took pointer input while declaring
+        `role="img"`, which tells assistive technology it is static content and
+        contradicts the click handler; swapping in a widget role only moved the
+        contradiction. A canvas needs neither: `tabIndex` makes it reachable, the
+        label names it, and the fallback children below are the text alternative
+        the HTML spec already defines for canvas content.
+      */}
       <canvas
         ref={canvasRef}
         className="runner-canvas"
         width={WIDTH}
         height={HEIGHT}
-        role="img"
+        tabIndex={0}
         aria-label="Endless runner mini-game: jump, duck, shoot, and pause while dodging bugs, errors, and malware and defeating animated bosses. Alt+T toggles an AI autopilot."
-      />
+      >
+        <p>
+          An endless runner mini-game. Press space or W to jump, S to duck, X or the arrow keys to
+          shoot, and Escape to pause. Alt+T hands control to an AI autopilot.
+        </p>
+      </canvas>
     </div>
   )
 }

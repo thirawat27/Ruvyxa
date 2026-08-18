@@ -11,6 +11,7 @@ cargo clippy --workspace --locked -- -D warnings
 pnpm -r build
 pnpm -r check
 pnpm -r test
+pnpm lint
 pnpm pack:smoke
 cargo run -p ruvyxa_cli -- check --root examples/demo
 ```

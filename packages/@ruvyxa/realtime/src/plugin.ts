@@ -59,8 +59,9 @@ function assertLongLivedTarget(manifest: Record<string, unknown>, subject: strin
     'vercel',
   ].includes(adapter ?? '')
   if (target !== 'node' || unsupportedAdapter) {
+    const adapterNote = adapter ? ` adapter=${adapter}` : ''
     throw new RealtimeDeploymentError(
-      `${subject} requires a long-lived Node/Bun build; received target=${target ?? 'unknown'}${adapter ? ` adapter=${adapter}` : ''}`,
+      `${subject} requires a long-lived Node/Bun build; received target=${target ?? 'unknown'}${adapterNote}`,
     )
   }
 }

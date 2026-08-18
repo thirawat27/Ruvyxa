@@ -1,1 +1,10 @@
 avoid-breaking-exported-api = false
+
+# Cognitive complexity ceiling, set well above Clippy's default of 25.
+#
+# These crates are parsers, linkers, and request routers: a `match` over twenty
+# token shapes is one decision to a reader and twenty to the metric, and
+# splitting such a match to satisfy a number makes the code harder to follow,
+# not easier. The ceiling is here to catch functions that genuinely outgrew what
+# one screen holds, and to fail on a new one rather than on the existing shape.
+cognitive-complexity-threshold = 40

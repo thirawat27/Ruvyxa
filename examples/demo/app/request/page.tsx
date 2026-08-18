@@ -53,8 +53,8 @@ export default function RequestPage() {
 
       <h2>Third-party scripts</h2>
       <p>
-        <code>&lt;Script&gt;</code> keeps a tag off the critical path. This one is inline and
-        <code> beforeInteractive</code>, so it runs before hydration and is visible in view-source.
+        <code>&lt;Script&gt;</code> keeps a tag off the critical path. This one is inline and{' '}
+        <code>beforeInteractive</code>, so it runs before hydration and is visible in view-source.
       </p>
       <Script id="demo-request-marker" strategy="beforeInteractive">
         {`window.__ruvyxaRequestDemo = true`}

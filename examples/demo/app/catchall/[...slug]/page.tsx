@@ -1,6 +1,6 @@
 import { notFound } from '@ruvyxa/react'
 
-export default function CatchAll({ params }: { params: { slug: string[] } }) {
+export default function CatchAll({ params }: Readonly<{ params: { slug: string[] } }>) {
   // This segment has no `not-found.tsx` of its own, so the call resolves to the
   // root boundary at `app/not-found.tsx` — the other half of the nearest-
   // boundary rule that `showcase/` demonstrates with a local one.

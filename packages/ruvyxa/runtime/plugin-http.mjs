@@ -340,6 +340,12 @@ function normalizeHttpHook(plugin, socket, value) {
   }
 }
 
+/** Accept one method, a list, or nothing, and always answer with a list. */
+function normalizeMethodList(method) {
+  if (method === undefined) return ['*']
+  return Array.isArray(method) ? method : [method]
+}
+
 function normalizeHttpRoute(plugin, value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new TypeError(`plugin "${plugin}" http.route() expects an options object`)
@@ -350,8 +356,7 @@ function normalizeHttpRoute(plugin, value) {
   if (typeof value.handler !== 'function') {
     throw new TypeError(`plugin "${plugin}" http.route() requires handler`)
   }
-  const input =
-    value.method === undefined ? ['*'] : Array.isArray(value.method) ? value.method : [value.method]
+  const input = normalizeMethodList(value.method)
   if (
     input.length === 0 ||
     input.some(

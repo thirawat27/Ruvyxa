@@ -512,7 +512,14 @@ export interface PwaIcon {
   src: string
   sizes: string
   type?: string
-  purpose?: 'any' | 'maskable' | 'monochrome' | string
+  /**
+   * The three values the manifest spec defines, plus an escape hatch.
+   *
+   * `(string & {})` keeps the literals in autocomplete. A plain `| string`
+   * absorbs them: the union collapses to `string` and the editor stops
+   * offering `maskable` at all.
+   */
+  purpose?: 'any' | 'maskable' | 'monochrome' | (string & {})
 }
 
 export interface PwaOptions {
@@ -806,10 +813,10 @@ export function sitemap(options: SitemapOptions): RuvyxaPlugin {
             writePublicAsset(context, `sitemap-${index}.xml`, document)
           })
           const entries = documents
-            .map(
-              (_, index) =>
-                `  <sitemap><loc>${escapeXml(`${siteUrl}/sitemap-${index}.xml`)}</loc></sitemap>`,
-            )
+            .map((_, index) => {
+              const shardUrl = `${siteUrl}/sitemap-${index}.xml`
+              return `  <sitemap><loc>${escapeXml(shardUrl)}</loc></sitemap>`
+            })
             .join('\n')
           writePublicAsset(
             context,
@@ -855,11 +862,10 @@ export interface RobotsOptions {
 
 /** Generates `robots.txt` into the build's public asset directory. */
 export function robots(options: RobotsOptions = {}): RuvyxaPlugin {
-  const configuredRules = options.rules
-    ? Array.isArray(options.rules)
-      ? options.rules
-      : [options.rules]
-    : []
+  let configuredRules: readonly RobotsRule[] = []
+  if (options.rules) {
+    configuredRules = Array.isArray(options.rules) ? options.rules : [options.rules]
+  }
   const rules: RobotsRule[] = configuredRules.length
     ? configuredRules.map((rule) => ({ ...rule }))
     : [{ userAgent: '*', allow: ['/'] }]
@@ -1001,9 +1007,8 @@ function createRssFeed(options: FeedOptions, siteUrl: string, items: FeedItem[])
       )
     }
     if (item.publishedAt) {
-      lines.push(
-        `      <pubDate>${normalizeDate(item.publishedAt, `feed.items[${index}]`)}</pubDate>`,
-      )
+      const field = `feed.items[${index}]`
+      lines.push(`      <pubDate>${normalizeDate(item.publishedAt, field)}</pubDate>`)
     }
     if (item.author) lines.push(`      <author>${escapeXml(item.author)}</author>`)
     for (const category of item.categories ?? []) {
@@ -1309,12 +1314,14 @@ export function contentEngineFromConfig(
   config: ContentEngineProjectConfig,
 ): RuvyxaPlugin | undefined {
   const content = config?.content
-  const engine =
-    content === true
-      ? {}
-      : content && typeof content === 'object' && !Array.isArray(content)
-        ? content.engine
-        : undefined
+  // `content: true` means "use the defaults"; an object may carry an explicit
+  // engine; anything else (absent, false, an array) declines the engine.
+  let engine
+  if (content === true) {
+    engine = {}
+  } else if (content && typeof content === 'object' && !Array.isArray(content)) {
+    engine = content.engine
+  }
   if (engine !== true && (typeof engine !== 'object' || engine === null || Array.isArray(engine))) {
     return undefined
   }
@@ -1362,7 +1369,7 @@ function normalizeContentEngineOptions(
   const exclude = normalizeRoutes(options.exclude, 'contentEngine') ?? []
   if (options.locale !== undefined) {
     try {
-      new Intl.Segmenter(options.locale)
+      Intl.Segmenter.supportedLocalesOf(options.locale)
     } catch {
       throw new TypeError('contentEngine: locale must be a valid BCP 47 locale')
     }
@@ -1468,7 +1475,8 @@ function createContentEngineArtifacts(
   const sitemapEntries = documents
     .map((document) => {
       const lastModified = document.updatedAt ?? document.publishedAt
-      return `  <url><loc>${escapeXml(document.url)}</loc>${lastModified ? `<lastmod>${lastModified}</lastmod>` : ''}</url>`
+      const lastModifiedTag = lastModified ? `<lastmod>${lastModified}</lastmod>` : ''
+      return `  <url><loc>${escapeXml(document.url)}</loc>${lastModifiedTag}</url>`
     })
     .join('\n')
   const sitemapBody = `<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${sitemapEntries}\n</urlset>\n`
@@ -1515,7 +1523,7 @@ function createLlmsText(
 function escapeMarkdownText(value: string): string {
   return value
     .replaceAll('\\', '\\\\')
-    .replace(/([\[\]])/g, '\\$1')
+    .replace(/([[\]])/g, '\\$1')
     .replace(/\s+/g, ' ')
     .trim()
 }
@@ -1702,7 +1710,7 @@ function markdownToPlainText(body: string): string {
   let fence: string | undefined
   let esmBlock = false
   for (const line of body.split('\n')) {
-    const fenceMatch = line.match(/^\s*(```+|~~~+)/)
+    const fenceMatch = /^\s*(```+|~~~+)/.exec(line)
     if (fenceMatch) {
       if (!fence) fence = fenceMatch[1][0]
       else if (fence === fenceMatch[1][0]) fence = undefined
@@ -1740,7 +1748,7 @@ function markdownInlineText(value: string): string {
 
 function firstMarkdownHeading(body: string): string | undefined {
   for (const line of body.split('\n')) {
-    const match = line.match(/^\s{0,3}#\s+(.+?)\s*#*\s*$/)
+    const match = /^\s{0,3}#\s+(.+?)\s*#*\s*$/.exec(line)
     if (match) {
       const heading = markdownInlineText(match[1])
       if (heading) return heading
@@ -1823,14 +1831,26 @@ function contentAnswers(value: unknown, file: string, siteUrl: string): ContentE
   })
 }
 
+/** `YYYY-MM-DD`, the whole value. */
+const CONTENT_DATE_ONLY = /^\d{4}-\d{2}-\d{2}$/
+
+/**
+ * `YYYY-MM-DDTHH:MM[:SS[.fraction]]` followed by a required `Z` or `+HH:MM` offset.
+ *
+ * Split from the date-only form rather than folded into one pattern with an
+ * optional time group: the combined expression was dense enough that the
+ * "offset is mandatory once a time is present" rule was invisible in it.
+ */
+const CONTENT_DATE_TIME =
+  /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2})$/
+
+function isContentDateString(value: string): boolean {
+  return CONTENT_DATE_ONLY.test(value) || CONTENT_DATE_TIME.test(value)
+}
+
 function contentDate(value: unknown, field: string, file: string): string | undefined {
   if (value === undefined || value === null) return undefined
-  if (
-    typeof value !== 'string' ||
-    !/^\d{4}-\d{2}-\d{2}(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,9})?)?(?:Z|[+-]\d{2}:\d{2}))?$/.test(
-      value,
-    )
-  ) {
+  if (typeof value !== 'string' || !isContentDateString(value)) {
     throw new TypeError(`contentEngine: ${file} frontmatter.${field} must be an ISO date string`)
   }
   const [year, month, day] = value.slice(0, 10).split('-').map(Number)
@@ -2021,6 +2041,8 @@ export interface BundleBudgetOptions {
 export function bundleBudget(options: BundleBudgetOptions): RuvyxaPlugin {
   const { maxChunkKb, maxTotalKb } = options ?? {}
   for (const [name, value] of Object.entries({ maxChunkKb, maxTotalKb })) {
+    // `!(value > 0)` rather than `value <= 0`: NaN is a number and fails every
+    // comparison, so the negated form rejects it and the direct one lets it through.
     if (value !== undefined && (typeof value !== 'number' || !(value > 0))) {
       throw new TypeError(`bundleBudget: ${name} must be a positive number of KiB`)
     }
@@ -2362,11 +2384,9 @@ function pluginSitemapEntries(
       videos: videos.map((video) => ({ ...video })),
     })
   }
-  return [...entries.values()].sort((left, right) => {
-    const leftKey = pluginSitemapSortKey(left.location)
-    const rightKey = pluginSitemapSortKey(right.location)
-    return leftKey < rightKey ? -1 : leftKey > rightKey ? 1 : 0
-  })
+  return [...entries.values()].sort((left, right) =>
+    compareStable(pluginSitemapSortKey(left.location), pluginSitemapSortKey(right.location)),
+  )
 }
 
 function pluginSitemapSortKey(location: string): string {
@@ -2591,7 +2611,7 @@ function isConcreteApplicationPath(value: unknown): value is string {
   return (
     typeof value === 'string' &&
     value.startsWith('/') &&
-    !/[\\?#\[\]*]|\p{Cc}/u.test(value) &&
+    !/[\\?#[\]*]|\p{Cc}/u.test(value) &&
     !value.split('/').some((segment) => segment === '.' || segment === '..')
   )
 }
@@ -2742,8 +2762,17 @@ function normalizePublicFilePath(value: unknown, plugin: string): string {
   return normalized
 }
 
+/**
+ * Byte-order string comparison, stable across machines.
+ *
+ * Deliberately not `localeCompare`: sitemap, feed, and route listings are build
+ * artifacts that have to come out identical everywhere, and `localeCompare`
+ * orders by the host's locale.
+ */
 function compareStable(left: string, right: string): number {
-  return left < right ? -1 : left > right ? 1 : 0
+  if (left < right) return -1
+  if (left > right) return 1
+  return 0
 }
 
 function normalizeItemUrl(value: string, siteUrl: string, field: string): string {
@@ -2810,7 +2839,7 @@ function manifestPagePaths(context: PluginBuildContext): string[] {
     if (routePath.includes('[')) continue
     paths.push(routePath)
   }
-  return paths.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+  return paths.sort(compareStable)
 }
 
 /** Writes into the directory served as `/` by the production server and adapters. */

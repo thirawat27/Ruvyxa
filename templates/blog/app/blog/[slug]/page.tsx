@@ -27,7 +27,7 @@ const posts: Record<string, { title: string; date: string; content: string }> = 
 
 export const staticParams = Object.keys(posts)
 
-export default function BlogPost({ params }: { params: { slug: string } }) {
+export default function BlogPost({ params }: Readonly<{ params: { slug: string } }>) {
   const post = posts[params.slug]
 
   if (!post) {

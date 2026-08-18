@@ -48,11 +48,26 @@ cargo clippy --workspace --locked -- -D warnings
 pnpm -r build
 pnpm -r check
 pnpm -r test
+pnpm lint
 pnpm format:check
 pnpm check:unused
 pnpm release:validate
 pnpm pack:smoke
 ```
+
+`pnpm lint` runs Oxlint over `packages/`, `templates/`, `examples/`, `scripts/`, and `tests/`.
+`pnpm -r check` and `pnpm release:validate` both call it, so it gates a release. The rules it
+enforces and, just as importantly, the ones it deliberately turns off are in `.oxlintrc.json`, each
+with the reason beside it: sequential `await` in a loop is how the bundler applies backpressure,
+`void` before a floating promise is the marker TypeScript itself recommends, and `__RUVYXA_*`
+globals are a contract with the generated entry, not a naming slip. Add a rule to the off list only
+with the reason it does not apply here, never to clear a finding.
+
+The Rust side has the matching gate: `.clippy.toml` sets `cognitive-complexity-threshold` and
+`[workspace.lints.clippy]` in `Cargo.toml` turns the lint on, so a function that grows past what one
+screen holds fails `cargo clippy -- -D warnings`. The threshold sits well above Clippy's default
+because a `match` over twenty token shapes is one decision to a reader; where the metric is inflated
+by macro expansion rather than real branching, `#[allow]` it on that function with the reason.
 
 `pnpm check:unused` runs Knip over the JavaScript/TypeScript workspaces and fails on unused files,
 exports, types, and dependencies. `pnpm release:validate` runs it too, so it gates a release. Ruvyxa

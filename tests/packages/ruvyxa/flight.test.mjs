@@ -17,7 +17,7 @@ describe('Flight transport contract', () => {
       route: '/docs',
       tree: { z: 1, child: clientReference('m_0123456789abcdef', { label: 'Open' }) },
     })
-    assert.match(encoded, new RegExp(`^\\{\"protocol\":\"${FLIGHT_PROTOCOL}`))
+    assert.match(encoded, new RegExp(`^\\{"protocol":"${FLIGHT_PROTOCOL}`))
     const decoded = decodeFlightPayload(encoded, version)
     assert.equal(JSON.parse(encoded).protocolVersion, FLIGHT_PROTOCOL_VERSION)
     assert.equal(decoded.route, '/docs')

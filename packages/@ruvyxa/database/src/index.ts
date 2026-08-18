@@ -131,5 +131,5 @@ function isNonEmptyObject(value: unknown): value is Record<string, unknown> {
 }
 
 function isModelName(value: string): boolean {
-  return /^[A-Za-z][A-Za-z0-9_]*$/.test(value)
+  return /^[A-Za-z]\w*$/.test(value)
 }

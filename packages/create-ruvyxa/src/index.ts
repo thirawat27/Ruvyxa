@@ -66,14 +66,12 @@ export async function createRuvyxaApp(
 ): Promise<CreateRuvyxaResult> {
   // --- Input Validation ---
   if (!targetDir || typeof targetDir !== 'string') {
-    throw new Error('Project directory name is required.\n' + '  Usage: npx create-ruvyxa my-app')
+    throw new Error('Project directory name is required.\n  Usage: npx create-ruvyxa my-app')
   }
 
   const trimmed = targetDir.trim()
   if (trimmed === '') {
-    throw new Error(
-      'Project directory name must not be empty.\n' + '  Usage: npx create-ruvyxa my-app',
-    )
+    throw new Error('Project directory name must not be empty.\n  Usage: npx create-ruvyxa my-app')
   }
 
   if (trimmed !== targetDir) {
@@ -235,7 +233,11 @@ async function listProjectFiles(targetDir: string): Promise<string[]> {
     const path = relative(targetDir, resolve(entry.parentPath, entry.name))
     files.push(path.split(/[\\/]/).join('/'))
   }
-  return files.sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+  return files.sort((a, b) => {
+    if (a < b) return -1
+    if (a > b) return 1
+    return 0
+  })
 }
 
 /** Keep generated output out even when a local starter was built before scaffolding. */

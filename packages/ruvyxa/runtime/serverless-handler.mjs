@@ -1022,10 +1022,10 @@ function corsPreflightResponse(request, cors) {
   if (!cors || request.method !== 'OPTIONS') return null
   const requestedMethod = request.headers.get('access-control-request-method')
   if (!requestedMethod || !isAllowedCorsOrigin(request.headers.get('origin'), cors)) return null
-  return withCorsHeaders(new Response(null, { status: 204 }), request, cors, true)
+  return withCorsHeaders(new Response(null, { status: 204 }), request, cors)
 }
 
-function withCorsHeaders(response, request, cors, preflight = false) {
+function withCorsHeaders(response, request, cors) {
   if (!cors) return response
   const headers = new Headers(response.headers)
   const origin = request.headers.get('origin')
@@ -1305,7 +1305,7 @@ function parseIpv6(value) {
     const tail = halves[1] === '' ? [] : halves[1].split(':')
     const zeros = 8 - head.length - tail.length
     if (zeros < 1) return null
-    groups = [...head, ...new Array(zeros).fill('0'), ...tail]
+    groups = [...head, ...Array.from({ length: zeros }, () => '0'), ...tail]
   }
   if (groups.length !== 8) return null
 
@@ -1371,6 +1371,9 @@ function limitBodyStream(request, limit) {
     },
   })
   try {
+    // The method comes from `request`, and the guard at the top already returned
+    // for a request with no body, so a GET can never reach here carrying one.
+    // oxlint-disable-next-line unicorn/no-invalid-fetch-options
     return new Request(request, { body: request.body.pipeThrough(limiter), duplex: 'half' })
   } catch {
     return request

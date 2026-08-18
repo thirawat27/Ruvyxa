@@ -1,0 +1,62 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "ignorePatterns": [
+    "**/dist/**",
+    "**/.ruvyxa/**",
+    "**/.ruvyxa-*/**",
+    "**/.test-build/**",
+    "**/native-bin/**",
+    "**/target/**",
+    "packages/create-ruvyxa/template/**",
+    "packages/ruvyxa/runtime/route-match.mjs"
+  ],
+  "categories": {
+    "correctness": "error",
+    "suspicious": "error",
+    "perf": "error"
+  },
+  "plugins": ["typescript", "unicorn", "oxc", "react", "jsx-a11y", "promise", "node"],
+  "env": {
+    "browser": true,
+    "es2024": true,
+    "node": true
+  },
+  "rules": {
+    "react/react-in-jsx-scope": "off",
+
+    "eslint/no-underscore-dangle": "off",
+    "eslint/no-shadow": "off",
+
+    "eslint/no-await-in-loop": "off",
+
+    "unicorn/no-array-sort": "off",
+    "unicorn/no-array-reverse": "off",
+
+    "unicorn/consistent-function-scoping": "off",
+
+    "oxc/no-map-spread": "off",
+
+    "unicorn/require-module-specifiers": "off",
+
+    "eslint/preserve-caught-error": "off",
+
+    "typescript/triple-slash-reference": "off",
+
+    "promise/always-return": "off",
+
+    "eslint/no-void": ["error", { "allowAsStatement": true }],
+
+    "eslint/no-nested-ternary": "error",
+    "eslint/no-useless-escape": "error",
+    "eslint/no-useless-concat": "error",
+    "eslint/no-unused-vars": "error"
+  },
+  "overrides": [
+    {
+      "files": ["tests/**", "**/test/**", "**/*.test.{ts,tsx,mjs,js}"],
+      "rules": {
+        "eslint/no-control-regex": "off"
+      }
+    }
+  ]
+}

@@ -17,7 +17,14 @@ const executable = process.platform === 'win32' ? 'ruvyxa.exe' : 'ruvyxa'
 const platformKey = currentPlatformKey()
 
 const binary = findBinary()
-const invokerRuntime = globalThis.Bun ? 'bun' : globalThis.Deno ? 'deno' : 'node'
+const invokerRuntime = detectInvokerRuntime()
+
+/** Which JavaScript runtime is running this shim, so the CLI can report it back. */
+function detectInvokerRuntime() {
+  if (globalThis.Bun) return 'bun'
+  if (globalThis.Deno) return 'deno'
+  return 'node'
+}
 
 if (!binary) {
   console.error(`Ruvyxa CLI binary was not found for ${platformKey}.`)

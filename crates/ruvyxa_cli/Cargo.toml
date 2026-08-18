@@ -48,3 +48,6 @@ libc = "0.2.189"
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[lints]
+workspace = true

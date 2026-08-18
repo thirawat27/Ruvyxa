@@ -51,21 +51,24 @@ try {
   ])
 }
 
+/** Real executables a Windows command shim of `name` could be standing in front of. */
+function windowsCandidates(name, directory) {
+  if (name === 'node') return [path.join(directory, 'node.exe')]
+  if (name === 'bun') {
+    return [path.join(directory, 'bun.exe'), path.join(directory, 'node_modules/bun/bin/bun.exe')]
+  }
+  return [
+    path.join(directory, 'deno.exe'),
+    path.join(directory, 'node_modules/deno/deno.exe'),
+    path.join(directory, 'node_modules/deno/node_modules/@deno/win32-x64/deno.exe'),
+  ]
+}
+
 function runtimeExecutable(name) {
   if (process.platform !== 'win32') return name
   const pathValue = Object.entries(process.env).find(([key]) => key.toLowerCase() === 'path')?.[1]
   for (const directory of (pathValue ?? '').split(path.delimiter)) {
-    const candidates =
-      name === 'node'
-        ? [path.join(directory, 'node.exe')]
-        : name === 'bun'
-          ? [path.join(directory, 'bun.exe'), path.join(directory, 'node_modules/bun/bin/bun.exe')]
-          : [
-              path.join(directory, 'deno.exe'),
-              path.join(directory, 'node_modules/deno/deno.exe'),
-              path.join(directory, 'node_modules/deno/node_modules/@deno/win32-x64/deno.exe'),
-            ]
-    const executable = candidates.find(existsSync)
+    const executable = windowsCandidates(name, directory).find(existsSync)
     if (executable) return executable
   }
   throw new Error(`could not resolve the ${name} executable behind its Windows command shim`)

@@ -94,7 +94,7 @@ export function Link({
   target,
   ref,
   ...rest
-}: LinkProps) {
+}: Readonly<LinkProps>) {
   const anchorRef = useRef<HTMLAnchorElement | null>(null)
   const prefetched = useRef(false)
 

@@ -309,13 +309,26 @@ function createRouter(): RouterInstance {
     return Boolean(globals.__RUVYXA_ROUTES__?.[context.route])
   }
 
-  function flightKey(entry: RouteManifestEntry, pathname: string): string | null {
-    return entry.flight && entry.artifactVersion ? `${entry.artifactVersion}:${pathname}` : null
+  /**
+   * The cache key for a prefetchable route, with the version that formed it.
+   *
+   * Returning the version alongside the key is what lets `startFlight` use it
+   * without a non-null assertion: the narrowing that proves it is a string
+   * happens here, and a bare `string | null` would throw that proof away at the
+   * return statement.
+   */
+  function flightKey(
+    entry: RouteManifestEntry,
+    pathname: string,
+  ): { key: string; artifactVersion: string } | null {
+    if (!entry.flight || !entry.artifactVersion) return null
+    return { key: `${entry.artifactVersion}:${pathname}`, artifactVersion: entry.artifactVersion }
   }
 
   function startFlight(entry: RouteManifestEntry, pathname: string): FlightEntry | null {
-    const key = flightKey(entry, pathname)
-    if (!key) return null
+    const resolved = flightKey(entry, pathname)
+    if (!resolved) return null
+    const { key, artifactVersion } = resolved
     const cached = flightCache.get(key)
     if (cached) {
       flightCache.delete(key)
@@ -324,7 +337,7 @@ function createRouter(): RouterInstance {
     }
 
     while (flightCache.size >= FLIGHT_CACHE_LIMIT) {
-      const oldest = flightCache.entries().next().value as [string, FlightEntry] | undefined
+      const oldest = flightCache.entries().next().value
       if (!oldest) break
       oldest[1].controller.abort()
       flightCache.delete(oldest[0])
@@ -333,7 +346,7 @@ function createRouter(): RouterInstance {
     const controller = new AbortController()
     const requestUrl = new URL(FLIGHT_URL, window.location.origin)
     requestUrl.searchParams.set('path', pathname)
-    requestUrl.searchParams.set('artifact', entry.artifactVersion!)
+    requestUrl.searchParams.set('artifact', artifactVersion)
     const promise = fetch(requestUrl, {
       credentials: 'omit',
       headers: { 'x-ruvyxa-flight': '1' },
@@ -347,7 +360,7 @@ function createRouter(): RouterInstance {
         if (new TextEncoder().encode(payload).byteLength > FLIGHT_BYTE_LIMIT) {
           throw new Error('Flight payload is too large')
         }
-        return decodeFlight(payload, entry.artifactVersion!, pathname)
+        return decodeFlight(payload, artifactVersion, pathname)
       })
       .catch((error: unknown) => {
         flightCache.delete(key)
@@ -358,8 +371,8 @@ function createRouter(): RouterInstance {
     return flight
   }
 
-  function hardNavigate(url: URL, replace: boolean): void {
-    if (replace) window.location.replace(url.href)
+  function hardNavigate(url: URL, history: 'push' | 'replace' | 'none'): void {
+    if (history === 'replace') window.location.replace(url.href)
     else window.location.assign(url.href)
   }
 
@@ -387,7 +400,7 @@ function createRouter(): RouterInstance {
     // rewrite the server resolves. Hand it to the browser rather than guess.
     if (!matched) {
       pendingNavigationId = null
-      hardNavigate(url, historyMode === 'replace')
+      hardNavigate(url, historyMode)
       return
     }
 
@@ -414,12 +427,12 @@ function createRouter(): RouterInstance {
       pendingNavigationId = null
       if (!loaded) {
         emit()
-        hardNavigate(url, historyMode === 'replace')
+        hardNavigate(url, historyMode)
         return
       }
       if (flight && flightValue === undefined) {
         emit()
-        hardNavigate(url, historyMode === 'replace')
+        hardNavigate(url, historyMode)
         return
       }
       context.flight = flightValue
@@ -433,7 +446,7 @@ function createRouter(): RouterInstance {
           if (id !== navigationId) return
           pendingNavigationId = null
           emit()
-          hardNavigate(url, historyMode === 'replace')
+          hardNavigate(url, historyMode)
           return
         }
       }
@@ -446,7 +459,7 @@ function createRouter(): RouterInstance {
     snapshot = context
     search = url.search
     if (!(await renderRouteWithTransition(context, options.viewTransition))) {
-      hardNavigate(url, historyMode === 'replace')
+      hardNavigate(url, historyMode)
       return
     }
     emit()
@@ -483,7 +496,9 @@ function createRouter(): RouterInstance {
       if (!matched?.route.src) return
       const pathname = canonicalRoutePath(url.pathname)
       if (pathname === null) return
-      if (matched.route.flight) void startFlight(matched.route, pathname)?.promise.catch(() => {})
+      if (matched.route.flight) {
+        startFlight(matched.route, pathname)?.promise.catch(() => {})
+      }
       if (globals.__RUVYXA_ROUTES__?.[matched.route.path]) return
       // `modulepreload` warms the network and the module graph without
       // executing the bundle, so a prefetch cannot register a tree factory

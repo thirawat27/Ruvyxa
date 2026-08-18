@@ -1123,11 +1123,7 @@ function compileJsonModuleSource(source, file) {
   // `<module>.default ?? <module>`, so attach the self-reference — but never
   // when the document has its own `default` key, because overwriting it would
   // change data the application can read through `require()`.
-  if (
-    value !== null &&
-    typeof value === 'object' &&
-    !Object.prototype.hasOwnProperty.call(value, 'default')
-  ) {
+  if (value !== null && typeof value === 'object' && !Object.hasOwn(value, 'default')) {
     lines.push(
       `Object.defineProperty(module.exports, 'default', { value: module.exports, configurable: true });`,
     )
@@ -1856,19 +1852,21 @@ async function writeIfChanged(file, contents) {
   await writeFile(file, contents)
 }
 
+/** Which oxc parser dialect an extension asks for. Anything unlisted is plain JS. */
+const TRANSFORM_LANG_BY_EXTENSION = {
+  '.tsx': 'tsx',
+  '.jsx': 'jsx',
+  '.ts': 'ts',
+  '.mts': 'ts',
+  '.cts': 'ts',
+}
+
 function transformModuleSource(module) {
   // Resolve lazily so tools that copy compiler.mjs for path-isolation checks do
   // not need the package dependency beside the copied file until compilation.
   const filename = String(module.filePath || module.key || 'ruvyxa:module.ts')
   const extension = path.extname(filename).toLowerCase()
-  const lang =
-    extension === '.tsx'
-      ? 'tsx'
-      : extension === '.jsx'
-        ? 'jsx'
-        : extension === '.ts' || extension === '.mts' || extension === '.cts'
-          ? 'ts'
-          : 'js'
+  const lang = TRANSFORM_LANG_BY_EXTENSION[extension] ?? 'js'
   const transformKey = createHash('sha256')
     .update(lang)
     .update('\0')

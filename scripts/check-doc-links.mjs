@@ -97,7 +97,7 @@ function headingAnchors(file) {
       .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
       .replace(/[*_~]/g, '')
       .toLowerCase()
-      .replace(/[^\p{L}\p{N} \-]/gu, '')
+      .replace(/[^\p{L}\p{N} -]/gu, '')
       .trim()
       .replace(/ +/g, '-')
     if (slug) anchors.add(slug)

@@ -870,6 +870,188 @@ fn discover_options(config: &ServerConfig) -> DiscoverOptions {
         .with_i18n(config.i18n.clone())
 }
 
+/// Pre-bundle the dependencies the first requests will need, in the background.
+///
+/// Fire-and-forget on purpose: warming is an optimization, and blocking startup
+/// on it would trade a slow first request for a slow `ruvyxa dev`.
+fn spawn_dependency_warmup(
+    config: &ServerConfig,
+    manifest: &RouteManifest,
+    worker_pool: &Arc<NodeWorkerPool>,
+) {
+    let warmup_routes = dependency_warmup_routes(config, manifest);
+    if warmup_routes.is_empty() {
+        return;
+    }
+    let warmup_pool = worker_pool.clone();
+    let warmup_root = config.root.display().to_string();
+    tokio::spawn(async move {
+        let warmed = warmup_pool.warmup(&warmup_root, warmup_routes).await;
+        info!(warmed, "dependency pre-bundling complete");
+    });
+}
+
+/// Start the TypeScript plugin host pool, unless plugins are disabled.
+async fn start_plugin_runtime(config: &ServerConfig) -> Result<Option<Arc<PluginHost>>> {
+    if !config.plugins_enabled {
+        return Ok(None);
+    }
+    let runtime_script = find_runtime_script(&config.root, "plugin-runtime.mjs")
+        .ok_or_else(|| RuvyxaError::Message("RUV1701 plugin-runtime.mjs not found".into()))?;
+    let executable = config.runtime.executable();
+    let plugin_workers = config
+        .middleware
+        .plugin_workers()
+        .map_err(RuvyxaError::Message)?;
+    let plugin_timeout = config
+        .middleware
+        .plugin_timeout()
+        .map_err(RuvyxaError::Message)?;
+    let host = PluginHost::start_pool_with_timeout_and_args(
+        &config.root,
+        &runtime_script,
+        &executable,
+        config.runtime.script_args(),
+        plugin_workers,
+        plugin_timeout,
+    )
+    .await?;
+    if host.pool_size() > 1 {
+        info!(
+            workers = host.pool_size(),
+            "TypeScript plugin middleware pool ready"
+        );
+    }
+    Ok(Some(Arc::new(host)))
+}
+
+/// Reject a websocket path the router cannot serve.
+///
+/// Registering over a reserved framework route would panic inside axum's
+/// router, so a bad descriptor has to become a diagnostic before the route
+/// table is built.
+fn validate_socket_path(path: &str, kind: &str) -> Result<()> {
+    if !path.starts_with('/') || path.contains(['?', '#', '*']) {
+        return Err(RuvyxaError::Message(format!(
+            "RUV1701 TypeScript plugin host returned invalid {kind} configuration"
+        )));
+    }
+    if RESERVED_FRAMEWORK_ROUTES.contains(&path) {
+        return Err(RuvyxaError::Message(format!(
+            "RUV1701 {kind} path {path} collides with a reserved framework route"
+        )));
+    }
+    Ok(())
+}
+
+/// Build the realtime transport a plugin declared, if any.
+fn realtime_runtime(plugin_runtime: Option<&Arc<PluginHost>>) -> Result<Option<RealtimeRuntime>> {
+    let Some(descriptor) = plugin_runtime.and_then(|runtime| runtime.descriptor().realtime())
+    else {
+        return Ok(None);
+    };
+    if !(5_000..=120_000).contains(&descriptor.heartbeat_ms)
+        || !(16..=4_096).contains(&descriptor.capacity)
+    {
+        return Err(RuvyxaError::Message(
+            "RUV1701 TypeScript plugin host returned invalid realtime configuration".into(),
+        ));
+    }
+    validate_socket_path(&descriptor.path, "realtime")?;
+    let (tx, _) = broadcast::channel(descriptor.capacity);
+    Ok(Some(RealtimeRuntime {
+        path: descriptor.path.clone(),
+        heartbeat: Duration::from_millis(descriptor.heartbeat_ms),
+        tx,
+    }))
+}
+
+/// Build the presence transport a plugin declared, if any.
+fn presence_runtime(plugin_runtime: Option<&Arc<PluginHost>>) -> Result<Option<PresenceRuntime>> {
+    let Some(descriptor) = plugin_runtime.and_then(|runtime| runtime.descriptor().presence())
+    else {
+        return Ok(None);
+    };
+    if !(5_000..=120_000).contains(&descriptor.heartbeat_ms) {
+        return Err(RuvyxaError::Message(
+            "RUV1701 TypeScript plugin host returned invalid presence configuration".into(),
+        ));
+    }
+    validate_socket_path(&descriptor.path, "presence")?;
+    Ok(Some(PresenceRuntime {
+        path: descriptor.path.clone(),
+        heartbeat: Duration::from_millis(descriptor.heartbeat_ms),
+        registry: CollabRegistry::new(),
+    }))
+}
+
+/// Reject a project that points both websocket transports at one path.
+///
+/// Registering the same path twice panics inside axum's router, so this has to
+/// fail before the route table is built.
+fn assert_transport_paths_distinct(
+    realtime: Option<&RealtimeRuntime>,
+    presence: Option<&PresenceRuntime>,
+) -> Result<()> {
+    if let (Some(realtime), Some(presence)) = (realtime, presence)
+        && realtime.path == presence.path
+    {
+        return Err(RuvyxaError::Message(format!(
+            "RUV1701 presence path {} collides with the realtime transport",
+            presence.path
+        )));
+    }
+    Ok(())
+}
+
+/// Assemble the route table: framework endpoints, the optional transports, then
+/// the page fallback.
+///
+/// The fallback is registered last on purpose. Everything under `/__ruvyxa/` is
+/// framework surface, and a project route must never shadow it.
+fn build_app_router(config: &ServerConfig, state: Arc<AppState>) -> Router {
+    let realtime_path = state.realtime.as_ref().map(|runtime| runtime.path.clone());
+    let presence_path = state.presence.as_ref().map(|runtime| runtime.path.clone());
+    let mut app = Router::new()
+        .route("/__ruvyxa/hmr", get(hmr_ws))
+        .route("/__ruvyxa/client", get(client_bundle))
+        .route("/__ruvyxa/hydration-loader.js", get(hydration_loader))
+        .route("/__ruvyxa/client/route-manifest.json", get(client_manifest))
+        .route("/__ruvyxa/flight", get(flight_endpoint))
+        .route("/__ruvyxa/image", get(dynamic_image_endpoint))
+        .route(
+            "/__ruvyxa/action",
+            post(action_endpoint).layer(DefaultBodyLimit::max(config.action_body_limit_bytes)),
+        )
+        .route(
+            "/__ruvyxa/trace",
+            get(trace_endpoint)
+                .post(trace_ack_endpoint)
+                .layer(DefaultBodyLimit::max(1_024)),
+        );
+    if config.watch {
+        app = app
+            .route("/__ruvyxa/devtools", get(devtools_dashboard))
+            .route("/__ruvyxa/devtools/data", get(devtools_data));
+    }
+    if let Some(path) = realtime_path {
+        app = app.route(&path, get(realtime_ws));
+    }
+    if let Some(path) = presence_path {
+        app = app.route(&path, get(presence_ws));
+    }
+    app.fallback(handle_request).with_state(state)
+}
+
+/// Resolve the configured host and port into one socket address.
+fn resolve_bind_address(config: &ServerConfig) -> Result<SocketAddr> {
+    format!("{}:{}", config.host, config.port)
+        .to_socket_addrs()
+        .map_err(|error| RuvyxaError::Message(format!("Invalid server address: {error}")))?
+        .next()
+        .ok_or_else(|| RuvyxaError::Message("Server address did not resolve".to_string()))
+}
+
 pub async fn serve(config: ServerConfig) -> Result<()> {
     config.validate_limits()?;
     let startup_started = Instant::now();
@@ -888,15 +1070,7 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
         "JavaScript worker pool ready"
     );
 
-    let warmup_routes = dependency_warmup_routes(&config, &manifest);
-    if !warmup_routes.is_empty() {
-        let warmup_pool = worker_pool.clone();
-        let warmup_root = config.root.display().to_string();
-        tokio::spawn(async move {
-            let warmed = warmup_pool.warmup(&warmup_root, warmup_routes).await;
-            info!(warmed, "dependency pre-bundling complete");
-        });
-    }
+    spawn_dependency_warmup(&config, &manifest, &worker_pool);
 
     let render_cache = Arc::new(if config.watch {
         RenderCache::default_dev()
@@ -910,101 +1084,10 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
     hmr_tracker.populate_from_manifest(&manifest.routes);
     let middleware_stack = MiddlewareStack::new(config.middleware.clone());
     middleware_stack.validate().map_err(RuvyxaError::Message)?;
-    let plugin_runtime = if !config.plugins_enabled {
-        None
-    } else {
-        let runtime_script = find_runtime_script(&config.root, "plugin-runtime.mjs")
-            .ok_or_else(|| RuvyxaError::Message("RUV1701 plugin-runtime.mjs not found".into()))?;
-        let executable = config.runtime.executable();
-        let plugin_workers = config
-            .middleware
-            .plugin_workers()
-            .map_err(RuvyxaError::Message)?;
-        let plugin_timeout = config
-            .middleware
-            .plugin_timeout()
-            .map_err(RuvyxaError::Message)?;
-        let host = PluginHost::start_pool_with_timeout_and_args(
-            &config.root,
-            &runtime_script,
-            &executable,
-            config.runtime.script_args(),
-            plugin_workers,
-            plugin_timeout,
-        )
-        .await?;
-        if host.pool_size() > 1 {
-            info!(
-                workers = host.pool_size(),
-                "TypeScript plugin middleware pool ready"
-            );
-        }
-        Some(Arc::new(host))
-    };
-    let realtime = plugin_runtime
-        .as_ref()
-        .and_then(|runtime| runtime.descriptor().realtime())
-        .map(|descriptor| {
-            if !descriptor.path.starts_with('/')
-                || descriptor.path.contains(['?', '#', '*'])
-                || !(5_000..=120_000).contains(&descriptor.heartbeat_ms)
-                || !(16..=4_096).contains(&descriptor.capacity)
-            {
-                return Err(RuvyxaError::Message(
-                    "RUV1701 TypeScript plugin host returned invalid realtime configuration".into(),
-                ));
-            }
-            // Registering over a reserved framework route would panic inside
-            // axum's router; fail with a diagnostic instead.
-            if RESERVED_FRAMEWORK_ROUTES.contains(&descriptor.path.as_str()) {
-                return Err(RuvyxaError::Message(format!(
-                    "RUV1701 realtime path {} collides with a reserved framework route",
-                    descriptor.path
-                )));
-            }
-            let (tx, _) = broadcast::channel(descriptor.capacity);
-            Ok(RealtimeRuntime {
-                path: descriptor.path.clone(),
-                heartbeat: Duration::from_millis(descriptor.heartbeat_ms),
-                tx,
-            })
-        })
-        .transpose()?;
-    let presence = plugin_runtime
-        .as_ref()
-        .and_then(|runtime| runtime.descriptor().presence())
-        .map(|descriptor| {
-            if !descriptor.path.starts_with('/')
-                || descriptor.path.contains(['?', '#', '*'])
-                || !(5_000..=120_000).contains(&descriptor.heartbeat_ms)
-            {
-                return Err(RuvyxaError::Message(
-                    "RUV1701 TypeScript plugin host returned invalid presence configuration".into(),
-                ));
-            }
-            if RESERVED_FRAMEWORK_ROUTES.contains(&descriptor.path.as_str()) {
-                return Err(RuvyxaError::Message(format!(
-                    "RUV1701 presence path {} collides with a reserved framework route",
-                    descriptor.path
-                )));
-            }
-            Ok(PresenceRuntime {
-                path: descriptor.path.clone(),
-                heartbeat: Duration::from_millis(descriptor.heartbeat_ms),
-                registry: CollabRegistry::new(),
-            })
-        })
-        .transpose()?;
-    // Realtime and presence are separate transports, so a project that claims
-    // both must not point them at one path; axum would panic on the duplicate.
-    if let (Some(realtime), Some(presence)) = (realtime.as_ref(), presence.as_ref())
-        && realtime.path == presence.path
-    {
-        return Err(RuvyxaError::Message(format!(
-            "RUV1701 presence path {} collides with the realtime transport",
-            presence.path
-        )));
-    }
+    let plugin_runtime = start_plugin_runtime(&config).await?;
+    let realtime = realtime_runtime(plugin_runtime.as_ref())?;
+    let presence = presence_runtime(plugin_runtime.as_ref())?;
+    assert_transport_paths_distinct(realtime.as_ref(), presence.as_ref())?;
     let state = AppState {
         config: config.clone(),
         reload_tx,
@@ -1046,38 +1129,7 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
         None
     };
 
-    let realtime_path = state.realtime.as_ref().map(|runtime| runtime.path.clone());
-    let presence_path = state.presence.as_ref().map(|runtime| runtime.path.clone());
-    let state = Arc::new(state);
-    let mut app = Router::new()
-        .route("/__ruvyxa/hmr", get(hmr_ws))
-        .route("/__ruvyxa/client", get(client_bundle))
-        .route("/__ruvyxa/hydration-loader.js", get(hydration_loader))
-        .route("/__ruvyxa/client/route-manifest.json", get(client_manifest))
-        .route("/__ruvyxa/flight", get(flight_endpoint))
-        .route("/__ruvyxa/image", get(dynamic_image_endpoint))
-        .route(
-            "/__ruvyxa/action",
-            post(action_endpoint).layer(DefaultBodyLimit::max(config.action_body_limit_bytes)),
-        )
-        .route(
-            "/__ruvyxa/trace",
-            get(trace_endpoint)
-                .post(trace_ack_endpoint)
-                .layer(DefaultBodyLimit::max(1_024)),
-        );
-    if config.watch {
-        app = app
-            .route("/__ruvyxa/devtools", get(devtools_dashboard))
-            .route("/__ruvyxa/devtools/data", get(devtools_data));
-    }
-    if let Some(path) = realtime_path {
-        app = app.route(&path, get(realtime_ws));
-    }
-    if let Some(path) = presence_path {
-        app = app.route(&path, get(presence_ws));
-    }
-    let app = app.fallback(handle_request).with_state(state);
+    let app = build_app_router(&config, Arc::new(state));
 
     // Apply middleware stack from config (compression, CORS, timing, logging, custom headers)
     let app = middleware_stack.apply(app).map_err(RuvyxaError::Message)?;
@@ -1089,15 +1141,27 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
             },
         ));
 
-    let address: SocketAddr = format!("{}:{}", config.host, config.port)
-        .to_socket_addrs()
-        .map_err(|error| RuvyxaError::Message(format!("Invalid server address: {error}")))?
-        .next()
-        .ok_or_else(|| RuvyxaError::Message("Server address did not resolve".to_string()))?;
+    let address = resolve_bind_address(&config)?;
     let (listener, bound_address) = bind_listener(&config, address).await?;
 
     info!("Ruvyxa server listening on http://{bound_address}");
     print_server_ready(&config, &manifest, bound_address, startup_started.elapsed());
+    let server_result = serve_until_shutdown(listener, app).await;
+
+    worker_pool.shutdown().await;
+    server_result?;
+    Ok(())
+}
+
+/// Accept connections until a termination signal arrives, then drain.
+///
+/// The grace window is bounded: a client holding a streaming response open
+/// would otherwise keep `ruvyxa dev` alive indefinitely after Ctrl-C, so the
+/// remaining connections are dropped once it expires.
+async fn serve_until_shutdown(
+    listener: tokio::net::TcpListener,
+    app: Router,
+) -> std::io::Result<()> {
     let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
     let server = axum::serve(listener, server_make_service(app))
         .with_graceful_shutdown(async move {
@@ -1106,7 +1170,7 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
         .into_future();
     tokio::pin!(server);
 
-    let server_result = tokio::select! {
+    tokio::select! {
         result = &mut server => result,
         signal = shutdown_signal() => {
             info!(signal, "shutting down Ruvyxa server");
@@ -1119,11 +1183,7 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
                 }
             }
         }
-    };
-
-    worker_pool.shutdown().await;
-    server_result?;
-    Ok(())
+    }
 }
 
 fn server_make_service(

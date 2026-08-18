@@ -581,7 +581,7 @@ function assertContentShape(content, site) {
 
 function assertLocale(value, field) {
   try {
-    new Intl.Segmenter(value)
+    Intl.Segmenter.supportedLocalesOf(value)
   } catch {
     throw new Error(`RUV1602 ${field} must be a valid BCP 47 locale.`)
   }

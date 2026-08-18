@@ -46,7 +46,7 @@ export function prismaAdapter(
           `Prisma delegate "${delegateName}" does not implement ${operation.kind}()`,
         )
       }
-      return Reflect.apply(method, delegate, [operation.args]) as Promise<unknown>
+      return Reflect.apply(method, delegate, [operation.args])
     },
     ...(typeof client.$connect === 'function'
       ? { connect: () => Reflect.apply(client.$connect as () => Promise<void>, client, []) }
@@ -159,5 +159,5 @@ export const DATABASE_OPERATION_KINDS: readonly DatabaseOperationKind[] = Object
 ])
 
 function isIdentifier(value: string): boolean {
-  return /^[A-Za-z][A-Za-z0-9_]*$/.test(value)
+  return /^[A-Za-z]\w*$/.test(value)
 }

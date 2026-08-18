@@ -24,11 +24,111 @@
       </section>
     </main>
     <script>
-      (()=>{let latest=null;const $=id=>document.getElementById(id),fmt=n=>n<1024?`${n} B`:`${(n/1024).toFixed(1)} KB`,time=n=>n<1000?`${n} µs`:`${(n/1000).toFixed(1)} ms`;
-        function renderRoutes(){const q=$('filter').value.trim().toLowerCase(),host=$('routes');host.replaceChildren();for(const r of(latest?.routes||[]).filter(r=>!q||`${r.path} ${r.file}`.toLowerCase().includes(q))){const row=document.createElement('div');row.className='route';const code=document.createElement('code');code.textContent=r.path;const tag=document.createElement('span');tag.className='tag';tag.textContent=`${r.kind} · ${r.strategy}`;row.append(code,tag);host.append(row)}}
-        function render(d){latest=d;renderRoutes();$('cache').textContent=`${d.cache.entries}/${d.cache.capacity}`;const total=d.cache.hits+d.cache.misses;$('hitRate').textContent=total?`${Math.round(d.cache.hits/total*100)}%`:'0%';$('bundles').textContent=fmt(d.bundles.reduce((n,b)=>n+b.bytes,0));$('actions').textContent=String(d.actions.reduce((n,a)=>n+a.calls,0));
-          const tbody=$('actionRows');tbody.replaceChildren();$('actionEmpty').hidden=d.actions.length>0;$('actionTable').hidden=d.actions.length===0;for(const a of d.actions){const tr=document.createElement('tr');for(const [v,c] of [[a.action,''],[a.calls,'num'],[a.errors,'num'],[time(Number(a.totalMicros/a.calls)),'num'],[time(Number(a.lastMicros)),'num']]){const td=document.createElement('td');td.textContent=String(v);td.className=c;tr.append(td)}tbody.append(tr)}$('lru').textContent=d.cache.lruKeys.length?d.cache.lruKeys.join('  →  '):'The render cache is empty.'}
-        async function poll(){try{const response=await fetch('/__ruvyxa/devtools/data',{cache:'no-store'});if(!response.ok)throw new Error();render(await response.json());$('status').textContent='Live'}catch{$('status').textContent='Disconnected'}finally{setTimeout(poll,1000)}}$('filter').addEventListener('input',renderRoutes);poll()})();
+      /*
+       * Written out rather than hand-minified. This panel is served only to a
+       * developer on localhost, so there is no payload budget to defend, and the
+       * previous single-line form hid which statements were inside a branch.
+       */
+      ;(() => {
+        let latest = null
+
+        const $ = (id) => document.getElementById(id)
+
+        function formatBytes(value) {
+          if (value < 1024) return `${value} B`
+          return `${(value / 1024).toFixed(1)} KB`
+        }
+
+        function formatMicros(value) {
+          if (value < 1000) return `${value} µs`
+          return `${(value / 1000).toFixed(1)} ms`
+        }
+
+        function matchesFilter(route, needle) {
+          if (!needle) return true
+          return `${route.path} ${route.file}`.toLowerCase().includes(needle)
+        }
+
+        function renderRoutes() {
+          const needle = $('filter').value.trim().toLowerCase()
+          const host = $('routes')
+          host.replaceChildren()
+          for (const route of latest?.routes || []) {
+            if (!matchesFilter(route, needle)) continue
+            const row = document.createElement('div')
+            row.className = 'route'
+            const code = document.createElement('code')
+            code.textContent = route.path
+            const tag = document.createElement('span')
+            tag.className = 'tag'
+            tag.textContent = `${route.kind} · ${route.strategy}`
+            row.append(code, tag)
+            host.append(row)
+          }
+        }
+
+        function formatHitRate(cache) {
+          const total = cache.hits + cache.misses
+          if (!total) return '0%'
+          return `${Math.round((cache.hits / total) * 100)}%`
+        }
+
+        function renderActions(actions) {
+          const tbody = $('actionRows')
+          tbody.replaceChildren()
+          $('actionEmpty').hidden = actions.length > 0
+          $('actionTable').hidden = actions.length === 0
+          for (const action of actions) {
+            const row = document.createElement('tr')
+            const cells = [
+              [action.action, ''],
+              [action.calls, 'num'],
+              [action.errors, 'num'],
+              [formatMicros(Number(action.totalMicros / action.calls)), 'num'],
+              [formatMicros(Number(action.lastMicros)), 'num'],
+            ]
+            for (const [value, className] of cells) {
+              const cell = document.createElement('td')
+              cell.textContent = String(value)
+              cell.className = className
+              row.append(cell)
+            }
+            tbody.append(row)
+          }
+        }
+
+        function formatLru(lruKeys) {
+          if (!lruKeys.length) return 'The render cache is empty.'
+          return lruKeys.join('  →  ')
+        }
+
+        function render(data) {
+          latest = data
+          renderRoutes()
+          $('cache').textContent = `${data.cache.entries}/${data.cache.capacity}`
+          $('hitRate').textContent = formatHitRate(data.cache)
+          $('bundles').textContent = formatBytes(data.bundles.reduce((n, b) => n + b.bytes, 0))
+          $('actions').textContent = String(data.actions.reduce((n, a) => n + a.calls, 0))
+          renderActions(data.actions)
+          $('lru').textContent = formatLru(data.cache.lruKeys)
+        }
+
+        async function poll() {
+          try {
+            const response = await fetch('/__ruvyxa/devtools/data', { cache: 'no-store' })
+            if (!response.ok) throw new Error('DevTools data request failed')
+            render(await response.json())
+            $('status').textContent = 'Live'
+          } catch {
+            $('status').textContent = 'Disconnected'
+          } finally {
+            setTimeout(poll, 1000)
+          }
+        }
+
+        $('filter').addEventListener('input', renderRoutes)
+        poll()
+      })()
     </script>
   </body>
 </html>

@@ -835,6 +835,11 @@ impl Worker {
         self.pending.len()
     }
 
+    // Twenty-four lines with one `match` and two `if let`s, which Clippy scores at
+    // 43. The count is inflated by the `warn!`/`debug!` expansions in the timeout
+    // arm, not by branching a reader has to hold: splitting this would hide the
+    // graceful-then-kill sequence behind a call for no gain.
+    #[allow(clippy::cognitive_complexity)]
     async fn shutdown(&self) {
         self.alive.store(false, Ordering::Release);
         let sender = self.stdin_tx.lock().ok().and_then(|mut guard| guard.take());

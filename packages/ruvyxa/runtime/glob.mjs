@@ -81,7 +81,9 @@ function findCalls(source) {
 function compareBySlashedPath(left, right) {
   const leftPath = slash(left)
   const rightPath = slash(right)
-  return leftPath < rightPath ? -1 : leftPath > rightPath ? 1 : 0
+  if (leftPath < rightPath) return -1
+  if (leftPath > rightPath) return 1
+  return 0
 }
 
 function parseCall(source, start) {

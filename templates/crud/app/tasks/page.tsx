@@ -30,9 +30,7 @@ export default async function TasksPage() {
       </form>
 
       {tasks.length === 0 ? (
-        <p className="empty" role="status">
-          No tasks yet. Add one above to get started.
-        </p>
+        <output className="empty">No tasks yet. Add one above to get started.</output>
       ) : (
         <ul className="task-list" aria-label="Task list">
           {tasks.map((task) => (

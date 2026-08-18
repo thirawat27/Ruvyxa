@@ -345,7 +345,7 @@ function startMascotSpinner(label) {
 try {
   if (missingTemplate) {
     throw new Error(
-      'Starter template name is required.\n' + `  Choose one of: ${STARTER_TEMPLATES.join(', ')}`,
+      `Starter template name is required.\n  Choose one of: ${STARTER_TEMPLATES.join(', ')}`,
     )
   }
 
@@ -365,7 +365,8 @@ try {
   console.log('')
   console.log(`  ${gray('starter:')} ${result.template}`)
   console.log('')
-  console.log(`  ${bold('Project')} ${dim(`(${result.files.length} files)`)}`)
+  const fileCount = dim(`(${result.files.length} files)`)
+  console.log(`  ${bold('Project')} ${fileCount}`)
   console.log('')
   console.log(`  ${colorizeEntry(target, true)}`)
   const budget = { remaining: TREE_MAX_ENTRIES, hidden: 0 }
@@ -376,15 +377,18 @@ try {
     console.log(`  ${dim(`… and ${budget.hidden} more`)}`)
   }
   console.log('')
-  console.log(`  ${bold('Next steps')} ${dim(`(detected: ${pm.name})`)}`)
+  const detected = dim(`(detected: ${pm.name})`)
+  console.log(`  ${bold('Next steps')} ${detected}`)
   console.log('')
   console.log(`    ${cyan('cd')} ${target}`)
   console.log(`    ${cyan(pm.install)}`)
   console.log(`    ${cyan(pm.dev)}`)
   console.log('')
-  console.log(
-    `  ${format('Clarity over cleverness. Speed by default. Control that stays yours.', `1;${PURPLE}`)}`,
+  const tagline = format(
+    'Clarity over cleverness. Speed by default. Control that stays yours.',
+    `1;${PURPLE}`,
   )
+  console.log(`  ${tagline}`)
   console.log('')
 } catch (err) {
   const message = err instanceof Error ? err.message : String(err)

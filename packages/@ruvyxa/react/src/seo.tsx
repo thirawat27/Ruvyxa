@@ -65,7 +65,7 @@ export function Seo({
   article,
   breadcrumbs,
   jsonLd,
-}: SeoProps): ReactElement {
+}: Readonly<SeoProps>): ReactElement {
   const structuredData = createStructuredData({
     title,
     description,

@@ -31,7 +31,7 @@ export const getStaticParams: GetStaticParams<{ slug: string }> = async () => {
   return posts.map((post) => ({ slug: post.slug }))
 }
 
-export default function BlogPost({ params }: PageProps<{ slug: string }>) {
+export default function BlogPost({ params }: Readonly<PageProps<{ slug: string }>>) {
   const post = posts.find((p) => p.slug === params.slug)
 
   if (!post) {
@@ -52,8 +52,8 @@ export default function BlogPost({ params }: PageProps<{ slug: string }>) {
       <section>
         <h2>About this page</h2>
         <p>
-          This page was pre-rendered at build time using <code>getStaticParams</code>. The slug "
-          <code>{params.slug}</code>" was resolved at build time.
+          This page was pre-rendered at build time using <code>getStaticParams</code>. The slug{' '}
+          &quot;<code>{params.slug}</code>&quot; was resolved at build time.
         </p>
       </section>
 

@@ -73,8 +73,8 @@ function packagedRuntimeGraph(entryFiles) {
     )
     const source = readFileSync(sourcePath, 'utf8')
     const specifiers = [
-      ...source.matchAll(/\b(?:import|export)\s+(?:[^'\"]*?\s+from\s+)?['\"](\.[^'\"]+)['\"]/g),
-      ...source.matchAll(/\bimport\s*\(\s*['\"](\.[^'\"]+)['\"]\s*\)/g),
+      ...source.matchAll(/\b(?:import|export)\s+(?:[^'"]*?\s+from\s+)?['"](\.[^'"]+)['"]/g),
+      ...source.matchAll(/\bimport\s*\(\s*['"](\.[^'"]+)['"]\s*\)/g),
     ]
     for (const match of specifiers) {
       const dependencyPath = resolve(dirname(sourcePath), match[1])

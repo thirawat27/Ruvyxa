@@ -44,7 +44,7 @@ interface ImageBaseProps extends Omit<
 
 export type ImageProps =
   | (ImageBaseProps & {
-      fill?: false | undefined
+      fill?: false
       /** Intrinsic width prevents cumulative layout shift. */
       width: number
       /** Intrinsic height prevents cumulative layout shift. */
@@ -234,7 +234,8 @@ function isLocalRuntimeImage(src: string): boolean {
 function runtimeImageUrl(src: string, width: number, quality?: number): string {
   const path = src.split(/[?#]/, 1)[0]
   const query = `src=${encodeURIComponent(path)}&w=${Math.max(1, Math.round(width))}`
-  return `/__ruvyxa/image?${query}${quality !== undefined ? `&q=${Math.round(quality)}` : ''}`
+  const qualityParam = quality === undefined ? '' : `&q=${Math.round(quality)}`
+  return `/__ruvyxa/image?${query}${qualityParam}`
 }
 
 function fillStyle(style: CSSProperties | undefined): CSSProperties {

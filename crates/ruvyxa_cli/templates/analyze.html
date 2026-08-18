@@ -43,23 +43,120 @@
     </main>
     <script id="analysis" type="application/json">__RUVYXA_ANALYSIS_DATA__</script>
     <script>
-      (() => {
-        const data=JSON.parse(document.getElementById('analysis').textContent); const manifest=data.bundle.clientManifest||{}; const routes=manifest.routes||[];
-        const bytes=n=>{if(!Number.isFinite(n))return '0 B';const u=['B','KB','MB'];let i=0;while(n>=1024&&i<u.length-1){n/=1024;i++}return `${n.toFixed(i?1:0)} ${u[i]}`};
-        const routeBytes=r=>Number(r.outputBytes??r.bytes??0)+[...(r.chunks||[]),...(r.sharedChunks||[])].reduce((n,c)=>n+Number(c.bytes||0),0);
-        const moduleNames=r=>[...new Set([...(r.chunkManifest?.modules||[]),...(r.chunks||[]).flatMap(c=>c.modules||[]),...(r.sharedChunks||[]).flatMap(c=>c.modules||[])])];
-        const max=Math.max(1,...routes.map(routeBytes)); document.getElementById('root').textContent=data.root;
-        document.getElementById('routes').textContent=String(routes.length); document.getElementById('output').textContent=bytes(Number(manifest.outputBytes||0));
-        document.getElementById('gzip').textContent=bytes(Number(manifest.estimatedGzBytes||0)); const diag=document.getElementById('diagnostics'); diag.textContent=String(data.validation.diagnostics.length); if(data.validation.diagnostics.length)diag.classList.add('bad');
-        const tbody=document.getElementById('rows'), empty=document.getElementById('empty');
-        function render(query=''){tbody.replaceChildren();const needle=query.trim().toLowerCase();const visible=routes.filter(r=>!needle||`${r.path} ${moduleNames(r).join(' ')}`.toLowerCase().includes(needle));
-          for(const r of visible){const size=routeBytes(r),mods=moduleNames(r);const tr=document.createElement('tr');
-            const path=document.createElement('td'),code=document.createElement('code');code.textContent=r.path;path.append(code);tr.append(path);
-            const amount=document.createElement('td');amount.className='num';amount.textContent=bytes(size);tr.append(amount);
-            const visual=document.createElement('td'),track=document.createElement('div'),bar=document.createElement('div');track.className='bar-track';bar.className='bar';bar.style.width=`${Math.max(2,size/max*100)}%`;track.append(bar);visual.append(track);tr.append(visual);
-            const modules=document.createElement('td');modules.textContent=`${mods.length} module${mods.length===1?'':'s'}`;modules.title=mods.join('\n');tr.append(modules);tbody.append(tr)} empty.hidden=visible.length!==0 }
-        document.getElementById('filter').addEventListener('input',e=>render(e.currentTarget.value));render();
-      })();
+      /*
+       * Written out rather than hand-minified. This report is a local artifact
+       * opened by the developer who ran `ruvyxa analyze`, so nothing here is on a
+       * payload budget, and the single-line form made the row builder unreadable.
+       */
+      ;(() => {
+        const data = JSON.parse(document.getElementById('analysis').textContent)
+        const manifest = data.bundle.clientManifest || {}
+        const routes = manifest.routes || []
+
+        function formatBytes(value) {
+          if (!Number.isFinite(value)) return '0 B'
+          const units = ['B', 'KB', 'MB']
+          let amount = value
+          let unit = 0
+          while (amount >= 1024 && unit < units.length - 1) {
+            amount /= 1024
+            unit++
+          }
+          return `${amount.toFixed(unit ? 1 : 0)} ${units[unit]}`
+        }
+
+        function routeBytes(route) {
+          const own = Number(route.outputBytes ?? route.bytes ?? 0)
+          const chunks = [...(route.chunks || []), ...(route.sharedChunks || [])]
+          return own + chunks.reduce((total, chunk) => total + Number(chunk.bytes || 0), 0)
+        }
+
+        function moduleNames(route) {
+          return [
+            ...new Set([
+              ...(route.chunkManifest?.modules || []),
+              ...(route.chunks || []).flatMap((chunk) => chunk.modules || []),
+              ...(route.sharedChunks || []).flatMap((chunk) => chunk.modules || []),
+            ]),
+          ]
+        }
+
+        const max = Math.max(1, ...routes.map(routeBytes))
+        const tbody = document.getElementById('rows')
+        const empty = document.getElementById('empty')
+
+        document.getElementById('root').textContent = data.root
+        document.getElementById('routes').textContent = String(routes.length)
+        document.getElementById('output').textContent = formatBytes(
+          Number(manifest.outputBytes || 0),
+        )
+        document.getElementById('gzip').textContent = formatBytes(
+          Number(manifest.estimatedGzBytes || 0),
+        )
+
+        const diagnostics = document.getElementById('diagnostics')
+        diagnostics.textContent = String(data.validation.diagnostics.length)
+        if (data.validation.diagnostics.length) {
+          diagnostics.classList.add('bad')
+        }
+
+        function element(tag, className) {
+          const node = document.createElement(tag)
+          if (className) node.className = className
+          return node
+        }
+
+        function buildRow(route) {
+          const row = document.createElement('tr')
+          const size = routeBytes(route)
+          const modules = moduleNames(route)
+
+          const path = element('td')
+          const code = document.createElement('code')
+          code.textContent = route.path
+          path.append(code)
+          row.append(path)
+
+          const amount = element('td', 'num')
+          amount.textContent = formatBytes(size)
+          row.append(amount)
+
+          const visual = element('td')
+          const track = element('div', 'bar-track')
+          const bar = element('div', 'bar')
+          bar.style.width = `${Math.max(2, (size / max) * 100)}%`
+          track.append(bar)
+          visual.append(track)
+          row.append(visual)
+
+          const count = element('td')
+          count.textContent = `${modules.length} module${modules.length === 1 ? '' : 's'}`
+          count.title = modules.join('\n')
+          row.append(count)
+
+          return row
+        }
+
+        function matchesFilter(route, needle) {
+          if (!needle) return true
+          return `${route.path} ${moduleNames(route).join(' ')}`.toLowerCase().includes(needle)
+        }
+
+        function render(query = '') {
+          tbody.replaceChildren()
+          const needle = query.trim().toLowerCase()
+          const visible = routes.filter((route) => matchesFilter(route, needle))
+          for (const route of visible) {
+            tbody.append(buildRow(route))
+          }
+          empty.hidden = visible.length !== 0
+        }
+
+        document.getElementById('filter').addEventListener('input', (event) => {
+          render(event.currentTarget.value)
+        })
+        render()
+      })()
     </script>
   </body>
 </html>

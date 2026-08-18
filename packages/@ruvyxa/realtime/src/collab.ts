@@ -186,10 +186,11 @@ export function createCollabClient(options: CollabClientOptions): CollabClient {
   }
 
   function send(frame: Record<string, unknown>): boolean {
-    if (!socket || socket.readyState !== 1) return false
-    ;(socket as unknown as { send(data: string): void }).send(
-      JSON.stringify({ version: 1, ...frame }),
-    )
+    if (!socket || socket.readyState !== 1) {
+      return false
+    }
+    const open = socket as unknown as { send(data: string): void }
+    open.send(JSON.stringify({ version: 1, ...frame }))
     return true
   }
 
@@ -317,14 +318,18 @@ export function createCollabClient(options: CollabClientOptions): CollabClient {
         throw new TypeError('Collaboration listener must be a function')
       }
       listeners.add(listener)
-      return () => void listeners.delete(listener)
+      return () => {
+        listeners.delete(listener)
+      }
     },
     onError(listener: CollabErrorListener) {
       if (typeof listener !== 'function') {
         throw new TypeError('Collaboration error listener must be a function')
       }
       errorListeners.add(listener)
-      return () => void errorListeners.delete(listener)
+      return () => {
+        errorListeners.delete(listener)
+      }
     },
     setPresence(next: unknown) {
       localPresence = next

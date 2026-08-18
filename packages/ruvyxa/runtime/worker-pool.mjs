@@ -192,22 +192,27 @@ process.on('SIGINT', () => shutdown('SIGINT'))
 function enforceWorkerCacheBudget() {
   const heapUsed = process.memoryUsage().heapUsed
   const pressure = memoryPressure.observe(heapUsed)
-  if (pressure.level === 'none') return pressure
 
-  const protectedKeys = new Set(buildLocks.keys())
-  const fraction = Math.min(1, pressure.toFreeBytes / Math.max(heapUsed, 1))
-  const requested = Math.max(1, Math.ceil(bundleCache.size * fraction))
-  let bundleEvictions = 0
-  for (let index = 0; index < requested; index++) {
-    const evicted = bundleCache.evictOldest(protectedKeys)
-    if (!evicted) break
-    deleteBundleCacheEntry(evicted.key, evicted.value)
-    bundleEvictions++
+  // Sweeping runs only under pressure, but the reading is returned either way:
+  // the speculation check at the call site needs `stopSpeculation` on every
+  // tick, not just the ticks that evicted something.
+  if (pressure.level !== 'none') {
+    const protectedKeys = new Set(buildLocks.keys())
+    const fraction = Math.min(1, pressure.toFreeBytes / Math.max(heapUsed, 1))
+    const requested = Math.max(1, Math.ceil(bundleCache.size * fraction))
+    let bundleEvictions = 0
+    for (let index = 0; index < requested; index++) {
+      const evicted = bundleCache.evictOldest(protectedKeys)
+      if (!evicted) break
+      deleteBundleCacheEntry(evicted.key, evicted.value)
+      bundleEvictions++
+    }
+    memoryPressure.recordEviction('bundle', bundleEvictions)
+    memoryPressure.recordEviction('module', moduleCache.clear())
+    clearCompilerCache()
+    memoryPressure.recordEviction('compilerSweep')
   }
-  memoryPressure.recordEviction('bundle', bundleEvictions)
-  memoryPressure.recordEviction('module', moduleCache.clear())
-  clearCompilerCache()
-  memoryPressure.recordEviction('compilerSweep')
+
   return pressure
 }
 
@@ -948,7 +953,7 @@ function parseStaticParamsCacheDuration(value) {
   if (typeof value === 'number') {
     seconds = value
   } else if (typeof value === 'string') {
-    const match = /^(\d+)(s|m|h|d)$/.exec(value.trim())
+    const match = /^(\d+)([smhd])$/.exec(value.trim())
     if (!match) {
       throw new Error('RUV1513 static params cache must use seconds or a duration like 10m')
     }
@@ -1219,7 +1224,7 @@ async function handleClient(request) {
   const resolvedRoot = path.resolve(projectRoot || process.cwd())
   const layouts = collectLayouts(appDir, path.dirname(pageFile))
   const specials = collectSpecials(appDir, path.dirname(pageFile))
-  const { outfile, version, inputsVersion, inputs } = await bundleClientModule(
+  const { outfile, inputsVersion, inputs } = await bundleClientModule(
     resolvedRoot,
     pageFile,
     layouts,

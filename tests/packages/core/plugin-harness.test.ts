@@ -72,7 +72,9 @@ describe('plugin test harness', () => {
     const plugin = definePlugin({
       name: 'build-steps',
       build: {
-        onStart: ({ outDir }) => void started.push(outDir),
+        onStart: ({ outDir }) => {
+          started.push(outDir)
+        },
         onResolve: ({ id }) => (id === 'virtual:config' ? '/resolved/config.ts' : undefined),
         onLoad: ({ id }) => (id === '/resolved/config.ts' ? 'export default 1' : undefined),
         onTransform: ({ code }) => `${code}\n// stamped`,
@@ -98,7 +100,9 @@ describe('plugin test harness', () => {
       dev: {
         onFileChange: {
           match: ['content/*'],
-          handler: ({ paths }) => void seen.push(...paths),
+          handler: ({ paths }) => {
+            seen.push(...paths)
+          },
         },
       },
     })

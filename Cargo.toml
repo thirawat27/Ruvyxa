@@ -24,6 +24,13 @@ license = "Apache-2.0"
 repository = "https://github.com/thirawat27/ruvyxa"
 rust-version = "1.96"
 
+[workspace.lints.clippy]
+# Nursery lint, off by default. Turned on because the JavaScript side now has
+# an equivalent gate (`.oxlintrc.json`), and the crates that grew the largest
+# functions - the resolver, the linker, the dev server - are the same ones
+# that have taken repeat regressions.
+cognitive_complexity = "warn"
+
 [workspace.dependencies]
 anyhow = "1.0.104"
 axum = { version = "0.8.9", features = ["ws"] }

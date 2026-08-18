@@ -856,9 +856,9 @@ function matchPath(pathname: string, prefix: string): string | null {
 }
 
 function matchOAuthPath(pathname: string, pattern: RegExp) {
-  const match = pathname.match(pattern)
+  const match = pattern.exec(pathname)
   if (!match) return null
-  const provider = safeDecodeComponent(match[1]!)
+  const provider = safeDecodeComponent(match[1])
   return provider ? { provider, phase: match[2] as 'start' | 'callback' } : null
 }
 

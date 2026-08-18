@@ -40,3 +40,6 @@ fast_image_resize.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+
+[lints]
+workspace = true

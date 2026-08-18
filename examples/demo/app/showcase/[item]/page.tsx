@@ -5,7 +5,7 @@ const ITEMS: Record<string, string> = {
   gadgets: 'Assorted gadgets, some assembled.',
 }
 
-export default function ShowcaseItem({ params }: { params: { item: string } }) {
+export default function ShowcaseItem({ params }: Readonly<{ params: { item: string } }>) {
   const item = params.item
 
   // Demonstrates error.tsx: an uncaught throw is caught by the nearest boundary.
