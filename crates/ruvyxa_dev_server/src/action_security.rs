@@ -1,7 +1,7 @@
 //! Server-action request validation: origin/fetch-metadata checks, payload
 //! parsing, and the per-key rate limiter.
 
-use std::collections::BTreeMap;
+use std::collections::{HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
@@ -14,9 +14,21 @@ const ACTION_NONCE_TTL: Duration = Duration::from_secs(600);
 const ACTION_NONCE_MAX_ENTRIES: usize = 10_000;
 
 /// Process-local replay protection for version-bound action requests.
+///
+/// Two structures over one set of keys: `seen` answers the replay question,
+/// and `order` holds the same keys in expiry order. Every nonce is stored with
+/// the same TTL, so insertion order *is* expiry order and the sweep stops at
+/// the first live entry. A single map keyed by nonce could not do that — the
+/// previous `retain` walked all `ACTION_NONCE_MAX_ENTRIES` on every action, and
+/// eviction then scanned again for the minimum.
+///
+/// Mirrored by `consumeActionNonce` in
+/// `packages/ruvyxa/runtime/serverless-handler.mjs`; both replay
+/// `tests/fixtures/action-contract.json`.
 #[derive(Debug, Default)]
 pub(crate) struct ActionReplayGuard {
-    entries: BTreeMap<String, Instant>,
+    seen: HashSet<String>,
+    order: VecDeque<(Instant, String)>,
 }
 
 impl ActionReplayGuard {
@@ -37,22 +49,31 @@ impl ActionReplayGuard {
             return Err("Versioned action requests require a valid replay nonce");
         }
         let now = Instant::now();
-        self.entries.retain(|_, expires| *expires > now);
-        let key = format!("{action_reference}:{nonce}");
-        if self.entries.contains_key(&key) {
-            return Err("Action request replayed");
-        }
-        self.entries.insert(key, now + ACTION_NONCE_TTL);
-        while self.entries.len() > ACTION_NONCE_MAX_ENTRIES {
-            if let Some(oldest) = self
-                .entries
-                .iter()
-                .min_by_key(|(_, expires)| **expires)
-                .map(|(key, _)| key.clone())
-            {
-                self.entries.remove(&oldest);
+        while self
+            .order
+            .front()
+            .is_some_and(|(expires, _)| *expires <= now)
+        {
+            if let Some((_, expired)) = self.order.pop_front() {
+                self.seen.remove(&expired);
             }
         }
+
+        let key = format!("{action_reference}:{nonce}");
+        if self.seen.contains(&key) {
+            return Err("Action request replayed");
+        }
+
+        // Full, with nothing expired left to drop. Dropping the oldest live
+        // nonce to make room would accept that nonce's replay — the one thing
+        // this guard exists to refuse -- and an attacker reaches this state by
+        // sending fresh nonces. Saturation fails closed instead.
+        if self.seen.len() >= ACTION_NONCE_MAX_ENTRIES {
+            return Err("Action replay protection is saturated");
+        }
+
+        self.order.push_back((now + ACTION_NONCE_TTL, key.clone()));
+        self.seen.insert(key);
         Ok(())
     }
 }
@@ -595,6 +616,55 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("x-ruvyxa-action-nonce", "0123456789abcdef".parse().unwrap());
         assert!(guard.consume(&headers, "a_0123456789abcdef").is_ok());
+        assert_eq!(
+            guard.consume(&headers, "a_0123456789abcdef"),
+            Err("Action request replayed")
+        );
+
+        let nonce = &fixture["nonce"];
+        assert_eq!(
+            nonce["ttlSeconds"].as_u64().unwrap(),
+            ACTION_NONCE_TTL.as_secs()
+        );
+        assert_eq!(
+            nonce["maxEntries"].as_u64().unwrap() as usize,
+            ACTION_NONCE_MAX_ENTRIES
+        );
+    }
+
+    /// A guard with no expired entry to reclaim refuses the request rather than
+    /// dropping a live nonce, whose replay it would then accept. Held with the
+    /// serverless handler by `action-contract.json`.
+    #[test]
+    fn a_saturated_replay_guard_refuses_rather_than_dropping_a_live_nonce() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tests/fixtures/action-contract.json"))
+                .unwrap();
+        let saturation = &fixture["nonce"]["saturation"];
+        assert_eq!(saturation["behavior"].as_str().unwrap(), "reject");
+
+        let mut guard = ActionReplayGuard::default();
+        let first = "n0000000000000000";
+        for index in 0..ACTION_NONCE_MAX_ENTRIES {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                "x-ruvyxa-action-nonce",
+                format!("n{index:016}").parse().unwrap(),
+            );
+            assert!(guard.consume(&headers, "a_0123456789abcdef").is_ok());
+        }
+
+        let mut headers = HeaderMap::new();
+        headers.insert("x-ruvyxa-action-nonce", "fedcba9876543210".parse().unwrap());
+        assert_eq!(
+            guard.consume(&headers, "a_0123456789abcdef"),
+            Err(saturation["message"].as_str().unwrap())
+        );
+
+        // The nonce that filling the guard would previously have evicted is
+        // still refused as a replay, which is the point of failing closed.
+        let mut headers = HeaderMap::new();
+        headers.insert("x-ruvyxa-action-nonce", first.parse().unwrap());
         assert_eq!(
             guard.consume(&headers, "a_0123456789abcdef"),
             Err("Action request replayed")

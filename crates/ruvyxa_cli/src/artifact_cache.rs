@@ -40,6 +40,9 @@ const WORKER_RUNTIME_FILES: &[&str] = &[
     // reaches worker output and must invalidate prerendered artifacts too.
     "action-runtime.mjs",
     "compiler.mjs",
+    // The ordering rule the worker's cache keys and fingerprints sort by. A
+    // change here reorders key material, so it belongs in cache identity.
+    "order.mjs",
     "paths.mjs",
     "entry-templates.mjs",
     "flight.mjs",

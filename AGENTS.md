@@ -63,6 +63,14 @@ with the reason beside it: sequential `await` in a loop is how the bundler appli
 globals are a contract with the generated entry, not a naming slip. Add a rule to the off list only
 with the reason it does not apply here, never to clear a finding.
 
+It also bans `localeCompare` outright. Ordering in this repository decides cache keys, content
+fingerprints, and the bytes of files the build writes, and `localeCompare` answers by the host's ICU
+locale — so two machines building the same project disagreed, and the JavaScript and Rust graphs
+sorted the same glob differently. Sort with `compareCodeUnits`/`compareEntryKeys` from
+`packages/ruvyxa/runtime/order.mjs`, `compareStable` in `packages/ruvyxa/src/plugins.ts`, or a bare
+`.sort()` for an array of strings. Code emitted into a function artifact writes the comparison out
+inline, because a deployed function directory resolves no sibling specifiers.
+
 It also caps structure directly: `complexity` at 30, `max-depth` at 4, `max-nested-callbacks` at 4,
 and `max-params` at 8. `max-lines-per-function` is deliberately off — a long flat function is a
 reading cost, a branchy one is a correctness risk, and only the second is worth failing a build

@@ -1,3 +1,5 @@
+import { compareEntryKeys } from './order.mjs'
+
 /**
  * Deterministic cache-budget policy shared by worker cache owners.
  *
@@ -63,9 +65,7 @@ export class CachePressureController {
       residentBytes,
       pressureLevel: this.#pressureLevel,
       pressureEvents: this.#pressureEvents,
-      evictions: Object.fromEntries(
-        [...this.#evictions].sort(([left], [right]) => left.localeCompare(right)),
-      ),
+      evictions: Object.fromEntries([...this.#evictions].sort(compareEntryKeys)),
     }
   }
 }

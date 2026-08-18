@@ -4,6 +4,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createRequire, isBuiltin } from 'node:module'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { compareCodeUnits } from './order.mjs'
 const JS_EXTENSIONS = ['', '.ts', '.tsx', '.js', '.jsx', '.mts', '.mjs', '.md', '.mdx']
 export const MDX_COMPONENT_EXTENSIONS = ['.tsx', '.ts', '.jsx', '.js', '.mts', '.mjs']
 const ASSET_EXTENSIONS = new Set(['.css', '.scss', '.sass', '.less'])
@@ -299,7 +300,7 @@ async function fingerprintProjectInputs(root, modules, configurationFiles = []) 
       path: path.relative(root, module.filePath).replaceAll('\\', '/'),
       source: module.source,
     }))
-    .sort((left, right) => left.path.localeCompare(right.path))
+    .sort((left, right) => compareCodeUnits(left.path, right.path))
 
   for (const module of projectModules) {
     hash.update(module.path)

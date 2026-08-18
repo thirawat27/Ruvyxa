@@ -2130,7 +2130,7 @@ function clientJavaScriptSizes(clientDir: string): Array<{ name: string; bytes: 
     const stats = statSync(path.join(clientDir, name))
     if (stats.isFile()) files.push({ name: name.replaceAll('\\', '/'), bytes: stats.size })
   }
-  return files.sort((a, b) => a.name.localeCompare(b.name))
+  return files.sort((a, b) => compareStable(a.name, b.name))
 }
 
 function formatKb(bytes: number): string {

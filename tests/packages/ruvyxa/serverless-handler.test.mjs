@@ -77,6 +77,60 @@ describe('serverless request body limits', () => {
     assert.equal((await invoke('a_0000000000000000', 'fedcba9876543210')).status, 409)
   })
 
+  it('refuses a saturated replay guard rather than dropping a live nonce', async () => {
+    const fixture = JSON.parse(
+      readFileSync(path.join(workspaceRoot, 'tests/fixtures/action-contract.json'), 'utf8'),
+    )
+    const { maxEntries, saturation } = fixture.nonce
+    assert.equal(saturation.behavior, 'reject')
+
+    const submit = async (input) => input
+    submit.ruvyxa = { kind: 'action' }
+    const route = {
+      ...pageRoute(fixture.routeId, '/target'),
+      actionReferenceId: fixture.expected,
+    }
+    const handler = createHandler({
+      routes: [route],
+      importPage: async () => ({}),
+      importApi: async () => ({}),
+      importAction: async () => ({ submit }),
+      // The action rate limiter would answer long before the replay guard
+      // filled; this test is about the guard's own bound.
+      security: { actionRateLimit: { max: maxEntries * 2, window: 60 } },
+    })
+    const invoke = (nonce) =>
+      handler(
+        new Request(
+          `http://localhost/__ruvyxa/action?path=/target&name=submit&id=${encodeURIComponent(fixture.expected)}`,
+          {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              host: 'localhost',
+              origin: 'http://localhost',
+              'sec-fetch-site': 'same-origin',
+              'x-ruvyxa-action-nonce': nonce,
+            },
+            body: '{}',
+          },
+        ),
+      )
+
+    const first = 'n0000000000000000'
+    for (let index = 0; index < maxEntries; index++) {
+      assert.equal((await invoke(`n${String(index).padStart(16, '0')}`)).status, 200)
+    }
+
+    const saturated = await invoke('fedcba9876543210')
+    assert.equal(saturated.status, saturation.status)
+    assert.equal(await saturated.text(), saturation.message)
+
+    // The entry that eviction would have freed is still held, so its replay is
+    // still refused. That is what failing closed buys.
+    assert.equal((await invoke(first)).status, 409)
+  })
+
   it('stops reading a lengthless action body at the action limit', async () => {
     const chunk = new TextEncoder().encode('abc')
     const chunkCount = 100

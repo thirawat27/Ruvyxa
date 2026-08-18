@@ -24,6 +24,7 @@
     "runtime/css-runner.mjs",
     "runtime/glob.mjs",
     "runtime/entry-templates.mjs",
+    "runtime/order.mjs",
     "runtime/flight.mjs",
     "runtime/plugin-http.mjs",
     "runtime/plugin-runtime.mjs",

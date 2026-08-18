@@ -39,6 +39,13 @@ const MAX_REVALIDATIONS_PER_REQUEST = 64
 const MAX_REVALIDATION_PATH_LENGTH = 2_048
 const MAX_PENDING_PATH_REVALIDATIONS = 1_024
 
+/**
+ * Replay-guard bounds, held with the native host by
+ * `tests/fixtures/action-contract.json`.
+ */
+const ACTION_NONCE_TTL_MS = 10 * 60 * 1000
+const MAX_ACTION_NONCES = 10_000
+
 /** Endpoint the framework's own server actions are posted to. */
 const ACTION_PATH = '/__ruvyxa/action'
 const FLIGHT_PATH = '/__ruvyxa/flight'
@@ -643,13 +650,32 @@ export function createHandler(options) {
       return textResponse(400, 'Versioned action requests require a valid replay nonce')
     }
     const now = Date.now()
+
+    // Every nonce is stored with the same TTL, so a Map's insertion order is
+    // also its expiry order and the first live entry ends the sweep. Scanning
+    // the whole map instead walked up to `MAX_ACTION_NONCES` entries on every
+    // versioned action request, for a prefix that is all this can ever remove.
+    // A backwards wall-clock step can leave an entry behind the one in front of
+    // it; that only delays its removal until a later sweep reaches it, and a
+    // nonce held longer than its TTL is refused, never wrongly accepted.
     for (const [key, expires] of actionNonces) {
-      if (expires <= now) actionNonces.delete(key)
+      if (expires > now) break
+      actionNonces.delete(key)
     }
+
     const key = `${actionReference}:${nonce}`
     if (actionNonces.has(key)) return textResponse(409, 'Action request replayed')
-    actionNonces.set(key, now + 10 * 60 * 1000)
-    while (actionNonces.size > 10_000) actionNonces.delete(actionNonces.keys().next().value)
+
+    // Full, with nothing expired left to drop. Evicting the oldest live nonce
+    // to make room would accept that nonce's replay — the one thing this map
+    // exists to refuse — and an attacker can reach this state on purpose by
+    // sending fresh nonces. Saturation fails closed, the same choice
+    // `failClosedRevalidations` makes when its own bound is reached.
+    if (actionNonces.size >= MAX_ACTION_NONCES) {
+      return textResponse(503, 'Action replay protection is saturated')
+    }
+
+    actionNonces.set(key, now + ACTION_NONCE_TTL_MS)
     return null
   }
 

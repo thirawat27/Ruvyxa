@@ -184,7 +184,11 @@ function sortedEntries(node) {
     const leftIsDir = left !== null
     const rightIsDir = right !== null
     if (leftIsDir !== rightIsDir) return leftIsDir ? -1 : 1
-    return leftName.localeCompare(rightName)
+    // Code units, not `localeCompare`: the claim above is that this listing is
+    // the same on every platform, and locale ordering is what breaks it.
+    if (leftName < rightName) return -1
+    if (leftName > rightName) return 1
+    return 0
   })
 }
 

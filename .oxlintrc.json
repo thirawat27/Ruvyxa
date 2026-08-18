@@ -53,6 +53,14 @@
 
     "eslint/max-lines-per-function": "off",
 
+    "eslint/no-restricted-properties": [
+      "error",
+      {
+        "property": "localeCompare",
+        "message": "localeCompare orders by the host's ICU locale, so two machines running the same build can disagree. Everything here sorts into a cache key, a fingerprint, or a file the build writes: use compareCodeUnits/compareEntryKeys from packages/ruvyxa/runtime/order.mjs, compareStable in packages/ruvyxa/src/plugins.ts, or a bare .sort() for a string array."
+      }
+    ],
+
     "eslint/no-nested-ternary": "error",
     "eslint/no-useless-escape": "error",
     "eslint/no-useless-concat": "error",

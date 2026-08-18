@@ -439,7 +439,10 @@ export function cache(key: string): CacheBuilder {
     },
     tags(...values: string[]) {
       if (values.length > 32) throw new TypeError('cache().tags() accepts at most 32 tags')
-      tags = [...new Set(values.map(validateCacheTag))].sort((a, b) => a.localeCompare(b))
+      // Plain `.sort()` is a UTF-16 code-unit ordering. Tag order is part of
+      // the cache entry's identity, and `localeCompare` would make that
+      // identity depend on the host's ICU locale.
+      tags = [...new Set(values.map(validateCacheTag))].sort()
       return this
     },
     scope(value: 'deployment' | 'request') {

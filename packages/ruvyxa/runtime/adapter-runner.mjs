@@ -897,10 +897,21 @@ async function ${renderName}(ctx) {
   return { imports, definition, renderName, moduleName, flightName }
 }
 
-/** Deterministic, collision-free key material for a cached Flight producer. */
+/**
+ * Deterministic, collision-free key material for a cached Flight producer.
+ *
+ * The key ordering is written out here rather than imported: this string is
+ * emitted into a function artifact that resolves no bare or sibling
+ * specifiers. It has to agree with `flightCacheKey` in `worker-pool.mjs`,
+ * which computes the same key on the build host — so both compare code units.
+ * `localeCompare` made the ordering depend on each host's ICU locale, and the
+ * two run in different environments by construction.
+ */
 function flightCachePrelude() {
   return `function __ruvyxaFlightKey(route, ctx) {
-  const params = Object.fromEntries(Object.entries(ctx.params ?? {}).sort(([left], [right]) => left.localeCompare(right)))
+  const params = Object.fromEntries(
+    Object.entries(ctx.params ?? {}).sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0)),
+  )
   return "flight:" + JSON.stringify([route, ctx.path, params])
 }`
 }

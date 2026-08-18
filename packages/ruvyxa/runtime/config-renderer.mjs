@@ -2,6 +2,7 @@ import { existsSync } from 'node:fs'
 import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { compareEntryKeys } from './order.mjs'
 
 import {
   cacheFileName,
@@ -1024,7 +1025,7 @@ function recordEnvironmentReads() {
 
   return () => {
     Object.defineProperty(process, 'env', { value: source, configurable: true, writable: true })
-    return Object.fromEntries([...observed].sort(([left], [right]) => left.localeCompare(right)))
+    return Object.fromEntries([...observed].sort(compareEntryKeys))
   }
 }
 

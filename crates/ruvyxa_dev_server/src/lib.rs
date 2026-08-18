@@ -2514,7 +2514,9 @@ async fn action_endpoint(
         if let Err(message) = replay {
             let status = if message == "Action request replayed" {
                 StatusCode::CONFLICT
-            } else if message == "Action replay protection is unavailable" {
+            } else if message == "Action replay protection is unavailable"
+                || message == "Action replay protection is saturated"
+            {
                 StatusCode::SERVICE_UNAVAILABLE
             } else {
                 StatusCode::BAD_REQUEST

@@ -60,6 +60,7 @@ import { clientEntrySource, metaSourceImports, nodeSsrEntrySource } from './entr
 import { WorkerAdmissionController } from './worker-admission.mjs'
 import { CachePressureController, LruCache } from './cache-budget.mjs'
 import { encodeFlightPayload } from './flight.mjs'
+import { compareEntryKeys } from './order.mjs'
 
 // --- Configuration ---
 const MAX_BUNDLE_CACHE_ENTRIES = positiveIntegerEnv('RUVYXA_CACHE_MAX_ENTRIES', 256)
@@ -783,9 +784,7 @@ async function handleFlight(request) {
 }
 
 function flightCacheKey(routePath, requestPath, params) {
-  const sortedParams = Object.fromEntries(
-    Object.entries(params || {}).sort(([left], [right]) => left.localeCompare(right)),
-  )
+  const sortedParams = Object.fromEntries(Object.entries(params || {}).sort(compareEntryKeys))
   return `flight:${JSON.stringify([routePath, requestPath, sortedParams])}`
 }
 

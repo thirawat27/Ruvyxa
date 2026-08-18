@@ -359,10 +359,14 @@ describe('runtime compiler', () => {
       const sourceDir = path.join(packageRoot, 'src')
       await mkdir(runtimeDir, { recursive: true })
       await mkdir(sourceDir, { recursive: true })
-      await copyFile(
-        path.join(workspaceRoot, 'packages/ruvyxa/runtime/compiler.mjs'),
-        path.join(runtimeDir, 'compiler.mjs'),
-      )
+      // compiler.mjs and the local modules it imports, since the copy is
+      // loaded as a module rather than read as text.
+      for (const runtimeFile of ['compiler.mjs', 'order.mjs']) {
+        await copyFile(
+          path.join(workspaceRoot, 'packages/ruvyxa/runtime', runtimeFile),
+          path.join(runtimeDir, runtimeFile),
+        )
+      }
       await writeFile(path.join(sourceDir, 'index.ts'), 'export {}\n')
 
       const copiedCompiler = await import(

@@ -4,5 +4,16 @@
   "routeId": "route_todos",
   "source": "export const create = 1\n",
   "expected": "a_4ec84a2fc14e2577",
-  "nonce": { "minLength": 16, "maxLength": 128, "ttlSeconds": 600, "maxEntries": 10000 }
+  "nonce": {
+    "minLength": 16,
+    "maxLength": 128,
+    "ttlSeconds": 600,
+    "maxEntries": 10000,
+    "saturation": {
+      "behavior": "reject",
+      "status": 503,
+      "message": "Action replay protection is saturated",
+      "why": "Both hosts used to evict the oldest tracked nonce once maxEntries was reached. Every entry shares one TTL, so the oldest tracked nonce is also the one with the most time left to live: evicting it accepted its replay, and an attacker reaches that state on purpose by sending maxEntries fresh nonces. Neither host may drop a live nonce to make room; a saturated guard refuses the request instead."
+    }
+  }
 }
