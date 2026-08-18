@@ -472,6 +472,42 @@ async function importModule(outfile, version) {
   return mod
 }
 
+/**
+ * Import a module and assert it exposes a callable `render` export.
+ *
+ * On Windows CI and high-parallelism builds the output file can briefly contain
+ * a partial write when an isolated import races against `writeIfChanged`. When
+ * that happens the ESM loader evaluates an incomplete (or empty) module that
+ * lacks the expected `render` export.
+ *
+ * This helper detects the condition, evicts the broken cache entry, waits
+ * briefly for the file system to settle, then re-imports once. If the retry
+ * still fails it throws a diagnostic error listing the exports that were
+ * actually present so the root cause is visible in CI logs.
+ */
+async function importRenderModule(outfile, version, pageFile) {
+  const mod = await importModule(outfile, version)
+  if (typeof mod.render === 'function') return mod
+
+  // Evict the broken entry from the module cache so a retry gets a fresh read.
+  const cacheKey = `${outfile}?${version}`
+  moduleCache.delete(cacheKey)
+
+  // Brief pause gives the filesystem time to flush a concurrent write.
+  await new Promise((resolve) => setTimeout(resolve, 50))
+
+  const retryVersion = isolatedVersion(version)
+  const retried = await importModule(outfile, retryVersion)
+  if (typeof retried.render === 'function') return retried
+
+  const available = Object.keys(retried).filter((k) => typeof retried[k] === 'function')
+  throw new Error(
+    `mod.render is not a function for ${pageFile}. ` +
+      `The bundled module at ${outfile} exports: [${available.join(', ') || 'none'}]. ` +
+      `This usually indicates a partial file write or bundler cache corruption.`,
+  )
+}
+
 /// Version token for a build-isolated import.
 ///
 /// Production prerendering asks for a fresh module per path so page-module
@@ -679,7 +715,7 @@ async function handleSsr(request) {
     routePath || requestPath,
     specials,
   )
-  const mod = await importModule(outfile, version)
+  const mod = await importRenderModule(outfile, version, pageFile)
   const context = requestContext({
     headerPairs: request.headerPairs,
     method: request.method,
@@ -784,7 +820,11 @@ async function handleSsg(request) {
     routePath || requestPath,
     specials,
   )
-  const mod = await importModule(outfile, fresh ? isolatedVersion(version) : version)
+  const mod = await importRenderModule(
+    outfile,
+    fresh ? isolatedVersion(version) : version,
+    pageFile,
+  )
   const html = await mod.render({ path: requestPath, params: params || {} })
 
   return { ok: true, html, dependencyHash, inputsVersion, inputs }

@@ -41,6 +41,15 @@ try {
     specials,
   )
   const mod = await import(pathToFileURL(bundleFile).href + `?t=${Date.now()}`)
+  if (typeof mod.render !== 'function') {
+    const available = Object.keys(mod).filter((k) => typeof mod[k] === 'function')
+    await fail(
+      'RUV1100',
+      `mod.render is not a function. The bundled module exports: [${available.join(', ') || 'none'}]. ` +
+        `This usually indicates a bundler or linker failure for ${pageFileArg}.`,
+    )
+    process.exit(1)
+  }
   // A context with no headers, so `cookies()` and `headers()` return empty
   // rather than throwing. This renderer is driven by `ruvyxa test:parity` and
   // one-shot tooling, which have no HTTP request to forward.
