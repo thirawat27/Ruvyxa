@@ -483,16 +483,34 @@ export function forwardedClientIp(request: Request): string | null {
   return entries.at(-1) ?? null
 }
 
-function normalizeOptions(options: AuthOptions) {
+/** The credential material `createAuth()` cannot start without. */
+function assertAuthSecret(options: AuthOptions): void {
   if (!options || typeof options !== 'object') throw new TypeError('createAuth() requires options')
   if (typeof options.secret !== 'string' || options.secret.length < 32) {
     throw new TypeError('createAuth() secret must contain at least 32 characters')
   }
-  const origin = new URL(options.origin)
+}
+
+/**
+ * The origin sessions are issued for.
+ *
+ * A path is rejected rather than trimmed: cookies scope by path, so an origin
+ * carrying one would silently narrow where the session is sent.
+ */
+function assertAuthOrigin(origin: URL): void {
   if (!['http:', 'https:'].includes(origin.protocol) || origin.pathname !== '/') {
     throw new TypeError('createAuth() origin must be an HTTP(S) origin without a path')
   }
-  const basePath = normalizeBasePath(options.basePath ?? '/__ruvyxa/auth')
+}
+
+/**
+ * The two stores this runtime cannot fake.
+ *
+ * `take` and `consume` have to be atomic at the storage layer — a read-then-write
+ * in this process would let two concurrent requests both claim one single-use
+ * token, or both pass one rate-limit slot.
+ */
+function assertAuthStores(options: AuthOptions): void {
   if (
     !options.store?.take ||
     !options.store?.set ||
@@ -504,6 +522,16 @@ function normalizeOptions(options: AuthOptions) {
   if (!options.rateLimitStore?.consume) {
     throw new TypeError('createAuth() requires an atomic rateLimitStore')
   }
+}
+
+/**
+ * Provider keys and their OAuth configuration.
+ *
+ * The key must equal `provider.id` because the callback URL is built from the
+ * key while the token exchange is built from the id; letting them differ makes
+ * a provider that works in one direction only.
+ */
+function assertAuthProviders(options: AuthOptions): void {
   for (const [name, provider] of Object.entries(options.providers ?? {})) {
     if (!/^[a-z][a-z0-9-]{0,63}$/.test(name) || !provider || typeof provider !== 'object') {
       throw new TypeError(`createAuth() provider key "${name}" is invalid`)
@@ -513,6 +541,16 @@ function normalizeOptions(options: AuthOptions) {
     }
     if (provider.type === 'oauth') validateOAuthProvider(provider)
   }
+}
+
+/**
+ * Resolve the session cookie's name and `Secure` flag together.
+ *
+ * They are decided in one place because they constrain each other: the
+ * `__Host-` prefix a browser enforces is only legal on a secure cookie, so
+ * picking the default name requires knowing `secure` first.
+ */
+function resolveSessionCookie(options: AuthOptions, origin: URL) {
   const secure = options.session?.secure ?? origin.protocol === 'https:'
   if (origin.protocol === 'https:' && !secure) {
     throw new TypeError('createAuth() cannot disable secure session cookies for an HTTPS origin')
@@ -522,6 +560,17 @@ function normalizeOptions(options: AuthOptions) {
   if (!/^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/.test(cookieName)) {
     throw new TypeError('createAuth() session cookieName is invalid')
   }
+  return { secure, cookieName }
+}
+
+function normalizeOptions(options: AuthOptions) {
+  assertAuthSecret(options)
+  const origin = new URL(options.origin)
+  assertAuthOrigin(origin)
+  const basePath = normalizeBasePath(options.basePath ?? '/__ruvyxa/auth')
+  assertAuthStores(options)
+  assertAuthProviders(options)
+  const { secure, cookieName } = resolveSessionCookie(options, origin)
   return {
     ...options,
     origin: origin.origin,

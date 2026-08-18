@@ -87,7 +87,23 @@ function findConfig(root) {
   return null
 }
 
-async function sanitizeConfig(config) {
+/**
+ * Reject a key `ruvyxa.config` does not define, at every level.
+ *
+ * Split by section rather than kept as one run of calls. The list is the
+ * config surface written out longhand, so it grows with every option, and as
+ * one function it was the largest thing in this module while containing no
+ * logic at all — the projection below is the part worth reading.
+ */
+function assertConfigKeys(config) {
+  assertTopLevelConfigKeys(config)
+  assertRuntimeConfigKeys(config)
+  assertSiteConfigKeys(config)
+  assertMiddlewareConfigKeys(config)
+}
+
+/** The option names `ruvyxa.config` accepts at its root. */
+function assertTopLevelConfigKeys(config) {
   assertKnownKeys(config, 'config', [
     'appDir',
     'outDir',
@@ -113,6 +129,10 @@ async function sanitizeConfig(config) {
     'adapterOptions',
     'plugins',
   ])
+}
+
+/** Compiler, server, build, image, i18n, security, and cache sections. */
+function assertRuntimeConfigKeys(config) {
   assertKnownKeys(config.css, 'config.css', ['entries'])
   assertKnownKeys(config.markdown, 'config.markdown', [
     'gfm',
@@ -168,6 +188,10 @@ async function sanitizeConfig(config) {
     'window',
   ])
   assertKnownKeys(config.cache, 'config.cache', ['routes', 'css', 'dir'])
+}
+
+/** Site metadata: the content engine, sitemap entries, and robots rules. */
+function assertSiteConfigKeys(config) {
   assertKnownKeys(config.site, 'config.site', [
     'url',
     'title',
@@ -249,6 +273,10 @@ async function sanitizeConfig(config) {
       'crawlDelay',
     ])
   }
+}
+
+/** Render defaults and the built-in middleware stack. */
+function assertMiddlewareConfigKeys(config) {
   assertKnownKeys(config.render, 'config.render', ['strategy', 'revalidate'])
   assertKnownKeys(config.middleware, 'config.middleware', ['builtin', 'workers', 'timeoutMs'])
   assertKnownKeys(config.middleware?.builtin, 'config.middleware.builtin', [
@@ -270,6 +298,10 @@ async function sanitizeConfig(config) {
     'window',
     'key',
   ])
+}
+
+async function sanitizeConfig(config) {
+  assertConfigKeys(config)
   assertConfigValueShape(config)
   assertMarkdownShape(config.markdown)
   assertContentShape(config.content, config.site)
@@ -281,71 +313,18 @@ async function sanitizeConfig(config) {
     react: booleanValue(config.react),
     reactCompiler: booleanValue(config.reactCompiler),
     typedRoutes: booleanValue(config.typedRoutes),
-    css: objectValue(config.css, {
-      entries: stringArrayValue(config.css?.entries),
-    }),
+    css: objectValue(config.css, { entries: stringArrayValue(config.css?.entries) }),
     // Executable unified plugins remain in the compiled config module. Rust
     // only needs to know whether to activate the persistent content bridge.
     markdown: config.markdown === undefined ? undefined : true,
-    server: objectValue(config.server, {
-      host: stringValue(config.server?.host),
-      port: numberValue(config.server?.port),
-    }),
-    build: objectValue(config.build, {
-      minify: booleanValue(config.build?.minify),
-      map: booleanValue(config.build?.map),
-      treeShake: booleanValue(config.build?.treeShake),
-      split: stringValue(config.build?.split),
-      workers: numberValue(config.build?.workers),
-      jsx: stringValue(config.build?.jsx),
-      target: stringValue(config.build?.target),
-      manifest: booleanValue(config.build?.manifest),
-      warm: booleanValue(config.build?.warm),
-      prerenderCache: booleanValue(config.build?.prerenderCache),
-    }),
-    render: objectValue(config.render, {
-      strategy: stringValue(config.render?.strategy),
-      revalidate: numberValue(config.render?.revalidate),
-    }),
-    debug: objectValue(config.debug, {
-      overlay: booleanValue(config.debug?.overlay),
-      traces: booleanValue(config.debug?.traces),
-    }),
-    image: objectValue(config.image, {
-      optimize: booleanValue(config.image?.optimize),
-      quality: numberValue(config.image?.quality),
-      lossless: booleanValue(config.image?.lossless),
-      keepOriginal: booleanValue(config.image?.keepOriginal),
-      variantWidths: numberArrayValue(config.image?.variantWidths),
-      workers: numberValue(config.image?.workers),
-      effort: numberValue(config.image?.effort),
-      onDemand: imageOnDemandValue(config.image?.onDemand),
-    }),
-    i18n: objectValue(config.i18n, {
-      locales: stringArrayValue(config.i18n?.locales),
-      defaultLocale: stringValue(config.i18n?.defaultLocale),
-      localeParam: stringValue(config.i18n?.localeParam),
-      detectLocale: booleanValue(config.i18n?.detectLocale),
-      cookie: stringValue(config.i18n?.cookie),
-    }),
-    security: objectValue(config.security, {
-      actionLimit: numberValue(config.security?.actionLimit),
-      apiLimit: numberValue(config.security?.apiLimit),
-      pluginLimit: numberValue(config.security?.pluginLimit),
-      actionRateLimit: objectValue(config.security?.actionRateLimit, {
-        max: numberValue(config.security?.actionRateLimit?.max),
-        window: numberValue(config.security?.actionRateLimit?.window),
-      }),
-      sameOrigin: booleanValue(config.security?.sameOrigin),
-      fetchMeta: booleanValue(config.security?.fetchMeta),
-      trustedProxyIps: stringArrayValue(config.security?.trustedProxyIps),
-      headers: booleanValue(config.security?.headers),
-    }),
-    cache: objectValue(config.cache, {
-      routes: booleanValue(config.cache?.routes),
-      css: booleanValue(config.cache?.css),
-      dir: stringValue(config.cache?.dir),
-    }),
+    server: serverValue(config.server),
+    build: buildValue(config.build),
+    render: renderValue(config.render),
+    debug: debugValue(config.debug),
+    image: imageValue(config.image),
+    i18n: i18nValue(config.i18n),
+    security: securityValue(config.security),
+    cache: cacheValue(config.cache),
     site: siteValue(config.site),
     content: contentValue(config.content),
     middleware: safeJsonValue(config.middleware),
@@ -353,6 +332,99 @@ async function sanitizeConfig(config) {
     adapterOptions: safeJsonValue(config.adapterOptions),
     plugins: pluginDescriptors(config.plugins, config.content),
   }
+}
+
+/*
+ * One projection helper per config section.
+ *
+ * Each `?.` is a branch, so the flat object literal these came from carried the
+ * complexity of the whole config surface in a single function while expressing
+ * one idea: read a value, coerce it, drop it if absent. Per-section helpers put
+ * each group next to the assertions that validated it, and match the
+ * `siteValue` / `contentValue` / `imageOnDemandValue` helpers already here.
+ */
+
+function serverValue(server) {
+  return objectValue(server, {
+    host: stringValue(server?.host),
+    port: numberValue(server?.port),
+  })
+}
+
+function buildValue(build) {
+  return objectValue(build, {
+    minify: booleanValue(build?.minify),
+    map: booleanValue(build?.map),
+    treeShake: booleanValue(build?.treeShake),
+    split: stringValue(build?.split),
+    workers: numberValue(build?.workers),
+    jsx: stringValue(build?.jsx),
+    target: stringValue(build?.target),
+    manifest: booleanValue(build?.manifest),
+    warm: booleanValue(build?.warm),
+    prerenderCache: booleanValue(build?.prerenderCache),
+  })
+}
+
+function renderValue(render) {
+  return objectValue(render, {
+    strategy: stringValue(render?.strategy),
+    revalidate: numberValue(render?.revalidate),
+  })
+}
+
+function debugValue(debug) {
+  return objectValue(debug, {
+    overlay: booleanValue(debug?.overlay),
+    traces: booleanValue(debug?.traces),
+  })
+}
+
+function imageValue(image) {
+  return objectValue(image, {
+    optimize: booleanValue(image?.optimize),
+    quality: numberValue(image?.quality),
+    lossless: booleanValue(image?.lossless),
+    keepOriginal: booleanValue(image?.keepOriginal),
+    variantWidths: numberArrayValue(image?.variantWidths),
+    workers: numberValue(image?.workers),
+    effort: numberValue(image?.effort),
+    onDemand: imageOnDemandValue(image?.onDemand),
+  })
+}
+
+function i18nValue(i18n) {
+  return objectValue(i18n, {
+    locales: stringArrayValue(i18n?.locales),
+    defaultLocale: stringValue(i18n?.defaultLocale),
+    localeParam: stringValue(i18n?.localeParam),
+    detectLocale: booleanValue(i18n?.detectLocale),
+    cookie: stringValue(i18n?.cookie),
+  })
+}
+
+function securityValue(security) {
+  return objectValue(security, {
+    actionLimit: numberValue(security?.actionLimit),
+    apiLimit: numberValue(security?.apiLimit),
+    pluginLimit: numberValue(security?.pluginLimit),
+    actionRateLimit: objectValue(security?.actionRateLimit, {
+      max: numberValue(security?.actionRateLimit?.max),
+      window: numberValue(security?.actionRateLimit?.window),
+    }),
+    sameOrigin: booleanValue(security?.sameOrigin),
+    fetchMeta: booleanValue(security?.fetchMeta),
+    trustedProxyIps: stringArrayValue(security?.trustedProxyIps),
+    headers: booleanValue(security?.headers),
+  })
+}
+
+function cacheValue(cache) {
+  return objectValue(cache, {
+    routes: booleanValue(cache?.routes),
+    css: booleanValue(cache?.css),
+    dir: stringValue(cache?.dir),
+  })
 }
 
 function assertMarkdownShape(markdown) {
@@ -457,6 +529,65 @@ function assertImageOnDemandShape(value) {
   assertShape(value, 'config.image.onDemand', { enabled: 'boolean', maxWidth: 'number' })
 }
 
+/** `config.site.sitemap`: `true` for the defaults, or the long form. */
+function assertSitemapShape(sitemap) {
+  if (sitemap === undefined) return
+  if (typeof sitemap !== 'boolean' && !isObject(sitemap)) {
+    throw new Error('RUV1602 config.site.sitemap must be boolean or object.')
+  }
+  if (!isObject(sitemap)) return
+
+  assertStringArray(sitemap.exclude, 'config.site.sitemap.exclude')
+  assertStringArray(sitemap.additionalPaths, 'config.site.sitemap.additionalPaths')
+  if (sitemap.defaults !== undefined && !isObject(sitemap.defaults)) {
+    throw new Error('RUV1602 config.site.sitemap.defaults must be an object.')
+  }
+  if (isObject(sitemap.defaults)) {
+    assertSitemapEntryMetadata(sitemap.defaults, 'config.site.sitemap.defaults')
+  }
+  if (sitemap.entries !== undefined && !Array.isArray(sitemap.entries)) {
+    throw new Error('RUV1602 config.site.sitemap.entries must be an array.')
+  }
+  for (const [index, entry] of sitemapEntries(sitemap.entries).entries()) {
+    assertSitemapEntry(entry, `config.site.sitemap.entries[${index}]`)
+  }
+}
+
+/** One `config.site.robots.rules` entry. */
+function assertRobotsRule(rule, field) {
+  if (!isObject(rule)) throw new Error(`RUV1602 ${field} must be an object.`)
+  assertStringOrArray(rule.userAgent, `${field}.userAgent`)
+  assertStringOrArray(rule.allow, `${field}.allow`)
+  assertStringOrArray(rule.disallow, `${field}.disallow`)
+  if (
+    rule.crawlDelay !== undefined &&
+    (!Number.isSafeInteger(rule.crawlDelay) || rule.crawlDelay < 0)
+  ) {
+    throw new Error(`RUV1602 ${field}.crawlDelay must be a non-negative safe integer.`)
+  }
+}
+
+/** `config.site.robots`: `true` for the defaults, or the long form. */
+function assertRobotsShape(robots) {
+  if (robots === undefined) return
+  if (typeof robots !== 'boolean' && !isObject(robots)) {
+    throw new Error('RUV1602 config.site.robots must be boolean or object.')
+  }
+  if (!isObject(robots)) return
+
+  assertStringOrArray(robots.sitemap, 'config.site.robots.sitemap')
+  if (robots.host !== undefined && typeof robots.host !== 'string') {
+    throw new Error('RUV1602 config.site.robots.host must be string.')
+  }
+  const rules = siteRobotsRules(robots.rules)
+  if (robots.rules !== undefined && !isObject(robots.rules) && !Array.isArray(robots.rules)) {
+    throw new Error('RUV1602 config.site.robots.rules must be object or array.')
+  }
+  for (const [index, rule] of rules.entries()) {
+    assertRobotsRule(rule, `config.site.robots.rules[${index}]`)
+  }
+}
+
 function assertSiteShape(site) {
   if (site === undefined) return
   if (!isObject(site)) throw new Error('RUV1602 config.site must be an object.')
@@ -468,62 +599,8 @@ function assertSiteShape(site) {
       throw new Error(`RUV1602 config.site.${field} must be string.`)
     }
   }
-  if (site.sitemap !== undefined) {
-    if (typeof site.sitemap !== 'boolean' && !isObject(site.sitemap)) {
-      throw new Error('RUV1602 config.site.sitemap must be boolean or object.')
-    }
-    if (isObject(site.sitemap)) {
-      assertStringArray(site.sitemap.exclude, 'config.site.sitemap.exclude')
-      assertStringArray(site.sitemap.additionalPaths, 'config.site.sitemap.additionalPaths')
-      if (site.sitemap.defaults !== undefined && !isObject(site.sitemap.defaults)) {
-        throw new Error('RUV1602 config.site.sitemap.defaults must be an object.')
-      }
-      if (isObject(site.sitemap.defaults)) {
-        assertSitemapEntryMetadata(site.sitemap.defaults, 'config.site.sitemap.defaults')
-      }
-      if (site.sitemap.entries !== undefined && !Array.isArray(site.sitemap.entries)) {
-        throw new Error('RUV1602 config.site.sitemap.entries must be an array.')
-      }
-      for (const [index, entry] of sitemapEntries(site.sitemap.entries).entries()) {
-        assertSitemapEntry(entry, `config.site.sitemap.entries[${index}]`)
-      }
-    }
-  }
-  if (site.robots !== undefined) {
-    if (typeof site.robots !== 'boolean' && !isObject(site.robots)) {
-      throw new Error('RUV1602 config.site.robots must be boolean or object.')
-    }
-    if (isObject(site.robots)) {
-      assertStringOrArray(site.robots.sitemap, 'config.site.robots.sitemap')
-      if (site.robots.host !== undefined && typeof site.robots.host !== 'string') {
-        throw new Error('RUV1602 config.site.robots.host must be string.')
-      }
-      const rules = siteRobotsRules(site.robots.rules)
-      if (
-        site.robots.rules !== undefined &&
-        !isObject(site.robots.rules) &&
-        !Array.isArray(site.robots.rules)
-      ) {
-        throw new Error('RUV1602 config.site.robots.rules must be object or array.')
-      }
-      for (const [index, rule] of rules.entries()) {
-        if (!isObject(rule)) {
-          throw new Error(`RUV1602 config.site.robots.rules[${index}] must be an object.`)
-        }
-        assertStringOrArray(rule.userAgent, `config.site.robots.rules[${index}].userAgent`)
-        assertStringOrArray(rule.allow, `config.site.robots.rules[${index}].allow`)
-        assertStringOrArray(rule.disallow, `config.site.robots.rules[${index}].disallow`)
-        if (
-          rule.crawlDelay !== undefined &&
-          (!Number.isSafeInteger(rule.crawlDelay) || rule.crawlDelay < 0)
-        ) {
-          throw new Error(
-            `RUV1602 config.site.robots.rules[${index}].crawlDelay must be a non-negative safe integer.`,
-          )
-        }
-      }
-    }
-  }
+  assertSitemapShape(site.sitemap)
+  assertRobotsShape(site.robots)
 }
 
 function assertContentShape(content, site) {

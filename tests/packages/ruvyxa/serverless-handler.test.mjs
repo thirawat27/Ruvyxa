@@ -506,6 +506,56 @@ describe('Fetch-native built-in middleware parity', () => {
     assert.match(rejected.headers.get('vary'), /Origin/i)
   })
 
+  it('sends CORS negotiation headers on preflight responses only', async () => {
+    // `Allow-Methods`, `Allow-Headers`, and `Max-Age` answer a preflight
+    // question and a browser reads them nowhere else. Asserted as one pair so a
+    // header that crosses the line has to move this test with it, and so this
+    // host cannot drift from the Rust middleware that serves the same apps.
+    const preflightOnly = [
+      'access-control-allow-methods',
+      'access-control-allow-headers',
+      'access-control-max-age',
+    ]
+    const both = ['access-control-allow-origin', 'access-control-allow-credentials']
+    const handler = middlewareHandler({
+      builtin: {
+        cors: {
+          origins: ['https://app.example'],
+          methods: ['GET', 'OPTIONS'],
+          headers: ['Content-Type'],
+          credentials: true,
+          maxAge: 3600,
+        },
+      },
+    })
+
+    const preflight = await handler(
+      new Request('https://worker.example/api', {
+        method: 'OPTIONS',
+        headers: {
+          origin: 'https://app.example',
+          'access-control-request-method': 'GET',
+        },
+      }),
+    )
+    for (const name of [...preflightOnly, ...both]) {
+      assert.ok(preflight.headers.has(name), `preflight response is missing ${name}`)
+    }
+
+    const actual = await handler(
+      new Request('https://worker.example/api', {
+        headers: { origin: 'https://app.example' },
+      }),
+    )
+    for (const name of preflightOnly) {
+      assert.equal(actual.headers.get(name), null, `actual response should not carry ${name}`)
+    }
+    for (const name of both) {
+      assert.ok(actual.headers.has(name), `actual response is missing ${name}`)
+    }
+    assert.match(actual.headers.get('vary'), /Origin/i)
+  })
+
   it('enforces bounded window rate limits with platform and explicit header keys', async () => {
     const handler = middlewareHandler({
       builtin: { rate: { max: 1, window: 60, key: 'header:x-tenant' } },

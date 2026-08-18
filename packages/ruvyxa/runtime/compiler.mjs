@@ -440,25 +440,11 @@ async function visitModule(context) {
 
   if (byKey.has(key)) return byKey.get(key)
 
-  // Classify the module kind before anything reads the source as JavaScript.
-  // Resolution answers "which file", not "which language"; without this split a
-  // JSON file reached through `require('./package.json')` was handed straight to
-  // the JavaScript transform.
-  const jsonModule = isJsonModuleFile(filePath) ? compileJsonModuleSource(source, filePath) : null
-  const styleModule =
-    !jsonModule && isCssModuleFile(filePath)
-      ? await compileStyleModuleSource(source, filePath, root)
-      : null
-  const contentModule =
-    jsonModule || styleModule
-      ? null
-      : await compileContentSource(source, filePath, root, markdownConfig)
-  const compiledSource = jsonModule?.source ?? styleModule?.source ?? contentModule.source
-  const contentFile = ['.md', '.mdx'].includes(path.extname(filePath ?? '').toLowerCase())
-  const globExpansion =
-    jsonModule || styleModule || contentFile
-      ? { source: compiledSource, inputs: [] }
-      : await expandImportMetaGlob(compiledSource, baseDir, root, tsconfigPaths)
+  const { jsonModule, styleModule, contentModule, compiledSource, globExpansion } =
+    await classifyModuleSource(
+      { source, filePath, root, baseDir, markdownConfig, tsconfigPaths },
+      expandImportMetaGlob,
+    )
   const id = `__m${modules.length}`
   const module = {
     id,
@@ -500,24 +486,22 @@ async function visitModule(context) {
     if (isAssetSpecifier(specifier) && !isCssModuleSpecifier(specifier)) continue
 
     const resolvedAlias = aliases[specifier]
-    const resolvedTsconfig = resolvedAlias
-      ? null
-      : resolveTsconfigPath(tsconfigPaths, specifier, resolveFile)
-    const resolved = resolvedAlias
-      ? resolveFile(path.resolve(resolvedAlias))
-      : (resolvedTsconfig ??
-        resolveLocalSpecifier(baseDir, specifier) ??
-        (platform === 'browser' || bundlePackages || bundleDependencies
-          ? resolvePackage(baseDir, specifier)
-          : null))
+    const resolved = resolveSpecifierPath(specifier, resolvedAlias, {
+      baseDir,
+      platform,
+      bundlePackages,
+      bundleDependencies,
+      tsconfigPaths,
+      resolveTsconfigPath,
+    })
 
     if (
-      resolved &&
-      (resolvedAlias ||
-        isProjectLocal(root, resolved) ||
-        platform === 'browser' ||
-        bundlePackages ||
-        bundleDependencies)
+      shouldBundleResolved(resolved, resolvedAlias, {
+        root,
+        platform,
+        bundlePackages,
+        bundleDependencies,
+      })
     ) {
       assertSupportedModuleKind(resolved, specifier, filePath || sourcefile)
       const depSource = await readSourceFile(resolved)
@@ -547,15 +531,7 @@ async function visitModule(context) {
       continue
     }
 
-    const externalSpecifier = resolvedAlias ? toImportPath(resolvedAlias) : specifier
-    if (!externals.has(externalSpecifier)) {
-      externals.set(externalSpecifier, `__ext${externals.size}`)
-    }
-    module.deps.set(specifier, {
-      external: true,
-      specifier: externalSpecifier,
-      alias: externals.get(externalSpecifier),
-    })
+    registerExternalDependency(module, specifier, resolvedAlias, externals)
 
     if (!externalSet.has(specifier) && specifier.startsWith('.')) {
       throw new Error(`RUV1801 cannot resolve '${specifier}' from ${filePath || sourcefile}`)
@@ -563,6 +539,96 @@ async function visitModule(context) {
   }
 
   return module
+}
+
+/**
+ * Decide what language a module is before anything reads it as JavaScript.
+ *
+ * Resolution answers "which file", not "which language". Without this split a
+ * JSON file reached through `require('./package.json')` was handed straight to
+ * the JavaScript transform. Markdown and CSS modules skip glob expansion for
+ * the same reason: `import.meta.glob` is a JavaScript construct, and scanning a
+ * stylesheet for it would only find false positives.
+ */
+async function classifyModuleSource(
+  { source, filePath, root, baseDir, markdownConfig, tsconfigPaths },
+  expandImportMetaGlob,
+) {
+  const jsonModule = isJsonModuleFile(filePath) ? compileJsonModuleSource(source, filePath) : null
+  const styleModule =
+    !jsonModule && isCssModuleFile(filePath)
+      ? await compileStyleModuleSource(source, filePath, root)
+      : null
+  const contentModule =
+    jsonModule || styleModule
+      ? null
+      : await compileContentSource(source, filePath, root, markdownConfig)
+  const compiledSource = jsonModule?.source ?? styleModule?.source ?? contentModule.source
+  const contentFile = ['.md', '.mdx'].includes(path.extname(filePath ?? '').toLowerCase())
+  const globExpansion =
+    jsonModule || styleModule || contentFile
+      ? { source: compiledSource, inputs: [] }
+      : await expandImportMetaGlob(compiledSource, baseDir, root, tsconfigPaths)
+  return { jsonModule, styleModule, contentModule, compiledSource, globExpansion }
+}
+
+/**
+ * Turn one import specifier into a file path, or `null` when nothing local
+ * answers it.
+ *
+ * Ordered most specific first: a configured alias wins outright, then a
+ * `tsconfig` path mapping, then a relative file, then `node_modules` — and that
+ * last step only when the output is actually meant to carry its dependencies.
+ */
+function resolveSpecifierPath(
+  specifier,
+  resolvedAlias,
+  { baseDir, platform, bundlePackages, bundleDependencies, tsconfigPaths, resolveTsconfigPath },
+) {
+  if (resolvedAlias) return resolveFile(path.resolve(resolvedAlias))
+  const resolvedTsconfig = resolveTsconfigPath(tsconfigPaths, specifier, resolveFile)
+  if (resolvedTsconfig) return resolvedTsconfig
+  const local = resolveLocalSpecifier(baseDir, specifier)
+  if (local) return local
+  if (platform === 'browser' || bundlePackages || bundleDependencies) {
+    return resolvePackage(baseDir, specifier)
+  }
+  return null
+}
+
+/**
+ * Whether a resolved file is walked into the bundle or left as an external.
+ *
+ * A server build leaves `node_modules` alone by default: Node resolves them at
+ * runtime, and inlining them would defeat the package manager's deduplication.
+ * A browser build has no such resolver, so everything it reaches comes along.
+ */
+function shouldBundleResolved(
+  resolved,
+  resolvedAlias,
+  { root, platform, bundlePackages, bundleDependencies },
+) {
+  if (!resolved) return false
+  return Boolean(
+    resolvedAlias ||
+    isProjectLocal(root, resolved) ||
+    platform === 'browser' ||
+    bundlePackages ||
+    bundleDependencies,
+  )
+}
+
+/** Record a specifier the bundle will import rather than inline. */
+function registerExternalDependency(module, specifier, resolvedAlias, externals) {
+  const externalSpecifier = resolvedAlias ? toImportPath(resolvedAlias) : specifier
+  if (!externals.has(externalSpecifier)) {
+    externals.set(externalSpecifier, `__ext${externals.size}`)
+  }
+  module.deps.set(specifier, {
+    external: true,
+    specifier: externalSpecifier,
+    alias: externals.get(externalSpecifier),
+  })
 }
 
 function linkModules(modules, externals, { minify, outfile, sourceMap }) {
@@ -1177,46 +1243,55 @@ function scopeCssModule(css, file, root) {
   let prelude = ''
   let preludeLocals = []
   let index = 0
-  let quote = null
-  let inComment = false
-  let escaped = false
+
+  /**
+   * The scoped name for one local class, minting it on first sight.
+   *
+   * `scopedNames` is the identity map and `classes` is what the module exports.
+   * They are written together because a class can be seen first as a selector
+   * and later as a `composes` target, and the two paths must agree on the name.
+   */
+  function scopeLocal(local) {
+    const scoped = scopedNames.get(local) ?? scopedClassName(file, root, local)
+    scopedNames.set(local, scoped)
+    if (!classes.has(local)) classes.set(local, scoped)
+    return scoped
+  }
+
+  /**
+   * Fold a `composes:` declaration into the classes that own the rule.
+   *
+   * The exported value gains the composed names rather than replacing them, so
+   * `class={styles.button}` yields every class the rule composed, in the order
+   * they were declared. Duplicates are dropped: a name appearing twice in the
+   * attribute changes nothing but the size of the HTML.
+   */
+  function applyComposition(names, owners) {
+    const composed = names.map(scopeLocal)
+    for (const owner of owners) {
+      const ownerScoped = scopeLocal(owner)
+      const exported = (classes.get(owner) ?? ownerScoped).split(/\s+/)
+      for (const scoped of composed) if (!exported.includes(scoped)) exported.push(scoped)
+      classes.set(owner, exported.join(' '))
+    }
+  }
 
   while (index < chars.length) {
     const char = chars[index]
     const next = chars[index + 1]
 
-    if (inComment) {
-      output += char
-      if (char === '*' && next === '/') {
-        output += '/'
-        index += 2
-        inComment = false
-      } else {
-        index += 1
-      }
-      continue
-    }
-
-    if (quote) {
-      output += char
-      if (escaped) escaped = false
-      else if (char === '\\') escaped = true
-      else if (char === quote) quote = null
-      index += 1
-      continue
-    }
-
     if (char === '/' && next === '*') {
-      output += '/*'
-      index += 2
-      inComment = true
+      const end = commentEnd(chars, index)
+      output += chars.slice(index, end).join('')
+      index = end
       continue
     }
     if (char === '"' || char === "'") {
-      output += char
-      prelude += char
-      quote = char
-      index += 1
+      const end = stringEnd(chars, index)
+      const literal = chars.slice(index, end).join('')
+      output += literal
+      prelude += literal
+      index = end
       continue
     }
 
@@ -1235,9 +1310,7 @@ function scopeCssModule(css, file, root) {
       let end = index + 1
       while (end < chars.length && /[A-Za-z0-9_-]/.test(chars[end])) end += 1
       const local = chars.slice(index + 1, end).join('')
-      const scoped = scopedNames.get(local) ?? scopedClassName(file, root, local)
-      scopedNames.set(local, scoped)
-      if (!classes.has(local)) classes.set(local, scoped)
+      const scoped = scopeLocal(local)
       output += `.${scoped}`
       prelude += `.${scoped}`
       if (!preludeLocals.includes(local)) preludeLocals.push(local)
@@ -1249,19 +1322,7 @@ function scopeCssModule(css, file, root) {
       const composition = localComposition(chars, index)
       const owners = [...ruleLocalClasses].reverse().find((items) => items.length > 0)
       if (composition && owners) {
-        const composed = composition.names.map((local) => {
-          const scoped = scopedNames.get(local) ?? scopedClassName(file, root, local)
-          scopedNames.set(local, scoped)
-          if (!classes.has(local)) classes.set(local, scoped)
-          return scoped
-        })
-        for (const owner of owners) {
-          const ownerScoped = scopedNames.get(owner) ?? scopedClassName(file, root, owner)
-          scopedNames.set(owner, ownerScoped)
-          const exported = (classes.get(owner) ?? ownerScoped).split(/\s+/)
-          for (const scoped of composed) if (!exported.includes(scoped)) exported.push(scoped)
-          classes.set(owner, exported.join(' '))
-        }
+        applyComposition(composition.names, owners)
         index = composition.end
         prelude = ''
         continue
@@ -1290,6 +1351,39 @@ function scopeCssModule(css, file, root) {
   }
 
   return Object.fromEntries(classes)
+}
+
+/**
+ * Index one past the delimiter that closes the comment starting at `start`.
+ *
+ * An unterminated comment runs to the end of the file, which is what a browser
+ * does with one too: the remaining bytes are not selectors, so the scanner must
+ * not resume reading them as such.
+ */
+function commentEnd(chars, start) {
+  for (let index = start + 2; index < chars.length; index += 1) {
+    if (chars[index] === '*' && chars[index + 1] === '/') return index + 2
+  }
+  return chars.length
+}
+
+/**
+ * Index one past the quote that closes the string starting at `start`.
+ *
+ * A backslash escapes the next character, so `content: "\""` stays one string
+ * rather than ending early and leaving the rest of the rule scanned as a
+ * selector.
+ */
+function stringEnd(chars, start) {
+  const quote = chars[start]
+  let escaped = false
+  for (let index = start + 1; index < chars.length; index += 1) {
+    const character = chars[index]
+    if (escaped) escaped = false
+    else if (character === '\\') escaped = true
+    else if (character === quote) return index + 1
+  }
+  return chars.length
 }
 
 function statementOpensNestedRule(chars, start) {
@@ -1616,23 +1710,32 @@ function hasNamedExport(source, name) {
       if (tokens[cursor] === '*') cursor += 1
       if (tokens[cursor] === name) return true
     }
-    if (tokens[cursor] === '{') {
-      cursor += 1
-      let specifier = []
-      while (cursor < tokens.length) {
-        const token = tokens[cursor]
-        if (token === ',' || token === '}') {
-          const asIndex = specifier.indexOf('as')
-          const exported = asIndex >= 0 ? specifier[asIndex + 1] : specifier[0]
-          if (exported === name) return true
-          specifier = []
-          if (token === '}') break
-        } else if (token !== 'type') {
-          specifier.push(token)
-        }
-        cursor += 1
-      }
+    if (tokens[cursor] === '{' && exportListBinds(tokens, cursor + 1, name)) return true
+  }
+  return false
+}
+
+/**
+ * Whether an `export { ... }` list publishes `name`.
+ *
+ * `a as b` publishes `b`, so the name after `as` is the one that counts. A bare
+ * `type` token is dropped rather than treated as an identifier: `export { type
+ * Foo, bar }` publishes only `bar`, and counting `type` would shift every
+ * specifier in the list by one.
+ */
+function exportListBinds(tokens, start, name) {
+  let specifier = []
+  for (let cursor = start; cursor < tokens.length; cursor += 1) {
+    const token = tokens[cursor]
+    if (token !== ',' && token !== '}') {
+      if (token !== 'type') specifier.push(token)
+      continue
     }
+    const asIndex = specifier.indexOf('as')
+    const exported = asIndex >= 0 ? specifier[asIndex + 1] : specifier[0]
+    if (exported === name) return true
+    specifier = []
+    if (token === '}') return false
   }
   return false
 }

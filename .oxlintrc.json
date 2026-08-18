@@ -46,6 +46,13 @@
 
     "eslint/no-void": ["error", { "allowAsStatement": true }],
 
+    "eslint/complexity": ["error", 30],
+    "eslint/max-depth": ["error", 4],
+    "eslint/max-nested-callbacks": ["error", 4],
+    "eslint/max-params": ["error", 8],
+
+    "eslint/max-lines-per-function": "off",
+
     "eslint/no-nested-ternary": "error",
     "eslint/no-useless-escape": "error",
     "eslint/no-useless-concat": "error",

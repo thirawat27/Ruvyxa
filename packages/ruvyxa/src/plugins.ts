@@ -786,6 +786,68 @@ export interface SitemapOptions {
  * public asset directory after every production build, using the route
  * manifest. Dynamic route patterns and non-page routes are skipped.
  */
+/** Whether a route survives `sitemap.exclude`. */
+function sitemapRouteIncluded(routePath: string, exclude: readonly string[]): boolean {
+  return !exclude.some((pattern) => matchSource(pattern, routePath) !== null)
+}
+
+/** One `<sitemap>` index entry pointing at a shard file. */
+function sitemapIndexEntry(siteUrl: string, index: number): string {
+  const shardUrl = `${siteUrl}/sitemap-${index}.xml`
+  return `  <sitemap><loc>${escapeXml(shardUrl)}</loc></sitemap>`
+}
+
+/** Write either the single sitemap document, or a shard set plus its index. */
+function writeSitemapDocuments(
+  context: PluginBuildContext,
+  documents: readonly string[],
+  siteUrl: string,
+): void {
+  if (documents.length === 1) {
+    writePublicAsset(context, 'sitemap.xml', documents[0])
+    return
+  }
+  documents.forEach((document, index) => {
+    writePublicAsset(context, `sitemap-${index}.xml`, document)
+  })
+  const entries = documents.map((_, index) => sitemapIndexEntry(siteUrl, index)).join('\n')
+  writePublicAsset(
+    context,
+    'sitemap.xml',
+    `<?xml version="1.0" encoding="UTF-8"?>\n<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${entries}\n</sitemapindex>\n`,
+  )
+}
+
+/**
+ * Build-complete handler for the `sitemap` plugin.
+ *
+ * Pulled out of `register()` so the plugin body is a single call rather than a
+ * closure nested inside `register({ build })` inside `build.onComplete(...)`:
+ * the sitemap-specific logic reads the same either way, but as a named
+ * function it no longer counts against how deep `sitemap()` itself nests.
+ */
+function sitemapOnComplete(
+  context: PluginBuildContext,
+  options: SitemapOptions,
+  siteUrl: string,
+  additionalPaths: readonly string[],
+  exclude: readonly string[],
+): void {
+  const paths = uniqueStrings([...manifestPagePaths(context), ...additionalPaths]).filter(
+    (routePath) => sitemapRouteIncluded(routePath, exclude),
+  )
+  const entries = pluginSitemapEntries(paths, siteUrl, options.defaults, options.entries)
+  const documents = sitemapDocuments(entries)
+  writeSitemapDocuments(context, documents, siteUrl)
+  if (options.robots === true) {
+    writePublicAsset(
+      context,
+      'robots.txt',
+      `User-agent: *\nAllow: /\n\nSitemap: ${siteUrl}/sitemap.xml\n`,
+    )
+  }
+}
+
 export function sitemap(options: SitemapOptions): RuvyxaPlugin {
   const siteUrl = normalizeSiteUrl(options?.siteUrl, 'sitemap')
   const exclude = options.exclude ?? []
@@ -800,38 +862,9 @@ export function sitemap(options: SitemapOptions): RuvyxaPlugin {
   return definePlugin({
     name: 'ruvyxa:sitemap',
     register({ build }) {
-      build.onComplete((context) => {
-        const paths = uniqueStrings([...manifestPagePaths(context), ...additionalPaths]).filter(
-          (routePath) => !exclude.some((pattern) => matchSource(pattern, routePath) !== null),
-        )
-        const entries = pluginSitemapEntries(paths, siteUrl, options.defaults, options.entries)
-        const documents = sitemapDocuments(entries)
-        if (documents.length === 1) {
-          writePublicAsset(context, 'sitemap.xml', documents[0])
-        } else {
-          documents.forEach((document, index) => {
-            writePublicAsset(context, `sitemap-${index}.xml`, document)
-          })
-          const entries = documents
-            .map((_, index) => {
-              const shardUrl = `${siteUrl}/sitemap-${index}.xml`
-              return `  <sitemap><loc>${escapeXml(shardUrl)}</loc></sitemap>`
-            })
-            .join('\n')
-          writePublicAsset(
-            context,
-            'sitemap.xml',
-            `<?xml version="1.0" encoding="UTF-8"?>\n<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n${entries}\n</sitemapindex>\n`,
-          )
-        }
-        if (options.robots === true) {
-          writePublicAsset(
-            context,
-            'robots.txt',
-            `User-agent: *\nAllow: /\n\nSitemap: ${siteUrl}/sitemap.xml\n`,
-          )
-        }
-      })
+      build.onComplete((context) =>
+        sitemapOnComplete(context, options, siteUrl, additionalPaths, exclude),
+      )
     },
   })
 }
@@ -2550,8 +2583,8 @@ function pluginSitemapLocation(value: string, siteUrl: string, field: string): s
   return location
 }
 
-function validatePluginSitemapVideo(video: SiteSitemapVideo, field: string): void {
-  if (!video || typeof video !== 'object') throw new TypeError(`${field} must be an object`)
+/** The three fields Google requires on every sitemap video, plus their URLs. */
+function validateSitemapVideoRequired(video: SiteSitemapVideo, field: string): void {
   for (const key of ['title', 'thumbnail_loc', 'description'] as const) {
     if (typeof video[key] !== 'string' || video[key].trim() === '') {
       throw new TypeError(`${field}.${key} must be a non-empty string`)
@@ -2560,6 +2593,10 @@ function validatePluginSitemapVideo(video: SiteSitemapVideo, field: string): voi
   validateAbsoluteHttpUrl(video.thumbnail_loc, `${field}.thumbnail_loc`)
   if (video.content_loc) validateAbsoluteHttpUrl(video.content_loc, `${field}.content_loc`)
   if (video.player_loc) validateAbsoluteHttpUrl(video.player_loc, `${field}.player_loc`)
+}
+
+/** Numeric bounds the sitemap video schema defines. */
+function validateSitemapVideoNumbers(video: SiteSitemapVideo, field: string): void {
   if (
     video.duration !== undefined &&
     (!Number.isInteger(video.duration) || video.duration < 1 || video.duration > 28_800)
@@ -2578,8 +2615,15 @@ function validatePluginSitemapVideo(video: SiteSitemapVideo, field: string): voi
   ) {
     throw new TypeError(`${field}.view_count must be a non-negative integer`)
   }
-  normalizeOptionalDate(video.expiration_date, `${field}.expiration_date`)
-  normalizeOptionalDate(video.publication_date, `${field}.publication_date`)
+}
+
+/**
+ * The yes/no flags, the allow/deny pairs, and the uploader.
+ *
+ * These are the fields the schema spells as literal strings rather than
+ * booleans, so a `true` here would serialize to something no crawler accepts.
+ */
+function validateSitemapVideoEnums(video: SiteSitemapVideo, field: string): void {
   for (const key of ['family_friendly', 'requires_subscription', 'live'] as const) {
     if (video[key] !== undefined && video[key] !== 'yes' && video[key] !== 'no') {
       throw new TypeError(`${field}.${key} must be "yes" or "no"`)
@@ -2604,6 +2648,15 @@ function validatePluginSitemapVideo(video: SiteSitemapVideo, field: string): voi
       validateAbsoluteHttpUrl(video.uploader.info, `${field}.uploader.info`)
     }
   }
+}
+
+function validatePluginSitemapVideo(video: SiteSitemapVideo, field: string): void {
+  if (!video || typeof video !== 'object') throw new TypeError(`${field} must be an object`)
+  validateSitemapVideoRequired(video, field)
+  validateSitemapVideoNumbers(video, field)
+  normalizeOptionalDate(video.expiration_date, `${field}.expiration_date`)
+  normalizeOptionalDate(video.publication_date, `${field}.publication_date`)
+  validateSitemapVideoEnums(video, field)
   stringList(video.tag, `${field}.tag`)
 }
 

@@ -669,105 +669,115 @@ export function createHandler(options) {
     })
   }
 
+  /** Serve a stored HTML document as-is. */
+  function prerenderedResponse(html, extraHeaders = {}) {
+    return new Response(html, {
+      status: 200,
+      headers: { 'content-type': 'text/html; charset=utf-8', ...extraHeaders },
+    })
+  }
+
+  /**
+   * Store a fresh render and settle the `revalidatePath()` claim that asked for it.
+   *
+   * A page that read cookies, headers, or draft mode rendered for one visitor.
+   * Writing it to the shared cache would serve that visitor's page to everyone
+   * who asks for this URL next, so `requestScoped` renders are never stored.
+   */
+  async function persistForcedRender(pathname, forcedClaim, rendered, revalidate) {
+    if (!writePrerendered || rendered.status !== 200 || rendered.requestScoped) return
+    await writePrerendered(pathname, await rendered.clone().text(), revalidate)
+    acknowledgeForcedRevalidation(pathname, forcedClaim)
+  }
+
+  /**
+   * CSR and SSG: serve what the build produced, and render only when there is
+   * nothing stored or `revalidatePath()` invalidated it.
+   *
+   * The two strategies differ in what the stored document contains — a shell
+   * versus a full page — which the build decided. At request time they are the
+   * same lookup, so they share one path rather than two identical ones.
+   */
+  async function servePrerendered(route, request, pathname, params, forced, forcedClaim) {
+    const cached = forced ? null : normalizeCacheEntry(readPrerendered?.(pathname))
+    if (cached) return prerenderedResponse(cached.html)
+
+    const rendered = await renderPage(route, pathname, params, request)
+    if (forced) await persistForcedRender(pathname, forcedClaim, rendered)
+    return rendered
+  }
+
+  /** ISR: serve the cached copy, and refresh it behind the response when stale. */
+  async function serveIncremental(
+    route,
+    request,
+    pathname,
+    params,
+    runtimeContext,
+    forced,
+    forcedClaim,
+  ) {
+    const revalidate = route.render.revalidate ?? 60
+    const cached = forced ? null : normalizeCacheEntry(readPrerendered?.(pathname, revalidate))
+    if (cached) {
+      if (cached.stale) await refreshStaleEntry(route, pathname, params, runtimeContext)
+      return prerenderedResponse(cached.html, {
+        'x-ruvyxa-isr': 'HIT',
+        'cache-control': `s-maxage=${revalidate}, stale-while-revalidate`,
+      })
+    }
+
+    const rendered = await renderPage(route, pathname, params, request)
+    if (writePrerendered && rendered.status === 200 && !rendered.requestScoped) {
+      const body = await rendered.clone().text()
+      await writePrerendered(pathname, body, revalidate)
+      if (forced) acknowledgeForcedRevalidation(pathname, forcedClaim)
+    }
+    return rendered
+  }
+
+  /**
+   * Kick off a background refresh for a stale ISR entry.
+   *
+   * A serverless runtime may freeze untracked work as soon as the response is
+   * returned, so the refresh is handed to `waitUntil` when the platform offers
+   * one. Awaiting it is slower, but it is the only way not to lose the refresh
+   * on a platform that exposes no lifetime hook.
+   */
+  async function refreshStaleEntry(route, pathname, params, runtimeContext) {
+    const revalidation = scheduleRevalidation(route, pathname, params)
+    if (!revalidation) return
+    if (typeof runtimeContext.waitUntil === 'function') {
+      runtimeContext.waitUntil(revalidation)
+      return
+    }
+    await revalidation
+  }
+
   async function handlePage(route, request, pathname, params, runtimeContext) {
     const strategy = route.render.strategy
     const forcedClaim = claimForcedRevalidation(pathname)
     const forced = forcedClaim !== null
 
-    // CSR: return pre-rendered shell (no server render needed)
-    if (strategy === 'csr') {
-      const cached = forced ? null : normalizeCacheEntry(readPrerendered?.(pathname))
-      if (cached) {
-        return new Response(cached.html, {
-          status: 200,
-          headers: { 'content-type': 'text/html; charset=utf-8' },
-        })
-      }
-      // Fallback: render the shell
-      const rendered = await renderPage(route, pathname, params, request)
-      if (forced && writePrerendered && rendered.status === 200 && !rendered.requestScoped) {
-        await writePrerendered(pathname, await rendered.clone().text())
-        acknowledgeForcedRevalidation(pathname, forcedClaim)
-      }
-      return rendered
+    if (strategy === 'csr' || strategy === 'ssg') {
+      return servePrerendered(route, request, pathname, params, forced, forcedClaim)
     }
-
-    // SSG: serve pre-rendered HTML directly
-    if (strategy === 'ssg') {
-      const cached = forced ? null : normalizeCacheEntry(readPrerendered?.(pathname))
-      if (cached) {
-        return new Response(cached.html, {
-          status: 200,
-          headers: { 'content-type': 'text/html; charset=utf-8' },
-        })
-      }
-      // Either nothing was pre-rendered, or `revalidatePath()` replaced it.
-      const rendered = await renderPage(route, pathname, params, request)
-      if (forced && writePrerendered && rendered.status === 200 && !rendered.requestScoped) {
-        await writePrerendered(pathname, await rendered.clone().text())
-        acknowledgeForcedRevalidation(pathname, forcedClaim)
-      }
-      return rendered
-    }
-
-    // ISR: serve cached HTML, revalidate in background if stale
     if (strategy === 'isr') {
-      const revalidate = route.render.revalidate ?? 60
-      const cached = forced ? null : normalizeCacheEntry(readPrerendered?.(pathname, revalidate))
-      if (cached) {
-        if (cached.stale) {
-          const revalidation = scheduleRevalidation(route, pathname, params)
-          if (revalidation) {
-            if (typeof runtimeContext.waitUntil === 'function') {
-              runtimeContext.waitUntil(revalidation)
-            } else {
-              // A serverless runtime may freeze untracked work as soon as the
-              // response is returned. Waiting is slower, but never loses the
-              // refresh when the platform exposes no lifetime hook.
-              await revalidation
-            }
-          }
-        }
-        return new Response(cached.html, {
-          status: 200,
-          headers: {
-            'content-type': 'text/html; charset=utf-8',
-            'x-ruvyxa-isr': 'HIT',
-            'cache-control': `s-maxage=${route.render.revalidate ?? 60}, stale-while-revalidate`,
-          },
-        })
-      }
-      // Cache miss: render on demand
-      const rendered = await renderPage(route, pathname, params, request)
-      // Cache the result for future requests
-      // A page that read cookies, headers, or draft mode rendered for one
-      // visitor. Writing it to the shared ISR cache would serve that visitor's
-      // page to everyone who asks for this URL next.
-      if (writePrerendered && rendered.status === 200 && !rendered.requestScoped) {
-        const body = await rendered.clone().text()
-        await writePrerendered(pathname, body, route.render.revalidate ?? 60)
-        if (forced) acknowledgeForcedRevalidation(pathname, forcedClaim)
-      }
-      return rendered
+      return serveIncremental(route, request, pathname, params, runtimeContext, forced, forcedClaim)
     }
 
-    // PPR: serve pre-rendered shell, then dynamic content
+    // PPR falls back to a full render here: streaming the shell separately needs
+    // a platform hook this generic handler does not have, and a platform wrapper
+    // overrides it where one exists.
     if (strategy === 'ppr') {
-      // For serverless without streaming support, fall back to full SSR
-      // Platform wrappers can override this with streaming if available
       const rendered = await renderPage(route, pathname, params, request)
-      if (forced && writePrerendered && rendered.status === 200 && !rendered.requestScoped) {
-        await writePrerendered(
-          pathname,
-          await rendered.clone().text(),
-          route.render.revalidate ?? 60,
-        )
-        acknowledgeForcedRevalidation(pathname, forcedClaim)
+      if (forced) {
+        await persistForcedRender(pathname, forcedClaim, rendered, route.render.revalidate ?? 60)
       }
       return rendered
     }
 
-    // SSR (default): full server render
+    // SSR (default): full server render, nothing stored.
     const rendered = await renderPage(route, pathname, params, request)
     if (forced && rendered.status >= 200 && rendered.status < 400) {
       acknowledgeForcedRevalidation(pathname, forcedClaim)
@@ -1022,24 +1032,41 @@ function corsPreflightResponse(request, cors) {
   if (!cors || request.method !== 'OPTIONS') return null
   const requestedMethod = request.headers.get('access-control-request-method')
   if (!requestedMethod || !isAllowedCorsOrigin(request.headers.get('origin'), cors)) return null
-  return withCorsHeaders(new Response(null, { status: 204 }), request, cors)
+  return withCorsHeaders(new Response(null, { status: 204 }), request, cors, true)
 }
 
-function withCorsHeaders(response, request, cors) {
+/**
+ * Attach the CORS headers this response is entitled to.
+ *
+ * `Allow-Methods`, `Allow-Headers`, and `Max-Age` answer a preflight question,
+ * and the Fetch standard has the browser read them only from a preflight
+ * response. Sending them on every actual response is not merely redundant: it
+ * advertises the whole method and header allowlist to any origin that gets a
+ * response at all, and it invites a proxy to cache a `Max-Age` that was never
+ * negotiated. `Allow-Origin`, `Allow-Credentials`, and `Vary` do belong on
+ * both, because the browser checks those on the actual response too.
+ *
+ * Mirrored by `apply_cors_headers` in `crates/ruvyxa_middleware/src/builtin.rs`;
+ * `tests/packages/ruvyxa/serverless-handler.test.mjs` holds the split for this
+ * host and `builtin.rs`'s own tests hold it for the other.
+ */
+function withCorsHeaders(response, request, cors, preflight = false) {
   if (!cors) return response
   const headers = new Headers(response.headers)
   const origin = request.headers.get('origin')
   if (isAllowedCorsOrigin(origin, cors)) {
     headers.set('access-control-allow-origin', origin)
     appendVaryOrigin(headers)
-    const methods = Array.isArray(cors.methods) ? cors.methods : []
-    const allowedHeaders = Array.isArray(cors.headers) ? cors.headers : []
-    if (methods.length > 0) headers.set('access-control-allow-methods', methods.join(', '))
-    if (allowedHeaders.length > 0) {
-      headers.set('access-control-allow-headers', allowedHeaders.join(', '))
-    }
     if (cors.credentials === true) headers.set('access-control-allow-credentials', 'true')
-    headers.set('access-control-max-age', String(cors.maxAge ?? 86400))
+    if (preflight) {
+      const methods = Array.isArray(cors.methods) ? cors.methods : []
+      const allowedHeaders = Array.isArray(cors.headers) ? cors.headers : []
+      if (methods.length > 0) headers.set('access-control-allow-methods', methods.join(', '))
+      if (allowedHeaders.length > 0) {
+        headers.set('access-control-allow-headers', allowedHeaders.join(', '))
+      }
+      headers.set('access-control-max-age', String(cors.maxAge ?? 86400))
+    }
   } else {
     appendVaryOrigin(headers)
   }

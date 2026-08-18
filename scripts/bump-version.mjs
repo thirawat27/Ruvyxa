@@ -62,22 +62,31 @@ const templateDirs = readdirSync('templates')
   .map((name) => `templates/${name}`)
   .filter((dir) => statSync(dir).isDirectory())
 
+/**
+ * Point a template's framework dependencies at the version being released.
+ *
+ * Only entries that already exist are touched: a template that does not depend
+ * on `@ruvyxa/react` must not gain the dependency because a release happened.
+ * Returns whether anything moved, so an unchanged template is not rewritten.
+ */
+function repinFrameworkDeps(manifest, version) {
+  const pin = `^${version}`
+  let changed = false
+  for (const dependency of ['ruvyxa', '@ruvyxa/react']) {
+    for (const group of ['dependencies', 'peerDependencies', 'devDependencies']) {
+      if (!manifest[group]?.[dependency] || manifest[group][dependency] === pin) continue
+      manifest[group][dependency] = pin
+      changed = true
+    }
+  }
+  return changed
+}
+
 for (const dir of templateDirs) {
   const templatePkg = join(dir, 'package.json')
   try {
     const tmpl = JSON.parse(readFileSync(templatePkg, 'utf8'))
-    let changed = false
-    for (const dependency of ['ruvyxa', '@ruvyxa/react']) {
-      for (const dependencyGroup of ['dependencies', 'peerDependencies', 'devDependencies']) {
-        if (
-          tmpl[dependencyGroup]?.[dependency] &&
-          tmpl[dependencyGroup][dependency] !== `^${newVersion}`
-        ) {
-          tmpl[dependencyGroup][dependency] = `^${newVersion}`
-          changed = true
-        }
-      }
-    }
+    const changed = repinFrameworkDeps(tmpl, newVersion)
     if (changed) {
       writeFileSync(templatePkg, JSON.stringify(tmpl, null, 2) + '\n')
       console.log(`${dir} framework deps → ^${newVersion}`)

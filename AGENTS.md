@@ -63,6 +63,12 @@ with the reason beside it: sequential `await` in a loop is how the bundler appli
 globals are a contract with the generated entry, not a naming slip. Add a rule to the off list only
 with the reason it does not apply here, never to clear a finding.
 
+It also caps structure directly: `complexity` at 30, `max-depth` at 4, `max-nested-callbacks` at 4,
+and `max-params` at 8. `max-lines-per-function` is deliberately off — a long flat function is a
+reading cost, a branchy one is a correctness risk, and only the second is worth failing a build
+over. When a function trips `complexity`, split it along the seam it already has (a strategy per
+branch, a section per validator) rather than hoisting fragments out to move the number.
+
 The Rust side has the matching gate: `.clippy.toml` sets `cognitive-complexity-threshold` and
 `[workspace.lints.clippy]` in `Cargo.toml` turns the lint on, so a function that grows past what one
 screen holds fails `cargo clippy -- -D warnings`. The threshold sits well above Clippy's default

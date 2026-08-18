@@ -320,6 +320,7 @@ where
                     &headers,
                     credentials,
                     &max_age,
+                    true,
                 );
                 return Ok(response);
             }
@@ -333,6 +334,7 @@ where
                     &headers,
                     credentials,
                     &max_age,
+                    false,
                 );
             } else {
                 // The response body is identical, but its CORS headers depend on
@@ -347,6 +349,20 @@ where
     }
 }
 
+/// Attach the CORS headers this response is entitled to.
+///
+/// `Allow-Methods`, `Allow-Headers`, and `Max-Age` answer a preflight question,
+/// and the Fetch standard has the browser read them only from a preflight
+/// response. Sending them on every actual response is not merely redundant: it
+/// advertises the whole method and header allowlist to any origin that gets a
+/// response at all, and it invites a proxy to cache a `Max-Age` that was never
+/// negotiated. `Allow-Origin`, `Allow-Credentials`, and `Vary` do belong on
+/// both, because the browser checks those on the actual response too.
+///
+/// Mirrored by `withCorsHeaders` in
+/// `packages/ruvyxa/runtime/serverless-handler.mjs`. The two hosts serve the
+/// same applications, so a split that held in one and not the other would make
+/// a project's CORS behavior depend on how it was deployed.
 fn apply_cors_headers<B>(
     response: &mut Response<B>,
     origin: Option<&str>,
@@ -354,6 +370,7 @@ fn apply_cors_headers<B>(
     headers_str: &str,
     credentials: bool,
     max_age: &str,
+    preflight: bool,
 ) {
     let h = response.headers_mut();
     if let Some(origin) = origin
@@ -361,6 +378,15 @@ fn apply_cors_headers<B>(
     {
         h.insert(header::ACCESS_CONTROL_ALLOW_ORIGIN, value);
         append_vary_origin(h);
+    }
+    if credentials {
+        h.insert(
+            header::ACCESS_CONTROL_ALLOW_CREDENTIALS,
+            HeaderValue::from_static("true"),
+        );
+    }
+    if !preflight {
+        return;
     }
     if !methods.is_empty()
         && let Ok(value) = HeaderValue::from_str(methods)
@@ -371,12 +397,6 @@ fn apply_cors_headers<B>(
         && let Ok(value) = HeaderValue::from_str(headers_str)
     {
         h.insert(header::ACCESS_CONTROL_ALLOW_HEADERS, value);
-    }
-    if credentials {
-        h.insert(
-            header::ACCESS_CONTROL_ALLOW_CREDENTIALS,
-            HeaderValue::from_static("true"),
-        );
     }
     if let Ok(value) = HeaderValue::from_str(max_age) {
         h.insert(header::ACCESS_CONTROL_MAX_AGE, value);
@@ -664,6 +684,73 @@ mod tests {
             response.headers().get(header::ACCESS_CONTROL_ALLOW_ORIGIN),
             Some(&HeaderValue::from_static("https://app.example"))
         );
+    }
+
+    /// The preflight-only headers are the ones a browser reads from a preflight
+    /// response and nowhere else. This asserts both halves in one place so a
+    /// change that moves a header across the line has to move this test too.
+    #[tokio::test]
+    async fn cors_sends_negotiation_headers_on_preflight_responses_only() {
+        let preflight_only = [
+            header::ACCESS_CONTROL_ALLOW_METHODS,
+            header::ACCESS_CONTROL_ALLOW_HEADERS,
+            header::ACCESS_CONTROL_MAX_AGE,
+        ];
+        let both = [
+            header::ACCESS_CONTROL_ALLOW_ORIGIN,
+            header::ACCESS_CONTROL_ALLOW_CREDENTIALS,
+        ];
+
+        let inner = tower::service_fn(|_request: Request<Body>| async {
+            Ok::<_, Infallible>(Response::new(Body::from("handled")))
+        });
+        let mut service = test_cors_layer().layer(inner);
+        let preflight = service
+            .call(
+                Request::builder()
+                    .method(axum::http::Method::OPTIONS)
+                    .header(header::ORIGIN, "https://app.example")
+                    .header(header::ACCESS_CONTROL_REQUEST_METHOD, "POST")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        for name in preflight_only.iter().chain(both.iter()) {
+            assert!(
+                preflight.headers().contains_key(name),
+                "preflight response is missing {name}"
+            );
+        }
+
+        let inner = tower::service_fn(|_request: Request<Body>| async {
+            Ok::<_, Infallible>(Response::new(Body::from("handled")))
+        });
+        let mut service = test_cors_layer().layer(inner);
+        let actual = service
+            .call(
+                Request::builder()
+                    .header(header::ORIGIN, "https://app.example")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+
+        for name in &preflight_only {
+            assert!(
+                !actual.headers().contains_key(name),
+                "actual response should not carry {name}"
+            );
+        }
+        for name in &both {
+            assert!(
+                actual.headers().contains_key(name),
+                "actual response is missing {name}"
+            );
+        }
+        assert!(actual.headers().contains_key(header::VARY));
     }
 
     #[tokio::test]

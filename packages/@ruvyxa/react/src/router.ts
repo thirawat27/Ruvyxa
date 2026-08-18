@@ -371,6 +371,18 @@ function createRouter(): RouterInstance {
     return flight
   }
 
+  /**
+   * Record the navigation in session history.
+   *
+   * `none` writes nothing: `popstate` navigations are already at the URL the
+   * browser moved to, and pushing it again would grow the history stack every
+   * time the user pressed Back.
+   */
+  function pushHistoryEntry(url: URL, history: 'push' | 'replace' | 'none'): void {
+    if (history === 'push') window.history.pushState({ ruvyxa: true }, '', url.href)
+    else if (history === 'replace') window.history.replaceState({ ruvyxa: true }, '', url.href)
+  }
+
   function hardNavigate(url: URL, history: 'push' | 'replace' | 'none'): void {
     if (history === 'replace') window.location.replace(url.href)
     else window.location.assign(url.href)
@@ -453,8 +465,7 @@ function createRouter(): RouterInstance {
       pendingNavigationId = null
     }
 
-    if (historyMode === 'push') window.history.pushState({ ruvyxa: true }, '', url.href)
-    else if (historyMode === 'replace') window.history.replaceState({ ruvyxa: true }, '', url.href)
+    pushHistoryEntry(url, historyMode)
 
     snapshot = context
     search = url.search
