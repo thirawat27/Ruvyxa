@@ -300,16 +300,27 @@ export interface ImageConfig {
    * `<Image>` otherwise uses the single full-size WebP. @default []
    */
   variantWidths?: number[]
+  /**
+   * Largest width the primary WebP is encoded at, in pixels. `0` publishes the
+   * source's own resolution.
+   *
+   * Encoding cannot be split across threads, so the primary output alone sets
+   * the wall time of a large-image build: a 6000x4000 camera original takes
+   * ~745ms uncapped and ~296ms at this default. 3840 is the top of the standard
+   * responsive ladder and the width of a 4K display, so a wider file is bytes
+   * no viewport can use. @default 3840
+   */
+  maxWidth?: number
   /** Image conversion workers. Zero selects the available CPU count. @default 0 */
   workers?: number
   /**
    * WebP encoder effort, 0 (fastest, largest files) to 6 (slowest, smallest).
    *
    * Encoding is the floor on build time for large images: it cannot be split
-   * across threads, so a single 6000x4000 source spends roughly 2.2s here at
-   * the default. Lowering this is the only way to go faster, and it costs
-   * bytes — measured on that source, effort 2 is ~1.8x faster for ~18% more
-   * output, effort 0 is ~2.9x faster for ~15% more.
+   * across threads, so once `maxWidth` has bounded the work this is the only
+   * lever left. It costs bytes — measured on a 24 MP source, effort 2 is ~2.4x
+   * faster for ~4% more output, effort 0 is ~3.5x faster for ~14% more. Raising
+   * it to 6 costs 24% more time for no smaller output at all.
    *
    * Results are cached by source and settings, so this mostly affects cold
    * builds and CI. @default 4

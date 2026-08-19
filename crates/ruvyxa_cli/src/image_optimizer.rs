@@ -28,7 +28,11 @@ use ruvyxa_dev_server::image_codec::{
 /// changes when the resampling implementation does. Without this byte, the
 /// first build after such a change would mix outputs from two resamplers in one
 /// asset directory.
-const CACHE_VERSION: u8 = 2;
+const CACHE_VERSION: u8 = 1;
+
+/// Widest primary output by default: the top of the standard responsive ladder,
+/// and the width of a 4K display.
+const DEFAULT_MAX_WIDTH: u32 = 3840;
 
 /// Build-time decoding is deliberately unbounded.
 ///
@@ -64,16 +68,29 @@ pub struct ImageOptimizationOptions {
     pub parallelism: usize,
     /// libwebp's `method`, 0 (fastest, largest) to 6 (slowest, smallest).
     ///
-    /// Encoding dominates a large-image build once resizing is vectorized: a
-    /// 6000x4000 source spends ~2.2 s in the full-size encode alone, and
-    /// libwebp cannot split one lossy encode across threads. `method` is the
-    /// only lever, and it trades bytes for time — measured on that source,
-    /// 4 → 2167 ms / 3636 KB, 2 → 1219 ms / 4281 KB, 0 → 738 ms / 4170 KB.
+    /// Encoding is what a large-image build spends its time on — decode and the
+    /// vectorized resize are a rounding error beside it — and libwebp cannot
+    /// split one lossy encode across threads, so this is the only lever left
+    /// once `max_width` has bounded the work. It trades bytes for time:
+    /// measured on a 24 MP source, 6 → 976 ms / 197 KB, 4 → 786 ms / 197 KB,
+    /// 2 → 332 ms / 205 KB, 0 → 224 ms / 225 KB.
     ///
-    /// The default stays at libwebp's own 4 so upgrading never silently
-    /// inflates a deployed asset set; projects that would rather have the build
-    /// time can opt out.
+    /// Note that 6 costs 24% more time than 4 for no smaller output at all, so
+    /// there is no reason to raise it. The default stays at libwebp's own 4 so
+    /// upgrading never silently inflates a deployed asset set; projects that
+    /// would rather have the build time can lower it.
     pub effort: u8,
+    /// Largest width the primary WebP is encoded at, in pixels. `0` disables
+    /// the cap and publishes the source's own resolution.
+    ///
+    /// Encoding is the whole cost of a large-image build and libwebp cannot
+    /// split one lossy encode across cores, so the primary output alone sets
+    /// the wall time: a 6000x4000 camera original takes 745 ms uncapped and
+    /// 296 ms at this default. Nothing is lost visually — 3840 is the widest
+    /// entry in the default `deviceSizes` ladder and matches a 4K display, so a
+    /// wider file is bytes no viewport can use. Raise it, or set `0`, for
+    /// projects that publish full-resolution originals deliberately.
+    pub max_width: u32,
     /// Optional runtime transforms for same-origin public assets.
     pub on_demand: OnDemandImageOptions,
 }
@@ -133,6 +150,7 @@ impl Default for ImageOptimizationOptions {
             variant_widths: Vec::new(),
             parallelism: 0,
             effort: 4,
+            max_width: DEFAULT_MAX_WIDTH,
             on_demand: OnDemandImageOptions::default(),
         }
     }
@@ -194,10 +212,24 @@ struct Conversion {
 
 /// One WebP file this source must produce.
 struct OutputPlan {
-    /// `None` is the full-size output; `Some(w)` is a responsive variant.
-    width: Option<u32>,
+    /// Width to resize to before encoding; `None` encodes the decoded pixels
+    /// unchanged.
+    ///
+    /// This used to double as the primary/variant flag, which stopped working
+    /// once the primary output could itself be downscaled by `max_width`.
+    resize_to: Option<u32>,
+    role: OutputRole,
     output: PathBuf,
     cached: PathBuf,
+}
+
+/// What an output is for, independent of whether it gets resized.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum OutputRole {
+    /// The file the source name maps to (`hero.jpg` -> `hero.webp`).
+    Primary,
+    /// A `srcset` entry, listed in the manifest.
+    Variant,
 }
 
 /// Copy public assets and convert PNG/JPEG files to one WebP output each.
@@ -416,11 +448,20 @@ fn process_one(
     let output_bytes = fs::metadata(&output)
         .with_context(|| format!("failed to inspect image output {}", output.display()))?
         .len();
+    // The manifest reports what was written, not what the source held: with a
+    // `max_width` cap those differ, and a consumer sizing anything from these
+    // numbers must see the emitted file.
+    let emitted_width = primary_output_width(options, width);
+    let emitted_height = if emitted_width == width {
+        height
+    } else {
+        scaled_height(width, height, emitted_width)
+    };
     Ok(Some(Conversion {
         source: source.to_path_buf(),
         output,
-        width,
-        height,
+        width: emitted_width,
+        height: emitted_height,
         source_bytes: source_data.len() as u64,
         output_bytes,
         cache_hit,
@@ -428,12 +469,19 @@ fn process_one(
     }))
 }
 
-/// The full-size output followed by one entry per responsive breakpoint.
+/// The primary output followed by one entry per responsive breakpoint.
 ///
-/// Widths at or above the intrinsic size are skipped: upscaling only inflates
-/// bytes for no visual gain, and the full-size WebP already covers the top of
-/// the `srcset`. The full-size entry is always first so callers can find it
-/// without searching.
+/// The primary is capped at `max_width`: a 24 MP camera original encodes to a
+/// 6000px WebP that no display can use, and libwebp cannot split one lossy
+/// encode across cores, so that single job is the whole build's critical path.
+/// Capping it to the largest width a device actually requests is what every
+/// other framework's image pipeline does, and it is the difference between
+/// 745 ms and 296 ms on that source. `max_width: 0` restores the uncapped
+/// behavior for projects that publish full-resolution originals on purpose.
+///
+/// Variant widths at or above the primary's emitted width are skipped:
+/// upscaling only inflates bytes for no visual gain, and the primary already
+/// covers the top of the `srcset`.
 fn plan_outputs(
     relative: &Path,
     assets_dir: &Path,
@@ -442,24 +490,32 @@ fn plan_outputs(
     options: &ImageOptimizationOptions,
     intrinsic_width: u32,
 ) -> Vec<OutputPlan> {
+    let primary_width = primary_output_width(options, intrinsic_width);
+    let resize_primary = (primary_width < intrinsic_width).then_some(primary_width);
+
     let mut widths: Vec<u32> = options
         .variant_widths
         .iter()
         .copied()
-        .filter(|width| *width > 0 && *width < intrinsic_width)
+        .filter(|width| *width > 0 && *width < primary_width)
         .collect();
     widths.sort_unstable();
     widths.dedup();
 
     let mut plans = Vec::with_capacity(widths.len() + 1);
     plans.push(OutputPlan {
-        width: None,
+        resize_to: resize_primary,
+        role: OutputRole::Primary,
         output: assets_dir.join(webp_path(relative)),
-        cached: cache_dir.join(format!("{}.webp", output_cache_key(digest, options, None))),
+        cached: cache_dir.join(format!(
+            "{}.webp",
+            output_cache_key(digest, options, resize_primary)
+        )),
     });
     for width in widths {
         plans.push(OutputPlan {
-            width: Some(width),
+            resize_to: Some(width),
+            role: OutputRole::Variant,
             output: assets_dir.join(variant_path(relative, width)),
             cached: cache_dir.join(format!(
                 "{}.webp",
@@ -468,6 +524,14 @@ fn plan_outputs(
         });
     }
     plans
+}
+
+/// Width the primary output is encoded at, after `max_width` is applied.
+fn primary_output_width(options: &ImageOptimizationOptions, intrinsic_width: u32) -> u32 {
+    match options.max_width {
+        0 => intrinsic_width,
+        cap => intrinsic_width.min(cap),
+    }
 }
 
 /// Produce one planned output, encoding only when the cache misses.
@@ -492,7 +556,7 @@ fn materialize_output(
                 plan.cached.display()
             )
         })?;
-        let encoded = match plan.width {
+        let encoded = match plan.resize_to {
             None => encode_webp(pixels, options.webp())?,
             Some(width) => {
                 let height = scaled_height(intrinsic_width, intrinsic_height, width);
@@ -503,10 +567,16 @@ fn materialize_output(
     }
     materialize_cached(&plan.cached, &plan.output)?;
 
-    Ok(plan.width.map(|width| ImageVariant {
-        width,
-        output: relative_url(assets_dir, &plan.output),
-    }))
+    // Only variants are listed in the manifest's `srcset`. The primary is
+    // tracked by the caller, and now that it can carry a `resize_to` of its own
+    // this can no longer be inferred from that field.
+    Ok(match plan.role {
+        OutputRole::Primary => None,
+        OutputRole::Variant => plan.resize_to.map(|width| ImageVariant {
+            width,
+            output: relative_url(assets_dir, &plan.output),
+        }),
+    })
 }
 
 fn copy_asset(source: &Path, output: &Path) -> anyhow::Result<()> {
@@ -658,6 +728,166 @@ mod tests {
             .encode(&data, width, height, jpeg_encoder::ColorType::Rgb)
             .unwrap();
         fs::write(path, out).unwrap();
+    }
+
+    /// The primary output is capped at `max_width` by default, and the manifest
+    /// reports what was written rather than what the source held.
+    #[test]
+    fn caps_the_primary_output_at_max_width() {
+        let temp = tempfile::tempdir().unwrap();
+        let public = temp.path().join("public");
+        let assets = temp.path().join("assets");
+        fs::create_dir(&public).unwrap();
+        write_jpeg(&public.join("hero.jpg"), 5000, 2500, [90, 140, 200]);
+
+        let report = optimize_public_images(
+            &public,
+            &assets,
+            &temp.path().join("cache"),
+            &ImageOptimizationOptions {
+                max_width: 1000,
+                ..ImageOptimizationOptions::default()
+            },
+        )
+        .unwrap();
+
+        let written = fs::read(assets.join("hero.webp")).unwrap();
+        assert_eq!(
+            image_decode::header_dimensions(&written).unwrap(),
+            (1000, 500),
+            "the primary WebP must be encoded at the cap, not the source width"
+        );
+        assert_eq!(
+            (report.entries[0].width, report.entries[0].height),
+            (1000, 500),
+            "the manifest must describe the emitted file, not the source"
+        );
+    }
+
+    /// `max_width: 0` keeps the previous uncapped behavior for projects that
+    /// publish full-resolution originals on purpose.
+    #[test]
+    fn max_width_zero_publishes_the_source_resolution() {
+        let temp = tempfile::tempdir().unwrap();
+        let public = temp.path().join("public");
+        let assets = temp.path().join("assets");
+        fs::create_dir(&public).unwrap();
+        write_jpeg(&public.join("hero.jpg"), 4200, 2100, [90, 140, 200]);
+
+        let report = optimize_public_images(
+            &public,
+            &assets,
+            &temp.path().join("cache"),
+            &ImageOptimizationOptions {
+                max_width: 0,
+                ..ImageOptimizationOptions::default()
+            },
+        )
+        .unwrap();
+
+        let written = fs::read(assets.join("hero.webp")).unwrap();
+        assert_eq!(
+            image_decode::header_dimensions(&written).unwrap(),
+            (4200, 2100)
+        );
+        assert_eq!(
+            (report.entries[0].width, report.entries[0].height),
+            (4200, 2100)
+        );
+    }
+
+    /// A source narrower than the cap is untouched by it.
+    #[test]
+    fn a_small_source_is_not_upscaled_to_the_cap() {
+        let temp = tempfile::tempdir().unwrap();
+        let public = temp.path().join("public");
+        let assets = temp.path().join("assets");
+        fs::create_dir(&public).unwrap();
+        write_png(
+            &public.join("icon.png"),
+            320,
+            200,
+            png::ColorType::Rgb,
+            &[1, 2, 3],
+        );
+
+        optimize_public_images(
+            &public,
+            &assets,
+            &temp.path().join("cache"),
+            &ImageOptimizationOptions::default(),
+        )
+        .unwrap();
+
+        let written = fs::read(assets.join("icon.webp")).unwrap();
+        assert_eq!(
+            image_decode::header_dimensions(&written).unwrap(),
+            (320, 200)
+        );
+    }
+
+    /// Variants at or above the capped primary width would duplicate it.
+    #[test]
+    fn variants_are_measured_against_the_capped_primary_not_the_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let public = temp.path().join("public");
+        let assets = temp.path().join("assets");
+        fs::create_dir(&public).unwrap();
+        write_jpeg(&public.join("hero.jpg"), 5000, 2500, [90, 140, 200]);
+
+        let report = optimize_public_images(
+            &public,
+            &assets,
+            &temp.path().join("cache"),
+            &ImageOptimizationOptions {
+                max_width: 1000,
+                variant_widths: vec![640, 1000, 2048],
+                ..ImageOptimizationOptions::default()
+            },
+        )
+        .unwrap();
+
+        let widths: Vec<u32> = report.entries[0]
+            .variants
+            .iter()
+            .map(|variant| variant.width)
+            .collect();
+        assert_eq!(
+            widths,
+            vec![640],
+            "1000 duplicates the primary and 2048 is wider than anything emitted"
+        );
+    }
+
+    /// The DEFAULT path: `variant_widths` is empty out of the box, so one large
+    /// source produces exactly one output — the full-size WebP. There is nothing
+    /// for rayon to overlap, so the whole build is that single encode.
+    #[test]
+    #[ignore = "measurement, not a correctness check"]
+    fn measure_default_single_large_image() {
+        for (label, width, height) in [
+            ("6000x4000 (24 MP)", 6000u16, 4000u16),
+            ("3840x2560 (9.8 MP)", 3840, 2560),
+            ("1920x1280 (2.5 MP)", 1920, 1280),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let public = temp.path().join("public");
+            let assets = temp.path().join("assets");
+            fs::create_dir(&public).unwrap();
+            write_jpeg(&public.join("hero.jpg"), width, height, [90, 140, 200]);
+
+            let started = std::time::Instant::now();
+            optimize_public_images(
+                &public,
+                &assets,
+                &temp.path().join("cache"),
+                &ImageOptimizationOptions::default(),
+            )
+            .unwrap();
+            let elapsed = started.elapsed();
+            let bytes = fs::metadata(assets.join("hero.webp")).unwrap().len();
+            println!("  {label}  {elapsed:?}  -> {} KB", bytes / 1024);
+        }
     }
 
     /// End-to-end build cost for one large source, printed with `--nocapture`.
