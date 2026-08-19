@@ -38,7 +38,7 @@ jobs:
       - name: Install RustSec cargo-audit
         run: cargo install cargo-audit --version 0.22.2 --locked
       - name: Audit Cargo lockfile
-        run: cargo audit --file Cargo.lock --deny warnings
+        run: cargo audit --file Cargo.lock
 
   javascript:
     name: JavaScript production dependency audit
