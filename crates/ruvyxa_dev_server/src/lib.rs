@@ -50,6 +50,7 @@ mod env_file;
 /// and a build/runtime mismatch there is invisible until someone compares two
 /// renderings of the same asset.
 pub mod image_codec;
+pub mod image_decode;
 #[cfg(test)]
 use env_file::parse_env_source;
 pub use env_file::project_env;

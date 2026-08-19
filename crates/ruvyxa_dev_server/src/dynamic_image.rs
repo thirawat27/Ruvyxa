@@ -2,8 +2,6 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use image::GenericImageView;
-
 use crate::image_codec::{
     Pixels, WebpSettings, decode_within_pixel_budget, encode_webp, header_dimensions, scaled_height,
 };
@@ -192,11 +190,11 @@ pub(crate) async fn optimize(
         // small image and then stream a much larger one.
         let decoded = decode_within_pixel_budget(&source, MAX_SOURCE_PIXELS)
             .map_err(|_| DynamicImageError::Decode)?;
-        let (source_width, source_height) = decoded.dimensions();
+        let (source_width, source_height) = (decoded.width, decoded.height);
         // Borrows the decoded buffer when it is already RGB8/RGBA8, which is
         // what both PNG and JPEG decode to. A request for the source's own
         // width then reaches the encoder without a single pixel copy.
-        let pixels = Pixels::from_image(&decoded);
+        let pixels = Pixels::from_decoded(&decoded);
         let target_width = width.min(source_width).max(1);
         let settings = WebpSettings {
             quality,
@@ -246,9 +244,17 @@ mod tests {
     async fn resizes_public_images_and_reuses_the_bounded_cache() {
         let temp = tempfile::tempdir().unwrap();
         let source = temp.path().join("avatar.png");
-        image::RgbaImage::from_pixel(100, 50, image::Rgba([10, 40, 90, 255]))
-            .save(&source)
-            .unwrap();
+        std::fs::write(
+            &source,
+            crate::image_decode::fixtures::png(
+                100,
+                50,
+                png::ColorType::Rgba,
+                png::BitDepth::Eight,
+                &[10, 40, 90, 255],
+            ),
+        )
+        .unwrap();
         let config = DynamicImageConfig {
             enabled: true,
             ..Default::default()
@@ -261,7 +267,10 @@ mod tests {
             .await
             .unwrap();
         assert!(Arc::ptr_eq(&first, &second));
-        let decoded = image::load_from_memory(&first).unwrap();
-        assert_eq!(decoded.dimensions(), (40, 20));
+        // The response is WebP, so the header read doubles as a format check.
+        assert_eq!(
+            crate::image_decode::header_dimensions(&first).unwrap(),
+            (40, 20)
+        );
     }
 }

@@ -49,12 +49,34 @@ futures-core = "0.3.34"
 # `async-await` macros and their proc-macro chain, which are not in the tree.
 futures-util = { version = "0.3.34", default-features = false, features = ["sink"] }
 grass = "0.13.4"
-image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp"] }
-# SIMD (AVX2/SSE4.1/NEON) convolution resize. `default-features = false` is
-# load-bearing: the `image` feature turns on that crate's default features,
-# which drags in `rav1e`/`ravif` and their build chain for an AVIF encoder
-# nothing here uses. Buffers are handed over as raw slices instead.
-fast_image_resize = { version = "6.1.0", default-features = false, features = ["rayon"] }
+# Decoders called directly instead of through the `image` facade. `image`
+# declares `avif`/`exr` as optional features, and Cargo records a dependency's
+# optional deps in the lockfile whether or not the feature is on — so `ravif`,
+# `rav1e`, `pulp` and their unmaintained `paste` macro sat in `Cargo.lock`
+# permanently even though none of them ever compiled. These three are the
+# decoders `image` itself wraps for the formats Ruvyxa accepts.
+png = "0.18.1"
+zune-jpeg = "0.5.15"
+zune-core = "0.5.3"
+image-webp = "0.2.4"
+# Test fixtures only: the decoders above are decode-only, and several tests need
+# to produce a real JPEG on disk to exercise the build-time optimizer.
+jpeg-encoder = "0.7.1"
+# SIMD (AVX2/SSE4.1/NEON) convolution resize.
+#
+# `fast_image_resize` filled this role and was measurably the fastest, but it
+# declares `image` as an OPTIONAL dependency, and Cargo records a dependency's
+# optional deps in `Cargo.lock` whether or not the feature is on. That kept
+# `image` -> `ravif`/`exr` -> `rav1e`/`pulp` -> the unmaintained `paste` macro
+# (RUSTSEC-2024-0436) permanently in the lockfile even after this repository
+# stopped depending on `image` directly. `pic-scale` reaches the same SIMD
+# convolution through a dependency tree that contains none of them.
+#
+# Measured on a 6000x4000 RGB source producing all eight responsive widths:
+# 3628 ms with `image::imageops` (scalar), 72 ms with `fast_image_resize`,
+# 89 ms here with `ThreadingPolicy::Adaptive`. The 17 ms is the price of a
+# lockfile with no unmaintained crate in it.
+pic-scale = "0.7.11"
 markdown = "1.0.0"
 notify = "8.2.0"
 # Pinned exactly and kept in lockstep with `oxc-transform` in

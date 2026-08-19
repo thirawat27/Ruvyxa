@@ -16,12 +16,11 @@ anyhow.workspace = true
 blake3.workspace = true
 chrono.workspace = true
 clap.workspace = true
-# Resizing and WebP encoding live in `ruvyxa_dev_server::image_codec`; only the
-# decode and header read happen here, so `image` is the sole direct image
-# dependency. `fast_image_resize` and `webp` reach this binary through that
-# module and must not be declared again — a second declaration is what lets the
-# two halves drift to different versions.
-image.workspace = true
+# Decoding, resizing, and WebP encoding all live in `ruvyxa_dev_server`
+# (`image_decode` and `image_codec`), which this crate calls. The decoder,
+# resizer, and encoder crates reach this binary through that module and must not
+# be declared here again — a second declaration is what lets the two halves
+# drift to different versions.
 rayon.workspace = true
 ruvyxa_bundler = { path = "../ruvyxa_bundler" }
 ruvyxa_dev_server = { path = "../ruvyxa_dev_server" }
@@ -47,6 +46,11 @@ windows-sys = { version = "0.61.2", features = ["Win32_System_ProcessStatus", "W
 libc = "0.2.189"
 
 [dev-dependencies]
+# Test fixtures only: these tests must put real encoded files on disk for the
+# optimizer to sniff and decode. Decoding in this crate goes through
+# `ruvyxa_dev_server::image_decode`.
+jpeg-encoder.workspace = true
+png.workspace = true
 tempfile.workspace = true
 
 [lints]

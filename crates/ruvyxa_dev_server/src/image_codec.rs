@@ -4,22 +4,24 @@
 //! Two things live here because getting either wrong is expensive and the cost
 //! is invisible until someone profiles a large image:
 //!
-//! - **Borrowing, not copying.** A `DynamicImage` that already holds RGB8 or
-//!   RGBA8 pixels can hand its buffer straight to both the resizer and the WebP
-//!   encoder. `to_rgb8()`/`to_rgba8()` clone instead, which on a 6000x4000
-//!   source is a 68 MB allocation and memcpy — per encode, and one source
-//!   produces nine of them.
-//! - **SIMD convolution.** `image::imageops::FilterType::Lanczos3` is a scalar
-//!   loop. `fast_image_resize` runs the same Lanczos3 convolution through
-//!   AVX2/SSE4.1/NEON. Measured on a 6000x4000 JPEG, producing all eight
-//!   responsive widths: 3628 ms scalar, 68 ms SIMD.
+//! - **Borrowing, not copying.** `image_decode` normalizes every source to RGB8
+//!   or RGBA8, so a decoded buffer goes straight to both the resizer and the
+//!   WebP encoder. The `DynamicImage` path this replaced cloned for any other
+//!   layout, which on a 6000x4000 source is a 68 MB allocation and memcpy — per
+//!   encode, and one source produces nine of them.
+//! - **SIMD convolution.** A scalar Lanczos3 loop takes 3628 ms to produce all
+//!   eight responsive widths from a 6000x4000 source. `pic-scale` runs the same
+//!   convolution through AVX2/SSE4.1/NEON in 89 ms. Re-check the number with
+//!   `cargo test --release -p ruvyxa_dev_server measure_responsive -- --ignored
+//!   --nocapture`.
 
 use std::fmt;
-use std::io::Cursor;
 
-use fast_image_resize::images::{Image as FirImage, ImageRef};
-use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer};
-use image::{DynamicImage, GenericImageView, ImageReader};
+use crate::image_decode::{self, Decoded};
+use pic_scale::{
+    ImageStore, ImageStoreMut, ImageStoreScaling, ResamplingFunction, ScalingOptions,
+    ThreadingPolicy,
+};
 
 /// Why a resize or encode could not produce output.
 ///
@@ -53,10 +55,7 @@ pub type Result<T> = std::result::Result<T, ImageCodecError>;
 /// the header is a fixed-size prefix, while decoding allocates
 /// `width * height * channels` bytes before anything gets a chance to object.
 pub fn header_dimensions(source: &[u8]) -> Result<(u32, u32)> {
-    ImageReader::new(Cursor::new(source))
-        .with_guessed_format()
-        .map_err(|error| ImageCodecError::InvalidBuffer(error.to_string()))?
-        .into_dimensions()
+    image_decode::header_dimensions(source)
         .map_err(|error| ImageCodecError::InvalidBuffer(error.to_string()))
 }
 
@@ -68,25 +67,8 @@ pub fn header_dimensions(source: &[u8]) -> Result<(u32, u32)> {
 /// 50000x50000, and the decoder will have committed ten gigabytes to the heap
 /// before the caller ever sees a dimension to reject. The header covers the
 /// honest case cheaply; `Limits` covers a header that lies about what follows.
-pub fn decode_within_pixel_budget(source: &[u8], max_pixels: u64) -> Result<DynamicImage> {
-    let (width, height) = header_dimensions(source)?;
-    if u64::from(width) * u64::from(height) > max_pixels {
-        return Err(ImageCodecError::InvalidBuffer(format!(
-            "image is {width}x{height}, above the {max_pixels} pixel budget"
-        )));
-    }
-
-    let mut reader = ImageReader::new(Cursor::new(source))
-        .with_guessed_format()
-        .map_err(|error| ImageCodecError::InvalidBuffer(error.to_string()))?;
-    let mut limits = image::Limits::default();
-    // Four channels is the widest layout `Pixels` keeps, and the decoder needs
-    // room for one such buffer. The slack absorbs per-decoder scratch without
-    // widening the budget enough to matter.
-    limits.max_alloc = Some(max_pixels.saturating_mul(4).saturating_add(1 << 20));
-    reader.limits(limits);
-    reader
-        .decode()
+pub fn decode_within_pixel_budget(source: &[u8], max_pixels: u64) -> Result<Decoded> {
+    image_decode::decode_within_pixel_budget(source, max_pixels)
         .map_err(|error| ImageCodecError::InvalidBuffer(error.to_string()))
 }
 
@@ -97,21 +79,14 @@ pub enum PixelLayout {
     Rgba8,
 }
 
-impl PixelLayout {
-    fn pixel_type(self) -> PixelType {
-        match self {
-            Self::Rgb8 => PixelType::U8x3,
-            Self::Rgba8 => PixelType::U8x4,
-        }
-    }
-}
-
 /// A decoded image whose pixels are ready to use without another conversion.
 ///
-/// `borrowed` is the common case: `image` decodes JPEG to `ImageRgb8` and PNG
-/// to `ImageRgb8`/`ImageRgba8`, so the buffer is already in one of the two
-/// layouts WebP wants. Formats that decode to something else (16-bit, luma,
-/// CMYK) convert once here rather than at every use.
+/// `borrowed` is the common case, and now the only one: every decoder in
+/// `image_decode` normalizes to RGB8 or RGBA8, so the buffer a decode produces
+/// is already in one of the two layouts WebP wants. The previous
+/// `DynamicImage`-based path had to branch on eight color types and clone for
+/// the ones that were neither, which on a 6000x4000 source was a 68 MB
+/// allocation and memcpy.
 pub struct Pixels<'a> {
     data: PixelData<'a>,
     pub width: u32,
@@ -125,42 +100,14 @@ enum PixelData<'a> {
 }
 
 impl<'a> Pixels<'a> {
-    /// Borrow a decoded image's pixels, converting only when its layout is
-    /// neither RGB8 nor RGBA8.
-    pub fn from_image(decoded: &'a DynamicImage) -> Self {
-        let (width, height) = decoded.dimensions();
-        if let Some(buffer) = decoded.as_rgb8() {
-            return Self {
-                data: PixelData::Borrowed(buffer.as_raw()),
-                width,
-                height,
-                layout: PixelLayout::Rgb8,
-            };
-        }
-        if let Some(buffer) = decoded.as_rgba8() {
-            return Self {
-                data: PixelData::Borrowed(buffer.as_raw()),
-                width,
-                height,
-                layout: PixelLayout::Rgba8,
-            };
-        }
-        // Preserve alpha when the source has it; dropping to RGB here would
-        // silently flatten transparency that the original file carried.
-        if decoded.color().has_alpha() {
-            Self {
-                data: PixelData::Owned(decoded.to_rgba8().into_raw()),
-                width,
-                height,
-                layout: PixelLayout::Rgba8,
-            }
-        } else {
-            Self {
-                data: PixelData::Owned(decoded.to_rgb8().into_raw()),
-                width,
-                height,
-                layout: PixelLayout::Rgb8,
-            }
+    /// Borrow a decoded image's pixels. Never copies: normalization already
+    /// happened inside the decoder.
+    pub fn from_decoded(decoded: &'a Decoded) -> Self {
+        Self {
+            data: PixelData::Borrowed(&decoded.data),
+            width: decoded.width,
+            height: decoded.height,
+            layout: decoded.layout,
         }
     }
 
@@ -189,29 +136,49 @@ impl<'a> Pixels<'a> {
     /// error compounds; with SIMD the full-source path is already fast enough
     /// that there is nothing to buy with that trade.
     pub fn resize(&self, width: u32, height: u32) -> Result<Pixels<'static>> {
-        let source = ImageRef::new(
-            self.width,
-            self.height,
-            self.as_slice(),
-            self.layout.pixel_type(),
-        )
-        .map_err(|error| ImageCodecError::InvalidBuffer(error.to_string()))?;
-        let mut destination = FirImage::new(width, height, self.layout.pixel_type());
-        // A `Resizer` owns scratch buffers and is not shared between threads;
-        // constructing one per resize costs nothing next to the convolution.
-        Resizer::new()
-            .resize(
-                &source,
-                &mut destination,
-                &ResizeOptions::new().resize_alg(ResizeAlg::Convolution(FilterType::Lanczos3)),
-            )
-            .map_err(|error| ImageCodecError::Resize(error.to_string()))?;
-        Ok(Pixels::from_owned(
-            destination.into_vec(),
-            width,
-            height,
-            self.layout,
-        ))
+        // `premultiply_alpha` is set explicitly rather than left to
+        // `ScalingOptions::default()`, which is `false`. Convolving
+        // non-premultiplied RGBA blends the colour of fully transparent pixels
+        // into their visible neighbours, so a sprite on a transparent canvas
+        // picks up a halo along every edge. The previous resizer premultiplied
+        // by default, and silently losing that would have changed output no
+        // test asserts on.
+        let options = ScalingOptions {
+            resampling_function: ResamplingFunction::Lanczos3,
+            premultiply_alpha: true,
+            // One resize already parallelizes internally. The build runs
+            // several concurrently on top of that, which oversubscribes only if
+            // both layers fan out to every core; `Adaptive` sizes its pool to
+            // the work rather than to the machine.
+            threading_policy: ThreadingPolicy::Adaptive,
+        };
+        let (source_width, source_height) = (self.width as usize, self.height as usize);
+        let (target_width, target_height) = (width as usize, height as usize);
+
+        let data = match self.layout {
+            PixelLayout::Rgb8 => {
+                let store =
+                    ImageStore::<u8, 3>::from_slice(self.as_slice(), source_width, source_height)
+                        .map_err(|error| ImageCodecError::InvalidBuffer(error.to_string()))?;
+                let mut destination = ImageStoreMut::<u8, 3>::alloc(target_width, target_height);
+                store
+                    .scale(&mut destination, options)
+                    .map_err(|error| ImageCodecError::Resize(error.to_string()))?;
+                destination.buffer.borrow().to_vec()
+            }
+            PixelLayout::Rgba8 => {
+                let store =
+                    ImageStore::<u8, 4>::from_slice(self.as_slice(), source_width, source_height)
+                        .map_err(|error| ImageCodecError::InvalidBuffer(error.to_string()))?;
+                let mut destination = ImageStoreMut::<u8, 4>::alloc(target_width, target_height);
+                store
+                    .scale(&mut destination, options)
+                    .map_err(|error| ImageCodecError::Resize(error.to_string()))?;
+                destination.buffer.borrow().to_vec()
+            }
+        };
+
+        Ok(Pixels::from_owned(data, width, height, self.layout))
     }
 }
 
@@ -266,54 +233,143 @@ pub fn scaled_height(source_width: u32, source_height: u32, target_width: u32) -
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{ImageBuffer, Rgb, Rgba};
+    use crate::image_decode::fixtures;
 
-    #[test]
-    fn borrows_rgb_and_rgba_buffers_without_converting() {
-        let rgb = DynamicImage::ImageRgb8(ImageBuffer::from_pixel(4, 3, Rgb([1u8, 2, 3])));
-        let pixels = Pixels::from_image(&rgb);
-        assert!(matches!(pixels.layout, PixelLayout::Rgb8));
-        assert!(std::ptr::eq(
-            pixels.as_slice().as_ptr(),
-            rgb.as_rgb8().unwrap().as_raw().as_ptr()
-        ));
-
-        let rgba = DynamicImage::ImageRgba8(ImageBuffer::from_pixel(4, 3, Rgba([1u8, 2, 3, 4])));
-        let pixels = Pixels::from_image(&rgba);
-        assert!(matches!(pixels.layout, PixelLayout::Rgba8));
-        assert!(std::ptr::eq(
-            pixels.as_slice().as_ptr(),
-            rgba.as_rgba8().unwrap().as_raw().as_ptr()
-        ));
+    fn decoded(width: u32, height: u32, layout: PixelLayout, sample: &[u8]) -> Decoded {
+        let channels = match layout {
+            PixelLayout::Rgb8 => 3,
+            PixelLayout::Rgba8 => 4,
+        };
+        Decoded {
+            data: sample
+                .iter()
+                .copied()
+                .cycle()
+                .take((width * height) as usize * channels)
+                .collect(),
+            width,
+            height,
+            layout,
+        }
     }
 
+    /// `Pixels` no longer converts anything: the decoder already normalized the
+    /// layout, so this must borrow the decoded buffer rather than clone it. On a
+    /// 6000x4000 source a clone here was a 68 MB allocation per encode.
     #[test]
-    fn converts_other_layouts_once_and_keeps_alpha() {
-        // Luma8 has no alpha and must not be widened to RGBA.
-        let luma = DynamicImage::ImageLuma8(ImageBuffer::from_pixel(2, 2, image::Luma([9u8])));
-        assert!(matches!(
-            Pixels::from_image(&luma).layout,
-            PixelLayout::Rgb8
-        ));
-
-        // LumaA8 does, and flattening it here would drop transparency the
-        // source actually carried.
-        let luma_alpha =
-            DynamicImage::ImageLumaA8(ImageBuffer::from_pixel(2, 2, image::LumaA([9u8, 128])));
-        assert!(matches!(
-            Pixels::from_image(&luma_alpha).layout,
-            PixelLayout::Rgba8
-        ));
+    fn borrows_the_decoded_buffer_without_copying() {
+        for (layout, sample) in [
+            (PixelLayout::Rgb8, &[1u8, 2, 3][..]),
+            (PixelLayout::Rgba8, &[1u8, 2, 3, 4][..]),
+        ] {
+            let source = decoded(4, 3, layout, sample);
+            let pixels = Pixels::from_decoded(&source);
+            assert!(std::ptr::eq(
+                pixels.as_slice().as_ptr(),
+                source.data.as_ptr()
+            ));
+            assert_eq!((pixels.width, pixels.height), (4, 3));
+        }
     }
 
     #[test]
     fn resize_preserves_layout_and_target_size() {
-        let source = DynamicImage::ImageRgba8(ImageBuffer::from_pixel(100, 40, Rgba([7u8; 4])));
-        let pixels = Pixels::from_image(&source);
+        let source = decoded(100, 40, PixelLayout::Rgba8, &[7u8; 4]);
+        let pixels = Pixels::from_decoded(&source);
         let resized = pixels.resize(50, scaled_height(100, 40, 50)).unwrap();
         assert_eq!((resized.width, resized.height), (50, 20));
         assert!(matches!(resized.layout, PixelLayout::Rgba8));
         assert_eq!(resized.as_slice().len(), 50 * 20 * 4);
+    }
+
+    /// Resizing must premultiply alpha.
+    ///
+    /// The source is fully transparent red everywhere except one opaque blue
+    /// column. Convolving the raw channels averages that invisible red into the
+    /// blue column and the result shows a magenta halo; premultiplying weights
+    /// each colour by its own alpha first, so a fully transparent pixel
+    /// contributes no colour at all. `ScalingOptions::default()` leaves this
+    /// off, so it is asserted rather than assumed.
+    #[test]
+    fn resizing_rgba_does_not_bleed_transparent_colour_into_visible_pixels() {
+        let (width, height) = (64u32, 8u32);
+        let mut data = Vec::with_capacity((width * height) as usize * 4);
+        for _ in 0..height {
+            for x in 0..width {
+                if x < width / 2 {
+                    data.extend_from_slice(&[0, 0, 255, 255]); // opaque blue
+                } else {
+                    data.extend_from_slice(&[255, 0, 0, 0]); // invisible red
+                }
+            }
+        }
+        let source = Decoded {
+            data,
+            width,
+            height,
+            layout: PixelLayout::Rgba8,
+        };
+        let resized = Pixels::from_decoded(&source).resize(8, 4).unwrap();
+        let pixels = resized.as_slice();
+
+        // Every pixel that is visible at all must still be blue: any red in a
+        // pixel with alpha is red that came from the transparent half.
+        for pixel in pixels.chunks_exact(4) {
+            let [red, _green, blue, alpha] = [pixel[0], pixel[1], pixel[2], pixel[3]];
+            if alpha > 0 {
+                assert!(
+                    red < 16,
+                    "transparent red bled into a visible pixel: {pixel:?}"
+                );
+                assert!(blue > red, "visible pixel lost its colour: {pixel:?}");
+            }
+        }
+    }
+
+    /// A solid image must survive a downscale unchanged.
+    ///
+    /// This is the cheapest possible check that the resizer is wired to the
+    /// right buffers and strides: any row/stride mistake turns a constant image
+    /// into stripes or noise, which a dimensions-only assertion would miss.
+    #[test]
+    fn resizing_a_solid_image_preserves_its_colour() {
+        let source = decoded(40, 40, PixelLayout::Rgb8, &[17, 99, 200]);
+        let resized = Pixels::from_decoded(&source).resize(10, 10).unwrap();
+        for pixel in resized.as_slice().chunks_exact(3) {
+            assert_eq!(pixel, [17, 99, 200], "solid colour changed during resize");
+        }
+    }
+
+    /// Not an assertion — a measurement, printed with `--nocapture`, so the
+    /// number in the module docs can be re-checked on any machine.
+    #[test]
+    #[ignore = "measurement, not a correctness check"]
+    fn measure_responsive_ladder_throughput() {
+        let (width, height) = (6000u32, 4000u32);
+        let mut data = Vec::with_capacity((width * height) as usize * 3);
+        for index in 0..(width * height) as usize {
+            data.extend_from_slice(&[
+                (index % 251) as u8,
+                (index % 241) as u8,
+                (index % 239) as u8,
+            ]);
+        }
+        let source = Decoded {
+            data,
+            width,
+            height,
+            layout: PixelLayout::Rgb8,
+        };
+        let pixels = Pixels::from_decoded(&source);
+        let started = std::time::Instant::now();
+        for target in [640u32, 750, 828, 1080, 1200, 1920, 2048, 3840] {
+            let scaled = scaled_height(width, height, target);
+            std::hint::black_box(pixels.resize(target, scaled).unwrap());
+        }
+        println!(
+            "eight responsive widths from 6000x4000: {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]
@@ -325,27 +381,36 @@ mod tests {
 
     #[test]
     fn refuses_oversized_images_without_decoding_them() {
-        let mut png = Vec::new();
-        DynamicImage::ImageRgb8(ImageBuffer::from_pixel(64, 64, Rgb([1u8, 2, 3])))
-            .write_to(&mut Cursor::new(&mut png), image::ImageFormat::Png)
-            .unwrap();
-
+        let png = fixtures::png(
+            64,
+            64,
+            png::ColorType::Rgb,
+            png::BitDepth::Eight,
+            &[1, 2, 3],
+        );
         assert_eq!(header_dimensions(&png).unwrap(), (64, 64));
         // 64x64 is 4096 pixels, so a 4095 budget must reject it and a 4096
         // budget must not.
         assert!(decode_within_pixel_budget(&png, 4095).is_err());
-        assert_eq!(
-            decode_within_pixel_budget(&png, 4096).unwrap().dimensions(),
-            (64, 64)
-        );
+        let decoded = decode_within_pixel_budget(&png, 4096).unwrap();
+        assert_eq!((decoded.width, decoded.height), (64, 64));
     }
 
     #[test]
     fn effort_changes_output_without_changing_dimensions() {
-        let source = DynamicImage::ImageRgb8(ImageBuffer::from_fn(64, 64, |x, y| {
-            Rgb([(x * 4) as u8, (y * 4) as u8, ((x ^ y) * 2) as u8])
-        }));
-        let pixels = Pixels::from_image(&source);
+        let mut data = Vec::new();
+        for y in 0..64u32 {
+            for x in 0..64u32 {
+                data.extend_from_slice(&[(x * 4) as u8, (y * 4) as u8, ((x ^ y) * 2) as u8]);
+            }
+        }
+        let source = Decoded {
+            data,
+            width: 64,
+            height: 64,
+            layout: PixelLayout::Rgb8,
+        };
+        let pixels = Pixels::from_decoded(&source);
         let base = WebpSettings {
             quality: 82,
             lossless: false,
@@ -354,10 +419,7 @@ mod tests {
         let slow = encode_webp(&pixels, base).unwrap();
         let fast = encode_webp(&pixels, WebpSettings { effort: 0, ..base }).unwrap();
         for encoded in [&slow, &fast] {
-            assert_eq!(
-                image::load_from_memory(encoded).unwrap().dimensions(),
-                (64, 64)
-            );
+            assert_eq!(header_dimensions(encoded).unwrap(), (64, 64));
         }
     }
 }

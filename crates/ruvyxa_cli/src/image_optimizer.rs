@@ -14,13 +14,12 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, bail};
-use image::GenericImageView;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use walkdir::WalkDir;
 
 use ruvyxa_dev_server::image_codec::{
-    Pixels, WebpSettings, encode_webp, header_dimensions, scaled_height,
+    Pixels, WebpSettings, decode_within_pixel_budget, encode_webp, header_dimensions, scaled_height,
 };
 
 /// Bumped when a change makes previously cached bytes wrong for the same input.
@@ -30,6 +29,15 @@ use ruvyxa_dev_server::image_codec::{
 /// first build after such a change would mix outputs from two resamplers in one
 /// asset directory.
 const CACHE_VERSION: u8 = 2;
+
+/// Build-time decoding is deliberately unbounded.
+///
+/// The runtime path caps decoded pixels because it answers untrusted request
+/// paths. A build decodes files the project author committed, and a cap here
+/// would silently skip optimization for a legitimately huge source rather than
+/// protect anything. The `image` crate this replaced carried no cap on the
+/// build path either, so this keeps build output byte-identical.
+const SOURCE_PIXEL_BUDGET: u64 = u64::MAX;
 
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
@@ -372,7 +380,7 @@ fn process_one(
     // and it is the difference between ~3 ms and ~120 ms per image.
     let mut decoded = None;
     if plans.iter().any(|plan| !plan.cached.is_file()) {
-        let Ok(image) = image::load_from_memory(&source_data) else {
+        let Ok(image) = decode_within_pixel_budget(&source_data, SOURCE_PIXEL_BUDGET) else {
             copy_asset(source, &unchanged_output)?;
             return Ok(None);
         };
@@ -380,7 +388,7 @@ fn process_one(
         // decode to a different size than it advertises. The decoded pixels are
         // the truth, so re-plan rather than emit variants for a width the image
         // does not have.
-        let decoded_dimensions = image.dimensions();
+        let decoded_dimensions = (image.width, image.height);
         if decoded_dimensions != (width, height) {
             (width, height) = decoded_dimensions;
             plans = plan_outputs(relative, assets_dir, cache_dir, &digest, options, width);
@@ -391,7 +399,7 @@ fn process_one(
     let cache_hit = plans
         .first()
         .is_some_and(|primary| primary.cached.is_file());
-    let pixels = decoded.as_ref().map(Pixels::from_image);
+    let pixels = decoded.as_ref().map(Pixels::from_decoded);
 
     // Every output of this source is one flat job list. The previous shape —
     // `rayon::join` between the full-size encode and a nested `par_iter` over
@@ -616,7 +624,41 @@ fn relative_url(root: &Path, path: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{ImageBuffer, Rgb, Rgba};
+    use ruvyxa_dev_server::image_decode;
+
+    /// Tests need real encoded files on disk, because the optimizer sniffs and
+    /// decodes them; a pixel buffer would not exercise the path under test.
+    fn write_png(path: &Path, width: u32, height: u32, color: png::ColorType, sample: &[u8]) {
+        let mut out = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut out, width, height);
+            encoder.set_color(color);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().unwrap();
+            let data: Vec<u8> = sample
+                .iter()
+                .copied()
+                .cycle()
+                .take((width * height) as usize * sample.len())
+                .collect();
+            writer.write_image_data(&data).unwrap();
+        }
+        fs::write(path, out).unwrap();
+    }
+
+    fn write_jpeg(path: &Path, width: u16, height: u16, rgb: [u8; 3]) {
+        let mut out = Vec::new();
+        let data: Vec<u8> = rgb
+            .iter()
+            .copied()
+            .cycle()
+            .take(usize::from(width) * usize::from(height) * 3)
+            .collect();
+        jpeg_encoder::Encoder::new(&mut out, 90)
+            .encode(&data, width, height, jpeg_encoder::ColorType::Rgb)
+            .unwrap();
+        fs::write(path, out).unwrap();
+    }
 
     #[test]
     fn publishes_exactly_one_webp_by_default_and_reuses_cache() {
@@ -626,8 +668,7 @@ mod tests {
         let cache = temp.path().join("cache");
         fs::create_dir(&public).unwrap();
         let source = public.join("hero.png");
-        let image = ImageBuffer::from_pixel(4, 3, Rgba([20u8, 40, 60, 255]));
-        image.save(&source).unwrap();
+        write_png(&source, 4, 3, png::ColorType::Rgba, &[20, 40, 60, 255]);
         fs::write(public.join("robots.txt"), b"hello").unwrap();
 
         let first = optimize_public_images(
@@ -681,9 +722,7 @@ mod tests {
         let cache = temp.path().join("cache");
         fs::create_dir(&public).unwrap();
         // 1000px wide: breakpoints 640 and 750 are below it, 828+ are not.
-        ImageBuffer::from_pixel(1000, 500, Rgb([10u8, 20, 30]))
-            .save(public.join("hero.jpg"))
-            .unwrap();
+        write_jpeg(&public.join("hero.jpg"), 1000, 500, [10, 20, 30]);
 
         let report = optimize_public_images(
             &public,
@@ -709,8 +748,11 @@ mod tests {
         assert_eq!(widths, vec![640, 750, 828]);
         assert_eq!(entry.variants[0].output, "/hero-640w.webp");
         // A downscaled variant preserves aspect ratio (1000x500 → 640x320).
-        let decoded = image::open(assets.join("hero-640w.webp")).unwrap();
-        assert_eq!(decoded.dimensions(), (640, 320));
+        assert_eq!(
+            image_decode::header_dimensions(&fs::read(assets.join("hero-640w.webp")).unwrap())
+                .unwrap(),
+            (640, 320)
+        );
     }
 
     #[test]
@@ -720,9 +762,13 @@ mod tests {
         let assets = temp.path().join("assets");
         fs::create_dir(&public).unwrap();
         // Narrower than every breakpoint: no variant should be emitted.
-        ImageBuffer::from_pixel(320, 200, Rgb([1u8, 2, 3]))
-            .save(public.join("icon.png"))
-            .unwrap();
+        write_png(
+            &public.join("icon.png"),
+            320,
+            200,
+            png::ColorType::Rgb,
+            &[1, 2, 3],
+        );
 
         let report = optimize_public_images(
             &public,
@@ -743,9 +789,7 @@ mod tests {
         let public = temp.path().join("public");
         let assets = temp.path().join("assets");
         fs::create_dir(&public).unwrap();
-        ImageBuffer::from_pixel(4, 3, Rgb([20u8, 40, 60]))
-            .save(public.join("photo.jpg"))
-            .unwrap();
+        write_jpeg(&public.join("photo.jpg"), 4, 3, [20, 40, 60]);
 
         optimize_public_images(
             &public,
@@ -754,7 +798,9 @@ mod tests {
             &ImageOptimizationOptions::default(),
         )
         .unwrap();
-        assert!(image::open(assets.join("photo.webp")).is_ok());
+        assert!(
+            image_decode::header_dimensions(&fs::read(assets.join("photo.webp")).unwrap()).is_ok()
+        );
     }
 
     #[test]
@@ -787,9 +833,14 @@ mod tests {
         let public = temp.path().join("public");
         let assets = temp.path().join("assets");
         fs::create_dir(&public).unwrap();
-        let image = ImageBuffer::from_pixel(1, 1, Rgb([1u8, 2, 3]));
-        image.save(public.join("hero.png")).unwrap();
-        image.save(public.join("hero.jpg")).unwrap();
+        write_png(
+            &public.join("hero.png"),
+            1,
+            1,
+            png::ColorType::Rgb,
+            &[1, 2, 3],
+        );
+        write_jpeg(&public.join("hero.jpg"), 1, 1, [1, 2, 3]);
 
         let error = optimize_public_images(
             &public,
@@ -816,9 +867,7 @@ mod tests {
         let cache = temp.path().join("cache");
         fs::create_dir(&public).unwrap();
         let source = public.join("hero.jpg");
-        ImageBuffer::from_pixel(1000, 500, Rgb([10u8, 20, 30]))
-            .save(&source)
-            .unwrap();
+        write_jpeg(&source, 1000, 500, [10, 20, 30]);
         let options = ImageOptimizationOptions {
             variant_widths: vec![640, 750, 828],
             ..ImageOptimizationOptions::default()
