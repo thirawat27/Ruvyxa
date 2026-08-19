@@ -9,11 +9,18 @@
     "maxLength": 128,
     "ttlSeconds": 600,
     "maxEntries": 10000,
+    "perClientMaxEntries": 1000,
     "saturation": {
       "behavior": "reject",
       "status": 503,
       "message": "Action replay protection is saturated",
       "why": "Both hosts used to evict the oldest tracked nonce once maxEntries was reached. Every entry shares one TTL, so the oldest tracked nonce is also the one with the most time left to live: evicting it accepted its replay, and an attacker reaches that state on purpose by sending maxEntries fresh nonces. Neither host may drop a live nonce to make room; a saturated guard refuses the request instead."
+    },
+    "clientSaturation": {
+      "behavior": "reject",
+      "status": 429,
+      "message": "Action replay protection is saturated for this client",
+      "why": "The rate limiter in front of the guard is keyed per client and per path and action, so one client spreading requests over two actions earns two fresh buckets while the nonce pool stays one — enough for a single address to reach global saturation and refuse every other client's actions for a TTL. Each address may hold at most perClientMaxEntries live nonces; the address over its share is refused with 429 while the pool still serves everyone else. Saturating the pool now takes ten distinct addresses instead of one."
     }
   }
 }

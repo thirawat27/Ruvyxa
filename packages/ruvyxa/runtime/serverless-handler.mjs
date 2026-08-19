@@ -46,6 +46,17 @@ const MAX_PENDING_PATH_REVALIDATIONS = 1_024
 const ACTION_NONCE_TTL_MS = 10 * 60 * 1000
 const MAX_ACTION_NONCES = 10_000
 
+/**
+ * Live nonces one client address may hold, a tenth of the whole pool.
+ *
+ * `actionRateLimitResponse` runs in front of this guard but is keyed per client
+ * *and per path and action*, so one caller spreading requests over two actions
+ * earns two fresh buckets while the nonce pool stays one — enough for a single
+ * address to saturate it and have every other caller's actions refused for a
+ * TTL. Mirrors `ACTION_NONCE_MAX_PER_CLIENT` in `action_security.rs`.
+ */
+const MAX_ACTION_NONCES_PER_CLIENT = MAX_ACTION_NONCES / 10
+
 /** Endpoint the framework's own server actions are posted to. */
 const ACTION_PATH = '/__ruvyxa/action'
 const FLIGHT_PATH = '/__ruvyxa/flight'
@@ -179,6 +190,8 @@ export function createHandler(options) {
   const trustedProxies = parseTrustedProxies(security?.trustedProxyIps)
   const actionBuckets = new Map()
   const actionNonces = new Map()
+  /** Live nonce count per client address, kept level with `actionNonces`. */
+  const actionNonceClients = new Map()
   const pendingRevalidations = new Map()
   /**
    * Generation claims for URLs `revalidatePath()` named, waiting for a
@@ -649,6 +662,7 @@ export function createHandler(options) {
     if (!/^[A-Za-z0-9._~-]{16,128}$/.test(nonce)) {
       return textResponse(400, 'Versioned action requests require a valid replay nonce')
     }
+    const client = clientAddress(headers, trustedProxies)
     const now = Date.now()
 
     // Every nonce is stored with the same TTL, so a Map's insertion order is
@@ -658,13 +672,22 @@ export function createHandler(options) {
     // A backwards wall-clock step can leave an entry behind the one in front of
     // it; that only delays its removal until a later sweep reaches it, and a
     // nonce held longer than its TTL is refused, never wrongly accepted.
-    for (const [key, expires] of actionNonces) {
-      if (expires > now) break
+    for (const [key, entry] of actionNonces) {
+      if (entry.expires > now) break
       actionNonces.delete(key)
+      releaseActionNonceClient(entry.client)
     }
 
     const key = `${actionReference}:${nonce}`
     if (actionNonces.has(key)) return textResponse(409, 'Action request replayed')
+
+    // This address is over its share of the pool. Checked before the global
+    // bound so the caller that filled the map is the one refused, rather than
+    // whichever request happens to arrive next. 429 rather than 503: only this
+    // address is over its quota, and the instance still serves everyone else.
+    if ((actionNonceClients.get(client) ?? 0) >= MAX_ACTION_NONCES_PER_CLIENT) {
+      return textResponse(429, 'Action replay protection is saturated for this client')
+    }
 
     // Full, with nothing expired left to drop. Evicting the oldest live nonce
     // to make room would accept that nonce's replay — the one thing this map
@@ -675,8 +698,22 @@ export function createHandler(options) {
       return textResponse(503, 'Action replay protection is saturated')
     }
 
-    actionNonces.set(key, now + ACTION_NONCE_TTL_MS)
+    actionNonces.set(key, { expires: now + ACTION_NONCE_TTL_MS, client })
+    actionNonceClients.set(client, (actionNonceClients.get(client) ?? 0) + 1)
     return null
+  }
+
+  /**
+   * Drop one live entry from a client's count, forgetting the address when its
+   * last nonce expires so `actionNonceClients` stays bounded by the pool.
+   *
+   * @param {string} client
+   */
+  function releaseActionNonceClient(client) {
+    const held = actionNonceClients.get(client)
+    if (held === undefined) return
+    if (held <= 1) actionNonceClients.delete(client)
+    else actionNonceClients.set(client, held - 1)
   }
 
   /**

@@ -8,7 +8,7 @@ use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::time::{Duration, Instant};
 
 use axum::Router;
@@ -56,8 +56,8 @@ pub use env_file::project_env;
 
 mod action_security;
 use action_security::{
-    ActionRateLimiter, ActionReplayGuard, action_rate_limit_key, hmr_origin_is_cross_site,
-    validate_action_payload, validate_action_request,
+    ActionRateLimiter, ActionReplayGuard, action_client_ip, action_rate_limit_key,
+    hmr_origin_is_cross_site, validate_action_payload, validate_action_request,
 };
 pub use action_security::{IpPrefix, TrustedProxies, action_reference_id};
 #[cfg(test)]
@@ -2506,22 +2506,25 @@ async fn action_endpoint(
                 (StatusCode::CONFLICT, "Action reference is stale or invalid").into_response(),
             );
         }
+        // A poisoned lock is recovered rather than refused. `ActionReplayGuard`
+        // records a nonce in `seen` before `order`, so a panic under this lock
+        // cannot leave state that accepts a replay — and `std::sync` poisoning
+        // never clears, so failing on it took every versioned action out for the
+        // life of the process. This matches how `collab.rs` treats its own room
+        // lock.
         let replay = state
             .action_replays
             .lock()
-            .map_err(|_| "Action replay protection is unavailable")
-            .and_then(|mut guard| guard.consume(&headers, provided_reference));
-        if let Err(message) = replay {
-            let status = if message == "Action request replayed" {
-                StatusCode::CONFLICT
-            } else if message == "Action replay protection is unavailable"
-                || message == "Action replay protection is saturated"
-            {
-                StatusCode::SERVICE_UNAVAILABLE
-            } else {
-                StatusCode::BAD_REQUEST
-            };
-            return with_security_headers((status, message).into_response());
+            .unwrap_or_else(PoisonError::into_inner)
+            .consume(
+                &headers,
+                provided_reference,
+                action_client_ip(peer, &headers, &state.config),
+            );
+        if let Err(rejection) = replay {
+            return with_security_headers(
+                (rejection.status(), rejection.message()).into_response(),
+            );
         }
     }
 

@@ -296,22 +296,35 @@ pub(crate) fn serve_public_file_sync(
     Ok(Some(response))
 }
 
-/// Sync fallback for client file serving (used by render_request test/bench path).
-pub(crate) fn serve_client_file_sync(
-    client_dir: &Path,
-    request_path: &str,
-) -> Result<Option<Response>> {
-    let Some(file_name) = request_path.strip_prefix("/__ruvyxa/client/") else {
-        return Ok(None);
-    };
+/// Resolve `/__ruvyxa/client/<name>` to a file inside `client_dir`, or refuse.
+///
+/// The client bundle directory is flat, so a served name may not carry a
+/// separator or a parent segment at all — a stricter rule than
+/// `is_safe_relative_path`, which exists to accept nested public assets.
+///
+/// This is the one place that rule lives. It was written out twice, once in
+/// each of the two callers below, which is a copy of a security guard whose
+/// halves nothing kept level: `render_pipeline` reaches the sync caller while
+/// live requests reach the async one, so a rule added to one of them would have
+/// left the other answering for paths it had already been taught to refuse.
+fn resolve_client_file(client_dir: &Path, request_path: &str) -> Option<PathBuf> {
+    let file_name = request_path.strip_prefix("/__ruvyxa/client/")?;
     if file_name.is_empty()
         || file_name.contains('/')
         || file_name.contains('\\')
         || file_name.contains("..")
     {
-        return Ok(None);
+        return None;
     }
-    let Some(file) = contained_public_asset(client_dir, &client_dir.join(file_name)) else {
+    contained_public_asset(client_dir, &client_dir.join(file_name))
+}
+
+/// Sync fallback for client file serving (used by render_request test/bench path).
+pub(crate) fn serve_client_file_sync(
+    client_dir: &Path,
+    request_path: &str,
+) -> Result<Option<Response>> {
+    let Some(file) = resolve_client_file(client_dir, request_path) else {
         return Ok(None);
     };
     if !file.is_file() {
@@ -336,19 +349,7 @@ pub(crate) async fn serve_client_file(
     request_path: &str,
     request_headers: Option<&HeaderMap>,
 ) -> Result<Option<Response>> {
-    let Some(file_name) = request_path.strip_prefix("/__ruvyxa/client/") else {
-        return Ok(None);
-    };
-
-    if file_name.is_empty()
-        || file_name.contains('/')
-        || file_name.contains('\\')
-        || file_name.contains("..")
-    {
-        return Ok(None);
-    }
-
-    let Some(file) = contained_public_asset(client_dir, &client_dir.join(file_name)) else {
+    let Some(file) = resolve_client_file(client_dir, request_path) else {
         return Ok(None);
     };
     let metadata = match tokio::fs::metadata(&file).await {

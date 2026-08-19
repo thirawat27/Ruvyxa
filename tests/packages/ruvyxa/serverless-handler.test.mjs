@@ -81,7 +81,7 @@ describe('serverless request body limits', () => {
     const fixture = JSON.parse(
       readFileSync(path.join(workspaceRoot, 'tests/fixtures/action-contract.json'), 'utf8'),
     )
-    const { maxEntries, saturation } = fixture.nonce
+    const { maxEntries, perClientMaxEntries, saturation } = fixture.nonce
     assert.equal(saturation.behavior, 'reject')
 
     const submit = async (input) => input
@@ -99,7 +99,7 @@ describe('serverless request body limits', () => {
       // filled; this test is about the guard's own bound.
       security: { actionRateLimit: { max: maxEntries * 2, window: 60 } },
     })
-    const invoke = (nonce) =>
+    const invoke = (nonce, client = '203.0.113.1') =>
       handler(
         new Request(
           `http://localhost/__ruvyxa/action?path=/target&name=submit&id=${encodeURIComponent(fixture.expected)}`,
@@ -111,6 +111,7 @@ describe('serverless request body limits', () => {
               origin: 'http://localhost',
               'sec-fetch-site': 'same-origin',
               'x-ruvyxa-action-nonce': nonce,
+              'cf-connecting-ip': client,
             },
             body: '{}',
           },
@@ -118,17 +119,73 @@ describe('serverless request body limits', () => {
       )
 
     const first = 'n0000000000000000'
+    // Spread across addresses: no single one may fill the pool any more, which
+    // is what the `clientSaturation` case below holds.
     for (let index = 0; index < maxEntries; index++) {
-      assert.equal((await invoke(`n${String(index).padStart(16, '0')}`)).status, 200)
+      const client = `203.0.113.${Math.floor(index / perClientMaxEntries)}`
+      assert.equal((await invoke(`n${String(index).padStart(16, '0')}`, client)).status, 200)
     }
 
-    const saturated = await invoke('fedcba9876543210')
+    const saturated = await invoke('fedcba9876543210', '198.51.100.7')
     assert.equal(saturated.status, saturation.status)
     assert.equal(await saturated.text(), saturation.message)
 
     // The entry that eviction would have freed is still held, so its replay is
     // still refused. That is what failing closed buys.
-    assert.equal((await invoke(first)).status, 409)
+    assert.equal((await invoke(first, '203.0.113.0')).status, 409)
+  })
+
+  it('refuses one client over its quota without refusing everyone else', async () => {
+    const fixture = JSON.parse(
+      readFileSync(path.join(workspaceRoot, 'tests/fixtures/action-contract.json'), 'utf8'),
+    )
+    const { maxEntries, perClientMaxEntries, clientSaturation } = fixture.nonce
+    assert.equal(clientSaturation.behavior, 'reject')
+
+    const submit = async (input) => input
+    submit.ruvyxa = { kind: 'action' }
+    const route = {
+      ...pageRoute(fixture.routeId, '/target'),
+      actionReferenceId: fixture.expected,
+    }
+    const handler = createHandler({
+      routes: [route],
+      importPage: async () => ({}),
+      importApi: async () => ({}),
+      importAction: async () => ({ submit }),
+      security: { actionRateLimit: { max: maxEntries * 2, window: 60 } },
+    })
+    const invoke = (nonce, client) =>
+      handler(
+        new Request(
+          `http://localhost/__ruvyxa/action?path=/target&name=submit&id=${encodeURIComponent(fixture.expected)}`,
+          {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              host: 'localhost',
+              origin: 'http://localhost',
+              'sec-fetch-site': 'same-origin',
+              'x-ruvyxa-action-nonce': nonce,
+              'cf-connecting-ip': client,
+            },
+            body: '{}',
+          },
+        ),
+      )
+
+    const noisy = '203.0.113.7'
+    for (let index = 0; index < perClientMaxEntries; index++) {
+      assert.equal((await invoke(`n${String(index).padStart(16, '0')}`, noisy)).status, 200)
+    }
+
+    const refused = await invoke('fedcba9876543210', noisy)
+    assert.equal(refused.status, clientSaturation.status)
+    assert.equal(await refused.text(), clientSaturation.message)
+
+    // The pool is a tenth full, so every other address is unaffected — the
+    // whole point of the quota.
+    assert.equal((await invoke('fedcba9876543210', '198.51.100.8')).status, 200)
   })
 
   it('stops reading a lengthless action body at the action limit', async () => {

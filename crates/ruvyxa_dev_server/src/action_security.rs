@@ -1,7 +1,7 @@
 //! Server-action request validation: origin/fetch-metadata checks, payload
 //! parsing, and the per-key rate limiter.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::time::{Duration, Instant};
 
@@ -12,6 +12,21 @@ use crate::{ActionQuery, ServerConfig};
 
 const ACTION_NONCE_TTL: Duration = Duration::from_secs(600);
 const ACTION_NONCE_MAX_ENTRIES: usize = 10_000;
+
+/// Live nonces one client address may hold, a tenth of the whole pool.
+///
+/// The rate limiter in front of this guard is keyed per client *and per path
+/// and action*, so a client that spreads its requests over two actions gets two
+/// fresh buckets while the nonce pool stays one — enough to reach global
+/// saturation alone, which refuses every other client's actions for a TTL. The
+/// quota bounds one address to a share, so saturating the pool now takes ten
+/// distinct addresses rather than one.
+///
+/// A tenth is a deliberate trade. A NAT'd office shares one address, and at
+/// this bound they collectively get 1,000 in-flight versioned actions per TTL
+/// before the guard starts refusing them; the alternative was letting any one
+/// address refuse everyone.
+const ACTION_NONCE_MAX_PER_CLIENT: usize = ACTION_NONCE_MAX_ENTRIES / 10;
 
 /// Process-local replay protection for version-bound action requests.
 ///
@@ -28,7 +43,57 @@ const ACTION_NONCE_MAX_ENTRIES: usize = 10_000;
 #[derive(Debug, Default)]
 pub(crate) struct ActionReplayGuard {
     seen: HashSet<String>,
-    order: VecDeque<(Instant, String)>,
+    order: VecDeque<NonceEntry>,
+    /// Live entry count per client, kept level with `order` by the same sweep.
+    /// An address drops out of the map when its last nonce expires, so this
+    /// cannot outgrow the pool it accounts for.
+    per_client: HashMap<IpAddr, usize>,
+}
+
+#[derive(Debug)]
+struct NonceEntry {
+    expires: Instant,
+    key: String,
+    client: IpAddr,
+}
+
+/// Why the replay guard refused a versioned action request.
+///
+/// The status travels with the rejection instead of being re-derived at the
+/// call site. It used to be recovered by comparing the message text against
+/// string literals repeated in `handle_action`, so rewording a message here
+/// silently answered `400` where `tests/fixtures/action-contract.json` pins
+/// `503` — a drift no test could catch, because the fixture's `status` was
+/// replayed by the serverless handler's suite and by nothing on this side.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ActionReplayRejection {
+    InvalidNonce,
+    Replayed,
+    ClientSaturated,
+    Saturated,
+}
+
+impl ActionReplayRejection {
+    pub(crate) fn status(self) -> StatusCode {
+        match self {
+            Self::InvalidNonce => StatusCode::BAD_REQUEST,
+            Self::Replayed => StatusCode::CONFLICT,
+            // The client's own quota, not the service's capacity: 429 says the
+            // caller should slow down, where 503 would claim the service is
+            // degraded for everyone when only this address is over its share.
+            Self::ClientSaturated => StatusCode::TOO_MANY_REQUESTS,
+            Self::Saturated => StatusCode::SERVICE_UNAVAILABLE,
+        }
+    }
+
+    pub(crate) fn message(self) -> &'static str {
+        match self {
+            Self::InvalidNonce => "Versioned action requests require a valid replay nonce",
+            Self::Replayed => "Action request replayed",
+            Self::ClientSaturated => "Action replay protection is saturated for this client",
+            Self::Saturated => "Action replay protection is saturated",
+        }
+    }
 }
 
 impl ActionReplayGuard {
@@ -36,7 +101,8 @@ impl ActionReplayGuard {
         &mut self,
         headers: &HeaderMap,
         action_reference: &str,
-    ) -> Result<(), &'static str> {
+        client: IpAddr,
+    ) -> Result<(), ActionReplayRejection> {
         let nonce = headers
             .get("x-ruvyxa-action-nonce")
             .and_then(|value| value.to_str().ok())
@@ -46,22 +112,30 @@ impl ActionReplayGuard {
                 byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'~' | b'-')
             })
         {
-            return Err("Versioned action requests require a valid replay nonce");
+            return Err(ActionReplayRejection::InvalidNonce);
         }
         let now = Instant::now();
-        while self
-            .order
-            .front()
-            .is_some_and(|(expires, _)| *expires <= now)
-        {
-            if let Some((_, expired)) = self.order.pop_front() {
-                self.seen.remove(&expired);
+        while self.order.front().is_some_and(|entry| entry.expires <= now) {
+            if let Some(expired) = self.order.pop_front() {
+                self.seen.remove(&expired.key);
+                self.release_client(expired.client);
             }
         }
 
         let key = format!("{action_reference}:{nonce}");
         if self.seen.contains(&key) {
-            return Err("Action request replayed");
+            return Err(ActionReplayRejection::Replayed);
+        }
+
+        // This address is over its share of the pool. Checked before the global
+        // bound so the address that filled the guard is the one refused, rather
+        // than whichever request happens to arrive next.
+        if self
+            .per_client
+            .get(&client)
+            .is_some_and(|held| *held >= ACTION_NONCE_MAX_PER_CLIENT)
+        {
+            return Err(ActionReplayRejection::ClientSaturated);
         }
 
         // Full, with nothing expired left to drop. Dropping the oldest live
@@ -69,12 +143,36 @@ impl ActionReplayGuard {
         // this guard exists to refuse -- and an attacker reaches this state by
         // sending fresh nonces. Saturation fails closed instead.
         if self.seen.len() >= ACTION_NONCE_MAX_ENTRIES {
-            return Err("Action replay protection is saturated");
+            return Err(ActionReplayRejection::Saturated);
         }
 
-        self.order.push_back((now + ACTION_NONCE_TTL, key.clone()));
-        self.seen.insert(key);
+        // `seen` is written before `order`, so the guard's structures can only
+        // ever disagree in the direction that refuses: an interruption between
+        // these lines strands one key that never expires, where the reverse
+        // order would leave a nonce that `seen` does not know about and whose
+        // replay the guard would then accept. That is what lets the caller
+        // recover a poisoned lock rather than answering 503 forever. The
+        // per-client count is raised last for the same reason — overcounting
+        // refuses, undercounting admits.
+        self.seen.insert(key.clone());
+        self.order.push_back(NonceEntry {
+            expires: now + ACTION_NONCE_TTL,
+            key,
+            client,
+        });
+        *self.per_client.entry(client).or_insert(0) += 1;
         Ok(())
+    }
+
+    /// Drop one live entry from a client's count, forgetting the address when
+    /// its last nonce expires so `per_client` stays bounded by the pool.
+    fn release_client(&mut self, client: IpAddr) {
+        if let Some(held) = self.per_client.get_mut(&client) {
+            *held -= 1;
+            if *held == 0 {
+                self.per_client.remove(&client);
+            }
+        }
     }
 }
 
@@ -549,23 +647,34 @@ pub(crate) fn action_fetch_site_is_cross_site(headers: &HeaderMap) -> bool {
         .is_some_and(|value| value.eq_ignore_ascii_case("cross-site"))
 }
 
+/// The address an action request is attributed to.
+///
+/// Forwarded identity is untrusted unless the direct peer is loopback or
+/// explicitly allowlisted. Private ranges alone are not a trust boundary:
+/// a LAN client can otherwise forge X-Forwarded-For and bypass the limiter.
+///
+/// Shared by the rate limiter and the replay guard's per-client quota, so the
+/// two cannot disagree about who a request belongs to.
+pub(crate) fn action_client_ip(
+    peer: SocketAddr,
+    headers: &HeaderMap,
+    config: &ServerConfig,
+) -> IpAddr {
+    let peer_ip = peer.ip();
+    if is_trusted_proxy_ip(config, peer_ip) {
+        forwarded_client_ip(config, headers).unwrap_or(peer_ip)
+    } else {
+        peer_ip
+    }
+}
+
 pub(crate) fn action_rate_limit_key(
     peer: SocketAddr,
     headers: &HeaderMap,
     query: &ActionQuery,
     config: &ServerConfig,
 ) -> String {
-    let peer_ip = peer.ip();
-
-    // Forwarded identity is untrusted unless the direct peer is loopback or
-    // explicitly allowlisted. Private ranges alone are not a trust boundary:
-    // a LAN client can otherwise forge X-Forwarded-For and bypass the limiter.
-    let client = if is_trusted_proxy_ip(config, peer_ip) {
-        forwarded_client_ip(config, headers).unwrap_or(peer_ip)
-    } else {
-        peer_ip
-    };
-
+    let client = action_client_ip(peer, headers, config);
     format!("{client}:{}:{}", query.path, query.name)
 }
 
@@ -599,6 +708,19 @@ fn is_trusted_proxy_ip(config: &ServerConfig, ip: IpAddr) -> bool {
 mod tests {
     use super::*;
 
+    /// One nonce header, so the guard tests read as the request they describe.
+    fn nonce_headers(nonce: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-ruvyxa-action-nonce", nonce.parse().unwrap());
+        headers
+    }
+
+    /// Distinct client addresses, one per index, for filling the pool.
+    fn client(index: usize) -> IpAddr {
+        let octets = u32::try_from(index).expect("test client index fits an IPv4 address");
+        IpAddr::V4(Ipv4Addr::from(octets))
+    }
+
     #[test]
     fn action_reference_and_nonce_replay_contract_is_stable() {
         let fixture: serde_json::Value =
@@ -613,12 +735,22 @@ mod tests {
         );
 
         let mut guard = ActionReplayGuard::default();
-        let mut headers = HeaderMap::new();
-        headers.insert("x-ruvyxa-action-nonce", "0123456789abcdef".parse().unwrap());
-        assert!(guard.consume(&headers, "a_0123456789abcdef").is_ok());
+        let headers = nonce_headers("0123456789abcdef");
+        assert!(
+            guard
+                .consume(&headers, "a_0123456789abcdef", client(1))
+                .is_ok()
+        );
         assert_eq!(
-            guard.consume(&headers, "a_0123456789abcdef"),
-            Err("Action request replayed")
+            guard.consume(&headers, "a_0123456789abcdef", client(1)),
+            Err(ActionReplayRejection::Replayed)
+        );
+
+        // A replay from a different address is still a replay: the client is an
+        // accounting dimension, never part of the nonce's identity.
+        assert_eq!(
+            guard.consume(&headers, "a_0123456789abcdef", client(2)),
+            Err(ActionReplayRejection::Replayed)
         );
 
         let nonce = &fixture["nonce"];
@@ -629,6 +761,10 @@ mod tests {
         assert_eq!(
             nonce["maxEntries"].as_u64().unwrap() as usize,
             ACTION_NONCE_MAX_ENTRIES
+        );
+        assert_eq!(
+            nonce["perClientMaxEntries"].as_u64().unwrap() as usize,
+            ACTION_NONCE_MAX_PER_CLIENT
         );
     }
 
@@ -645,29 +781,111 @@ mod tests {
 
         let mut guard = ActionReplayGuard::default();
         let first = "n0000000000000000";
+        // Spread across addresses, because no single one may fill the pool any
+        // more — that is what `a_single_client_cannot_saturate_the_pool` holds.
         for index in 0..ACTION_NONCE_MAX_ENTRIES {
-            let mut headers = HeaderMap::new();
-            headers.insert(
-                "x-ruvyxa-action-nonce",
-                format!("n{index:016}").parse().unwrap(),
+            let headers = nonce_headers(&format!("n{index:016}"));
+            assert!(
+                guard
+                    .consume(
+                        &headers,
+                        "a_0123456789abcdef",
+                        client(index / ACTION_NONCE_MAX_PER_CLIENT)
+                    )
+                    .is_ok()
             );
-            assert!(guard.consume(&headers, "a_0123456789abcdef").is_ok());
         }
 
-        let mut headers = HeaderMap::new();
-        headers.insert("x-ruvyxa-action-nonce", "fedcba9876543210".parse().unwrap());
+        let headers = nonce_headers("fedcba9876543210");
+        let rejection = guard
+            .consume(&headers, "a_0123456789abcdef", client(9999))
+            .expect_err("a saturated guard must refuse");
+        assert_eq!(rejection, ActionReplayRejection::Saturated);
+
+        // Both halves of the fixture's saturation clause, replayed here as the
+        // serverless handler's suite replays them. The status was previously
+        // derived in `handle_action` by comparing the message against a copy of
+        // this literal, so a reworded message answered 400 with nothing failing.
+        assert_eq!(rejection.message(), saturation["message"].as_str().unwrap());
         assert_eq!(
-            guard.consume(&headers, "a_0123456789abcdef"),
-            Err(saturation["message"].as_str().unwrap())
+            rejection.status().as_u16(),
+            u16::try_from(saturation["status"].as_u64().unwrap()).unwrap()
         );
 
         // The nonce that filling the guard would previously have evicted is
         // still refused as a replay, which is the point of failing closed.
-        let mut headers = HeaderMap::new();
-        headers.insert("x-ruvyxa-action-nonce", first.parse().unwrap());
+        let headers = nonce_headers(first);
         assert_eq!(
-            guard.consume(&headers, "a_0123456789abcdef"),
-            Err("Action request replayed")
+            guard.consume(&headers, "a_0123456789abcdef", client(0)),
+            Err(ActionReplayRejection::Replayed)
+        );
+    }
+
+    /// One address may hold only its share, so it cannot refuse everyone else's
+    /// actions by filling the pool alone. The rate limiter in front of the guard
+    /// does not bound this on its own: it is keyed per path and action too, so
+    /// the same client earns a fresh bucket per action while the pool stays one.
+    #[test]
+    fn a_single_client_cannot_saturate_the_pool() {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("../../../tests/fixtures/action-contract.json"))
+                .unwrap();
+        let clause = &fixture["nonce"]["clientSaturation"];
+        assert_eq!(clause["behavior"].as_str().unwrap(), "reject");
+
+        let mut guard = ActionReplayGuard::default();
+        let noisy = client(7);
+        for index in 0..ACTION_NONCE_MAX_PER_CLIENT {
+            let headers = nonce_headers(&format!("n{index:016}"));
+            assert!(guard.consume(&headers, "a_0123456789abcdef", noisy).is_ok());
+        }
+
+        let headers = nonce_headers("fedcba9876543210");
+        let rejection = guard
+            .consume(&headers, "a_0123456789abcdef", noisy)
+            .expect_err("a client over its quota must be refused");
+        assert_eq!(rejection, ActionReplayRejection::ClientSaturated);
+        assert_eq!(rejection.message(), clause["message"].as_str().unwrap());
+        assert_eq!(
+            rejection.status().as_u16(),
+            u16::try_from(clause["status"].as_u64().unwrap()).unwrap()
+        );
+
+        // The pool is a tenth full, so every other address is unaffected — the
+        // whole point of the quota.
+        assert!(
+            guard
+                .consume(&headers, "a_0123456789abcdef", client(8))
+                .is_ok()
+        );
+    }
+
+    /// Every rejection carries its own status, and nothing else in the crate
+    /// pins them now that `handle_action` no longer restates them.
+    #[test]
+    fn every_replay_rejection_carries_its_own_status() {
+        let mut guard = ActionReplayGuard::default();
+        let headers = nonce_headers("short");
+        assert_eq!(
+            guard.consume(&headers, "a_0123456789abcdef", client(1)),
+            Err(ActionReplayRejection::InvalidNonce)
+        );
+
+        assert_eq!(
+            ActionReplayRejection::ClientSaturated.status(),
+            StatusCode::TOO_MANY_REQUESTS
+        );
+        assert_eq!(
+            ActionReplayRejection::InvalidNonce.status(),
+            StatusCode::BAD_REQUEST
+        );
+        assert_eq!(
+            ActionReplayRejection::Replayed.status(),
+            StatusCode::CONFLICT
+        );
+        assert_eq!(
+            ActionReplayRejection::Saturated.status(),
+            StatusCode::SERVICE_UNAVAILABLE
         );
     }
 
