@@ -23,12 +23,42 @@ pub struct Decoded {
     pub layout: PixelLayout,
 }
 
+/// Why an image could not be decoded.
+///
+/// `TooLarge` is a variant rather than a message because callers answer it
+/// differently: the runtime image endpoint returns 413 for it and 400 for
+/// everything else. Recovering that from formatted text would be the same
+/// stringly-typed coupling this crate removed from the action replay guard, and
+/// the alternative — re-reading the header at the call site to decide — parsed
+/// the same prefix a second time on every request.
 #[derive(Debug)]
-pub struct DecodeError(pub String);
+pub enum DecodeError {
+    /// The magic bytes matched no format this build accepts.
+    Unsupported,
+    /// The header declares more pixels than the caller allowed.
+    TooLarge {
+        width: u32,
+        height: u32,
+        max_pixels: u64,
+    },
+    /// The bytes claim a supported format but do not decode as one.
+    Malformed(String),
+}
 
 impl std::fmt::Display for DecodeError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        formatter.write_str(&self.0)
+        match self {
+            Self::Unsupported => formatter.write_str("unrecognized image format"),
+            Self::TooLarge {
+                width,
+                height,
+                max_pixels,
+            } => write!(
+                formatter,
+                "image is {width}x{height}, above the {max_pixels} pixel budget"
+            ),
+            Self::Malformed(detail) => formatter.write_str(detail),
+        }
     }
 }
 
@@ -37,7 +67,7 @@ impl std::error::Error for DecodeError {}
 type Result<T> = std::result::Result<T, DecodeError>;
 
 fn fail(detail: impl std::fmt::Display) -> DecodeError {
-    DecodeError(detail.to_string())
+    DecodeError::Malformed(detail.to_string())
 }
 
 /// The formats runtime and build-time optimization accept.
@@ -71,7 +101,7 @@ pub fn sniff(source: &[u8]) -> Option<Format> {
 /// the header is a fixed-size prefix, while decoding allocates
 /// `width * height * channels` bytes before anything gets a chance to object.
 pub fn header_dimensions(source: &[u8]) -> Result<(u32, u32)> {
-    match sniff(source).ok_or_else(|| fail("unrecognized image format"))? {
+    match sniff(source).ok_or(DecodeError::Unsupported)? {
         Format::Png => {
             let reader = png::Decoder::new(Cursor::new(source))
                 .read_info()
@@ -108,23 +138,34 @@ fn to_u32(value: usize) -> Result<u32> {
 /// ever sees a dimension to reject. The header covers the honest case cheaply;
 /// the decoder limit covers a header that lies about what follows.
 pub fn decode_within_pixel_budget(source: &[u8], max_pixels: u64) -> Result<Decoded> {
-    let format = sniff(source).ok_or_else(|| fail("unrecognized image format"))?;
-    let (width, height) = header_dimensions(source)?;
-    if u64::from(width) * u64::from(height) > max_pixels {
-        return Err(fail(format!(
-            "image is {width}x{height}, above the {max_pixels} pixel budget"
-        )));
-    }
     // Four channels is the widest layout `Decoded` keeps, and a decoder needs
     // room for one such buffer. The slack absorbs per-decoder scratch without
     // widening the budget enough to matter.
     let max_alloc = max_pixels.saturating_mul(4).saturating_add(1 << 20);
 
-    match format {
-        Format::Png => decode_png(source, max_alloc),
+    // The header check happens inside each decoder, against the reader it has
+    // already built. Calling `header_dimensions` here instead re-sniffed the
+    // magic bytes and parsed the header a second time, and the decoder then
+    // parsed it a third — three passes over the same prefix for one answer.
+    // That is invisible on a 6000x4000 photo and is most of the per-image cost
+    // on a directory of icons.
+    match sniff(source).ok_or(DecodeError::Unsupported)? {
+        Format::Png => decode_png(source, max_pixels, max_alloc),
         Format::Jpeg => decode_jpeg(source, max_pixels),
-        Format::Webp => decode_webp(source, max_alloc),
+        Format::Webp => decode_webp(source, max_pixels, max_alloc),
     }
+}
+
+/// Reject a header that declares more pixels than the caller allowed.
+fn check_budget(width: u32, height: u32, max_pixels: u64) -> Result<()> {
+    if u64::from(width) * u64::from(height) > max_pixels {
+        return Err(DecodeError::TooLarge {
+            width,
+            height,
+            max_pixels,
+        });
+    }
+    Ok(())
 }
 
 /// PNG, normalized to 8-bit RGB or RGBA.
@@ -133,13 +174,15 @@ pub fn decode_within_pixel_budget(source: &[u8], max_pixels: u64) -> Result<Deco
 /// transparency, and strips 16-bit samples down to 8 — so the output is one of
 /// four color types rather than the full PNG matrix. Grayscale still arrives as
 /// grayscale, and is widened here.
-fn decode_png(source: &[u8], max_alloc: u64) -> Result<Decoded> {
+fn decode_png(source: &[u8], max_pixels: u64, max_alloc: u64) -> Result<Decoded> {
     let mut decoder = png::Decoder::new(Cursor::new(source));
     decoder.set_transformations(png::Transformations::normalize_to_color8());
     decoder.set_limits(png::Limits {
         bytes: usize::try_from(max_alloc).unwrap_or(usize::MAX),
     });
     let mut reader = decoder.read_info().map_err(fail)?;
+    let info = reader.info();
+    check_budget(info.width, info.height, max_pixels)?;
     let size = reader
         .output_buffer_size()
         .ok_or_else(|| fail("PNG output buffer size overflows"))?;
@@ -171,12 +214,28 @@ fn decode_png(source: &[u8], max_alloc: u64) -> Result<Decoded> {
 /// discarded.
 fn widen(buffer: &[u8], channels: usize, has_alpha: bool) -> Vec<u8> {
     let out_channels = if has_alpha { 4 } else { 3 };
-    let mut out = Vec::with_capacity(buffer.len() / channels * out_channels);
-    for pixel in buffer.chunks_exact(channels) {
-        let luma = pixel[0];
-        out.extend_from_slice(&[luma, luma, luma]);
-        if has_alpha {
-            out.push(pixel[1]);
+    let pixels = buffer.len() / channels;
+    // Written into a pre-sized buffer through fixed-width chunks rather than
+    // grown by `extend_from_slice`/`push` per pixel: the destination stride is a
+    // compile-time constant inside each branch, so the loop vectorizes and the
+    // bounds checks fold away. The pushing version reallocated as it went and
+    // re-checked capacity on every channel.
+    let mut out = vec![0u8; pixels * out_channels];
+    if has_alpha {
+        for (source, target) in buffer
+            .chunks_exact(channels)
+            .zip(out.chunks_exact_mut(out_channels))
+        {
+            let [luma, alpha] = [source[0], source[1]];
+            target.copy_from_slice(&[luma, luma, luma, alpha]);
+        }
+    } else {
+        for (source, target) in buffer
+            .chunks_exact(channels)
+            .zip(out.chunks_exact_mut(out_channels))
+        {
+            let luma = source[0];
+            target.copy_from_slice(&[luma, luma, luma]);
         }
     }
     out
@@ -198,10 +257,14 @@ fn decode_jpeg(source: &[u8], max_pixels: u64) -> Result<Decoded> {
         zune_core::bytestream::ZCursor::new(source),
         options,
     );
-    let data = decoder.decode().map_err(fail)?;
+    // Headers first, so an oversized image is refused before its pixel buffer
+    // is allocated rather than after.
+    decoder.decode_headers().map_err(fail)?;
     let (width, height) = decoder
         .dimensions()
-        .ok_or_else(|| fail("JPEG decoded to no dimensions"))?;
+        .ok_or_else(|| fail("JPEG header declares no dimensions"))?;
+    check_budget(to_u32(width)?, to_u32(height)?, max_pixels)?;
+    let data = decoder.decode().map_err(fail)?;
     Ok(Decoded {
         data,
         width: to_u32(width)?,
@@ -211,10 +274,11 @@ fn decode_jpeg(source: &[u8], max_pixels: u64) -> Result<Decoded> {
 }
 
 /// WebP, decoded to RGB8 or RGBA8 depending on what the file carries.
-fn decode_webp(source: &[u8], max_alloc: u64) -> Result<Decoded> {
+fn decode_webp(source: &[u8], max_pixels: u64, max_alloc: u64) -> Result<Decoded> {
     let mut decoder = image_webp::WebPDecoder::new(Cursor::new(source)).map_err(fail)?;
     decoder.set_memory_limit(usize::try_from(max_alloc).unwrap_or(usize::MAX));
     let (width, height) = decoder.dimensions();
+    check_budget(width, height, max_pixels)?;
     let layout = if decoder.has_alpha() {
         PixelLayout::Rgba8
     } else {
@@ -400,6 +464,40 @@ mod tests {
         assert!(matches!(decoded.layout, PixelLayout::Rgb8));
         assert_eq!((decoded.width, decoded.height), (16, 8));
         assert_eq!(decoded.data.len(), 16 * 8 * 3);
+    }
+
+    /// The budget rejection must stay a distinct variant: the runtime image
+    /// endpoint answers 413 for it and 400 for everything else, and it used to
+    /// tell them apart by parsing the header a second time at the call site.
+    #[test]
+    fn an_oversized_image_is_distinguishable_from_a_corrupt_one() {
+        let png_bytes = fixtures::png(
+            64,
+            64,
+            png::ColorType::Rgb,
+            png::BitDepth::Eight,
+            &[1, 2, 3],
+        );
+        assert!(matches!(
+            decode_within_pixel_budget(&png_bytes, 4095),
+            Err(DecodeError::TooLarge {
+                width: 64,
+                height: 64,
+                max_pixels: 4095
+            })
+        ));
+        assert!(matches!(
+            decode_within_pixel_budget(b"nonsense", 4096),
+            Err(DecodeError::Unsupported)
+        ));
+
+        // A real PNG header followed by garbage is malformed, not oversized.
+        let mut truncated = png_bytes.clone();
+        truncated.truncate(png_bytes.len() / 2);
+        assert!(matches!(
+            decode_within_pixel_budget(&truncated, u64::MAX),
+            Err(DecodeError::Malformed(_))
+        ));
     }
 
     #[test]

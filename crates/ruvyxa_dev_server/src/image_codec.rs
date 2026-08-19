@@ -11,9 +11,15 @@
 //!   encode, and one source produces nine of them.
 //! - **SIMD convolution.** A scalar Lanczos3 loop takes 3628 ms to produce all
 //!   eight responsive widths from a 6000x4000 source. `pic-scale` runs the same
-//!   convolution through AVX2/SSE4.1/NEON in 89 ms. Re-check the number with
-//!   `cargo test --release -p ruvyxa_dev_server measure_responsive -- --ignored
-//!   --nocapture`.
+//!   convolution through AVX2/SSE4.1/NEON in 71 ms.
+//!
+//! What this module is *not* the bottleneck for is the build. Measured on a
+//! 6000x4000 source (16 cores): decode 31 ms, the whole resize ladder 71 ms,
+//! and the WebP encodes 758 ms. With nine outputs scheduled across the cores,
+//! the wall time is the single full-size encode — so work spent shaving the
+//! resize does not show up, and only libwebp settings move the total. Re-check
+//! any of it with
+//! `cargo test --release -p ruvyxa_dev_server measure_ -- --ignored --nocapture`.
 
 use std::fmt;
 
@@ -146,10 +152,13 @@ impl<'a> Pixels<'a> {
         let options = ScalingOptions {
             resampling_function: ResamplingFunction::Lanczos3,
             premultiply_alpha: true,
-            // One resize already parallelizes internally. The build runs
-            // several concurrently on top of that, which oversubscribes only if
-            // both layers fan out to every core; `Adaptive` sizes its pool to
-            // the work rather than to the machine.
+            // `Adaptive` rather than `Single`, even though the build already
+            // runs several of these concurrently under rayon and this nests a
+            // second pool inside that one. Measured both ways: the ladder alone
+            // is 71 ms adaptive against 156 ms single, and the full build is
+            // 691 ms against 704 ms — so the nesting costs nothing here and
+            // `Single` halves the runtime endpoint, which resizes one image per
+            // request with no outer parallelism to borrow.
             threading_policy: ThreadingPolicy::Adaptive,
         };
         let (source_width, source_height) = (self.width as usize, self.height as usize);
@@ -164,7 +173,7 @@ impl<'a> Pixels<'a> {
                 store
                     .scale(&mut destination, options)
                     .map_err(|error| ImageCodecError::Resize(error.to_string()))?;
-                destination.buffer.borrow().to_vec()
+                take_buffer(destination.buffer)
             }
             PixelLayout::Rgba8 => {
                 let store =
@@ -174,7 +183,7 @@ impl<'a> Pixels<'a> {
                 store
                     .scale(&mut destination, options)
                     .map_err(|error| ImageCodecError::Resize(error.to_string()))?;
-                destination.buffer.borrow().to_vec()
+                take_buffer(destination.buffer)
             }
         };
 
@@ -195,9 +204,15 @@ pub struct WebpSettings {
 ///
 /// Mirrors what `Encoder::encode_simple` sets up, plus `method`. libwebp's
 /// `thread_level` is deliberately left alone: it does not split a single lossy
-/// image encode, and measurement confirmed it (2385 ms vs 2351 ms on a
-/// 6000x4000 source). Encode parallelism comes from running the independent
-/// outputs concurrently, not from inside one encode.
+/// image encode. Re-measured on a 6000x4000 source at `method` 4 — 750 ms with
+/// `thread_level` 0 against 814 ms with it on, so enabling it is a loss, not a
+/// wash. Encode parallelism comes from running the independent outputs
+/// concurrently, not from inside one encode.
+///
+/// `effort` is where the time is. Same source, `quality` 82: effort 0 is 221 ms
+/// for 225 KB, 2 is 323 ms for 205 KB, 4 is 752 ms for 197 KB, and 6 is 943 ms
+/// for the same 197 KB — so 6 buys nothing over 4 and the build default stays
+/// at 4 while the request path, where latency is what a user feels, uses 2.
 pub fn encode_webp(pixels: &Pixels<'_>, settings: WebpSettings) -> Result<Vec<u8>> {
     let mut config = webp::WebPConfig::new().map_err(|()| {
         ImageCodecError::Encode("could not initialize the encoder configuration".to_string())
@@ -219,6 +234,19 @@ pub fn encode_webp(pixels: &Pixels<'_>, settings: WebpSettings) -> Result<Vec<u8
         .encode_advanced(&config)
         .map(|memory| memory.to_vec())
         .map_err(|error| ImageCodecError::Encode(format!("{error:?}")))
+}
+
+/// Move a resize result out of its store instead of copying it.
+///
+/// `ImageStoreMut::alloc` always produces `BufferStore::Owned`, so this takes
+/// the `Vec` the resizer already filled. Reading it back through `borrow()` and
+/// calling `to_vec()` copied every output a second time — 29 MB per variant on
+/// a 3840-wide result, and one source emits eight of them.
+fn take_buffer(buffer: pic_scale::BufferStore<'_, u8>) -> Vec<u8> {
+    match buffer {
+        pic_scale::BufferStore::Owned(data) => data,
+        pic_scale::BufferStore::Borrowed(slice) => slice.to_vec(),
+    }
 }
 
 /// Height that preserves aspect ratio, never zero.
@@ -326,50 +354,31 @@ mod tests {
         }
     }
 
-    /// A solid image must survive a downscale unchanged.
+    /// A solid image must survive a downscale as the same colour.
     ///
     /// This is the cheapest possible check that the resizer is wired to the
     /// right buffers and strides: any row/stride mistake turns a constant image
-    /// into stripes or noise, which a dimensions-only assertion would miss.
+    /// into stripes or noise. It is a tolerance rather than an equality because
+    /// Lanczos3 is evaluated in fixed point, and AVX2, NEON, and the scalar
+    /// fallback round the same weights differently — CI saw `202` for `200` on
+    /// another target. A drift of a couple of levels is the arithmetic; the
+    /// defect this guards against moves whole channels.
     #[test]
     fn resizing_a_solid_image_preserves_its_colour() {
-        let source = decoded(40, 40, PixelLayout::Rgb8, &[17, 99, 200]);
+        const EXPECTED: [u8; 3] = [17, 99, 200];
+        const TOLERANCE: i16 = 4;
+
+        let source = decoded(40, 40, PixelLayout::Rgb8, &EXPECTED);
         let resized = Pixels::from_decoded(&source).resize(10, 10).unwrap();
         for pixel in resized.as_slice().chunks_exact(3) {
-            assert_eq!(pixel, [17, 99, 200], "solid colour changed during resize");
+            for (channel, expected) in pixel.iter().zip(EXPECTED) {
+                let drift = i16::from(*channel) - i16::from(expected);
+                assert!(
+                    drift.abs() <= TOLERANCE,
+                    "solid colour changed during resize: got {pixel:?}, expected about {EXPECTED:?}"
+                );
+            }
         }
-    }
-
-    /// Not an assertion — a measurement, printed with `--nocapture`, so the
-    /// number in the module docs can be re-checked on any machine.
-    #[test]
-    #[ignore = "measurement, not a correctness check"]
-    fn measure_responsive_ladder_throughput() {
-        let (width, height) = (6000u32, 4000u32);
-        let mut data = Vec::with_capacity((width * height) as usize * 3);
-        for index in 0..(width * height) as usize {
-            data.extend_from_slice(&[
-                (index % 251) as u8,
-                (index % 241) as u8,
-                (index % 239) as u8,
-            ]);
-        }
-        let source = Decoded {
-            data,
-            width,
-            height,
-            layout: PixelLayout::Rgb8,
-        };
-        let pixels = Pixels::from_decoded(&source);
-        let started = std::time::Instant::now();
-        for target in [640u32, 750, 828, 1080, 1200, 1920, 2048, 3840] {
-            let scaled = scaled_height(width, height, target);
-            std::hint::black_box(pixels.resize(target, scaled).unwrap());
-        }
-        println!(
-            "eight responsive widths from 6000x4000: {:?}",
-            started.elapsed()
-        );
     }
 
     #[test]
@@ -420,6 +429,124 @@ mod tests {
         let fast = encode_webp(&pixels, WebpSettings { effort: 0, ..base }).unwrap();
         for encoded in [&slow, &fast] {
             assert_eq!(header_dimensions(encoded).unwrap(), (64, 64));
+        }
+    }
+
+    /// A photo-like 6000x4000 RGB source: gradients plus detail, so an encoder
+    /// sees realistic entropy rather than a degenerate constant.
+    #[cfg(test)]
+    fn large_photo_source() -> Decoded {
+        let (width, height) = (6000u32, 4000u32);
+        let mut data = Vec::with_capacity((width * height) as usize * 3);
+        for y in 0..height {
+            for x in 0..width {
+                data.extend_from_slice(&[(x / 24) as u8, (y / 16) as u8, ((x ^ y) / 8) as u8]);
+            }
+        }
+        Decoded {
+            data,
+            width,
+            height,
+            layout: PixelLayout::Rgb8,
+        }
+    }
+
+    /// Where the time actually goes, end to end. Run with
+    /// `cargo test --release -p ruvyxa_dev_server measure_ -- --ignored --nocapture`.
+    #[test]
+    #[ignore = "measurement, not a correctness check"]
+    fn measure_full_pipeline() {
+        use std::time::Instant;
+        let source = large_photo_source();
+        let (width, height) = (source.width, source.height);
+        let mut jpeg = Vec::new();
+        jpeg_encoder::Encoder::new(&mut jpeg, 88)
+            .encode(
+                &source.data,
+                width as u16,
+                height as u16,
+                jpeg_encoder::ColorType::Rgb,
+            )
+            .unwrap();
+        println!("source JPEG {} KB", jpeg.len() / 1024);
+
+        let started = Instant::now();
+        let decoded = decode_within_pixel_budget(&jpeg, u64::MAX).unwrap();
+        println!("  decode           {:?}", started.elapsed());
+
+        let pixels = Pixels::from_decoded(&decoded);
+        let settings = WebpSettings {
+            quality: 82,
+            lossless: false,
+            effort: 4,
+        };
+
+        let started = Instant::now();
+        let resized: Vec<_> = RESPONSIVE_WIDTHS
+            .iter()
+            .map(|target| {
+                pixels
+                    .resize(*target, scaled_height(width, height, *target))
+                    .unwrap()
+            })
+            .collect();
+        println!("  resize x8        {:?}", started.elapsed());
+
+        let started = Instant::now();
+        for item in &resized {
+            std::hint::black_box(encode_webp(item, settings).unwrap());
+        }
+        println!("  encode x8        {:?}", started.elapsed());
+
+        let started = Instant::now();
+        std::hint::black_box(encode_webp(&pixels, settings).unwrap());
+        println!("  encode full-size {:?}", started.elapsed());
+    }
+
+    const RESPONSIVE_WIDTHS: [u32; 8] = [640, 750, 828, 1080, 1200, 1920, 2048, 3840];
+
+    /// The full-size encode is the build's critical path — with nine outputs on
+    /// sixteen cores, nothing finishes before the longest single job. These are
+    /// the two libwebp knobs that could shorten it.
+    #[test]
+    #[ignore = "measurement, not a correctness check"]
+    fn measure_encode_knobs() {
+        use std::time::Instant;
+        let source = large_photo_source();
+        let pixels = Pixels::from_decoded(&source);
+
+        for effort in [0u8, 2, 4, 6] {
+            let settings = WebpSettings {
+                quality: 82,
+                lossless: false,
+                effort,
+            };
+            let started = Instant::now();
+            let encoded = encode_webp(&pixels, settings).unwrap();
+            println!(
+                "  effort {effort}        {:>10.1?}  {:>5} KB",
+                started.elapsed(),
+                encoded.len() / 1024
+            );
+        }
+
+        for threads in [0i32, 1] {
+            let mut config = webp::WebPConfig::new().unwrap();
+            config.lossless = 0;
+            config.alpha_compression = 1;
+            config.quality = 82.0;
+            config.method = 4;
+            config.thread_level = threads;
+            let started = Instant::now();
+            let encoded = webp::Encoder::from_rgb(pixels.as_slice(), pixels.width, pixels.height)
+                .encode_advanced(&config)
+                .unwrap()
+                .len();
+            println!(
+                "  thread_level {threads}  {:>10.1?}  {:>5} KB",
+                started.elapsed(),
+                encoded / 1024
+            );
         }
     }
 }

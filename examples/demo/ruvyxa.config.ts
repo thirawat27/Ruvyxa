@@ -65,7 +65,7 @@ const settings: RuvyxaConfig = {
     optimize: true,
     quality: 82,
     lossless: false,
-    workers: 0,
+    workers: 2,
   },
 
   plugins: [...demoPlugins, realtime()],

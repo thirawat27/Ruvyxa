@@ -2,9 +2,8 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use crate::image_codec::{
-    Pixels, WebpSettings, decode_within_pixel_budget, encode_webp, header_dimensions, scaled_height,
-};
+use crate::image_codec::{Pixels, WebpSettings, encode_webp, scaled_height};
+use crate::image_decode::{DecodeError, decode_within_pixel_budget};
 use crate::static_assets::{contained_public_asset, is_safe_relative_path};
 
 const MAX_SOURCE_BYTES: u64 = 20 * 1024 * 1024;
@@ -179,17 +178,18 @@ pub(crate) async fn optimize(
         // about the decoded size: PNG compresses a uniform 50000x50000 canvas
         // into a few hundred kilobytes, so decoding first and measuring after
         // means the 10 GB allocation this limit exists to prevent has already
-        // happened by the time the check runs.
-        let (header_width, header_height) =
-            header_dimensions(&source).map_err(|_| DynamicImageError::Decode)?;
-        if u64::from(header_width) * u64::from(header_height) > MAX_SOURCE_PIXELS {
-            return Err(DynamicImageError::TooLarge);
-        }
-        // The decoder re-checks under its own allocation limit, because a
-        // header is only a claim: a truncated or hand-edited file can declare a
-        // small image and then stream a much larger one.
-        let decoded = decode_within_pixel_budget(&source, MAX_SOURCE_PIXELS)
-            .map_err(|_| DynamicImageError::Decode)?;
+        // happened by the time the check runs. The decoder reads the header it
+        // has already parsed and answers the budget from there, so this costs
+        // no extra pass; it then re-checks under its own allocation limit,
+        // because a header is only a claim and a hand-edited file can declare a
+        // small image before streaming a much larger one.
+        let decoded =
+            decode_within_pixel_budget(&source, MAX_SOURCE_PIXELS).map_err(
+                |error| match error {
+                    DecodeError::TooLarge { .. } => DynamicImageError::TooLarge,
+                    _ => DynamicImageError::Decode,
+                },
+            )?;
         let (source_width, source_height) = (decoded.width, decoded.height);
         // Borrows the decoded buffer when it is already RGB8/RGBA8, which is
         // what both PNG and JPEG decode to. A request for the source's own

@@ -660,6 +660,32 @@ mod tests {
         fs::write(path, out).unwrap();
     }
 
+    /// End-to-end build cost for one large source, printed with `--nocapture`.
+    /// This is the number that competes: decode, the whole responsive ladder,
+    /// and every WebP encode, through the same rayon layers a real build uses.
+    #[test]
+    #[ignore = "measurement, not a correctness check"]
+    fn measure_public_image_build() {
+        let temp = tempfile::tempdir().unwrap();
+        let public = temp.path().join("public");
+        let assets = temp.path().join("assets");
+        fs::create_dir(&public).unwrap();
+        write_jpeg(&public.join("hero.jpg"), 6000, 4000, [90, 140, 200]);
+
+        let options = ImageOptimizationOptions {
+            variant_widths: vec![640, 750, 828, 1080, 1200, 1920, 2048, 3840],
+            ..ImageOptimizationOptions::default()
+        };
+        let started = std::time::Instant::now();
+        let report =
+            optimize_public_images(&public, &assets, &temp.path().join("cache"), &options).unwrap();
+        println!(
+            "6000x4000 -> {} variants + full size: {:?}",
+            report.entries[0].variants.len(),
+            started.elapsed()
+        );
+    }
+
     #[test]
     fn publishes_exactly_one_webp_by_default_and_reuses_cache() {
         let temp = tempfile::tempdir().unwrap();
