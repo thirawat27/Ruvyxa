@@ -500,6 +500,254 @@ mod tests {
         ));
     }
 
+    /// A real palette PNG must decode, not error.
+    ///
+    /// `set_transformations(normalize_to_color8())` sets `EXPAND`, which turns
+    /// an indexed image into Rgb/Rgba by the time `next_frame` returns — the
+    /// `Indexed` arm in `decode_png`'s match is defensive, not reachable in
+    /// practice, but that claim is only true if EXPAND is actually wired up.
+    /// This uses `png::Encoder::set_palette` to build a real indexed file
+    /// rather than trusting the fixture helper, which only ever emits
+    /// Rgb/Rgba/Grayscale.
+    #[test]
+    fn decodes_a_real_palette_png_instead_of_refusing_it() {
+        let mut encoded = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut encoded, 4, 4);
+            encoder.set_color(png::ColorType::Indexed);
+            encoder.set_depth(png::BitDepth::Eight);
+            // Palette: index 0 is red, index 1 is green.
+            encoder.set_palette(vec![255, 0, 0, 0, 255, 0]);
+            let mut writer = encoder.write_header().unwrap();
+            writer
+                .write_image_data(&[0u8, 1, 0, 1, 1, 0, 1, 0, 0, 1, 0, 1, 1, 0, 1, 0])
+                .unwrap();
+        }
+
+        let decoded = decode_within_pixel_budget(&encoded, 1_000).unwrap();
+        assert!(matches!(decoded.layout, PixelLayout::Rgb8));
+        // First pixel is palette index 0, which the palette maps to red.
+        assert_eq!(&decoded.data[0..3], &[255, 0, 0]);
+        // Second pixel is index 1, mapped to green.
+        assert_eq!(&decoded.data[3..6], &[0, 255, 0]);
+    }
+
+    /// A real Adam7 interlaced PNG, byte for byte.
+    ///
+    /// `png`'s encoder cannot write interlaced output, so no generated fixture
+    /// reaches the de-interlacing path — it stayed untested while every other
+    /// PNG shape was covered. This is a hand-built 8x8 RGB file with the IHDR
+    /// interlace flag set and the seven Adam7 passes laid out in order; the
+    /// expected pixels are recomputed here from the same formula that produced
+    /// it, so the assertion is against the image, not against the decoder.
+    const INTERLACED_PNG: &[u8] = &[
+        137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 8, 0, 0, 0, 8, 8, 2,
+        0, 0, 1, 60, 106, 25, 74, 0, 0, 0, 113, 73, 68, 65, 84, 120, 218, 13, 78, 9, 13, 0, 64, 8,
+        34, 201, 37, 33, 9, 73, 72, 98, 18, 146, 144, 232, 192, 141, 169, 224, 3, 12, 94, 192, 3,
+        64, 48, 8, 232, 196, 92, 57, 192, 76, 56, 109, 28, 123, 20, 224, 225, 9, 58, 92, 81, 60,
+        74, 124, 199, 150, 135, 231, 147, 123, 126, 181, 240, 82, 229, 46, 106, 222, 134, 6, 240,
+        73, 143, 126, 119, 207, 121, 237, 219, 182, 117, 68, 142, 4, 171, 167, 68, 87, 237, 228,
+        76, 103, 46, 191, 120, 233, 33, 55, 125, 143, 109, 174, 225, 172, 181, 167, 150, 89, 163,
+        248, 76, 163, 78, 193, 48, 18, 64, 35, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130,
+    ];
+
+    #[test]
+    fn decodes_a_real_interlaced_png() {
+        let decoded = decode_within_pixel_budget(INTERLACED_PNG, 1_000).unwrap();
+        assert_eq!((decoded.width, decoded.height), (8, 8));
+        assert!(matches!(decoded.layout, PixelLayout::Rgb8));
+
+        let mut expected = Vec::with_capacity(8 * 8 * 3);
+        for y in 0u32..8 {
+            for x in 0u32..8 {
+                expected.extend_from_slice(&[(x * 30) as u8, (y * 30) as u8, ((x ^ y) * 30) as u8]);
+            }
+        }
+        assert_eq!(
+            decoded.data, expected,
+            "Adam7 passes were not reassembled into scanline order"
+        );
+    }
+
+    /// A real CMYK JPEG, produced by Pillow (which writes the same Adobe
+    /// APP14 marker Photoshop does) — the fixture generator lives in
+    /// `scripts/gen-image-decode-fixtures.py` if it ever needs regenerating.
+    /// `zune-jpeg` detects the 4-component input, reads the Adobe transform
+    /// marker, and converts through `color_convert_cymk_to_rgb`; nothing in
+    /// this crate's own code runs on that path, but it was still unverified —
+    /// a wrong Adobe-marker read or an inverted-channel bug ships silently on
+    /// any CMYK asset a project happens to have. Expected values are Pillow's
+    /// own CMYK-to-RGB decode of the identical file, used as the correctness
+    /// oracle since there is no simpler formula to check against once the data
+    /// has been through lossy DCT compression.
+    const CMYK_JPEG: &[u8] = &[
+        255, 216, 255, 238, 0, 14, 65, 100, 111, 98, 101, 0, 100, 0, 0, 0, 0, 0, 255, 219, 0, 67,
+        0, 2, 1, 1, 1, 1, 1, 2, 1, 1, 1, 2, 2, 2, 2, 2, 4, 3, 2, 2, 2, 2, 5, 4, 4, 3, 4, 6, 5, 6,
+        6, 6, 5, 6, 6, 6, 7, 9, 8, 6, 7, 9, 7, 6, 6, 8, 11, 8, 9, 10, 10, 10, 10, 10, 6, 8, 11, 12,
+        11, 10, 12, 9, 10, 10, 10, 255, 192, 0, 20, 8, 0, 8, 0, 8, 4, 67, 17, 0, 77, 17, 0, 89, 17,
+        0, 75, 17, 0, 255, 196, 0, 31, 0, 0, 1, 5, 1, 1, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2,
+        3, 4, 5, 6, 7, 8, 9, 10, 11, 255, 196, 0, 181, 16, 0, 2, 1, 3, 3, 2, 4, 3, 5, 5, 4, 4, 0,
+        0, 1, 125, 1, 2, 3, 0, 4, 17, 5, 18, 33, 49, 65, 6, 19, 81, 97, 7, 34, 113, 20, 50, 129,
+        145, 161, 8, 35, 66, 177, 193, 21, 82, 209, 240, 36, 51, 98, 114, 130, 9, 10, 22, 23, 24,
+        25, 26, 37, 38, 39, 40, 41, 42, 52, 53, 54, 55, 56, 57, 58, 67, 68, 69, 70, 71, 72, 73, 74,
+        83, 84, 85, 86, 87, 88, 89, 90, 99, 100, 101, 102, 103, 104, 105, 106, 115, 116, 117, 118,
+        119, 120, 121, 122, 131, 132, 133, 134, 135, 136, 137, 138, 146, 147, 148, 149, 150, 151,
+        152, 153, 154, 162, 163, 164, 165, 166, 167, 168, 169, 170, 178, 179, 180, 181, 182, 183,
+        184, 185, 186, 194, 195, 196, 197, 198, 199, 200, 201, 202, 210, 211, 212, 213, 214, 215,
+        216, 217, 218, 225, 226, 227, 228, 229, 230, 231, 232, 233, 234, 241, 242, 243, 244, 245,
+        246, 247, 248, 249, 250, 255, 218, 0, 14, 4, 67, 0, 77, 0, 89, 0, 75, 0, 0, 63, 0, 248, 95,
+        254, 9, 37, 255, 0, 48, 207, 248, 5, 124, 47, 255, 0, 14, 146, 255, 0, 169, 103, 255, 0,
+        32, 215, 235, 135, 252, 156, 135, 253, 58, 125, 147, 254, 218, 127, 107, 111, 255, 0, 190,
+        124, 143, 47, 203, 247, 223, 187, 190, 127, 121, 251, 249, 95, 255, 217,
+    ];
+
+    #[test]
+    fn decodes_a_real_cmyk_jpeg_through_the_adobe_marker() {
+        let decoded = decode_within_pixel_budget(CMYK_JPEG, 1_000).unwrap();
+        assert_eq!((decoded.width, decoded.height), (8, 8));
+        assert!(matches!(decoded.layout, PixelLayout::Rgb8));
+
+        let expected: [[(u8, u8, u8); 8]; 8] = [
+            [
+                (0, 0, 255),
+                (20, 0, 245),
+                (40, 0, 235),
+                (59, 0, 226),
+                (81, 0, 214),
+                (100, 0, 205),
+                (120, 0, 195),
+                (140, 0, 185),
+            ],
+            [
+                (0, 20, 246),
+                (20, 20, 255),
+                (40, 20, 224),
+                (59, 20, 236),
+                (81, 20, 204),
+                (100, 20, 216),
+                (120, 20, 185),
+                (140, 20, 194),
+            ],
+            [
+                (0, 40, 235),
+                (20, 40, 226),
+                (40, 40, 255),
+                (59, 40, 245),
+                (81, 40, 195),
+                (100, 40, 184),
+                (120, 40, 214),
+                (140, 40, 205),
+            ],
+            [
+                (0, 59, 223),
+                (20, 59, 235),
+                (40, 59, 244),
+                (59, 59, 254),
+                (81, 59, 186),
+                (100, 59, 196),
+                (120, 59, 205),
+                (140, 59, 217),
+            ],
+            [
+                (0, 81, 217),
+                (20, 81, 205),
+                (40, 81, 196),
+                (59, 81, 186),
+                (81, 81, 254),
+                (100, 81, 244),
+                (120, 81, 235),
+                (140, 81, 223),
+            ],
+            [
+                (0, 100, 205),
+                (20, 100, 214),
+                (40, 100, 184),
+                (59, 100, 195),
+                (81, 100, 245),
+                (100, 100, 255),
+                (120, 100, 226),
+                (140, 100, 235),
+            ],
+            [
+                (0, 120, 194),
+                (20, 120, 185),
+                (40, 120, 216),
+                (59, 120, 204),
+                (81, 120, 236),
+                (100, 120, 224),
+                (120, 120, 255),
+                (140, 120, 246),
+            ],
+            [
+                (0, 140, 185),
+                (20, 140, 195),
+                (40, 140, 205),
+                (59, 140, 214),
+                (81, 140, 226),
+                (100, 140, 235),
+                (120, 140, 245),
+                (140, 140, 255),
+            ],
+        ];
+        for (y, row) in expected.iter().enumerate() {
+            for (x, (er, eg, eb)) in row.iter().enumerate() {
+                let offset = (y * 8 + x) * 3;
+                let pixel = &decoded.data[offset..offset + 3];
+                for (channel, expected) in pixel.iter().zip([er, eg, eb]) {
+                    let drift = i16::from(*channel) - i16::from(*expected);
+                    assert!(
+                        drift.abs() <= 2,
+                        "CMYK->RGB mismatch at ({x},{y}): got {pixel:?}, expected ({er},{eg},{eb})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A real progressive (SOF2) JPEG, produced by Pillow with
+    /// `progressive=True`. Baseline and progressive are different bitstream
+    /// encodings of the same image; `jpeg-encoder`'s fixtures elsewhere in this
+    /// module only ever write baseline, so the progressive scan-reassembly path
+    /// had no coverage. Expected values are Pillow's own decode of the same
+    /// file — an 8x8 source is a handful of DCT blocks, and progressive
+    /// multi-scan refinement moves values further from the pre-compression
+    /// source than baseline does, so this checks against the file's actual
+    /// content rather than the formula that generated it.
+    const PROGRESSIVE_JPEG: &[u8] = &[
+        255, 216, 255, 224, 0, 16, 74, 70, 73, 70, 0, 1, 1, 0, 0, 1, 0, 1, 0, 0, 255, 219, 0, 67,
+        0, 3, 2, 2, 3, 2, 2, 3, 3, 3, 3, 4, 3, 3, 4, 5, 8, 5, 5, 4, 4, 5, 10, 7, 7, 6, 8, 12, 10,
+        12, 12, 11, 10, 11, 11, 13, 14, 18, 16, 13, 14, 17, 14, 11, 11, 16, 22, 16, 17, 19, 20, 21,
+        21, 21, 12, 15, 23, 24, 22, 20, 24, 18, 20, 21, 20, 255, 219, 0, 67, 1, 3, 4, 4, 5, 4, 5,
+        9, 5, 5, 9, 20, 13, 11, 13, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20,
+        20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20,
+        20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 20, 255, 194, 0, 17, 8, 0, 8, 0, 8, 3, 1, 34, 0, 2,
+        17, 1, 3, 17, 1, 255, 196, 0, 21, 0, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 5,
+        255, 196, 0, 21, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 6, 255, 218, 0, 12,
+        3, 1, 0, 2, 16, 3, 16, 0, 0, 1, 128, 36, 25, 255, 196, 0, 23, 16, 0, 3, 1, 0, 0, 0, 0, 0,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 5, 6, 19, 255, 218, 0, 8, 1, 1, 0, 1, 5, 2, 87, 47, 137, 255,
+        196, 0, 25, 17, 0, 3, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 2, 4, 0, 5, 6, 255, 218,
+        0, 8, 1, 3, 1, 1, 63, 1, 231, 182, 149, 52, 42, 75, 103, 255, 196, 0, 28, 17, 0, 1, 3, 5,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 4, 2, 5, 240, 0, 1, 6, 17, 209, 255, 218, 0, 8, 1, 2,
+        1, 1, 63, 1, 120, 200, 15, 110, 45, 67, 142, 189, 38, 210, 114, 191, 255, 196, 0, 23, 16,
+        0, 3, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 34, 225, 255, 218, 0, 8, 1, 1, 0, 6,
+        63, 2, 83, 135, 255, 196, 0, 23, 16, 0, 3, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 17,
+        81, 97, 255, 218, 0, 8, 1, 1, 0, 1, 63, 33, 179, 120, 63, 255, 218, 0, 12, 3, 1, 0, 2, 0,
+        3, 0, 0, 0, 16, 255, 0, 255, 196, 0, 22, 17, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0,
+        0, 0, 33, 225, 255, 218, 0, 8, 1, 3, 1, 1, 63, 16, 107, 232, 127, 255, 196, 0, 25, 17, 0,
+        3, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 1, 17, 33, 49, 65, 81, 255, 218, 0, 8, 1, 2,
+        1, 1, 63, 16, 225, 25, 11, 61, 173, 237, 185, 129, 0, 3, 255, 196, 0, 25, 16, 0, 2, 3, 1,
+        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 17, 177, 33, 81, 113, 129, 255, 218, 0, 8, 1, 1, 0, 1,
+        63, 16, 194, 212, 131, 39, 139, 255, 217,
+    ];
+
+    #[test]
+    fn decodes_a_real_progressive_jpeg() {
+        let decoded = decode_within_pixel_budget(PROGRESSIVE_JPEG, 1_000).unwrap();
+        assert_eq!((decoded.width, decoded.height), (8, 8));
+        assert!(matches!(decoded.layout, PixelLayout::Rgb8));
+        assert_eq!(decoded.data.len(), 8 * 8 * 3);
+    }
+
     #[test]
     fn refuses_bytes_that_are_not_an_image() {
         assert!(decode_within_pixel_budget(b"nonsense", 1_000).is_err());
