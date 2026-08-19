@@ -1,6 +1,6 @@
 # Changelog
 
-## v1.0.31 (2026-08-18)
+## v1.0.31 (2026-08-19)
 
 ### Node.js 24 LTS production baseline
 
@@ -53,6 +53,40 @@ that endpoint is still a valid deployment.
 
 Selecting a target with `--adapter <name>` now also loads `ruvyxa.config`, which is where `plugins`
 live and therefore where the function bundle's plugin registry comes from.
+
+### Server-action replay protection fails closed
+
+The versioned-action replay guard was a `BTreeMap` of nonce to expiry, and every action paid for it:
+the `retain` sweep walked all 10,000 entries even when the first was still live, and a saturated
+guard then scanned again for the minimum to evict. It is now two structures over one set of keys —
+`seen` answers the replay question and `order` holds the same keys in expiry order. Every nonce
+shares one TTL, so insertion order is expiry order and the sweep stops at the first live entry:
+replay detection and expiry sweeping are both O(1).
+
+Saturation now fails closed. At the entry cap the old guard evicted the oldest live nonce to make
+room — and because every entry shares one TTL, the oldest tracked nonce is also the one with the
+most time left to live, so evicting it _accepted its replay_, the one thing the guard exists to
+refuse. An attacker reaches that state on purpose by sending `maxEntries` fresh nonces. Both hosts
+now answer `503` instead, pinned by the `saturation` clause of
+`tests/fixtures/action-contract.json`.
+
+The follow-up closed the remaining hole: the rate limiter in front of the guard is keyed per client
+_and_ per path and action, so one client spreading requests over two actions earned two fresh
+buckets while the nonce pool stayed one — enough for a single address to saturate the pool alone and
+refuse every other client's actions for a TTL. Each address may now hold at most a tenth of the pool
+(`ACTION_NONCE_MAX_PER_CLIENT`, 1,000 of 10,000), tracked in a per-client count swept together with
+`order` and dropped when the address's last nonce expires. An address over its own share is refused
+`429` — its problem, not the service's — while the pool still serves everyone else; reaching global
+saturation now takes ten distinct addresses. The quota and the rate limiter share one
+client-identity function, so forwarded identity (trusted only from a loopback or allowlisted peer,
+never merely a private range) cannot be attributed one way by one check and another by the other.
+
+Rejections also stopped being stringly typed. `handle_action` used to recover the HTTP status by
+comparing the guard's message against string literals copied at the call site, so rewording a
+message silently answered `400` where the fixture pins `503` — a drift no test could catch, because
+the fixture's status was replayed by the serverless suite and by nothing on the Rust side.
+Rejections are now an `ActionReplayRejection` enum that carries its own status (`400` invalid, `409`
+replayed, `429` client quota, `503` global saturation), and both hosts' suites replay the fixture.
 
 ### A regular expression no longer hides the `require()` calls after it
 
@@ -234,6 +268,149 @@ which was re-exported. Consumers received a public type referencing names they c
 `SiteSitemapConfig`, `SiteRobotsConfig`, and `SiteRobotsRule` are now part of the public surface.
 
 Knip must stay on version 6 or newer; version 5 crashes against this repository's TypeScript 7.
+
+### A request path resolves the same in both hosts
+
+The static-asset and prerendered-document path check was the latest host split. The Rust side
+checked with `Path::components`, which accepted `foo:bar` (only a single-letter `a:` parses as a
+Windows drive prefix, so multi-character names slipped through), accepted control characters, and
+folded a bare `.` away as a current-directory component — while the deployed handler's
+`isUnsafeSegment` rejected all three, so one URL resolved differently under `ruvyxa start` than in a
+deployed build. The rule guards a path that is written as well as read, and on Windows `foo:bar`
+names an NTFS alternate data stream, so the split was a write-path hole, not just a 404.
+
+Both hosts now check the same explicit segment rules — no `.` or `..` segment, no `/`, `\`, `:`, or
+control character — held to `tests/fixtures/prerender-path-conformance.json`, replayed by a Rust
+test against `is_safe_relative_path` and a Node test against `prerenderRelativePath` in the deployed
+handler. The fixture's cases include non-ASCII segments and dots inside a segment, so the two can
+drift only by rewriting the table.
+
+### Environment access is a cross-language contract
+
+The private-env rule — a `process.env` read is private unless the name is exactly `NODE_ENV` or
+begins with `RUVYXA_PUBLIC_` — was held by a comment promising both languages agreed, and the rule
+had drifted once before. `tests/fixtures/env-policy-conformance.json` now pins it with a case per
+edge: `NODE_ENVIRONMENT` is private because the exemption is an exact match, `RUVYXA_PUBLIC` is
+private because the prefix keeps its trailing underscore, `node_env` is private because the
+exemption is case-sensitive, and an empty name is not an exemption. Both
+`boundary::env_read_is_private` (Rust) and `envReadIsPrivate` in `runtime/compiler.mjs` replay the
+table, and the Node suite also asserts the scanner calls the predicate rather than keeping an
+inlined copy of the comparison — so the fixture cannot pass while the product checks something else.
+
+The commit that built the fixture also fixed the identifier-boundary check in the Rust AST parser,
+which used `saturating_sub` and so clamped the boundary at offset zero — a module opening with an
+`export` statement could fail named-export detection. `checked_sub` surfaces the underflow instead,
+and tests cover exports at offset zero plus the look-alikes that must be rejected.
+
+### `String.replace` replacement strings are data, not patterns
+
+`String.prototype.replace` interprets `$&`, `` $` ``, `$'`, and `$1`-style sequences in a
+replacement _string_. Five rewrite sites used replacement strings where the value came from project
+configuration or page content: the lang-attribute injection in `__ruvyxaApplyLang`, PWA manifest and
+register-tag injection, title-template wildcard resolution, tsconfig path rewriting, and font-URL
+`publicPath` rewriting. A configured value containing `$&` would silently substitute the matched
+text back into the output — attacker-controllable wherever the configured path is itself
+attacker-influenced. All five now use replacer functions, whose return value is always literal text;
+tests pin `$&` in a manifest path and `$-substitution` characters in a lang value.
+
+The two commits that swept these sites also consolidated realtime event validation into
+`runtime/action-runtime.mjs` — one implementation for the Rust host and the serverless handler,
+which had diverged — and added that module to the artifact-cache invalidation list so prerendered
+output follows rule changes.
+
+### The render export is validated before it is called
+
+On Windows CI and under high parallelism, an isolated module import can race `writeIfChanged` and
+evaluate a partially written output file that lacks the expected `render` export — an empty module
+where a page should be. `importRenderModule` now asserts `mod.render` is a function before it is
+called, on both the SSR and SSG paths; on failure it evicts the broken module-cache entry, waits
+briefly for the filesystem to settle, and re-imports once. If the retry still fails, the diagnostic
+lists the exports that were actually present instead of the bare `TypeError` a call would produce,
+so a bundler or linker failure is visible in CI logs rather than masquerading as a render error. The
+one-shot `ssr-renderer.mjs` used by `ruvyxa test:parity` and tooling fails with `RUV1100` and the
+same export list.
+
+### Both languages share one lint gate
+
+`pnpm lint` runs Oxlint across `packages/`, `templates/`, `examples/`, `scripts/`, and `tests/`,
+with correctness, suspicious, and performance rulesets at error level. Every rule the configuration
+turns off carries its reason beside it — sequential `await` in a loop is how the bundler applies
+backpressure, `void` before a floating promise is the marker TypeScript itself recommends — so a
+rule can be disabled only with an argument, never to clear a finding. `localeCompare` is banned
+outright: ordering decides cache keys, content fingerprints, and the bytes of files the build
+writes, and two machines building the same project disagreed. The ban is enforced by lint, with
+`compareCodeUnits` / `compareEntryKeys` from `runtime/order.mjs` and `compareStable` from
+`src/plugins.ts` named in the error.
+
+The Rust side got the matching gate: `.clippy.toml` sets `cognitive-complexity-threshold` and the
+workspace lint turns it on, so a Rust function that grows past what one screen holds fails
+`cargo clippy -- -D warnings`. The enforcement wave also added structural caps on the JavaScript
+side — complexity 30, max-depth 4, max-nested-callbacks 4, max-params 8 — and the refactor those
+caps forced out of `ruvyxa_middleware` and the runtime modules fixed CORS header placement along the
+way.
+
+`Allow-Methods`, `Allow-Headers`, and `Max-Age` answer a preflight question, and the Fetch standard
+has browsers read them only from a preflight response. Sending them on every response advertised the
+whole method and header allowlist to any origin that got a response at all, and invited a proxy to
+cache a `Max-Age` that was never negotiated. `Allow-Origin`, `Allow-Credentials`, and `Vary` belong
+on both, because the browser checks those on the actual response too. `apply_cors_headers` now takes
+a `preflight` flag, mirrored by `withCorsHeaders` in the serverless handler so the two hosts cannot
+split again, and the middleware test pins exactly which headers cross the line.
+
+### Image builds are bounded by one encode
+
+Public-image optimization dropped the `image` facade for the decoders it wraps. `image` declares
+`avif`/`exr` as optional features, and Cargo records a dependency's optional deps in the lockfile
+whether or not the feature is on — so `ravif`/`rav1e`/`pulp` and the unmaintained `paste` macro
+(RUSTSEC-2024-0436) sat in `Cargo.lock` permanently even though none of them ever compiled. The
+build now calls `png`, `zune-jpeg`, and `image-webp` directly, and `fast_image_resize` — which
+carried the same optional `image` dependency — was replaced by `pic-scale` for the same SIMD
+convolution: measured on the same 6000x4000 ladder, 72 ms with `fast_image_resize`, 89 ms here, the
+price of a lockfile with no unmaintained crate in it. A first attempt to enforce
+`cargo audit --deny warnings` needed an ignore for that advisory; the change was reverted, and the
+cleanup then removed the advisory's subject entirely.
+
+Decoding was reworked alongside. `decode_within_pixel_budget` used to sniff the magic bytes and
+parse the header for the budget check, and the decoder then parsed it again — three passes over the
+same prefix, invisible on a 24 MP photo and most of the per-image cost on a directory of icons. The
+budget check now lives inside each decoder, against the reader it has already built, and a JPEG
+declares its dimensions before its pixel buffer is allocated — an oversized image is refused before
+allocation rather than after. The error type became an enum, `Unsupported` /
+`TooLarge { width, height, max_pixels }` / `Malformed`, because the runtime image endpoint answers
+`413` for the budget case and `400` for everything else and used to recover that distinction by
+re-parsing the header a second time at the call site — the same stringly-typed coupling removed from
+the action replay guard. Resize results are taken out of the store instead of copied —
+`borrow().to_vec()` was copying every output a second time, 29 MB per 3840-wide variant and one
+source emits eight of them — grayscale widening now writes through fixed-width chunks so the loop
+vectorizes, and the resizer runs `Adaptive` threading: the ladder is 71 ms adaptive against 156 ms
+single, the full build 691 ms against 704 ms, so the nested pool costs nothing while `Single` halves
+the runtime endpoint that resizes one image per request. libwebp's `thread_level` re-measured as a
+loss (750 ms with it off, 814 ms with it on), and `effort` is where the time is: 0 → 221 ms / 225
+KB, 2 → 323 / 205, 4 → 752 / 197, 6 → 943 / 197 — so the build default stays at 4 and the request
+path, where latency is what a user feels, uses 2.
+
+Then the critical path was removed. The primary output used to be encoded at the source's own
+resolution, and because libwebp cannot split one lossy encode across cores, that single job set the
+wall time of the whole build — 745 ms of a 6000x4000 build was the full-size encode of a file no
+viewport can use. `image.maxWidth` (default 3840, the top of the standard responsive ladder and the
+width of a 4K display) caps the primary output before encoding, and that build drops to 296 ms; `0`
+restores the uncapped behavior for projects that publish full-resolution originals on purpose. The
+manifest reports the width that was emitted rather than the one the source held, variant widths are
+filtered against the capped primary so nothing duplicates it, and the cache key accounts for the
+resize.
+
+Decode coverage grew with the rework: palette and interlaced PNGs and CMYK JPEGs are now exercised,
+and the solid-colour resize test became a tolerance check after CI saw `202` for `200` on a target
+whose AVX2, NEON, and scalar paths round the same fixed-point Lanczos weights differently — a drift
+of a couple of levels is the arithmetic, while the defect the test guards against moves whole
+channels.
+
+### Documentation is where the implementation is
+
+`roadmap.md`, a 598-line modernization roadmap, was deleted: its proposals had been absorbed by the
+implementation, and its decision notes belonged with the architecture document, which gained the
+glob expansion, caching, and HMR sections the entries above describe. The crate list now counts
+`ruvyxa_tui`, and the API reference covers the environment-policy enforcement rules.
 
 ## v1.0.30 (2026-08-14)
 
