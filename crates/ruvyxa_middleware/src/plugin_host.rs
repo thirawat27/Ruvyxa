@@ -201,12 +201,36 @@ struct PluginWorker {
     stdout: BufReader<ChildStdout>,
 }
 
+/// Which environment the plugin host is serving.
+///
+/// A plugin cannot otherwise tell `ruvyxa dev` from `ruvyxa start`, and some
+/// first-party plugins need to: `feed` and `searchIndex` answer a request for
+/// the file they generate only in development, because in production that file
+/// has already been written by the build and re-running a project-supplied
+/// loader per request would put a file read or a database query on the
+/// response path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PluginEnvironment {
+    Development,
+    Production,
+}
+
+impl PluginEnvironment {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Development => "development",
+            Self::Production => "production",
+        }
+    }
+}
+
 /// Spawn parameters retained so a crashed plugin host can be restarted.
 struct PluginSpawnConfig {
     project_root: std::path::PathBuf,
     runtime_script: std::path::PathBuf,
     executable: std::path::PathBuf,
     executable_args: Vec<String>,
+    environment: PluginEnvironment,
 }
 
 /// Persistent TypeScript plugin host shared by the request and response phases.
@@ -257,6 +281,9 @@ impl PluginHost {
         pool_size: usize,
         call_timeout: Duration,
     ) -> Result<Self> {
+        // Production is the safe default for a host that did not state its
+        // environment: it withholds development-only request handling rather
+        // than enabling it for a server that may be serving real traffic.
         Self::start_pool_with_timeout_and_args(
             project_root,
             runtime_script,
@@ -264,6 +291,7 @@ impl PluginHost {
             &[],
             pool_size,
             call_timeout,
+            PluginEnvironment::Production,
         )
         .await
     }
@@ -276,6 +304,7 @@ impl PluginHost {
         executable_args: &[&str],
         pool_size: usize,
         call_timeout: Duration,
+        environment: PluginEnvironment,
     ) -> Result<Self> {
         let spawn = PluginSpawnConfig {
             project_root: project_root.to_path_buf(),
@@ -285,6 +314,7 @@ impl PluginHost {
                 .iter()
                 .map(|arg| (*arg).to_string())
                 .collect(),
+            environment,
         };
         let mut worker = spawn_worker(&spawn)?;
         let descriptor =
@@ -491,6 +521,9 @@ fn spawn_worker(spawn: &PluginSpawnConfig) -> Result<PluginWorker> {
         .arg(&spawn.runtime_script)
         .arg(&spawn.project_root)
         .arg("--persistent")
+        // Read by name rather than by position: the one-shot build path passes
+        // a hook name where this path passes `--persistent`.
+        .arg(format!("--environment={}", spawn.environment.as_str()))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())

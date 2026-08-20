@@ -267,7 +267,11 @@ function projectPlugins(config) {
 }
 
 function loadProjectPluginRegistry(config) {
-  return createPluginRegistry({ root: projectRoot, plugins: projectPlugins(config) })
+  return createPluginRegistry({
+    root: projectRoot,
+    plugins: projectPlugins(config),
+    environment: 'production',
+  })
 }
 
 /**
@@ -759,6 +763,8 @@ function __ruvyxaPluginRegistryReady() {
   __ruvyxaPluginRegistry ??= __ruvyxaCreatePluginRegistry({
     root: ${JSON.stringify(projectRoot)},
     plugins: Array.isArray(__ruvyxaConfig?.plugins) ? __ruvyxaConfig.plugins : [],
+    // A deployed function only ever serves production traffic.
+    environment: 'production',
   })
   return __ruvyxaPluginRegistry
 }

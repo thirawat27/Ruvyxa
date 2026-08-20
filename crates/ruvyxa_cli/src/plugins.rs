@@ -309,6 +309,9 @@ impl TypeScriptPluginWorker {
             .arg(runner)
             .arg(project_root)
             .arg("--persistent")
+            // This worker exists to run build hooks, so its plugins see the
+            // environment a build runs in. Nothing here serves requests.
+            .arg("--environment=production")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             // Stdout is reserved for the NDJSON protocol. The runtime routes

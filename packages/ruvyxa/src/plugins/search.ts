@@ -43,25 +43,45 @@ export function searchIndex(options: SearchIndexOptions): RuvyxaPlugin {
     (options.stopWords ?? []).map((word) => word.toLocaleLowerCase(options.locale)),
   )
 
+  const indexBody = (documents: SearchDocument[]) =>
+    createSearchIndexBody(documents, options.locale, stopWords, minTermLength)
+
   return definePlugin({
     name: 'ruvyxa:search-index',
-    register({ build }) {
+    register({ environment, http, build }) {
+      // Same rule as `feed`: a static list answers from either environment, a
+      // loader runs per request only in development, where there is no built
+      // index to serve and a stale one would be worse than the cost.
+      const staticDocuments = Array.isArray(options.documents) ? [...options.documents] : undefined
+      if (staticDocuments || environment === 'development') {
+        let cached: string | undefined
+        http.onRequest({
+          match: [outputPath],
+          async handler({ request }) {
+            if (new URL(request.url).pathname !== outputPath) return undefined
+            const body = staticDocuments
+              ? (cached ??= indexBody(staticDocuments))
+              : indexBody(await resolveSearchDocuments(options))
+            return new Response(body, {
+              headers: { 'content-type': 'application/json; charset=utf-8' },
+            })
+          },
+        })
+      }
       build.onComplete(async (context) => {
-        const input =
-          typeof options.documents === 'function'
-            ? await options.documents()
-            : [...options.documents]
-        if (!Array.isArray(input)) {
-          throw new TypeError('searchIndex: document loader must return an array')
-        }
-        writePublicAsset(
-          context,
-          outputPath,
-          createSearchIndexBody(input, options.locale, stopWords, minTermLength),
-        )
+        writePublicAsset(context, outputPath, indexBody(await resolveSearchDocuments(options)))
       })
     },
   })
+}
+
+async function resolveSearchDocuments(options: SearchIndexOptions): Promise<SearchDocument[]> {
+  const documents =
+    typeof options.documents === 'function' ? await options.documents() : [...options.documents]
+  if (!Array.isArray(documents)) {
+    throw new TypeError('searchIndex: document loader must return an array')
+  }
+  return documents
 }
 
 export function createSearchIndexBody(

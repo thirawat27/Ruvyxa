@@ -1,0 +1,44 @@
+{
+  "contract": "ruvyxa.client-bootstrap",
+  "schemaVersion": 1,
+  "why": [
+    "Route parameters and the request path travel from the document to the client",
+    "bundle through one element. Three writers emit it — the dev server's",
+    "client_hydration_script, the CLI's prerender writer, and the CSR shell — and",
+    "two generated preludes read it, one per module graph. All five have to agree",
+    "on the element and its key names or hydration silently starts with empty",
+    "parameters.",
+    "",
+    "It is a data block rather than an executable script on purpose. Every page",
+    "carried an inline <script> that assigned these globals, so a",
+    "Content-Security-Policy without 'unsafe-inline' blocked it and hydration",
+    "never started. A CSP hash could not cover it either, because the parameters",
+    "differ per request. type=\"application/json\" is not executed, so script-src",
+    "does not apply to it at all and a strict policy needs no nonce for it."
+  ],
+  "elementId": "__ruvyxa-bootstrap",
+  "scriptType": "application/json",
+  "keys": {
+    "params": "params",
+    "path": "path",
+    "csr": "csr"
+  },
+  "globals": {
+    "params": "__RUVYXA_ROUTE_PARAMS__",
+    "path": "__RUVYXA_REQUEST_PATH__",
+    "csr": "__RUVYXA_CSR__"
+  },
+  "escaping": {
+    "why": [
+      "The block is raw text inside a script element, and the parameters come",
+      "from the request URL. serde_json escapes quotes and backslashes but leaves",
+      "< alone, so a path segment containing </script> closed the element and ran",
+      "whatever followed. The CSR shell interpolated serialized JSON directly and",
+      "was reachable that way; the other two writers already escaped."
+    ],
+    "cases": [
+      { "raw": "</script>", "mustNotAppearRaw": "</script>" },
+      { "raw": "<!--<script>", "mustNotAppearRaw": "<!--<script>" }
+    ]
+  }
+}

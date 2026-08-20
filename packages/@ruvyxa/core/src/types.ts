@@ -717,7 +717,26 @@ export interface PluginNativeDefinition {
 }
 
 /** Grouped extension sockets available while a plugin registers itself. */
+/**
+ * Which environment the plugin host is serving.
+ *
+ * Unrelated to `PluginEnvironment`, which names the bundle a build hook is
+ * transforming for (`client`, `server`, `edge`, ...). This is `ruvyxa dev`
+ * versus a server or function answering real traffic.
+ */
+export type PluginHostEnvironment = 'development' | 'production'
+
 export interface PluginRegistrationApi {
+  /**
+   * The environment this host serves.
+   *
+   * Available at registration rather than per request on purpose: a plugin
+   * that only makes sense in one environment declines to register its hooks at
+   * all, so the other environment pays nothing. A host that does not state an
+   * environment reports `production`, so development-only behaviour is never
+   * enabled by omission.
+   */
+  readonly environment: PluginHostEnvironment
   readonly http: PluginHttpSocket
   readonly build: PluginBuildSocket
   readonly dev: PluginDevSocket

@@ -45,13 +45,22 @@ export const RESERVED_FRAMEWORK_PATHS = Object.freeze([
  * conflicting routes, and reserved paths all fail loudly at construction
  * rather than on some later request.
  */
-export async function createPluginRegistry({ root, plugins: pluginsValue, markdown } = {}) {
+export async function createPluginRegistry({
+  root,
+  plugins: pluginsValue,
+  markdown,
+  environment,
+} = {}) {
   const plugins = Array.isArray(pluginsValue) ? pluginsValue : []
   const names = new Set()
   const routeOwners = new Map()
   const registry = {
     root,
     markdown,
+    // Production is the safe default: a host that did not state its
+    // environment withholds development-only behaviour rather than enabling it
+    // for a server that may be serving real traffic.
+    environment: environment === 'development' ? 'development' : 'production',
     plugins: [],
     httpRequest: [],
     httpResponse: [],
@@ -172,6 +181,9 @@ export async function dispatchPluginResponse(registry, request, initialResponse)
 export function describeRegistry(registry) {
   return {
     plugins: registry.plugins,
+    // Top level, not under `http`: the environment is a property of the host,
+    // not of its HTTP registrations.
+    environment: registry.environment,
     http: {
       request: registry.httpRequest.length,
       response: registry.httpResponse.length,
@@ -234,6 +246,10 @@ function patternUnion(entries) {
 
 function createRegistrationApi(registry, plugin, routeOwners) {
   return Object.freeze({
+    // Registration-time rather than request-time on purpose: a plugin that
+    // only makes sense in one environment declines to register at all, so the
+    // other environment pays nothing — not even a per-request comparison.
+    environment: registry.environment,
     http: Object.freeze({
       onRequest(value) {
         const registration = normalizeHttpHook(plugin, 'onRequest', value)

@@ -156,6 +156,156 @@ is what makes a redeploy or a second worker safe, and is now asserted directly.
 The development server's process-global client-manifest cache had the same shape and is now bounded
 to 128 roots with oldest-first eviction. Eviction costs a re-parse and never a wrong answer.
 
+### React's streaming scripts can be covered by a policy now
+
+Converting the route bootstrap to a data block left one inline script: a route that streams Suspense
+content carries React's own runtime, the script that swaps a resolved boundary into place. It is
+React's, not Ruvyxa's, so it cannot be moved out of an executable element — and the artifact holding
+it is written once and reused by every request, so a per-request nonce would be baked in and
+therefore public.
+
+Its bytes are fixed once that artifact is written, which is what makes a hash the right mechanism.
+They are per-document, though: React's swap script names the boundary ids it completes, so
+`$RC("B:0","S:0")` differs from page to page and no one can maintain the list by hand.
+
+`securityHeaders({ inlineScriptHashes: true })` has the build record them. `build.onComplete` walks
+the prerendered documents, hashes each executable inline script, and writes `csp-inline-hashes.json`
+into the output directory; each response then picks up the hashes for the document it is serving. A
+route with no inline script gets its policy unchanged, and a missing manifest — a development
+server, or a deployment that did not enable this — sends the policy without the extra sources rather
+than failing the response.
+
+`script-src` has to be in the policy already. A policy that deliberately falls back to `default-src`
+is left alone: narrowing it to exactly these hashes would block the application's own bundles, which
+is a different decision than the one this option was asked to make. Data blocks and `src` scripts
+are deliberately not hashed — the first is never executed and the second is already governed by
+`script-src`.
+
+In `examples/demo` this is one route out of twenty: `/ppr-page` gains two sources, and every other
+page's policy is untouched.
+
+### The bootstrap is data, not script
+
+Every rendered page carried an inline `<script>` that assigned `globalThis.__RUVYXA_ROUTE_PARAMS__`
+and `__RUVYXA_REQUEST_PATH__`. Any `Content-Security-Policy` without `'unsafe-inline'` blocked it,
+and hydration never started — so a project could not adopt a strict policy at all. A CSP hash could
+not cover it either, because the parameters differ per request.
+
+It is now a `<script type="application/json">` data block. The browser does not execute a data
+block, so `script-src` does not apply to it, and a strict policy needs no nonce for it. The
+generated client prelude reads the block and assigns the same globals, which is why `router.ts` and
+every other reader is unchanged.
+
+Four writers emitted that script — `client_hydration_script`, the CSR shell in `render_pipeline.rs`,
+and **two** in `prerender.rs`. The fourth wrote only the path and the CSR flag, so a search for the
+route-params global did not find it and it kept shipping an inline script after the other three were
+converted; it turned up only by grepping the demo's built output.
+`tests/fixtures/client-bootstrap-conformance.json` now holds the element id and key names, both
+preludes are executed against it rather than pattern-matched, and the Rust mirror is compared
+byte-for-byte with the JavaScript one.
+
+A route that streams Suspense content still emits React's own inline runtime, which no hash can
+cover. Those routes need `'unsafe-inline'`, or a policy that does not cover them.
+
+`headScriptHashes(plugins)` is exported from `ruvyxa/plugins` for the other case: a plugin's `head`
+entries are identical on every request, so they are covered by a `'sha256-…'` source rather than a
+nonce.
+
+### Route parameters could close the CSR shell's script element
+
+The CSR shell interpolated `serde_json::to_string` output straight into an inline `<script>`.
+`serde_json` escapes `"` and `\` but leaves `<` alone, and these parameters come from the request
+URL, so a path segment containing `</script>` closed the element and ran whatever followed it. The
+dev server's other writer and the prerender writer already went through `safe_json_for_script`; this
+one never did.
+
+Every writer now escapes before building the block, and
+`bootstrap_block_cannot_be_closed_by_a_route_parameter` replays the escaping cases from the shared
+fixture — asserting first that each case is genuinely dangerous unescaped, so the test cannot pass
+by testing nothing.
+
+### One cross-site rule instead of three
+
+Whether a request is provably same-origin was decided by three separate implementations: the action
+endpoint, the native server, and — once it was written — the `originGuard` plugin. They were kept in
+step by a comment saying they mirrored each other, which is the arrangement that let
+`STATIC_CONTENT_TYPES` and `DEFAULT_SECURITY_HEADERS` drift apart in production.
+
+`@ruvyxa/core/origin-policy` is now the single JavaScript implementation, copied into
+`runtime/origin-policy.mjs` for function bundles the same way `route-match.mjs` is. The native host
+keeps its own copy — it is a different language — and both replay
+`tests/fixtures/origin-policy-conformance.json`.
+
+The one input the three legitimately disagree about is the trusted scheme, so the table takes it as
+an argument rather than deriving it: the native host supplies one only when the transport peer is in
+`security.trustedProxyIps`, a deployed function reads `X-Forwarded-Proto` as stated because its
+platform ingress is the trusted proxy by construction, and the plugin has no trust policy and
+supplies none. Splitting the decision at that seam is what made a shared table possible.
+
+`scripts/sync-route-match.mjs` became `scripts/sync-shared-runtime.mjs` and takes a table of
+modules; `pnpm --filter ruvyxa sync:route-match` is now `sync:runtime`. `origin-policy.mjs` is
+registered in the package's `files`, in `HANDLER_RUNTIME_FILES`, and in `WORKER_RUNTIME_FILES` — the
+last because extracting code out of `action-runtime.mjs` would otherwise have taken it out of the
+prerender cache's identity, letting the rule change while every hash stayed equal.
+
+### Plugins can tell development from production
+
+`register(api)` receives `api.environment`. A host that does not state one reports `production`, so
+development-only behaviour is never enabled by omission, and the native server passes it explicitly
+rather than inferring it from `watch` — a development server with watching disabled is still a
+development server.
+
+It is available at registration rather than per request on purpose: a plugin that only makes sense
+in one environment declines to register its hooks at all, so the other environment pays nothing, not
+even a comparison.
+
+`feed` and `searchIndex` use it. Given a loader rather than a static list, they now answer requests
+in development, where there is no built asset to serve; in production they stay build-time only,
+because running a project's loader per request would put a file read or a database query on the
+response path in front of the file the build already wrote. Their development answers are
+deliberately not memoized: the developer edits the source the loader reads.
+
+`createPluginHarness` takes `{ environment }` so both branches are testable.
+
+### Five plugins join `ruvyxa/plugins`
+
+`originGuard`, `healthCheck`, `webVitals`, `llmsTxt`, and `wellKnown` are exported from
+`ruvyxa/plugins` alongside the existing catalog. Each is built from the public plugin API, so a
+project can compose them with its own plugins or reimplement any of them.
+
+`originGuard` is the one worth reading twice. Server actions already reject cross-site requests in
+both hosts — `action-runtime.mjs` and `action_security.rs` — but a handler under `app/api/` gets
+none of that: it is reachable from any origin, and a session cookie defaults to `SameSite=Lax`,
+which a cross-site form POST still carries. The plugin compares `Origin` against `Host` for unsafe
+methods, accepts `Sec-Fetch-Site: same-origin` when the origin was stripped, and fails closed when
+neither is present. It does **not** weigh `X-Forwarded-Proto` the way the action guard does: that
+comparison is only meaningful against a trusted-proxy list, which a plugin cannot reach. The host
+comparison is the load-bearing check either way.
+
+It is opt-in rather than a default. An API meant to be called from another origin is a legitimate
+design, and that case is governed by CORS.
+
+`webVitals` publishes its client script as a build asset and loads it with `src` rather than
+inlining a snippet into `<head>`. An inline snippet would force `'unsafe-inline'` into every
+`script-src` policy that wanted the plugin, so the plugin that measures performance would have
+quietly cost the application its CSP. Its collector accepts only the shape its own script sends —
+the endpoint is reachable by anyone, and an unvalidated payload would let a third party write
+arbitrary strings into the application's logs.
+
+### Generated files are served during development
+
+`robots`, `feed`, and `searchIndex` only ever wrote their output at `build.onComplete`, so
+`/robots.txt`, `/rss.xml`, and the search index answered 404 under `ruvyxa dev` — the output could
+not be checked without a production build. They now answer requests for their own file from the same
+bytes the build writes, which is what `openApi`, `pwa`, and `contentEngine` already did.
+
+`feed` and `searchIndex` do this only when their content is a static array. Given a loader they stay
+build-time only, deliberately: a plugin cannot tell development from production at request time, so
+running a loader per request would put a file read or a database query on the production response
+path — and shadow the asset the build already wrote with a different one. `sitemap` and the new
+`llmsTxt` remain build-time only because their entries come from the route manifest, which does not
+exist while the development server is running.
+
 ### `plugins.ts` is a barrel
 
 `packages/ruvyxa/src/plugins.ts` was 2,954 lines covering every first-party plugin family. It is now

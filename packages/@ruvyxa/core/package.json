@@ -44,6 +44,10 @@
       "types": "./dist/plugin-harness.d.ts",
       "default": "./dist/plugin-harness.js"
     },
+    "./origin-policy": {
+      "types": "./dist/origin-policy.d.ts",
+      "default": "./dist/origin-policy.js"
+    },
     "./route-match": {
       "types": "./dist/route-match.d.ts",
       "default": "./dist/route-match.js"

@@ -1234,8 +1234,12 @@ fn prerender_html_includes_hashed_hydration_and_preload_assets() {
 
     assert!(html.contains(r#"<link rel="modulepreload" href="/__ruvyxa/client/shared.456.js">"#));
     assert!(html.contains(r#"<script type="module" src="/__ruvyxa/client/docs.123.js"></script>"#));
-    assert!(html.contains(r#"globalThis.__RUVYXA_REQUEST_PATH__ = "/docs/start""#));
-    assert!(html.contains(r#"globalThis.__RUVYXA_ROUTE_PARAMS__ = {"slug":"start"}"#));
+    // A data block, not an executable script: every page carries this, so an
+    // inline assignment here is what a strict `script-src` blocks.
+    assert!(html.contains(
+        r#"<script type="application/json" id="__ruvyxa-bootstrap">{"params":{"slug":"start"},"path":"/docs/start"}</script>"#
+    ));
+    assert!(!html.contains("globalThis.__RUVYXA_ROUTE_PARAMS__ ="));
     assert!(html.find("modulepreload").unwrap() < html.find("</head>").unwrap());
     assert!(html.find("docs.123.js").unwrap() < html.find("</body>").unwrap());
 }

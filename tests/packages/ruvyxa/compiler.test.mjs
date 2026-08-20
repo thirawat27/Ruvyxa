@@ -1670,6 +1670,9 @@ export const marker = 'reached'
       const described = await runJson(pluginRuntime, [root, 'describe'], {})
       assert.deepEqual(described.result, {
         plugins: ['native-hooks'],
+        // `describe` reports the environment the host stated. It is the one
+        // place the flag is visible if it ever stops arriving.
+        environment: 'production',
         http: {
           request: 1,
           response: 1,
@@ -1954,6 +1957,7 @@ export const marker = 'reached'
       const described = await runJson(pluginRuntime, [root, 'describe'], {})
       assert.deepEqual(described.result, {
         plugins: ['ruvyxa:observability', 'ruvyxa:content-engine', 'ruvyxa:openapi'],
+        environment: 'production',
         http: {
           request: 3,
           response: 1,

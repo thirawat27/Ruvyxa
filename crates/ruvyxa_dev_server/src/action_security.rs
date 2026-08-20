@@ -551,9 +551,29 @@ pub(crate) fn action_origin_is_cross_site(
     config: &ServerConfig,
     peer: IpAddr,
 ) -> bool {
+    // The trust policy is this host's alone; the decision that follows it is
+    // shared. Only a proxy we trust can vouch for the scheme a browser used.
+    origin_is_cross_site(headers, forwarded_scheme(headers, config, peer))
+}
+
+/// Whether the request is not provably same-origin.
+///
+/// The shared half of the decision, with the trusted scheme already resolved by
+/// the caller. That split is what lets this be held to
+/// `tests/fixtures/origin-policy-conformance.json` together with
+/// `packages/@ruvyxa/core/src/origin-policy.ts`: a deployed function has no
+/// transport peer to weigh `X-Forwarded-Proto` against, and the `originGuard`
+/// plugin has no trust policy at all, so the three hosts legitimately differ on
+/// that one input and on nothing after it.
+///
+/// Three ports of these rules used to be kept in step by a comment saying they
+/// mirrored each other — the arrangement that let `STATIC_CONTENT_TYPES` and
+/// `DEFAULT_SECURITY_HEADERS` drift apart in production.
+pub(crate) fn origin_is_cross_site(headers: &HeaderMap, trusted_scheme: Option<&str>) -> bool {
     let Some(origin) = headers
         .get(header::ORIGIN)
         .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
     else {
         // Modern browsers send either Origin or Fetch Metadata. Fail closed
         // when both are absent; otherwise a stripped-origin cross-site form can
@@ -566,6 +586,7 @@ pub(crate) fn action_origin_is_cross_site(
     let Some(host) = headers
         .get(header::HOST)
         .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
     else {
         return true;
     };
@@ -594,10 +615,26 @@ pub(crate) fn action_origin_is_cross_site(
     // `Origin` itself and a cross-site page cannot forge it, so a matching host
     // already establishes same-origin intent. Comparing against a scheme we
     // cannot observe adds no protection and only produces false rejections.
-    match forwarded_scheme(headers, config, peer) {
+    match trusted_scheme {
         Some(scheme) => !origin_scheme.eq_ignore_ascii_case(scheme),
         None => false,
     }
+}
+
+/// Read `X-Forwarded-Proto` into a scheme, taking the leftmost entry.
+///
+/// Callers apply their own trust policy before calling this. Shared with
+/// `parseForwardedScheme` in `@ruvyxa/core/origin-policy` and replayed from the
+/// same fixture.
+pub(crate) fn parse_forwarded_scheme(value: Option<&str>) -> Option<&'static str> {
+    value
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .and_then(|value| match value {
+            value if value.eq_ignore_ascii_case("https") => Some("https"),
+            value if value.eq_ignore_ascii_case("http") => Some("http"),
+            _ => None,
+        })
 }
 
 /// The request scheme as reported by a trusted proxy, when one vouched for it.
@@ -609,16 +646,11 @@ fn forwarded_scheme(
     if !is_trusted_proxy_ip(config, peer) {
         return None;
     }
-    headers
-        .get("x-forwarded-proto")
-        .and_then(|value| value.to_str().ok())
-        .and_then(|value| value.split(',').next())
-        .map(str::trim)
-        .and_then(|value| match value {
-            value if value.eq_ignore_ascii_case("https") => Some("https"),
-            value if value.eq_ignore_ascii_case("http") => Some("http"),
-            _ => None,
-        })
+    parse_forwarded_scheme(
+        headers
+            .get("x-forwarded-proto")
+            .and_then(|value| value.to_str().ok()),
+    )
 }
 
 /// Cross-site check for the HMR WebSocket handshake.
@@ -707,6 +739,7 @@ fn is_trusted_proxy_ip(config: &ServerConfig, ip: IpAddr) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use axum::http::{HeaderName, HeaderValue};
 
     /// One nonce header, so the guard tests read as the request they describe.
     fn nonce_headers(nonce: &str) -> HeaderMap {
@@ -719,6 +752,71 @@ mod tests {
     fn client(index: usize) -> IpAddr {
         let octets = u32::try_from(index).expect("test client index fits an IPv4 address");
         IpAddr::V4(Ipv4Addr::from(octets))
+    }
+
+    /// Both languages replay `tests/fixtures/origin-policy-conformance.json`.
+    ///
+    /// The JavaScript side is `tests/packages/core/origin-policy-contract.test.ts`
+    /// over `@ruvyxa/core/origin-policy`, which the action endpoint and the
+    /// `originGuard` plugin both read. Three ports of this decision used to be
+    /// kept in step by a comment saying they mirrored each other.
+    #[test]
+    fn origin_policy_matches_the_shared_conformance_table() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/origin-policy-conformance.json"
+        ))
+        .unwrap();
+
+        for case in fixture["cases"].as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            let mut headers = HeaderMap::new();
+            for (field, value) in case["headers"].as_object().unwrap() {
+                headers.insert(
+                    HeaderName::from_bytes(field.as_bytes()).unwrap(),
+                    HeaderValue::from_str(value.as_str().unwrap()).unwrap(),
+                );
+            }
+            let trusted = case["trustedScheme"].as_str();
+            assert_eq!(
+                origin_is_cross_site(&headers, trusted),
+                case["crossSite"].as_bool().unwrap(),
+                "origin policy case disagrees with the shared fixture: {name}"
+            );
+        }
+
+        for case in fixture["forwardedScheme"]["cases"].as_array().unwrap() {
+            let header = case["header"].as_str().unwrap();
+            assert_eq!(
+                parse_forwarded_scheme(Some(header)),
+                case["scheme"].as_str(),
+                "forwarded scheme case disagrees with the shared fixture: {header:?}"
+            );
+        }
+        assert_eq!(parse_forwarded_scheme(None), None);
+    }
+
+    /// The trusted-proxy gate is this host's alone, and is the reason the shared
+    /// table takes the scheme as an input rather than deriving it.
+    #[test]
+    fn forwarded_scheme_is_ignored_when_the_peer_is_not_a_trusted_proxy() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::HOST, HeaderValue::from_static("app.test"));
+        headers.insert(header::ORIGIN, HeaderValue::from_static("http://app.test"));
+        headers.insert("x-forwarded-proto", HeaderValue::from_static("https"));
+
+        let config = ServerConfig::dev("D:/app", "127.0.0.1", 3000);
+        let untrusted = IpAddr::V4(Ipv4Addr::new(203, 0, 113, 7));
+        // Loopback is trusted by default, so it is the contrast case.
+        let trusted = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+        assert!(
+            !action_origin_is_cross_site(&headers, &config, untrusted),
+            "an untrusted peer's X-Forwarded-Proto must not reject a matching host"
+        );
+        assert!(
+            action_origin_is_cross_site(&headers, &config, trusted),
+            "a trusted proxy stating https must reject an http origin"
+        );
     }
 
     #[test]

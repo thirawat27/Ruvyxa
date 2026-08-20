@@ -1,0 +1,179 @@
+{
+  "contract": "ruvyxa.origin-policy",
+  "schemaVersion": 1,
+  "why": [
+    "Three implementations decide whether a request is provably same-origin: the",
+    "native server in crates/ruvyxa_dev_server/src/action_security.rs, the shared",
+    "JavaScript module packages/@ruvyxa/core/src/origin-policy.ts (read by the",
+    "action endpoint through its generated runtime copy and by the originGuard",
+    "plugin), and any future host. They used to be kept in step by a comment",
+    "saying they mirrored each other, which is the arrangement that let",
+    "STATIC_CONTENT_TYPES and DEFAULT_SECURITY_HEADERS drift apart.",
+    "",
+    "trustedScheme is an input rather than something the table derives, because",
+    "it is the one step the callers legitimately disagree about. The native host",
+    "supplies a scheme only when the transport peer is in security.trustedProxyIps;",
+    "a deployed function is reachable only through its platform ingress and reads",
+    "X-Forwarded-Proto as stated; the plugin has no trust policy and always",
+    "supplies null. Everything after that decision must be identical."
+  ],
+  "cases": [
+    {
+      "name": "no origin and no fetch metadata fails closed",
+      "headers": { "host": "app.test" },
+      "host": "app.test",
+      "trustedScheme": null,
+      "crossSite": true
+    },
+    {
+      "name": "sec-fetch-site same-origin substitutes for a stripped origin",
+      "headers": { "host": "app.test", "sec-fetch-site": "same-origin" },
+      "host": "app.test",
+      "trustedScheme": null,
+      "crossSite": false
+    },
+    {
+      "name": "sec-fetch-site cross-site is not a substitute",
+      "headers": { "host": "app.test", "sec-fetch-site": "cross-site" },
+      "host": "app.test",
+      "trustedScheme": null,
+      "crossSite": true
+    },
+    {
+      "name": "sec-fetch-site is compared case-insensitively",
+      "headers": { "host": "app.test", "sec-fetch-site": "Same-Origin" },
+      "host": "app.test",
+      "trustedScheme": null,
+      "crossSite": false
+    },
+    {
+      "name": "matching host is same-origin",
+      "headers": { "host": "app.test", "origin": "http://app.test" },
+      "host": "app.test",
+      "trustedScheme": null,
+      "crossSite": false
+    },
+    {
+      "name": "host comparison ignores case",
+      "headers": { "host": "App.Test", "origin": "http://APP.TEST" },
+      "host": "App.Test",
+      "trustedScheme": null,
+      "crossSite": false
+    },
+    {
+      "name": "a different host is cross-site",
+      "headers": { "host": "app.test", "origin": "https://evil.test" },
+      "host": "app.test",
+      "trustedScheme": null,
+      "crossSite": true
+    },
+    {
+      "name": "port is part of the host comparison",
+      "headers": { "host": "app.test:3000", "origin": "http://app.test" },
+      "host": "app.test:3000",
+      "trustedScheme": null,
+      "crossSite": true
+    },
+    {
+      "name": "a subdomain is a different origin",
+      "headers": { "host": "app.test", "origin": "https://evil.app.test" },
+      "host": "app.test",
+      "trustedScheme": null,
+      "crossSite": true
+    },
+    {
+      "name": "an absent host cannot be compared against",
+      "headers": { "origin": "http://app.test" },
+      "host": "",
+      "trustedScheme": null,
+      "crossSite": true
+    },
+    {
+      "name": "an origin with no scheme separator is rejected",
+      "headers": { "host": "app.test", "origin": "app.test" },
+      "host": "app.test",
+      "trustedScheme": null,
+      "crossSite": true
+    },
+    {
+      "name": "an origin carrying a path is rejected",
+      "headers": { "host": "app.test", "origin": "http://app.test/evil" },
+      "host": "app.test",
+      "trustedScheme": null,
+      "crossSite": true
+    },
+    {
+      "name": "an origin with an empty host is rejected",
+      "headers": { "host": "app.test", "origin": "http://" },
+      "host": "app.test",
+      "trustedScheme": null,
+      "crossSite": true
+    },
+    {
+      "name": "the literal null origin is rejected",
+      "headers": { "host": "app.test", "origin": "null" },
+      "host": "app.test",
+      "trustedScheme": null,
+      "crossSite": true
+    },
+    {
+      "name": "an empty origin falls back to fetch metadata",
+      "headers": { "host": "app.test", "origin": "", "sec-fetch-site": "same-origin" },
+      "host": "app.test",
+      "trustedScheme": null,
+      "crossSite": false
+    },
+    {
+      "name": "no trusted scheme means the scheme is not asserted",
+      "headers": { "host": "app.test", "origin": "http://app.test" },
+      "host": "app.test",
+      "trustedScheme": null,
+      "crossSite": false
+    },
+    {
+      "name": "a trusted https scheme rejects an http origin",
+      "headers": { "host": "app.test", "origin": "http://app.test" },
+      "host": "app.test",
+      "trustedScheme": "https",
+      "crossSite": true
+    },
+    {
+      "name": "a trusted https scheme accepts an https origin",
+      "headers": { "host": "app.test", "origin": "https://app.test" },
+      "host": "app.test",
+      "trustedScheme": "https",
+      "crossSite": false
+    },
+    {
+      "name": "a trusted http scheme rejects an https origin",
+      "headers": { "host": "app.test", "origin": "https://app.test" },
+      "host": "app.test",
+      "trustedScheme": "http",
+      "crossSite": true
+    },
+    {
+      "name": "the origin scheme is compared case-insensitively",
+      "headers": { "host": "app.test", "origin": "HTTPS://app.test" },
+      "host": "app.test",
+      "trustedScheme": "https",
+      "crossSite": false
+    }
+  ],
+  "forwardedScheme": {
+    "why": [
+      "How X-Forwarded-Proto is read into a scheme, once a host has decided the",
+      "proxy that wrote it is trusted. Each proxy appends to the right, so the",
+      "leftmost entry is the one the client-facing edge observed."
+    ],
+    "cases": [
+      { "header": "https", "scheme": "https" },
+      { "header": "http", "scheme": "http" },
+      { "header": "HTTPS", "scheme": "https" },
+      { "header": "  https  ", "scheme": "https" },
+      { "header": "https,http", "scheme": "https" },
+      { "header": "https, http", "scheme": "https" },
+      { "header": "ws", "scheme": null },
+      { "header": "", "scheme": null }
+    ]
+  }
+}

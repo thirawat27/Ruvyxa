@@ -29,7 +29,9 @@ use ruvyxa_graph::{
 };
 #[cfg(test)]
 use ruvyxa_middleware::PluginHttpResponse;
-use ruvyxa_middleware::{MiddlewareConfig, MiddlewareStack, PluginHost, PluginHttpRequest};
+use ruvyxa_middleware::{
+    MiddlewareConfig, MiddlewareStack, PluginEnvironment, PluginHost, PluginHttpRequest,
+};
 use serde::{Deserialize, Serialize};
 #[cfg(test)]
 use tokio::net::TcpListener;
@@ -83,6 +85,10 @@ use port_binding::{PORT_FALLBACK_SCAN_LIMIT, port_conflict_diagnostic};
 mod html_document;
 mod i18n;
 mod trace;
+pub use html_document::{
+    BOOTSTRAP_ELEMENT_ID, bootstrap_data_block, hydration_loader_source, hydration_loader_url,
+    localize_document, safe_json_for_script,
+};
 #[cfg(test)]
 use html_document::{
     client_hydration_script, compose_document, dev_diagnostic_overlay, hmr_client_script,
@@ -91,9 +97,6 @@ use html_document::{
 use html_document::{
     dev_error_overlay, error_response, plain_error_page, public_internal_error,
     url_encode_component,
-};
-pub use html_document::{
-    hydration_loader_source, hydration_loader_url, localize_document, safe_json_for_script,
 };
 
 mod plugin_bridge;
@@ -397,6 +400,13 @@ pub struct ServerConfig {
     pub route_manifest_observer: Option<RouteManifestObserver>,
     /// Start the TypeScript plugin host for this server.
     pub plugins_enabled: bool,
+    /// Which environment the plugin host serves.
+    ///
+    /// Deliberately explicit rather than inferred from `watch`: a development
+    /// server with watching disabled is still a development server, and a
+    /// plugin that decided otherwise would withhold behaviour the developer
+    /// asked for.
+    pub plugin_environment: PluginEnvironment,
     /// Head elements plugins declared in `ruvyxa.config.ts`.
     pub plugin_head: Vec<PluginHeadEntry>,
     pub default_render_strategy: Option<RenderStrategy>,
@@ -476,6 +486,7 @@ impl ServerConfig {
             middleware: MiddlewareConfig::default(),
             route_manifest_observer: None,
             plugins_enabled: false,
+            plugin_environment: PluginEnvironment::Development,
             plugin_head: Vec::new(),
             default_render_strategy: None,
             default_revalidate: None,
@@ -515,6 +526,7 @@ impl ServerConfig {
             middleware: MiddlewareConfig::default(),
             route_manifest_observer: None,
             plugins_enabled: false,
+            plugin_environment: PluginEnvironment::Production,
             plugin_head: Vec::new(),
             default_render_strategy: None,
             default_revalidate: None,
@@ -915,6 +927,7 @@ async fn start_plugin_runtime(config: &ServerConfig) -> Result<Option<Arc<Plugin
         config.runtime.script_args(),
         plugin_workers,
         plugin_timeout,
+        config.plugin_environment,
     )
     .await?;
     if host.pool_size() > 1 {

@@ -22,7 +22,8 @@ use ruvyxa_graph::{
 use serde::Deserialize;
 
 use crate::html_document::{
-    client_hydration_script, compose_localized_document, error_page, hmr_client_script,
+    bootstrap_data_block, client_hydration_script, compose_localized_document, error_page,
+    hmr_client_script, safe_json_for_script,
 };
 use crate::plugin_head::render_plugin_head;
 use crate::render_cache::{CachedDocument, ForcedRevalidationClaim, RenderCache};
@@ -875,8 +876,20 @@ async fn render_page_csr(
     };
     let client_script = client_hydration_script(&state.config, route, request_path, params);
 
-    let params_json = serde_json::to_string(params).unwrap_or_else(|_| "{}".to_string());
-    let path_json = serde_json::to_string(request_path).unwrap_or_else(|_| "\"\"".to_string());
+    // Escaped, not merely serialized. `serde_json` escapes `"` and `\` but
+    // leaves `<` alone, and these parameters come from the request URL — so a
+    // path segment containing `</script>` used to close this element and run
+    // whatever followed it. The other two writers of this payload already went
+    // through `safe_json_for_script`; this one did not.
+    let params_json =
+        safe_json_for_script(&serde_json::to_string(params).unwrap_or_else(|_| "{}".to_string()));
+    let path_json = safe_json_for_script(
+        &serde_json::to_string(request_path).unwrap_or_else(|_| "\"\"".to_string()),
+    );
+    // `csr: true` tells the client prelude to mount rather than hydrate: this
+    // shell was not rendered from the route tree, so there is no markup to
+    // hydrate against. See the bootstrap in `ruvyxa_bundler::output`.
+    let bootstrap = bootstrap_data_block(&params_json, &path_json, true);
 
     let shell = format!(
         r#"<!doctype html>
@@ -886,13 +899,7 @@ async fn render_page_csr(
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   {asset_links}
   <style data-ruvyxa-css>{styles}</style>
-  <script>
-    window.__RUVYXA_ROUTE_PARAMS__ = {params_json};
-    window.__RUVYXA_REQUEST_PATH__ = {path_json};
-    // This shell was not rendered from the route tree, so the client must
-    // mount rather than hydrate. See the bootstrap in `ruvyxa_bundler::output`.
-    window.__RUVYXA_CSR__ = true;
-  </script>
+  {bootstrap}
 </head>
 <body>
   <div id="__ruvyxa"></div>

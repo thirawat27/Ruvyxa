@@ -85,6 +85,7 @@ describe('collab()', () => {
     const claims: Array<{ capability: string; options: unknown }> = []
     let buildHook: ((context: any) => void | Promise<void>) | undefined
     await plugin.register({
+      environment: 'production',
       http: { onRequest() {}, onResponse() {}, route() {} },
       build: {
         onStart() {},

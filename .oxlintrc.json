@@ -8,6 +8,7 @@
     "**/native-bin/**",
     "**/target/**",
     "packages/create-ruvyxa/template/**",
+    "packages/ruvyxa/runtime/origin-policy.mjs",
     "packages/ruvyxa/runtime/route-match.mjs"
   ],
   "categories": {

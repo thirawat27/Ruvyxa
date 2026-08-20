@@ -25,6 +25,7 @@
     "runtime/glob.mjs",
     "runtime/entry-templates.mjs",
     "runtime/order.mjs",
+    "runtime/origin-policy.mjs",
     "runtime/flight.mjs",
     "runtime/plugin-http.mjs",
     "runtime/plugin-runtime.mjs",
@@ -124,8 +125,8 @@
     "@ruvyxa/cli-win32-x64": "workspace:^"
   },
   "scripts": {
-    "build": "node scripts/sync-route-match.mjs --check && tsc -p tsconfig.json",
-    "sync:route-match": "node scripts/sync-route-match.mjs",
+    "build": "node scripts/sync-shared-runtime.mjs --check && tsc -p tsconfig.json",
+    "sync:runtime": "node scripts/sync-shared-runtime.mjs",
     "check": "tsc -p tsconfig.check.json",
     "test": "pnpm run build && node --test \"../../tests/packages/ruvyxa/**/*.test.mjs\"",
     "format": "tsc -p tsconfig.check.json",

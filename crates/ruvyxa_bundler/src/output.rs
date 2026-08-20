@@ -146,6 +146,8 @@ import Page from {page_path};
 globalThis.__RUVYXA_ROUTE_PATTERN__ = {route_pattern};
 {route_shell}
 
+{CLIENT_BOOTSTRAP_PRELUDE}
+
 const __ruvyxaCtx = {{
   // The registry is keyed by route pattern, so this bundle has no concrete
   // request path of its own to fall back to. Reading the browser's location is
@@ -222,6 +224,37 @@ fn special_import(file: &Option<std::path::PathBuf>, ident: &str) -> (String, Op
 /// `packages/ruvyxa/runtime/entry-templates.mjs`;
 /// `tests/packages/ruvyxa/entry-templates.test.mjs` asserts the two agree.
 const ROUTE_CONTEXT_PRELUDE: &str = "const __ruvyxaRouteContext = (globalThis.__RUVYXA_ROUTE_CONTEXT__ ||= React.createContext(null));";
+
+/// Read the bootstrap data block and publish it on `globalThis`.
+///
+/// The document used to carry these assignments as an executable inline
+/// `<script>`. Every page had one, so any `Content-Security-Policy` without
+/// `'unsafe-inline'` blocked it and hydration never started — and since the
+/// parameters differ per request, a CSP hash could not cover it either.
+///
+/// `type="application/json"` is a data block rather than executable script, so
+/// `script-src` does not apply to it. Publishing the same globals here is what
+/// keeps every reader downstream unchanged.
+///
+/// `??=` rather than `=`: a soft navigation has already written the params for
+/// the route it is entering, and this bundle may only be evaluated afterwards.
+///
+/// Mirrors `clientBootstrapPrelude()` in
+/// `packages/ruvyxa/runtime/entry-templates.mjs`; both are replayed against
+/// `tests/fixtures/client-bootstrap-conformance.json`.
+const CLIENT_BOOTSTRAP_PRELUDE: &str = r#"const __ruvyxaBootstrap = (() => {
+  if (typeof document === "undefined") return {}
+  const el = document.getElementById("__ruvyxa-bootstrap")
+  if (!el) return {}
+  try {
+    return JSON.parse(el.textContent || "{}")
+  } catch {
+    return {}
+  }
+})()
+globalThis.__RUVYXA_ROUTE_PARAMS__ ??= __ruvyxaBootstrap.params
+globalThis.__RUVYXA_REQUEST_PATH__ ??= __ruvyxaBootstrap.path
+if (__ruvyxaBootstrap.csr === true) globalThis.__RUVYXA_CSR__ = true"#;
 
 /// Inline error / not-found boundary class.
 ///

@@ -18,22 +18,36 @@
  * everything, a trailing `*` matches by prefix, anything else matches exactly.
  */
 
-export { cacheRules, headers, observability, redirects, securityHeaders } from './plugins/http.js'
+export {
+  cacheRules,
+  headScriptHashes,
+  headers,
+  healthCheck,
+  observability,
+  originGuard,
+  redirects,
+  securityHeaders,
+} from './plugins/http.js'
 export type {
   CacheRule,
   ContentSecurityPolicy,
   HeaderRule,
+  HealthCheckOptions,
   ObservabilityEntry,
   ObservabilityOptions,
+  OriginGuardOptions,
   RedirectRule,
   SecurityHeadersOptions,
 } from './plugins/http.js'
 export { pwa } from './plugins/pwa.js'
 export type { PwaIcon, PwaOptions } from './plugins/pwa.js'
-export { feed, robots, sitemap } from './plugins/seo.js'
+export { feed, llmsTxt, robots, sitemap } from './plugins/seo.js'
 export type {
   FeedItem,
   FeedOptions,
+  LlmsTxtLink,
+  LlmsTxtOptions,
+  LlmsTxtSection,
   RobotsOptions,
   RobotsRule,
   SitemapOptions,
@@ -51,3 +65,7 @@ export { openApi } from './plugins/openapi.js'
 export type { OpenApiMethod, OpenApiOperation, OpenApiOptions } from './plugins/openapi.js'
 export { alias, bundleBudget, fonts, requireEnv } from './plugins/build.js'
 export type { BundleBudgetOptions, FontsOptions } from './plugins/build.js'
+export { webVitals } from './plugins/web-vitals.js'
+export type { WebVitalsEntry, WebVitalsOptions } from './plugins/web-vitals.js'
+export { wellKnown } from './plugins/well-known.js'
+export type { SecurityTxtOptions, WellKnownEntry, WellKnownOptions } from './plugins/well-known.js'

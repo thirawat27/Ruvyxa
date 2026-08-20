@@ -311,7 +311,8 @@ pub(crate) fn client_hydration_script(
     let src = escape_html(&script_src);
 
     format!(
-        r#"{preload_links}<script>globalThis.__RUVYXA_ROUTE_PARAMS__ = {params_json};globalThis.__RUVYXA_REQUEST_PATH__ = {request_path_json};</script><script type="module" src="{src}"></script>"#,
+        r#"{preload_links}{bootstrap}<script type="module" src="{src}"></script>"#,
+        bootstrap = bootstrap_data_block(&params_json, &request_path_json, false),
     )
 }
 
@@ -533,6 +534,35 @@ fn load_client_manifest(manifest_path: &Path) -> Option<Arc<HashMap<String, Clie
 /// tied to this one by a comment promising they would stay in step — the exact
 /// arrangement `AGENTS.md` names as the thing that drifts. Escaping rules for a
 /// payload two writers embed in the same element belong in one place.
+/// The element that carries route bootstrap data to the client bundle.
+///
+/// Held with the key names to `tests/fixtures/client-bootstrap-conformance.json`,
+/// which the generated client prelude in
+/// `packages/ruvyxa/runtime/entry-templates.mjs` and its Rust mirror in
+/// `crates/ruvyxa_bundler/src/output.rs` both read.
+pub const BOOTSTRAP_ELEMENT_ID: &str = "__ruvyxa-bootstrap";
+
+/// Render the route bootstrap as a JSON data block.
+///
+/// This used to be an executable `<script>` that assigned
+/// `globalThis.__RUVYXA_ROUTE_PARAMS__` directly. Every page carried one, so a
+/// `Content-Security-Policy` without `'unsafe-inline'` blocked it and broke
+/// hydration — and because the parameters differ per request, a CSP hash could
+/// not cover it either, leaving a per-request nonce as the only alternative.
+///
+/// `type="application/json"` is a data block: the browser does not execute it,
+/// so `script-src` does not apply to it at all. The client prelude reads it and
+/// assigns the same globals, which is why nothing downstream changed.
+///
+/// The content is still raw text inside a `script` element, so it goes through
+/// the same escaping an executable payload needed.
+pub fn bootstrap_data_block(params_json: &str, request_path_json: &str, csr: bool) -> String {
+    let csr = if csr { ",\"csr\":true" } else { "" };
+    format!(
+        r#"<script type="application/json" id="{BOOTSTRAP_ELEMENT_ID}">{{"params":{params_json},"path":{request_path_json}{csr}}}</script>"#
+    )
+}
+
 pub fn safe_json_for_script(json: &str) -> String {
     json.replace('<', "\\u003c")
         .replace('>', "\\u003e")
@@ -1012,6 +1042,98 @@ mod tests {
         assert_eq!(&input[index..], "</BODY>");
     }
 
+    /// The element and key names every writer and both preludes agree on.
+    #[test]
+    fn bootstrap_block_matches_the_shared_conformance_contract() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/client-bootstrap-conformance.json"
+        ))
+        .unwrap();
+
+        assert_eq!(BOOTSTRAP_ELEMENT_ID, fixture["elementId"].as_str().unwrap());
+
+        let block = bootstrap_data_block(r#"{"slug":"a"}"#, r#""/blog/a""#, false);
+        let script_type = fixture["scriptType"].as_str().unwrap();
+        assert!(
+            block.contains(&format!(r#"type="{script_type}""#)),
+            "the block must be a data block, not executable script: {block}"
+        );
+        assert!(
+            block.contains(&format!(r#"id="{BOOTSTRAP_ELEMENT_ID}""#)),
+            "{block}"
+        );
+
+        let payload = block
+            .split_once('>')
+            .and_then(|(_, rest)| rest.rsplit_once("</script>"))
+            .map(|(payload, _)| payload)
+            .expect("the block carries a JSON payload");
+        let parsed: serde_json::Value = serde_json::from_str(payload).unwrap();
+        assert_eq!(
+            parsed[fixture["keys"]["params"].as_str().unwrap()]["slug"],
+            "a"
+        );
+        assert_eq!(parsed[fixture["keys"]["path"].as_str().unwrap()], "/blog/a");
+        // Absent rather than false, so a hydrating page carries no CSR marker.
+        assert!(
+            parsed
+                .get(fixture["keys"]["csr"].as_str().unwrap())
+                .is_none()
+        );
+
+        let csr = bootstrap_data_block("{}", r#""/""#, true);
+        let csr_payload: serde_json::Value = serde_json::from_str(
+            csr.split_once('>')
+                .and_then(|(_, rest)| rest.rsplit_once("</script>"))
+                .map(|(payload, _)| payload)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(csr_payload[fixture["keys"]["csr"].as_str().unwrap()], true);
+    }
+
+    /// A route parameter carrying `</script>` must not close the block.
+    ///
+    /// The CSR shell interpolated `serde_json::to_string` output straight into
+    /// an inline `<script>`. `serde_json` escapes `"` and `\` but not `<`, and
+    /// these parameters come from the request URL, so a path segment could
+    /// close the element and run whatever followed it. Every writer now goes
+    /// through `safe_json_for_script` before reaching `bootstrap_data_block`.
+    #[test]
+    fn bootstrap_block_cannot_be_closed_by_a_route_parameter() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/client-bootstrap-conformance.json"
+        ))
+        .unwrap();
+
+        for case in fixture["escaping"]["cases"].as_array().unwrap() {
+            let raw = case["raw"].as_str().unwrap();
+            let forbidden = case["mustNotAppearRaw"].as_str().unwrap();
+
+            let unescaped = serde_json::to_string(&serde_json::json!({ "slug": raw })).unwrap();
+            assert!(
+                unescaped.contains(forbidden),
+                "the fixture case must actually be dangerous before escaping: {unescaped}"
+            );
+
+            let block = bootstrap_data_block(&safe_json_for_script(&unescaped), r#""/""#, false);
+            // Scoped to the payload: `</script>` is also the block's own
+            // closing tag, so the whole string legitimately contains it once.
+            let payload = block
+                .split_once('>')
+                .and_then(|(_, rest)| rest.rsplit_once("</script>"))
+                .map(|(payload, _)| payload)
+                .expect("the block carries a JSON payload");
+            assert!(!payload.contains(forbidden), "{block}");
+            assert_eq!(block.matches("</script>").count(), 1, "{block}");
+            assert_eq!(
+                serde_json::from_str::<serde_json::Value>(payload).unwrap()["params"]["slug"],
+                serde_json::Value::from(raw),
+                "escaping must preserve the decoded value"
+            );
+        }
+    }
+
     #[test]
     fn script_json_neutralizes_html_comment_and_tag_openers() {
         // `</` alone is not enough: `<!--<script>` moves the tokenizer into
@@ -1036,13 +1158,10 @@ mod tests {
     fn composed_document_escapes_untrusted_route_params() {
         let params =
             serde_json::to_string(&serde_json::json!({ "slug": "</script><img>" })).unwrap();
-        let script = format!(
-            "<script>globalThis.__RUVYXA_ROUTE_PARAMS__ = {};</script>",
-            safe_json_for_script(&params)
-        );
+        let block = bootstrap_data_block(&safe_json_for_script(&params), r#""/""#, false);
 
-        assert!(!script.contains("</script><img>"));
-        assert_eq!(script.matches("</script>").count(), 1);
+        assert!(!block.contains("</script><img>"));
+        assert_eq!(block.matches("</script>").count(), 1);
     }
 
     #[test]

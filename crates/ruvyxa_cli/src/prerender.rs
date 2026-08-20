@@ -802,7 +802,7 @@ pub(crate) fn csr_shell_html(
   <title>Loading...</title>
   <style data-ruvyxa-css>{styles}</style>
   {preload_links}
-  <script>window.__RUVYXA_REQUEST_PATH__ = {path_json};window.__RUVYXA_CSR__ = true;</script>
+  {bootstrap}
 </head>
 <body>
   <div id="__ruvyxa"></div>
@@ -810,7 +810,14 @@ pub(crate) fn csr_shell_html(
 </body>
 </html>"#,
         client_src = escape_html_attribute(&client_src),
-        path_json = inline_script_json(route_path, "\"\""),
+        // `params` is empty rather than the route's: this shell is written once
+        // per route pattern, not per request, so it has no concrete parameters
+        // to carry. The client bundle falls back to reading `location`.
+        bootstrap = ruvyxa_dev_server::bootstrap_data_block(
+            "{}",
+            &inline_script_json(route_path, "\"\""),
+            true,
+        ),
     )
 }
 
@@ -932,7 +939,8 @@ pub(crate) fn inject_prerender_client_assets(
         |loader| ruvyxa_dev_server::hydration_loader_url(loader, &assets.src, assets.hydration),
     );
     let scripts = format!(
-        r#"<script>globalThis.__RUVYXA_ROUTE_PARAMS__ = {params_json};globalThis.__RUVYXA_REQUEST_PATH__ = {request_path_json};</script><script type="module" src="{}"></script>"#,
+        r#"{}<script type="module" src="{}"></script>"#,
+        ruvyxa_dev_server::bootstrap_data_block(&params_json, &request_path_json, false),
         escape_html_attribute(&script_src)
     );
     let lower = html.to_ascii_lowercase();
@@ -975,8 +983,16 @@ mod csr_shell_tests {
         let html = csr_shell_html("/hooks", &BTreeMap::new(), "");
 
         assert!(
-            html.contains("window.__RUVYXA_CSR__ = true;"),
+            html.contains(r#""csr":true"#),
             "shell must flag itself for the client bootstrap: {html}"
         );
+        // A data block, not an executable script. This writer was missed when
+        // the other three were converted, because it names only the path and
+        // the CSR flag — a search for the route-params global did not find it.
+        assert!(
+            html.contains(r#"<script type="application/json" id="__ruvyxa-bootstrap">"#),
+            "{html}"
+        );
+        assert!(!html.contains("<script>"), "{html}");
     }
 }

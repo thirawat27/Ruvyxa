@@ -105,6 +105,7 @@ describe('@ruvyxa/database', () => {
     const plugin = databasePluginEntry({ requiredEnv: ['RUVYXA_TEST_DATABASE_URL'] })
     let hook: (() => void) | undefined
     plugin.register({
+      environment: 'production',
       http: { onRequest() {}, onResponse() {}, route() {} },
       build: {
         onStart() {},

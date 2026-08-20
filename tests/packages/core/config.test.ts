@@ -15,6 +15,7 @@ function registrationApi(
   onRequest: (value: PluginHttpRequestRegistration | PluginHttpRequestHandler) => void,
 ): PluginRegistrationApi {
   return {
+    environment: 'production',
     http: { onRequest, onResponse() {}, route() {} },
     build: {
       onStart() {},
@@ -151,6 +152,7 @@ describe('config and plugin APIs', () => {
     })
 
     await plugin.register({
+      environment: 'production',
       http: {
         onRequest() {
           registrations.push('http.request')

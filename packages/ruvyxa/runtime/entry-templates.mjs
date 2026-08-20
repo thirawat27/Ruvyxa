@@ -17,6 +17,49 @@
 /** Global that carries the shared routing React context across bundles. */
 export const ROUTE_CONTEXT_GLOBAL = '__RUVYXA_ROUTE_CONTEXT__'
 
+/**
+ * Element carrying route bootstrap data from the document to the bundle.
+ *
+ * Held with the JSON key names to
+ * `tests/fixtures/client-bootstrap-conformance.json`, which the three Rust
+ * writers of this element also replay.
+ */
+export const BOOTSTRAP_ELEMENT_ID = '__ruvyxa-bootstrap'
+
+/**
+ * Read the bootstrap data block and publish it on `globalThis`.
+ *
+ * The document used to carry these assignments as an executable inline
+ * `<script>`. Every page had one, so any `Content-Security-Policy` without
+ * `'unsafe-inline'` blocked it and hydration never started — and since the
+ * parameters differ per request, a CSP hash could not cover it either.
+ *
+ * `type="application/json"` is a data block rather than executable script, so
+ * `script-src` does not apply to it. Publishing the same globals here is what
+ * keeps every reader downstream — `router.ts` above all — unchanged.
+ *
+ * `??=` rather than `=`: a soft navigation has already written the params for
+ * the route it is entering, and this bundle may only be evaluated afterwards.
+ * Overwriting would replace them with the ones the document was served with.
+ *
+ * Mirrored by `client_bootstrap_prelude` in `crates/ruvyxa_bundler/src/output.rs`.
+ */
+export function clientBootstrapPrelude() {
+  return `const __ruvyxaBootstrap = (() => {
+  if (typeof document === "undefined") return {}
+  const el = document.getElementById(${JSON.stringify(BOOTSTRAP_ELEMENT_ID)})
+  if (!el) return {}
+  try {
+    return JSON.parse(el.textContent || "{}")
+  } catch {
+    return {}
+  }
+})()
+globalThis.__RUVYXA_ROUTE_PARAMS__ ??= __ruvyxaBootstrap.params
+globalThis.__RUVYXA_REQUEST_PATH__ ??= __ruvyxaBootstrap.path
+if (__ruvyxaBootstrap.csr === true) globalThis.__RUVYXA_CSR__ = true`
+}
+
 /** Global registry of route pattern to tree factory, read by the client router. */
 export const ROUTE_REGISTRY_GLOBAL = '__RUVYXA_ROUTES__'
 const SHELL_REGISTRY_GLOBAL = '__RUVYXA_SHELLS__'
@@ -493,6 +536,8 @@ ${boundary}${meta}
 ${routeTreeFunction({ name: '__ruvyxaTree', pageName, layoutNames, routePath, errorName, loadingName, notFoundName, metaNames })}
 ${routeRegistration({ name: '__ruvyxaTree', routePath })}
 ${shell}
+
+${clientBootstrapPrelude()}
 
 const __ruvyxaCtx = {
   path: globalThis.__RUVYXA_REQUEST_PATH__ ?? ${requestPathLiteral},

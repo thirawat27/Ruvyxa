@@ -24,8 +24,13 @@
  * the reverse. `tests/fixtures/framework-endpoint-conformance.json` records
  * that both hosts must serve this endpoint, but not yet the field-by-field
  * table — do not treat it as covering these rules.
+ *
+ * The two cross-site checks are the exception: they now come from
+ * `origin-policy.mjs`, the generated copy of `@ruvyxa/core/origin-policy`, and
+ * both languages are held to `tests/fixtures/origin-policy-conformance.json`.
  */
 
+import { fetchSiteIsCrossSite, originIsCrossSite, parseForwardedScheme } from './origin-policy.mjs'
 import { collectRevalidations, requestContext, runWithRequestContext } from './request-context.mjs'
 
 /** Payload encodings a server action accepts. Mirrors `action_content_type`. */
@@ -68,51 +73,19 @@ export function actionContentType(headers) {
   return ACTION_CONTENT_TYPES.includes(mediaType) ? mediaType : null
 }
 
-/** True when `Sec-Fetch-Site` explicitly reports a cross-site request. */
-export function actionFetchSiteIsCrossSite(headers) {
-  const site = headers.get('sec-fetch-site')
-  return typeof site === 'string' && site.toLowerCase() === 'cross-site'
-}
-
 /**
- * True when the request is not provably same-origin.
+ * Whether the request is provably same-origin.
  *
- * Mirrors `action_origin_is_cross_site`. With no `Origin`, a `Sec-Fetch-Site:
- * same-origin` header is the only accepted substitute — failing closed keeps a
- * stripped-origin cross-site form from reaching a mutation endpoint.
- *
- * The scheme is compared only when `X-Forwarded-Proto` states it. Unlike the
- * Rust host there is no transport peer address to weigh that header against:
- * a deployed function is reachable only through its platform's ingress, so the
- * ingress is the trusted proxy by construction. The load-bearing check either
- * way is the host comparison, which a cross-site page cannot forge.
+ * A deployed function has no transport peer address to weigh
+ * `X-Forwarded-Proto` against, so unlike the native host it cannot consult a
+ * trusted-proxy list. It is reachable only through its platform's ingress, so
+ * the ingress is the trusted proxy by construction and the header is read as
+ * stated. The host comparison is the load-bearing check either way.
  */
-export function actionOriginIsCrossSite(headers) {
-  const origin = headers.get('origin')
-  if (typeof origin !== 'string' || origin === '') {
-    const site = headers.get('sec-fetch-site')
-    return !(typeof site === 'string' && site.toLowerCase() === 'same-origin')
-  }
-
-  const host = headers.get('host')
-  if (typeof host !== 'string' || host === '') return true
-
-  const separator = origin.indexOf('://')
-  if (separator < 0) return true
-  const originScheme = origin.slice(0, separator)
-  const originHost = origin.slice(separator + 3)
-  if (originHost === '' || originHost.includes('/')) return true
-  if (originHost.toLowerCase() !== host.toLowerCase()) return true
-
-  const forwarded = forwardedScheme(headers)
-  return forwarded === null ? false : originScheme.toLowerCase() !== forwarded
-}
-
-function forwardedScheme(headers) {
-  const value = headers.get('x-forwarded-proto')
-  if (typeof value !== 'string') return null
-  const scheme = value.split(',')[0]?.trim().toLowerCase()
-  return scheme === 'https' || scheme === 'http' ? scheme : null
+function actionOriginIsCrossSite(headers) {
+  const host = headers.get('host') ?? ''
+  const trustedScheme = parseForwardedScheme(headers.get('x-forwarded-proto'))
+  return originIsCrossSite(headers, host, { trustedScheme })
 }
 
 /**
@@ -133,7 +106,7 @@ export function validateActionRequest(headers, payloadBytes, policy = {}) {
   if (policy.sameOrigin !== false && actionOriginIsCrossSite(headers)) {
     return textResponse(403, 'Cross-origin action request blocked')
   }
-  if (policy.fetchMeta !== false && actionFetchSiteIsCrossSite(headers)) {
+  if (policy.fetchMeta !== false && fetchSiteIsCrossSite(headers)) {
     return textResponse(403, 'Cross-site action request blocked')
   }
   return null

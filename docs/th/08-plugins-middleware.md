@@ -81,6 +81,12 @@ resource
 | `openApi`                             | OpenAPI 3.1 JSON ที่ serve ตอน development และเขียนเข้า production output                         |
 | `alias`, `bundleBudget`, `requireEnv` | import aliasing ตอน build, client JavaScript size limit และ required environment validation       |
 | `fonts`                               | self-host Google Fonts stylesheet URL ที่ส่งให้ตอน build                                          |
+| `originGuard`                         | บล็อก mutation request ข้าม origin ที่ยิงเข้า route handler เปิดใช้เองตาม route scope             |
+| `healthCheck`                         | liveness endpoint ที่ตอบจาก request host ก่อนเข้า route rendering                                 |
+| `webVitals`                           | เก็บ Core Web Vitals จาก browser แล้วรายงานฝั่ง server                                            |
+| `llmsTxt`                             | `llms.txt` ตอน build จาก section ที่กำหนดเองและ route ที่ค้นพบ                                    |
+| `wellKnown`                           | ไฟล์ใต้ `/.well-known/` รวมถึง `security.txt` ตาม RFC 9116                                        |
+| `headScriptHashes`                    | CSP source hash สำหรับ inline script/style ที่ plugin ใส่เข้ามา                                   |
 
 ใช้ข้อมูลแบบ explicit กับ build-time plugin: มันไม่ค้นหา business content หรือ API semantic
 ของคุณให้เอง ตัวอย่างนี้เป็น PWA declaration ที่สมบูรณ์พร้อม `name` ที่จำเป็น:
@@ -108,6 +114,99 @@ PWA plugin ใช้ `/manifest.webmanifest`, `/sw.js` และ `/pwa-register.
 ทั้งสามต้องต่างกัน `openApi` ใช้ `/openapi.json` โดยปริยาย, ต้องมี title/version ที่ไม่ว่าง
 และปฏิเสธ method/path กับ `operationId` ที่ซ้ำ รัน production build และตรวจ generated output
 ทุกครั้งที่เพิ่ม build plugin
+
+## Build artifact ตอน development
+
+`robots`, `feed`, `searchIndex`, `openApi`, `pwa`, `wellKnown` และ `webVitals` ตอบ request
+สำหรับไฟล์ที่ตัวเองสร้างด้วย ดังนั้น `ruvyxa dev` จึง serve byte เดียวกับที่ build เขียนออกมา
+และตรวจ output ได้โดยไม่ต้องรัน production build
+
+`feed` กับ `searchIndex` ทำแบบนี้เฉพาะตอนที่ content เป็น static array ถ้าให้ loader มา
+ทั้งคู่จะเป็น build-time อย่างเดียว: plugin แยกไม่ออกว่ากำลังอยู่ใน development หรือ production
+ตอนรับ request การรัน loader ต่อ request จึงเท่ากับเอา file read หรือ database query ไปวางบน
+response path ของ production `sitemap` และ `llmsTxt` เป็น build-time อย่างเดียว
+ด้วยเหตุผลประเภทเดียวกัน — entry ของมันมาจาก route manifest ซึ่งยังไม่มีตอน development server ทำงาน
+
+## การป้องกัน route handler
+
+Server action ปฏิเสธ request ข้าม origin อยู่แล้วทั้งสอง host แต่ handler ใต้ `app/api/`
+ไม่ได้ป้องกัน: มันเรียกได้จากทุก origin และ session cookie ใช้ `SameSite=Lax` โดยปริยาย ซึ่ง
+cross-site form POST ยังพา cookie ไปด้วย `originGuard` ปิดช่องนั้นให้กับ route ที่ระบุ
+
+```ts
+import { healthCheck, originGuard, webVitals, wellKnown } from 'ruvyxa/plugins'
+
+export default config({
+  plugins: [
+    originGuard({ routes: ['/api/*'] }),
+    healthCheck({ path: '/health', check: () => ({ status: 'up' }) }),
+    webVitals({ sampleRate: 0.1 }),
+    wellKnown({
+      securityTxt: {
+        contact: 'mailto:security@example.com',
+        expires: '2027-01-01T00:00:00.000Z',
+      },
+    }),
+  ],
+})
+```
+
+มันเป็น opt-in ไม่ใช่ค่าปริยาย เพราะ API ที่ตั้งใจให้เรียกจาก origin อื่นเป็นการออกแบบที่ถูกต้อง
+กรณีนั้นให้ CORS เป็นตัวคุมแทน method ที่ไม่ปลอดภัยถูกตรวจโดยเทียบ `Origin` กับ `Host` ถ้า origin
+ถูกถอดออกจะถอยไปใช้ `Sec-Fetch-Site: same-origin` และถ้าไม่มีทั้งสองอย่างจะ fail closed `webVitals`
+publish client script เป็น build asset แล้วโหลดด้วย `src` จึงไม่บังคับให้ policy `script-src`
+ต้องเปิด `'unsafe-inline'`
+
+## Content-Security-Policy
+
+หน้าเว็บไม่มี inline script ที่รันได้ของ Ruvyxa เองเลย route parameter และ request path เดินทางไปหา
+client ผ่าน `<script type="application/json">` ซึ่ง browser ไม่ execute และ `script-src`
+ไม่มีผลกับมัน policy แบบเข้มจึงไม่ต้องใช้ nonce:
+
+```ts
+securityHeaders({ contentSecurityPolicy: { 'default-src': ["'self'"], 'script-src': ["'self'"] } })
+```
+
+ยังเหลือสองอย่างที่ต้องครอบคลุม อย่างแรกคือ plugin ที่ใส่ inline `<script>` ผ่าน `head`
+ซึ่งเหมือนกันทุก request จึงใช้ hash แทน nonce ได้:
+
+```ts
+import { headScriptHashes, securityHeaders } from 'ruvyxa/plugins'
+
+const plugins = [analytics()]
+export default config({
+  plugins: [
+    ...plugins,
+    securityHeaders({
+      contentSecurityPolicy: { 'script-src': ["'self'", ...headScriptHashes(plugins)] },
+    }),
+  ],
+})
+```
+
+`headScriptHashes` จะไม่คืนอะไรให้ plugin ที่โหลด script ด้วย `src` — `webVitals` ตัว first-party
+ถูกออกแบบมาแบบนั้นด้วยเหตุผลนี้ ใส่ `{ tag: 'style' }` เพื่อเอา hash สำหรับ `style-src`
+
+อย่างที่สองคือ React เอง route ที่ stream เนื้อหา Suspense จะพา inline runtime ของ React มาด้วย —
+script ที่ย้าย boundary ที่ resolve แล้วเข้าไปแทนที่ มันไม่ใช่ของ Ruvyxa จึงย้ายไปเป็น data block
+ไม่ได้ และมันถูกเขียนลง build artifact ที่ทุก request ใช้ซ้ำ nonce ต่อ request จึงถูก bake
+ติดไปและกลายเป็นค่าสาธารณะ ส่วน byte ของมันคงที่เมื่อ artifact ถูกเขียนแล้ว hash จึงเป็นกลไกที่เหมาะ
+— แต่มันอ้างอิง boundary id ที่กำลังเติม จึงต่างกันไปในแต่ละหน้าและดูแลด้วยมือไม่ไหว
+
+`inlineScriptHashes` ให้ build เป็นคนบันทึกให้:
+
+```ts
+securityHeaders({
+  contentSecurityPolicy: { 'default-src': ["'self'"], 'script-src': ["'self'"] },
+  inlineScriptHashes: true,
+})
+```
+
+build จะเขียน `csp-inline-hashes.json` ลง output directory แล้วแต่ละ response จะหยิบ hash
+ของหน้าที่ตัวเองเสิร์ฟไปใส่ — หน้าที่ไม่มี inline script ก็ได้ policy เดิมไม่เปลี่ยน ใส่
+`{ outDir }` ถ้า build output ไม่ใช่ `.ruvyxa` และต้องมี `script-src` อยู่ใน policy อยู่แล้ว: policy
+ที่ตั้งใจให้ fallback ไป `default-src` จะถูกปล่อยไว้เฉย ๆ เพราะการบีบให้เหลือแค่ hash
+เหล่านี้จะบล็อก bundle ของแอปเอง ส่วนใน `ruvyxa dev` ยังไม่มีอะไรถูก build จึงไม่มี hash ถูกเพิ่ม
 
 **ก่อนหน้า:** [Configuration และ environment](07-configuration.md) · **ถัดไป:**
 [การเชื่อมต่อ](09-integrations-auth-data-and-realtime.md)

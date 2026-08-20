@@ -39,6 +39,10 @@ const WORKER_RUNTIME_FILES: &[&str] = &[
     // rule the deployed handler uses, so a change to those channel/size limits
     // reaches worker output and must invalidate prerendered artifacts too.
     "action-runtime.mjs",
+    // `action-runtime.mjs` delegates its cross-site checks here. Extracting
+    // them out of a hashed file would otherwise have taken them out of cache
+    // identity: the rule could change while every hash above stayed equal.
+    "origin-policy.mjs",
     "compiler.mjs",
     // The ordering rule the worker's cache keys and fingerprints sort by. A
     // change here reorders key material, so it belongs in cache identity.

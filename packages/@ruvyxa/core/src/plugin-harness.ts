@@ -8,6 +8,7 @@ import type {
   PluginDiagnostic,
   PluginEnvironment,
   PluginHeadEntry,
+  PluginHostEnvironment,
   PluginHttpRequestRegistration,
   PluginHttpResponseRegistration,
   PluginHttpRouteRegistration,
@@ -139,10 +140,14 @@ const DEFAULT_ORIGIN = 'http://localhost'
  */
 export async function createPluginHarness(
   plugins: RuvyxaPlugin | readonly RuvyxaPlugin[],
-  options: { root?: string } = {},
+  options: { root?: string; environment?: PluginHostEnvironment } = {},
 ): Promise<PluginHarness> {
   const list = Array.isArray(plugins) ? [...plugins] : [plugins as RuvyxaPlugin]
   const root = options.root ?? DEFAULT_ROOT
+  // Matches what a host reports when it says nothing, so a plugin under test
+  // behaves here the way it does in a deployment by default. Pass
+  // `environment: 'development'` to exercise the other branch.
+  const environment = options.environment ?? 'production'
 
   const requestHooks: Array<{ plugin: string; registration: PluginHttpRequestRegistration }> = []
   const responseHooks: Array<{ plugin: string; registration: PluginHttpResponseRegistration }> = []
@@ -164,6 +169,7 @@ export async function createPluginHarness(
     for (const entry of plugin.head ?? []) head.push(entry)
 
     const api: PluginRegistrationApi = {
+      environment,
       http: {
         onRequest(registration) {
           requestHooks.push({ plugin: plugin.name, registration: asRegistration(registration) })

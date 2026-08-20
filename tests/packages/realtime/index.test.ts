@@ -37,6 +37,7 @@ describe('@ruvyxa/realtime', () => {
     let registered: unknown
     let buildHook: ((context: any) => void | Promise<void>) | undefined
     await plugin.register({
+      environment: 'production',
       http: { onRequest() {}, onResponse() {}, route() {} },
       build: {
         onStart() {},

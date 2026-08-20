@@ -26,6 +26,21 @@ import { transformWithReactCompiler } from './react-compiler.mjs'
 
 const [projectRootArg, mode] = process.argv.slice(2)
 
+/**
+ * Which environment this host serves, as stated by whoever spawned it.
+ *
+ * Named apart from the build `environment` (client/server/edge/worker/shared)
+ * that transform hooks carry — the two are unrelated axes.
+ *
+ * Read by name rather than by position: the persistent path passes
+ * `--persistent` where the one-shot build path passes a hook name. A host that
+ * says nothing is treated as production, so development-only request handling
+ * is never enabled for a server that may be serving real traffic.
+ */
+const hostEnvironment = process.argv.includes('--environment=development')
+  ? 'development'
+  : 'production'
+
 if (!projectRootArg || !mode) {
   writeResponse(failure('RUV1701', 'Plugin runtime requires project root and mode arguments.'))
   process.exit(1)
@@ -55,7 +70,7 @@ try {
 
 async function loadRegistry(root) {
   const configFile = findConfig(root)
-  if (!configFile) return createPluginRegistry({ root, plugins: [] })
+  if (!configFile) return createPluginRegistry({ root, plugins: [], environment: hostEnvironment })
 
   const moduleCode = `export { default } from ${JSON.stringify(toImportPath(configFile))}`
   const outfile = path.join(
@@ -85,6 +100,7 @@ async function loadRegistry(root) {
     root,
     plugins: contentPlugin ? [...configuredPlugins, contentPlugin] : configuredPlugins,
     markdown: config.markdown,
+    environment: hostEnvironment,
   })
 }
 

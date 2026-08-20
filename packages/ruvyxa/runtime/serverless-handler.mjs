@@ -136,6 +136,8 @@ export const HANDLER_RUNTIME_FILES = Object.freeze([
   'route-match.mjs',
   'request-context.mjs',
   'action-runtime.mjs',
+  // `action-runtime.mjs` imports this for its two cross-site checks.
+  'origin-policy.mjs',
   'flight.mjs',
 ])
 

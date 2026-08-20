@@ -13,6 +13,7 @@ import type {
 export type {
   PluginBuildCompleteHook,
   PluginHeadEntry,
+  PluginHostEnvironment,
   PluginBuildContext,
   PluginBuildDefinition,
   PluginBuildLoadContext,

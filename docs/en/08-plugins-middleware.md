@@ -82,6 +82,12 @@ third-party resources.
 | `openApi`                             | OpenAPI 3.1 JSON served in development and written into production output.                          |
 | `alias`, `bundleBudget`, `requireEnv` | Build-time import aliasing, client JavaScript size limits, and required environment validation.     |
 | `fonts`                               | Build-time self-hosting for supplied Google Fonts stylesheet URLs.                                  |
+| `originGuard`                         | Blocks cross-site mutation requests to route handlers, opt-in per route scope.                      |
+| `healthCheck`                         | Liveness endpoint answered by the request host, ahead of route rendering.                           |
+| `webVitals`                           | Core Web Vitals collected in the browser and reported server-side.                                  |
+| `llmsTxt`                             | Build-time `llms.txt` site index from curated sections and discovered routes.                       |
+| `wellKnown`                           | Files under `/.well-known/`, including RFC 9116 `security.txt`.                                     |
+| `headScriptHashes`                    | CSP source hashes for inline scripts and styles that plugins contribute.                            |
 
 Use explicit data with build-time plugins: they do not discover your business content or API
 semantics automatically. For example, this is a complete PWA declaration with the required `name`:
@@ -109,6 +115,102 @@ The PWA plugin defaults to `/manifest.webmanifest`, `/sw.js`, and `/pwa-register
 paths must differ. `openApi` defaults to `/openapi.json`, requires a non-empty title/version, and
 rejects duplicate method/path and `operationId` entries. Run a production build and inspect the
 generated output whenever adding a build plugin.
+
+## Build artifacts during development
+
+`robots`, `feed`, `searchIndex`, `openApi`, `pwa`, `wellKnown`, and `webVitals` also answer requests
+for the file they generate, so `ruvyxa dev` serves the same bytes the build writes and the output
+can be checked without a production build.
+
+`feed` and `searchIndex` do this only when their content is a static array. Given a loader, they
+stay build-time only: a plugin cannot tell development from production at request time, so running a
+loader per request would put a file read or a database query on the production response path.
+`sitemap` and `llmsTxt` are build-time only for the same class of reason — their entries come from
+the route manifest, which does not exist while the development server is running.
+
+## Guarding route handlers
+
+Server actions reject cross-site requests in both hosts. A handler under `app/api/` does not: it is
+reachable from any origin, and a session cookie defaults to `SameSite=Lax`, which a cross-site form
+POST still carries. `originGuard` closes that for the routes it is given.
+
+```ts
+import { healthCheck, originGuard, webVitals, wellKnown } from 'ruvyxa/plugins'
+
+export default config({
+  plugins: [
+    originGuard({ routes: ['/api/*'] }),
+    healthCheck({ path: '/health', check: () => ({ status: 'up' }) }),
+    webVitals({ sampleRate: 0.1 }),
+    wellKnown({
+      securityTxt: {
+        contact: 'mailto:security@example.com',
+        expires: '2027-01-01T00:00:00.000Z',
+      },
+    }),
+  ],
+})
+```
+
+It is opt-in rather than a default because an API meant to be called from another origin is a
+legitimate design; that case is governed by CORS instead. Unsafe methods are checked by comparing
+`Origin` against `Host`, falling back to `Sec-Fetch-Site: same-origin` when the origin was stripped,
+and failing closed when neither is present. `webVitals` publishes its client script as a build asset
+and loads it with `src`, so it does not force `'unsafe-inline'` into a `script-src` policy.
+
+## Content-Security-Policy
+
+A page carries no executable inline script of Ruvyxa's own. Route parameters and the request path
+travel to the client in a `<script type="application/json">` data block, which the browser does not
+execute and `script-src` does not apply to, so a strict policy needs no nonce for it:
+
+```ts
+securityHeaders({ contentSecurityPolicy: { 'default-src': ["'self'"], 'script-src': ["'self'"] } })
+```
+
+Two things still need covering. A plugin that contributes an inline `<script>` through `head` is
+identical on every request, so it is covered by a hash rather than a nonce:
+
+```ts
+import { headScriptHashes, securityHeaders } from 'ruvyxa/plugins'
+
+const plugins = [analytics()]
+export default config({
+  plugins: [
+    ...plugins,
+    securityHeaders({
+      contentSecurityPolicy: { 'script-src': ["'self'", ...headScriptHashes(plugins)] },
+    }),
+  ],
+})
+```
+
+`headScriptHashes` returns nothing for a plugin that loads its script with `src`; the first-party
+`webVitals` is built that way for exactly this reason. Pass `{ tag: 'style' }` for the matching
+`style-src` hashes.
+
+The other is React itself. A route that streams Suspense content carries React's own inline runtime
+— the script that swaps a resolved boundary into place. It is not Ruvyxa's to move into a data
+block, and it is written into a build artifact every request reuses, so a per-request nonce would be
+baked in and therefore public. Its bytes are fixed once the artifact is written, so a hash is what
+fits — but they name the boundary ids they complete, which makes them per-document and impossible to
+maintain by hand.
+
+`inlineScriptHashes` has the build record them:
+
+```ts
+securityHeaders({
+  contentSecurityPolicy: { 'default-src': ["'self'"], 'script-src': ["'self'"] },
+  inlineScriptHashes: true,
+})
+```
+
+The build writes `csp-inline-hashes.json` into the output directory, and each response picks up the
+hashes for the document it is serving — a route with no inline script gets its policy unchanged.
+Pass `{ outDir }` when the project's build output is not `.ruvyxa`. It requires `script-src` to
+already be in the policy: a policy that deliberately falls back to `default-src` is left alone,
+because narrowing it to exactly these hashes would block the application's own bundles. Under
+`ruvyxa dev` nothing has been built, so no hashes are added.
 
 **Previous:** [Configuration and environment](07-configuration.md) · **Next:**
 [Integrations](09-integrations-auth-data-and-realtime.md)

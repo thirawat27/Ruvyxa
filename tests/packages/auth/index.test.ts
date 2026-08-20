@@ -554,6 +554,7 @@ describe('@ruvyxa/auth', () => {
     const auth = runtime()
     let hook: ((context: unknown) => void | Promise<void>) | undefined
     await auth.plugin.register({
+      environment: 'production',
       http: { onRequest() {}, onResponse() {}, route() {} },
       build: {
         onStart() {},
