@@ -1,5 +1,209 @@
 # Changelog
 
+## v1.0.32 (unreleased)
+
+### Navigation paints the destination immediately
+
+A soft navigation used to hold the previous page on screen until the target route's Flight payload
+arrived. On a slow route that reads as a dead click: the user pressed a link and nothing changed.
+
+Every client entry for a route that has a `loading.tsx` now also emits a `__ruvyxaShell` factory —
+the route's layouts wrapped around its loading component — registered under
+`globalThis.__RUVYXA_SHELLS__`. The router paints it as soon as the route's bundle is available and
+replaces it with the real tree when the payload lands.
+
+The shell needs **no server round-trip**. Its layouts and loading component are already inside the
+bundle that `<Link prefetch>` warms, so there is nothing left to fetch by the time it is painted;
+this costs no request the navigation was not already making. The URL is committed at the same
+moment, so the address bar cannot lag behind what the user can see, and a payload that then fails
+falls back to a full load without pushing a second history entry.
+
+A route with no `loading.tsx` has declared no loading state and keeps the previous behaviour — the
+old page stays up. Inventing a blank screen for it would be worse than the page the user is already
+looking at.
+
+Both entry generators emit it, `crates/ruvyxa_bundler/src/output.rs` and
+`packages/ruvyxa/runtime/entry-templates.mjs`, so a project renders the same way under `ruvyxa dev`
+and in a built bundle. Server entries carry no shell: a server render has its data in hand and never
+shows the fallback.
+
+Splitting the bundle wait from the payload wait pushed `navigate` past the `complexity` gate. It was
+split along the seams it already had — `needsRouteLoad`, `commitShell`, `settleFlight` — rather than
+by hoisting fragments out to move the number.
+
+### `error.tsx` can retry against the server
+
+The fallback receives `{ error, reset, retry }` where it previously received `{ error, reset }`.
+
+The two recover from different failures and are deliberately not merged. `reset` clears the boundary
+and re-renders against data the client already has, which recovers from a fault in the render
+itself. `retry` aborts any request still in flight for the route, discards the cached payload,
+re-fetches it, and only then clears the boundary — which is what is needed when the failure _was_
+the data. One button that silently did the wrong one would look like it worked.
+
+A failed retry replaces the error rather than clearing it, so the boundary never shows children
+whose data still is not there. On a page with no mounted router there is nothing to re-fetch from,
+so it degrades to a `reset` instead of doing nothing. `router.retry()` backs it, and the exported
+`RuvyxaErrorBoundary` gained the same pair so a hand-written boundary is not weaker than the
+convention one.
+
+### `params()` reads route parameters from any depth
+
+A page already receives its parameters as props. `params()`, exported from `ruvyxa/server`, is for
+everything below it — the shared formatters, loaders, and nested components that need a `[lang]`
+segment and used to reach it by prop-drilling, or by re-parsing the URL themselves.
+
+Unlike `cookies()`, `headers()`, and `draftMode()`, **reading it does not make the render
+request-dependent**. A parameter is part of the route's identity rather than of who is asking:
+`/th/blog/hello` renders the same document for every visitor. Recording a request-state read here
+would have quietly dropped any page that read its own parameters out of static rendering and out of
+the ISR cache — the opposite of what the API is for.
+
+It resolves in API route handlers too. A server action is invoked at its own endpoint rather than
+matched against a route pattern, so it has no route parameters, and `params()` reports that rather
+than returning an empty object — otherwise a mistyped segment name would read as "this route has no
+such parameter".
+
+### Reproducible builds, measured rather than asserted
+
+Ruvyxa already enforced the ingredients of a reproducible build — `localeCompare` banned, ordering
+through explicit comparators, the Rust and JavaScript graphs held to shared conformance fixtures.
+Nothing checked the property those rules exist to produce.
+
+`pnpm verify:reproducible` builds a project twice from clean and compares every emitted file. It
+sorts the differences by what they mean rather than reporting one list: emitted code differing is a
+defect and fails; build telemetry (`build.json`'s `createdAtUnix` and `timing`, and the cache
+counters in `client/manifest.json` that `ruvyxa bench` reads) describes how the build _ran_ and is
+reported without failing; a prerendered page differing is almost always the application's own clock
+or random value, which Ruvyxa cannot tell apart from a bug. `--strict` fails on all three, which is
+what attesting that an artifact matches a commit needs.
+
+The demo builds to 91 emitted files that are byte-identical across two clean builds.
+
+### Deployed servers survive a deploy
+
+The standalone server that the node, bun, deno, aws, railway, and render adapters emit was correct
+about paths, cache headers, and body limits, and had nothing at all about process lifecycle.
+
+- **Graceful shutdown.** Every container platform stops a deploy with `SIGTERM` and a kill shortly
+  after. Node's default is to exit immediately, dropping every response still being written — so a
+  rolling deploy showed users connection resets. The server now stops accepting, drains in-flight
+  responses, and closes idle keep-alive sockets so the drain is not held open by connections
+  carrying nothing. A request that never finishes cannot outlive the platform's own grace period.
+- **Keep-alive above the proxy's idle window.** Node closes an idle connection after 5 seconds while
+  AWS ALB idles at 60. When the proxy believes a pooled socket is good and the origin has already
+  begun closing it, the request that lands on it fails — a 502 that appears only under load, only in
+  production, and only intermittently. `keepAliveTimeout` now defaults to 65s with `headersTimeout`
+  above it; both are overridable by environment variable.
+- **A bad route cannot take the process down.** An unhandled rejection terminates Node by default,
+  taking every concurrent request with it, so it is now reported and the server keeps serving. An
+  uncaught exception is treated differently on purpose: the process state is no longer trustworthy,
+  so it drains and exits non-zero for the supervisor to replace.
+- **Stream failures are contained.** Both the static-file pipe and the response-body pipe commit
+  their status before the body flows, so a later failure can only end the connection — and left
+  unhandled, that `error` event was fatal to the whole process. A client that disconnects now also
+  stops the file read, and stops a render still producing for nobody.
+
+The generated server is assembled as a template string, so `tsc` validates the template and never
+the program that comes out of it — the first execution is on a user's host after a deploy. A test
+now writes the emitted source out and parses it, alongside assertions for each behaviour above. The
+same guard was added for the route boundary emitted by `entry-templates.mjs`, after an unescaped
+backtick inside a comment closed that template early and produced a class that could not compile.
+
+### An ISR cache write no longer fails the page it rendered
+
+`writePrerendered` failures escaped the request on the foreground paths. A runtime filesystem that
+is read-only is ordinary in production — a container started with `--read-only`, a pod with
+`readOnlyRootFilesystem`, Cloud Run, a Lambda bundle outside `/tmp` — and so is a full disk. Storing
+the render is a cache optimisation; serving it is the request. A page that had already rendered
+correctly returned 500 to every visitor because the write that came after it threw.
+
+Ordinary ISR and SSG writes are now best-effort and degrade to rendering on each request. A write
+that settles a `revalidatePath()` claim still surfaces: the caller was promised that the next
+request sees the new document, and this instance cannot reach instances already warm elsewhere, so
+the durable write is the only thing that makes the promise true. Swallowing it would report success
+while every later request kept serving the old page; the claim stays pending for retry instead.
+
+### Host locale can no longer change build output
+
+`localeCompare` was banned for deciding ordering by the host's ICU locale. Two case-folding calls
+were doing the same thing and were not covered.
+
+`compiler.mjs` generated heading slugs with `toLocaleLowerCase()` while the native compiler's
+`slugify` lowercases with Rust's locale-independent `char::to_lowercase` — so on a Turkish host `I`
+became `ı` in one and `i` in the other, and the two compilers disagreed about a heading `id`.
+`contentTitleFromRoute` used `toLocaleUpperCase()` for a title baked into generated metadata and
+prerendered HTML, so the same project built to different bytes on different machines.
+
+Both now fold locale-independently, and `no-restricted-properties` covers `toLocaleLowerCase` and
+`toLocaleUpperCase` alongside `localeCompare`. A unit test cannot catch this class — CI runs on
+en-US, where the assertion passes whether or not the bug is present — so the lint rule is the gate
+that fires on every host. The `searchIndex` plugin still folds by locale, because the locale there
+comes from the project's own configuration rather than from the host, and carries a documented
+exemption on each line.
+
+### Auth keys are owned by the runtime that owns the secret
+
+Derived HMAC keys lived in a module-global `Map` keyed on the secret. It had no eviction, so every
+distinct secret the process ever saw kept both its plaintext — as the map key — and its derived key
+alive until the process exited, and discarding an auth runtime could release neither.
+
+Each runtime now holds its own lazily-imported key, which ties the key's lifetime to the object that
+owns the secret. Signature bytes and the never-cache-a-rejected-import behaviour are unchanged; a
+session issued by one runtime is still readable by the next one started from the same secret, which
+is what makes a redeploy or a second worker safe, and is now asserted directly.
+
+The development server's process-global client-manifest cache had the same shape and is now bounded
+to 128 roots with oldest-first eviction. Eviction costs a re-parse and never a wrong answer.
+
+### `plugins.ts` is a barrel
+
+`packages/ruvyxa/src/plugins.ts` was 2,954 lines covering every first-party plugin family. It is now
+a barrel that re-exports the public API by name from `packages/ruvyxa/src/plugins/`: one module per
+family (`http`, `pwa`, `seo`, `search`, `content-engine`, `openapi`, `build`), plus `shared` for
+helpers two or more families use and `sitemap-xml` for the sitemap document builder.
+
+The split follows the section markers the file already carried, so it reflects the boundaries the
+author drew rather than new ones. All 145 declarations moved unchanged — none lost, added, or
+duplicated — and the built module exports the same 17 functions it did before.
+
+The barrel lists names explicitly rather than re-exporting `*`, because the family modules also
+export helpers to each other and a wildcard would publish those as package API. A new plugin goes in
+its family module and gets one line in the barrel; adding it only to the module leaves it
+unreachable from `ruvyxa/plugins`.
+
+### `RenderMeta` has one source of truth for client scheduling
+
+`RenderMeta` carried both a `hydrate: bool` and a `hydration: HydrationMode`, where the boolean was
+only ever `hydration != None`. Both were public and independently assignable, and code in the tree
+already set one without the other — so the bundler and the document writer could disagree about
+whether a route ships JavaScript. The boolean is gone and `RenderMeta::ships_client_bundle()`
+derives the answer. The `export const hydrate = false` API is unchanged.
+
+### Dependencies
+
+`oxc` moves to `0.146.0` on both sides of the lockstep — the Rust bundler and the `oxc-transform`
+the Node compiler uses — because a version split lets one page's server render and client hydration
+disagree. `MinifierOptions` gained a field in that release; the options literal now spreads the
+defaults and names only the field it means to change, so the next addition is not a compile error
+that says nothing about what the new option should be.
+
+Also updated: `@babel/core` to 8, `pnpm` to 11.22.0, `oxlint` to 1.79.0, `sass` to 1.103.0, and the
+usual transitive movement. `babel-plugin-react-compiler` still emits memoisation and source maps
+under Babel 8.
+
+`@types/node` is deliberately held at `24.13.3`, the newest release on the 24 line. `engines.node`
+is `>=24.19.0`, and types from a later major would let code typecheck against APIs that do not exist
+on the runtime the package tells users to run.
+
+Oxlint 1.79 brought rules that found real defects rather than noise. The one worth naming: `<Link>`
+tracked whether it had prefetched with a boolean plus an effect that reset it when `href` changed,
+which left a window — between the href changing and the effect running — where the guard still said
+"already prefetched" and the new destination was skipped. The guard now records _which_ href was
+warmed, which closes the window and removes the effect. A ref written during render in
+`@ruvyxa/realtime` was removed as well: it could not stabilise a dependency that sat beside it in
+the same list.
+
 ## v1.0.31 (2026-08-20)
 
 ### Node.js 24 LTS production baseline
