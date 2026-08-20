@@ -103,7 +103,7 @@ export const meta = ({ params }: { params: Record<string, string> }) => ({
 })
 ```
 
-`error.tsx` รับ `{ error, reset }`; `loading.tsx` และ `not-found.tsx` เป็น component ปกติ
+`error.tsx` รับ `{ error, reset, retry }`; `loading.tsx` และ `not-found.tsx` เป็น component ปกติ
 หากต้องการเลือก `not-found.tsx` ที่ใกล้ที่สุด ให้ import `notFound` จาก `@ruvyxa/react` แล้วเรียกมัน
 (มัน throw tagged signal) อย่าสับสนกับ `notFound` จาก `ruvyxa/server` ซึ่งสร้าง HTTP `Response`
 สถานะ 404
@@ -174,10 +174,25 @@ export default function ProductError({ error, reset }: RouteErrorProps) {
 }
 ```
 
-`loading.tsx` ถูกใช้เป็น Suspense fallback ของ route ส่วน `not-found.tsx` render ฝั่ง server ได้ แต่
-`reset()` จะ render ใหม่หลัง hydration ดังนั้น `error.tsx` ที่มีปุ่มลองใหม่ต้องเป็น client component
-ควรแสดงข้อความ error ที่ปลอดภัยสำหรับผู้ใช้ และบันทึกรายละเอียดวินิจฉัยใน server หรือ integration
-ด้าน observability แทนการ render secret หรือ stack trace
+`loading.tsx` ทำสองหน้าที่ ฝั่ง server มันคือ Suspense fallback ของ route ส่วนฝั่งเบราว์เซอร์มันคือ
+**loading shell** ของ route ด้วย: เมื่อ navigate ไปยัง route ที่มีไฟล์นี้ Ruvyxa จะวาด layout กับ
+`loading.tsx` ของปลายทางทันทีที่ bundle ของ route พร้อม โดยไม่รอข้อมูลจาก server ของหน้านั้น
+เนื้อหาจริงจะเข้ามาแทน fallback เมื่อ payload มาถึง
+
+นี่คือสิ่งที่ทำให้การ navigate ไป route ที่ช้ารู้สึกว่า "ตอบสนองทันที"
+แทนที่จะเหมือนกดแล้วไม่มีอะไรเกิดขึ้น และไม่มีค่า request เพิ่มเลย เพราะ layout กับ component
+loading อยู่ใน bundle ที่ `<Link prefetch>` อุ่นไว้อยู่แล้ว ส่วน route ที่ไม่มี `loading.tsx`
+ถือว่าไม่ได้ประกาศสถานะ loading ไว้ หน้าเดิมจึงค้างอยู่ จนกว่าหน้าใหม่จะพร้อม เหมือนเดิมทุกประการ
+
+`error.tsx` ได้เส้นทางการกู้คืนทั้งสองแบบ: `reset()` ล้าง boundary แล้ว render ใหม่จากข้อมูลที่
+client มีอยู่แล้ว เหมาะกับกรณีที่พังเพราะตัว render เอง ส่วน `retry()` จะขอข้อมูล route จาก server
+ใหม่ก่อน ซึ่งเป็นสิ่งที่ต้องการเมื่อสิ่งที่พังคือ _ข้อมูล_ — คืนค่าเป็น promise ที่ resolve เมื่อ
+boundary ถูก reset แล้ว ถ้าไม่มี router ทำงานอยู่ `retry()` จะถอยไปทำงานเหมือน `reset()`
+
+ส่วน `not-found.tsx` render ฝั่ง server ได้ แต่ `reset()` จะ render ใหม่หลัง hydration ดังนั้น
+`error.tsx` ที่มีปุ่มลองใหม่ต้องเป็น client component ควรแสดงข้อความ error ที่ปลอดภัยสำหรับผู้ใช้
+และบันทึกรายละเอียดวินิจฉัยใน server หรือ integration ด้าน observability แทนการ render secret หรือ
+stack trace
 
 ## นโยบาย i18n route
 

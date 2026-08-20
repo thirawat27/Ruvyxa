@@ -6,8 +6,20 @@ import { Component, type ErrorInfo, type ReactNode } from 'react'
 export interface ErrorFallbackProps {
   /** The error that was thrown. */
   error: Error
-  /** Call this to reset the error boundary and retry rendering. */
+  /** Call this to reset the error boundary and render its children again. */
   resetError: () => void
+  /**
+   * Re-fetch the current route from the server, then reset the boundary.
+   *
+   * `resetError` re-renders against data the client already has, so it can only
+   * recover from a fault in the render itself. When the failure was the data —
+   * a request that errored, a payload that never arrived — the request has to
+   * be repeated, and that is what this does.
+   *
+   * Outside a mounted router there is nothing to re-fetch from, so it falls
+   * back to `resetError`. Resolves once the boundary has been reset.
+   */
+  retry: () => Promise<void>
 }
 
 /**
@@ -69,11 +81,32 @@ export class RuvyxaErrorBoundary extends Component<ErrorBoundaryProps, ErrorBoun
     this.setState({ error: null })
   }
 
+  retry = async (): Promise<void> => {
+    // Reached through the global rather than `useRouter()` because this is a
+    // class component, and because the boundary has to keep working on a page
+    // that never mounted the client router.
+    const router = (globalThis as { __RUVYXA_ROUTER_INSTANCE__?: { retry?: () => Promise<void> } })
+      .__RUVYXA_ROUTER_INSTANCE__
+    if (typeof router?.retry !== 'function') {
+      this.resetError()
+      return
+    }
+    try {
+      await router.retry()
+      this.resetError()
+    } catch (error) {
+      // A failed retry replaces the error rather than clearing it: the boundary
+      // must not show its children again when the data still is not there.
+      this.setState({ error: error instanceof Error ? error : new Error(String(error)) })
+    }
+  }
+
   render(): ReactNode {
     if (this.state.error) {
       return this.props.fallback({
         error: this.state.error,
         resetError: this.resetError,
+        retry: this.retry,
       })
     }
     return this.props.children

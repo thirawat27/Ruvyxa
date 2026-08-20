@@ -105,10 +105,10 @@ export const meta = ({ params }: { params: Record<string, string> }) => ({
 })
 ```
 
-`error.tsx` receives `{ error, reset }`; `loading.tsx` and `not-found.tsx` are plain components. To
-select the nearest `not-found.tsx`, import `notFound` from `@ruvyxa/react` and call it (it throws a
-tagged signal). Do not confuse it with `notFound` from `ruvyxa/server`, which creates an HTTP
-`Response` with status 404.
+`error.tsx` receives `{ error, reset, retry }`; `loading.tsx` and `not-found.tsx` are plain
+components. To select the nearest `not-found.tsx`, import `notFound` from `@ruvyxa/react` and call
+it (it throws a tagged signal). Do not confuse it with `notFound` from `ruvyxa/server`, which
+creates an HTTP `Response` with status 404.
 
 ### A complete route-state boundary
 
@@ -176,10 +176,26 @@ export default function ProductError({ error, reset }: RouteErrorProps) {
 }
 ```
 
-`loading.tsx` is used as the route's Suspense fallback. `not-found.tsx` can render on the server,
-but `reset()` re-renders after hydration, so make an `error.tsx` with a retry control a client
-component. Keep error text safe for end users; log diagnostic detail on the server or through your
-observability integration instead of rendering secrets or stack traces.
+`loading.tsx` does two jobs. On the server it is the route's Suspense fallback. In the browser it is
+also the route's **loading shell**: when you navigate to a route that has one, Ruvyxa paints its
+layouts and its `loading.tsx` as soon as the route's bundle is available, without waiting for the
+page's server data. The content replaces the fallback when the payload arrives.
+
+That is what makes a navigation to a slow route feel immediate rather than like a dead click, and it
+costs no extra request — the layouts and the loading component are already in the bundle that
+`<Link prefetch>` warms. A route with no `loading.tsx` has no declared loading state, so the
+previous page stays on screen until the new one is ready, exactly as before.
+
+`error.tsx` gets both recovery paths. `reset()` clears the boundary and re-renders against the data
+the client already has, which recovers from a fault in the render itself. `retry()` re-requests the
+route from the server first, which is what you want when the failure _was_ the data — it returns a
+promise that resolves once the boundary has been reset. Outside a mounted router `retry()` falls
+back to `reset()`.
+
+`not-found.tsx` can render on the server, but `reset()` re-renders after hydration, so make an
+`error.tsx` with a retry control a client component. Keep error text safe for end users; log
+diagnostic detail on the server or through your observability integration instead of rendering
+secrets or stack traces.
 
 ## i18n route policy
 

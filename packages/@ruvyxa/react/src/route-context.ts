@@ -110,6 +110,7 @@ export function useRouter(): RuvyxaRouter {
     push: (href: RouteHref, options?: NavigateOptions) => instance.navigate(href, { ...options }),
     replace: (href: RouteHref, options?: NavigateOptions) =>
       instance.navigate(href, { ...options, replace: true }),
+    retry: () => instance.retry(),
     back: () => {
       if (typeof window !== 'undefined') window.history.back()
     },

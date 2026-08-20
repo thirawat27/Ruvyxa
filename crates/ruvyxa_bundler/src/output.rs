@@ -117,6 +117,20 @@ pub fn build_entry_source(input: &BundleInput) -> (String, String) {
         &meta_names,
     );
 
+    // Only a route with a declared loading state gets a shell; see
+    // `route_shell_function`. Emitted for the browser bundle alone — a server
+    // render has the data in hand and never shows a loading fallback for it.
+    let route_shell = match (input.target, loading_name.as_deref()) {
+        (BundleTarget::Client, Some(loading)) => format!(
+            "
+{}
+;(globalThis.__RUVYXA_SHELLS__ ||= {{}})[{route_pattern}] = __ruvyxaShell;
+",
+            route_shell_function(&route_pattern, &layout_wrappers, loading, &meta_names)
+        ),
+        _ => String::new(),
+    };
+
     let source = match input.target {
         BundleTarget::Client => {
             format!(
@@ -130,6 +144,7 @@ import Page from {page_path};
 {route_tree}
 ;(globalThis.__RUVYXA_ROUTES__ ||= {{}})[{route_pattern}] = __ruvyxaTree;
 globalThis.__RUVYXA_ROUTE_PATTERN__ = {route_pattern};
+{route_shell}
 
 const __ruvyxaCtx = {{
   // The registry is keyed by route pattern, so this bundle has no concrete
@@ -220,6 +235,23 @@ const ROUTE_BOUNDARY_PRELUDE: &str = r#"class __ruvyxaBoundary extends React.Com
     super(props);
     this.state = { error: null };
     this.reset = () => this.setState({ error: null });
+    // Ask the server for this route again, then clear the boundary.
+    // A plain reset re-renders the payload that just failed, so it can only
+    // recover from a fault in the client tree. A page whose data failed to load
+    // needs the request repeated, which is what the router's retry does.
+    // Without a mounted router there is nothing to re-fetch from, so this
+    // degrades to a plain reset rather than doing nothing at all.
+    this.retry = () => {
+      const router = globalThis.__RUVYXA_ROUTER_INSTANCE__;
+      if (!router || typeof router.retry !== "function") {
+        this.reset();
+        return Promise.resolve();
+      }
+      return Promise.resolve(router.retry()).then(
+        () => this.reset(),
+        (failure) => this.setState({ error: failure }),
+      );
+    };
   }
   static getDerivedStateFromError(error) {
     return { error };
@@ -232,7 +264,11 @@ const ROUTE_BOUNDARY_PRELUDE: &str = r#"class __ruvyxaBoundary extends React.Com
         throw error;
       }
       if (this.props.errorFallback) {
-        return React.createElement(this.props.errorFallback, { error, reset: this.reset });
+        return React.createElement(this.props.errorFallback, {
+          error,
+          reset: this.reset,
+          retry: this.retry,
+        });
       }
       throw error;
     }
@@ -386,6 +422,34 @@ fn route_tree_function(
         "  return React.createElement(__ruvyxaRouteContext.Provider, {{\n    value: {{ pathname: ctx.path, params: ctx.params ?? {{}}, route: {route_path_literal}, flight: ctx.flight }},\n  }}, {meta_child}tree);"
     ));
     format!("function __ruvyxaTree(ctx) {{\n{}\n}}", lines.join("\n"))
+}
+
+/// Build the route's loading shell: its layouts wrapped around `loading.tsx`.
+///
+/// This is the half of a route that needs no server data. The layouts and the
+/// loading component are already in this bundle, so once it has executed the
+/// client can paint the shell with no request at all — which is what lets a
+/// navigation show the destination immediately instead of leaving the previous
+/// page up until the Flight payload lands.
+///
+/// Emitted only for a route that has a `loading.tsx`; a route without one has
+/// no declared loading state, and a blank screen would be worse than the page
+/// the user is already looking at. Mirrors `routeShellFunction()` in
+/// `packages/ruvyxa/runtime/entry-templates.mjs`.
+fn route_shell_function(
+    route_path_literal: &str,
+    layout_wrappers: &str,
+    loading_name: &str,
+    meta_names: &str,
+) -> String {
+    let meta_child = if meta_names.is_empty() {
+        String::new()
+    } else {
+        format!("__ruvyxaMetaElement(__ruvyxaResolveMeta([{meta_names}], ctx)), ")
+    };
+    format!(
+        "function __ruvyxaShell(ctx) {{\n  let tree = React.createElement({loading_name}, null);\n  for (const Layout of [{layout_wrappers}].reverse()) {{\n    tree = React.createElement(Layout, null, tree);\n  }}\n  return React.createElement(__ruvyxaRouteContext.Provider, {{\n    value: {{ pathname: ctx.path, params: ctx.params ?? {{}}, route: {route_path_literal}, flight: undefined }},\n  }}, {meta_child}tree);\n}}"
+    )
 }
 
 /// Wrap the fully-linked bundle in the target-specific format.
@@ -588,6 +652,76 @@ mod tests {
             ),
             "{source}"
         );
+    }
+
+    /// The shell is what makes a navigation paint immediately: it holds the
+    /// destination's layouts and its `loading.tsx`, all of which are already in
+    /// this bundle, so the client router can render it without waiting for the
+    /// Flight payload.
+    #[test]
+    fn emits_a_loading_shell_the_client_router_can_paint() {
+        let mut bundle = input(
+            "/project/app/blog/[slug]/page.tsx",
+            vec!["/project/app/layout.tsx"],
+            "/blog/[slug]",
+        );
+        bundle.specials = RouteSpecials {
+            loading: Some(PathBuf::from("/project/app/loading.tsx")),
+            ..RouteSpecials::default()
+        };
+        let (source, _) = build_entry_source(&bundle);
+
+        assert!(source.contains("function __ruvyxaShell(ctx)"), "{source}");
+        assert!(
+            source.contains(
+                r#";(globalThis.__RUVYXA_SHELLS__ ||= {})["/blog/[slug]"] = __ruvyxaShell;"#
+            ),
+            "{source}"
+        );
+        // The shell renders the loading component inside the layouts, with no
+        // page and no Flight payload — a stale payload from the page being
+        // navigated away from must never reach it.
+        assert!(
+            source.contains("let tree = React.createElement(RouteLoading, null);"),
+            "{source}"
+        );
+        assert!(source.contains("flight: undefined"), "{source}");
+        assert!(
+            !source
+                .split("function __ruvyxaShell")
+                .nth(1)
+                .unwrap()
+                .starts_with(
+                    "(ctx) {
+  let tree = React.createElement(Page"
+                ),
+            "the shell must not render the page: {source}"
+        );
+    }
+
+    /// A route with no `loading.tsx` has no declared loading state. Painting a
+    /// blank shell for it would be worse than leaving the previous page up.
+    #[test]
+    fn omits_the_shell_when_a_route_declares_no_loading_state() {
+        let (source, _) = build_entry_source(&input("/project/app/page.tsx", Vec::new(), "/"));
+        assert!(!source.contains("__ruvyxaShell"), "{source}");
+        assert!(!source.contains("__RUVYXA_SHELLS__"), "{source}");
+    }
+
+    /// A server render has its data in hand and never shows a loading fallback,
+    /// so shipping the shell there would be dead bytes on every SSR bundle.
+    #[test]
+    fn server_entries_carry_no_shell() {
+        for target in [BundleTarget::Ssr, BundleTarget::Edge] {
+            let mut bundle = input("/project/app/page.tsx", Vec::new(), "/");
+            bundle.target = target;
+            bundle.specials = RouteSpecials {
+                loading: Some(PathBuf::from("/project/app/loading.tsx")),
+                ..RouteSpecials::default()
+            };
+            let (source, _) = build_entry_source(&bundle);
+            assert!(!source.contains("__RUVYXA_SHELLS__"), "{source}");
+        }
     }
 
     #[test]

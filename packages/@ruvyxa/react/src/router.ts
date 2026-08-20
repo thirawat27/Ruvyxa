@@ -81,6 +81,16 @@ export interface RuvyxaRouter {
   forward(): void
   /** Re-render the current route from its already-loaded bundle. */
   refresh(): void
+  /**
+   * Re-fetch the current route's server payload, then re-render it.
+   *
+   * `refresh()` re-runs the client tree against the payload it already has, so
+   * it cannot recover from a server-side failure. This discards that payload
+   * first, which is what an `error.tsx` retry button needs: the render failed
+   * because of what the server sent (or did not send), and rendering the same
+   * bytes again would fail the same way.
+   */
+  retry(): Promise<void>
   /** Warm a route's bundle so a later navigation renders immediately. */
   prefetch(href: RouteHref): void
   /** `true` while a navigation is loading a bundle. */
@@ -91,6 +101,14 @@ type TreeFactory = (context: RouteContextValue) => unknown
 
 interface RouterGlobals {
   __RUVYXA_ROUTES__?: Record<string, TreeFactory>
+  /**
+   * Loading shells, keyed by route pattern.
+   *
+   * Separate from `__RUVYXA_ROUTES__` because only a route with a `loading.tsx`
+   * has one, and the router has to be able to tell "no shell" from "a tree that
+   * would suspend immediately".
+   */
+  __RUVYXA_SHELLS__?: Record<string, TreeFactory>
   __RUVYXA_ROOT__?: { render(tree: unknown): void }
   __RUVYXA_ROUTE_PARAMS__?: RouteParams
   __RUVYXA_REQUEST_PATH__?: string
@@ -140,6 +158,7 @@ export interface RouterInstance {
   ): Promise<void>
   prefetch(href: string): void
   refresh(): void
+  retry(): Promise<void>
 }
 
 /**
@@ -241,6 +260,88 @@ function createRouter(): RouterInstance {
     globals.__RUVYXA_REQUEST_PATH__ = context.pathname
     globals.__RUVYXA_ROUTE_PATTERN__ = context.route
     root.render(factory(context))
+    return true
+  }
+
+  /**
+   * Paint the destination's layouts and its `loading.tsx`, with no server data.
+   *
+   * Everything this renders is already in the route bundle, so once that bundle
+   * has executed there is nothing left to wait for. That is the whole point: a
+   * navigation to a slow route otherwise leaves the previous page on screen
+   * until the Flight payload lands, which reads as a dead click.
+   *
+   * `flight` is deliberately left undefined in the context. The shell must not
+   * be handed a stale payload from the page being navigated away from, and any
+   * component that reads it has to treat "not here yet" as a real state.
+   */
+  function renderShell(context: RouteContextValue): boolean {
+    const factory = globals.__RUVYXA_SHELLS__?.[context.route]
+    const root = globals.__RUVYXA_ROOT__
+    if (!factory || !root) return false
+    globals.__RUVYXA_ROUTE_PARAMS__ = context.params
+    globals.__RUVYXA_REQUEST_PATH__ = context.pathname
+    globals.__RUVYXA_ROUTE_PATTERN__ = context.route
+    root.render(factory({ ...context, flight: undefined }))
+    return true
+  }
+
+  /**
+   * Whether this navigation has to fetch the route's bundle before rendering.
+   *
+   * Two ways it does: the registry has never seen this route, or it holds a
+   * tree built by an earlier deploy. The second is what makes this more than a
+   * presence check — after a deploy the registry still answers, but with a
+   * factory whose chunks no longer exist on the server.
+   */
+  function needsRouteLoad(entry: RouteManifestEntry, route: string): boolean {
+    if (!globals.__RUVYXA_ROUTES__?.[route]) return true
+    if (!entry.artifactVersion) return false
+    return globals.__RUVYXA_ROUTE_ARTIFACTS__?.[route] !== entry.artifactVersion
+  }
+
+  /**
+   * Await the route's server payload, or report that it never arrived.
+   *
+   * Both navigation branches need the same three-way answer — no payload was
+   * expected, one arrived, or the request failed — and both used to spell it
+   * out separately, one with a `try`/`catch` and one with a `.catch()` plus an
+   * `undefined` check. A route with no Flight payload succeeds with no value,
+   * which is different from a route whose payload failed to load.
+   */
+  async function settleFlight(
+    flight: FlightEntry | null,
+  ): Promise<{ ok: boolean; value: FlightValue | undefined }> {
+    if (!flight) return { ok: true, value: undefined }
+    try {
+      return { ok: true, value: await flight.promise }
+    } catch {
+      return { ok: false, value: undefined }
+    }
+  }
+
+  /**
+   * Paint the destination's loading state and commit its URL.
+   *
+   * Both navigation branches — one that has to fetch the route bundle first and
+   * one that already has it — reach this same point: the bundle is present, the
+   * data is not, and the shell is the best thing to show. Committing the URL
+   * here rather than after the data lands keeps the address bar from lagging
+   * behind what the user can already see.
+   *
+   * Returns whether the shell went up, which is what tells the rest of the
+   * navigation that history has already been pushed for it.
+   */
+  function commitShell(
+    context: RouteContextValue,
+    url: URL,
+    historyMode: 'push' | 'replace' | 'none',
+  ): boolean {
+    if (!renderShell(context)) return false
+    pushHistoryEntry(url, historyMode)
+    snapshot = { ...context, flight: undefined }
+    search = url.search
+    emit()
     return true
   }
 
@@ -425,47 +526,64 @@ function createRouter(): RouterInstance {
     const flight = startFlight(matched.route, context.pathname)
     navigationAbort = flight?.controller ?? null
 
-    const staleArtifact =
-      Boolean(matched.route.artifactVersion) &&
-      globals.__RUVYXA_ROUTE_ARTIFACTS__?.[context.route] !== matched.route.artifactVersion
-    if (!globals.__RUVYXA_ROUTES__?.[context.route] || staleArtifact) {
+    // Set by whichever branch paints the loading shell. Once it is up the URL
+    // has already been committed, so the tail of this function must not push a
+    // second history entry for the same navigation.
+    let shellPainted = false
+
+    if (needsRouteLoad(matched.route, context.route)) {
       pendingNavigationId = id
       emit()
-      const [loaded, flightValue] = await Promise.all([
-        loadRoute(matched.route, context),
-        flight?.promise,
-      ]).catch(() => [false, undefined] as const)
+      // Awaited separately rather than through one `Promise.all` so the shell
+      // can go up the moment the bundle is here, instead of after the data it
+      // does not need. Both requests are already in flight — `startFlight` ran
+      // above — so nothing is serialised by splitting the waits.
+      const loaded = await loadRoute(matched.route, context).catch(() => false)
+      if (id !== navigationId) return
+      if (!loaded) {
+        pendingNavigationId = null
+        emit()
+        hardNavigate(url, historyMode)
+        return
+      }
+
+      // The bundle loaded, so this navigation is going to happen. Commit the
+      // URL and paint the destination's own loading state; the content replaces
+      // it below. Committing history here keeps the address bar from lagging
+      // behind what the user can see.
+      shellPainted = flight ? commitShell(context, url, historyMode) : false
+
+      const settled = await settleFlight(flight)
       if (id !== navigationId) return
       pendingNavigationId = null
-      if (!loaded) {
+      if (!settled.ok) {
         emit()
-        hardNavigate(url, historyMode)
+        // A full load of the same URL. History already points at it when the
+        // shell was painted, so `hardNavigate` must not push it a second time.
+        hardNavigate(url, shellPainted ? 'none' : historyMode)
         return
       }
-      if (flight && flightValue === undefined) {
-        emit()
-        hardNavigate(url, historyMode)
-        return
-      }
-      context.flight = flightValue
+      context.flight = settled.value
     } else {
       if (flight) {
         pendingNavigationId = id
         emit()
-        try {
-          context.flight = await flight.promise
-        } catch {
-          if (id !== navigationId) return
+        // The bundle is already here, so the shell is one render away.
+        shellPainted = commitShell(context, url, historyMode)
+        const settled = await settleFlight(flight)
+        if (id !== navigationId) return
+        if (!settled.ok) {
           pendingNavigationId = null
           emit()
-          hardNavigate(url, historyMode)
+          hardNavigate(url, shellPainted ? 'none' : historyMode)
           return
         }
+        context.flight = settled.value
       }
       pendingNavigationId = null
     }
 
-    pushHistoryEntry(url, historyMode)
+    if (!shellPainted) pushHistoryEntry(url, historyMode)
 
     snapshot = context
     search = url.search
@@ -542,6 +660,50 @@ function createRouter(): RouterInstance {
     emit()
   }
 
+  /**
+   * Discard the cached server payload for the current route and render it again.
+   *
+   * Any in-flight request for the same key is aborted before the entry is
+   * dropped, so a retry during a slow fetch does not leave a request running
+   * whose result nothing will read.
+   *
+   * A route with no Flight payload has nothing to re-fetch, so this degrades to
+   * `refresh()` rather than reporting a failure the caller cannot act on.
+   */
+  async function retry(): Promise<void> {
+    const matched = match(snapshot.pathname)
+    const resolved = matched ? flightKey(matched.route, snapshot.pathname) : null
+    if (!matched || !resolved) {
+      refresh()
+      return
+    }
+
+    const existing = flightCache.get(resolved.key)
+    if (existing) {
+      existing.controller.abort()
+      flightCache.delete(resolved.key)
+    }
+
+    const flight = startFlight(matched.route, snapshot.pathname)
+    if (!flight) {
+      refresh()
+      return
+    }
+
+    pendingNavigationId = navigationId
+    emit()
+    try {
+      const value = await flight.promise
+      // Re-render against a *new* context object. Mutating `snapshot` in place
+      // would leave `getSnapshot()` returning the same reference, and
+      // `useSyncExternalStore` would treat the re-render as a no-op.
+      snapshot = { ...snapshot, flight: value }
+    } finally {
+      pendingNavigationId = null
+    }
+    refresh()
+  }
+
   if (typeof window !== 'undefined') {
     window.addEventListener('popstate', () => {
       // The browser has already changed the URL; re-pushing it would corrupt
@@ -556,6 +718,7 @@ function createRouter(): RouterInstance {
       return () => listeners.delete(listener)
     },
     getSnapshot: () => snapshot,
+    retry,
     getSearch: () => search,
     getPending: () => pendingNavigationId !== null,
     navigate,

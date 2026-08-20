@@ -19,6 +19,7 @@ export const ROUTE_CONTEXT_GLOBAL = '__RUVYXA_ROUTE_CONTEXT__'
 
 /** Global registry of route pattern to tree factory, read by the client router. */
 export const ROUTE_REGISTRY_GLOBAL = '__RUVYXA_ROUTES__'
+const SHELL_REGISTRY_GLOBAL = '__RUVYXA_SHELLS__'
 
 /**
  * Global carrying the route pattern this document was served from.
@@ -204,6 +205,23 @@ export function routeBoundaryPrelude() {
     super(props)
     this.state = { error: null }
     this.reset = () => this.setState({ error: null })
+    // Ask the server for this route again, then clear the boundary.
+    // A plain reset re-renders the payload that just failed, so it can only
+    // recover from a fault in the client tree. A page whose data failed to load
+    // needs the request repeated, which is what the router's retry does.
+    // Without a mounted router there is nothing to re-fetch from, so this
+    // degrades to a plain reset rather than doing nothing at all.
+    this.retry = () => {
+      const router = globalThis.__RUVYXA_ROUTER_INSTANCE__
+      if (!router || typeof router.retry !== "function") {
+        this.reset()
+        return Promise.resolve()
+      }
+      return Promise.resolve(router.retry()).then(
+        () => this.reset(),
+        (failure) => this.setState({ error: failure }),
+      )
+    }
   }
   static getDerivedStateFromError(error) {
     return { error }
@@ -216,7 +234,11 @@ export function routeBoundaryPrelude() {
         throw error
       }
       if (this.props.errorFallback) {
-        return React.createElement(this.props.errorFallback, { error, reset: this.reset })
+        return React.createElement(this.props.errorFallback, {
+          error,
+          reset: this.reset,
+          retry: this.retry,
+        })
       }
       throw error
     }
@@ -357,6 +379,57 @@ export function routeRecoveryFunction({ layoutNames, routePath, notFoundName }) 
 }
 
 /**
+ * Emit the route's loading shell: its layouts wrapped around `loading.tsx`.
+ *
+ * This is the half of a route that needs no server data. The layouts and the
+ * loading component are already in the route bundle, so once that bundle is
+ * warm — which is exactly what `<Link>` prefetching does — the client can paint
+ * the shell with no request at all.
+ *
+ * That is what makes a navigation feel instant. Without it the router holds the
+ * previous page on screen until the Flight payload arrives, so a slow route
+ * looks like a dead click; with it the user sees the destination's own chrome
+ * and its loading state immediately, and the content replaces the fallback when
+ * the payload lands.
+ *
+ * Emitted only for a route that has a `loading.tsx`. A route without one has no
+ * declared loading state, and inventing a blank screen for it would be worse
+ * than leaving the previous page up.
+ *
+ * @param {object} options
+ * @param {string} options.name Function name to declare.
+ * @param {string[]} options.layoutNames Layout identifiers, root-to-leaf.
+ * @param {string} options.routePath Route pattern, e.g. `/blog/[slug]`.
+ * @param {string} options.loadingName `loading.tsx` component identifier.
+ * @param {string[]} [options.metaNames] Namespace identifiers, least specific first.
+ */
+export function routeShellFunction({ name, layoutNames, routePath, loadingName, metaNames = [] }) {
+  const lines = [`  let tree = React.createElement(${loadingName}, null)`]
+  lines.push(`  for (const Layout of [${layoutNames.join(', ')}].reverse()) {
+    tree = React.createElement(Layout, null, tree)
+  }`)
+  const metaChild =
+    metaNames.length > 0
+      ? `${META_ELEMENT_LOCAL}(${META_RESOLVE_LOCAL}([${metaNames.join(', ')}], ctx)), `
+      : ''
+  lines.push(`  return React.createElement(${ROUTE_CONTEXT_LOCAL}.Provider, {
+    value: { pathname: ctx.path, params: ctx.params ?? {}, route: ${JSON.stringify(routePath)}, flight: undefined },
+  }, ${metaChild}tree)`)
+  return `function ${name}(ctx) {\n${lines.join('\n')}\n}`
+}
+
+/**
+ * Register the shell so the client router can paint it during a navigation.
+ *
+ * Kept in a registry separate from `__RUVYXA_ROUTES__` because a route may have
+ * a tree and no shell, and the router has to be able to tell the difference
+ * rather than rendering a tree that would immediately suspend on missing data.
+ */
+export function routeShellRegistration({ name, routePath }) {
+  return `;(globalThis.${SHELL_REGISTRY_GLOBAL} ||= {})[${JSON.stringify(routePath)}] = ${name}`
+}
+
+/**
  * Emit the registration that lets the client router re-render a visited route.
  *
  * `import()` caches by URL, so a bundle that has already executed will not run
@@ -406,6 +479,11 @@ export function clientEntrySource({
     ? `\n${routeBoundaryPrelude()}\n`
     : ''
   const meta = metaNames.length > 0 ? `\n${routeMetaPrelude({ lang: false })}\n` : ''
+  // Only a route with a declared loading state gets a shell; see
+  // `routeShellFunction`.
+  const shell = loadingName
+    ? `${routeShellFunction({ name: '__ruvyxaShell', layoutNames, routePath, loadingName, metaNames })}\n${routeShellRegistration({ name: '__ruvyxaShell', routePath })}\n`
+    : ''
   return `import React from "react"
 import { hydrateRoot } from "react-dom/client"
 ${imports.join('\n')}
@@ -414,6 +492,7 @@ ${routeContextPrelude()}
 ${boundary}${meta}
 ${routeTreeFunction({ name: '__ruvyxaTree', pageName, layoutNames, routePath, errorName, loadingName, notFoundName, metaNames })}
 ${routeRegistration({ name: '__ruvyxaTree', routePath })}
+${shell}
 
 const __ruvyxaCtx = {
   path: globalThis.__RUVYXA_REQUEST_PATH__ ?? ${requestPathLiteral},

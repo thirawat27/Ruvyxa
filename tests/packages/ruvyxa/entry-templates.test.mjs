@@ -195,6 +195,102 @@ describe('entry-templates special files', () => {
     assert.match(prelude, /throw error/)
   })
 
+  /**
+   * The prelude is assembled as a template string, so nothing in the normal
+   * build parses what comes out of it — a stray backtick anywhere inside,
+   * including in a comment, closes the string early and emits a class that
+   * cannot compile. That has now happened twice in this repository, in two
+   * different generators, and both times it surfaced only when a project was
+   * built. Compiling the emitted class is the cheap guard.
+   */
+  it('emits a boundary class that actually compiles', () => {
+    const prelude = routeBoundaryPrelude()
+    // `extends React.Component` is evaluated when the class is defined, so a
+    // stand-in has to be in scope. Only the shape the prelude touches matters.
+    const React = {
+      Component: class {
+        constructor(props) {
+          this.props = props
+          this.state = {}
+        }
+        setState(next) {
+          this.state = { ...this.state, ...next }
+        }
+      },
+      createElement: () => null,
+    }
+    const Boundary = new Function('React', `${prelude}; return __ruvyxaBoundary`)(React)
+    assert.equal(typeof Boundary, 'function')
+    assert.equal(typeof Boundary.getDerivedStateFromError, 'function')
+    assert.deepEqual(Boundary.getDerivedStateFromError('boom'), { error: 'boom' })
+
+    // Both recovery paths must exist on an instance, not just in the source.
+    const instance = new Boundary({})
+    assert.equal(typeof instance.reset, 'function')
+    assert.equal(typeof instance.retry, 'function')
+    // With no router mounted, retry degrades to a reset rather than throwing.
+    instance.setState({ error: 'boom' })
+    return instance.retry().then(() => {
+      assert.equal(instance.state.error, null)
+    })
+  })
+
+  /**
+   * `reset` clears the boundary's own state, so it can only recover from a
+   * fault in the client tree. A page whose server data failed needs the request
+   * repeated, which is what `retry` asks the router to do — and when no router
+   * is mounted there is nothing to re-fetch from, so it degrades to a reset
+   * rather than silently doing nothing.
+   */
+  it('offers the fallback a server-backed retry as well as a local reset', () => {
+    const prelude = routeBoundaryPrelude()
+    assert.match(prelude, /reset: this\.reset/)
+    assert.match(prelude, /retry: this\.retry/)
+    assert.match(prelude, /__RUVYXA_ROUTER_INSTANCE__/)
+    assert.match(prelude, /typeof router\.retry !== "function"/)
+  })
+
+  /**
+   * The shell is the half of a route that needs no server data: its layouts
+   * wrapped around `loading.tsx`, both already in the route bundle. Painting it
+   * is what lets a navigation show the destination immediately instead of
+   * leaving the previous page on screen until the Flight payload lands.
+   */
+  it('emits a loading shell the client router can paint without server data', () => {
+    const source = clientEntrySource({
+      imports: [],
+      pageName: 'Page',
+      layoutNames: ['Layout0'],
+      routePath: '/blog/[slug]',
+      requestPathLiteral: '"/blog/x"',
+      paramsLiteral: '{}',
+      loadingName: 'RouteLoading',
+    })
+
+    assert.match(source, /function __ruvyxaShell\(ctx\)/)
+    assert.match(source, /__RUVYXA_SHELLS__ \|\|= \{\}\)\["\/blog\/\[slug\]"\] = __ruvyxaShell/)
+    // The loading component sits inside the layouts, with no page.
+    assert.match(source, /let tree = React\.createElement\(RouteLoading, null\)/)
+    // A stale payload from the page being navigated away from must never reach
+    // the shell, so the context carries no flight value at all.
+    const shell = source.slice(source.indexOf('function __ruvyxaShell'))
+    assert.match(shell, /flight: undefined/)
+    assert.doesNotMatch(shell.slice(0, shell.indexOf('__RUVYXA_SHELLS__')), /createElement\(Page/)
+  })
+
+  it('omits the shell for a route that declares no loading state', () => {
+    const source = clientEntrySource({
+      imports: [],
+      pageName: 'Page',
+      layoutNames: [],
+      routePath: '/',
+      requestPathLiteral: '"/"',
+      paramsLiteral: '{}',
+    })
+    assert.doesNotMatch(source, /__ruvyxaShell/)
+    assert.doesNotMatch(source, /__RUVYXA_SHELLS__/)
+  })
+
   it('needs the boundary only for error/not-found, not loading alone', () => {
     assert.equal(needsRouteBoundary({ errorName: 'E' }), true)
     assert.equal(needsRouteBoundary({ notFoundName: 'N' }), true)
