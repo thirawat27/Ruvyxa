@@ -72,6 +72,36 @@ socket upgrade ซึ่ง build artifact ทำไม่ได้; `ruvyxa bui
 การเลือก adapter ที่ให้บริการสิ่งที่โปรเจกต์ใช้ไม่ได้ จะทำให้ build ล้มเหลว แทนที่จะ deploy
 เว็บที่ตอบ 404: static adapter ที่มี server action หรือ plugin HTTP route จะรายงาน `RUV2204`
 
+## Reproducible build
+
+source เดิมกับ config เดิม จะได้ output เป็น byte เดิมเสมอ ไม่ว่ารันบนเครื่องไหน นี่เป็นคุณสมบัติที่
+Ruvyxa **บังคับ** ไว้ ไม่ใช่แค่หวังว่าจะเป็น:
+
+- `localeCompare` และการแปลงตัวพิมพ์ที่ขึ้นกับ locale (`toLocaleLowerCase`, `toLocaleUpperCase`)
+  ถูกแบนด้วย lint เพราะทั้งคู่ตอบตาม ICU locale ของเครื่อง การเรียงลำดับใช้ comparator ที่ระบุชัดแทน
+- การ match route, การกำหนดชนิดไฟล์ static และการตรวจความปลอดภัยของ prerender path ฝั่ง Rust และ
+  JavaScript ถูกผูกไว้ด้วย conformance fixture ร่วมกัน สองภาษาจึงไม่มีทางเลื่อนออกจากกัน
+- ตัวตัดสิน cache identity คือ content hash ไม่ใช่ timestamp
+
+ตรวจกับโปรเจกต์ของคุณเองได้:
+
+```bash
+pnpm verify:reproducible --root path/to/project
+```
+
+คำสั่งนี้ build จากศูนย์สองรอบ แล้วเทียบทุกไฟล์ที่ออกมา พร้อมแยกประเภทความต่างตามความหมาย:
+
+- **โค้ดที่ emit ออกมาต่างกัน** = ข้อบกพร่อง และทำให้ check ไม่ผ่าน แปลว่ามีบางอย่างใน build ขึ้นกับ
+  เวลาจริง, ลำดับการวนซ้ำ, ค่าสุ่ม, absolute path หรือ locale ของเครื่อง
+- **Build telemetry** — `createdAtUnix` กับ `timing` ใน `build.json` และตัวนับ cache ใน
+  `client/manifest.json` ที่ `ruvyxa bench` อ่าน — เป็นข้อมูลว่า build _ทำงานอย่างไร_ จึงต่างกันได้
+  ตามธรรมชาติ รายงานให้ทราบแต่ไม่ทำให้ fail
+- **Prerendered HTML ต่างกัน** เกือบทุกครั้งเกิดจากหน้าเว็บของคุณเอง render นาฬิกาหรือค่าสุ่ม Ruvyxa
+  แยกกรณีนี้จากบั๊กไม่ได้ จึงรายงานไว้ให้คุณตัดสิน
+
+ใส่ `--strict` เพื่อให้ fail ทั้งสามประเภท ซึ่งเหมาะกับตอนที่ต้องการยืนยันว่า artifact ที่ deploy
+ตรงกับ commit ที่ระบุ
+
 ## Platform limit
 
 native realtime ต้องเป็น long-lived Node/Bun build; Deno รองรับ server route ครบชุดแต่ host native

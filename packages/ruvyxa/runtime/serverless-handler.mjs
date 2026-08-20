@@ -192,6 +192,44 @@ export function createHandler(options) {
   const actionNonces = new Map()
   /** Live nonce count per client address, kept level with `actionNonces`. */
   const actionNonceClients = new Map()
+  /**
+   * Persist a rendered document.
+   *
+   * Whether a failed write may be swallowed depends on what the write promised.
+   *
+   * An ordinary ISR/SSG store is a cache optimization: serving the page is the
+   * request, storing it only makes the next one cheaper. Hosts whose runtime
+   * filesystem is read-only are ordinary in production — a container started
+   * with `--read-only`, a pod with `readOnlyRootFilesystem: true`, Cloud Run, a
+   * Lambda bundle outside `/tmp` — and letting that throw turned a page that
+   * had already rendered correctly into a 500 for every visitor. A full disk or
+   * a revoked permission did the same. Those degrade to rendering every time.
+   *
+   * A write that settles a `revalidatePath()` claim is not an optimization. The
+   * caller was told that the next request sees the new document, and this
+   * instance cannot reach the ones already warm elsewhere, so the durable write
+   * is the only thing that makes the promise true. Swallowing its failure would
+   * report success while every later request kept serving the old page, so it
+   * still surfaces and leaves the generation pending for retry.
+   *
+   * @returns whether the document was stored, so callers that only make sense
+   * after a durable write can tell.
+   */
+  async function persistPrerendered(pathname, html, revalidate, forced = false) {
+    if (!writePrerendered) return false
+    if (forced) {
+      await writePrerendered(pathname, html, revalidate)
+      return true
+    }
+    try {
+      await writePrerendered(pathname, html, revalidate)
+      return true
+    } catch (error) {
+      console.error(`[ruvyxa] could not store the rendered page for ${pathname}:`, error)
+      return false
+    }
+  }
+
   const pendingRevalidations = new Map()
   /**
    * Generation claims for URLs `revalidatePath()` named, waiting for a
@@ -445,6 +483,7 @@ export function createHandler(options) {
       headerPairs: [...request.headers],
       method,
       url: new URL(request.url).pathname,
+      params: params ?? {},
     })
     const result = await runWithRequestContext(context, () => handler({ request, params }))
     recordRevalidations(collectRevalidations(context))
@@ -495,6 +534,7 @@ export function createHandler(options) {
         headerPairs: [...request.headers],
         method: request.method,
         url: pathname,
+        params: match.params ?? {},
       })
       const tree = await runWithRequestContext(context, () =>
         module.flight({ path: pathname, params: match.params ?? {} }),
@@ -749,7 +789,7 @@ export function createHandler(options) {
    */
   async function persistForcedRender(pathname, forcedClaim, rendered, revalidate) {
     if (!writePrerendered || rendered.status !== 200 || rendered.requestScoped) return
-    await writePrerendered(pathname, await rendered.clone().text(), revalidate)
+    await persistPrerendered(pathname, await rendered.clone().text(), revalidate, true)
     acknowledgeForcedRevalidation(pathname, forcedClaim)
   }
 
@@ -793,8 +833,8 @@ export function createHandler(options) {
     const rendered = await renderPage(route, pathname, params, request)
     if (writePrerendered && rendered.status === 200 && !rendered.requestScoped) {
       const body = await rendered.clone().text()
-      await writePrerendered(pathname, body, revalidate)
-      if (forced) acknowledgeForcedRevalidation(pathname, forcedClaim)
+      const stored = await persistPrerendered(pathname, body, revalidate, forced)
+      if (forced && stored) acknowledgeForcedRevalidation(pathname, forcedClaim)
     }
     return rendered
   }
@@ -861,6 +901,7 @@ export function createHandler(options) {
       headerPairs: [...(request?.headers ?? [])],
       method: request?.method ?? 'GET',
       url: pathname,
+      params: params ?? {},
     })
     const rendered = await runWithRequestContext(context, () =>
       mod.render({ path: pathname, params: params ?? {} }),
@@ -887,7 +928,7 @@ export function createHandler(options) {
         // page built from nobody's session and caching it for everybody.
         const rendered = await mod.render({ path: pathname, params: params ?? {} })
         const html = localizeHtmlDocument(rendered, route.path, pathname, params ?? {}, i18n)
-        await writePrerendered(pathname, html, route.render.revalidate ?? 60)
+        await persistPrerendered(pathname, html, route.render.revalidate ?? 60)
       } catch (error) {
         console.error(`[ruvyxa] ISR revalidation failed for ${pathname}:`, error)
       } finally {

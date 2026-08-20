@@ -259,7 +259,7 @@ pub(crate) fn client_hydration_script(
     // `export const hydrate = false` pages ship zero client JavaScript.
     // CSR routes never reach this branch: the 'use client' directive forces
     // hydrate=true during graph discovery.
-    if !route.render.hydrate {
+    if !route.render.ships_client_bundle() {
         return String::new();
     }
     let params_json = serde_json::to_string(params).unwrap_or_else(|_| "{}".to_string());

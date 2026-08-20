@@ -118,7 +118,7 @@ globalThis.__RUVYXA_REQUEST_CONTEXT__ = {
  * object is accepted as a fallback so a request framed by an older host still
  * produces a usable context rather than an empty one.
  */
-export function requestContext({ headerPairs, headers, method = 'GET', url = '/' } = {}) {
+export function requestContext({ headerPairs, headers, method = 'GET', url = '/', params } = {}) {
   const pairs = Array.isArray(headerPairs)
     ? headerPairs.map(([name, value]) => [String(name), String(value)])
     : Object.entries(headers ?? {}).map(([name, value]) => [String(name), String(value)])
@@ -128,6 +128,10 @@ export function requestContext({ headerPairs, headers, method = 'GET', url = '/'
     method: String(method).toUpperCase(),
     url: String(url),
     draft: hasDraftCookie(pairs),
+    // Only pages carry route parameters. Left undefined elsewhere on purpose:
+    // `params()` distinguishes "not a page" from "a page with no parameters",
+    // and an empty object here would collapse the two.
+    ...(params ? { params: Object.freeze({ ...params }) } : {}),
     used: false,
     // URLs `revalidatePath()` asked the server to refresh. A Set because the
     // same path revalidated twice in one handler is one instruction, and the

@@ -183,7 +183,20 @@ function sendStatic(req, res, hit, pathname) {
     res.end();
     return;
   }
-  createReadStream(hit.file).pipe(res);
+  const file = createReadStream(hit.file);
+  // The response headers are already out, so there is no status left to send:
+  // a read that fails here (the file was replaced mid-deploy, a disk error)
+  // can only be turned into a broken connection, which is what a truncated
+  // body would look like anyway. Without this listener the 'error' event is
+  // unhandled and takes the whole process down.
+  file.on('error', (error) => {
+    console.error('[ruvyxa] static read failed:', error);
+    res.destroy(error);
+  });
+  // A client that disconnects mid-download leaves the read stream open;
+  // closing it stops the file descriptor and the buffering behind it.
+  res.on('close', () => file.destroy());
+  file.pipe(res);
 }
 
 class RequestBodyTooLarge extends Error {}
@@ -257,7 +270,19 @@ const server = createServer(async (req, res) => {
     // Preserve streaming responses instead of buffering the complete body.
     // This lowers peak memory and lets the first chunk reach the client while
     // an SSR or API stream is still being produced.
-    Readable.fromWeb(response.body).pipe(res);
+    const body = Readable.fromWeb(response.body);
+    // Status and headers are already committed by the time a stream fails, so
+    // the only honest signal left is to drop the connection. Unhandled, this
+    // event would terminate the process and take every concurrent request with
+    // it — one aborted download must not be able to do that.
+    body.on('error', (error) => {
+      console.error('[ruvyxa] response stream failed:', error);
+      res.destroy(error);
+    });
+    // Stop producing for a client that has gone away: without this an aborted
+    // navigation keeps the render running to completion for nobody.
+    res.on('close', () => body.destroy());
+    body.pipe(res);
   } catch (error) {
     if (error instanceof RequestBodyTooLarge) {
       if (!res.headersSent) {
@@ -278,6 +303,79 @@ const server = createServer(async (req, res) => {
 
 const port = Number(process.env.PORT || 3000);
 const host = process.env.HOST || '0.0.0.0';
+
+function positiveMs(name, fallback) {
+  const raw = Number(process.env[name]);
+  return Number.isFinite(raw) && raw > 0 ? raw : fallback;
+}
+
+// Keep-alive has to outlive the proxy in front of it. Node closes an idle
+// connection after 5 seconds by default, while AWS ALB idles at 60 and most
+// other managed load balancers sit at or above that. When the proxy believes a
+// pooled socket is still good and Node has already begun closing it, the
+// request that lands on it fails as a 502 — intermittently, under load, and
+// only in production. Staying above the proxy's idle window makes the proxy,
+// not the origin, the side that retires a connection.
+server.keepAliveTimeout = positiveMs('RUVYXA_KEEP_ALIVE_TIMEOUT', 65_000);
+// Must exceed keepAliveTimeout, or Node can time out the headers of a request
+// arriving on a connection it was still willing to keep.
+server.headersTimeout = positiveMs('RUVYXA_HEADERS_TIMEOUT', server.keepAliveTimeout + 5_000);
+
+// How long in-flight work may finish after a shutdown signal. Platforms send
+// SIGTERM and then SIGKILL after their own grace period (commonly 30s), so
+// this stays under the usual floor.
+const SHUTDOWN_GRACE_MS = positiveMs('RUVYXA_SHUTDOWN_GRACE', 25_000);
+
+let shuttingDown = false;
+
+function shutdown(reason, exitCode) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(\`[ruvyxa] \${reason}: draining connections\`);
+
+  // Stop accepting new connections and wait for in-flight responses. Without
+  // this a deploy kills the process outright and every request being served at
+  // that moment fails in the user's browser.
+  server.close(() => {
+    clearTimeout(forceExit);
+    console.log('[ruvyxa] shutdown complete');
+    process.exit(exitCode);
+  });
+
+  // Idle keep-alive sockets hold the close callback for as long as
+  // keepAliveTimeout, which would make every deploy wait a full minute for
+  // connections carrying nothing. Requests in progress are unaffected.
+  if (typeof server.closeIdleConnections === 'function') server.closeIdleConnections();
+
+  // A request that never finishes must not outlive the platform's own grace
+  // period, or the process is SIGKILLed and the drain was pointless.
+  const forceExit = setTimeout(() => {
+    console.error('[ruvyxa] drain timed out; exiting with requests still open');
+    process.exit(exitCode);
+  }, SHUTDOWN_GRACE_MS);
+  forceExit.unref();
+}
+
+for (const signal of ['SIGTERM', 'SIGINT']) {
+  process.on(signal, () => shutdown(\`received \${signal}\`, 0));
+}
+
+// One route that rejects outside the request's own try/catch would otherwise
+// terminate the process — Node's default for an unhandled rejection — and take
+// every other in-flight request down with it. A single bad request must not be
+// able to do that, so this is reported and the server keeps serving.
+process.on('unhandledRejection', (reason) => {
+  console.error('[ruvyxa] unhandled promise rejection:', reason);
+});
+
+// An uncaught exception is different: the process state after it is undefined,
+// so continuing to serve from it is not trustworthy. Drain what is in flight,
+// then leave with a non-zero code so the supervisor restarts a clean process.
+process.on('uncaughtException', (error) => {
+  console.error('[ruvyxa] uncaught exception:', error);
+  shutdown('uncaught exception', 1);
+});
+
 server.listen(port, host, () => {
   console.log(\`[ruvyxa] standalone server listening on http://\${host === '0.0.0.0' ? 'localhost' : host}:\${port}\`);
 });

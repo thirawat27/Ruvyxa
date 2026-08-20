@@ -75,6 +75,38 @@ Selecting an adapter that cannot serve something the project uses fails the buil
 deploying a site that answers 404: a static adapter with a server action or a plugin HTTP route
 reports `RUV2204`.
 
+## Reproducible builds
+
+The same source and the same configuration produce the same output bytes, on any machine. This is a
+property Ruvyxa enforces rather than hopes for:
+
+- `localeCompare` and locale-sensitive case folding (`toLocaleLowerCase`, `toLocaleUpperCase`) are
+  banned by lint, because both answer by the host's ICU locale. Ordering goes through explicit
+  comparators instead.
+- The Rust and JavaScript implementations of route matching, static asset typing, and prerender path
+  safety are held to shared conformance fixtures, so the two languages cannot drift apart.
+- Content hashes, not timestamps, decide cache identity.
+
+Check it on your own project:
+
+```bash
+pnpm verify:reproducible --root path/to/project
+```
+
+It builds twice from clean, then compares every emitted file and sorts the differences by what they
+mean:
+
+- **Emitted code differing** is a defect and fails the check. It means something in the build
+  depends on wall-clock time, iteration order, a random value, an absolute path, or the host locale.
+- **Build telemetry** — `build.json`'s `createdAtUnix` and `timing`, and the cache counters in
+  `client/manifest.json` that `ruvyxa bench` reads — describes how the build _ran_, so it varies by
+  design and is reported without failing.
+- **Prerendered HTML differing** is almost always your own page rendering a clock or a random value.
+  Ruvyxa cannot tell that apart from a bug, so it is reported for you to judge.
+
+Pass `--strict` to fail on all three, which is what you want if you are attesting that a deployment
+artifact matches a specific commit.
+
 ## Platform limits
 
 Native realtime requires a long-lived Node/Bun build; Deno supports the full server route set but

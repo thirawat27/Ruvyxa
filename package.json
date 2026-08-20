@@ -23,6 +23,7 @@
     "release:validate": "pnpm lint && node scripts/validate-package-metadata.mjs && node scripts/validate-release-publish-plan.mjs && node scripts/check-oxc-lockstep.mjs && node scripts/check-doc-links.mjs && node scripts/check-template-mirrors.mjs --check && node scripts/sync-adapters.mjs && knip",
     "release:bump": "node scripts/bump-version.mjs",
     "pack:smoke": "node scripts/pack-smoke.mjs",
+    "verify:reproducible": "node scripts/verify-reproducible.mjs",
     "test:full-flow": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/test-full-flow.ps1",
     "publish:dry-run": "pnpm -r --filter './packages/**' publish --access public --dry-run"
   },

@@ -122,19 +122,27 @@ pub struct RenderMeta {
     /// dynamic slots to be streamed at request time.
     #[serde(default)]
     pub has_dynamic_slots: bool,
-    /// Whether the served HTML includes the client hydration bundle.
-    /// `export const hydrate = false` opts a page out for zero-JS content
-    /// pages; interactivity ('use client' islands) does not run there.
-    #[serde(default = "default_hydrate")]
-    pub hydrate: bool,
-    /// Scheduling mode for the client bundle. The legacy `hydrate` boolean is
-    /// retained in manifests for backward compatibility.
+    /// When the client bundle is scheduled, and whether there is one at all.
+    ///
+    /// This is the single source of truth for client-side scheduling.
+    /// `export const hydrate = false` (or `'none'`) parses to
+    /// [`HydrationMode::None`], which is what
+    /// [`RenderMeta::ships_client_bundle`] answers from — a page that ships no
+    /// bundle runs no interactivity, so `'use client'` islands do not execute
+    /// there. A separate `hydrate: bool` field used to be stored beside this
+    /// one and was only ever `hydration != None`; because both were public and
+    /// independently assignable, callers could and did set one without the
+    /// other, leaving the bundler and the document writer disagreeing about
+    /// whether a route had JavaScript.
     #[serde(default)]
     pub hydration: HydrationMode,
 }
 
-fn default_hydrate() -> bool {
-    true
+impl RenderMeta {
+    /// Whether the served HTML includes a client bundle.
+    pub fn ships_client_bundle(&self) -> bool {
+        self.hydration != HydrationMode::None
+    }
 }
 
 impl Default for RenderMeta {
@@ -145,7 +153,6 @@ impl Default for RenderMeta {
             has_static_params: false,
             static_paths: Vec::new(),
             has_dynamic_slots: false,
-            hydrate: true,
             hydration: HydrationMode::Load,
         }
     }
@@ -979,14 +986,12 @@ fn detect_render_strategy(
     // Boolean false remains the zero-JS contract; string values add deferred
     // route-level hydration without changing the default.
     let hydration = parse_hydration_mode(&source, &code);
-    let hydrate = hydration != HydrationMode::None;
 
     // 2. Check for PPR opt-in: export const ppr = true
     if has_export_const_bool(&source, &code, "ppr", true) {
         return RenderMeta {
             strategy: RenderStrategy::Ppr,
             has_dynamic_slots: true,
-            hydrate,
             hydration,
             ..Default::default()
         };
@@ -999,7 +1004,6 @@ fn detect_render_strategy(
             strategy: RenderStrategy::Isr,
             revalidate: Some(seconds),
             has_static_params,
-            hydrate,
             hydration,
             ..Default::default()
         };
@@ -1010,7 +1014,6 @@ fn detect_render_strategy(
         return RenderMeta {
             strategy: RenderStrategy::Ssg,
             has_static_params: true,
-            hydrate,
             hydration,
             ..Default::default()
         };
@@ -1030,7 +1033,6 @@ fn detect_render_strategy(
         if reachable_code.is_some_and(|code| !has_dynamic_data_markers(&code)) {
             return RenderMeta {
                 strategy: RenderStrategy::Ssg,
-                hydrate,
                 hydration,
                 ..Default::default()
             };
@@ -1039,7 +1041,6 @@ fn detect_render_strategy(
 
     // 6. Default: SSR
     RenderMeta {
-        hydrate,
         hydration,
         ..Default::default()
     }
@@ -1736,7 +1737,7 @@ mod tests {
 
         assert_eq!(route.render.strategy, RenderStrategy::Ssg);
         assert!(!route.render.has_static_params);
-        assert!(route.render.hydrate);
+        assert!(route.render.ships_client_bundle());
     }
 
     #[test]
@@ -1773,7 +1774,7 @@ mod tests {
             .find(|route| route.path == "/no-js")
             .unwrap();
         assert_eq!(no_js.render.strategy, RenderStrategy::Ssg);
-        assert!(!no_js.render.hydrate);
+        assert!(!no_js.render.ships_client_bundle());
 
         // 'use client' wins: CSR pages cannot opt out of client rendering.
         let csr = manifest
@@ -1782,7 +1783,7 @@ mod tests {
             .find(|route| route.path == "/csr-page")
             .unwrap();
         assert_eq!(csr.render.strategy, RenderStrategy::Csr);
-        assert!(csr.render.hydrate);
+        assert!(csr.render.ships_client_bundle());
     }
 
     #[test]
@@ -1818,7 +1819,7 @@ mod tests {
 
         assert_eq!(idle.render.hydration, HydrationMode::Idle);
         assert_eq!(visible.render.hydration, HydrationMode::Visible);
-        assert!(idle.render.hydrate && visible.render.hydrate);
+        assert!(idle.render.ships_client_bundle() && visible.render.ships_client_bundle());
     }
 
     #[test]

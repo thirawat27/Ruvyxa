@@ -2117,7 +2117,7 @@ async fn client_manifest(State(state): State<Arc<AppState>>) -> Response {
             let eligible = manifest
                 .routes
                 .iter()
-                .filter(|route| route.kind == RouteKind::Page && route.render.hydrate)
+                .filter(|route| route.kind == RouteKind::Page && route.render.ships_client_bundle())
                 .cloned()
                 .collect::<Vec<_>>();
             let mut entries = Vec::with_capacity(eligible.len());
@@ -4450,7 +4450,7 @@ mod tests {
 
         // `export const hydrate = false` pages get no hydration payload at all.
         let mut no_hydrate = route.clone();
-        no_hydrate.render.hydrate = false;
+        no_hydrate.render.hydration = ruvyxa_graph::HydrationMode::None;
         assert_eq!(
             client_hydration_script(&config, &no_hydrate, "/", &BTreeMap::new()),
             ""

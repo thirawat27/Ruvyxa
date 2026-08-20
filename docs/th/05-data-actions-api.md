@@ -142,6 +142,43 @@ export default function Dashboard() {
 ผลที่ควรรู้: หน้าที่อ่าน request จะ render ใหม่ทุกครั้ง ถ้าคุณต้องการ cookie แค่กับส่วนเล็ก ๆ
 ของหน้า การย้ายส่วนนั้นไปไว้ใน island ที่มี `'use client'` จะทำให้ส่วนที่เหลือยัง cache ได้
 
+### อ่าน route parameter จากจุดไหนก็ได้ในหน้า
+
+`params()` คืนค่า route parameter ที่ match กับหน้าที่กำลัง render อยู่ ตัว page เองได้รับค่านี้เป็น
+props อยู่แล้ว — `params()` มีไว้สำหรับทุกอย่างที่อยู่ _ใต้_ มันลงไป
+
+```tsx
+// app/[lang]/blog/[slug]/page.tsx
+import { params } from 'ruvyxa/server'
+
+function PublishedOn({ date }: { date: Date }) {
+  const { lang } = params()
+  return <time dateTime={date.toISOString()}>{date.toLocaleDateString(lang as string)}</time>
+}
+
+export default function Post() {
+  const { slug } = params()
+  return (
+    <article>
+      <PublishedOn date={publishedAt(slug as string)} />
+    </article>
+  )
+}
+```
+
+ต่างจากสามฟังก์ชันข้างบน — **ตัวนี้ไม่เปลี่ยนวิธี cache ของหน้า** เพราะ parameter เป็นส่วนหนึ่งของ
+ตัวตนของ route ไม่ใช่ของคนที่เรียก: `/th/blog/hello` render ออกมาเป็นเอกสารเดียวกันสำหรับทุกคน
+หน้าที่อ่าน params ของตัวเองจึงยังคง render แบบ static ได้และยังเก็บใน ISR cache ได้ตามเดิม
+
+- segment ที่ประกาศเป็น catch-all จะได้ค่าเป็น array ตรงตามที่ตัว matcher สร้างไว้
+- parameter ที่ไม่มีอยู่ใน route จะเป็น `undefined` เหมือนการอ่าน key ที่ไม่มี
+- ใช้ได้ทั้งใน page และใน API route handler ส่วน server action ถูกเรียกที่ endpoint ของตัวเอง ไม่ได้
+  match กับ route pattern จึงไม่มี route parameter — `params()` จะแจ้งตรง ๆ แทนที่จะคืน object ว่าง
+  ไม่งั้นการพิมพ์ชื่อ segment ผิดจะดูเหมือน "route นี้ไม่มี parameter ตัวนั้น"
+
+ถ้าอยู่ใน component ที่เป็น `'use client'` ให้ใช้ `useParams()` จาก `@ruvyxa/react` แทน เพราะฝั่ง
+เบราว์เซอร์ไม่มี per-request store ให้อ่าน
+
 ### เรียกนอก request
 
 ทั้งสองกรณีจะ throw พร้อมข้อความที่ระบุชื่อฟังก์ชัน:

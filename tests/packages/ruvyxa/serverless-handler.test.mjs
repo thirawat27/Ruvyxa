@@ -774,6 +774,42 @@ describe('prerender cache path mapping', () => {
 })
 
 describe('ISR cache freshness', () => {
+  it('serves the page it rendered even when the cache write fails', async () => {
+    // A read-only runtime filesystem is ordinary in production: a container run
+    // with --read-only, a pod with readOnlyRootFilesystem, Cloud Run, a Lambda
+    // bundle outside /tmp. Storing the render is a cache optimization, so a
+    // write that throws has to degrade to rendering every time — never to a
+    // 500 for a page that had already rendered correctly.
+    let renders = 0
+    const route = pageRoute('isr', '/isr', 'isr')
+    route.render.revalidate = 60
+    const handler = createHandler({
+      routes: [route],
+      importPage: async () => ({
+        render: async () => {
+          renders += 1
+          return '<html>rendered</html>'
+        },
+      }),
+      importApi: async () => ({}),
+      readPrerendered: () => null,
+      writePrerendered: () => {
+        throw Object.assign(new Error('EROFS: read-only file system'), { code: 'EROFS' })
+      },
+    })
+
+    const first = await handler(new Request('http://localhost/isr'))
+    assert.equal(first.status, 200)
+    assert.equal(await first.text(), '<html>rendered</html>')
+
+    // Nothing was stored, so the next request renders again rather than
+    // serving a cached document that does not exist.
+    const second = await handler(new Request('http://localhost/isr'))
+    assert.equal(second.status, 200)
+    assert.equal(await second.text(), '<html>rendered</html>')
+    assert.equal(renders, 2)
+  })
+
   it('does not regenerate a fresh cache hit', async () => {
     let renders = 0
     const route = pageRoute('isr', '/isr', 'isr')

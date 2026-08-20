@@ -726,6 +726,7 @@ async function handleSsr(request) {
     headerPairs: request.headerPairs,
     method: request.method,
     url: requestTarget || requestPath,
+    params: params || {},
   })
   const html = await runWithRequestContext(context, () =>
     mod.render({ path: requestPath, params: params || {} }),
@@ -759,7 +760,12 @@ async function handleFlight(request) {
     specials,
   )
   const mod = await importModule(outfile, version)
-  const context = requestContext({ method: 'GET', url: requestPath, headerPairs: [] })
+  const context = requestContext({
+    method: 'GET',
+    url: requestPath,
+    headerPairs: [],
+    params: params || {},
+  })
   const source = await readFile(pageFile, 'utf8')
   const usesCache = hasModuleDirective(source, 'use cache')
   const produce = () => mod.flight({ path: requestPath, params: params || {} })
@@ -1066,6 +1072,7 @@ async function handleApi(request) {
     headers: requestHeaders,
     method: upperMethod,
     url: requestPath,
+    params: params || {},
   })
   const result = await runWithRequestContext(context, () =>
     handler({ request: req, params: params || {} }),

@@ -23,7 +23,11 @@ describe('deno', () => {
     const server = output.artifacts?.find((artifact) => artifact.kind === 'function')
     const source = server && 'handlerSource' in server ? String(server.handlerSource) : ''
     assert.match(source, /node:http/)
-    assert.match(source, /Readable\.fromWeb\(response\.body\)\.pipe\(res\)/)
+    // Streamed, not buffered — the paired assertion below is the other half
+    // of that contract. Piped through a named handle so the stream's error
+    // and client-disconnect events can be handled; see standalone-server.
+    assert.match(source, /Readable\.fromWeb\(response\.body\)/)
+    assert.match(source, /body\.pipe\(res\)/)
     assert.doesNotMatch(source, /response\.arrayBuffer\(\)/)
     assert.equal(
       output.artifacts?.find((artifact) => artifact.kind === 'static-site')?.optional,

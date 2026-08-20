@@ -147,6 +147,45 @@ The consequence worth knowing: a page that reads the request renders on every re
 need one cookie for a small part of the page, keeping that part in a `'use client'` island leaves
 the rest cacheable.
 
+### Route parameters, from anywhere in the page
+
+`params()` returns the route parameters matched for the page being rendered. A page already receives
+them as props; `params()` is for everything _below_ it.
+
+```tsx
+// app/[lang]/blog/[slug]/page.tsx
+import { params } from 'ruvyxa/server'
+
+function PublishedOn({ date }: { date: Date }) {
+  const { lang } = params()
+  return <time dateTime={date.toISOString()}>{date.toLocaleDateString(lang as string)}</time>
+}
+
+export default function Post() {
+  const { slug } = params()
+  return (
+    <article>
+      <PublishedOn date={publishedAt(slug as string)} />
+    </article>
+  )
+}
+```
+
+Unlike the three calls above, **this one does not change how the page is cached**. A parameter is
+part of the route's identity rather than of who is asking: `/th/blog/hello` renders the same
+document for every visitor, so a page that reads its own params stays statically renderable and
+keeps its ISR cache entry.
+
+- A segment declared as catch-all arrives as an array, exactly as the matcher produced it.
+- A parameter that is not in the route is `undefined`, the same as reading a missing key.
+- It works in a page and in an API route handler. A server action is invoked at its own endpoint
+  rather than matched against a route pattern, so it has no route parameters and `params()` says so
+  rather than returning an empty object — otherwise a mistyped segment name would read as "this
+  route has no such parameter."
+
+Inside a `'use client'` component, use `useParams()` from `@ruvyxa/react` instead: the browser has
+no request-scoped store to read.
+
 ### Calling them outside a request
 
 Both cases throw with a message naming the accessor:

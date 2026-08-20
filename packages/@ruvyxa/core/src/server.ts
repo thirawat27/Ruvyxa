@@ -630,6 +630,15 @@ export interface RequestContext {
   setCookies?: string[]
   /** Values isolated to this request by `cache().scope('request')`. */
   cache?: Map<string, unknown>
+  /**
+   * Route parameters matched for this request, for {@link params}.
+   *
+   * Absent for API routes and server actions, which are not matched against a
+   * page pattern, and for hosts older than this field — {@link params} reports
+   * that rather than inventing an empty object, so a typo in a segment name
+   * cannot read as "this route has no parameters".
+   */
+  params?: Readonly<Record<string, string | string[]>>
 }
 
 /** The seam a host installs on `globalThis`. */
@@ -729,6 +738,56 @@ export function headers(): Headers {
   const collected = new Headers()
   for (const [name, value] of context.headers) collected.append(name, value)
   return collected
+}
+
+/**
+ * Route parameters for the page being rendered, from anywhere inside it.
+ *
+ * Params are already passed to a page as props; this exists for everything
+ * *below* it. A locale segment like `app/[lang]/...` is needed by shared
+ * formatters, data loaders, and deeply nested components, and threading it
+ * through every intermediate component as a prop is the kind of plumbing that
+ * gets skipped — after which each of those helpers grows its own way of
+ * guessing the locale from the URL.
+ *
+ * Unlike {@link cookies} and {@link headers}, reading this does **not** make the
+ * render request-dependent. A parameter is part of the route's identity, not of
+ * who is asking: `/th/blog/hello` renders the same document for everyone, so a
+ * page that reads its own params stays statically renderable and cacheable.
+ * That is why this reads the context without recording a request-state read.
+ *
+ * @example
+ * ```tsx
+ * // app/[lang]/blog/[slug]/page.tsx — and any component it renders
+ * import { params } from 'ruvyxa/server'
+ *
+ * function PublishedOn({ date }: { date: Date }) {
+ *   const { lang } = params()
+ *   return <time>{date.toLocaleDateString(lang as string)}</time>
+ * }
+ * ```
+ */
+export function params(): Readonly<Record<string, string | string[]>> {
+  const contextHost = (globalThis as Record<string, unknown>)[CONTEXT_KEY] as
+    RequestContextHost | undefined
+  const context = contextHost?.peek?.() ?? contextHost?.current() ?? null
+  if (!context) {
+    throw new Error(
+      'params() was called outside a request.\n\n' +
+        'It reads the route parameters of the page being rendered, so there has to ' +
+        'be one. Calling it at module scope runs at import time, before any route ' +
+        'has been matched — move the call inside the component or handler.',
+    )
+  }
+  if (!context.params) {
+    throw new Error(
+      'params() is available while a page or API route is being served.\n\n' +
+        'A server action is invoked at its own endpoint rather than matched ' +
+        'against a route pattern, so it has no route parameters to read. Pass the ' +
+        'values the action needs as arguments instead.',
+    )
+  }
+  return context.params
 }
 
 /** Draft mode state for the request being served. */

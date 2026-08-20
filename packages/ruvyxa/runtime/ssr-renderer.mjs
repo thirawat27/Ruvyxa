@@ -53,9 +53,10 @@ try {
   // A context with no headers, so `cookies()` and `headers()` return empty
   // rather than throwing. This renderer is driven by `ruvyxa test:parity` and
   // one-shot tooling, which have no HTTP request to forward.
+  const routeParams = JSON.parse(paramsJson)
   const html = await runWithRequestContext(
-    requestContext({ headerPairs: [], method: 'GET', url: requestPath }),
-    () => mod.render({ path: requestPath, params: JSON.parse(paramsJson) }),
+    requestContext({ headerPairs: [], method: 'GET', url: requestPath, params: routeParams }),
+    () => mod.render({ path: requestPath, params: routeParams }),
   )
 
   await writeResponse({ ok: true, html })
