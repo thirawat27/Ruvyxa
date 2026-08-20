@@ -482,6 +482,7 @@ summary: |
 ## ภาษาไทย
 ## 🚀
 ## ✨
+## Istanbul
 
 | Left | Right |
 | :--- | ----: |
@@ -518,6 +519,11 @@ A note[^1]
         { depth: 2, slug: 'ภาษาไทย', text: 'ภาษาไทย' },
         { depth: 2, slug: 'section', text: '🚀' },
         { depth: 2, slug: 'section-1', text: '✨' },
+        // Locale-independent case folding. A host whose ICU default is Turkish
+        // lowercases `I` to `ı`, while the native compiler's `slugify` uses
+        // Rust's `char::to_lowercase` and gives `i`. Asserting `istanbul`
+        // pins the slug to the cross-language contract rather than the host.
+        { depth: 2, slug: 'istanbul', text: 'Istanbul' },
       ])
       assert.match(output, /id:\s*"repeat-1"/)
       assert.match(output, /contains-task-list/)

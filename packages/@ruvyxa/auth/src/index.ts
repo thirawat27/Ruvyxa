@@ -146,7 +146,7 @@ export function createAuth(options: AuthOptions): AuthRuntime {
   async function getSession(request: Request): Promise<AuthSession | null> {
     const token = readCookie(request.headers.get('cookie'), settings.cookieName)
     if (!token) return null
-    const key = await tokenKey('session', token, settings.secret)
+    const key = await tokenKey('session', token, settings.hmacKey)
     const serialized = await settings.store.get(key)
     if (!serialized) return null
     const session = parseSession(serialized)
@@ -159,7 +159,7 @@ export function createAuth(options: AuthOptions): AuthRuntime {
 
   async function logout(request: Request): Promise<Headers> {
     const token = readCookie(request.headers.get('cookie'), settings.cookieName)
-    if (token) await settings.store.delete(await tokenKey('session', token, settings.secret))
+    if (token) await settings.store.delete(await tokenKey('session', token, settings.hmacKey))
     return new Headers({ 'set-cookie': deleteCookie(settings) })
   }
 
@@ -178,14 +178,14 @@ async function issueSession(
   const ttlSeconds = remember ? settings.rememberTtlSeconds : settings.ttlSeconds
   const createdAt = new Date()
   const session: AuthSession = {
-    id: await tokenKey('id', token, settings.secret),
+    id: await tokenKey('id', token, settings.hmacKey),
     user: structuredClone(user),
     createdAt: createdAt.toISOString(),
     expiresAt: new Date(createdAt.getTime() + ttlSeconds * 1000).toISOString(),
     remember,
   }
   await settings.store.set(
-    await tokenKey('session', token, settings.secret),
+    await tokenKey('session', token, settings.hmacKey),
     JSON.stringify(session),
     ttlSeconds,
   )
@@ -207,7 +207,7 @@ async function startOAuth(
   const state = randomToken(24)
   const verifier = randomToken(48)
   await settings.store.set(
-    await tokenKey('oauth', state, settings.secret),
+    await tokenKey('oauth', state, settings.hmacKey),
     JSON.stringify({ verifier, returnTo }),
     OAUTH_STATE_TTL_SECONDS,
   )
@@ -248,7 +248,7 @@ async function finishOAuth(
   if (readCookie(request.headers.get('cookie'), oauthStateCookieName(settings)) !== state) {
     throw new AuthError('RUV3103', 'OAuth state does not match the initiating browser', 400)
   }
-  const stateValue = await settings.store.take(await tokenKey('oauth', state, settings.secret))
+  const stateValue = await settings.store.take(await tokenKey('oauth', state, settings.hmacKey))
   if (!stateValue) throw new AuthError('RUV3103', 'OAuth state is invalid or expired', 400)
   const parsed = JSON.parse(stateValue) as { verifier?: unknown; returnTo?: unknown }
   if (typeof parsed.verifier !== 'string')
@@ -306,7 +306,7 @@ async function startMagicLink(
   }
   await consumeRateLimit(request, `magic:${email}`, settings)
   const token = randomToken(32)
-  const tokenStoreKey = await tokenKey('magic', token, settings.secret)
+  const tokenStoreKey = await tokenKey('magic', token, settings.hmacKey)
   await settings.store.set(tokenStoreKey, email, MAGIC_LINK_TTL_SECONDS)
   const target = new URL(`${settings.origin}${settings.basePath}/magic-link/callback`)
   target.searchParams.set('token', token)
@@ -346,7 +346,7 @@ async function magicLinkConfirmPage(
   }
   // Peek (never take): expiry feedback belongs on the page, consumption
   // belongs to the POST.
-  const email = await settings.store.get(await tokenKey('magic', token, settings.secret))
+  const email = await settings.store.get(await tokenKey('magic', token, settings.hmacKey))
   if (!email) {
     return htmlPage(
       400,
@@ -370,7 +370,7 @@ async function finishMagicLink(request: Request, settings: NormalizedOptions): P
   if (!provider || provider.type !== 'magic-link') throw notConfigured('magic-link')
   const token = await readCallbackToken(request)
   if (!token) throw new AuthError('RUV3103', 'Magic link token is missing', 400)
-  const email = await settings.store.take(await tokenKey('magic', token, settings.secret))
+  const email = await settings.store.take(await tokenKey('magic', token, settings.hmacKey))
   if (!email) throw new AuthError('RUV3103', 'Magic link is invalid or expired', 400)
   const user = await provider.resolveUser(email)
   if (!user) throw invalidCredentials()
@@ -430,12 +430,12 @@ async function consumeRateLimit(
   // total, across every identity it tries. Neither dimension is limited by the
   // other, which is what the combined key used to get wrong.
   await consumeBucket(
-    await tokenKey('rate', `${scope}:${clientKey}`, settings.secret),
+    await tokenKey('rate', `${scope}:${clientKey}`, settings.hmacKey),
     settings.rateLimitMax,
     settings,
   )
   await consumeBucket(
-    await tokenKey('rate-client', clientKey, settings.secret),
+    await tokenKey('rate-client', clientKey, settings.hmacKey),
     settings.rateLimitMax * CLIENT_RATE_LIMIT_MULTIPLIER,
     settings,
   )
@@ -573,6 +573,7 @@ function normalizeOptions(options: AuthOptions) {
   const { secure, cookieName } = resolveSessionCookie(options, origin)
   return {
     ...options,
+    hmacKey: createHmacKeyHolder(options.secret),
     origin: origin.origin,
     basePath,
     secure,
@@ -729,23 +730,26 @@ function readCookie(header: string | null, name: string): string | null {
 }
 
 /**
- * Derived HMAC keys, one per secret.
+ * This runtime's derived HMAC key, imported once and owned by this runtime.
  *
  * `tokenKey` runs on every session lookup, every rate-limit check, and twice
  * more per issued session, and the secret is fixed for the life of a runtime —
- * so re-importing the key each time was pure repeated work on the hot path.
+ * so re-importing the key each time would be pure repeated work on the hot
+ * path. The promise itself is cached so concurrent first calls share one
+ * import rather than racing to perform several.
  *
- * The promise itself is cached so concurrent first calls share one import
- * rather than racing to perform several. Keys stay `extractable: false`, so
- * holding one adds no exposure the previous code did not already have, and the
- * signature bytes are unchanged.
+ * The key is held by the runtime rather than by a module-global map keyed on
+ * the secret, because that map could only grow: it had no eviction, so every
+ * distinct secret the process ever saw kept both its plaintext (as the map
+ * key) and its derived key alive until the process exited, and discarding a
+ * runtime could not release either. Holding it here ties the key's lifetime to
+ * the object that owns the secret, which is the lifetime it always should have
+ * had. Keys stay `extractable: false` and the signature bytes are unchanged.
  */
-const hmacKeys = new Map<string, Promise<CryptoKey>>()
-
-function hmacKey(secret: string): Promise<CryptoKey> {
-  let key = hmacKeys.get(secret)
-  if (!key) {
-    key = crypto.subtle
+function createHmacKeyHolder(secret: string): () => Promise<CryptoKey> {
+  let pending: Promise<CryptoKey> | undefined
+  return () => {
+    pending ??= crypto.subtle
       .importKey(
         'raw',
         new TextEncoder().encode(secret),
@@ -756,18 +760,21 @@ function hmacKey(secret: string): Promise<CryptoKey> {
       .catch((error: unknown) => {
         // Never cache a rejected import: a transient failure must not turn
         // into a permanently broken runtime.
-        hmacKeys.delete(secret)
+        pending = undefined
         throw error
       })
-    hmacKeys.set(secret, key)
+    return pending
   }
-  return key
 }
 
-async function tokenKey(kind: string, token: string, secret: string): Promise<string> {
+async function tokenKey(
+  kind: string,
+  token: string,
+  hmacKey: () => Promise<CryptoKey>,
+): Promise<string> {
   const signature = await crypto.subtle.sign(
     'HMAC',
-    await hmacKey(secret),
+    await hmacKey(),
     new TextEncoder().encode(`${kind}:${token}`),
   )
   return `${kind}:${base64Url(new Uint8Array(signature))}`

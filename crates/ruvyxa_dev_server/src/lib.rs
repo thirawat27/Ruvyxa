@@ -4244,6 +4244,52 @@ mod tests {
     }
 
     #[test]
+    fn client_manifest_cache_evicts_oldest_roots_past_its_bound() {
+        use crate::html_document::{MAX_CACHED_MANIFEST_ROOTS, cached_client_manifest_roots};
+
+        // The cache is process-global and keyed by manifest path, so a process
+        // that sees many roots used to retain every parse it ever made. Walk
+        // past the bound and confirm the cache stops growing while still
+        // answering correctly for the roots it is asked about.
+        let temps: Vec<_> = (0..MAX_CACHED_MANIFEST_ROOTS + 8)
+            .map(|index| {
+                let temp = tempfile::tempdir().unwrap();
+                let client_dir = temp.path().join(".ruvyxa/client");
+                std::fs::create_dir_all(&client_dir).unwrap();
+                std::fs::write(
+                    client_dir.join("manifest.json"),
+                    format!(
+                        r#"{{"routes":[{{"path":"/","src":"/__ruvyxa/client/home.{index}.js","sharedChunks":[]}}]}}"#
+                    ),
+                )
+                .unwrap();
+                (temp, index)
+            })
+            .collect();
+
+        for (temp, index) in &temps {
+            let config = ServerConfig::production(temp.path(), "localhost", 3000);
+            let assets = prebuilt_client_assets(&config, "/").unwrap();
+            assert_eq!(assets.src, format!("/__ruvyxa/client/home.{index}.js"));
+        }
+
+        assert!(
+            cached_client_manifest_roots() <= MAX_CACHED_MANIFEST_ROOTS,
+            "manifest cache grew past its bound: {} entries",
+            cached_client_manifest_roots(),
+        );
+
+        // An evicted root must still resolve — eviction costs a re-parse, never
+        // a wrong answer.
+        let (first_temp, first_index) = &temps[0];
+        let config = ServerConfig::production(first_temp.path(), "localhost", 3000);
+        assert_eq!(
+            prebuilt_client_assets(&config, "/").unwrap().src,
+            format!("/__ruvyxa/client/home.{first_index}.js"),
+        );
+    }
+
+    #[test]
     fn client_manifest_cache_refreshes_after_rebuild() {
         let temp = tempfile::tempdir().unwrap();
         let client_dir = temp.path().join(".ruvyxa/client");

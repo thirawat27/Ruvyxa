@@ -1908,7 +1908,13 @@ function collectContentHeadingElements(node, headings, slugCounts) {
     if (!slug) {
       const baseSlug =
         text
-          .toLocaleLowerCase()
+          // Locale-independent on purpose: this slug becomes a heading `id` in
+          // build output, and the native compiler's `slugify` lowercases with
+          // Rust's `char::to_lowercase`. `toLocaleLowerCase()` would answer by
+          // the host's ICU locale instead — on a Turkish host `I` becomes `ı`
+          // here and `i` there, so the same source would build to different
+          // bytes on different machines. Same reason `localeCompare` is banned.
+          .toLowerCase()
           .replace(/[^\p{Letter}\p{Number}]+/gu, '-')
           .replace(/(?:^-)|(?:-$)/g, '') || 'section'
       const occurrence = slugCounts.get(baseSlug) ?? 0

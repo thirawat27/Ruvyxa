@@ -67,9 +67,9 @@ It also bans `localeCompare` outright. Ordering in this repository decides cache
 fingerprints, and the bytes of files the build writes, and `localeCompare` answers by the host's ICU
 locale — so two machines building the same project disagreed, and the JavaScript and Rust graphs
 sorted the same glob differently. Sort with `compareCodeUnits`/`compareEntryKeys` from
-`packages/ruvyxa/runtime/order.mjs`, `compareStable` in `packages/ruvyxa/src/plugins.ts`, or a bare
-`.sort()` for an array of strings. Code emitted into a function artifact writes the comparison out
-inline, because a deployed function directory resolves no sibling specifiers.
+`packages/ruvyxa/runtime/order.mjs`, `compareStable` in `packages/ruvyxa/src/plugins/shared.ts`, or
+a bare `.sort()` for an array of strings. Code emitted into a function artifact writes the
+comparison out inline, because a deployed function directory resolves no sibling specifiers.
 
 It also caps structure directly: `complexity` at 30, `max-depth` at 4, `max-nested-callbacks` at 4,
 and `max-params` at 8. `max-lines-per-function` is deliberately off — a long flat function is a
@@ -107,6 +107,13 @@ cargo run -p ruvyxa_cli -- test:parity --root examples/demo
   the shared module run `pnpm --filter ruvyxa sync:route-match` and commit both; `ruvyxa`'s build
   fails on a stale copy. The Rust router cannot share the module, so both languages are held to
   `tests/fixtures/route-match-conformance.json` — add a case there before changing match behavior.
+- `packages/ruvyxa/src/plugins.ts` is a barrel, not an implementation file: it re-exports the public
+  plugin API by name from `packages/ruvyxa/src/plugins/`, one module per plugin family (`http`,
+  `pwa`, `seo`, `search`, `content-engine`, `openapi`, `build`) plus `shared` for helpers two or
+  more families use and `sitemap-xml` for the sitemap document builder. The barrel lists names
+  explicitly rather than re-exporting `*` because the family modules also export helpers to each
+  other; a `*` would publish those as package API. A new plugin goes in the family module and gets
+  one line in the barrel — adding it only to the module leaves it unreachable from `ruvyxa/plugins`.
 - Rust shared behavior needs Rust tests near the changed crate.
 - Runtime/config/package behavior needs Node tests under `tests/packages/**`. TypeScript suites go
   through `scripts/test-package.mjs <suite>`, which compiles them with `tsc -p tsconfig.test.json`

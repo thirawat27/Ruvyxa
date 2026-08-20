@@ -55,6 +55,43 @@ describe('@ruvyxa/auth', () => {
     assert.equal(session?.remember, true)
   })
 
+  it('derives session keys from the secret alone, so runtimes are interchangeable', async () => {
+    // The derived HMAC key is owned by each runtime rather than by a process-global
+    // map keyed on the secret. That ownership change must stay invisible to the
+    // token bytes: a session issued by one runtime has to remain readable by the
+    // next one started from the same secret (a redeploy, a second worker), and has
+    // to stay unreadable to a runtime holding a different secret.
+    const store = memoryAuthStore({ development: true })
+    const rateLimitStore = memoryRateLimitStore({ development: true })
+
+    const issuer = runtime({ store, rateLimitStore })
+    const response = await issuer.handle(
+      new Request(`${origin}/__ruvyxa/auth/login/email`, {
+        method: 'POST',
+        headers: { origin, 'content-type': 'application/json' },
+        body: JSON.stringify({ email: 'ada@example.com', password: 'correct' }),
+      }),
+    )
+    assert.equal(response?.status, 200)
+    const cookie = response?.headers.get('set-cookie')!.split(';')[0]!
+
+    const sameSecret = runtime({ store, rateLimitStore })
+    const resolved = await sameSecret.getSession(
+      new Request(`${origin}/dashboard`, { headers: { cookie } }),
+    )
+    assert.equal(resolved?.user.email, 'ada@example.com')
+
+    const otherSecret = runtime({
+      store,
+      rateLimitStore,
+      secret: 'a-completely-different-secret-of-sufficient-length',
+    })
+    assert.equal(
+      await otherSecret.getSession(new Request(`${origin}/dashboard`, { headers: { cookie } })),
+      null,
+    )
+  })
+
   it('rejects and deletes stored sessions with an invalid expiration date', async () => {
     const values = new Map<string, string>()
     let sessionKey = ''

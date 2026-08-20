@@ -57,7 +57,15 @@
       "error",
       {
         "property": "localeCompare",
-        "message": "localeCompare orders by the host's ICU locale, so two machines running the same build can disagree. Everything here sorts into a cache key, a fingerprint, or a file the build writes: use compareCodeUnits/compareEntryKeys from packages/ruvyxa/runtime/order.mjs, compareStable in packages/ruvyxa/src/plugins.ts, or a bare .sort() for a string array."
+        "message": "localeCompare orders by the host's ICU locale, so two machines running the same build can disagree. Everything here sorts into a cache key, a fingerprint, or a file the build writes: use compareCodeUnits/compareEntryKeys from packages/ruvyxa/runtime/order.mjs, compareStable in packages/ruvyxa/src/plugins/shared.ts, or a bare .sort() for a string array."
+      },
+      {
+        "property": "toLocaleLowerCase",
+        "message": "toLocaleLowerCase answers by the host's ICU locale, so a Turkish host lowercases `I` to `ı` where every other host and the Rust compiler give `i` — the same divergence localeCompare is banned for. Case-fold build output (heading slugs, ids, titles, cache keys) with toLowerCase(). If the feature genuinely takes a locale from the user, pass it explicitly and disable this rule on that line with the reason."
+      },
+      {
+        "property": "toLocaleUpperCase",
+        "message": "toLocaleUpperCase answers by the host's ICU locale, so a Turkish host uppercases `i` to `İ` where every other host gives `I`. Case-fold build output with toUpperCase(). If the feature genuinely takes a locale from the user, pass it explicitly and disable this rule on that line with the reason."
       }
     ],
 

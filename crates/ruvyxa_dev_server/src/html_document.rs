@@ -338,6 +338,9 @@ pub(crate) fn client_hydration_script(
 /// fingerprint — reads and hashes as before.
 struct CachedClientManifest {
     content_hash: blake3::Hash,
+    /// Insertion order, used only to choose an eviction victim once
+    /// [`MAX_CACHED_MANIFEST_ROOTS`] is exceeded.
+    sequence: u64,
     /// `(length, mtime)` the cached bytes were read at, once that pair became
     /// old enough to identify them. See [`manifest_identity`].
     settled_identity: Option<(u64, SystemTime)>,
@@ -368,8 +371,69 @@ fn manifest_identity(manifest_path: &Path) -> Option<(u64, SystemTime)> {
         .map(|_| (metadata.len(), modified))
 }
 
-static CLIENT_MANIFEST_CACHE: OnceLock<Mutex<HashMap<PathBuf, CachedClientManifest>>> =
-    OnceLock::new();
+/// How many project roots may keep a parsed manifest at once.
+///
+/// A server process normally serves exactly one root, so this bound is never
+/// reached in production; it exists because the cache is process-global and
+/// keyed by path, and nothing in the type stopped a process that saw many roots
+/// (a test run, a supervisor reusing one process) from retaining every parse it
+/// ever made for the life of the process. 128 is far above the real working set
+/// and small enough that the eviction scan below is irrelevant.
+pub(crate) const MAX_CACHED_MANIFEST_ROOTS: usize = 128;
+
+/// The manifest cache with the insertion order needed to bound it.
+///
+/// `next_sequence` is what makes eviction oldest-first: entries carry the
+/// sequence they were inserted at, so the entry to drop is the one holding the
+/// smallest. Refreshing an entry's `settled_identity` deliberately leaves its
+/// sequence alone — that is not a new insertion, and letting a steady stream of
+/// metadata refreshes reorder the queue would make eviction depend on read
+/// traffic rather than on age.
+#[derive(Default)]
+struct ClientManifestCache {
+    entries: HashMap<PathBuf, CachedClientManifest>,
+    next_sequence: u64,
+}
+
+impl ClientManifestCache {
+    /// Store a parse, evicting the oldest root once the bound is exceeded.
+    fn insert(&mut self, manifest_path: &Path, entry: CachedClientManifest) {
+        self.entries.insert(manifest_path.to_path_buf(), entry);
+
+        while self.entries.len() > MAX_CACHED_MANIFEST_ROOTS {
+            let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, cached)| cached.sequence)
+                .map(|(path, _)| path.clone())
+            else {
+                break;
+            };
+            self.entries.remove(&oldest);
+        }
+    }
+
+    fn take_sequence(&mut self) -> u64 {
+        let sequence = self.next_sequence;
+        self.next_sequence += 1;
+        sequence
+    }
+}
+
+static CLIENT_MANIFEST_CACHE: OnceLock<Mutex<ClientManifestCache>> = OnceLock::new();
+
+/// How many roots the process-global manifest cache is currently holding.
+///
+/// Eviction is deliberately invisible through `prebuilt_client_assets` — an
+/// evicted root simply re-parses and returns the same assets — so the bound can
+/// only be proven by looking at the cache itself.
+#[cfg(test)]
+pub(crate) fn cached_client_manifest_roots() -> usize {
+    CLIENT_MANIFEST_CACHE
+        .get()
+        .and_then(|cache| cache.lock().ok())
+        .map_or(0, |guard| guard.entries.len())
+}
 
 pub(crate) fn prebuilt_client_assets(
     config: &ServerConfig,
@@ -383,7 +447,7 @@ pub(crate) fn prebuilt_client_assets(
 /// Load the client manifest's per-route asset lookup, reusing the cached parse
 /// when the source file's contents are byte-identical to the cached parse.
 fn load_client_manifest(manifest_path: &Path) -> Option<Arc<HashMap<String, ClientAssets>>> {
-    let cache = CLIENT_MANIFEST_CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    let cache = CLIENT_MANIFEST_CACHE.get_or_init(|| Mutex::new(ClientManifestCache::default()));
 
     // Metadata first. Hashing the bytes is what makes invalidation exact, but
     // it also means reading the whole manifest off disk on every server-rendered
@@ -395,7 +459,7 @@ fn load_client_manifest(manifest_path: &Path) -> Option<Arc<HashMap<String, Clie
     let identity = manifest_identity(manifest_path);
     if let Some(identity) = identity
         && let Ok(guard) = cache.lock()
-        && let Some(entry) = guard.get(manifest_path)
+        && let Some(entry) = guard.entries.get(manifest_path)
         && entry.settled_identity == Some(identity)
     {
         return Some(Arc::clone(&entry.routes));
@@ -405,7 +469,7 @@ fn load_client_manifest(manifest_path: &Path) -> Option<Arc<HashMap<String, Clie
     let content_hash = blake3::hash(&source);
 
     if let Ok(mut guard) = cache.lock()
-        && let Some(entry) = guard.get_mut(manifest_path)
+        && let Some(entry) = guard.entries.get_mut(manifest_path)
         && entry.content_hash == content_hash
     {
         // Same bytes, newly settled timestamp: record it so the next request
@@ -433,10 +497,12 @@ fn load_client_manifest(manifest_path: &Path) -> Option<Arc<HashMap<String, Clie
     let routes = Arc::new(routes);
 
     if let Ok(mut guard) = cache.lock() {
+        let sequence = guard.take_sequence();
         guard.insert(
-            manifest_path.to_path_buf(),
+            manifest_path,
             CachedClientManifest {
                 content_hash,
+                sequence,
                 // Re-read rather than reusing the pre-read value: the file may
                 // have been rewritten between the metadata call and the read,
                 // and storing the older identity next to the newer bytes would
