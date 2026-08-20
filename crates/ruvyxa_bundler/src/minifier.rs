@@ -56,9 +56,15 @@ fn minify_javascript(source: &str, tree_shaking: bool) -> Result<String> {
         // `treeShaking: false` must still preserve otherwise-unused bindings.
         // Oxc's safest compression profile keeps those bindings while allowing
         // semantics-preserving whitespace reduction and identifier mangling.
+        //
+        // Spread the defaults rather than listing every field: oxc is pinned to
+        // an exact version and adds options between releases (`mangle_properties`
+        // arrived in 0.146), so an exhaustive literal turns each bump into a
+        // compile error that says nothing about what the new option should be.
+        // Only the field this branch actually means to change is named.
         MinifierOptions {
-            mangle: MinifierOptions::default().mangle,
             compress: Some(CompressOptions::safest()),
+            ..MinifierOptions::default()
         }
     };
     let result = Minifier::new(options).minify(&allocator, &mut program);

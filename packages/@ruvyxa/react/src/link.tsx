@@ -96,16 +96,16 @@ export function Link({
   ...rest
 }: Readonly<LinkProps>) {
   const anchorRef = useRef<HTMLAnchorElement | null>(null)
-  const prefetched = useRef(false)
+  // Which href was prefetched, rather than a bare "yes" plus an effect to clear
+  // it when the href changes. Recording the value closes the window that split
+  // version left open: between an href change and the reset effect running, the
+  // guard still said "already prefetched" and the new destination was skipped.
+  const prefetchedHref = useRef<string | null>(null)
 
   const warm = useCallback(() => {
-    if (prefetched.current) return
-    prefetched.current = true
+    if (prefetchedHref.current === href) return
+    prefetchedHref.current = href
     getRouterInstance().prefetch(href)
-  }, [href])
-
-  useEffect(() => {
-    prefetched.current = false
   }, [href])
 
   useEffect(() => {

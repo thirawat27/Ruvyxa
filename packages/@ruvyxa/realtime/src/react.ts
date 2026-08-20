@@ -18,7 +18,6 @@ import {
   useContext,
   useEffect,
   useMemo,
-  useRef,
   useSyncExternalStore,
 } from 'react'
 import type { ReactNode } from 'react'
@@ -88,13 +87,12 @@ export function useCollabRoom(): CollabSnapshot {
 export function usePresence<T>(state: T): readonly CollabPeer[] {
   const client = useCollabClient()
   const room = useCollabRoom()
-  // Publishing during render would make an effect-free component write on every
-  // pass; the ref keeps the effect's dependency stable while still sending the
-  // newest value.
-  const latest = useRef(state)
-  latest.current = state
+  // `state` is already an effect dependency, so the effect always runs with the
+  // newest value and reads it directly. A ref used to hold it, written during
+  // render — which is unsafe under concurrent rendering, and bought nothing:
+  // the ref could not stabilise a dependency that was in the list beside it.
   useEffect(() => {
-    client.setPresence(latest.current)
+    client.setPresence(state)
   }, [client, state])
   return useMemo(() => room.peers.filter((peer) => !peer.self), [room.peers])
 }

@@ -92,7 +92,7 @@
     }
   },
   "dependencies": {
-    "@babel/core": "^7.29.7",
+    "@babel/core": "^8.0.1",
     "@jridgewell/trace-mapping": "^0.3.31",
     "@mdx-js/mdx": "^3.1.1",
     "@ruvyxa/adapter-aws": "workspace:^",
@@ -108,9 +108,9 @@
     "@ruvyxa/adapter-vercel": "workspace:^",
     "@ruvyxa/core": "workspace:^",
     "babel-plugin-react-compiler": "^1.0.0",
-    "oxc-transform": "0.144.0",
+    "oxc-transform": "0.146.0",
     "remark-gfm": "^4.0.1",
-    "sass": "^1.102.0",
+    "sass": "^1.103.0",
     "yaml": "^2.9.0"
   },
   "devDependencies": {

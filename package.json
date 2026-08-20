@@ -5,7 +5,7 @@
   "type": "module",
   "description": "A production-minded web framework built around clarity, speed, control, and predictable application delivery.",
   "license": "Apache-2.0",
-  "packageManager": "pnpm@11.21.0",
+  "packageManager": "pnpm@11.22.0",
   "scripts": {
     "build": "pnpm -r build",
     "check": "pnpm -r check && pnpm lint",
@@ -30,7 +30,7 @@
   "devDependencies": {
     "@types/node": "24.13.3",
     "knip": "6.32.2",
-    "oxlint": "1.78.0",
+    "oxlint": "1.79.0",
     "postcss": "^8.5.26",
     "prettier": "3.9.6",
     "typescript": "^7.0.2"

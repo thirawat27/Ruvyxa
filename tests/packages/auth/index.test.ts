@@ -72,8 +72,9 @@ describe('@ruvyxa/auth', () => {
         body: JSON.stringify({ email: 'ada@example.com', password: 'correct' }),
       }),
     )
-    assert.equal(response?.status, 200)
-    const cookie = response?.headers.get('set-cookie')!.split(';')[0]!
+    assert.ok(response)
+    assert.equal(response.status, 200)
+    const cookie = response.headers.get('set-cookie')!.split(';')[0]!
 
     const sameSecret = runtime({ store, rateLimitStore })
     const resolved = await sameSecret.getSession(

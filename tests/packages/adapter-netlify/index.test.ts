@@ -79,7 +79,9 @@ describe('netlify', () => {
         (artifact) => artifact.kind === 'function' && artifact.path === functionPath,
       )
       assert.ok(functionArtifact, functionPath)
-      const handlerSource =
+      // Annotated because the narrowed property and the binding share a name,
+      // which TypeScript reads as a circular initializer and widens to `any`.
+      const handlerSource: string =
         'handlerSource' in functionArtifact ? String(functionArtifact.handlerSource) : ''
       assert.notEqual(handlerSource, '', functionPath)
       assert.match(handlerSource, /createHandler/)

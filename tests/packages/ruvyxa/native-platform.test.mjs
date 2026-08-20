@@ -107,7 +107,7 @@ describe('Ruvyxa CLI platforms', () => {
 
     assert.match(workspaceManifest, /rust-version = "1\.96"/)
     assert.equal(workspacePackage.engines.node, '>=24.19.0')
-    assert.equal(workspacePackage.packageManager, 'pnpm@11.21.0')
+    assert.equal(workspacePackage.packageManager, 'pnpm@11.22.0')
     assert.equal(ruvyxaPackage.engines.node, '>=24.19.0')
     assert.match(ciWorkflow, /toolchain: 1\.96\.0/)
     assert.match(ciWorkflow, /node: '24\.19\.0'/)
