@@ -36,7 +36,14 @@
     "`result` is the ordered list of package-relative targets, or the string",
     "\"blocked\" for an explicit null, or \"unmatched\" when the map answers",
     "nothing and the legacy fields take over. Existence on disk is not part of",
-    "this table: each host probes the file system its own way."
+    "this table: each host probes the file system its own way.",
+    "",
+    "`react-server` is a bundle target rather than a flag, because the condition",
+    "changes which *file* a specifier names: React itself resolves to a build",
+    "with no useState in it. Ordering it ahead of `node` is what makes a package",
+    "that ships both reach its server-components build — the last case here is",
+    "react-server-dom-webpack's own exports map, which returns a stub that",
+    "refuses to load unless the condition is on."
   ],
   "exports": [
     {
@@ -46,7 +53,8 @@
       "results": {
         "client": ["./browser.js"],
         "ssr": ["./esm.js"],
-        "edge": ["./esm.js"]
+        "edge": ["./esm.js"],
+        "react-server": ["./esm.js"]
       }
     },
     {
@@ -56,7 +64,8 @@
       "results": {
         "client": ["./esm.mjs"],
         "ssr": ["./esm.mjs"],
-        "edge": ["./esm.mjs"]
+        "edge": ["./esm.mjs"],
+        "react-server": ["./esm.mjs"]
       }
     },
     {
@@ -66,7 +75,8 @@
       "results": {
         "client": ["./cjs.js"],
         "ssr": ["./cjs.js"],
-        "edge": "unmatched"
+        "edge": "unmatched",
+        "react-server": ["./cjs.js"]
       }
     },
     {
@@ -76,7 +86,8 @@
       "results": {
         "client": ["./browser.js"],
         "ssr": ["./node.js"],
-        "edge": ["./default.js"]
+        "edge": ["./default.js"],
+        "react-server": ["./node.js"]
       }
     },
     {
@@ -86,7 +97,8 @@
       "results": {
         "client": ["./browser.js"],
         "ssr": ["./node.js"],
-        "edge": ["./worker.js"]
+        "edge": ["./worker.js"],
+        "react-server": ["./node.js"]
       }
     },
     {
@@ -96,26 +108,42 @@
       "results": {
         "client": ["./default.js"],
         "ssr": ["./node.js"],
-        "edge": ["./edge.js"]
+        "edge": ["./edge.js"],
+        "react-server": ["./node.js"]
       }
     },
     {
       "name": "an explicit null blocks the subpath outright",
       "exportsJson": "{\"./internal\":null,\"./public\":\"./public.js\"}",
       "key": "./internal",
-      "results": { "client": "blocked", "ssr": "blocked", "edge": "blocked" }
+      "results": {
+        "client": "blocked",
+        "ssr": "blocked",
+        "edge": "blocked",
+        "react-server": "blocked"
+      }
     },
     {
       "name": "a subpath the map does not cover is unmatched, not blocked",
       "exportsJson": "{\"./public\":\"./public.js\"}",
       "key": "./private",
-      "results": { "client": "unmatched", "ssr": "unmatched", "edge": "unmatched" }
+      "results": {
+        "client": "unmatched",
+        "ssr": "unmatched",
+        "edge": "unmatched",
+        "react-server": "unmatched"
+      }
     },
     {
       "name": "a bare condition map answers only the root key",
       "exportsJson": "{\"import\":\"./esm.js\"}",
       "key": "./sub",
-      "results": { "client": "unmatched", "ssr": "unmatched", "edge": "unmatched" }
+      "results": {
+        "client": "unmatched",
+        "ssr": "unmatched",
+        "edge": "unmatched",
+        "react-server": "unmatched"
+      }
     },
     {
       "name": "a string exports field answers only the root key",
@@ -124,14 +152,20 @@
       "results": {
         "client": ["./index.js"],
         "ssr": ["./index.js"],
-        "edge": ["./index.js"]
+        "edge": ["./index.js"],
+        "react-server": ["./index.js"]
       }
     },
     {
       "name": "a string exports field does not answer a subpath",
       "exportsJson": "\"./index.js\"",
       "key": "./sub",
-      "results": { "client": "unmatched", "ssr": "unmatched", "edge": "unmatched" }
+      "results": {
+        "client": "unmatched",
+        "ssr": "unmatched",
+        "edge": "unmatched",
+        "react-server": "unmatched"
+      }
     },
     {
       "name": "an array offers its entries in order",
@@ -140,14 +174,20 @@
       "results": {
         "client": ["./first.js", "./second.js"],
         "ssr": ["./first.js", "./second.js"],
-        "edge": ["./first.js", "./second.js"]
+        "edge": ["./first.js", "./second.js"],
+        "react-server": ["./first.js", "./second.js"]
       }
     },
     {
       "name": "a target that is not package-relative is not a target",
       "exportsJson": "{\".\":\"lodash\"}",
       "key": ".",
-      "results": { "client": "unmatched", "ssr": "unmatched", "edge": "unmatched" }
+      "results": {
+        "client": "unmatched",
+        "ssr": "unmatched",
+        "edge": "unmatched",
+        "react-server": "unmatched"
+      }
     },
     {
       "name": "nested condition objects are walked",
@@ -156,7 +196,8 @@
       "results": {
         "client": ["./browser.mjs"],
         "ssr": ["./node.js"],
-        "edge": ["./node.js"]
+        "edge": ["./node.js"],
+        "react-server": ["./node.js"]
       }
     },
     {
@@ -166,7 +207,8 @@
       "results": {
         "client": ["./dist/features/alpha.js"],
         "ssr": ["./dist/features/alpha.js"],
-        "edge": ["./dist/features/alpha.js"]
+        "edge": ["./dist/features/alpha.js"],
+        "react-server": ["./dist/features/alpha.js"]
       }
     },
     {
@@ -176,7 +218,8 @@
       "results": {
         "client": ["./features/alpha.mjs"],
         "ssr": ["./features/alpha.mjs"],
-        "edge": ["./features/alpha.mjs"]
+        "edge": ["./features/alpha.mjs"],
+        "react-server": ["./features/alpha.mjs"]
       }
     },
     {
@@ -186,7 +229,8 @@
       "results": {
         "client": ["./long/theme.css"],
         "ssr": ["./long/theme.css"],
-        "edge": ["./long/theme.css"]
+        "edge": ["./long/theme.css"],
+        "react-server": ["./long/theme.css"]
       }
     },
     {
@@ -196,7 +240,8 @@
       "results": {
         "client": ["./client-entry.js"],
         "ssr": ["./client-entry.js"],
-        "edge": ["./client-entry.js"]
+        "edge": ["./client-entry.js"],
+        "react-server": ["./client-entry.js"]
       }
     },
     {
@@ -206,14 +251,20 @@
       "results": {
         "client": ["./dist/.js"],
         "ssr": ["./dist/.js"],
-        "edge": ["./dist/.js"]
+        "edge": ["./dist/.js"],
+        "react-server": ["./dist/.js"]
       }
     },
     {
       "name": "a pattern with two stars is not a pattern",
       "exportsJson": "{\"./*/*\":\"./dist/*.js\"}",
       "key": "./a/b",
-      "results": { "client": "unmatched", "ssr": "unmatched", "edge": "unmatched" }
+      "results": {
+        "client": "unmatched",
+        "ssr": "unmatched",
+        "edge": "unmatched",
+        "react-server": "unmatched"
+      }
     },
     {
       "name": "an unknown condition is skipped rather than taken",
@@ -222,14 +273,20 @@
       "results": {
         "client": ["./default.js"],
         "ssr": ["./default.js"],
-        "edge": ["./default.js"]
+        "edge": ["./default.js"],
+        "react-server": ["./default.js"]
       }
     },
     {
       "name": "a condition map with no supported condition is unmatched",
       "exportsJson": "{\"deno\":\"./deno.js\",\"bun\":\"./bun.js\"}",
       "key": ".",
-      "results": { "client": "unmatched", "ssr": "unmatched", "edge": "unmatched" }
+      "results": {
+        "client": "unmatched",
+        "ssr": "unmatched",
+        "edge": "unmatched",
+        "react-server": "unmatched"
+      }
     },
     {
       "name": "module competes inside the first pass, ahead of require",
@@ -238,66 +295,182 @@
       "results": {
         "client": ["./esm.js"],
         "ssr": ["./esm.js"],
-        "edge": ["./esm.js"]
+        "edge": ["./esm.js"],
+        "react-server": ["./esm.js"]
+      }
+    },
+    {
+      "name": "react-server wins over node for a package that ships both",
+      "exportsJson": "{\"react-server\":\"./server-components.js\",\"node\":\"./node.js\",\"browser\":\"./browser.js\",\"default\":\"./default.js\"}",
+      "key": ".",
+      "results": {
+        "client": ["./browser.js"],
+        "ssr": ["./node.js"],
+        "edge": ["./default.js"],
+        "react-server": ["./server-components.js"]
+      }
+    },
+    {
+      "name": "author order still decides when react-server is written last",
+      "exportsJson": "{\"node\":\"./node.js\",\"react-server\":\"./server-components.js\"}",
+      "key": ".",
+      "results": {
+        "client": "unmatched",
+        "ssr": ["./node.js"],
+        "edge": "unmatched",
+        "react-server": ["./node.js"]
+      },
+      "$why": "Node matches conditions in the order the author wrote them, and both `node` and `react-server` are accepted here, so the first one wins. This is deliberately NOT a second departure like the `require` pass: that one exists because this bundler emits ESM and a CommonJS build cannot be a peer of an ESM one, which is a property of the output. Here both builds load, and which is right is the package author's call — the packages that mean it, React's own among them, list `react-server` first."
+    },
+    {
+      "name": "a package with no react-server build falls back to its node build",
+      "exportsJson": "{\"node\":\"./node.js\",\"default\":\"./default.js\"}",
+      "key": ".",
+      "results": {
+        "client": ["./default.js"],
+        "ssr": ["./node.js"],
+        "edge": ["./default.js"],
+        "react-server": ["./node.js"]
+      }
+    },
+    {
+      "name": "react-server is invisible to every other target",
+      "exportsJson": "{\"react-server\":\"./server-components.js\",\"default\":\"./default.js\"}",
+      "key": ".",
+      "results": {
+        "client": ["./default.js"],
+        "ssr": ["./default.js"],
+        "edge": ["./default.js"],
+        "react-server": ["./server-components.js"]
+      }
+    },
+    {
+      "name": "the react-server binding of react-server-dom-webpack, as shipped",
+      "exportsJson": "{\"react-server\":{\"workerd\":\"./server.edge.js\",\"node\":\"./server.node.js\",\"edge-light\":\"./server.edge.js\",\"browser\":\"./server.browser.js\"},\"default\":\"./server.js\"}",
+      "key": ".",
+      "results": {
+        "client": ["./server.js"],
+        "ssr": ["./server.js"],
+        "edge": ["./server.js"],
+        "react-server": ["./server.node.js"]
       }
     }
   ],
   "specifiers": [
-    { "specifier": "react", "package": "react", "key": "." },
-    { "specifier": "react/jsx-runtime", "package": "react", "key": "./jsx-runtime" },
-    { "specifier": "@scope/pkg", "package": "@scope/pkg", "key": "." },
-    { "specifier": "@scope/pkg/sub/path", "package": "@scope/pkg", "key": "./sub/path" },
-    { "specifier": "pkg/deep/nested/file.js", "package": "pkg", "key": "./deep/nested/file.js" },
-    { "specifier": "./relative", "package": null, "key": null },
-    { "specifier": "/absolute", "package": null, "key": null },
-    { "specifier": "", "package": null, "key": null },
-    { "specifier": "@scope", "package": null, "key": null }
+    {
+      "specifier": "react",
+      "package": "react",
+      "key": "."
+    },
+    {
+      "specifier": "react/jsx-runtime",
+      "package": "react",
+      "key": "./jsx-runtime"
+    },
+    {
+      "specifier": "@scope/pkg",
+      "package": "@scope/pkg",
+      "key": "."
+    },
+    {
+      "specifier": "@scope/pkg/sub/path",
+      "package": "@scope/pkg",
+      "key": "./sub/path"
+    },
+    {
+      "specifier": "pkg/deep/nested/file.js",
+      "package": "pkg",
+      "key": "./deep/nested/file.js"
+    },
+    {
+      "specifier": "./relative",
+      "package": null,
+      "key": null
+    },
+    {
+      "specifier": "/absolute",
+      "package": null,
+      "key": null
+    },
+    {
+      "specifier": "",
+      "package": null,
+      "key": null
+    },
+    {
+      "specifier": "@scope",
+      "package": null,
+      "key": null
+    }
   ],
   "legacyEntries": [
     {
       "name": "browser competes only for a browser bundle",
-      "manifest": { "browser": "./browser.js", "module": "./esm.js", "main": "./cjs.js" },
+      "manifest": {
+        "browser": "./browser.js",
+        "module": "./esm.js",
+        "main": "./cjs.js"
+      },
       "key": ".",
       "results": {
         "client": ["browser.js", "esm.js", "cjs.js", "index"],
         "ssr": ["esm.js", "cjs.js", "index"],
-        "edge": ["esm.js", "cjs.js", "index"]
+        "edge": ["esm.js", "cjs.js", "index"],
+        "react-server": ["esm.js", "cjs.js", "index"]
       }
     },
     {
       "name": "module is preferred to main on every target",
-      "manifest": { "module": "./esm.js", "main": "./cjs.js" },
+      "manifest": {
+        "module": "./esm.js",
+        "main": "./cjs.js"
+      },
       "key": ".",
       "results": {
         "client": ["esm.js", "cjs.js", "index"],
         "ssr": ["esm.js", "cjs.js", "index"],
-        "edge": ["esm.js", "cjs.js", "index"]
+        "edge": ["esm.js", "cjs.js", "index"],
+        "react-server": ["esm.js", "cjs.js", "index"]
       }
     },
     {
       "name": "a package with no entry fields falls back to the directory layout",
       "manifest": {},
       "key": ".",
-      "results": { "client": ["index"], "ssr": ["index"], "edge": ["index"] }
+      "results": {
+        "client": ["index"],
+        "ssr": ["index"],
+        "edge": ["index"],
+        "react-server": ["index"]
+      }
     },
     {
       "name": "a subpath is taken literally and the fields do not apply",
-      "manifest": { "main": "./cjs.js" },
+      "manifest": {
+        "main": "./cjs.js"
+      },
       "key": "./deep/file.js",
       "results": {
         "client": ["deep/file.js"],
         "ssr": ["deep/file.js"],
-        "edge": ["deep/file.js"]
+        "edge": ["deep/file.js"],
+        "react-server": ["deep/file.js"]
       }
     },
     {
       "name": "the object form of browser names no entry point",
-      "manifest": { "browser": { "./a.js": "./b.js" }, "main": "./cjs.js" },
+      "manifest": {
+        "browser": {
+          "./a.js": "./b.js"
+        },
+        "main": "./cjs.js"
+      },
       "key": ".",
       "results": {
         "client": ["cjs.js", "index"],
         "ssr": ["cjs.js", "index"],
-        "edge": ["cjs.js", "index"]
+        "edge": ["cjs.js", "index"],
+        "react-server": ["cjs.js", "index"]
       }
     }
   ],

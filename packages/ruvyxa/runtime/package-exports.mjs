@@ -58,6 +58,14 @@ export const PACKAGE_EXPORT_CONDITIONS = Object.freeze({
     preferred: Object.freeze(['worker', 'edge-light', 'import', 'module', 'default']),
     fallback: Object.freeze([]),
   }),
+  // `react-server` first, ahead of `node`, because a package that ships a
+  // server-components build lists it as a narrower case of the same runtime —
+  // React's own `exports` does exactly that, and taking `node` instead would
+  // load the build with `useState` in it and make every server component throw.
+  'react-server': Object.freeze({
+    preferred: Object.freeze(['react-server', 'node', 'import', 'module', 'default']),
+    fallback: Object.freeze(['require']),
+  }),
 })
 
 /** Every bundle target this rule knows, for validation at the call site. */

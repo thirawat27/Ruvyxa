@@ -19,6 +19,7 @@
     "runtime/adapter-runner.mjs",
     "runtime/api-renderer.mjs",
     "runtime/cache-budget.mjs",
+    "runtime/client-references.mjs",
     "runtime/compiler.mjs",
     "runtime/config-renderer.mjs",
     "runtime/css-runner.mjs",

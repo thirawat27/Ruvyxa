@@ -4,6 +4,8 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import test from 'node:test'
 
+import { createCodeIndex } from '../../../packages/ruvyxa/runtime/scanner.mjs'
+
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../..')
 const runtimeDir = path.join(repoRoot, 'packages/ruvyxa/runtime')
 
@@ -40,10 +42,15 @@ async function localRuntimeGraph(entryFiles) {
 
     const sourcePath = path.join(runtimeDir, runtimeFile)
     const source = await readFile(sourcePath, 'utf8')
+    // Matches inside comments and strings are not imports. A doc comment that
+    // shows an example import sent this walk looking for a runtime module that
+    // never existed — the same class of defect the runtime scanner exists to
+    // prevent, this time in the checker rather than the code it checks.
+    const code = createCodeIndex(source)
     const specifiers = [
       ...source.matchAll(/\b(?:import|export)\s+(?:[^'"]*?\s+from\s+)?['"](\.[^'"]+)['"]/g),
       ...source.matchAll(/\bimport\s*\(\s*['"](\.[^'"]+)['"]\s*\)/g),
-    ]
+    ].filter((match) => code.isCode(match.index))
     for (const match of specifiers) {
       const dependency = path.relative(runtimeDir, path.resolve(path.dirname(sourcePath), match[1]))
       assert.ok(

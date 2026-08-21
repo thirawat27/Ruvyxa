@@ -406,6 +406,79 @@ describe('runtime compiler', () => {
     }
   })
 
+  it('replaces a use-client module with a reference in the server-components graph', async () => {
+    // The whole point of the react-server graph: a `'use client'` module is not
+    // compiled into it. Its imports must not be walked either, or the server
+    // bundle would pull in browser-only code and a `useState` that the
+    // react-server build of React does not export.
+    await withFixture(async ({ root, outDir }) => {
+      const clientFile = path.join(root, 'counter.jsx')
+      const serverFile = path.join(root, 'server-page.jsx')
+      const outfile = path.join(outDir, 'rsc.mjs')
+      await writeFile(
+        clientFile,
+        `'use client'
+import { useState } from 'react'
+export default function Counter({ start }) { const [n] = useState(start); return n }
+export const Badge = () => null
+`,
+      )
+      await writeFile(
+        serverFile,
+        `import Counter, { Badge } from './counter.jsx'
+export default function Page() { return [Counter, Badge] }
+`,
+      )
+
+      const result = await compileBundleWithMetadata({
+        projectRoot: root,
+        entrySource: `export { default } from './server-page.jsx'
+`,
+        sourcefile: 'ruvyxa:rsc-entry.tsx',
+        outfile,
+        platform: 'node',
+        bundleTarget: 'react-server',
+      })
+      const code = await readFile(outfile, 'utf8')
+
+      assert.equal(result.clientReferences.length, 1)
+      assert.match(result.clientReferences[0].id, /^ruv:m_[a-f0-9]{16}$/)
+      assert.equal(result.clientReferences[0].relativePath, 'counter.jsx')
+      assert.ok(code.includes('createClientModuleProxy'), 'the proxy replaces the module')
+      assert.ok(!code.includes('useState'), 'the client module must not be compiled in')
+    })
+  })
+
+  it('leaves a use-client module alone for every other bundle target', async () => {
+    // The transform is scoped to the server-components graph. An ordinary
+    // server or browser bundle must compile the module exactly as before.
+    await withFixture(async ({ root, outDir }) => {
+      const clientFile = path.join(root, 'counter.jsx')
+      const outfile = path.join(outDir, 'plain.mjs')
+      await writeFile(
+        clientFile,
+        `'use client'
+import { useState } from 'react'
+export default function Counter() { const [n] = useState(1); return n }
+`,
+      )
+
+      const result = await compileBundleWithMetadata({
+        projectRoot: root,
+        entrySource: `export { default } from './counter.jsx'
+`,
+        sourcefile: 'ruvyxa:entry.tsx',
+        outfile,
+        platform: 'node',
+      })
+      const code = await readFile(outfile, 'utf8')
+
+      assert.deepEqual(result.clientReferences, [])
+      assert.ok(code.includes('useState'), 'the module is compiled normally')
+      assert.ok(!code.includes('createClientModuleProxy'))
+    })
+  })
+
   it('compiles Markdown and MDX modules with frontmatter and components', async () => {
     await withFixture(async ({ root, outDir }) => {
       const cardFile = path.join(root, 'Card.js')

@@ -230,7 +230,7 @@ window.__RUVYXA_HYDRATED = true;
 "#
             )
         }
-        BundleTarget::Ssr | BundleTarget::Edge => {
+        BundleTarget::Ssr | BundleTarget::Edge | BundleTarget::ReactServer => {
             format!(
                 r#"import React from "react";
 import {{ renderToString }} from "react-dom/server";
@@ -847,7 +847,7 @@ pub fn wrap(linked: String, input: &BundleInput) -> String {
             // external package imports must remain top-level ESM imports.
             linked
         }
-        BundleTarget::Ssr | BundleTarget::Edge => {
+        BundleTarget::Ssr | BundleTarget::Edge | BundleTarget::ReactServer => {
             // The linker hoists external ESM imports and exposes the virtual
             // entry render function as a top-level ESM export.
             format!("// Ruvyxa SSR bundle\n{linked}")

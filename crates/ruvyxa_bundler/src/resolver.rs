@@ -1530,6 +1530,15 @@ fn resolve_exports_value(
             let (preferred, fallback): (&[&str], &[&str]) = match target {
                 BundleTarget::Client => (&["browser", "import", "module", "default"], &["require"]),
                 BundleTarget::Ssr => (&["node", "import", "module", "default"], &["require"]),
+                // `react-server` first, ahead of `node`, because a package that
+                // ships a server-components build lists it as a narrower case
+                // of the same runtime — React's own `exports` does exactly
+                // that, and taking `node` instead would load the build with
+                // `useState` in it and make every server component throw.
+                BundleTarget::ReactServer => (
+                    &["react-server", "node", "import", "module", "default"],
+                    &["require"],
+                ),
                 BundleTarget::Edge => (
                     &["worker", "edge-light", "import", "module", "default"],
                     &[],
@@ -1904,6 +1913,7 @@ fn collect_deps_cached(
                 BundleTarget::Client => 0,
                 BundleTarget::Ssr => 1,
                 BundleTarget::Edge => 2,
+                BundleTarget::ReactServer => 3,
             },
             jsx_automatic: matches!(jsx_runtime, JsxRuntime::Automatic),
         };
@@ -3205,6 +3215,7 @@ export default function Card() { return <div className={cn("card")} /> }"#,
             "client" => BundleTarget::Client,
             "ssr" => BundleTarget::Ssr,
             "edge" => BundleTarget::Edge,
+            "react-server" => BundleTarget::ReactServer,
             other => panic!("the shared fixture names a target this host does not have: {other}"),
         }
     }

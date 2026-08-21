@@ -1,5 +1,3 @@
-import type { ReactNode } from 'react'
-
 /**
  * The level an interception replaces.
  *
@@ -12,10 +10,7 @@ import type { ReactNode } from 'react'
 export default function GalleryLayout({
   children,
   modal,
-}: {
-  children: ReactNode
-  modal?: ReactNode
-}) {
+}: Readonly<{ children: React.ReactNode; modal?: React.ReactNode }>) {
   return (
     <div className="gallery-shell">
       {children}

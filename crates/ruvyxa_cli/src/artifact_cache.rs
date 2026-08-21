@@ -44,6 +44,10 @@ const WORKER_RUNTIME_FILES: &[&str] = &[
     // identity: the rule could change while every hash above stayed equal.
     "origin-policy.mjs",
     "compiler.mjs",
+    // The identity a `'use client'` module carries into the server-components
+    // graph. A change to it changes which reference a rendered payload names,
+    // so prerendered output built against the old one is stale.
+    "client-references.mjs",
     // Which file a bare specifier names. `compiler.mjs` delegates that whole
     // decision here, so a change to a condition list changes which modules a
     // prerendered page was built from — the definition of stale output.

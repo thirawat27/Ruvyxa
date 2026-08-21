@@ -16,6 +16,16 @@ pub enum BundleTarget {
     /// Edge runtime ESM module (Cloudflare Workers, Vercel Edge Functions).
     /// Like SSR but restricts Node.js-specific APIs (fs, native modules).
     Edge,
+    /// React Server Components graph: Node.js ESM resolved with the
+    /// `react-server` export condition.
+    ///
+    /// A separate target rather than a flag on [`Self::Ssr`] because the
+    /// condition changes which *file* a specifier names — `react` itself
+    /// resolves to its `react-server` build, which has no `useState` — and that
+    /// is a resolution decision, not a rendering one. The two graphs cannot
+    /// share a module instance, which is why they are also rendered in
+    /// different processes.
+    ReactServer,
 }
 
 /// JSX transform runtime mode.

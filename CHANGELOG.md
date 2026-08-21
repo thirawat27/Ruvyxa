@@ -2,6 +2,63 @@
 
 ## v1.0.32 (unreleased)
 
+### Two import scanners read comments as imports
+
+`scripts/pack-smoke.mjs` and `tests/packages/ruvyxa/worker-runtime-contract.test.mjs` each walk
+`runtime/*.mjs` for relative imports, so a new sibling module cannot work in the monorepo and then
+be missing from the published tarball. Both matched the text with a regex and neither masked
+comments or strings — so a doc comment containing an example `import … from './counter'` sent both
+looking for `packages/ruvyxa/runtime/counter`, and both failed on a file that was never meant to
+exist.
+
+They mask through `createCodeIndex` from `runtime/scanner.mjs` now — the same tool the rest of the
+repository already uses for exactly this. Two copies of one scan with one hole is what "count the
+copies before trusting a check" means in practice: fixing the comment would have left the second
+scanner waiting for the next one.
+
+### Groundwork for React Server Components — not a usable feature yet
+
+**Ruvyxa still does not support RSC.** A page cannot be a server component today, and nothing in
+this release changes what an application can write. What landed is the part that had to be measured
+before any of it could be designed, and it is described here because the diff adds files a reader
+would otherwise have to guess about.
+
+Two runtime contracts were established against a real `react-server-dom-webpack@19.2.8`, by running
+it rather than by reading its documentation:
+
+- `server.browser` reads `__webpack_require__.u` **at module load** and throws in a plain Node
+  process; `server.node` does not, and renders a Flight stream with no webpack globals present. That
+  single fact decides which binding a non-webpack bundler can use.
+- The client side asks for exactly two globals — `__webpack_chunk_load__` and `__webpack_require__`
+  — which are a chunk loader and a registry, and are satisfied by a fifteen-line shim over Ruvyxa's
+  own registry.
+
+Three pieces are in the tree, each with tests:
+
+- `BundleTarget::ReactServer` and a matching `react-server` target in
+  `packages/ruvyxa/runtime/package-exports.mjs`, so both graphs resolve the `react-server` export
+  condition identically. Five cases in `tests/fixtures/module-resolution-conformance.json` pin it,
+  including `react-server-dom-webpack`'s own exports map — which returns a stub that refuses to load
+  unless the condition is on. Ordering `react-server` ahead of `node` is what reaches a package's
+  server-components build; author order still decides between two accepted conditions, and that is
+  deliberately _not_ a second departure from Node like the `require` pass.
+- `packages/ruvyxa/runtime/client-references.mjs`: the id a `'use client'` module carries across the
+  three places that must agree about it, the proxy module the server graph compiles in its place,
+  the browser registration, the webpack shim, and the manifest React serialises against. The
+  manifest is a `Proxy` because React looks up `"<id>#<export>"` for export names no bundler can
+  enumerate in advance — `createClientModuleProxy` answers any property, so the manifest has to as
+  well.
+- `compileBundleWithMetadata` honours `bundleTarget: 'react-server'` by replacing each
+  `'use client'` module with that proxy and reporting the references it found. Its imports are
+  deliberately not walked: the server graph would otherwise pull in browser-only code and a
+  `useState` the react-server build of React does not export.
+
+Together these already produce a real Flight payload from a Ruvyxa-compiled server component, client
+reference and all. What stops it being a feature is the next piece: every client-reference chunk
+currently inlines its own copy of React, so a page with two of them has two Reacts. Sharing one
+React across chunks changes how Ruvyxa emits _every_ client bundle, which is a decision about
+existing output rather than an addition to it.
+
 ### Intercepting routes are implemented
 
 `(.)`, `(..)`, `(..)(..)`, and `(...)` are real now, rather than refused. A folder carrying one is

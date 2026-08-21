@@ -4,6 +4,7 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createRequire, isBuiltin } from 'node:module'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
+import { clientModuleId, clientProxyModuleSource } from './client-references.mjs'
 import { compareCodeUnits } from './order.mjs'
 import {
   isSafePackageRelativePath,
@@ -179,6 +180,9 @@ export async function compileBundleWithMetadata({
   const root = path.resolve(projectRoot)
   const modules = []
   const byKey = new Map()
+  // Every `'use client'` module the server-components graph turned into a
+  // reference. Empty for every other bundle target, so nothing else changes.
+  const clientReferences = new Map()
   const externals = new Map()
   const externalSet = new Set(external)
   const tsconfigPaths = loadTsconfigPaths(root)
@@ -198,6 +202,7 @@ export async function compileBundleWithMetadata({
     aliases,
     platform,
     bundleTarget: resolvedBundleTarget,
+    clientReferences,
     bundlePackages,
     bundleAliasDependencies,
     bundleDependencies: false,
@@ -215,6 +220,14 @@ export async function compileBundleWithMetadata({
   }
   return {
     outfile,
+    // Every `'use client'` module this graph turned into a reference, in a
+    // stable order. Empty for every bundle target but `react-server`, so no
+    // existing caller sees a change. The client build reads it to know which
+    // modules need their own browser chunk, and the render reads it to build
+    // the manifest React serialises references against.
+    clientReferences: [...clientReferences.values()].sort((left, right) =>
+      compareCodeUnits(left.id, right.id),
+    ),
     // Hash of the emitted bundle, used as the ESM import version token. Two
     // builds that emit identical code must resolve to the same import URL:
     // Node never releases a module URL once it is loaded, so a token that
@@ -489,6 +502,7 @@ async function visitModule(context) {
     aliases,
     platform,
     bundleTarget,
+    clientReferences,
     bundlePackages,
     bundleAliasDependencies,
     bundleDependencies,
@@ -500,9 +514,28 @@ async function visitModule(context) {
 
   if (byKey.has(key)) return byKey.get(key)
 
+  // A `'use client'` module is not compiled into the server-components graph at
+  // all: React needs a *reference* to it, and the real module belongs to the
+  // browser graph, which is a different React instance. Swapping the source
+  // here rather than after classification is deliberate — the module's own
+  // imports must not be walked, or the server graph would pull in browser-only
+  // code and a `useState` that does not exist in the react-server build.
+  const clientReference =
+    bundleTarget === 'react-server' && filePath && hasModuleDirective(source, 'use client')
+      ? clientModuleId(path.relative(root, filePath))
+      : null
+  if (clientReference) {
+    clientReferences.set(clientReference, {
+      id: clientReference,
+      file: filePath,
+      relativePath: path.relative(root, filePath).replaceAll('\\', '/'),
+    })
+  }
+  const moduleSource = clientReference ? clientProxyModuleSource(clientReference) : source
+
   const { jsonModule, styleModule, contentModule, compiledSource, globExpansion } =
     await classifyModuleSource(
-      { source, filePath, root, baseDir, markdownConfig, tsconfigPaths },
+      { source: moduleSource, filePath, root, baseDir, markdownConfig, tsconfigPaths },
       expandImportMetaGlob,
     )
   const id = `__m${modules.length}`
@@ -581,6 +614,7 @@ async function visitModule(context) {
         aliases,
         platform,
         bundleTarget,
+        clientReferences,
         bundlePackages,
         bundleAliasDependencies,
         bundleDependencies:

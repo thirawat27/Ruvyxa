@@ -463,6 +463,11 @@ pub(crate) fn plugin_environment(target: ruvyxa_bundler::BundleTarget) -> &'stat
         ruvyxa_bundler::BundleTarget::Client => "client",
         ruvyxa_bundler::BundleTarget::Ssr => "server",
         ruvyxa_bundler::BundleTarget::Edge => "edge",
+        // A plugin sees the runtime it is transforming for. The server
+        // components graph runs on the server, so `server` is what a
+        // `PluginEnvironment` consumer already knows how to handle; the
+        // `react-server` condition is a resolution detail, not a new host.
+        ruvyxa_bundler::BundleTarget::ReactServer => "server",
     }
 }
 

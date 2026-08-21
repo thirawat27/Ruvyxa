@@ -14,6 +14,8 @@ import { rm } from 'node:fs/promises'
 import { arch, platform } from 'node:process'
 import { setTimeout as sleep } from 'node:timers/promises'
 
+import { createCodeIndex } from '../packages/ruvyxa/runtime/scanner.mjs'
+
 const destination = '.npm-pack'
 const currentPlatformPackage = `@ruvyxa/cli-${platform}-${arch}`
 const packages = [
@@ -72,10 +74,16 @@ function packagedRuntimeGraph(entryFiles) {
       `runtime import escapes package/runtime: ${runtimeFile}`,
     )
     const source = readFileSync(sourcePath, 'utf8')
+    // A match inside a comment or a string is not an import. A doc comment
+    // showing an example import sent this walk looking for a runtime module
+    // that never existed — and `tests/packages/ruvyxa/worker-runtime-contract.test.mjs`
+    // held a second copy of this same scan with the same hole, which is what
+    // "count the copies" means in practice.
+    const code = createCodeIndex(source)
     const specifiers = [
       ...source.matchAll(/\b(?:import|export)\s+(?:[^'"]*?\s+from\s+)?['"](\.[^'"]+)['"]/g),
       ...source.matchAll(/\bimport\s*\(\s*['"](\.[^'"]+)['"]\s*\)/g),
-    ]
+    ].filter((match) => code.isCode(match.index))
     for (const match of specifiers) {
       const dependencyPath = resolve(dirname(sourcePath), match[1])
       const dependencyRelative = relative(ruvyxaRuntimeSource, dependencyPath)
