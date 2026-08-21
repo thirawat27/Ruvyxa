@@ -18,6 +18,31 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+/// Shift every mapping down by `lines` generated lines.
+///
+/// A bundle is not always shipped exactly as the bundler emitted it: the CLI
+/// prepends an `import "./shared.<hash>.js";` line when a route reads from the
+/// shared-module registry, and it did that after the map was built. Every
+/// mapping then named the line above the one it described — a map that was
+/// exactly right when it left this crate and exactly wrong on disk.
+///
+/// Generated lines are the `;`-separated groups of the `mappings` field, so
+/// prepending that many empty groups is the whole edit; nothing else in the
+/// document depends on the generated line.
+///
+/// Returns `None` when the input is not a source map document, so a caller that
+/// cannot shift a map does not ship one that lies.
+pub fn shift_generated_lines(map_json: &str, lines: usize) -> Option<String> {
+    if lines == 0 {
+        return Some(map_json.to_string());
+    }
+    let mut document: serde_json::Value = serde_json::from_str(map_json).ok()?;
+    let mappings = document.get_mut("mappings")?;
+    let shifted = format!("{}{}", ";".repeat(lines), mappings.as_str()?);
+    *mappings = serde_json::Value::String(shifted);
+    serde_json::to_string(&document).ok()
+}
+
 /// A single mapping segment: one generated position → one original position.
 #[derive(Debug, Clone)]
 pub struct Mapping {
@@ -415,6 +440,48 @@ fn decode_vlq_segment(segment: &str) -> Option<Vec<i64>> {
     }
 
     (shift == 0).then_some(values)
+}
+
+/// One decoded mapping: where a generated position came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecodedMapping {
+    pub generated_line: usize,
+    pub generated_column: usize,
+    pub source: usize,
+    pub original_line: usize,
+}
+
+/// Decode a  string into the positions it actually encodes.
+///
+/// The builder is unit-tested against strings it produced itself, which cannot
+/// catch a caller feeding it the wrong positions. This exists so a test can ask
+/// the finished map where a bundle line came from and compare that with where
+/// it really came from.
+pub fn decode_mappings(mappings: &str) -> Vec<DecodedMapping> {
+    let mut decoded = Vec::new();
+    let (mut source, mut original_line) = (0i64, 0i64);
+    for (generated_line, line) in mappings.split(';').enumerate() {
+        let mut generated_column = 0i64;
+        for segment in line.split(',').filter(|segment| !segment.is_empty()) {
+            let values = decode_vlq_segment(segment).expect("mappings must be valid Base64-VLQ");
+            generated_column += values[0];
+            // A one-field segment names a generated column with no source.
+            if values.len() < 4 {
+                continue;
+            }
+            source += values[1];
+            original_line += values[2];
+            decoded.push(DecodedMapping {
+                generated_line,
+                generated_column: usize::try_from(generated_column)
+                    .expect("generated column is never negative"),
+                source: usize::try_from(source).expect("source index is never negative"),
+                original_line: usize::try_from(original_line)
+                    .expect("original line is never negative"),
+            });
+        }
+    }
+    decoded
 }
 
 /// Decode a single VLQ value from a Base64-VLQ string (for testing).

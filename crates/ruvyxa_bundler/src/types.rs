@@ -79,6 +79,18 @@ pub struct RouteSpecials {
     pub not_found: Option<PathBuf>,
 }
 
+/// One parallel-route slot handed to the entry generator.
+///
+/// `level` is a directory, not a file: it names which layout in the chain
+/// receives this slot, and the generator matches it against each layout's own
+/// directory.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteSlotInput {
+    pub level: PathBuf,
+    pub name: String,
+    pub file: PathBuf,
+}
+
 /// Input descriptor for a single bundle job.
 #[derive(Debug, Clone)]
 pub struct BundleInput {
@@ -86,6 +98,17 @@ pub struct BundleInput {
     pub project_root: PathBuf,
     pub app_dir: PathBuf,
     pub layouts: Vec<PathBuf>,
+    /// `template.tsx` files on the path to this route, root first.
+    ///
+    /// Kept apart from `layouts` because a level may have either, both, or
+    /// neither, and the two interleave during composition. Templates contribute
+    /// no metadata — only `layouts` and the page do.
+    pub templates: Vec<PathBuf>,
+    /// Parallel-route slots, as `(level directory, slot name, file)`.
+    ///
+    /// The level is the directory holding the `@name` folder; its layout is the
+    /// one that receives the slot as a prop.
+    pub slots: Vec<RouteSlotInput>,
     pub request_path: String,
     pub target: BundleTarget,
     pub options: BundleOptions,

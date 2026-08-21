@@ -947,6 +947,143 @@ fn build_target_is_accepted_and_reaches_no_bundle_option() {
     assert!(encoded.get("target").is_none());
 }
 
+/// The written `.js` and the written `.js.map` describe the same file.
+///
+/// The bundler emits a map for the bundle it produced, and this module then
+/// prepends `import "./shared.<hash>.js";` to routes that read the shared
+/// registry — after the map was built. Every mapping named the line above the
+/// one it described, and the whole feature was one line short on exactly the
+/// routes a real project has.
+///
+/// The check is the one a debugger makes: find a token in the emitted file,
+/// resolve its position through the map, and require the source line it names
+/// to be the line that token came from.
+#[test]
+fn an_emitted_bundle_and_its_source_map_agree_after_the_shared_import() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let app = root.join("app");
+    let client_dir = root.join(".ruvyxa").join("client");
+    std::fs::create_dir_all(app.join("second")).unwrap();
+    std::fs::create_dir_all(&client_dir).unwrap();
+
+    // A module both routes import, so the build lifts it into a shared chunk
+    // and both route bundles get the prepended import.
+    std::fs::write(
+        app.join("shared-label.ts"),
+        "export const SHARED_LABEL = 'shared-label-token';\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("page.tsx"),
+        "import { SHARED_LABEL } from './shared-label';\n\
+         export default function Page() { return <main>{SHARED_LABEL}{\"route-token-alpha\"}</main>; }\n",
+    )
+    .unwrap();
+    std::fs::write(
+        app.join("second/page.tsx"),
+        "import { SHARED_LABEL } from '../shared-label';\n\
+         export default function Second() { return <main>{SHARED_LABEL}{\"route-token-beta\"}</main>; }\n",
+    )
+    .unwrap();
+
+    let manifest = discover_routes(DiscoverOptions::new(&app)).unwrap();
+    let build = BuildConfigOptions {
+        minify: Some(false),
+        sourcemap: Some(true),
+        tree_shaking: Some(false),
+        split_strategy: Some("route".to_string()),
+        parallelism: Some(1),
+        jsx_runtime: Some("classic".to_string()),
+        _es_target: None,
+        emit_chunk_manifest: Some(true),
+        prebundle_dependencies: Some(true),
+        prerender_cache: Some(true),
+    };
+
+    emit_client_bundles(
+        root,
+        &app,
+        &manifest,
+        &client_dir,
+        &build,
+        &[],
+        RuvyxaBuildCache {
+            dependency_hash: "no-config",
+            directory: &root.join(".ruvyxa/cache/bundler"),
+        },
+    )
+    .unwrap();
+
+    let maps = std::fs::read_dir(&client_dir)
+        .unwrap()
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| path.to_string_lossy().ends_with(".js.map"))
+        .collect::<Vec<_>>();
+    assert!(!maps.is_empty(), "sourcemap: true must emit maps");
+
+    let mut resolved_any = false;
+    for map_path in maps {
+        let script_path = PathBuf::from(map_path.to_string_lossy().trim_end_matches(".map"));
+        let script = std::fs::read_to_string(&script_path).unwrap();
+        // Only the routes that actually took the shared import are interesting,
+        // and they are the ones this bug applied to.
+        if !script.starts_with("import \"./shared.") {
+            continue;
+        }
+        let map: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&map_path).unwrap()).unwrap();
+        let contents = map["sourcesContent"]
+            .as_array()
+            .expect("sourcesContent")
+            .iter()
+            .map(|value| {
+                value
+                    .as_str()
+                    .unwrap_or_default()
+                    .lines()
+                    .map(str::to_string)
+                    .collect::<Vec<_>>()
+            })
+            .collect::<Vec<_>>();
+
+        // A literal the route bundle keeps: the shared value itself is emitted
+        // into the shared chunk, which is a different file with its own lines.
+        const TOKEN: &str = "route-token-";
+        let Some((line, column)) = script
+            .lines()
+            .enumerate()
+            .find_map(|(index, text)| text.find(TOKEN).map(|column| (index, column)))
+        else {
+            continue;
+        };
+        let decoded =
+            ruvyxa_bundler::sourcemap::decode_mappings(map["mappings"].as_str().expect("mappings"));
+        let resolved = decoded
+            .iter()
+            .filter(|mapping| mapping.generated_line == line && mapping.generated_column <= column)
+            .max_by_key(|mapping| mapping.generated_column)
+            .unwrap_or_else(|| {
+                panic!("nothing maps the position holding {TOKEN} in {script_path:?}")
+            });
+        let original = contents
+            .get(resolved.source)
+            .and_then(|lines| lines.get(resolved.original_line))
+            .unwrap_or_else(|| panic!("mapping points past the end of its source"));
+        assert!(
+            original.contains(TOKEN),
+            "{script_path:?}: the position holding {TOKEN} maps to {} line {} — {original:?}",
+            map["sources"][resolved.source],
+            resolved.original_line
+        );
+        resolved_any = true;
+    }
+    assert!(
+        resolved_any,
+        "no route took the shared import, so nothing was actually checked"
+    );
+}
+
 #[test]
 fn emit_client_bundles_writes_chunk_manifest_when_enabled() {
     let temp = tempfile::tempdir().unwrap();
@@ -2293,6 +2430,8 @@ fn server_only_route(path: &str, kind: ruvyxa_graph::RouteKind) -> ruvyxa_graph:
         kind,
         file: PathBuf::from(format!("app{path}/route.ts")),
         layout_chain: Vec::new(),
+        template_chain: Vec::new(),
+        slots: Vec::new(),
         server_modules: Vec::new(),
         client_modules: Vec::new(),
         runtime: ruvyxa_graph::RuntimeTarget::Node,

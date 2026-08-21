@@ -38,6 +38,79 @@ pub fn minify_with_options(
     minify_javascript(&stage0, tree_shaking)
 }
 
+/// One generated position and the input position it came from.
+///
+/// Minification rewrites the text wholesale, so the only thing that can carry a
+/// source map across it is the minifier itself. Oxc's codegen emits these; the
+/// bundler joins them to the linker's line provenance to reach the module a
+/// position started in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct MinifiedPosition {
+    pub(crate) generated_line: u32,
+    pub(crate) generated_column: u32,
+    pub(crate) source_line: u32,
+}
+
+/// Minify and report where each emitted position came from in `source`.
+///
+/// Used only when a source map was asked for: producing the mapping costs
+/// codegen work that a build without `build.map` should not pay.
+pub(crate) fn minify_tracking_positions(
+    source: &str,
+    target: BundleTarget,
+) -> Result<(String, Vec<MinifiedPosition>)> {
+    let _ = target;
+    let allocator = Allocator::default();
+    let program = parse_for_minification(&allocator, source)?;
+    let (mut program, options) = program;
+    let result = Minifier::new(options).minify(&allocator, &mut program);
+
+    let mut codegen_options = codegen_options();
+    // Any path will do: it only names the `sources` entry of oxc's own map,
+    // which is discarded once the positions have been read out of it.
+    codegen_options.source_map_path = Some(std::path::PathBuf::from("ruvyxa-linked.js"));
+    let generated = Codegen::new()
+        .with_options(codegen_options)
+        .with_scoping(result.scoping)
+        .with_private_member_mappings(result.class_private_mappings)
+        .build(&program);
+
+    let positions = generated.map.as_ref().map_or_else(Vec::new, |map| {
+        map.get_tokens()
+            .map(|token| MinifiedPosition {
+                generated_line: token.get_dst_line(),
+                generated_column: token.get_dst_col(),
+                source_line: token.get_src_line(),
+            })
+            .collect()
+    });
+    Ok((generated.code, positions))
+}
+
+/// Parse and pick the compression profile the two minify entry points share.
+fn parse_for_minification<'a>(
+    allocator: &'a Allocator,
+    source: &'a str,
+) -> Result<(oxc::ast::ast::Program<'a>, MinifierOptions)> {
+    let parsed = Parser::new(allocator, source, SourceType::unambiguous()).parse();
+    if !parsed.diagnostics.is_empty() {
+        return Err(BundleError::Compiler(format!(
+            "Oxc could not parse linked JavaScript: {} syntax diagnostic(s)",
+            parsed.diagnostics.len()
+        )));
+    }
+    // `treeShaking: false` must still preserve otherwise-unused bindings, and
+    // the bundler shakes before this runs, so the map-producing path always
+    // takes the safest profile for the same reason `minify_javascript` does.
+    Ok((
+        parsed.program,
+        MinifierOptions {
+            compress: Some(CompressOptions::safest()),
+            ..MinifierOptions::default()
+        },
+    ))
+}
+
 fn minify_javascript(source: &str, tree_shaking: bool) -> Result<String> {
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::unambiguous()).parse();
@@ -191,18 +264,18 @@ fn find_node_env_conditional(source: &str) -> Option<(usize, usize, String)> {
         let consequent_close = matching_delimiter(&masked, consequent_open, b'{', b'}')?;
 
         let after_consequent = skip_ascii_whitespace(bytes, consequent_close + 1);
-        let else_start = masked[after_consequent..]
-            .starts_with("else")
-            .then_some(after_consequent);
-        let alternative = else_start.and_then(|else_index| {
-            let open = skip_ascii_whitespace(bytes, else_index + 4);
-            (bytes.get(open) == Some(&b'{'))
-                .then(|| matching_delimiter(&masked, open, b'{', b'}').map(|close| (open, close)))?
-        });
+        let else_start = else_keyword_at(&masked, after_consequent).then_some(after_consequent);
 
-        let end = alternative
-            .map(|(_, close)| close + 1)
-            .unwrap_or(consequent_close + 1);
+        // What the `else` clause is, and where the whole statement ends.
+        //
+        // A clause that is neither a block nor another `if` is a brace-less
+        // statement whose end cannot be found without parsing, so the guard is
+        // left alone rather than half-removed.
+        let Some(clause) = else_clause(&masked, bytes, else_start, consequent_close) else {
+            search = consequent_close + 1;
+            continue;
+        };
+        let end = clause.end;
         // The surviving branch keeps its braces and becomes a block statement.
         //
         // Splicing the *body* in discarded the block's lexical scope, which is
@@ -214,16 +287,145 @@ fn find_node_env_conditional(source: &str) -> Option<(usize, usize, String)> {
         // and keeps the branch's bindings exactly where the author put them.
         let replacement = if condition_result {
             source[consequent_open..=consequent_close].to_string()
-        } else if let Some((open, close)) = alternative {
-            source[open..=close].to_string()
         } else {
-            String::new()
+            // The `else` clause survives as written. For a block that is its
+            // braces; for an `else if` chain it is the chain itself, which is
+            // already a complete statement — so nothing is spliced and the
+            // remaining branches keep their own conditions.
+            match clause.kind {
+                ElseClause::None => String::new(),
+                ElseClause::Block { open, close } => source[open..=close].to_string(),
+                ElseClause::Chain { at } => source[at..end].to_string(),
+            }
         };
 
         return Some((start, end, replacement));
     }
 
     None
+}
+
+/// What follows the folded `if`, and where the whole statement ends.
+struct FoldedElse {
+    kind: ElseClause,
+    /// One past the last byte of the entire `if`/`else` statement.
+    end: usize,
+}
+
+enum ElseClause {
+    None,
+    Block {
+        open: usize,
+        close: usize,
+    },
+    /// `else if (…) { … }`, possibly continuing. `at` is the `if`.
+    Chain {
+        at: usize,
+    },
+}
+
+/// Whether `else` appears at `index` as a keyword rather than as the start of
+/// an identifier such as `elsewhere`.
+fn else_keyword_at(masked: &str, index: usize) -> bool {
+    masked[index..].starts_with("else")
+        && !masked.as_bytes()[index + 4..]
+            .first()
+            .is_some_and(|byte| is_ascii_identifier_byte(*byte))
+}
+
+/// Measure the `else` clause of a guard whose consequent ends at
+/// `consequent_close`.
+///
+/// Returns `None` when the clause is a brace-less statement, whose end cannot
+/// be found without parsing. The caller then leaves the guard alone: the fold
+/// used to take `consequent_close + 1` as the end whatever followed, so
+///
+/// ```js
+/// if (process.env.NODE_ENV !== "production") { warn() } else if (flag) { run() }
+/// ```
+///
+/// lost its `if` and left a bare `else if` behind — a syntax error that failed
+/// the whole production client bundle, from a pass that runs while the graph is
+/// being resolved and reports nothing.
+fn else_clause(
+    masked: &str,
+    bytes: &[u8],
+    else_start: Option<usize>,
+    consequent_close: usize,
+) -> Option<FoldedElse> {
+    let Some(else_index) = else_start else {
+        return Some(FoldedElse {
+            kind: ElseClause::None,
+            end: consequent_close + 1,
+        });
+    };
+
+    let clause_start = skip_ascii_whitespace(bytes, else_index + 4);
+    if bytes.get(clause_start) == Some(&b'{') {
+        let close = matching_delimiter(masked, clause_start, b'{', b'}')?;
+        return Some(FoldedElse {
+            kind: ElseClause::Block {
+                open: clause_start,
+                close,
+            },
+            end: close + 1,
+        });
+    }
+
+    // `else if …`: walk the rest of the chain so both outcomes know where the
+    // statement ends — the kept branch has to delete it, the dropped branch has
+    // to leave it intact.
+    if !identifier_at(masked, clause_start, "if") {
+        return None;
+    }
+    let end = if_statement_end(masked, bytes, clause_start)?;
+    Some(FoldedElse {
+        kind: ElseClause::Chain { at: clause_start },
+        end,
+    })
+}
+
+/// Whether `word` appears at `index` as a whole identifier.
+fn identifier_at(masked: &str, index: usize, word: &str) -> bool {
+    masked[index..].starts_with(word)
+        && !masked.as_bytes()[index + word.len()..]
+            .first()
+            .is_some_and(|byte| is_ascii_identifier_byte(*byte))
+}
+
+/// One past the last byte of the `if` statement starting at `index`.
+///
+/// Iterative rather than recursive: an `else if` chain is arbitrarily long and
+/// this walks it a link at a time. `None` for any shape it cannot measure —
+/// a brace-less branch, or an unbalanced delimiter — so the caller declines to
+/// fold instead of guessing where the statement stopped.
+fn if_statement_end(masked: &str, bytes: &[u8], index: usize) -> Option<usize> {
+    let mut at = index;
+    loop {
+        let condition_open = skip_ascii_whitespace(bytes, at + 2);
+        if bytes.get(condition_open) != Some(&b'(') {
+            return None;
+        }
+        let condition_close = matching_delimiter(masked, condition_open, b'(', b')')?;
+        let body_open = skip_ascii_whitespace(bytes, condition_close + 1);
+        if bytes.get(body_open) != Some(&b'{') {
+            return None;
+        }
+        let body_close = matching_delimiter(masked, body_open, b'{', b'}')?;
+
+        let after = skip_ascii_whitespace(bytes, body_close + 1);
+        if !else_keyword_at(masked, after) {
+            return Some(body_close + 1);
+        }
+        let clause_start = skip_ascii_whitespace(bytes, after + 4);
+        if bytes.get(clause_start) == Some(&b'{') {
+            return Some(matching_delimiter(masked, clause_start, b'{', b'}')? + 1);
+        }
+        if !identifier_at(masked, clause_start, "if") {
+            return None;
+        }
+        at = clause_start;
+    }
 }
 
 fn production_condition_result(condition: &str) -> Option<bool> {
@@ -296,15 +498,31 @@ fn is_ascii_identifier_byte(byte: u8) -> bool {
 /// unused) collapse fully instead of leaving one dead hop behind after a
 /// single pass.
 fn tree_shake(source: &str) -> String {
+    tree_shake_tracking_lines(source).0
+}
+
+/// Tree-shake, and report which input line each output line came from.
+///
+/// A pass never deletes a line — a dead export becomes a `// [tree-shaken]`
+/// comment, and a line carrying both live and dead exports becomes two — so the
+/// output is a line-for-line descendant of the input and the provenance is
+/// exact. The source map needs it to survive this stage: without it the map
+/// describes a document that only exists before shaking.
+pub(crate) fn tree_shake_tracking_lines(source: &str) -> (String, Vec<usize>) {
     let mut current = source.to_string();
+    let mut origins: Vec<usize> = (0..current.lines().count()).collect();
     for _ in 0..64 {
-        let next = tree_shake_pass(&current);
+        let (next, pass_origins) = tree_shake_pass(&current);
         if next == current {
             break;
         }
+        origins = pass_origins
+            .into_iter()
+            .map(|line| origins.get(line).copied().unwrap_or(line))
+            .collect();
         current = next;
     }
-    current
+    (current, origins)
 }
 
 /// Remove unused exports from the linked bundle, one pass.
@@ -318,7 +536,7 @@ fn tree_shake(source: &str) -> String {
 ///
 /// This is conservative — if we can't prove an export is unused, we keep it.
 /// Chained re-exports need repeated passes; see [`tree_shake`].
-fn tree_shake_pass(source: &str) -> String {
+fn tree_shake_pass(source: &str) -> (String, Vec<usize>) {
     // Step 1: Collect all consumed members: `__ruv_xxx__.member`. An empty
     // set is meaningful, not a signal to bail — it means every remaining
     // live export in this pass is unreferenced (e.g. the last hop of a
@@ -333,7 +551,9 @@ fn tree_shake_pass(source: &str) -> String {
     let mut out = String::with_capacity(source.len());
     let mut current_module_id: Option<String> = None;
 
-    for line in source.lines() {
+    let mut origins: Vec<usize> = Vec::new();
+
+    for (index, line) in source.lines().enumerate() {
         let trimmed = line.trim();
 
         // Track which module scope we're inside.
@@ -350,6 +570,7 @@ fn tree_shake_pass(source: &str) -> String {
             // Keep the closer regardless, and leave the module scope.
             out.push_str(line);
             out.push('\n');
+            origins.push(index);
             current_module_id = None;
             continue;
         }
@@ -373,17 +594,20 @@ fn tree_shake_pass(source: &str) -> String {
                     out.push_str(indent);
                     out.push_str(&join_statements(&kept));
                     out.push('\n');
+                    origins.push(index);
                 }
                 out.push_str(indent);
                 out.push_str("// [tree-shaken] ");
                 out.push_str(&join_statements(&dropped));
                 out.push('\n');
+                origins.push(index);
                 continue;
             }
         }
 
         out.push_str(line);
         out.push('\n');
+        origins.push(index);
     }
 
     // Remove trailing newline if source didn't end with one.
@@ -391,7 +615,7 @@ fn tree_shake_pass(source: &str) -> String {
         out.pop();
     }
 
-    out
+    (out, origins)
 }
 
 /// Scan the source for all `__ruv_<hex16>__.<member>` accesses.
@@ -1041,5 +1265,112 @@ var __ruv_cccc3333cccc3333__ = (function() {
                 .collect();
             assert!(active.is_empty(), "{dead} should be shaken: {active:?}");
         }
+    }
+
+    /// Folding a `NODE_ENV` guard must leave parsable JavaScript.
+    ///
+    /// The fold deletes code while a production client graph is being resolved,
+    /// so its failure mode is a bundle that no longer parses and a pass that
+    /// reports nothing. It used to take the consequent's closing brace as the
+    /// end of the statement whatever followed, which cut the `if` out of an
+    /// `else if` chain and left the `else` behind.
+    ///
+    /// Parsed rather than matched, because "the output does not parse" is the
+    /// failure.
+    #[test]
+    fn every_foldable_shape_leaves_parsable_javascript() {
+        for (name, source) in [
+            (
+                "production guard",
+                "if (process.env.NODE_ENV === 'production') { keep() } else { drop() }\n",
+            ),
+            (
+                "development guard",
+                "if (process.env.NODE_ENV !== 'production') { drop() } else { keep() }\n",
+            ),
+            (
+                "development guard with no else",
+                "if (process.env.NODE_ENV !== 'production') { drop() }\nkeep()\n",
+            ),
+            (
+                "else-if chain after a production guard",
+                "if (process.env.NODE_ENV === 'production') { keep() } else if (flag) { drop() }\n",
+            ),
+            (
+                "else-if chain after a development guard",
+                "if (process.env.NODE_ENV !== 'production') { drop() } else if (flag) { keep() } else { other() }\n",
+            ),
+            (
+                "long else-if chain",
+                "if (process.env.NODE_ENV !== 'production') { drop() } else if (a) { one() } else if (b) { two() } else { three() }\n",
+            ),
+            (
+                "brace-less else, left alone",
+                "if (process.env.NODE_ENV !== 'production') { drop() } else keep()\n",
+            ),
+            (
+                "brace-less consequent, left alone",
+                "if (process.env.NODE_ENV !== 'production') drop()\nkeep()\n",
+            ),
+            (
+                "identifier that merely starts with else",
+                "if (process.env.NODE_ENV === 'production') { keep() }\nelsewhere()\n",
+            ),
+            (
+                "nested guards",
+                "if (process.env.NODE_ENV !== 'production') {\n  if (process.env.NODE_ENV !== 'production') { drop() } else { alsoDrop() }\n} else {\n  keep()\n}\n",
+            ),
+            (
+                "guard quoted inside a template literal",
+                "const doc = `if (process.env.NODE_ENV !== 'production') { drop() }`\nkeep()\n",
+            ),
+        ] {
+            let folded = fold_production_node_env(source);
+            assert!(
+                crate::compiler::transform(&folded, false).is_ok(),
+                "{name}: folded output does not parse\n--- folded ---\n{folded}"
+            );
+        }
+    }
+
+    /// The fold has to keep the branch a production build would run, and drop
+    /// the other one — parsing alone would accept a fold that kept neither.
+    #[test]
+    fn the_fold_keeps_the_production_branch_and_drops_the_rest() {
+        let kept = |source: &str| fold_production_node_env(source);
+
+        let production =
+            kept("if (process.env.NODE_ENV === 'production') { keep() } else { drop() }\n");
+        assert!(production.contains("keep()"), "{production}");
+        assert!(!production.contains("drop()"), "{production}");
+
+        let development =
+            kept("if (process.env.NODE_ENV !== 'production') { drop() } else { keep() }\n");
+        assert!(development.contains("keep()"), "{development}");
+        assert!(!development.contains("drop()"), "{development}");
+
+        // The chain the guard was hiding stays whole, conditions and all.
+        let chain = kept(
+            "if (process.env.NODE_ENV !== 'production') { drop() } else if (flag) { keep() } else { other() }\n",
+        );
+        assert!(!chain.contains("drop()"), "{chain}");
+        assert!(chain.contains("if (flag) { keep() }"), "{chain}");
+        assert!(chain.contains("other()"), "{chain}");
+
+        // A production guard deletes the whole chain behind it.
+        let pruned = kept(
+            "if (process.env.NODE_ENV === 'production') { keep() } else if (flag) { drop() } else { alsoDrop() }\n",
+        );
+        assert!(pruned.contains("keep()"), "{pruned}");
+        assert!(!pruned.contains("drop()"), "{pruned}");
+        assert!(!pruned.contains("alsoDrop()"), "{pruned}");
+
+        // A shape it cannot measure is left exactly as written.
+        let untouched = "if (process.env.NODE_ENV !== 'production') { drop() } else keep()\n";
+        assert_eq!(kept(untouched), untouched);
+
+        // Text is not code.
+        let quoted = "const doc = `if (process.env.NODE_ENV !== 'production') { drop() }`\n";
+        assert_eq!(kept(quoted), quoted);
     }
 }

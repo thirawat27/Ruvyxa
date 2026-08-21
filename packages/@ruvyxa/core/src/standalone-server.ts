@@ -38,7 +38,7 @@ export function standaloneServerSource(options: StandaloneServerOptions = {}): s
     options.isrCache === 'tmp' ? "path.join(os.tmpdir(), 'ruvyxa-isr-cache')" : 'prerenderDir'
 
   return `import { createServer } from 'node:http';
-import { createHandler, prerenderRelativePath } from './serverless-handler.mjs';
+import { createHandler, parseByteRange, prerenderRelativePath } from './serverless-handler.mjs';
 import { applyPluginHttp, loadActionModule, loadRouteModule } from './route-modules.mjs';
 // Imported so the directory stays deployable through any bundler that a host
 // puts in front of it, matching the serverless adapters.
@@ -168,9 +168,27 @@ function sendStatic(req, res, hit, pathname) {
   const contentType =
     MIME_TYPES[path.extname(hit.file).slice(1).toLowerCase()] ??
     ${JSON.stringify(FALLBACK_CONTENT_TYPE)};
-  res.statusCode = 200;
+
+  // Ranges, decided by the same table the Rust server answers. This host and
+  // \`ruvyxa start\` serve the same public/ directory, so a video that scrubs
+  // under one has to scrub under the other.
+  const range = parseByteRange(req.headers.range ?? '', hit.size);
+  if (range.kind === 'unsatisfiable') {
+    res.statusCode = 416;
+    res.setHeader('accept-ranges', 'bytes');
+    res.setHeader('content-range', 'bytes */' + hit.size);
+    res.end();
+    return;
+  }
+  const partial = range.kind === 'partial' ? range : null;
+
+  res.statusCode = partial ? 206 : 200;
   res.setHeader('content-type', contentType);
-  res.setHeader('content-length', hit.size);
+  res.setHeader('accept-ranges', 'bytes');
+  res.setHeader('content-length', partial ? partial.end - partial.start + 1 : hit.size);
+  if (partial) {
+    res.setHeader('content-range', 'bytes ' + partial.start + '-' + partial.end + '/' + hit.size);
+  }
   // Same cache policy the Rust server applies to the same files: hashed
   // bundles are immutable, everything else from public/ revalidates hourly
   // instead of on every navigation.
@@ -183,7 +201,9 @@ function sendStatic(req, res, hit, pathname) {
     res.end();
     return;
   }
-  const file = createReadStream(hit.file);
+  const file = partial
+    ? createReadStream(hit.file, { start: partial.start, end: partial.end })
+    : createReadStream(hit.file);
   // The response headers are already out, so there is no status left to send:
   // a read that fails here (the file was replaced mid-deploy, a disk error)
   // can only be turned into a broken connection, which is what a truncated

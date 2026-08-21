@@ -339,6 +339,107 @@ export function routeContextPrelude() {
  *   with no metadata code at all, which is what a caller that has not adopted
  *   route metadata gets.
  */
+/**
+ * Interleave the layout and template chains into one root-first level list.
+ *
+ * Both chains are ordered root-first and each entry names a file, so the
+ * directory holding it is the level. Merging on that directory is what keeps
+ * `layout > template` correct at every level even when only one of the two
+ * exists there — flattening it into "every template inside every layout" would
+ * put a layout outside a template that should have contained it, which is
+ * observable the moment a template provides context.
+ *
+ * Mirrors `route_wrapper_levels()` in `crates/ruvyxa_bundler/src/output.rs`.
+ *
+ * @param {string[]} layoutPaths Layout files, root first.
+ * @param {string[]} templatePaths `template.tsx` files, root first.
+ * @returns {{ layout: string|null, template: string|null }[]}
+ */
+export function wrapperLevels(layoutPaths = [], templatePaths = [], slots = []) {
+  const normalize = (value) => value.replace(/\\/g, '/').replace(/\/+$/, '')
+  const directory = (file) => normalize(file).replace(/\/[^/]*$/, '')
+  const levels = new Map()
+  const at = (key) => {
+    if (!levels.has(key)) levels.set(key, { layout: null, template: null, slots: null })
+    return levels.get(key)
+  }
+
+  layoutPaths.forEach((file, index) => {
+    at(directory(file)).layout = `Layout${index}`
+  })
+  templatePaths.forEach((file, index) => {
+    at(directory(file)).template = `Template${index}`
+  })
+  // A slot names the directory holding its `@name` folder, which is the level
+  // whose layout receives it — the same key the two chains merge on.
+  slots.forEach((slot, index) => {
+    const level = at(normalize(slot.level))
+    level.slots ??= {}
+    level.slots[slot.name] = `Slot${index}`
+  })
+
+  // Root-first. A shorter directory is always an ancestor here, because every
+  // entry lies on one path from the app root to the route.
+  return [...levels.entries()]
+    .sort((left, right) => left[0].split('/').length - right[0].split('/').length)
+    .map(([, level]) => level)
+}
+
+/**
+ * Emit the loop that wraps a tree in its layouts and templates.
+ *
+ * A route with no `template.tsx` emits exactly the loop it always did: nothing
+ * about an ordinary route's bundle changes because the feature exists.
+ *
+ * The template's `key` is the whole reason the file exists: React remounts a
+ * keyed element when the key changes, so navigating within the same layout
+ * resets the template's state and re-runs its effects, while the layout above
+ * it stays mounted.
+ *
+ * Mirrors `wrapper_loop()` in `crates/ruvyxa_bundler/src/output.rs`; both are
+ * pinned by `tests/fixtures/entry-composition-conformance.json`.
+ *
+ * @param {string[]} layoutNames Layout identifiers, root-to-leaf.
+ * @param {{ layout: string|null, template: string|null }[]} levels
+ */
+export function wrapperLoop(layoutNames, levels = []) {
+  if (levels.every((level) => !level.template && !hasSlots(level))) {
+    return `  for (const Layout of [${layoutNames.join(', ')}].reverse()) {
+    tree = React.createElement(Layout, null, tree)
+  }`
+  }
+  const triples = levels
+    .map((level) => `[${level.layout ?? 'null'}, ${level.template ?? 'null'}, ${slotProps(level)}]`)
+    .join(', ')
+  return `  for (const [Layout, Template, slots] of [${triples}].reverse()) {
+    if (Template) tree = React.createElement(Template, { key: ctx.path }, tree)
+    if (Layout) tree = React.createElement(Layout, slots, tree)
+  }`
+}
+
+function hasSlots(level) {
+  return Boolean(level.slots) && Object.keys(level.slots).length > 0
+}
+
+/**
+ * The slot props one level's layout receives, or `null`.
+ *
+ * Built inside the loop rather than hoisted, because the elements depend on
+ * `ctx` and the loop runs once per render. Ordered by slot name so the emitted
+ * source does not depend on the order a filesystem listed the directories in.
+ */
+function slotProps(level) {
+  if (!hasSlots(level)) return 'null'
+  const props = Object.keys(level.slots)
+    .sort()
+    .map(
+      (name) =>
+        `${JSON.stringify(name)}: React.createElement(${level.slots[name]}, { params: ctx.params ?? {}, requestPath: ctx.path })`,
+    )
+    .join(', ')
+  return `{ ${props} }`
+}
+
 export function routeTreeFunction({
   name,
   pageName,
@@ -348,6 +449,7 @@ export function routeTreeFunction({
   errorName = null,
   loadingName = null,
   notFoundName = null,
+  levels = [],
 }) {
   const lines = [
     `  let tree = React.createElement(${pageName}, { params: ctx.params ?? {}, requestPath: ctx.path })`,
@@ -364,9 +466,7 @@ export function routeTreeFunction({
       `  tree = React.createElement(React.Suspense, { fallback: React.createElement(${loadingName}, null) }, tree)`,
     )
   }
-  lines.push(`  for (const Layout of [${layoutNames.join(', ')}].reverse()) {
-    tree = React.createElement(Layout, null, tree)
-  }`)
+  lines.push(wrapperLoop(layoutNames, levels))
   // Metadata is a sibling of the layouts, not a wrapper around them: a layout
   // that suspends must not be able to hold the document title back past the
   // flushed shell. It is passed as an extra child of the provider — an element
@@ -446,11 +546,16 @@ export function routeRecoveryFunction({ layoutNames, routePath, notFoundName }) 
  * @param {string} options.loadingName `loading.tsx` component identifier.
  * @param {string[]} [options.metaNames] Namespace identifiers, least specific first.
  */
-export function routeShellFunction({ name, layoutNames, routePath, loadingName, metaNames = [] }) {
+export function routeShellFunction({
+  name,
+  layoutNames,
+  routePath,
+  loadingName,
+  metaNames = [],
+  levels = [],
+}) {
   const lines = [`  let tree = React.createElement(${loadingName}, null)`]
-  lines.push(`  for (const Layout of [${layoutNames.join(', ')}].reverse()) {
-    tree = React.createElement(Layout, null, tree)
-  }`)
+  lines.push(wrapperLoop(layoutNames, levels))
   const metaChild =
     metaNames.length > 0
       ? `${META_ELEMENT_LOCAL}(${META_RESOLVE_LOCAL}([${metaNames.join(', ')}], ctx)), `
@@ -517,6 +622,7 @@ export function clientEntrySource({
   loadingName = null,
   notFoundName = null,
   metaNames = [],
+  levels = [],
 }) {
   const boundary = needsRouteBoundary({ errorName, notFoundName })
     ? `\n${routeBoundaryPrelude()}\n`
@@ -525,7 +631,7 @@ export function clientEntrySource({
   // Only a route with a declared loading state gets a shell; see
   // `routeShellFunction`.
   const shell = loadingName
-    ? `${routeShellFunction({ name: '__ruvyxaShell', layoutNames, routePath, loadingName, metaNames })}\n${routeShellRegistration({ name: '__ruvyxaShell', routePath })}\n`
+    ? `${routeShellFunction({ name: '__ruvyxaShell', layoutNames, routePath, loadingName, metaNames, levels })}\n${routeShellRegistration({ name: '__ruvyxaShell', routePath })}\n`
     : ''
   return `import React from "react"
 import { hydrateRoot } from "react-dom/client"
@@ -533,7 +639,7 @@ ${imports.join('\n')}
 
 ${routeContextPrelude()}
 ${boundary}${meta}
-${routeTreeFunction({ name: '__ruvyxaTree', pageName, layoutNames, routePath, errorName, loadingName, notFoundName, metaNames })}
+${routeTreeFunction({ name: '__ruvyxaTree', pageName, layoutNames, routePath, errorName, loadingName, notFoundName, metaNames, levels })}
 ${routeRegistration({ name: '__ruvyxaTree', routePath })}
 ${shell}
 
@@ -583,6 +689,7 @@ export function nodeSsrEntrySource({
   loadingName = null,
   notFoundName = null,
   metaNames = [],
+  levels = [],
 }) {
   const boundary = needsRouteBoundary({ errorName, notFoundName })
     ? `\n${routeBoundaryPrelude()}\n`
@@ -613,7 +720,7 @@ ${imports.join('\n')}
 
 ${routeContextPrelude()}
 ${boundary}${metaPrelude}
-${routeTreeFunction({ name: '__ruvyxaTree', pageName, layoutNames, routePath, errorName, loadingName, notFoundName, metaNames })}
+${routeTreeFunction({ name: '__ruvyxaTree', pageName, layoutNames, routePath, errorName, loadingName, notFoundName, metaNames, levels })}
 ${recovery}
 export async function render(ctx) {
   const html = await __ruvyxaRenderDocument(ctx)

@@ -133,6 +133,12 @@ export function Hero() {
 }
 ```
 
+ไฟล์ใน `public/` เสิร์ฟพร้อมรองรับ byte range ทำให้ `<video>` และ `<audio>`
+เลื่อนตำแหน่งได้โดยไม่ต้องดาวน์โหลดใหม่ และการดาวน์โหลดที่ขาดตอนสามารถทำต่อได้ `ruvyxa start` กับ
+deployment แบบ standalone/node ตอบ range เหมือนกัน โดย range เดี่ยว `Range: bytes=…` คืน `206` พร้อม
+`Content-Range` range ที่เลยท้ายไฟล์คืน `416` และ multi-range จะคืนไฟล์ทั้งไฟล์ asset ที่ใหญ่กว่า 8
+MiB จะ stream จากดิสก์แทนการ buffer และ ranged request ของไฟล์นั้นจะอ่านเฉพาะไบต์ที่ขอเท่านั้น
+
 imported project CSS อาจอยู่นอก `app/` ได้ หากต้อง include global style ที่ module ไม่ได้ import
 ให้ใส่ file/directory แบบ project-relative ใน `css.entries` runtime รู้จัก Sass เป็น package
 dependency ให้ใช้ style ที่ build resolve ได้ และรัน `npm run check` หลังเปลี่ยน boundary

@@ -200,7 +200,7 @@ fn compile_json_module(source: &str, path: &Path) -> Result<String> {
 /// to fail a build here. The linker's `RUV1612` guard still refuses anything
 /// that remains unlinkable, so giving up quietly cannot ship broken output.
 fn expand_multi_statement_esm(source: &str) -> Option<String> {
-    if !has_esm_statement_sharing_a_line(source) {
+    if !has_esm_statement_sharing_a_line(source) && !has_esm_clause_spanning_lines(source) {
         return None;
     }
 
@@ -267,6 +267,58 @@ pub(crate) fn has_esm_statement_sharing_a_line(source: &str) -> bool {
             })
         })
     })
+}
+
+/// Whether an `import`/`export` **clause** is broken across lines.
+///
+/// The linker rewrites one line at a time and expects a whole ESM statement on
+/// each. `has_esm_statement_sharing_a_line` covers the minified direction — two
+/// statements on one line — and this covers the other one, which Prettier
+/// produces the moment an import or export list outgrows the print width:
+///
+/// ```js
+/// export {
+///   readFile,
+///   writeFile,
+/// }
+/// ```
+///
+/// A `.ts`/`.tsx` module never reaches the linker in that shape because the
+/// transform re-prints it. A `.js`/`.mjs`/`.cjs` module is passed through
+/// untouched, so it did: the multi-line `import` form failed the build with
+/// `RUV1612`, and the `export` form was worse — the clause line matched the
+/// local-named-export rewrite and vanished, leaving `readFile,` and a stray `}`
+/// loose inside the module IIFE. Nothing said `export`, so `reject_surviving_esm`
+/// passed it, and the browser got a bundle that does not parse.
+///
+/// Only the clause form counts. `export default {` and `export const x = {` also
+/// open a brace they do not close, and the linker handles both deliberately —
+/// re-printing those would rewrite working output for nothing.
+pub(crate) fn has_esm_clause_spanning_lines(source: &str) -> bool {
+    if !source.contains("import") && !source.contains("export") {
+        return false;
+    }
+    ast::masked_code(source).lines().any(|line| {
+        let trimmed = line.trim_start();
+        let Some(rest) = ["import", "export"]
+            .iter()
+            .find_map(|keyword| trimmed.strip_prefix(keyword))
+        else {
+            return false;
+        };
+        // A token boundary, so `exporter` and `imports` are ordinary code.
+        if rest.starts_with(is_identifier_char) {
+            return false;
+        }
+        // The clause brace is the first thing after the keyword. Anything else
+        // — `default`, `const`, `* from`, a bare specifier — is a form the
+        // linker already spans correctly.
+        rest.trim_start().starts_with('{') && !rest.contains('}')
+    })
+}
+
+fn is_identifier_char(character: char) -> bool {
+    is_ascii_identifier_byte(character as u8) && character.is_ascii()
 }
 
 fn is_ascii_identifier_byte(byte: u8) -> bool {
@@ -958,5 +1010,176 @@ mod tests {
         // A package entry point without an extension is JavaScript by Node's
         // own rules.
         reject_unsupported_module_kind("", Path::new("bin/cli")).unwrap();
+    }
+
+    /// Sources whose `@` is not a decorator, and decorators that are hard to
+    /// measure.
+    ///
+    /// Stripping deletes bytes, so the failure mode is code that silently loses
+    /// a piece of itself — a `@media` block cut out of a styled-components
+    /// template still parses and still renders, just without the media query.
+    /// Each case lists the fragments that must survive verbatim.
+    const DECORATOR_CORPUS: &[(&str, &str, &[&str])] = &[
+        (
+            "css at-rule inside a styled template",
+            "const Box = styled.div`\n  color: red;\n  @media (max-width: 600px) {\n    color: blue;\n  }\n`\nexport const value = Box\n",
+            &["@media (max-width: 600px)", "color: blue"],
+        ),
+        (
+            "keyframes and supports inside a template",
+            "const css = `\n  @supports (display: grid) { display: grid }\n  @keyframes spin { from { rotate: 0deg } }\n`\nexport const value = css\n",
+            &["@supports", "@keyframes spin"],
+        ),
+        (
+            "an email address in a comment",
+            "// contact @someone (nobody@example.com)\nexport const value = 1\n",
+            &["@someone", "nobody@example.com"],
+        ),
+        (
+            "an at sign in a string",
+            "export const handle = \"@ruvyxa/core\"\nexport const scoped = '@scope/pkg'\n",
+            &["@ruvyxa/core", "@scope/pkg"],
+        ),
+        (
+            "an at sign in jsx text",
+            "export const el = <p>write to @support</p>\n",
+            &["@support"],
+        ),
+        (
+            "a jsdoc tag",
+            "/**\n * @param {number} a\n * @returns {number}\n */\nexport function twice(a) { return a * 2 }\n",
+            &["return a * 2"],
+        ),
+        (
+            "decorator with a string holding a paren",
+            "@Route(\"/a)b\")\nclass Service {}\nexport const value = Service\n",
+            &["class Service", "export const value"],
+        ),
+        (
+            "decorator with nested parens",
+            "@Inject(factory(deps(1, 2), 3))\nclass Service {}\nexport const value = Service\n",
+            &["class Service"],
+        ),
+        (
+            "decorator with a template argument",
+            "@Query(`select 1`)\nclass Service {}\nexport const value = Service\n",
+            &["class Service"],
+        ),
+        (
+            "stacked decorators",
+            "@First()\n@Second\n@Third({ a: 1 })\nclass Service {}\nexport const value = Service\n",
+            &["class Service"],
+        ),
+        (
+            "member decorators",
+            "class Service {\n  @Input() name = \"x\"\n  @Output() changed = 1\n  run() { return this.name }\n}\nexport const value = Service\n",
+            &["name = \"x\"", "changed = 1", "run()"],
+        ),
+        (
+            "decorator followed by a comment",
+            "@Injectable() // wires the service\nclass Service {}\nexport const value = Service\n",
+            &["class Service"],
+        ),
+        (
+            "at sign inside a regex",
+            "const p = /@[a-z]+/g\nexport const value = p.source\n",
+            &["/@[a-z]+/g"],
+        ),
+    ];
+
+    #[test]
+    fn stripping_decorators_keeps_every_at_sign_that_is_not_one() {
+        for (name, source, must_survive) in DECORATOR_CORPUS {
+            let stripped = strip_decorators(source);
+            for fragment in *must_survive {
+                assert!(
+                    stripped.contains(fragment),
+                    "{name}: lost {fragment:?}\n--- stripped ---\n{stripped}"
+                );
+            }
+            assert!(
+                transform(&stripped, true).is_ok(),
+                "{name}: stripped output does not parse\n{stripped}"
+            );
+        }
+    }
+
+    #[test]
+    fn the_transform_accepts_the_corpus_and_its_own_output() {
+        for (name, source, _) in DECORATOR_CORPUS {
+            let output = transform(source, true).unwrap_or_else(|error| panic!("{name}: {error}"));
+            assert!(
+                transform(&output, true).is_ok(),
+                "{name}: transform output does not re-parse\n{output}"
+            );
+        }
+    }
+
+    /// A `.js` module the pass-through path hands to the linker must link.
+    ///
+    /// The linker rewrites one ESM statement per line and cannot span one. A
+    /// `.ts` module always gets that shape from the transform; a `.js` one is
+    /// passed through, and `expand_multi_statement_esm` is the only thing that
+    /// gives it. The two predicates gating that expansion and the linker's
+    /// requirement are three separate pieces of knowledge about the same rule,
+    /// and they were not the same: `has_esm_statement_sharing_a_line` covered
+    /// the minified direction only, so a Prettier-wrapped `export { … }` reached
+    /// the linker intact and left a stray clause loose in the module IIFE — a
+    /// bundle that does not parse, with no build error at all.
+    ///
+    /// This walks the whole path rather than asserting on a predicate, so the
+    /// three cannot drift apart again without failing.
+    #[test]
+    fn every_javascript_shape_survives_expansion_and_linking() {
+        for source in [
+            // Minified: several statements per line.
+            "const a=1;function f(){return a}export{a as A,f};\n",
+            "export const value=1;export default value;\n",
+            // Prettier-wrapped: one statement across several lines.
+            "const a = 1\nconst b = 2\nexport {\n  a,\n  b as second,\n}\n",
+            "import {\n  join,\n} from \"node:path\"\nexport const value = join\n",
+            // Already one statement per line: expansion must not be needed.
+            "export const a = 1\nexport function b() {}\n",
+            // Shapes the linker spans deliberately; re-printing them would
+            // rewrite working output for nothing.
+            "export default {\n  name: \"x\",\n}\n",
+            "export const config = {\n  name: \"x\",\n}\n",
+            "export default class Page {\n  render() {}\n}\n",
+            // Text that reads like a statement.
+            "export const doc = `export {\n  a,\n}`\nexport const value = 1\n",
+        ] {
+            let expanded = expand_multi_statement_esm(source).unwrap_or_else(|| source.to_string());
+            let entry = PathBuf::from("/p/dep.js");
+            let module = CompiledModule::new(
+                entry.clone(),
+                expanded.clone(),
+                Vec::new(),
+                BTreeMap::new(),
+                false,
+                false,
+            );
+            // A re-export needs its dependency in the graph to rewrite; that
+            // path has its own coverage in `linker.rs`. These cases are about
+            // the shape reaching the linker at all.
+            let input = BundleInput {
+                entry,
+                project_root: PathBuf::from("/p"),
+                app_dir: PathBuf::from("/p/app"),
+                layouts: Vec::new(),
+                templates: Vec::new(),
+                slots: Vec::new(),
+                request_path: "/".to_string(),
+                target: crate::BundleTarget::Client,
+                options: crate::BundleOptions::default(),
+                specials: crate::RouteSpecials::default(),
+            };
+
+            let linked = crate::linker::link(&[module], &input)
+                .unwrap_or_else(|error| panic!("link rejected {source:?}: {error}\n{expanded}"));
+            assert!(
+                transform(&linked, false).is_ok(),
+                "linked output does not parse for {source:?}\n{linked}"
+            );
+        }
     }
 }

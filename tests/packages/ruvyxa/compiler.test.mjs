@@ -1204,6 +1204,59 @@ export const marker = 'reached'
     })
   })
 
+  /**
+   * Export shapes that broke the line-based rewriters in both module graphs.
+   *
+   * A generator's `*` binds to the keyword with no space, so
+   * `export function* gen()` matched neither the Node rewriter's
+   * `/^export\s+(async\s+)?function\s+/` nor the Rust linker's list of
+   * literal prefixes. The `export` survived, and Node reported
+   * `RUV1700 Unexpected token 'export'` from inside generated code.
+   *
+   * The module is imported and run, not matched: a rewrite that produced
+   * syntactically valid output binding the wrong thing would pass a regular
+   * expression and fail a caller.
+   */
+  it('rewrites generator and reserved-word exports before wrapping modules', async () => {
+    await withFixture(async ({ root, outDir }) => {
+      const moduleFile = path.join(root, 'shapes.js')
+      const outfile = path.join(outDir, 'export-shapes.mjs')
+      await writeFile(
+        moduleFile,
+        [
+          'export function* counter() { yield 1; yield 2 }',
+          'export async function* stream() { yield "a" }',
+          // `from` is ordinary English inside a string, and a reserved word is
+          // a legal property name. Neither is an ESM statement.
+          'export const note = "copied from here"',
+          'const conditions = { import: "./index.mjs", export: "./index.js" }',
+          'export const entry = conditions.import',
+          '',
+        ].join('\n'),
+      )
+
+      await compileBundle({
+        projectRoot: root,
+        entrySource: `export { counter, stream, note, entry } from ${JSON.stringify(toImportPath(moduleFile))}`,
+        sourcefile: 'ruvyxa:export-shapes-entry.js',
+        outfile,
+        platform: 'browser',
+      })
+
+      const output = await readFile(outfile, 'utf8')
+      assert.doesNotMatch(output, /^\s*export function\*/m, `an export survived:\n${output}`)
+      assert.doesNotMatch(output, /^\s*export async function\*/m, `an export survived:\n${output}`)
+
+      const mod = await import(pathToFileURL(outfile).href + `?t=${Date.now()}`)
+      assert.deepEqual([...mod.counter()], [1, 2])
+      const streamed = []
+      for await (const value of mod.stream()) streamed.push(value)
+      assert.deepEqual(streamed, ['a'])
+      assert.equal(mod.note, 'copied from here')
+      assert.equal(mod.entry, './index.mjs')
+    })
+  })
+
   it('handles JSX returned from ternaries and map callbacks', async () => {
     await withFixture(async ({ root, outDir }) => {
       const pageFile = path.join(root, 'page.tsx')

@@ -132,10 +132,23 @@ pub(crate) fn build_reference_manifest(
     })
 }
 
+/// The lane a module belongs to.
+///
+/// Held to `tests/fixtures/module-lane-conformance.json` together with
+/// `moduleLane()` in `packages/ruvyxa/runtime/compiler.mjs`; the two graphs each
+/// compile a project depending on which command ran, and they had disagreed.
+///
+/// The stem rule is a **project** convention and stops at an installed package.
+/// `react-dom/server.js` is a package entry point a bundle may legitimately
+/// contain, and reading the convention into `node_modules` would refuse it — the
+/// Node graph did exactly that for one build until its own tests caught it. A
+/// directive still counts wherever it appears: a dependency that declares
+/// `'use server'` means it.
 fn declared_lane(module: &CompiledModule) -> ModuleLane {
     match directive(&module.js) {
         Some("use client") => ModuleLane::Client,
         Some("use server") => ModuleLane::Action,
+        _ if is_installed_dependency(&module.path) => ModuleLane::Shared,
         _ => match module.path.file_stem().and_then(|name| name.to_str()) {
             Some("client") => ModuleLane::Client,
             Some("action" | "actions") => ModuleLane::Action,
@@ -143,6 +156,12 @@ fn declared_lane(module: &CompiledModule) -> ModuleLane {
             _ => ModuleLane::Shared,
         },
     }
+}
+
+/// Whether a path lives inside an installed package rather than project source.
+fn is_installed_dependency(path: &Path) -> bool {
+    path.components()
+        .any(|component| component.as_os_str() == "node_modules")
 }
 
 fn directive(source: &str) -> Option<&str> {
@@ -301,5 +320,80 @@ mod tests {
             Some("use client")
         );
         assert_eq!(directive("/* unterminated"), None);
+    }
+
+    /// Lane assignment, held to the table the Node module graph replays.
+    ///
+    /// The two decide which modules a browser bundle may contain, and a project
+    /// is compiled by whichever graph the command it ran uses. They had
+    /// disagreed — see the fixture for what that cost — so neither may answer
+    /// this from a list only it knows.
+    #[test]
+    fn lane_assignment_matches_the_shared_conformance_contract() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/module-lane-conformance.json"
+        ))
+        .unwrap();
+
+        for case in fixture["cases"].as_array().unwrap() {
+            let file = case["file"].as_str().unwrap();
+            let source = case["source"].as_str().unwrap();
+            let expected = case["lane"].as_str().unwrap();
+            let lane = declared_lane(&module(&format!("C:/project/{file}"), source, vec![]));
+            assert_eq!(
+                lane_name(lane),
+                expected,
+                "{file} with source {source:?} must be a {expected} module"
+            );
+        }
+
+        // The declared tables, not only the worked examples: a host that grew a
+        // lane the other does not know would pass every case above.
+        for (directive, expected) in fixture["directiveLanes"].as_object().unwrap() {
+            let source = format!("'{directive}'\nexport const q = 1");
+            let lane = declared_lane(&module("C:/project/app/x.ts", &source, vec![]));
+            assert_eq!(lane_name(lane), expected.as_str().unwrap(), "{directive}");
+        }
+        for (stem, expected) in fixture["fileStemLanes"].as_object().unwrap() {
+            let path = format!("C:/project/app/{stem}.ts");
+            let lane = declared_lane(&module(&path, "export const q = 1", vec![]));
+            assert_eq!(lane_name(lane), expected.as_str().unwrap(), "{stem}");
+        }
+        let lane = declared_lane(&module("C:/project/app/anything.ts", "export {}", vec![]));
+        assert_eq!(lane_name(lane), fixture["defaultLane"].as_str().unwrap());
+    }
+
+    /// Every crossing the shared table forbids is rejected here.
+    ///
+    /// `actionToClient` is this host's alone — the Node graph has no hook on the
+    /// server compile that could see it — and the fixture says so rather than
+    /// implying a parity that does not exist. It is still enforced here.
+    #[test]
+    fn every_forbidden_crossing_in_the_shared_contract_is_rejected() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/module-lane-conformance.json"
+        ))
+        .unwrap();
+
+        // One module per lane, named so the stem alone decides it.
+        let source_for = |lane: &str| match lane {
+            "client" => ("C:/project/app/client.tsx", "export const q = 1"),
+            "server" => ("C:/project/app/server.ts", "export const q = 1"),
+            "action" => ("C:/project/app/action.ts", "export const q = 1"),
+            other => panic!("no fixture module for lane {other}"),
+        };
+
+        for (name, crossing) in fixture["invalidCrossings"].as_object().unwrap() {
+            let (importer_path, importer_source) = source_for(crossing["from"].as_str().unwrap());
+            let (dependency_path, dependency_source) = source_for(crossing["to"].as_str().unwrap());
+            let modules = vec![
+                module(importer_path, importer_source, vec![dependency_path]),
+                module(dependency_path, dependency_source, vec![]),
+            ];
+
+            let error = build_reference_manifest(&modules, Path::new("C:/project"))
+                .expect_err(&format!("{name} must be rejected"));
+            assert!(error.to_string().contains("RUV1820"), "{name}: {error}");
+        }
     }
 }

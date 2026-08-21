@@ -44,6 +44,16 @@ pub struct RouteEntry {
     pub kind: RouteKind,
     pub file: PathBuf,
     pub layout_chain: Vec<String>,
+    /// `template.tsx` files on the path to this route, root first.
+    ///
+    /// Separate from `layout_chain` rather than merged into it because a level
+    /// may have either, both, or neither, and composition interleaves them by
+    /// directory.
+    #[serde(default)]
+    pub template_chain: Vec<String>,
+    /// Parallel-route slots this route composes into its layouts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slots: Vec<RouteSlot>,
     pub server_modules: Vec<String>,
     pub client_modules: Vec<String>,
     pub runtime: RuntimeTarget,
@@ -242,6 +252,8 @@ pub fn discover_routes(options: DiscoverOptions) -> Result<RouteManifest> {
         let path = route_path_from_dir(relative_dir)?;
         let id = route_id(&app_dir, &file);
         let layout_chain = layout_chain(&app_dir, route_dir);
+        let template_chain = template_chain(&app_dir, route_dir);
+        let slots = route_slots(&app_dir, route_dir);
 
         routes.push(RouteEntry {
             id,
@@ -249,6 +261,8 @@ pub fn discover_routes(options: DiscoverOptions) -> Result<RouteManifest> {
             kind,
             file: file.clone(),
             layout_chain: layout_chain.clone(),
+            template_chain,
+            slots,
             server_modules: sibling_modules(
                 route_dir,
                 &["server.ts", "server.js", "action.ts", "action.js"],
@@ -611,6 +625,8 @@ struct ModuleCache {
     /// and it is a full second pass over the source.
     masked: BTreeMap<PathBuf, Arc<str>>,
     edges: BTreeMap<PathBuf, Arc<[PathBuf]>>,
+    /// `tsconfig.json` path aliases, read once per run on first use.
+    aliases: Option<Arc<ruvyxa_bundler::resolver::TsConfigPaths>>,
 }
 
 impl ModuleCache {
@@ -681,7 +697,38 @@ impl ModuleCache {
         Some(masked)
     }
 
-    /// Relative imports declared by `file`, resolved to paths.
+    /// The project's `tsconfig.json` path aliases.
+    ///
+    /// The bundler's table, not a third one: this walk decides which modules a
+    /// route can reach, and a module it cannot see is a module whose data
+    /// fetching it reports as absent.
+    fn aliases(&mut self) -> Option<Arc<ruvyxa_bundler::resolver::TsConfigPaths>> {
+        if let Some(aliases) = &self.aliases {
+            return Some(Arc::clone(aliases));
+        }
+        let root = self.project_root.clone()?;
+        let loaded = Arc::new(ruvyxa_bundler::resolver::TsConfigPaths::load(&root));
+        self.aliases = Some(Arc::clone(&loaded));
+        Some(loaded)
+    }
+
+    /// Resolve a non-relative specifier through the project's path aliases.
+    ///
+    /// Returns `None` for a bare package specifier, which stays outside this
+    /// walk — see [`collect_relative_graph`].
+    fn aliased_import(&mut self, specifier: &str) -> Option<PathBuf> {
+        let resolved = self.aliases()?.resolve(specifier)?;
+        Some(self.canonical(&resolved))
+    }
+
+    /// Project imports declared by `file`, resolved to paths.
+    ///
+    /// Relative and aliased specifiers both land here. Only relative ones used
+    /// to: `import { load } from '@/lib/data'` produced no edge at all, so a
+    /// page whose data fetching lived one alias away looked to
+    /// [`detect_render_strategy`] like a page that fetched nothing, and was
+    /// pre-rendered at build time. The same import written `../../lib/data`
+    /// stayed SSR. Which spelling a project uses is not a rendering decision.
     fn edges(&mut self, file: &Path) -> Arc<[PathBuf]> {
         let key = self.canonical(file);
         if let Some(cached) = self.edges.get(&key) {
@@ -690,13 +737,18 @@ impl ModuleCache {
 
         let resolved: Arc<[PathBuf]> = match self.module(&key) {
             Some(module) => {
-                let mut edges: Vec<PathBuf> = module
-                    .ast
-                    .import_specifiers()
-                    .into_iter()
-                    .filter(|specifier| specifier.starts_with('.'))
-                    .filter_map(|specifier| resolve_relative_import(&key, &specifier))
-                    .collect();
+                let specifiers = module.ast.import_specifiers();
+                let mut edges: Vec<PathBuf> = Vec::with_capacity(specifiers.len());
+                for specifier in specifiers {
+                    let edge = if specifier.starts_with('.') {
+                        resolve_relative_import(&key, &specifier)
+                    } else {
+                        self.aliased_import(&specifier)
+                    };
+                    if let Some(edge) = edge {
+                        edges.push(edge);
+                    }
+                }
                 let provider = self.project_root.as_deref().and_then(|root| {
                     ruvyxa_bundler::content::resolve_mdx_components_file_in_root(&key, root)
                 });
@@ -892,11 +944,160 @@ fn route_id(app_dir: &Path, file: &Path) -> String {
 }
 
 fn layout_chain(app_dir: &Path, route_dir: &Path) -> Vec<String> {
-    let mut layouts = Vec::new();
+    nested_chain(app_dir, route_dir, "layout.tsx")
+}
+
+/// One parallel-route slot resolved for a particular route.
+///
+/// A `@name` directory beside a `layout.tsx` declares a slot that layout
+/// receives as a prop. The slot matches the URL independently of the page: for
+/// `/dashboard/reports`, the slot at `app/dashboard/@team` renders
+/// `@team/reports/page.tsx` if it exists, and `@team/default.tsx` otherwise.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RouteSlot {
+    /// Directory holding the `@name` folder, as a route id (`app/dashboard`).
+    /// This is the level whose layout receives the slot.
+    pub level: String,
+    /// Slot name without the `@`, which is the prop name the layout sees.
+    pub name: String,
+    /// File that renders this slot for this route.
+    pub file: PathBuf,
+}
+
+/// Parallel-route slots in scope for a route, level order then name order.
+///
+/// Walks the same directory chain the layout and template chains do, and at
+/// each level resolves every `@name` folder against the route's remaining
+/// segments. A slot that matches neither a page nor a `default.tsx` is left out
+/// entirely — the layout sees no prop, which is the same thing Next.js renders
+/// for an unmatched slot with no default.
+fn route_slots(app_dir: &Path, route_dir: &Path) -> Vec<RouteSlot> {
+    let Ok(relative) = route_dir.strip_prefix(app_dir) else {
+        return Vec::new();
+    };
+    let segments = relative
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value.to_os_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    let mut slots = Vec::new();
+    let mut level = app_dir.to_path_buf();
+    for depth in 0..=segments.len() {
+        if depth > 0 {
+            level.push(&segments[depth - 1]);
+        }
+        // The URL below this level is what the slot has to match.
+        let remaining = &segments[depth..];
+        slots.extend(slots_at_level(app_dir, &level, remaining));
+    }
+    slots
+}
+
+/// Every `@name` folder directly inside `level`, resolved against `remaining`.
+fn slots_at_level(
+    app_dir: &Path,
+    level: &Path,
+    remaining: &[std::ffi::OsString],
+) -> Vec<RouteSlot> {
+    let Ok(entries) = fs::read_dir(level) else {
+        return Vec::new();
+    };
+    let mut named = entries
+        .filter_map(std::result::Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter_map(|entry| {
+            let raw = entry.file_name();
+            let name = raw.to_string_lossy();
+            let name = name.strip_prefix('@')?.to_string();
+            // A slot needs a name; `@` alone is a directory nobody can address.
+            (!name.is_empty()).then(|| (name, entry.path()))
+        })
+        .collect::<Vec<_>>();
+    // Directory order is filesystem order, which differs between machines and
+    // decides prop order in the generated entry.
+    named.sort_by(|left, right| left.0.cmp(&right.0));
+
+    named
+        .into_iter()
+        .filter_map(|(name, slot_dir)| {
+            let file = slot_page_for(&slot_dir, remaining)?;
+            Some(RouteSlot {
+                level: directory_id(app_dir, level),
+                name,
+                file,
+            })
+        })
+        .collect()
+}
+
+/// The file a slot renders for the remaining URL segments.
+///
+/// The slot's own page for that sub-path when it has one, and its
+/// `default.tsx` otherwise. `default.tsx` is what a slot falls back to when the
+/// URL does not name anything inside it, which is the majority of navigations
+/// once more than one slot exists.
+fn slot_page_for(slot_dir: &Path, remaining: &[std::ffi::OsString]) -> Option<PathBuf> {
+    let mut target = slot_dir.to_path_buf();
+    for segment in remaining {
+        target.push(segment);
+    }
+    for name in ["page.tsx", "page.jsx", "page.md", "page.mdx"] {
+        let candidate = target.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    for name in ["default.tsx", "default.jsx"] {
+        let candidate = slot_dir.join(name);
+        if candidate.is_file() {
+            return Some(candidate);
+        }
+    }
+    None
+}
+
+/// Route id for a directory, matching [`route_id`]'s shape for a file.
+fn directory_id(app_dir: &Path, directory: &Path) -> String {
+    let relative = directory.strip_prefix(app_dir).unwrap_or(directory);
+    let segments = relative
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value.to_string_lossy().replace('\\', "/")),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    if segments.is_empty() {
+        "app".to_string()
+    } else {
+        format!("app/{}", segments.join("/"))
+    }
+}
+
+/// `template.tsx` files from the app root down to the route, root first.
+///
+/// A template wraps its level's children the way a layout does, and differs in
+/// one respect that is the whole reason it exists: it is given a key derived
+/// from the request path, so navigating within the same layout remounts it —
+/// state resets and effects run again. Composition interleaves the two, layout
+/// outside template at each level; see `route_wrapper_levels` in
+/// `crates/ruvyxa_bundler/src/output.rs` and its mirror in
+/// `packages/ruvyxa/runtime/entry-templates.mjs`.
+fn template_chain(app_dir: &Path, route_dir: &Path) -> Vec<String> {
+    nested_chain(app_dir, route_dir, "template.tsx")
+}
+
+/// Files named `file_name` on the path from the app root to `route_dir`, root
+/// first.
+fn nested_chain(app_dir: &Path, route_dir: &Path, file_name: &str) -> Vec<String> {
+    let mut found = Vec::new();
     let mut current = app_dir.to_path_buf();
 
-    if current.join("layout.tsx").exists() {
-        layouts.push(route_id(app_dir, &current.join("layout.tsx")));
+    if current.join(file_name).exists() {
+        found.push(route_id(app_dir, &current.join(file_name)));
     }
 
     if let Ok(relative) = route_dir.strip_prefix(app_dir) {
@@ -905,14 +1106,14 @@ fn layout_chain(app_dir: &Path, route_dir: &Path) -> Vec<String> {
                 continue;
             };
             current.push(segment);
-            let layout = current.join("layout.tsx");
-            if layout.exists() {
-                layouts.push(route_id(app_dir, &layout));
+            let candidate = current.join(file_name);
+            if candidate.exists() {
+                found.push(route_id(app_dir, &candidate));
             }
         }
     }
 
-    layouts
+    found
 }
 
 fn resolve_layout_file(app_dir: &Path, layout_id: &str) -> Option<PathBuf> {
@@ -986,6 +1187,37 @@ fn detect_render_strategy(
     // Boolean false remains the zero-JS contract; string values add deferred
     // route-level hydration without changing the default.
     let hydration = parse_hydration_mode(&source, &code);
+
+    // 1b. `export const dynamic` — the route segment config Next.js uses to
+    // override the automatic choice. A page written against that convention
+    // used to be read by nothing here: `force-dynamic` on an otherwise-static
+    // page was discarded and the page was pre-rendered anyway, which is the
+    // opposite of what it asked for and produced no diagnostic. It is checked
+    // before the opt-in exports below because that is the precedence Next
+    // defines — `force-dynamic` outranks `revalidate`.
+    match export_const_value(&source, &code, "dynamic")
+        .map(|value| value.trim_end_matches(';').trim().trim_matches(['\'', '"']))
+    {
+        Some("force-dynamic") => {
+            return RenderMeta {
+                hydration,
+                ..Default::default()
+            };
+        }
+        // `error` is `force-static` plus a runtime complaint about dynamic
+        // APIs; this graph decides strategy, not runtime behaviour, so the
+        // strategy is the part it can honour.
+        Some("force-static" | "error") => {
+            return RenderMeta {
+                strategy: RenderStrategy::Ssg,
+                has_static_params: has_static_params_export(&code),
+                hydration,
+                ..Default::default()
+            };
+        }
+        // `auto` is the default, and anything else is not this export.
+        _ => {}
+    }
 
     // 2. Check for PPR opt-in: export const ppr = true
     if has_export_const_bool(&source, &code, "ppr", true) {
@@ -1127,7 +1359,34 @@ fn has_dynamic_data_markers(code: &str) -> bool {
         "process.env.",
     ];
 
-    MARKERS.iter().any(|marker| code.contains(marker))
+    MARKERS
+        .iter()
+        .any(|marker| contains_marker_identifier(code, marker))
+}
+
+/// True when `marker` appears in `code` as its own identifier.
+///
+/// A plain `contains` reads `router.prefetch('/products')` as a `fetch(` call
+/// and takes automatic pre-rendering away from a page that only warms a link —
+/// `prefetch` is an API this framework ships, so the collision is the ordinary
+/// case rather than a contrived one.
+///
+/// Only the leading edge is checked. Every marker already ends at a `(` or a
+/// `.`, which cannot continue an identifier, and a member access has to keep
+/// matching: `globalThis.fetch(` is a fetch.
+///
+/// A byte that begins a multi-byte character is not an ASCII identifier byte,
+/// so an identifier outside ASCII reads as a word boundary and the marker
+/// counts. That is the safe direction: this decides whether a route may be
+/// pre-rendered, and a false marker costs a static page while a missed one
+/// ships stale data.
+fn contains_marker_identifier(code: &str, marker: &str) -> bool {
+    let bytes = code.as_bytes();
+    code.match_indices(marker).any(|(start, _)| {
+        !start.checked_sub(1).is_some_and(
+            |index| matches!(bytes[index], b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'_' | b'$'),
+        )
+    })
 }
 
 /// Right-hand side of `export const <name> = …`, taken from the real source.
@@ -1303,8 +1562,22 @@ fn has_export_function(code: &str, name: &str) -> bool {
     false
 }
 
+/// Names a page may use to declare its static parameter set.
+///
+/// `generateStaticParams` is Next.js's name for the same export, with the same
+/// contract: return the parameter objects to pre-render. Accepting it costs
+/// nothing and removes a silent failure — a page brought over from Next.js
+/// declared its parameters, this file did not recognise the name, and the route
+/// was served dynamically with no diagnostic anywhere. Mirrored by the resolver
+/// in `packages/ruvyxa/runtime/worker-pool.mjs`, which has to read the same
+/// names or discovery and execution disagree.
+pub const STATIC_PARAMS_EXPORTS: [&str; 3] =
+    ["getStaticParams", "staticParams", "generateStaticParams"];
+
 fn has_static_params_export(code: &str) -> bool {
-    has_export_function(code, "getStaticParams") || has_export_function(code, "staticParams")
+    STATIC_PARAMS_EXPORTS
+        .iter()
+        .any(|name| has_export_function(code, name))
 }
 
 fn detect_conflicts(routes: &[RouteEntry]) -> Result<()> {
@@ -2328,5 +2601,433 @@ import 'server-only';
 
         assert_eq!(manifest.routes[0].render.strategy, RenderStrategy::Isr);
         assert_eq!(manifest.routes[0].render.revalidate, Some(90));
+    }
+
+    /// Which spelling an import uses is not a rendering decision.
+    ///
+    /// Rule 5 of `detect_render_strategy` pre-renders a static route whose
+    /// reachable graph shows no data fetching, and the walk that produces that
+    /// graph followed relative specifiers only. An aliased import produced no
+    /// edge at all, so `@/lib/data` and `../../lib/data` — the same file, the
+    /// same `fetch` — gave the same page two different strategies, and the
+    /// aliased one was baked at build time and never refreshed again.
+    ///
+    /// A bare package specifier is deliberately still outside the walk, and is
+    /// asserted here so the boundary stays a decision rather than an accident:
+    /// following `node_modules` would find `fetch(` in almost any dependency
+    /// and take automatic pre-rendering away from every page.
+    #[test]
+    fn an_aliased_import_is_followed_like_a_relative_one() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let app = root.join("app");
+        fs::create_dir_all(app.join("news")).unwrap();
+        fs::create_dir_all(root.join("lib")).unwrap();
+        fs::write(
+            root.join("tsconfig.json"),
+            r#"{"compilerOptions":{"baseUrl":".","paths":{"@/*":["./*"]}}}"#,
+        )
+        .unwrap();
+        fs::write(
+            root.join("lib/data.ts"),
+            "export const load = fetch('https://example.com/news');",
+        )
+        .unwrap();
+
+        let strategy_for = |specifier: &str| {
+            fs::write(
+                app.join("news/page.tsx"),
+                format!(
+                    "import {{ load }} from '{specifier}'; \
+                     export default function Page() {{ return <main>{{load}}</main>; }}"
+                ),
+            )
+            .unwrap();
+            discover_routes(DiscoverOptions::new(&app)).unwrap().routes[0]
+                .render
+                .strategy
+        };
+
+        assert_eq!(
+            strategy_for("../../lib/data"),
+            RenderStrategy::Ssr,
+            "a relative import of a fetching module keeps the route dynamic"
+        );
+        assert_eq!(
+            strategy_for("@/lib/data"),
+            RenderStrategy::Ssr,
+            "the same module through an alias must reach the same conclusion"
+        );
+        assert_eq!(
+            strategy_for("my-data-lib"),
+            RenderStrategy::Ssg,
+            "a bare package specifier stays outside this walk on purpose"
+        );
+    }
+
+    /// A marker has to be a whole identifier, not a substring of one.
+    ///
+    /// `prefetch(` contains `fetch(`, and `prefetch` is an API this framework
+    /// ships on `useRouter()` — so a page that warmed one link was read as a
+    /// page that fetched data and lost automatic pre-rendering. The reverse
+    /// direction is the dangerous one and is asserted alongside it: a member
+    /// access is still a call, so `globalThis.fetch(` has to keep counting.
+    #[test]
+    fn a_data_marker_must_be_its_own_identifier() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        fs::create_dir_all(&app).unwrap();
+
+        let strategy_for = |body: &str| {
+            fs::write(
+                app.join("page.tsx"),
+                format!("export default function Page() {{ {body} return <main/>; }}"),
+            )
+            .unwrap();
+            discover_routes(DiscoverOptions::new(&app)).unwrap().routes[0]
+                .render
+                .strategy
+        };
+
+        for (body, why) in [
+            ("router.prefetch('/products');", "prefetch is not fetch"),
+            ("const value = parseheaders(raw);", "not headers()"),
+            ("const value = readcookies(raw);", "not cookies()"),
+            ("const value = mysearchParamsHelper;", "not searchParams"),
+        ] {
+            assert_eq!(strategy_for(body), RenderStrategy::Ssg, "{body} — {why}");
+        }
+
+        for (body, why) in [
+            ("fetch('/api/data');", "a bare call"),
+            (
+                "globalThis.fetch('/api/data');",
+                "a member access is still a call",
+            ),
+            ("await headers();", "the framework accessor"),
+            ("const now = Date.now();", "a clock read"),
+            (
+                "const value = props.searchParams;",
+                "a request-dependent prop",
+            ),
+            ("const key = process.env.SECRET;", "an environment read"),
+        ] {
+            assert_eq!(strategy_for(body), RenderStrategy::Ssr, "{body} — {why}");
+        }
+    }
+
+    /// `export const dynamic` decides the strategy, as it does in Next.js.
+    ///
+    /// A page written against that convention used to be read by nothing here:
+    /// `force-dynamic` on an otherwise-static page was discarded, the page was
+    /// pre-rendered anyway, and no diagnostic said so. Its precedence matters
+    /// too — `force-dynamic` outranks `revalidate`, so a page carrying both is
+    /// dynamic rather than ISR.
+    #[test]
+    fn the_dynamic_route_segment_config_decides_the_strategy() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        fs::create_dir_all(&app).unwrap();
+
+        let strategy_for = |body: &str| {
+            fs::write(
+                app.join("page.tsx"),
+                format!("{body}\nexport default function Page() {{ return <main/>; }}"),
+            )
+            .unwrap();
+            let route = discover_routes(DiscoverOptions::new(&app)).unwrap().routes[0].clone();
+            (route.render.strategy, route.render.revalidate)
+        };
+
+        assert_eq!(
+            strategy_for("").0,
+            RenderStrategy::Ssg,
+            "a page with no markers is still pre-rendered by default"
+        );
+        assert_eq!(
+            strategy_for("export const dynamic = 'force-dynamic';").0,
+            RenderStrategy::Ssr,
+            "force-dynamic must take the page off the pre-render path"
+        );
+        assert_eq!(
+            strategy_for("export const dynamic = 'force-static';").0,
+            RenderStrategy::Ssg
+        );
+        assert_eq!(
+            strategy_for("export const dynamic = 'error';").0,
+            RenderStrategy::Ssg,
+            "error is force-static plus a runtime complaint this graph cannot make"
+        );
+        assert_eq!(
+            strategy_for("export const dynamic = 'auto';").0,
+            RenderStrategy::Ssg,
+            "auto is the default and changes nothing"
+        );
+
+        // A page that reads request data is dynamic with or without the export.
+        assert_eq!(
+            strategy_for("export const dynamic = 'force-dynamic';\nconst now = Date.now();").0,
+            RenderStrategy::Ssr
+        );
+        // Precedence: force-dynamic outranks an ISR opt-in.
+        assert_eq!(
+            strategy_for("export const dynamic = 'force-dynamic';\nexport const revalidate = 60;"),
+            (RenderStrategy::Ssr, None),
+            "force-dynamic outranks revalidate, as it does in Next.js"
+        );
+        // Without it, the ISR opt-in still wins.
+        assert_eq!(
+            strategy_for("export const revalidate = 60;"),
+            (RenderStrategy::Isr, Some(60))
+        );
+        // A commented-out or quoted occurrence is not the export — the same
+        // rule every other route export here is held to.
+        assert_eq!(
+            strategy_for("// export const dynamic = 'force-dynamic';").0,
+            RenderStrategy::Ssg
+        );
+    }
+
+    /// Next.js's name for the static parameter set is accepted.
+    ///
+    /// The contract is identical — return the parameter objects to pre-render —
+    /// so the only thing the unfamiliar name changed was whether anything
+    /// noticed. A dynamic route that declared `generateStaticParams` discovered
+    /// as SSR and pre-rendered nothing, silently.
+    #[test]
+    fn a_dynamic_route_accepts_every_static_params_name() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        fs::create_dir_all(app.join("blog/[slug]")).unwrap();
+
+        for name in STATIC_PARAMS_EXPORTS {
+            fs::write(
+                app.join("blog/[slug]/page.tsx"),
+                format!(
+                    "export async function {name}() {{ return [{{ slug: 'a' }}]; }}\n\
+                     export default function Page() {{ return <main/>; }}"
+                ),
+            )
+            .unwrap();
+            let route = discover_routes(DiscoverOptions::new(&app)).unwrap().routes[0].clone();
+            assert_eq!(
+                (route.render.strategy, route.render.has_static_params),
+                (RenderStrategy::Ssg, true),
+                "{name} declares a static parameter set"
+            );
+        }
+
+        // A name that is not one of them stays dynamic rather than being
+        // guessed at.
+        fs::write(
+            app.join("blog/[slug]/page.tsx"),
+            "export async function makeStaticParams() { return []; }\n\
+             export default function Page() { return <main/>; }",
+        )
+        .unwrap();
+        assert_eq!(
+            discover_routes(DiscoverOptions::new(&app)).unwrap().routes[0]
+                .render
+                .strategy,
+            RenderStrategy::Ssr
+        );
+    }
+
+    /// `template.tsx` is discovered on the same chain `layout.tsx` is.
+    ///
+    /// Kept as its own chain rather than folded into `layout_chain`, because a
+    /// level may have either, both, or neither and composition interleaves them
+    /// by directory. Merging the two lists here would lose which level each
+    /// entry belongs to.
+    #[test]
+    fn a_template_chain_is_discovered_alongside_the_layout_chain() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        fs::create_dir_all(app.join("dash/reports")).unwrap();
+        fs::write(
+            app.join("layout.tsx"),
+            "export default function L({children}) { return children }",
+        )
+        .unwrap();
+        fs::write(
+            app.join("template.tsx"),
+            "export default function T({children}) { return children }",
+        )
+        .unwrap();
+        fs::write(
+            app.join("dash/layout.tsx"),
+            "export default function L({children}) { return children }",
+        )
+        .unwrap();
+        // A level with a template and no layout beside it.
+        fs::write(
+            app.join("dash/reports/template.tsx"),
+            "export default function T({children}) { return children }",
+        )
+        .unwrap();
+        fs::write(
+            app.join("dash/reports/page.tsx"),
+            "export default function Page() { return <main/>; }",
+        )
+        .unwrap();
+
+        let manifest = discover_routes(DiscoverOptions::new(&app)).unwrap();
+        let route = &manifest.routes[0];
+
+        assert_eq!(route.path, "/dash/reports");
+        assert_eq!(route.layout_chain, vec!["app/layout", "app/dash/layout"]);
+        assert_eq!(
+            route.template_chain,
+            vec!["app/template", "app/dash/reports/template"],
+            "root first, and only the levels that have one"
+        );
+
+        // A route with no template in scope carries an empty chain, which is
+        // what keeps its emitted bundle byte-identical to before the feature.
+        fs::write(
+            app.join("page.tsx"),
+            "export default function Home() { return <main/>; }",
+        )
+        .unwrap();
+        let manifest = discover_routes(DiscoverOptions::new(&app)).unwrap();
+        let home = manifest
+            .routes
+            .iter()
+            .find(|route| route.path == "/")
+            .expect("the home route");
+        assert_eq!(
+            home.template_chain,
+            vec!["app/template"],
+            "the root template is in scope for the root route too"
+        );
+    }
+
+    /// A `@name` folder declares a slot the level's layout receives as a prop.
+    ///
+    /// Slots match the URL independently of the page, which is the whole point:
+    /// `/dashboard/reports` renders the page from `reports/page.tsx` and the
+    /// team panel from `@team/reports/page.tsx` at the same time. A slot with
+    /// nothing for the current URL falls back to its `default.tsx`.
+    ///
+    /// Before this, a `@name` directory was pruned from the walk and produced
+    /// nothing at all — a project that wrote one got no route, no slot, and no
+    /// diagnostic.
+    #[test]
+    fn a_parallel_slot_resolves_against_the_url_below_its_level() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        let page = "export default function P() { return <main/>; }";
+        fs::create_dir_all(app.join("dashboard/reports")).unwrap();
+        fs::create_dir_all(app.join("dashboard/@team/reports")).unwrap();
+        fs::create_dir_all(app.join("dashboard/@activity")).unwrap();
+        fs::write(
+            app.join("dashboard/layout.tsx"),
+            "export default function L({children}) { return children }",
+        )
+        .unwrap();
+        fs::write(app.join("dashboard/page.tsx"), page).unwrap();
+        fs::write(app.join("dashboard/reports/page.tsx"), page).unwrap();
+        // The team slot has a page for both URLs.
+        fs::write(app.join("dashboard/@team/page.tsx"), page).unwrap();
+        fs::write(app.join("dashboard/@team/reports/page.tsx"), page).unwrap();
+        // The activity slot has a page for the index only, and a default for
+        // everything else.
+        fs::write(app.join("dashboard/@activity/page.tsx"), page).unwrap();
+        fs::write(app.join("dashboard/@activity/default.tsx"), page).unwrap();
+
+        let manifest = discover_routes(DiscoverOptions::new(&app)).unwrap();
+        let slots_for = |path: &str| {
+            manifest
+                .routes
+                .iter()
+                .find(|route| route.path == path)
+                .unwrap_or_else(|| panic!("no route {path}"))
+                .slots
+                .iter()
+                .map(|slot| {
+                    (
+                        slot.name.clone(),
+                        slot.level.clone(),
+                        slot.file
+                            .strip_prefix(&app)
+                            .unwrap_or(&slot.file)
+                            .display()
+                            .to_string()
+                            .replace('\\', "/"),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+
+        // A `@name` folder is still not a route of its own.
+        assert_eq!(
+            manifest
+                .routes
+                .iter()
+                .map(|route| route.path.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/dashboard", "/dashboard/reports"]
+        );
+
+        assert_eq!(
+            slots_for("/dashboard"),
+            vec![
+                (
+                    "activity".to_string(),
+                    "app/dashboard".to_string(),
+                    "dashboard/@activity/page.tsx".to_string()
+                ),
+                (
+                    "team".to_string(),
+                    "app/dashboard".to_string(),
+                    "dashboard/@team/page.tsx".to_string()
+                ),
+            ],
+            "named order, not filesystem order"
+        );
+        assert_eq!(
+            slots_for("/dashboard/reports"),
+            vec![
+                (
+                    "activity".to_string(),
+                    "app/dashboard".to_string(),
+                    "dashboard/@activity/default.tsx".to_string()
+                ),
+                (
+                    "team".to_string(),
+                    "app/dashboard".to_string(),
+                    "dashboard/@team/reports/page.tsx".to_string()
+                ),
+            ],
+            "the team slot follows the URL; the activity slot falls back"
+        );
+    }
+
+    /// A slot with neither a matching page nor a default contributes nothing.
+    ///
+    /// The layout simply does not receive the prop, which is what Next.js
+    /// renders for an unmatched slot with no `default.tsx`. Inventing an empty
+    /// element instead would put a wrapper in the tree the author never wrote.
+    #[test]
+    fn an_unmatched_slot_without_a_default_is_left_out() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        let page = "export default function P() { return <main/>; }";
+        fs::create_dir_all(app.join("dashboard/settings")).unwrap();
+        fs::create_dir_all(app.join("dashboard/@team")).unwrap();
+        fs::write(app.join("dashboard/settings/page.tsx"), page).unwrap();
+        fs::write(app.join("dashboard/@team/page.tsx"), page).unwrap();
+
+        let manifest = discover_routes(DiscoverOptions::new(&app)).unwrap();
+        let route = manifest
+            .routes
+            .iter()
+            .find(|route| route.path == "/dashboard/settings")
+            .expect("the settings route");
+        assert!(
+            route.slots.is_empty(),
+            "the team slot has nothing for /dashboard/settings: {:?}",
+            route.slots
+        );
     }
 }

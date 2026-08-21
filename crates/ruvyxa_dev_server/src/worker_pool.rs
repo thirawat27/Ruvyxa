@@ -16,10 +16,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 use std::task::{Context, Poll};
 
+use crate::worker_protocol::{
+    StaticParamSegment, StaticParamsRoute, WarmupRoute, WorkerRequest, WorkerResponse,
+    base64_encode, next_request_id,
+};
 use axum::body::{Body, Bytes};
 use base64::Engine;
 use futures_core::Stream;
-use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{Child, Command};
 use tokio::sync::{Mutex, Notify, mpsc};
@@ -52,6 +55,18 @@ const MAX_NODE_TIMEOUT_MS: u64 = 2_147_483_647;
 /// Maximum time a worker receives to exit after its stdin closes before it is killed.
 const WORKER_SHUTDOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// Maximum time a retired worker is given to finish the requests it already
+/// holds before it is shut down anyway.
+///
+/// A retired worker is drained rather than killed so an API stream mid-flight
+/// still completes, and that wait used to be unbounded: the task held the only
+/// `Arc` to the process, so one request that never reached a terminal frame
+/// kept a whole Node process — and its module graph — alive for the life of the
+/// server. `recycle` runs on every instrumentation change, so those accumulate.
+/// The ceiling is generous compared with a request timeout, because exceeding
+/// it means something is already wrong and the process has to go regardless.
+const WORKER_DRAIN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Isolated prerenders one worker performs before it is retired and replaced.
 ///
 /// A build asks for import isolation per path so page-module state cannot leak
@@ -77,328 +92,6 @@ const ISOLATED_RENDER_RECYCLE_ENV: &str = "RUVYXA_PRERENDER_RECYCLE_AFTER";
 /// The bounded channel applies backpressure to the Node worker instead of
 /// failing an already-started HTTP response with an incomplete chunked body.
 const MAX_PENDING_RESPONSE_FRAMES: usize = 16;
-
-static REQUEST_COUNTER: AtomicU64 = AtomicU64::new(1);
-
-fn next_request_id() -> String {
-    REQUEST_COUNTER.fetch_add(1, Ordering::Relaxed).to_string()
-}
-
-// --- Public Request/Response Types ---
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "type", rename_all = "camelCase")]
-pub enum WorkerRequest {
-    #[serde(rename = "ssr")]
-    Ssr {
-        id: String,
-        #[serde(rename = "projectRoot")]
-        project_root: String,
-        #[serde(rename = "appDir")]
-        app_dir: String,
-        #[serde(rename = "pageFile")]
-        page_file: String,
-        #[serde(rename = "requestPath")]
-        request_path: String,
-        /// Original path and query used to populate the ambient request
-        /// context. Routing and page rendering continue to use `requestPath`.
-        #[serde(rename = "requestTarget")]
-        request_target: String,
-        /// Route pattern (`/blog/[slug]`), not the concrete URL. It keys the
-        /// worker's bundle cache and the browser's client-route registry, so a
-        /// per-URL value would make every dynamic request a cache miss and
-        /// register a route the client router can never look up.
-        #[serde(rename = "routePath")]
-        route_path: String,
-        params: RouteParams,
-        /// Ordered request headers, so a page can read `cookies()` and
-        /// `headers()` while it renders. Additive: a worker script that
-        /// predates request context ignores the field and renders as before.
-        #[serde(rename = "headerPairs")]
-        header_pairs: Vec<(String, String)>,
-        /// Request method, uppercased.
-        method: String,
-    },
-    #[serde(rename = "flight")]
-    Flight {
-        id: String,
-        #[serde(rename = "projectRoot")]
-        project_root: String,
-        #[serde(rename = "appDir")]
-        app_dir: String,
-        #[serde(rename = "pageFile")]
-        page_file: String,
-        #[serde(rename = "requestPath")]
-        request_path: String,
-        #[serde(rename = "routePath")]
-        route_path: String,
-        params: RouteParams,
-        #[serde(rename = "artifactVersion")]
-        artifact_version: String,
-    },
-    #[serde(rename = "api")]
-    Api {
-        id: String,
-        #[serde(rename = "projectRoot")]
-        project_root: String,
-        #[serde(rename = "routeFile")]
-        route_file: String,
-        method: String,
-        #[serde(rename = "requestPath")]
-        request_path: String,
-        /// Legacy collapsed headers, retained so older worker scripts can still
-        /// execute the request. New workers must prefer `headerPairs` below.
-        headers: BTreeMap<String, String>,
-        /// Ordered request header values. An HTTP header name can occur more
-        /// than once, so a map would silently discard values at this boundary.
-        #[serde(rename = "headerPairs")]
-        header_pairs: Vec<(String, String)>,
-        body: Option<String>,
-        /// Lossless request body transport for bytes that are not valid UTF-8.
-        /// The explicit field name is the NDJSON protocol tag for base64 data.
-        #[serde(rename = "bodyBase64", skip_serializing_if = "Option::is_none")]
-        body_base64: Option<String>,
-        /// Ask workers that support framed responses to stream the API body.
-        /// Older workers ignore this additive field and return the legacy body.
-        #[serde(rename = "streamResponse")]
-        stream_response: bool,
-        params: RouteParams,
-        /// Graph version already owned by the Rust HMR tracker. A matching
-        /// worker may omit the otherwise repeated dependency list.
-        #[serde(rename = "knownInputsVersion", skip_serializing_if = "Option::is_none")]
-        known_inputs_version: Option<String>,
-    },
-    #[serde(rename = "action")]
-    Action {
-        id: String,
-        #[serde(rename = "projectRoot")]
-        project_root: String,
-        #[serde(rename = "actionFile")]
-        action_file: String,
-        #[serde(rename = "actionName")]
-        action_name: String,
-        #[serde(rename = "payloadJson")]
-        payload_json: String,
-        #[serde(rename = "contentType")]
-        content_type: String,
-        #[serde(rename = "requestPath")]
-        request_path: String,
-        /// Ordered request header values so action handlers can observe the
-        /// same cookies, authorization, and tracing headers as the endpoint.
-        /// This additive field is ignored by older worker scripts.
-        #[serde(rename = "headerPairs")]
-        header_pairs: Vec<(String, String)>,
-        /// Action graph version already owned by the Rust HMR tracker.
-        #[serde(rename = "knownInputsVersion", skip_serializing_if = "Option::is_none")]
-        known_inputs_version: Option<String>,
-    },
-    #[serde(rename = "client")]
-    Client {
-        id: String,
-        #[serde(rename = "projectRoot")]
-        project_root: String,
-        #[serde(rename = "appDir")]
-        app_dir: String,
-        #[serde(rename = "pageFile")]
-        page_file: String,
-        #[serde(rename = "requestPath")]
-        request_path: String,
-        /// Route pattern (`/blog/[slug]`), not the concrete URL. It keys the
-        /// worker's bundle cache and the browser's client-route registry, so a
-        /// per-URL value would make every dynamic request a cache miss and
-        /// register a route the client router can never look up.
-        #[serde(rename = "routePath")]
-        route_path: String,
-        params: RouteParams,
-    },
-    #[serde(rename = "invalidate")]
-    Invalidate {
-        id: String,
-        paths: Vec<String>,
-        #[serde(rename = "traceId", skip_serializing_if = "Option::is_none")]
-        trace_id: Option<String>,
-    },
-    #[serde(rename = "ping")]
-    Ping { id: String },
-    #[serde(rename = "warmup")]
-    Warmup {
-        id: String,
-        #[serde(rename = "projectRoot")]
-        project_root: String,
-        routes: Vec<WarmupRoute>,
-    },
-    /// Pre-render a page (used for ISR background revalidation at runtime).
-    #[serde(rename = "ssg")]
-    Ssg {
-        id: String,
-        #[serde(rename = "projectRoot")]
-        project_root: String,
-        #[serde(rename = "appDir")]
-        app_dir: String,
-        #[serde(rename = "pageFile")]
-        page_file: String,
-        #[serde(rename = "requestPath")]
-        request_path: String,
-        /// Route pattern (`/blog/[slug]`), not the concrete URL. It keys the
-        /// worker's bundle cache and the browser's client-route registry, so a
-        /// per-URL value would make every dynamic request a cache miss and
-        /// register a route the client router can never look up.
-        #[serde(rename = "routePath")]
-        route_path: String,
-        params: RouteParams,
-        /// "full" | "ppr" — controls whether to wait for all content or just the shell.
-        mode: String,
-        /// Build-only isolation: reload the module without discarding the compiled bundle cache.
-        fresh: bool,
-    },
-    /// Resolve static route parameters during production builds.
-    #[serde(rename = "staticParams")]
-    StaticParams {
-        id: String,
-        #[serde(rename = "projectRoot")]
-        project_root: String,
-        #[serde(rename = "pageFile")]
-        page_file: String,
-        #[serde(rename = "routePath")]
-        route_path: String,
-        segments: Vec<StaticParamSegment>,
-        routes: Vec<StaticParamsRoute>,
-    },
-}
-
-impl WorkerRequest {
-    fn id(&self) -> &str {
-        match self {
-            Self::Ssr { id, .. }
-            | Self::Flight { id, .. }
-            | Self::Api { id, .. }
-            | Self::Action { id, .. }
-            | Self::Client { id, .. }
-            | Self::Invalidate { id, .. }
-            | Self::Ping { id, .. }
-            | Self::Warmup { id, .. }
-            | Self::Ssg { id, .. }
-            | Self::StaticParams { id, .. } => id,
-        }
-    }
-
-    /// Whether serving this request makes the worker import a bundle under a
-    /// fresh module URL, permanently adding one module graph to its ESM
-    /// registry.
-    fn retains_an_isolated_module_graph(&self) -> bool {
-        matches!(self, Self::Ssg { fresh: true, .. })
-    }
-
-    /// Returns `true` if this request type is safe to retry without risk of
-    /// duplicate side effects. Actions and API calls are NOT idempotent.
-    pub fn is_idempotent(&self) -> bool {
-        matches!(
-            self,
-            Self::Ssr { .. }
-                | Self::Flight { .. }
-                | Self::Ssg { .. }
-                | Self::StaticParams { .. }
-                | Self::Client { .. }
-                | Self::Ping { .. }
-                | Self::Warmup { .. }
-                | Self::Invalidate { .. }
-        )
-    }
-}
-
-/// A route to pre-warm in the worker's module cache.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WarmupRoute {
-    pub page_file: String,
-    pub app_dir: String,
-    /// Route pattern, so warmup compiles the exact bundle a later request asks
-    /// for. A mismatched key would leave the warm module unused.
-    pub route_path: String,
-}
-
-/// Route metadata passed to build-time parameter discovery.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct StaticParamsRoute {
-    pub path: String,
-    pub id: String,
-}
-
-/// Dynamic segment metadata used to normalize the single-segment shorthand.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct StaticParamSegment {
-    pub name: String,
-    pub catch_all: bool,
-    pub optional: bool,
-}
-
-#[derive(Debug, Default, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct WorkerResponse {
-    pub id: String,
-    pub ok: bool,
-    /// Framed API response discriminator. Absent for the legacy one-message protocol.
-    pub frame: Option<String>,
-    pub html: Option<String>,
-    /// Encoded `ruvyxa.flight` envelope for a public navigation request.
-    pub flight: Option<String>,
-    pub script: Option<String>,
-    pub status: Option<u16>,
-    pub headers: Option<BTreeMap<String, String>>,
-    /// Ordered response headers. Prefer this over `headers` so repeated
-    /// `Set-Cookie` values survive the Node-to-Rust boundary.
-    pub header_pairs: Option<Vec<(String, String)>>,
-    pub body: Option<String>,
-    /// Base64-encoded bytes for an `api-chunk` frame.
-    pub body_base64: Option<String>,
-    pub code: Option<String>,
-    pub message: Option<String>,
-    pub stack: Option<String>,
-    pub pong: Option<bool>,
-    pub warmed: Option<usize>,
-    pub module_cache_size: Option<usize>,
-    /// Distinct module URLs retained by the worker's ESM registry. Node cannot
-    /// evict them; the host uses this telemetry to retire the process safely
-    /// before normal dev/HMR rebuilds grow memory without bound.
-    pub retained_module_urls: Option<usize>,
-    pub params: Option<Vec<RouteParams>>,
-    /// Set when the render read request state — a cookie, a header, draft
-    /// mode. Such HTML belongs to one request and must never be stored in a
-    /// cache other requests can read. Absent from older workers, which is
-    /// treated as `false` because those workers cannot expose the accessors
-    /// that would make it true.
-    pub request_scoped: Option<bool>,
-    /// Concrete URLs `revalidatePath()` asked the host to refresh, collected
-    /// from the API route or server action that just ran. Absent from older
-    /// workers, which never call it.
-    pub revalidate: Option<Vec<String>>,
-    /// Content hash of the compiled SSG dependency graph.
-    pub dependency_hash: Option<String>,
-    /// Version of the normalized dependency set in `inputs`. When the request
-    /// supplied the same known version, a current worker omits `inputs` to
-    /// avoid repeated NDJSON work.
-    pub inputs_version: Option<String>,
-    /// Absolute source files used by the compiled bundle.
-    pub inputs: Option<Vec<PathBuf>>,
-}
-
-impl WorkerResponse {
-    fn is_terminal(&self) -> bool {
-        !matches!(self.frame.as_deref(), Some("api-start" | "api-chunk"))
-    }
-
-    fn stream_error(id: String, message: impl Into<String>) -> Self {
-        Self {
-            id,
-            frame: Some("api-error".to_string()),
-            code: Some("RUV1704".to_string()),
-            message: Some(message.into()),
-            ..Self::default()
-        }
-    }
-}
 
 #[derive(Clone)]
 struct PendingResponse {
@@ -567,6 +260,16 @@ impl Stream for WorkerBodyStream {
                     }
                     frame => {
                         self.finished = true;
+                        // `finished` means "this stream is over", not "the entry
+                        // is gone": the stdout reader only removes an entry it
+                        // saw a terminal frame for, and `api-start` is not one.
+                        // A worker that repeats `api-start` mid-stream ends up
+                        // here, and without this the entry outlives every
+                        // consumer — `in_flight` never returns to zero, so the
+                        // worker is permanently avoided by `select_worker` and
+                        // retiring it waits out `WORKER_DRAIN_TIMEOUT`.
+                        // Removing an entry the reader already took is a no-op.
+                        self.remove_pending();
                         Poll::Ready(Some(Err(io::Error::new(
                             io::ErrorKind::InvalidData,
                             format!("Unexpected worker API stream frame: {frame:?}"),
@@ -872,18 +575,25 @@ impl Worker {
     ) -> Result<WorkerResponse> {
         let mut channel = self.open_response(request).await?;
 
-        match tokio::time::timeout(response_timeout, channel.receiver.recv()).await {
+        let received = tokio::time::timeout(response_timeout, channel.receiver.recv()).await;
+        // Unconditionally, on every path. This request has exactly one frame,
+        // so the entry is the stdout reader's to remove when that frame is
+        // terminal — and nobody's when it is not. A non-terminal frame here
+        // would leave an entry whose receiver has just been dropped, which
+        // `wait_until_idle` can never observe as idle: retiring that worker
+        // would then hang until `WORKER_DRAIN_TIMEOUT`. Removing an entry the
+        // reader already took is a no-op, so this costs one lock.
+        self.pending.remove(&channel.id).await;
+
+        match received {
             Ok(Some(response)) => Ok(response),
             Ok(None) => Err(RuvyxaError::Message(
                 "Worker response channel closed unexpectedly".to_string(),
             )),
-            Err(_) => {
-                self.pending.remove(&channel.id).await;
-                Err(RuvyxaError::Message(format!(
-                    "Worker request timed out after {}ms",
-                    response_timeout.as_millis()
-                )))
-            }
+            Err(_) => Err(RuvyxaError::Message(format!(
+                "Worker request timed out after {}ms",
+                response_timeout.as_millis()
+            ))),
         }
     }
 
@@ -1028,6 +738,17 @@ pub struct NodeWorkerPool {
     /// recycling. Current workers report the actual ESM registry count; the
     /// isolated-render counter remains as compatibility for older workers.
     retained_module_urls_per_worker: Option<usize>,
+    /// Workers taken out of selection that are still finishing admitted work.
+    ///
+    /// A retired process is no longer in `workers`, so `shutdown` could not see
+    /// it. Both retirement paths are ordinary traffic rather than edge cases:
+    /// `ruvyxa build` retires a worker every `RUVYXA_PRERENDER_RECYCLE_AFTER`
+    /// isolated renders, and `recycle` retires the whole generation at once
+    /// whenever instrumentation changes. Each left a live child the pool no
+    /// longer owned, and a CLI that exited before the drain task finished never
+    /// dropped that `Child` — so `kill_on_drop` never ran and the `node`
+    /// process was orphaned, still holding its handles on the build directory.
+    retiring: Arc<StdMutex<Vec<Arc<Worker>>>>,
 }
 
 /// One server-side page render.
@@ -1223,18 +944,63 @@ impl NodeWorkerPool {
             next_worker: AtomicU64::new(0),
             response_timeout,
             retained_module_urls_per_worker,
+            retiring: Arc::new(StdMutex::new(Vec::new())),
         })
     }
 
     /// Stop every owned Node worker before the server releases its process resources.
+    ///
+    /// "Owned" includes the workers already taken out of selection: see
+    /// [`NodeWorkerPool::retiring`] for why leaving those to their drain tasks
+    /// orphaned them. Shutting a draining worker down here also unblocks its
+    /// task, because closing the worker clears its pending set.
     pub async fn shutdown(&self) {
-        let Ok(workers) = self.workers.read().map(|workers| workers.clone()) else {
-            warn!("worker pool lock poisoned during shutdown");
-            return;
+        let live = match self.workers.read() {
+            Ok(workers) => workers.clone(),
+            Err(_) => {
+                warn!("worker pool lock poisoned during shutdown");
+                Vec::new()
+            }
         };
-        for worker in workers {
-            worker.shutdown().await;
+        let retiring = match self.retiring.lock() {
+            Ok(mut retiring) => std::mem::take(&mut *retiring),
+            Err(_) => {
+                warn!("retiring worker list poisoned during shutdown");
+                Vec::new()
+            }
+        };
+
+        // Concurrently. Each worker closes its stdin and then waits up to
+        // `WORKER_SHUTDOWN_TIMEOUT` for the process to exit; one at a time that
+        // is `2s × pool size` between Ctrl-C and the terminal coming back, and
+        // the waits are independent.
+        let mut stopping = tokio::task::JoinSet::new();
+        for worker in live.into_iter().chain(retiring) {
+            stopping.spawn(async move { worker.shutdown().await });
         }
+        while stopping.join_next().await.is_some() {}
+    }
+
+    /// Retire a worker the pool has already replaced, keeping it owned.
+    ///
+    /// The worker is registered before the drain task starts and deregistered
+    /// after it finishes, so `shutdown` sees exactly the processes that are
+    /// still alive.
+    fn retire_in_background(&self, worker: Arc<Worker>, index: usize) {
+        let register = Arc::clone(&self.retiring);
+        match register.lock() {
+            Ok(mut retiring) => retiring.push(Arc::clone(&worker)),
+            Err(_) => warn!(
+                worker = index,
+                "retiring worker list poisoned; the drain task still owns this process"
+            ),
+        }
+        tokio::spawn(async move {
+            drain_then_shutdown(Arc::clone(&worker), index).await;
+            if let Ok(mut retiring) = register.lock() {
+                retiring.retain(|retired| !Arc::ptr_eq(retired, &worker));
+            }
+        });
     }
 
     /// Send a request to the least-loaded worker.
@@ -1353,11 +1119,7 @@ impl NodeWorkerPool {
             return true;
         }
 
-        let draining = Arc::clone(saturated);
-        tokio::spawn(async move {
-            draining.pending.wait_until_idle().await;
-            draining.shutdown().await;
-        });
+        self.retire_in_background(Arc::clone(saturated), index);
         true
     }
 
@@ -1408,11 +1170,8 @@ impl NodeWorkerPool {
             }
         };
 
-        for worker in old_workers {
-            tokio::spawn(async move {
-                worker.pending.wait_until_idle().await;
-                worker.shutdown().await;
-            });
+        for (index, worker) in old_workers.into_iter().enumerate() {
+            self.retire_in_background(worker, index);
         }
         Ok(worker_count)
     }
@@ -1873,8 +1632,27 @@ impl NodeWorkerPool {
     }
 }
 
-fn base64_encode(bytes: &[u8]) -> String {
-    base64::engine::general_purpose::STANDARD.encode(bytes)
+/// Let a retired worker finish what it holds, then stop it either way.
+///
+/// The wait is bounded because this task owns the last `Arc` to the process: a
+/// request that never reaches a terminal frame used to keep the whole Node
+/// process alive for the life of the server, and `recycle` retires a full
+/// generation every time instrumentation changes. Past the ceiling the process
+/// is shut down with work still in flight, which is the lesser failure — those
+/// requests were already past any timeout a client would wait through.
+async fn drain_then_shutdown(worker: Arc<Worker>, index: usize) {
+    if tokio::time::timeout(WORKER_DRAIN_TIMEOUT, worker.pending.wait_until_idle())
+        .await
+        .is_err()
+    {
+        warn!(
+            worker = index,
+            pending = worker.pending.len(),
+            timeout_secs = WORKER_DRAIN_TIMEOUT.as_secs(),
+            "retired Node worker did not drain; stopping it with requests in flight"
+        );
+    }
+    worker.shutdown().await;
 }
 
 fn configure_worker_timeout(
@@ -2004,6 +1782,7 @@ fn find_worker_script(root: &Path) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::worker_protocol::request_id_of;
 
     /// `lines()` grows until it finds a newline, so a worker emitting one huge
     /// line was allocated in full before anything could reject it — the server
@@ -2137,16 +1916,36 @@ mod tests {
         })
     }
 
-    fn stub_pool(workers: Vec<Arc<Worker>>) -> NodeWorkerPool {
+    /// A pool wrapped around workers a test already built.
+    ///
+    /// This literal was written out ten times, differing only in the four
+    /// arguments below. Every field added to `NodeWorkerPool` had to be copied
+    /// into all ten, and the tenth was always the one that was missed.
+    fn pool_over(
+        workers: Vec<Arc<Worker>>,
+        worker_script: PathBuf,
+        response_timeout: std::time::Duration,
+        retained_module_urls_per_worker: Option<usize>,
+    ) -> NodeWorkerPool {
         NodeWorkerPool {
             workers: StdRwLock::new(workers),
-            worker_script: PathBuf::from("worker-pool.mjs"),
+            worker_script,
             env: BTreeMap::new(),
             runtime: JavaScriptRuntime::Node,
             next_worker: AtomicU64::new(0),
-            response_timeout: std::time::Duration::from_millis(DEFAULT_WORKER_TIMEOUT_MS),
-            retained_module_urls_per_worker: None,
+            response_timeout,
+            retained_module_urls_per_worker,
+            retiring: Arc::new(StdMutex::new(Vec::new())),
         }
+    }
+
+    fn stub_pool(workers: Vec<Arc<Worker>>) -> NodeWorkerPool {
+        pool_over(
+            workers,
+            PathBuf::from("worker-pool.mjs"),
+            std::time::Duration::from_millis(DEFAULT_WORKER_TIMEOUT_MS),
+            None,
+        )
     }
 
     fn ssg_request(fresh: bool) -> WorkerRequest {
@@ -2358,15 +2157,12 @@ mod tests {
                 .await
                 .unwrap(),
         );
-        let pool = NodeWorkerPool {
-            workers: StdRwLock::new(vec![Arc::clone(&original)]),
+        let pool = pool_over(
+            vec![Arc::clone(&original)],
             worker_script,
-            env: BTreeMap::new(),
-            runtime: JavaScriptRuntime::Node,
-            next_worker: AtomicU64::new(0),
-            response_timeout: std::time::Duration::from_millis(DEFAULT_WORKER_TIMEOUT_MS),
-            retained_module_urls_per_worker: None,
-        };
+            std::time::Duration::from_millis(DEFAULT_WORKER_TIMEOUT_MS),
+            None,
+        );
 
         let replaced = pool
             .recycle()
@@ -2397,14 +2193,6 @@ mod tests {
         pool.shutdown().await;
     }
 
-    fn request_id_of(frame: &str) -> String {
-        serde_json::from_str::<serde_json::Value>(frame.trim())
-            .expect("worker frames must be valid JSON")["id"]
-            .as_str()
-            .expect("invalidate frames carry a string id")
-            .to_string()
-    }
-
     #[test]
     fn worker_timeout_normalizes_valid_project_configuration() {
         let mut env = BTreeMap::from([(WORKER_TIMEOUT_ENV.to_string(), " 45000 ".to_string())]);
@@ -2431,94 +2219,6 @@ mod tests {
             assert_eq!(timeout, std::time::Duration::from_millis(fallback_ms));
             assert_eq!(env[WORKER_TIMEOUT_ENV], fallback_ms.to_string());
         }
-    }
-
-    #[test]
-    fn ssr_worker_request_serializes_path_and_query_separately() {
-        let request = WorkerRequest::Ssr {
-            id: "test".to_string(),
-            project_root: "/project".to_string(),
-            app_dir: "/project/app".to_string(),
-            page_file: "/project/app/search/page.tsx".to_string(),
-            request_path: "/search".to_string(),
-            request_target: "/search?q=ruvyxa".to_string(),
-            route_path: "/search".to_string(),
-            params: BTreeMap::new(),
-            header_pairs: Vec::new(),
-            method: "GET".to_string(),
-        };
-
-        let value = serde_json::to_value(request).unwrap();
-        assert_eq!(value["requestPath"], "/search");
-        assert_eq!(value["requestTarget"], "/search?q=ruvyxa");
-    }
-
-    #[test]
-    fn api_worker_request_serializes_lossless_body_and_header_pairs() {
-        let request = WorkerRequest::Api {
-            id: "test".to_string(),
-            project_root: "/project".to_string(),
-            route_file: "/project/app/api/upload/route.ts".to_string(),
-            method: "POST".to_string(),
-            request_path: "/api/upload".to_string(),
-            headers: BTreeMap::from([("x-repeat".to_string(), "second".to_string())]),
-            header_pairs: vec![
-                ("x-repeat".to_string(), "first".to_string()),
-                ("x-repeat".to_string(), "second".to_string()),
-            ],
-            body: None,
-            body_base64: Some(base64_encode(&[0, 255, 128, 13, 10])),
-            stream_response: true,
-            params: BTreeMap::new(),
-            known_inputs_version: Some("graph-v1".to_string()),
-        };
-
-        let value = serde_json::to_value(request).unwrap();
-        assert_eq!(
-            value["headerPairs"][0],
-            serde_json::json!(["x-repeat", "first"])
-        );
-        assert_eq!(
-            value["headerPairs"][1],
-            serde_json::json!(["x-repeat", "second"])
-        );
-        assert_eq!(value["bodyBase64"], "AP+ADQo=");
-        assert_eq!(value["streamResponse"], true);
-        assert_eq!(value["knownInputsVersion"], "graph-v1");
-    }
-
-    #[test]
-    fn action_worker_request_serializes_lossless_request_header_pairs() {
-        let request = WorkerRequest::Action {
-            id: "action".to_string(),
-            project_root: "/project".to_string(),
-            action_file: "/project/app/action.ts".to_string(),
-            action_name: "inspect".to_string(),
-            payload_json: "{}".to_string(),
-            content_type: "application/json".to_string(),
-            request_path: "/account".to_string(),
-            header_pairs: vec![
-                ("authorization".to_string(), "Bearer token".to_string()),
-                ("cookie".to_string(), "a=1".to_string()),
-                ("cookie".to_string(), "b=2".to_string()),
-            ],
-            known_inputs_version: Some("action-v1".to_string()),
-        };
-
-        let value = serde_json::to_value(request).unwrap();
-        assert_eq!(
-            value["headerPairs"][0],
-            serde_json::json!(["authorization", "Bearer token"])
-        );
-        assert_eq!(
-            value["headerPairs"][1],
-            serde_json::json!(["cookie", "a=1"])
-        );
-        assert_eq!(value["knownInputsVersion"], "action-v1");
-        assert_eq!(
-            value["headerPairs"][2],
-            serde_json::json!(["cookie", "b=2"])
-        );
     }
 
     #[tokio::test]
@@ -2557,6 +2257,66 @@ mod tests {
         let bytes = axum::body::to_bytes(body, 1024).await.unwrap();
 
         assert_eq!(bytes.as_ref(), &[0, 255, 128, 13, 10]);
+    }
+
+    /// A frame the stream rejects still releases the worker's pending entry.
+    ///
+    /// Ending the stream and releasing the entry are two different things. The
+    /// stdout reader only removes an entry it has seen a terminal frame for,
+    /// and `api-start` is not terminal — so a worker that repeats it mid-stream
+    /// ends the body here while leaving the entry behind, and nothing else ever
+    /// removes it. `in_flight` then never returns to zero: `select_worker`
+    /// permanently avoids the worker as its busiest, and retiring it sits out
+    /// the full `WORKER_DRAIN_TIMEOUT` before the process is closed.
+    #[tokio::test]
+    async fn a_rejected_stream_frame_releases_the_pending_entry() {
+        let pending: PendingResponses = Arc::new(PendingResponseSet::default());
+        let (sender, receiver) = mpsc::channel(2);
+        let streaming = Arc::new(AtomicBool::new(true));
+        pending
+            .insert(
+                "stream".to_string(),
+                PendingResponse {
+                    sender: sender.clone(),
+                    streaming: Arc::clone(&streaming),
+                },
+            )
+            .await;
+        // A second `api-start`: not a chunk, not an end, and not terminal, so
+        // the reader that delivered it kept the entry.
+        sender
+            .send(WorkerResponse {
+                id: "stream".to_string(),
+                ok: true,
+                frame: Some("api-start".to_string()),
+                ..WorkerResponse::default()
+            })
+            .await
+            .unwrap();
+        drop(sender);
+        assert_eq!(pending.len(), 1);
+
+        let body = Body::from_stream(WorkerBodyStream::new(
+            ResponseChannel {
+                id: "stream".to_string(),
+                receiver,
+                streaming,
+            },
+            Arc::clone(&pending),
+            std::time::Duration::from_secs(1),
+        ));
+        let error = axum::body::to_bytes(body, 1024).await.unwrap_err();
+        assert!(error.to_string().contains("Unexpected worker API stream"));
+
+        // Removal is spawned, so give that task a turn rather than asserting on
+        // scheduling order.
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            while pending.len() != 0 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("the rejected stream never released its pending entry");
     }
 
     #[tokio::test]
@@ -2751,6 +2511,74 @@ mod tests {
         worker.shutdown().await;
     }
 
+    /// Shutdown reaches a worker that was retired and is still draining.
+    ///
+    /// A retired worker leaves `self.workers`, so the only thing that used to
+    /// close it was its own detached drain task — and that task is by
+    /// definition still waiting. `ruvyxa build` retires a worker every
+    /// `RUVYXA_PRERENDER_RECYCLE_AFTER` isolated renders and `recycle` retires
+    /// the whole generation at once, so the last thing a build does before
+    /// exiting is create these. Whatever the CLI does next, the `node` children
+    /// were no longer anybody's: the process exits without unwinding the drain
+    /// task, nothing drops the `Child`, and `kill_on_drop` never runs.
+    ///
+    /// The pending entry below is what a real in-flight request is to the drain
+    /// task: it makes `wait_until_idle` block, which is the state the bug needs.
+    #[tokio::test]
+    async fn shutdown_closes_a_worker_that_is_still_draining() {
+        let temp = tempfile::tempdir().unwrap();
+        let worker_script = temp.path().join("worker.mjs");
+        std::fs::write(
+            &worker_script,
+            "import { createInterface } from 'node:readline'; createInterface({ input: process.stdin }).on('line', (line) => { const { id } = JSON.parse(line); process.stdout.write(JSON.stringify({ id, ok: true, pong: true }) + '\\n'); });",
+        )
+        .unwrap();
+
+        let retired = Arc::new(
+            Worker::spawn(&worker_script, &BTreeMap::new(), JavaScriptRuntime::Node)
+                .await
+                .unwrap(),
+        );
+        let pool = pool_over(
+            vec![Arc::clone(&retired)],
+            worker_script,
+            std::time::Duration::from_millis(DEFAULT_WORKER_TIMEOUT_MS),
+            None,
+        );
+
+        // Held for the rest of the test: dropping the receiver would let the
+        // entry be reaped and the worker would drain on its own.
+        let (sender, _receiver) = mpsc::channel::<WorkerResponse>(MAX_PENDING_RESPONSE_FRAMES);
+        retired
+            .pending
+            .insert(
+                "in-flight".to_string(),
+                PendingResponse {
+                    sender,
+                    streaming: Arc::new(AtomicBool::new(false)),
+                },
+            )
+            .await;
+
+        assert_eq!(pool.recycle().await.unwrap(), 1);
+        assert!(
+            !Arc::ptr_eq(&retired, &pool.workers.read().unwrap()[0]),
+            "recycle must have taken the worker out of selection"
+        );
+        assert_eq!(
+            retired.in_flight(),
+            1,
+            "the retired worker must still be draining when shutdown runs"
+        );
+
+        pool.shutdown().await;
+
+        assert!(
+            retired.child.lock().await.is_none(),
+            "shutdown left a retired worker process running"
+        );
+    }
+
     #[tokio::test]
     async fn pool_shutdown_closes_owned_node_workers() {
         let temp = tempfile::tempdir().unwrap();
@@ -2764,15 +2592,12 @@ mod tests {
         let worker = Worker::spawn(&worker_script, &BTreeMap::new(), JavaScriptRuntime::Node)
             .await
             .unwrap();
-        let pool = NodeWorkerPool {
-            workers: StdRwLock::new(vec![Arc::new(worker)]),
+        let pool = pool_over(
+            vec![Arc::new(worker)],
             worker_script,
-            env: BTreeMap::new(),
-            runtime: JavaScriptRuntime::Node,
-            next_worker: AtomicU64::new(0),
-            response_timeout: std::time::Duration::from_millis(DEFAULT_WORKER_TIMEOUT_MS),
-            retained_module_urls_per_worker: None,
-        };
+            std::time::Duration::from_millis(DEFAULT_WORKER_TIMEOUT_MS),
+            None,
+        );
 
         pool.shutdown().await;
 
@@ -2813,15 +2638,12 @@ process.stdin.resume()
         let worker = Worker::spawn(&worker_script, &BTreeMap::new(), JavaScriptRuntime::Node)
             .await
             .unwrap();
-        let pool = NodeWorkerPool {
-            workers: StdRwLock::new(vec![Arc::new(worker)]),
+        let pool = pool_over(
+            vec![Arc::new(worker)],
             worker_script,
-            env: BTreeMap::new(),
-            runtime: JavaScriptRuntime::Node,
-            next_worker: AtomicU64::new(0),
-            response_timeout: std::time::Duration::from_millis(DEFAULT_WORKER_TIMEOUT_MS),
-            retained_module_urls_per_worker: Some(3),
-        };
+            std::time::Duration::from_millis(DEFAULT_WORKER_TIMEOUT_MS),
+            Some(3),
+        );
 
         let mut pids = Vec::new();
         for _ in 0..6 {
@@ -2881,15 +2703,12 @@ process.stdin.resume()
                 .await
                 .unwrap(),
         );
-        let pool = NodeWorkerPool {
-            workers: StdRwLock::new(vec![Arc::clone(&worker)]),
+        let pool = pool_over(
+            vec![Arc::clone(&worker)],
             worker_script,
-            env: BTreeMap::new(),
-            runtime: JavaScriptRuntime::Node,
-            next_worker: AtomicU64::new(0),
-            response_timeout: std::time::Duration::from_secs(2),
-            retained_module_urls_per_worker: Some(2),
-        };
+            std::time::Duration::from_secs(2),
+            Some(2),
+        );
         let params = BTreeMap::new();
         let route_file = temp.path().join("route.ts");
 
@@ -2958,15 +2777,12 @@ process.stdin.resume()
         let worker = Worker::spawn(&worker_script, &BTreeMap::new(), JavaScriptRuntime::Node)
             .await
             .unwrap();
-        let pool = NodeWorkerPool {
-            workers: StdRwLock::new(vec![Arc::new(worker)]),
+        let pool = pool_over(
+            vec![Arc::new(worker)],
             worker_script,
-            env: BTreeMap::new(),
-            runtime: JavaScriptRuntime::Node,
-            next_worker: AtomicU64::new(0),
-            response_timeout: std::time::Duration::from_millis(DEFAULT_WORKER_TIMEOUT_MS),
-            retained_module_urls_per_worker: Some(3),
-        };
+            std::time::Duration::from_millis(DEFAULT_WORKER_TIMEOUT_MS),
+            Some(3),
+        );
 
         let mut pids = Vec::new();
         for _ in 0..6 {
@@ -3060,15 +2876,12 @@ process.stdin.resume()
                 .await
                 .unwrap(),
         );
-        let pool = NodeWorkerPool {
-            workers: StdRwLock::new(vec![failed_worker.clone()]),
+        let pool = pool_over(
+            vec![failed_worker.clone()],
             worker_script,
-            env: BTreeMap::new(),
-            runtime: JavaScriptRuntime::Node,
-            next_worker: AtomicU64::new(0),
-            response_timeout: std::time::Duration::from_millis(DEFAULT_WORKER_TIMEOUT_MS),
-            retained_module_urls_per_worker: None,
-        };
+            std::time::Duration::from_millis(DEFAULT_WORKER_TIMEOUT_MS),
+            None,
+        );
 
         let mut child = failed_worker.child.lock().await;
         child.as_mut().unwrap().start_kill().unwrap();
@@ -3130,15 +2943,12 @@ process.stdin.resume()
                 .await;
         }
 
-        let pool = NodeWorkerPool {
-            workers: StdRwLock::new(vec![busy.clone(), idle.clone()]),
+        let pool = pool_over(
+            vec![busy.clone(), idle.clone()],
             worker_script,
-            env: BTreeMap::new(),
-            runtime: JavaScriptRuntime::Node,
-            next_worker: AtomicU64::new(0),
-            response_timeout: std::time::Duration::from_millis(DEFAULT_WORKER_TIMEOUT_MS),
-            retained_module_urls_per_worker: None,
-        };
+            std::time::Duration::from_millis(DEFAULT_WORKER_TIMEOUT_MS),
+            None,
+        );
 
         // Every selection must land on the idle worker regardless of the
         // rotating start offset, never the loaded one.
@@ -3171,15 +2981,12 @@ process.stdin.resume()
                 .await
                 .unwrap(),
         );
-        let pool = NodeWorkerPool {
-            workers: StdRwLock::new(vec![busy.clone(), idle]),
+        let pool = pool_over(
+            vec![busy.clone(), idle],
             worker_script,
-            env: BTreeMap::new(),
-            runtime: JavaScriptRuntime::Node,
-            next_worker: AtomicU64::new(0),
-            response_timeout: std::time::Duration::from_millis(DEFAULT_WORKER_TIMEOUT_MS),
-            retained_module_urls_per_worker: None,
-        };
+            std::time::Duration::from_millis(DEFAULT_WORKER_TIMEOUT_MS),
+            None,
+        );
 
         // Request completion also needs this mutex. Routing new work must not
         // join that contention chain just to observe a worker's load.
@@ -3239,15 +3046,12 @@ process.stdin.resume()
             ));
         }
 
-        let pool = NodeWorkerPool {
-            workers: StdRwLock::new(workers.clone()),
+        let pool = pool_over(
+            workers.clone(),
             worker_script,
-            env: BTreeMap::new(),
-            runtime: JavaScriptRuntime::Node,
-            next_worker: AtomicU64::new(0),
-            response_timeout: std::time::Duration::from_millis(DEFAULT_WORKER_TIMEOUT_MS),
-            retained_module_urls_per_worker: None,
-        };
+            std::time::Duration::from_millis(DEFAULT_WORKER_TIMEOUT_MS),
+            None,
+        );
 
         // With every worker idle the rotating offset spreads work round-robin.
         let mut picked = Vec::new();
@@ -3258,5 +3062,67 @@ process.stdin.resume()
         assert_eq!(picked, vec![0, 1, 2]);
 
         pool.shutdown().await;
+    }
+
+    /// A single-frame request leaves nothing behind, whatever frame arrives.
+    ///
+    /// `send` is used for the requests that answer in one frame, so the stdout
+    /// reader removes the entry only when it sees a terminal one. A worker that
+    /// replied with a non-terminal frame instead used to leave an entry whose
+    /// receiver had just been dropped — a pending count that never returns to
+    /// zero, so retiring that worker waited out the full drain timeout on every
+    /// recycle. Nothing in the protocol should produce that frame; the point is
+    /// that a worker which does cannot strand the pool.
+    #[tokio::test]
+    async fn a_single_frame_request_never_strands_its_pending_entry() {
+        for frame in [None, Some("api-start")] {
+            let (stdin_tx, mut stdin_rx) = mpsc::channel::<String>(4);
+            let worker = stub_worker(Some(stdin_tx));
+            let request = ssg_request(true);
+
+            let responder = {
+                let worker = Arc::clone(&worker);
+                tokio::spawn(async move {
+                    let line = stdin_rx.recv().await.expect("the request reaches stdin");
+                    let id = request_id_of(&line);
+                    // Exactly what the stdout reader does: a non-terminal frame
+                    // keeps the entry, a terminal one takes it.
+                    let terminal = frame.is_none();
+                    let pending = worker
+                        .pending
+                        .response(&id, terminal)
+                        .await
+                        .expect("the request registered a pending response");
+                    let _ = pending
+                        .sender
+                        .send(WorkerResponse {
+                            id,
+                            frame: frame.map(str::to_string),
+                            ..Default::default()
+                        })
+                        .await;
+                })
+            };
+
+            let sent = worker
+                .send(&request, std::time::Duration::from_secs(5))
+                .await;
+            responder.await.unwrap();
+
+            assert!(sent.is_ok(), "frame {frame:?} should answer the request");
+            assert_eq!(
+                worker.pending.len(),
+                0,
+                "frame {frame:?} left a pending entry behind"
+            );
+            // The property that actually matters: the worker can be retired
+            // without waiting out the drain ceiling.
+            tokio::time::timeout(
+                std::time::Duration::from_secs(1),
+                worker.pending.wait_until_idle(),
+            )
+            .await
+            .unwrap_or_else(|_| panic!("frame {frame:?} left the worker undrainable"));
+        }
     }
 }

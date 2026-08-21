@@ -158,12 +158,116 @@ cargo run -p ruvyxa_cli -- test:parity --root examples/demo
   serverless handler never had, so a project that configured only `origins` answered a cross-origin
   `PUT` under `ruvyxa dev` and had the browser block it in production.
   `tests/fixtures/cors-conformance.json` holds both hosts now.
-- A gate a comment promises has to exist. `output.rs` said
-  `tests/packages/ruvyxa/entry-templates.test.mjs` asserted that its generated-entry preludes agreed
-  with `entry-templates.mjs`; that test never read `output.rs`, so the routing-context and
-  error-boundary preludes were two hand-maintained copies with nothing holding them together.
-  `tests/packages/ruvyxa/entry-prelude-parity.test.mjs` executes both copies against one stand-in
-  React. When a doc comment names the test that holds a contract, open that test.
+- A rule the two module graphs both enforce needs one table, not two implementations that happen to
+  agree today. The client/server module lane is the newest example: `references.rs` read a module's
+  leading directive and then its file stem, while `compiler.mjs` matched the single literal filename
+  `server.ts` — so `server.js`, every `action.ts`, and every `'use server'` module were compiled
+  into the browser bundle under `ruvyxa dev` and refused by `ruvyxa build` with RUV1820. Server-only
+  source reached a browser exactly where nobody checks, and the error arrived only at the end.
+  `tests/fixtures/module-lane-conformance.json` holds both now.
+- A route's element tree is composed by two generators — `route_tree_function` in
+  `crates/ruvyxa_bundler/src/output.rs` and `routeTreeFunction()` in
+  `packages/ruvyxa/runtime/entry-templates.mjs` — and a project renders through whichever one built
+  it. Layouts, `template.tsx`, and parallel-route slots all merge onto one list of directory levels
+  (`route_wrapper_levels` / `wrapperLevels()`), because they interleave:
+  `layout > template > children` at each level, with that level's slots as the layout's props.
+  Flattening them into "every template inside every layout" is the tempting shortcut and it is
+  wrong. Add a case to `tests/fixtures/entry-composition-conformance.json` before changing what
+  either emits, and keep a route that uses none of these features on the byte-identical loop it
+  always had.
+- A position in generated output has to be recorded where it is produced, never derived from the
+  emit format. Source maps were built from three constants describing how many lines the output
+  wrapper, the linker header, and the per-module preamble take; all three were wrong, and
+  tree-shaking, minification, and a line the CLI prepended afterwards were not accounted for at all.
+  The linker reports line provenance now, tree-shaking carries it, the minifier hands back oxc's
+  positions, and `sourcemap::shift_generated_lines` moves a finished map when a caller prepends to
+  the bundle. When adding a pass that rewrites bundle text, carry the provenance through it or the
+  map describes a document nobody shipped.
+- A Next.js convention that Ruvyxa does not implement must fail loudly or work, never silently do
+  nothing. `export const dynamic` and `generateStaticParams` were read by nothing: a page that asked
+  for `force-dynamic` was pre-rendered anyway and a route that declared its parameters pre-rendered
+  none, with no diagnostic in either case. Both are honoured now. `export const metadata` is
+  deliberately not aliased to `meta` — the shapes differ, and a name that half-works is worse than
+  one that does not. When adding an alias, check that the _contract_ matches, not just the intent.
+- A specifier the route graph cannot follow is not a specifier with nothing behind it.
+  `detect_render_strategy` pre-renders a route whose reachable graph shows no request-dependent
+  data, and `ModuleCache::edges` followed relative imports only — so an aliased import produced no
+  edge and a page fetching through `@/lib/data` was baked at build time while the same page written
+  `../../lib/data` stayed dynamic. The walk uses the bundler's `TsConfigPaths` now. Bare package
+  specifiers stay outside it deliberately, and `an_aliased_import_is_followed_like_a_relative_one`
+  asserts that boundary so it stays a decision.
+- Marker scans over source text need a word boundary. `has_dynamic_data_markers` used `contains`,
+  and `prefetch(` contains `fetch(` — so `router.prefetch()`, an API this framework ships, took
+  automatic pre-rendering away from the page that called it. When a marker decides something, check
+  which direction a wrong answer errs in and make the loose end the safe one.
+- A list that mirrors a code construct has to be checked against that construct, in the direction
+  the guard reads. `RESERVED_FRAMEWORK_ROUTES` protects plugins from registering a path axum has
+  already taken, and two tests compared it with `tests/fixtures/framework-endpoint-conformance.json`
+  — but nothing read `build_app_router`'s route chain _inwards_, so two registered paths were
+  missing from the list and a plugin transport on either panicked the router at startup.
+  `every_registered_route_is_reserved` parses the chain now. When a doc comment says "must stay in
+  sync with X", the test has to read X.
+- An empty cache slot is a question the cache cannot answer, not a "no". `RuntimeCache`'s generation
+  counter exists so a collection that started before a watcher event cannot install its result, and
+  `invalidate_styles_for_paths` skipped the bump when the slot was empty — which is exactly the
+  in-flight state. Before deciding a change is irrelevant, check that the evidence for that exists.
+- Output a machine parses needs a test that parses it. `site_discovery.rs` concatenates XML and
+  every assertion matched its own output text, so nothing held `sitemap_header`'s conditional
+  namespace declarations to the prefixes `sitemap_entry_xml` emits — a mismatch no parser accepts,
+  reported by nothing until a search engine drops the sitemap. Neither ecosystem has an XML parser
+  and one was not added; the rules are written out in the test module and held by
+  `assert_the_checker_rejects_what_a_parser_would`, since a checker that accepts everything makes
+  every test using it pass.
+- Write the shared table down _while_ adding the second implementation, not after both are working.
+  Byte-range parsing was added to the Rust server and to the generated standalone server in one go,
+  and `tests/fixtures/byte-range-conformance.json` immediately caught a disagreement neither side
+  would have noticed alone: both had a permissive number parser, and they were permissive about
+  different things — `u64::from_str` takes a leading `+`, `Number()` takes `1e1` and `0x2`. The
+  fixture, not either host language, decides what a byte position is.
+- A worker the pool has retired is still the pool's. `NodeWorkerPool::shutdown` walked `workers`
+  only, so a worker taken out of selection — every `RUVYXA_PRERENDER_RECYCLE_AFTER` isolated
+  prerenders, and the whole generation on `recycle` — was owned by nothing but its detached drain
+  task. A process that exits does not unwind that task, so nothing drops the `Child` and
+  `kill_on_drop` never runs. Anything spawning a child into a detached task needs a registry the
+  shutdown path reads.
+- Any pass that _deletes_ code needs its output parsed by a test, not matched. The `NODE_ENV` fold
+  in `crates/ruvyxa_bundler/src/minifier.rs` runs while a production client graph is being resolved
+  and reports nothing, and it cut the `if` out of an `else if` chain — a bundle that does not parse,
+  from a stage nobody watches. Text-matching its output would have passed.
+- `exports` condition order is the package author's, and the first _supported_ condition wins, so
+  which conditions a target supports is the whole decision. `require` beside `import` handed a
+  browser bundle a CommonJS build; it is a second pass now. When touching `resolve_exports_value`,
+  note that two divergences from Node are intentional and pinned by
+  `package_exports_resolution_matches_the_documented_rules`: an unlisted subpath falls through to
+  the legacy fields, and only an explicit `null` blocks.
+- A test that has never been seen red has not been shown to hold anything. Sabotage the thing it
+  guards and watch it fail before trusting it. Three tests written during this audit passed a broken
+  implementation on the first attempt: an `ast.rs` corpus whose regexes held nothing consequential,
+  a render-cache stress test that could not reach the race it named, and a prerender traversal test
+  that covered the path rule but not the containment check behind it. Each needed a different case
+  before it bit — a regex carrying a whole `import` statement, an inverted lock order, a symlink.
+- - `ast.rs` answers to oxc. `the_scanner_finds_the_same_static_edges_as_the_real_parser` runs a
+    corpus through both the byte scanner and the real parser and requires the static edges to match;
+    add a case there before changing the scan. Two things decide whether a case is worth adding:
+    `skip_string` stops at a newline by design, so a mis-scan cannot cross one — a regex holding
+    nothing consequential proves nothing — and the corpus must stay parseable, because the
+    differential asserts oxc accepts it.
+- Both linkers rewrite ESM one line at a time, and every decision about what a line _is_ must go
+  through `ast::masked_code` / `ModuleAst::is_code_offset` rather than a substring test. Four
+  ordinary shapes failed builds because it did not: `export const note = "copied from here"` (a
+  quoted `from` chose the re-export branch), `{ import: "./x" }` (a reserved word is a legal
+  property name, and `reject_surviving_esm` flagged the token anywhere), `export function* gen()`
+  (both graphs listed declaration forms with a trailing space), and a Prettier-wrapped
+  `export { a, }` in a `.js` module — that last one emitted a bundle that does not parse with no
+  build error at all. When adding a shape, add it to the adversarial suite in `linker.rs` that links
+  and then **parses** the result; matching the output text passes on exactly the bugs this class
+  produces.
+- - A gate a comment promises has to exist. `output.rs` said
+    `tests/packages/ruvyxa/entry-templates.test.mjs` asserted that its generated-entry preludes
+    agreed with `entry-templates.mjs`; that test never read `output.rs`, so the routing-context and
+    error-boundary preludes were two hand-maintained copies with nothing holding them together.
+    `tests/packages/ruvyxa/entry-prelude-parity.test.mjs` executes both copies against one stand-in
+    React. When a doc comment names the test that holds a contract, open that test.
 - Documentation changes should describe actual supported behavior, not intended future behavior.
 - If a check was already failing before your work, report it as baseline and do not weaken tests to
   pass.

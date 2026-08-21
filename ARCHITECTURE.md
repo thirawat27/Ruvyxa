@@ -1430,9 +1430,28 @@ client-only rule, since that output runs on the server.
 | Private `process.env` | Module graph accesses `process.env.*` not in `RUVYXA_PUBLIC_` | RUV1008    |
 | Client-only in server | Module graph from server entry contains `client-only`         | RUV1009    |
 | Server dir in client  | Import chain reaches `server/` directory from client entry    | RUV1010    |
+| Lane crossing         | Client lane imports a server or action module                 | RUV1820    |
 
 The check traverses the compiled module graph (BFS) and flags any prohibited import.
 `NodeModulesExternal` option can whitelist known packages.
+
+##### Module lanes
+
+RUV1820 is decided from a module's **lane** rather than from a marker import. The leading directive
+decides it first — `'use client'` is a client module, `'use server'` an action module — and the file
+stem decides what carries no directive: `client`, `server`, `action`, and `actions`, in whichever
+language the project writes them. Everything else is shared, and a shared module reachable from a
+client module joins the client lane; server and action modules terminate that closure instead, which
+is what makes the crossing visible.
+
+Both module graphs assign lanes, and they had disagreed: the Rust bundler read the directive and the
+stem while the Node graph matched the single filename `server.ts`, so `server.js`, every action
+module, and every `'use server'` module reached the browser under `ruvyxa dev` and were refused by
+`ruvyxa build`. `tests/fixtures/module-lane-conformance.json` holds both now — the Rust half in
+`crates/ruvyxa_bundler/src/references.rs`, the Node half in
+`tests/packages/ruvyxa/module-lane.test.mjs`. The action-imports-client crossing is the Rust
+bundler's alone, because the Node graph has no hook on the server compile that could see it; the
+fixture records that rather than implying parity.
 
 #### `has_default_export()`
 

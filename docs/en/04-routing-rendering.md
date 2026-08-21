@@ -87,6 +87,20 @@ export default function Post({ params }: PageProps<{ slug: string }>) {
 }
 ```
 
+`generateStaticParams` and `staticParams` are accepted as names for the same export, so a page
+brought over from Next.js declares its parameters without being renamed.
+
+## Overriding the rendering strategy
+
+Ruvyxa picks a strategy automatically, and `export const dynamic` overrides it — the same route
+segment config Next.js uses, with the same precedence. `'force-dynamic'` takes the route off the
+pre-render path even if it also exports `revalidate`; `'force-static'` and `'error'` put it on;
+`'auto'` is the default. `export const revalidate = <seconds>` opts into ISR and
+`export const ppr = true` into partial pre-rendering.
+
+`export const metadata` is **not** read: Next's metadata object is nested where Ruvyxa's `meta` is
+flat, so the two are not interchangeable. Use `export const meta` below.
+
 ## Route metadata and boundaries
 
 `export const meta` accepts a `Meta` object or `MetaFactory`. Layout metadata merges from root to
@@ -109,6 +123,79 @@ export const meta = ({ params }: { params: Record<string, string> }) => ({
 components. To select the nearest `not-found.tsx`, import `notFound` from `@ruvyxa/react` and call
 it (it throws a tagged signal). Do not confuse it with `notFound` from `ruvyxa/server`, which
 creates an HTTP `Response` with status 404.
+
+### `template.tsx`
+
+A `template.tsx` wraps its level's children the way a layout does, and differs in the one respect
+that is the reason to reach for it: it is keyed by the request path, so navigating within the same
+layout **remounts** it — state resets and effects run again — while the layout above it stays
+mounted. Use it for an enter animation, a per-navigation `useEffect`, or state that must not survive
+a move between sibling routes.
+
+```tsx
+// app/dashboard/template.tsx
+'use client'
+import { useEffect } from 'react'
+
+export default function DashboardTemplate({ children }: { children: React.ReactNode }) {
+  useEffect(() => {
+    // Runs again on every navigation inside app/dashboard/, unlike a layout.
+  }, [])
+  return <section className="fade-in">{children}</section>
+}
+```
+
+Layouts and templates nest `layout > template > children` at each level, so a level may have either,
+both, or neither. Templates declare no metadata; `export const meta` belongs on a layout or a page.
+
+### Parallel routes
+
+A `@name` folder beside a `layout.tsx` declares a slot that layout receives as a prop, alongside the
+page it already renders as `children`. Use it when one screen is several independent panels rather
+than one page.
+
+```text
+app/dashboard/
+├── @activity/
+│   ├── default.tsx
+│   └── page.tsx
+├── @team/
+│   ├── page.tsx
+│   └── reports/page.tsx
+├── layout.tsx
+├── page.tsx
+└── reports/page.tsx
+```
+
+```tsx
+// app/dashboard/layout.tsx
+export default function DashboardLayout({
+  children,
+  team,
+  activity,
+}: {
+  children: React.ReactNode
+  team?: React.ReactNode
+  activity?: React.ReactNode
+}) {
+  return (
+    <div className="grid">
+      <aside>{team}</aside>
+      <aside>{activity}</aside>
+      <main>{children}</main>
+    </div>
+  )
+}
+```
+
+Each slot matches the URL independently of the page. At `/dashboard/reports` the page comes from
+`reports/page.tsx` and `team` from `@team/reports/page.tsx`; `activity` has nothing for that URL and
+renders its `default.tsx`. A slot with neither a matching page nor a `default.tsx` is left out — the
+layout does not receive the prop at all. A `@name` folder never becomes a route of its own.
+
+Two limits worth knowing: a slot's own nested `layout.tsx` or `loading.tsx` is not composed into the
+slot subtree, and an unmatched slot falls back to `default.tsx` on every navigation rather than
+keeping what it last rendered.
 
 ### A complete route-state boundary
 

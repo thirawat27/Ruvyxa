@@ -1232,6 +1232,8 @@ mod tests {
                     kind: *kind,
                     file: PathBuf::from("/project/app/page.tsx"),
                     layout_chain: Vec::new(),
+                    template_chain: Vec::new(),
+                    slots: Vec::new(),
                     server_modules: Vec::new(),
                     client_modules: Vec::new(),
                     runtime: RuntimeTarget::Node,
@@ -1608,5 +1610,403 @@ mod tests {
         assert_eq!(report, DiscoveryReport::default());
         assert!(!assets.join("robots.txt").exists());
         assert!(!assets.join("sitemap.xml").exists());
+    }
+
+    /// Reject anything an XML parser would reject in `document`.
+    ///
+    /// Written out rather than pulled in: neither ecosystem here carries an XML
+    /// parser, and a dependency added for one test is a dependency the release
+    /// has to keep. Only the rules that can actually be broken by generating a
+    /// document with string concatenation are checked — escaping, nesting,
+    /// namespace prefixes, and the XML 1.0 character range — which is also all
+    /// this file could get wrong.
+    ///
+    /// `assert_the_checker_rejects_what_a_parser_would` holds the checker
+    /// itself, since a checker that accepts everything would make every test
+    /// below pass.
+    fn assert_well_formed_xml(document: &str) {
+        check_well_formed_xml(document).unwrap_or_else(|error| {
+            panic!("generated XML is not well formed: {error}\n---\n{document}")
+        });
+    }
+
+    /// Every entity reference XML 1.0 predefines, plus numeric ones.
+    fn check_reference(text: &str, at: usize) -> std::result::Result<usize, String> {
+        let rest = &text[at..];
+        let end = rest
+            .find(';')
+            .ok_or_else(|| format!("unterminated entity reference at byte {at}"))?;
+        let name = &rest[1..end];
+        let valid = matches!(name, "amp" | "lt" | "gt" | "quot" | "apos")
+            || name.strip_prefix("#x").is_some_and(|digits| {
+                !digits.is_empty() && digits.chars().all(|c| c.is_ascii_hexdigit())
+            })
+            || name.strip_prefix('#').is_some_and(|digits| {
+                !digits.is_empty() && digits.chars().all(|c| c.is_ascii_digit())
+            });
+        if !valid {
+            return Err(format!("unknown entity reference &{name}; at byte {at}"));
+        }
+        Ok(end + 1)
+    }
+
+    /// Character data: a bare `<` is a syntax error and a bare `&` starts a
+    /// reference. Escaping is the one thing a string-concatenating generator
+    /// gets wrong, so this is the rule that matters most here.
+    fn check_character_data(
+        text: &str,
+        offset: usize,
+        what: &str,
+    ) -> std::result::Result<(), String> {
+        let mut index = 0;
+        while index < text.len() {
+            match text.as_bytes()[index] {
+                b'<' => {
+                    return Err(format!(
+                        "unescaped '<' in {what} at byte {}",
+                        offset + index
+                    ));
+                }
+                b'&' => index += check_reference(text, index)?,
+                _ => index += 1,
+            }
+        }
+        Ok(())
+    }
+
+    /// Characters XML 1.0 forbids outright. Escaping does not help: `&#x1;` is
+    /// just as illegal as the byte, so the only fix is refusing the input.
+    fn check_xml_characters(document: &str) -> std::result::Result<(), String> {
+        for (index, character) in document.char_indices() {
+            let legal = matches!(character, '\t' | '\n' | '\r') || character >= ' ';
+            if !legal {
+                return Err(format!(
+                    "character U+{:04X} at byte {index} is not allowed anywhere in XML 1.0",
+                    character as u32
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// One start tag, split into the parts the checks below need.
+    struct Tag<'a> {
+        name: &'a str,
+        attributes: Vec<(&'a str, &'a str)>,
+    }
+
+    /// Split a tag body into its element name and its attributes.
+    fn parse_tag(body: &str) -> std::result::Result<Tag<'_>, String> {
+        let body = body.trim_end_matches('/').trim();
+        let (name, rest) = body.split_once(char::is_whitespace).unwrap_or((body, ""));
+        if name.is_empty() {
+            return Err("a tag has no element name".to_string());
+        }
+        let mut attributes = Vec::new();
+        let mut rest = rest.trim_start();
+        while !rest.is_empty() {
+            let (attribute, remainder) = rest
+                .split_once('=')
+                .ok_or_else(|| format!("attribute without a value in <{name}>"))?;
+            let remainder = remainder
+                .strip_prefix('"')
+                .ok_or_else(|| format!("attribute value is not double quoted in <{name}>"))?;
+            let (value, remainder) = remainder
+                .split_once('"')
+                .ok_or_else(|| format!("unterminated attribute value in <{name}>"))?;
+            attributes.push((attribute.trim(), value));
+            rest = remainder.trim_start();
+        }
+        Ok(Tag { name, attributes })
+    }
+
+    /// A prefix has to be declared by an `xmlns:` attribute in scope, or the
+    /// document does not parse at all. This is the rule that binds
+    /// `sitemap_header` to `sitemap_entry_xml`: the header declares a prefix
+    /// only when `sitemap_features` saw a reason to, and every prefix an entry
+    /// emits has to be one of those.
+    fn check_prefix(
+        name: &str,
+        scopes: &[Vec<String>],
+        what: &str,
+    ) -> std::result::Result<(), String> {
+        let Some((prefix, _)) = name.split_once(':') else {
+            return Ok(());
+        };
+        if matches!(prefix, "xmlns" | "xml") {
+            return Ok(());
+        }
+        if scopes
+            .iter()
+            .any(|declared| declared.iter().any(|value| value == prefix))
+        {
+            return Ok(());
+        }
+        Err(format!(
+            "{what} uses undeclared namespace prefix {prefix:?}"
+        ))
+    }
+
+    fn check_well_formed_xml(document: &str) -> std::result::Result<(), String> {
+        check_xml_characters(document)?;
+        let body = document
+            .strip_prefix(SITEMAP_XML_DECLARATION)
+            .unwrap_or(document);
+        let offset = document.len() - body.len();
+
+        let mut open: Vec<&str> = Vec::new();
+        let mut scopes: Vec<Vec<String>> = Vec::new();
+        let mut roots = 0usize;
+        let mut index = 0usize;
+
+        while index < body.len() {
+            let Some(start) = body[index..].find('<') else {
+                check_character_data(&body[index..], offset + index, "character data")?;
+                break;
+            };
+            check_character_data(
+                &body[index..index + start],
+                offset + index,
+                "character data",
+            )?;
+            index += start;
+            let end = body[index..]
+                .find('>')
+                .ok_or_else(|| format!("unterminated tag at byte {}", offset + index))?;
+            let raw = &body[index + 1..index + end];
+            index += end + 1;
+
+            if let Some(name) = raw.strip_prefix('/') {
+                let name = name.trim();
+                match open.pop() {
+                    Some(expected) if expected == name => {
+                        scopes.pop();
+                    }
+                    Some(expected) => {
+                        return Err(format!("</{name}> closes <{expected}>"));
+                    }
+                    None => return Err(format!("</{name}> closes nothing")),
+                }
+                continue;
+            }
+
+            let self_closing = raw.ends_with('/');
+            let Tag { name, attributes } = parse_tag(raw)?;
+            let declared = attributes
+                .iter()
+                .filter_map(|(attribute, _)| attribute.strip_prefix("xmlns:"))
+                .map(str::to_string)
+                .collect::<Vec<_>>();
+            scopes.push(declared);
+            check_prefix(name, &scopes, &format!("element <{name}>"))?;
+            for (attribute, value) in &attributes {
+                check_prefix(
+                    attribute,
+                    &scopes,
+                    &format!("attribute {attribute} of <{name}>"),
+                )?;
+                check_character_data(value, offset + index, &format!("attribute {attribute}"))?;
+            }
+            if open.is_empty() {
+                roots += 1;
+            }
+            if self_closing {
+                scopes.pop();
+            } else {
+                open.push(name);
+            }
+        }
+
+        if let Some(unclosed) = open.last() {
+            return Err(format!("<{unclosed}> is never closed"));
+        }
+        if roots != 1 {
+            return Err(format!(
+                "a document must have exactly one root, found {roots}"
+            ));
+        }
+        Ok(())
+    }
+
+    /// The checker itself, held to the failures it exists to catch.
+    ///
+    /// Without this, a checker that returned `Ok(())` unconditionally would
+    /// make every assertion below green while proving nothing.
+    #[test]
+    fn assert_the_checker_rejects_what_a_parser_would() {
+        for (document, why) in [
+            ("<a>1 < 2</a>", "a bare '<' in text"),
+            ("<a>Tom & Jerry</a>", "a bare '&' in text"),
+            ("<a>&nope;</a>", "an entity reference nothing defines"),
+            ("<a><b></a></b>", "mismatched nesting"),
+            ("<a><b></a>", "an unclosed element"),
+            ("<a></a><b></b>", "two root elements"),
+            ("<x:a></x:a>", "an undeclared element prefix"),
+            ("<a x:href=\"1\"></a>", "an undeclared attribute prefix"),
+            ("<a href=1></a>", "an unquoted attribute value"),
+            ("<a>\u{8}</a>", "a character XML 1.0 forbids"),
+        ] {
+            assert!(
+                check_well_formed_xml(document).is_err(),
+                "{why} must be rejected: {document}"
+            );
+        }
+
+        for (document, why) in [
+            ("<a>Tom &amp; Jerry</a>", "escaped text"),
+            ("<a>&#233;&#x2014;</a>", "numeric references"),
+            ("<a><b/><b></b></a>", "a self-closing element"),
+            (
+                "<a xmlns:x=\"urn:x\"><x:b x:c=\"1\"/></a>",
+                "a declared prefix, on an element and an attribute",
+            ),
+            ("<a>ทดสอบ</a>", "text outside ASCII"),
+        ] {
+            assert!(
+                check_well_formed_xml(document).is_ok(),
+                "{why} must be accepted: {document} — {:?}",
+                check_well_formed_xml(document)
+            );
+        }
+    }
+
+    /// The generated sitemap parses, with every field a project can set.
+    ///
+    /// Every other assertion in this file matches the text this module emits,
+    /// which is the same question asked twice: the generator and the assertion
+    /// agree because they were written together. A search engine does not read
+    /// the text, it parses the document, and a sitemap it cannot parse is
+    /// rejected whole — silently, long after the build reported success.
+    ///
+    /// The values below are chosen to be hostile to a string-concatenating
+    /// generator: every character `escape_xml` handles, in every kind of field
+    /// that reaches the document — element text, attribute values, and the
+    /// `loc` built from a route path.
+    #[test]
+    fn the_generated_sitemap_parses_as_xml() {
+        let options: SitemapGenerationOptions = serde_json::from_value(serde_json::json!({
+            "entries": [{
+                "url": "/about",
+                "lastModified": "2026-07-29T04:30:00.000Z",
+                "changeFrequency": "monthly",
+                "priority": 0.8,
+                "alternates": {
+                    "languages": {
+                        "de": "https://ruvyxa.dev/de/about?a=1&b=2",
+                        "th": "https://ruvyxa.dev/th/about"
+                    }
+                },
+                "images": ["https://cdn.ruvyxa.dev/about.jpg?w=1&h=2"],
+                "videos": [{
+                    "title": "Quotes \" and 'apostrophes' & <angles>",
+                    "thumbnail_loc": "https://cdn.ruvyxa.dev/thumb.jpg",
+                    "description": "A <production> sitemap & its \"quirks\"",
+                    "content_loc": "https://cdn.ruvyxa.dev/video.mp4?x=1&y=2",
+                    "player_loc": "https://cdn.ruvyxa.dev/player?id=1&autoplay=0",
+                    "duration": 120,
+                    "view_count": 42,
+                    "rating": 4.5,
+                    "publication_date": "2026-07-29",
+                    "expiration_date": "2027-07-29T00:00:00Z",
+                    "family_friendly": "yes",
+                    "requires_subscription": "no",
+                    "live": "no",
+                    "restriction": { "relationship": "allow", "content": "TH US" },
+                    "platform": { "relationship": "deny", "content": "tv" },
+                    "uploader": {
+                        "content": "Ruvyxa & Co",
+                        "info": "https://ruvyxa.dev/team?id=1&role=2"
+                    },
+                    "tag": ["framework & tooling", "<sitemap>"]
+                }]
+            }]
+        }))
+        .unwrap();
+
+        // A route path carrying the same characters, so `loc` is exercised as
+        // well as the configured fields.
+        let routes = manifest(&[
+            ("/", RouteKind::Page),
+            ("/about", RouteKind::Page),
+            ("/q&a", RouteKind::Page),
+            ("/ทดสอบ", RouteKind::Page),
+        ]);
+        let entries = sitemap_entries(&routes, &[], "https://ruvyxa.dev", Some(&options)).unwrap();
+        for document in sitemap_documents(&entries).unwrap() {
+            assert_well_formed_xml(&document);
+        }
+    }
+
+    /// Sharding must not produce a shard that fails to parse, and the index
+    /// that points at them has to parse too.
+    ///
+    /// Each shard repeats the header, so a namespace an entry needs has to be
+    /// declared on every shard rather than only on the one that first used it.
+    #[test]
+    fn every_sitemap_shard_and_its_index_parse_as_xml() {
+        let options: SitemapGenerationOptions = serde_json::from_value(serde_json::json!({
+            "entries": [{
+                "url": "/p3",
+                "images": ["https://cdn.ruvyxa.dev/three.jpg"],
+                "alternates": { "languages": { "th": "https://ruvyxa.dev/th/p3" } }
+            }]
+        }))
+        .unwrap();
+        let routes = manifest(&[
+            ("/p0", RouteKind::Page),
+            ("/p1", RouteKind::Page),
+            ("/p2", RouteKind::Page),
+            ("/p3", RouteKind::Page),
+        ]);
+        let entries = sitemap_entries(&routes, &[], "https://ruvyxa.dev", Some(&options)).unwrap();
+
+        let shards = sitemap_documents_with_limits(&entries, 1, SITEMAP_MAX_BYTES).unwrap();
+        assert_eq!(shards.len(), 4, "one URL per shard was requested");
+        for shard in &shards {
+            assert_well_formed_xml(shard);
+        }
+        assert_well_formed_xml(&sitemap_index_xml("https://ruvyxa.dev", shards.len()).unwrap());
+    }
+
+    /// Every line of the generated robots.txt is a directive a crawler reads.
+    ///
+    /// robots.txt has no escaping, so the file's whole defence is refusing
+    /// input rather than encoding it — which means the property to check is
+    /// that nothing a project configured became a line of its own.
+    #[test]
+    fn the_generated_robots_txt_is_only_directives() {
+        let options: RobotsGenerationOptions = serde_json::from_value(serde_json::json!({
+            "rules": [
+                { "userAgent": "*", "allow": "/", "disallow": ["/admin", "/api/private"] },
+                { "userAgent": ["Googlebot", "Bingbot"], "disallow": "", "crawlDelay": 10 }
+            ],
+            "sitemap": ["https://ruvyxa.dev/sitemap.xml", "https://ruvyxa.dev/news.xml"],
+            "host": "ruvyxa.dev"
+        }))
+        .unwrap();
+
+        let text = robots_txt(Some("https://ruvyxa.dev"), Some(&options)).unwrap();
+        let known = [
+            "User-agent",
+            "Allow",
+            "Disallow",
+            "Crawl-delay",
+            "Sitemap",
+            "Host",
+        ];
+        for line in text.lines().filter(|line| !line.trim().is_empty()) {
+            let (field, _) = line
+                .split_once(": ")
+                .or_else(|| line.split_once(':'))
+                .unwrap_or_else(|| panic!("{line:?} is not a robots.txt directive"));
+            assert!(
+                known.contains(&field),
+                "{line:?} declares unknown directive {field:?}"
+            );
+        }
+
+        // The explicit list replaces the automatic one rather than adding to it.
+        assert_eq!(text.matches("Sitemap: ").count(), 2);
+        assert!(text.contains("Host: https://ruvyxa.dev"));
     }
 }

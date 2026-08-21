@@ -10,6 +10,7 @@ use std::time::{Duration, SystemTime};
 use axum::http::{HeaderMap, HeaderValue, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use ruvyxa_diagnostics::{Result, RuvyxaError};
+use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use crate::apply_security_headers;
 
@@ -121,6 +122,157 @@ fn not_modified_response() -> Response {
     response
 }
 
+/// One byte range, already resolved against the length of the file.
+///
+/// `end` is inclusive, as it is on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ByteRange {
+    start: u64,
+    end: u64,
+}
+
+impl ByteRange {
+    fn len(&self) -> u64 {
+        self.end - self.start + 1
+    }
+}
+
+/// What a request's `Range` header asks this server to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RangeRequest {
+    /// No range, or one this server declines to honour. Send the whole file.
+    Whole,
+    Partial(ByteRange),
+    /// The client named a range that does not exist in this file. RFC 9110
+    /// requires 416 rather than silently sending something else.
+    Unsatisfiable,
+}
+
+/// Decide what to serve for a request that may carry `Range`.
+///
+/// A media element does not download a file and play it; it asks for bytes as
+/// it needs them. Without ranges, dragging a video's scrubber restarts the
+/// download from zero, and Safari refuses to play a resource whose server does
+/// not answer its opening `Range: bytes=0-1` with a 206 at all — so the
+/// streaming path added for exactly these files could not play them.
+fn requested_range(headers: Option<&HeaderMap>, len: u64, validator: Option<&str>) -> RangeRequest {
+    let Some(headers) = headers else {
+        return RangeRequest::Whole;
+    };
+    let Some(value) = headers
+        .get(header::RANGE)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return RangeRequest::Whole;
+    };
+
+    // `If-Range` makes the range conditional on the client still holding the
+    // version it is continuing. A mismatch is not an error: the whole
+    // representation is the correct answer, and it is the only way a client
+    // resuming a download notices the file changed underneath it. A
+    // date-formed `If-Range` is never compared, because this server sends no
+    // `Last-Modified` for it to have come from.
+    if let Some(if_range) = headers
+        .get(header::IF_RANGE)
+        .and_then(|value| value.to_str().ok())
+    {
+        match validator {
+            Some(validator) if normalized_etag(if_range) == normalized_etag(validator) => {}
+            _ => return RangeRequest::Whole,
+        }
+    }
+
+    parse_single_byte_range(value, len)
+}
+
+/// One byte position from a range specifier: ASCII digits and nothing else.
+///
+/// Both languages had a permissive number parser and they were permissive
+/// about different things: Rust's `u64::from_str` accepts a leading `+`, and
+/// JavaScript's `Number()` accepts `1e1` and `0x2`. None of those is a range
+/// specifier, so neither side takes any of them — a disagreement the shared
+/// fixture now decides rather than each parser's host language.
+fn byte_position(text: &str) -> Option<u64> {
+    if text.is_empty() || !text.bytes().all(|byte| byte.is_ascii_digit()) {
+        return None;
+    }
+    // A position too large to represent is still a position, and it is past the
+    // end of any real file — which is exactly what the caller needs to decide.
+    // Reporting it as unparsable would send the whole file instead of a 416.
+    Some(text.parse::<u64>().unwrap_or(u64::MAX))
+}
+
+/// Parse a single-range `bytes=` specifier against a known length.
+///
+/// Multi-range requests are answered whole. A `multipart/byteranges` body is
+/// more machinery than any client of this server needs, and RFC 9110 lets a
+/// server ignore a `Range` it does not wish to honour — which is why an
+/// unparsable specifier also falls back to the whole file rather than to 416.
+/// Only a syntactically valid range that this file cannot satisfy is a 416.
+fn parse_single_byte_range(value: &str, len: u64) -> RangeRequest {
+    let Some(spec) = value.trim().strip_prefix("bytes=") else {
+        return RangeRequest::Whole;
+    };
+    let spec = spec.trim();
+    if spec.contains(',') {
+        return RangeRequest::Whole;
+    }
+    let Some((first, last)) = spec.split_once('-') else {
+        return RangeRequest::Whole;
+    };
+    let (first, last) = (first.trim(), last.trim());
+
+    if first.is_empty() {
+        // `bytes=-N`: the final N bytes, clamped to the file.
+        let Some(suffix) = byte_position(last) else {
+            return RangeRequest::Whole;
+        };
+        // An empty file has no byte to name, and a zero-length suffix names
+        // none either.
+        if suffix == 0 || len == 0 {
+            return RangeRequest::Unsatisfiable;
+        }
+        return RangeRequest::Partial(ByteRange {
+            start: len.saturating_sub(suffix),
+            end: len - 1,
+        });
+    }
+
+    let Some(start) = byte_position(first) else {
+        return RangeRequest::Whole;
+    };
+    if start >= len {
+        return RangeRequest::Unsatisfiable;
+    }
+    let end = if last.is_empty() {
+        len - 1
+    } else {
+        match byte_position(last) {
+            // A last-byte position past the end is clamped, not refused: a
+            // client that asks for one megabyte from here should get whatever
+            // of it exists.
+            Some(end) => end.min(len - 1),
+            None => return RangeRequest::Whole,
+        }
+    };
+    if end < start {
+        return RangeRequest::Unsatisfiable;
+    }
+    RangeRequest::Partial(ByteRange { start, end })
+}
+
+/// Refuse a range this file cannot satisfy, telling the client the real length.
+fn range_not_satisfiable_response(len: u64) -> Response {
+    let mut response = StatusCode::RANGE_NOT_SATISFIABLE.into_response();
+    let headers = response.headers_mut();
+    headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
+    if let Ok(value) = HeaderValue::from_str(&format!("bytes */{len}")) {
+        headers.insert(header::CONTENT_RANGE, value);
+    }
+    apply_security_headers(&mut response);
+    response
+}
+
 pub(crate) async fn serve_public_file(
     public_dir: &Path,
     request_path: &str,
@@ -158,14 +310,22 @@ pub(crate) async fn serve_public_file(
     // process — and none of that memory buys anything, because the bytes are
     // written out and dropped immediately.
     if metadata.len() > streamed_asset_threshold() {
-        let identity = identity.as_ref().and_then(weak_validator);
-        if let Some(etag) = &identity
+        let validator = identity.as_ref().and_then(weak_validator);
+        if let Some(etag) = &validator
             && request_matches_etag(request_headers, etag)
         {
             return Ok(Some(not_modified_response()));
         }
+        let range = match requested_range(request_headers, metadata.len(), validator.as_deref()) {
+            RangeRequest::Whole => None,
+            RangeRequest::Partial(range) => Some(range),
+            RangeRequest::Unsatisfiable => {
+                return Ok(Some(range_not_satisfiable_response(metadata.len())));
+            }
+        };
         return Ok(Some(
-            streamed_file_response(&file, &metadata, content_type, identity.as_deref()).await?,
+            streamed_file_response(&file, &metadata, content_type, validator.as_deref(), range)
+                .await?,
         ));
     }
 
@@ -190,9 +350,28 @@ pub(crate) async fn serve_public_file(
         return Ok(Some(not_modified_response()));
     }
 
-    let mut response = bytes.into_response();
+    // Ranges are honoured here too, not only above the streaming threshold.
+    // `Accept-Ranges` is a promise about the resource, and audio, small clips
+    // and resumed downloads all sit below 8 MiB — advertising the header on
+    // one branch and ignoring the request on the other would be a lie the
+    // client cannot detect until playback breaks.
+    let full_length = bytes.len() as u64;
+    let range = match requested_range(request_headers, full_length, Some(&etag)) {
+        RangeRequest::Whole => None,
+        RangeRequest::Partial(range) => Some(range),
+        RangeRequest::Unsatisfiable => {
+            return Ok(Some(range_not_satisfiable_response(full_length)));
+        }
+    };
+    let body = match range {
+        Some(range) => bytes[range.start as usize..=range.end as usize].to_vec(),
+        None => bytes,
+    };
+
+    let mut response = body.into_response();
     let headers = response.headers_mut();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
     headers.insert(
         header::ETAG,
         HeaderValue::from_str(&etag).unwrap_or_else(|_| HeaderValue::from_static("")),
@@ -201,6 +380,15 @@ pub(crate) async fn serve_public_file(
         header::CACHE_CONTROL,
         HeaderValue::from_static("public, max-age=3600, must-revalidate"),
     );
+    if let Some(range) = range {
+        *response.status_mut() = StatusCode::PARTIAL_CONTENT;
+        if let Ok(value) = HeaderValue::from_str(&format!(
+            "bytes {}-{}/{full_length}",
+            range.start, range.end
+        )) {
+            response.headers_mut().insert(header::CONTENT_RANGE, value);
+        }
+    }
     apply_security_headers(&mut response);
     Ok(Some(response))
 }
@@ -238,27 +426,53 @@ fn weak_validator(identity: &AssetIdentity) -> Option<String> {
     Some(format!("W/\"{:x}-{:x}\"", identity.len, modified.as_secs()))
 }
 
-/// Send a file as a stream, with `Content-Length` so the response is still sized.
+/// Send a file, or one range of it, as a stream with an accurate length.
+///
+/// Seeking and then bounding the reader is what keeps a range cheap: only the
+/// requested bytes are ever read, which is the difference between scrubbing to
+/// the end of a video and re-reading the whole file to reach it.
 async fn streamed_file_response(
     file: &Path,
     metadata: &std::fs::Metadata,
     content_type: &'static str,
     etag: Option<&str>,
+    range: Option<ByteRange>,
 ) -> Result<Response> {
-    let handle = tokio::fs::File::open(file)
+    let mut handle = tokio::fs::File::open(file)
         .await
         .map_err(|source| RuvyxaError::Io {
             message: format!("Failed to open public file {}", file.display()),
             source,
         })?;
-    let body = axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(handle));
+
+    let full_length = metadata.len();
+    let body_length = match range {
+        Some(range) => {
+            handle
+                .seek(std::io::SeekFrom::Start(range.start))
+                .await
+                .map_err(|source| RuvyxaError::Io {
+                    message: format!("Failed to seek public file {}", file.display()),
+                    source,
+                })?;
+            range.len()
+        }
+        None => full_length,
+    };
+    let body = match range {
+        Some(range) => axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(
+            handle.take(range.len()),
+        )),
+        None => axum::body::Body::from_stream(tokio_util::io::ReaderStream::new(handle)),
+    };
 
     let mut response = body.into_response();
     let headers = response.headers_mut();
     headers.insert(header::CONTENT_TYPE, HeaderValue::from_static(content_type));
+    headers.insert(header::ACCEPT_RANGES, HeaderValue::from_static("bytes"));
     // Axum cannot infer a length for a stream, and a large download with no
     // length gives the client no progress and forces chunked framing.
-    if let Ok(length) = HeaderValue::from_str(&metadata.len().to_string()) {
+    if let Ok(length) = HeaderValue::from_str(&body_length.to_string()) {
         headers.insert(header::CONTENT_LENGTH, length);
     }
     if let Some(etag) = etag
@@ -270,6 +484,15 @@ async fn streamed_file_response(
         header::CACHE_CONTROL,
         HeaderValue::from_static("public, max-age=3600, must-revalidate"),
     );
+    if let Some(range) = range {
+        *response.status_mut() = StatusCode::PARTIAL_CONTENT;
+        if let Ok(value) = HeaderValue::from_str(&format!(
+            "bytes {}-{}/{full_length}",
+            range.start, range.end
+        )) {
+            response.headers_mut().insert(header::CONTENT_RANGE, value);
+        }
+    }
     apply_security_headers(&mut response);
     Ok(response)
 }
@@ -1010,5 +1233,280 @@ mod tests {
             None,
             "a different mtime must miss"
         );
+    }
+
+    /// Serve `request_path` with an arbitrary request header set.
+    async fn serve_with(
+        public_dir: &Path,
+        request_path: &str,
+        request_headers: &[(header::HeaderName, &str)],
+    ) -> Response {
+        let mut headers = HeaderMap::new();
+        for (name, value) in request_headers {
+            headers.insert(name, HeaderValue::from_str(value).unwrap());
+        }
+        serve_public_file(public_dir, request_path, Some(&headers))
+            .await
+            .expect("serving must not fail")
+            .expect("asset must resolve")
+    }
+
+    /// The bytes a response actually delivered, plus its status and headers.
+    async fn delivered(response: Response) -> (StatusCode, HeaderMap, Vec<u8>) {
+        let status = response.status();
+        let headers = response.headers().clone();
+        let body = axum::body::to_bytes(response.into_body(), usize::MAX)
+            .await
+            .expect("body must be readable");
+        (status, headers, body.to_vec())
+    }
+
+    /// Replay the shared cross-language byte-range table.
+    ///
+    /// `ruvyxa start` and a standalone deployment serve the same `public/`
+    /// directory, so a video that scrubs under one has to scrub under the
+    /// other. `parseByteRange` in `serverless-handler.mjs` answers this same
+    /// file from `tests/packages/ruvyxa/byte-range-contract.test.mjs`.
+    ///
+    /// The interesting part is boundary arithmetic — inclusive ends, suffixes
+    /// longer than the file, a start exactly at the length — and each of those
+    /// is one fixture entry rather than a test of its own.
+    #[test]
+    fn resolves_the_shared_cross_language_byte_range_table() {
+        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/byte-range-conformance.json");
+        let fixture: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&fixture_path)
+                .unwrap_or_else(|error| panic!("read {}: {error}", fixture_path.display())),
+        )
+        .expect("conformance fixture is valid JSON");
+
+        let cases = fixture["cases"].as_array().expect("fixture declares cases");
+        assert!(!cases.is_empty(), "the fixture must carry cases");
+        for case in cases {
+            let value = case["value"].as_str().expect("case value");
+            let length = case["length"].as_u64().expect("case length");
+            let why = case["why"].as_str().unwrap_or_default();
+            let expected = match case["kind"].as_str().expect("case kind") {
+                "whole" => RangeRequest::Whole,
+                "unsatisfiable" => RangeRequest::Unsatisfiable,
+                "partial" => RangeRequest::Partial(ByteRange {
+                    start: case["start"].as_u64().expect("partial case start"),
+                    end: case["end"].as_u64().expect("partial case end"),
+                }),
+                kind => panic!("unknown case kind {kind:?}"),
+            };
+            assert_eq!(
+                parse_single_byte_range(value, length),
+                expected,
+                "{value:?} against {length} bytes — {why}"
+            );
+        }
+    }
+
+    /// A media element's opening probe is answered with 206 and only those bytes.
+    ///
+    /// This is the request a browser makes before it will play anything, and
+    /// the one a scrubbed video repeats for every seek. The streaming threshold
+    /// was introduced for exactly these files, so a large asset had to answer
+    /// it — before this, dragging the scrubber restarted the download from zero
+    /// and a strict player refused the resource outright.
+    #[tokio::test]
+    async fn a_ranged_request_for_a_streamed_asset_returns_only_that_range() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let size = (DEFAULT_STREAMED_ASSET_THRESHOLD + 1024) as usize;
+        let content: Vec<u8> = (0..size).map(|index| (index % 251) as u8).collect();
+        std::fs::write(temp.path().join("movie.mp4"), &content).expect("write");
+
+        let response = serve_with(temp.path(), "/movie.mp4", &[(header::RANGE, "bytes=0-1")]).await;
+        let (status, headers, body) = delivered(response).await;
+
+        assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+        assert_eq!(headers[header::ACCEPT_RANGES], "bytes");
+        assert_eq!(headers[header::CONTENT_LENGTH], "2");
+        assert_eq!(
+            headers[header::CONTENT_RANGE],
+            format!("bytes 0-1/{size}"),
+            "the client learns the real length from the range, not Content-Length"
+        );
+        assert_eq!(body, content[0..=1]);
+
+        // A seek near the end must read from there rather than from zero.
+        let start = size as u64 - 512;
+        let response = serve_with(
+            temp.path(),
+            "/movie.mp4",
+            &[(header::RANGE, &format!("bytes={start}-"))],
+        )
+        .await;
+        let (status, headers, body) = delivered(response).await;
+        assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+        assert_eq!(headers[header::CONTENT_LENGTH], "512");
+        assert_eq!(body, content[start as usize..]);
+    }
+
+    /// `Accept-Ranges` is a promise about the resource, so the branch below the
+    /// streaming threshold has to keep it. Audio, short clips and resumed
+    /// downloads all live there.
+    #[tokio::test]
+    async fn a_ranged_request_for_a_buffered_asset_returns_only_that_range() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::fs::write(temp.path().join("clip.mp3"), b"0123456789").expect("write");
+
+        let whole = serve_with(temp.path(), "/clip.mp3", &[]).await;
+        assert_eq!(
+            whole.headers()[header::ACCEPT_RANGES],
+            "bytes",
+            "a resource that advertises ranges must answer them"
+        );
+
+        let response = serve_with(temp.path(), "/clip.mp3", &[(header::RANGE, "bytes=3-5")]).await;
+        let (status, headers, body) = delivered(response).await;
+
+        assert_eq!(status, StatusCode::PARTIAL_CONTENT);
+        assert_eq!(headers[header::CONTENT_RANGE], "bytes 3-5/10");
+        assert_eq!(body, b"345");
+    }
+
+    /// A range this file cannot satisfy is refused with the length, not with
+    /// some other part of the file.
+    #[tokio::test]
+    async fn an_unsatisfiable_range_is_refused_with_the_real_length() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::fs::write(temp.path().join("clip.mp3"), b"0123456789").expect("write");
+
+        let response =
+            serve_with(temp.path(), "/clip.mp3", &[(header::RANGE, "bytes=64-128")]).await;
+        let (status, headers, body) = delivered(response).await;
+
+        assert_eq!(status, StatusCode::RANGE_NOT_SATISFIABLE);
+        assert_eq!(headers[header::CONTENT_RANGE], "bytes */10");
+        assert!(body.is_empty(), "a refusal must not carry file bytes");
+    }
+
+    /// `If-Range` decides whether the client is still continuing the version it
+    /// started, and a mismatch means the whole file rather than a splice of two.
+    #[tokio::test]
+    async fn if_range_against_a_stale_validator_returns_the_whole_file() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::fs::write(temp.path().join("clip.mp3"), b"0123456789").expect("write");
+        let current = etag_of(temp.path(), "/clip.mp3").await;
+
+        let matched = serve_with(
+            temp.path(),
+            "/clip.mp3",
+            &[(header::RANGE, "bytes=3-5"), (header::IF_RANGE, &current)],
+        )
+        .await;
+        assert_eq!(matched.status(), StatusCode::PARTIAL_CONTENT);
+
+        let stale = serve_with(
+            temp.path(),
+            "/clip.mp3",
+            &[
+                (header::RANGE, "bytes=3-5"),
+                (header::IF_RANGE, "\"0000000000000000\""),
+            ],
+        )
+        .await;
+        let (status, _, body) = delivered(stale).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "a client holding a stale version must be handed the current one whole"
+        );
+        assert_eq!(body, b"0123456789");
+    }
+
+    /// The client bundle directory is flat, and only that directory is served.
+    ///
+    /// `/__ruvyxa/client/` is the one route that reads from the build output
+    /// rather than from `public/`, and the rule deciding what it may name had
+    /// no test at all. Both callers reach it through `resolve_client_file`, so
+    /// `render_request_cached` and a live request cannot disagree about a path.
+    #[test]
+    fn the_client_bundle_route_serves_one_flat_directory() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let client_dir = temp.path().join("client");
+        std::fs::create_dir_all(client_dir.join("nested")).expect("create");
+        std::fs::write(client_dir.join("entry.abc123.js"), b"//bundle").expect("write");
+        std::fs::write(client_dir.join("nested").join("inner.js"), b"//inner").expect("write");
+        // A real file next to the directory, which is what a traversal is for.
+        std::fs::write(temp.path().join("secret.js"), b"//secret").expect("write");
+
+        assert_eq!(
+            resolve_client_file(&client_dir, "/__ruvyxa/client/entry.abc123.js"),
+            contained_public_asset(&client_dir, &client_dir.join("entry.abc123.js")),
+            "a hashed bundle must still be served"
+        );
+
+        for refused in [
+            // Not this route.
+            "/entry.abc123.js",
+            "/__ruvyxa/entry.abc123.js",
+            "/__ruvyxa/client",
+            // The directory is flat: a separator is never part of a name.
+            "/__ruvyxa/client/",
+            "/__ruvyxa/client/nested/inner.js",
+            "/__ruvyxa/client/nested\\inner.js",
+            // Traversal, in both separator spellings and disguised in a name.
+            "/__ruvyxa/client/../secret.js",
+            "/__ruvyxa/client/..\\secret.js",
+            "/__ruvyxa/client/..",
+            "/__ruvyxa/client/a..b",
+        ] {
+            assert_eq!(
+                resolve_client_file(&client_dir, refused),
+                None,
+                "{refused} must not resolve to a file"
+            );
+        }
+    }
+
+    /// A symlink inside the client directory cannot lead out of it.
+    ///
+    /// The name rules above are about text. This is the case they cannot see:
+    /// every segment is an ordinary name, and only canonicalizing the result
+    /// shows that it left the directory.
+    #[test]
+    fn a_symlinked_client_bundle_cannot_escape_its_directory() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let client_dir = temp.path().join("client");
+        std::fs::create_dir_all(&client_dir).expect("create");
+        std::fs::write(temp.path().join("secret.js"), b"//secret").expect("write");
+
+        if link_file(
+            &temp.path().join("secret.js"),
+            &client_dir.join("escape.js"),
+        )
+        .is_none()
+        {
+            // Windows without the symlink privilege. The rule is unchanged;
+            // this host simply cannot build the case, and CI can.
+            return;
+        }
+
+        assert_eq!(
+            resolve_client_file(&client_dir, "/__ruvyxa/client/escape.js"),
+            None,
+            "a symlinked bundle escaped the client directory"
+        );
+    }
+
+    /// Create `link` pointing at `target`, or report that this host will not.
+    fn link_file(target: &Path, link: &Path) -> Option<()> {
+        #[cfg(unix)]
+        {
+            std::os::unix::fs::symlink(target, link).ok()
+        }
+        #[cfg(windows)]
+        {
+            std::os::windows::fs::symlink_file(target, link).ok()
+        }
+        #[cfg(not(any(unix, windows)))]
+        {
+            let _ = (target, link);
+            None
+        }
     }
 }

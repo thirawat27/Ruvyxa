@@ -32,6 +32,35 @@ describe('generated standalone server', () => {
   })
 
   /**
+   * A `<video>` in a deployed app is served by this program, and by
+   * `ruvyxa start` during development. Without ranges, a seek restarts the
+   * download from zero and a strict player refuses the resource outright — so
+   * a clip that scrubs locally would not scrub after a deploy.
+   *
+   * The parser itself is not asserted here: it is imported from
+   * `serverless-handler.mjs`, and both it and the Rust server answer
+   * `tests/fixtures/byte-range-conformance.json`. What this checks is that this
+   * server reaches for that parser rather than growing a third copy of the rule.
+   */
+  it('answers byte-range requests for static files', () => {
+    assert.ok(
+      generated.includes('parseByteRange'),
+      'ranges must be decided by the shared parser, not reimplemented here',
+    )
+    assert.ok(
+      generated.includes("setHeader('accept-ranges', 'bytes')"),
+      'a resource that answers ranges has to advertise them',
+    )
+    assert.match(generated, /statusCode = 416/, 'an unsatisfiable range is a 416')
+    assert.match(generated, /partial \? 206 : 200/, 'a satisfied range is a 206')
+    assert.match(
+      generated,
+      /createReadStream\(hit\.file, \{ start: partial\.start, end: partial\.end \}\)/,
+      'only the requested bytes may be read; re-reading the file to reach a late seek is the cost ranges exist to avoid',
+    )
+  })
+
+  /**
    * Every container platform stops a deploy by sending SIGTERM and killing the
    * process shortly after. Node's default action is to exit immediately, which
    * drops every response still being written — so a rolling deploy shows users

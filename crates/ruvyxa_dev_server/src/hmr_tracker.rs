@@ -666,6 +666,8 @@ mod tests {
             kind: ruvyxa_graph::RouteKind::Page,
             file: PathBuf::from(file),
             layout_chain: Vec::new(),
+            template_chain: Vec::new(),
+            slots: Vec::new(),
             server_modules: Vec::new(),
             client_modules: Vec::new(),
             runtime: ruvyxa_graph::RuntimeTarget::Node,

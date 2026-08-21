@@ -1480,16 +1480,38 @@ fn resolve_exports_value(
             }
         }
         PackageJsonValue::Object(map) => {
-            let conditions: &[&str] = match target {
-                BundleTarget::Client => &["browser", "import", "module", "default", "require"],
-                BundleTarget::Ssr => &["node", "import", "module", "default", "require"],
-                BundleTarget::Edge => &["worker", "edge-light", "import", "module", "default"],
+            // Node matches conditions in the order the package author wrote
+            // them, and the first supported one wins. `require` is therefore
+            // not in the same pass as the rest: a package that lists it first —
+            //
+            //   "exports": { ".": { "require": "./cjs.js", "import": "./esm.mjs" } }
+            //
+            // handed its CommonJS build to a browser bundle that had an ESM
+            // build sitting right beside it, because author order put `require`
+            // ahead of `import` and both were equally acceptable. Ruvyxa emits
+            // ESM, so `require` is a fallback for packages that ship nothing
+            // else, not a peer of `import`.
+            //
+            // Two passes rather than a reordered list, because reordering would
+            // break author order for the conditions that legitimately compete
+            // (`browser` before `import`, say). Within each pass the author's
+            // order still decides.
+            let (preferred, fallback): (&[&str], &[&str]) = match target {
+                BundleTarget::Client => (&["browser", "import", "module", "default"], &["require"]),
+                BundleTarget::Ssr => (&["node", "import", "module", "default"], &["require"]),
+                BundleTarget::Edge => (
+                    &["worker", "edge-light", "import", "module", "default"],
+                    &[],
+                ),
             };
-            for (condition, value) in map {
-                if conditions.contains(&condition.as_str()) {
-                    let resolved = resolve_exports_value(value, target, wildcard);
-                    if !matches!(resolved, ExportTargets::Unmatched) {
-                        return resolved;
+
+            for conditions in [preferred, fallback] {
+                for (condition, value) in map {
+                    if conditions.contains(&condition.as_str()) {
+                        let resolved = resolve_exports_value(value, target, wildcard);
+                        if !matches!(resolved, ExportTargets::Unmatched) {
+                            return resolved;
+                        }
                     }
                 }
             }
@@ -3126,5 +3148,199 @@ export default function Card() { return <div className={cn("card")} /> }"#,
             panic!("expected second resolution after package.json change");
         };
         assert!(second.ends_with("dist/second.js"));
+    }
+
+    /// One `exports` shape and what it must resolve to.
+    struct ExportsCase {
+        /// What the case asserts, printed when it fails.
+        why: &'static str,
+        manifest: &'static str,
+        /// Files created inside the package, relative to its directory.
+        files: &'static [&'static str],
+        specifier: &'static str,
+        target: BundleTarget,
+        expect: ExpectedResolution,
+    }
+
+    enum ExpectedResolution {
+        EndsWith(&'static str),
+        Blocked,
+        Unavailable,
+    }
+
+    /// `exports` shapes real packages ship, and what each must resolve to.
+    ///
+    /// Written against Node's own rules, then checked case by case against what
+    /// this resolver deliberately does differently — the two intentional
+    /// divergences are pinned here too, so a later change has to argue with a
+    /// test rather than quietly move them.
+    #[test]
+    fn package_exports_resolution_matches_the_documented_rules() {
+        use ExpectedResolution::{Blocked, EndsWith, Unavailable};
+
+        let cases = [
+            ExportsCase {
+                why: "nested conditions resolve inside the matched branch",
+                manifest: r#"{"exports":{".":{"browser":{"import":"./b.mjs","default":"./b.js"},"default":"./n.js"}}}"#,
+                files: &["b.mjs", "b.js", "n.js"],
+                specifier: "pkg",
+                target: BundleTarget::Client,
+                expect: EndsWith("b.mjs"),
+            },
+            ExportsCase {
+                why: "an ESM build beats a CommonJS one listed before it",
+                manifest: r#"{"exports":{".":{"require":"./cjs.js","import":"./esm.mjs"}}}"#,
+                files: &["cjs.js", "esm.mjs"],
+                specifier: "pkg",
+                target: BundleTarget::Client,
+                expect: EndsWith("esm.mjs"),
+            },
+            ExportsCase {
+                why: "require still answers a package that ships nothing else",
+                manifest: r#"{"exports":{".":{"require":"./cjs.js"}}}"#,
+                files: &["cjs.js"],
+                specifier: "pkg",
+                target: BundleTarget::Client,
+                expect: EndsWith("cjs.js"),
+            },
+            ExportsCase {
+                why: "author order still decides between competing conditions",
+                manifest: r#"{"exports":{".":{"browser":"./b.js","import":"./esm.mjs"}}}"#,
+                files: &["b.js", "esm.mjs"],
+                specifier: "pkg",
+                target: BundleTarget::Client,
+                expect: EndsWith("b.js"),
+            },
+            ExportsCase {
+                why: "an explicitly blocked subpath stays blocked",
+                manifest: r#"{"exports":{".":"./index.js","./private":null}}"#,
+                files: &["index.js", "private.js"],
+                specifier: "pkg/private",
+                target: BundleTarget::Client,
+                expect: Blocked,
+            },
+            ExportsCase {
+                why: "a wildcard target blocked by a more specific null",
+                manifest: r#"{"exports":{"./*":"./src/*.js","./internal/*":null}}"#,
+                files: &["src/internal/x.js"],
+                specifier: "pkg/internal/x",
+                target: BundleTarget::Client,
+                expect: Blocked,
+            },
+            ExportsCase {
+                why: "the more specific wildcard wins",
+                manifest: r#"{"exports":{"./*":"./generic/*.js","./deep/*":"./special/*.js"}}"#,
+                files: &["generic/deep/x.js", "special/x.js"],
+                specifier: "pkg/deep/x",
+                target: BundleTarget::Client,
+                expect: EndsWith("special/x.js"),
+            },
+            ExportsCase {
+                why: "a wildcard with a suffix",
+                manifest: r#"{"exports":{"./*.js":"./src/*.js"}}"#,
+                files: &["src/thing.js"],
+                specifier: "pkg/thing.js",
+                target: BundleTarget::Client,
+                expect: EndsWith("src/thing.js"),
+            },
+            ExportsCase {
+                // Node resolves an `exports` target exactly: no extension
+                // search, no directory index. A target naming a file that is
+                // not there is not there.
+                why: "an export target is taken literally",
+                manifest: r#"{"exports":{".":"./src/entry"}}"#,
+                files: &["src/entry.js"],
+                specifier: "pkg",
+                target: BundleTarget::Ssr,
+                expect: Unavailable,
+            },
+            ExportsCase {
+                // Trailing-slash folder mappings were deprecated and then
+                // removed in Node 17. Matching Node means refusing them.
+                why: "a trailing-slash folder mapping is not honoured",
+                manifest: r#"{"exports":{"./lib/":"./src/lib/"}}"#,
+                files: &["src/lib/thing.js"],
+                specifier: "pkg/lib/thing.js",
+                target: BundleTarget::Client,
+                expect: Unavailable,
+            },
+            ExportsCase {
+                // Deliberately more permissive than Node, which raises
+                // ERR_PACKAGE_PATH_NOT_EXPORTED. An omitted subpath falls
+                // through to the legacy fields; only an explicit `null` blocks.
+                why: "an unlisted subpath falls through instead of failing",
+                manifest: r#"{"exports":{".":"./index.js"}}"#,
+                files: &["index.js", "secret.js"],
+                specifier: "pkg/secret",
+                target: BundleTarget::Client,
+                expect: EndsWith("secret.js"),
+            },
+            ExportsCase {
+                why: "module beats main for a browser bundle",
+                manifest: r#"{"main":"./cjs.js","module":"./esm.mjs"}"#,
+                files: &["cjs.js", "esm.mjs"],
+                specifier: "pkg",
+                target: BundleTarget::Client,
+                expect: EndsWith("esm.mjs"),
+            },
+            ExportsCase {
+                why: "the legacy browser field is honoured",
+                manifest: r#"{"main":"./node.js","browser":"./browser.js"}"#,
+                files: &["node.js", "browser.js"],
+                specifier: "pkg",
+                target: BundleTarget::Client,
+                expect: EndsWith("browser.js"),
+            },
+            ExportsCase {
+                why: "main may name a directory with an index",
+                manifest: r#"{"main":"./lib"}"#,
+                files: &["lib/index.js"],
+                specifier: "pkg",
+                target: BundleTarget::Ssr,
+                expect: EndsWith("index.js"),
+            },
+            ExportsCase {
+                why: "a manifest with no entry fields falls back to index",
+                manifest: r#"{"name":"pkg"}"#,
+                files: &["index.js"],
+                specifier: "pkg",
+                target: BundleTarget::Ssr,
+                expect: EndsWith("index.js"),
+            },
+            ExportsCase {
+                why: "an edge bundle falls through to default",
+                manifest: r#"{"exports":{".":{"node":"./node.js","default":"./universal.js"}}}"#,
+                files: &["node.js", "universal.js"],
+                specifier: "pkg",
+                target: BundleTarget::Edge,
+                expect: EndsWith("universal.js"),
+            },
+        ];
+
+        for case in cases {
+            let tmp = tempfile::tempdir().unwrap();
+            let root = tmp.path();
+            let pkg = root.join("node_modules").join("pkg");
+            fs::create_dir_all(&pkg).unwrap();
+            for file in case.files {
+                let path = pkg.join(file);
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(&path, "export default 1;").unwrap();
+            }
+            fs::write(pkg.join("package.json"), case.manifest).unwrap();
+
+            let cache = ResolveGraphCache::new();
+            let got = resolve_package_exports(&cache, root, case.specifier, case.target);
+            let why = case.why;
+            match (case.expect, &got) {
+                (EndsWith(tail), PackageExportsResolution::Resolved(path)) => assert!(
+                    path.to_string_lossy().replace('\\', "/").ends_with(tail),
+                    "{why}: expected a path ending in {tail}, got {path:?}"
+                ),
+                (Blocked, PackageExportsResolution::Blocked) => {}
+                (Unavailable, PackageExportsResolution::Unavailable) => {}
+                _ => panic!("{why}: unexpected resolution {got:?}"),
+            }
+        }
     }
 }

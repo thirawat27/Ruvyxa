@@ -22,7 +22,7 @@
 import { availableParallelism } from 'node:os'
 import { createHash, randomUUID } from 'node:crypto'
 import { once } from 'node:events'
-import { existsSync } from 'node:fs'
+import { existsSync, readdirSync } from 'node:fs'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import path from 'node:path'
@@ -56,11 +56,32 @@ import { cache as serverCache } from '@ruvyxa/core/server'
 // way (`{1,128}` for the length check, a literal `128` for the channel cap),
 // which is the state a rule is in just before it drifts.
 import { actionRealtimeEvent } from './action-runtime.mjs'
-import { clientEntrySource, metaSourceImports, nodeSsrEntrySource } from './entry-templates.mjs'
+import {
+  clientEntrySource,
+  metaSourceImports,
+  nodeSsrEntrySource,
+  wrapperLevels,
+} from './entry-templates.mjs'
 import { WorkerAdmissionController } from './worker-admission.mjs'
 import { CachePressureController, LruCache } from './cache-budget.mjs'
 import { encodeFlightPayload } from './flight.mjs'
 import { compareEntryKeys } from './order.mjs'
+
+/**
+ * Names a page may use to declare its static parameter set, most specific
+ * first.
+ *
+ * `generateStaticParams` is Next.js's name for the same export with the same
+ * contract, and accepting it removes a silent failure: a page brought over
+ * declared its parameters, nothing recognised the name, and the route was
+ * served dynamically with no diagnostic anywhere.
+ *
+ * Held to the same list as `STATIC_PARAMS_EXPORTS` in
+ * `crates/ruvyxa_graph/src/lib.rs`, which decides whether a route *has* static
+ * params; this decides what to call when it does. Recognising a name in one and
+ * not the other is a route that discovers as SSG and then pre-renders nothing.
+ */
+const STATIC_PARAMS_EXPORTS = ['getStaticParams', 'staticParams', 'generateStaticParams']
 
 // --- Configuration ---
 const MAX_BUNDLE_CACHE_ENTRIES = positiveIntegerEnv('RUVYXA_CACHE_MAX_ENTRIES', 256)
@@ -645,6 +666,9 @@ async function handleWarmup(request) {
           const layouts = route.appDir
             ? collectLayouts(route.appDir, path.dirname(route.pageFile))
             : []
+          const templates = route.appDir
+            ? collectTemplates(route.appDir, path.dirname(route.pageFile))
+            : []
           const specials = route.appDir
             ? collectSpecials(route.appDir, path.dirname(route.pageFile))
             : null
@@ -656,6 +680,7 @@ async function handleWarmup(request) {
             layouts,
             route.routePath || '/',
             specials,
+            templates,
           )
           await importModule(outfile, version)
           warmed++
@@ -711,6 +736,8 @@ async function handleSsr(request) {
   await ensureInstrumentation(resolvedRoot)
 
   const layouts = collectLayouts(appDir, path.dirname(pageFile))
+  const templates = collectTemplates(appDir, path.dirname(pageFile))
+  const slots = collectSlots(appDir, path.dirname(pageFile))
   const specials = collectSpecials(appDir, path.dirname(pageFile))
   // The route pattern, not the concrete URL: it keys the client-side route
   // registry, and a per-URL key would make every dynamic request a cache miss.
@@ -720,6 +747,7 @@ async function handleSsr(request) {
     layouts,
     routePath || requestPath,
     specials,
+    { templates, slots },
   )
   const mod = await importRenderModule(outfile, version, pageFile)
   const context = requestContext({
@@ -751,6 +779,8 @@ async function handleFlight(request) {
   await ensureInstrumentation(resolvedRoot)
   ensureReactDeps(resolvedRoot)
   const layouts = collectLayouts(appDir, path.dirname(pageFile))
+  const templates = collectTemplates(appDir, path.dirname(pageFile))
+  const slots = collectSlots(appDir, path.dirname(pageFile))
   const specials = collectSpecials(appDir, path.dirname(pageFile))
   const { outfile, version, inputsVersion, inputs } = await bundleSsrModule(
     resolvedRoot,
@@ -758,6 +788,7 @@ async function handleFlight(request) {
     layouts,
     routePath || requestPath,
     specials,
+    { templates, slots },
   )
   const mod = await importModule(outfile, version)
   const context = requestContext({
@@ -821,6 +852,8 @@ async function handleSsg(request) {
   ensureReactDeps(resolvedRoot)
 
   const layouts = collectLayouts(appDir, path.dirname(pageFile))
+  const templates = collectTemplates(appDir, path.dirname(pageFile))
+  const slots = collectSlots(appDir, path.dirname(pageFile))
   const specials = collectSpecials(appDir, path.dirname(pageFile))
   const { outfile, version, dependencyHash, inputsVersion, inputs } = await bundleSsgModule(
     resolvedRoot,
@@ -829,6 +862,7 @@ async function handleSsg(request) {
     mode || 'full',
     routePath || requestPath,
     specials,
+    { templates, slots },
   )
   const mod = await importRenderModule(
     outfile,
@@ -850,7 +884,7 @@ async function handleStaticParams(request) {
 
   const cacheDir = path.join(resolvedRoot, '.ruvyxa', 'cache', 'ssg')
   await ensureDir(cacheDir)
-  const moduleCode = `export { getStaticParams, staticParams } from ${JSON.stringify(toImportPath(pageFile))}`
+  const moduleCode = `export { ${STATIC_PARAMS_EXPORTS.join(', ')} } from ${JSON.stringify(toImportPath(pageFile))}`
   const hash = createHash('sha256')
     .update(moduleCode)
     .update(pageFile)
@@ -902,10 +936,13 @@ async function handleStaticParams(request) {
     routes,
     route: { path: routePath, segments },
   }
-  const result =
-    typeof mod.getStaticParams === 'function'
-      ? await mod.getStaticParams(context)
-      : mod.staticParams
+  let result
+  for (const name of STATIC_PARAMS_EXPORTS) {
+    const declared = mod[name]
+    if (declared === undefined) continue
+    result = typeof declared === 'function' ? await declared(context) : declared
+    break
+  }
   const normalized = normalizeStaticParams(result, segments)
 
   if (normalized.cacheSeconds !== null) {
@@ -1229,6 +1266,8 @@ async function handleClient(request) {
 
   const resolvedRoot = path.resolve(projectRoot || process.cwd())
   const layouts = collectLayouts(appDir, path.dirname(pageFile))
+  const templates = collectTemplates(appDir, path.dirname(pageFile))
+  const slots = collectSlots(appDir, path.dirname(pageFile))
   const specials = collectSpecials(appDir, path.dirname(pageFile))
   const { outfile, inputsVersion, inputs } = await bundleClientModule(
     resolvedRoot,
@@ -1238,6 +1277,7 @@ async function handleClient(request) {
     JSON.stringify(params || {}),
     routePath || requestPath,
     specials,
+    { templates, slots },
   )
   const script = await readFile(outfile, 'utf8')
 
@@ -1356,21 +1396,116 @@ function dropModuleCacheEntries(cacheKey, outfile) {
 
 // --- Shared Utilities ---
 function collectLayouts(appDir, routeDir) {
-  const layouts = []
+  return collectNested(appDir, routeDir, 'layout.tsx')
+}
+
+/**
+ * `template.tsx` files from the app root down to the route, root first.
+ *
+ * Discovered here rather than carried in the worker request for the same reason
+ * layouts are: this host already walks the directory chain, and a second source
+ * of truth is a second thing to keep level with
+ * `template_chain()` in `crates/ruvyxa_graph/src/lib.rs`.
+ */
+function collectTemplates(appDir, routeDir) {
+  return collectNested(appDir, routeDir, 'template.tsx')
+}
+
+/** Files named `fileName` on the path from the app root to `routeDir`, root first. */
+function collectNested(appDir, routeDir, fileName) {
+  const found = []
   let current = appDir
 
-  pushIfExists(layouts, path.join(current, 'layout.tsx'))
+  pushIfExists(found, path.join(current, fileName))
 
   const relative = path.relative(appDir, routeDir)
   if (relative && !relative.startsWith('..')) {
     for (const segment of relative.split(path.sep)) {
       if (!segment) continue
       current = path.join(current, segment)
-      pushIfExists(layouts, path.join(current, 'layout.tsx'))
+      pushIfExists(found, path.join(current, fileName))
     }
   }
 
-  return layouts
+  return found
+}
+
+/**
+ * Import statements and composition levels for a route's layouts and templates.
+ *
+ * The two interleave by directory, so building the identifiers and the levels
+ * together is what keeps `Layout0`/`Template0` pointing at the files
+ * `wrapperLevels()` names.
+ */
+function wrapperEntryParts(layouts, templates, slots = []) {
+  const imports = []
+  const layoutNames = []
+  layouts.forEach((file, index) => {
+    imports.push(`import Layout${index} from ${JSON.stringify(toImportPath(file))}`)
+    layoutNames.push(`Layout${index}`)
+  })
+  templates.forEach((file, index) => {
+    imports.push(`import Template${index} from ${JSON.stringify(toImportPath(file))}`)
+  })
+  slots.forEach((slot, index) => {
+    imports.push(`import Slot${index} from ${JSON.stringify(toImportPath(slot.file))}`)
+  })
+  return { imports, layoutNames, levels: wrapperLevels(layouts, templates, slots) }
+}
+
+/**
+ * Parallel-route slots in scope for a route, level order then name order.
+ *
+ * Walks the same directory chain the layout and template chains do, and at each
+ * level resolves every `@name` folder against the route's remaining segments: a
+ * page inside the slot for that sub-path, else the slot's `default.tsx`, else
+ * nothing at all. Mirrors `route_slots()` in `crates/ruvyxa_graph/src/lib.rs`,
+ * which decides the same thing for the Rust bundler — a slot one host composes
+ * and the other does not is a panel that appears under `ruvyxa build` and
+ * vanishes under `ruvyxa dev`.
+ */
+function collectSlots(appDir, routeDir) {
+  const relative = path.relative(appDir, routeDir)
+  if (relative.startsWith('..')) return []
+  const segments = relative ? relative.split(path.sep).filter(Boolean) : []
+
+  const slots = []
+  let level = appDir
+  for (let depth = 0; depth <= segments.length; depth += 1) {
+    if (depth > 0) level = path.join(level, segments[depth - 1])
+    const remaining = segments.slice(depth)
+    let names
+    try {
+      names = readdirSync(level, { withFileTypes: true })
+        .filter(
+          (entry) => entry.isDirectory() && entry.name.startsWith('@') && entry.name.length > 1,
+        )
+        .map((entry) => entry.name.slice(1))
+        .sort()
+    } catch {
+      continue
+    }
+    for (const name of names) {
+      const slotDir = path.join(level, `@${name}`)
+      const file = slotPageFor(slotDir, remaining)
+      if (file) slots.push({ level, name, file })
+    }
+  }
+  return slots
+}
+
+/** The file a slot renders for the remaining URL segments, or null. */
+function slotPageFor(slotDir, remaining) {
+  const target = path.join(slotDir, ...remaining)
+  for (const name of ['page.tsx', 'page.jsx', 'page.md', 'page.mdx']) {
+    const candidate = path.join(target, name)
+    if (existsSync(candidate)) return candidate
+  }
+  for (const name of ['default.tsx', 'default.jsx']) {
+    const candidate = path.join(slotDir, name)
+    if (existsSync(candidate)) return candidate
+  }
+  return null
 }
 
 function pushIfExists(collection, file) {
@@ -1406,17 +1541,25 @@ function specialEntryParts(specials) {
 // token. Identical output keeps the same token, so no new module URL is
 // registered; changed output produces a new token and a genuine reload.
 
-async function bundleSsrModule(projectRoot, pageFile, layouts, routePath = '/', specials = null) {
+async function bundleSsrModule(
+  projectRoot,
+  pageFile,
+  layouts,
+  routePath = '/',
+  specials = null,
+  nested = {},
+) {
+  const { templates = [], slots = [] } = nested
   const cacheDir = path.join(projectRoot, '.ruvyxa', 'cache', 'ssr')
   await ensureDir(cacheDir)
 
   const imports = [`import Page, * as PageModule from ${JSON.stringify(toImportPath(pageFile))}`]
-  const wrappers = []
-
-  layouts.forEach((layoutFile, index) => {
-    imports.push(`import Layout${index} from ${JSON.stringify(toImportPath(layoutFile))}`)
-    wrappers.push(`Layout${index}`)
-  })
+  const {
+    imports: wrapperImports,
+    layoutNames: wrappers,
+    levels,
+  } = wrapperEntryParts(layouts, templates, slots)
+  imports.push(...wrapperImports)
 
   const { imports: specialImports, names } = specialEntryParts(specials)
   imports.push(...specialImports)
@@ -1431,6 +1574,7 @@ async function bundleSsrModule(projectRoot, pageFile, layouts, routePath = '/', 
     pageName: 'Page',
     pageModuleName: 'PageModule',
     layoutNames: wrappers,
+    levels,
     routePath,
     readyEvent: 'onAllReady',
     tolerateStreamErrors: true,
@@ -1580,17 +1724,19 @@ async function bundleClientModule(
   paramsJson,
   routePath = requestPath,
   specials = null,
+  nested = {},
 ) {
+  const { templates = [], slots = [] } = nested
   const cacheDir = path.join(projectRoot, '.ruvyxa', 'cache', 'client')
   await ensureDir(cacheDir)
 
   const imports = [`import Page from ${JSON.stringify(toImportPath(pageFile))}`]
-  const wrappers = []
-
-  layouts.forEach((layoutFile, index) => {
-    imports.push(`import Layout${index} from ${JSON.stringify(toImportPath(layoutFile))}`)
-    wrappers.push(`Layout${index}`)
-  })
+  const {
+    imports: wrapperImports,
+    layoutNames: wrappers,
+    levels,
+  } = wrapperEntryParts(layouts, templates, slots)
+  imports.push(...wrapperImports)
 
   const { imports: specialImports, names } = specialEntryParts(specials)
   imports.push(...specialImports)
@@ -1604,6 +1750,7 @@ async function bundleClientModule(
     imports,
     pageName: 'Page',
     layoutNames: wrappers,
+    levels,
     routePath,
     requestPathLiteral: JSON.stringify(requestPath),
     paramsLiteral: paramsJson,
@@ -1662,17 +1809,19 @@ async function bundleSsgModule(
   mode,
   routePath = '/',
   specials = null,
+  nested = {},
 ) {
+  const { templates = [], slots = [] } = nested
   const cacheDir = path.join(projectRoot, '.ruvyxa', 'cache', 'ssg')
   await ensureDir(cacheDir)
 
   const imports = [`import Page from ${JSON.stringify(toImportPath(pageFile))}`]
-  const wrappers = []
-
-  layouts.forEach((layoutFile, index) => {
-    imports.push(`import Layout${index} from ${JSON.stringify(toImportPath(layoutFile))}`)
-    wrappers.push(`Layout${index}`)
-  })
+  const {
+    imports: wrapperImports,
+    layoutNames: wrappers,
+    levels,
+  } = wrapperEntryParts(layouts, templates, slots)
+  imports.push(...wrapperImports)
 
   const { imports: specialImports, names } = specialEntryParts(specials)
   imports.push(...specialImports)
@@ -1686,6 +1835,7 @@ async function bundleSsgModule(
     imports,
     pageName: 'Page',
     layoutNames: wrappers,
+    levels,
     routePath,
     // A partial prerender commits the static shell as soon as it is ready and
     // lets the dynamic slots stream in behind their Suspense boundaries.

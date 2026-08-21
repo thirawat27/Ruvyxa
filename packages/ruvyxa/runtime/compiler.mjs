@@ -237,7 +237,6 @@ export function cacheFileName(parts, extension) {
   return `${hash.digest('hex').slice(0, 16)}.${extension}`
 }
 
-/** Match one leading module directive after BOM, whitespace, and comments. */
 /**
  * Whether a `process.env.NAME` read must not reach a browser bundle.
  *
@@ -256,6 +255,7 @@ export function envReadIsPrivate(name) {
   return name !== 'NODE_ENV' && !name.startsWith('RUVYXA_PUBLIC_')
 }
 
+/** Match one leading module directive after a BOM, whitespace, and comments. */
 export function hasModuleDirective(source, expected) {
   let index = source.charCodeAt(0) === 0xfeff ? 1 : 0
   while (index < source.length) {
@@ -277,6 +277,53 @@ export function hasModuleDirective(source, expected) {
   if (quote !== '"' && quote !== "'") return false
   const end = source.indexOf(quote, index + 1)
   return end !== -1 && source.slice(index + 1, end) === expected
+}
+
+/**
+ * The lane a module belongs to: `client`, `server`, `action`, or `shared`.
+ *
+ * `declared_lane` in `crates/ruvyxa_bundler/src/references.rs` decides the same
+ * thing, and both replay `tests/fixtures/module-lane-conformance.json`. They had
+ * disagreed: the Rust bundler read the leading directive and then the file stem,
+ * while this graph matched the single literal filename `server.ts`. So
+ * `server.js` — the other half of the documented convention — every action
+ * module, and every `'use server'` module were compiled into the browser bundle
+ * under `ruvyxa dev` and refused by `ruvyxa build` with RUV1820. Server-only
+ * source reached a browser during development and the error arrived only at the
+ * end.
+ *
+ * The directive outranks the stem: a `server.ts` opening with `'use client'` is
+ * a client module that happens to be named server.
+ *
+ * The stem rule is a **project** convention and applies to project files only.
+ * `react-dom/server.js` is a package entry point that a browser bundle may
+ * legitimately contain, and reading the convention into `node_modules` refused
+ * it. A directive still counts wherever it appears: a dependency that declares
+ * `'use server'` means it.
+ *
+ * @param {string} filePath Absolute path of the module.
+ * @param {string} source Module source, before transformation.
+ * @returns {'client' | 'server' | 'action' | 'shared'} The module's lane.
+ * @public
+ */
+export function moduleLane(filePath, source) {
+  if (hasModuleDirective(source, 'use client')) return 'client'
+  if (hasModuleDirective(source, 'use server')) return 'action'
+  if (isInstalledDependency(filePath)) return 'shared'
+  // The stem, not the extension: the convention is a filename, and a project
+  // writes it in whichever language it uses. `server.d.ts` has the stem
+  // `server.d` and is a declaration file, not a server module.
+  const base = path.basename(filePath)
+  const stem = base.slice(0, base.length - path.extname(base).length)
+  if (stem === 'client') return 'client'
+  if (stem === 'server') return 'server'
+  if (stem === 'action' || stem === 'actions') return 'action'
+  return 'shared'
+}
+
+/** Whether a path lives inside an installed package rather than project source. */
+function isInstalledDependency(filePath) {
+  return filePath.split(/[\\/]/).includes('node_modules')
 }
 
 function projectInputPaths(root, modules, configurationFiles = []) {
@@ -949,8 +996,15 @@ function rewriteExport(line, module, exported, reExportAll) {
     return line.replace(/^export\s+/, '')
   }
 
-  if (/^export\s+(async\s+)?function\s+/.test(line)) {
-    const name = line.match(/^export\s+(?:async\s+)?function\s+([A-Za-z_$][\w$]*)/)?.[1]
+  // `\s*\*?\s*` rather than `\s+`: a generator's `*` binds to the keyword, so
+  // `export function* stream()` and `export async function* stream()` matched
+  // nothing here and fell through with their `export` intact. Node then parsed
+  // the wrapped module and reported `RUV1700 Unexpected token 'export'` from
+  // inside generated code. `declared_lane`'s neighbour in
+  // `crates/ruvyxa_bundler/src/linker.rs` had the same blind spot, written as a
+  // list of prefixes with trailing spaces — one bug, once per module graph.
+  if (/^export\s+(?:async\s+)?function\s*\*?\s*[A-Za-z_$]/.test(line)) {
+    const name = line.match(/^export\s+(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)/)?.[1]
     if (name) exported.push(`__exports.${name} = ${name};`)
     return line.replace(/^export\s+/, '')
   }
@@ -2085,15 +2139,25 @@ function normalizeJsxRuntime(value) {
   throw new Error(`RUV1804 JSX runtime must be \`classic\` or \`automatic\`, got \`${value}\``)
 }
 
+/**
+ * Reject a module that must not be in a browser bundle.
+ *
+ * Every module this graph compiles on the browser platform is already inside a
+ * client boundary's dependency closure, so the module's own lane is the whole
+ * question — the Rust bundler reaches the same answer by walking that closure
+ * from the other end and rejecting the crossing into it.
+ */
 function checkClientBoundary(root, filePath, source) {
   if (!filePath) return
   const normalized = path.relative(root, filePath).replaceAll('\\', '/')
-  if (
-    normalized === 'server.ts' ||
-    normalized.startsWith('server/') ||
-    normalized.endsWith('/server.ts')
-  ) {
+  if (normalized.startsWith('server/')) {
     throw new Error(`RUV1007: Server-only file imported into client bundle: ${filePath}`)
+  }
+  const lane = moduleLane(filePath, source)
+  if (lane === 'server' || lane === 'action') {
+    throw new Error(
+      `RUV1007: ${lane === 'server' ? 'Server-only' : 'Server action'} module imported into client bundle: ${filePath}`,
+    )
   }
   if (extractSpecifiers(source).some(isServerOnlySpecifier)) {
     throw new Error(`RUV1007: Server-only module imported into client bundle: ${filePath}`)

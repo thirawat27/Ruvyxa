@@ -117,86 +117,142 @@ fn dfs_detect_cycle(
 /// Detects circular dependencies first; returns
 /// [`BundleError::CircularDependency`] if a cycle is found.
 pub fn link(modules: &[CompiledModule], input: &BundleInput) -> Result<String> {
-    detect_cycles(modules)?;
-    link_inner(modules, input, &BTreeMap::new(), &BTreeSet::new())
+    Ok(link_with_origins(modules, input, &BTreeMap::new(), &BTreeSet::new())?.code)
 }
 
-/// Inner link implementation — does NOT check for cycles.
-/// Called by `link` and `link_parallel` after cycle detection.
-fn link_inner(
-    modules: &[CompiledModule],
-    input: &BundleInput,
+/// Where one line of linked output came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct LineOrigin {
+    /// Index into [`LinkedBundle::modules`].
+    pub(crate) module: u32,
+    /// 0-based line in that module's compiled source.
+    pub(crate) line: u32,
+}
+
+/// Linked output together with the provenance of every line in it.
+///
+/// The source map has to know which module each generated line came from and
+/// which line of that module it was. Deriving that from the emit format — how
+/// many lines the header takes, how many the per-module preamble adds — is what
+/// the bundler used to do, with three constants, and it could not have been
+/// right: the external-import block above the header has no fixed length, the
+/// preamble is longer than the constant said, and `rewrite_module_into` can
+/// write more lines than it reads. Recording the positions while the text is
+/// being built is the only way they are exact.
+pub(crate) struct LinkedBundle {
+    pub(crate) code: String,
+    /// Modules in emit order.
+    pub(crate) modules: Vec<PathBuf>,
+    /// One entry per line of `code`; `None` for lines the linker wrote itself.
+    pub(crate) line_origins: Vec<Option<LineOrigin>>,
+}
+
+/// One module's IIFE, with the provenance of each of its lines.
+struct ModuleSegment {
+    text: String,
+    origins: Vec<Option<u32>>,
+}
+
+/// Lines held by a buffer every writer newline-terminates.
+fn count_lines(text: &str) -> usize {
+    text.bytes().filter(|byte| *byte == b'\n').count()
+}
+
+/// Emit one module's IIFE.
+///
+/// The wrapper was written out twice, byte for byte, once in the sequential
+/// path and once in the parallel one. The source map reads its shape, so a
+/// third reader of the same format is precisely what this file did not need.
+fn write_module_segment(
+    module: &CompiledModule,
     dynamic_import_files: &BTreeMap<PathBuf, String>,
+) -> Result<ModuleSegment> {
+    let id = module_id(&module.path);
+    let label = module.path.to_string_lossy().into_owned();
+    let mut text = String::with_capacity(module.js.len() + 200);
+
+    text.push_str("// \u{2500}\u{2500} ");
+    text.push_str(&label);
+    text.push_str(" \u{2500}\u{2500}\n");
+    text.push_str("var ");
+    text.push_str(&id);
+    text.push_str(" = (function() {\n");
+    text.push_str("  \"use strict\";\n");
+    text.push_str("  var __exports = {};\n");
+    text.push_str("  var module = { exports: __exports };\n");
+    text.push_str("  var exports = module.exports;\n");
+    text.push_str("  var process = globalThis.process || { env: { NODE_ENV: \"production\" } };\n");
+
+    let mut origins = vec![None; count_lines(&text)];
+    origins.extend(rewrite_module_into(
+        &module.js,
+        &DepIndex::new(&module.deps, &module.dependency_aliases),
+        dynamic_import_files,
+        &mut text,
+        true,
+        true,
+        &label,
+    )?);
+
+    text.push_str("  return module.exports;\n");
+    text.push_str("})();\n\n");
+    origins.resize(count_lines(&text), None);
+    Ok(ModuleSegment { text, origins })
+}
+
+/// Assemble the header, the module segments, and the target's footer.
+fn assemble_linked(
+    project_modules: &[&CompiledModule],
+    segments: &[ModuleSegment],
+    input: &BundleInput,
     shared_modules: &BTreeSet<PathBuf>,
-) -> Result<String> {
-    let project_modules = ordered_project_modules(modules);
-
-    // Pre-calculate output capacity to avoid reallocations.
-    // Each module contributes: its JS source + ~200 bytes of wrapper overhead.
-    let estimated_size: usize = project_modules
+) -> LinkedBundle {
+    let estimated = segments
         .iter()
-        .map(|m| m.js.len() + 200)
+        .map(|segment| segment.text.len())
         .sum::<usize>()
-        + 64; // header
+        + 256;
+    let mut code = String::with_capacity(estimated);
 
-    let mut out = String::with_capacity(estimated_size);
-
-    let external_imports = collect_external_imports(&project_modules, input.target);
-    for import in external_imports {
-        out.push_str(&import);
-        out.push('\n');
+    let external_imports = collect_external_imports(project_modules, input.target);
+    for import in &external_imports {
+        code.push_str(import);
+        code.push('\n');
     }
-    if !out.is_empty() {
-        out.push('\n');
+    if !external_imports.is_empty() {
+        code.push('\n');
     }
+    code.push_str("// Generated by ruvyxa_bundler \u{2014} do not edit\n");
+    code.push_str("\"use strict\";\n\n");
+    write_shared_module_bindings(&mut code, shared_modules);
 
-    // Header comment
-    out.push_str("// Generated by ruvyxa_bundler \u{2014} do not edit\n");
-    out.push_str("\"use strict\";\n\n");
-
-    write_shared_module_bindings(&mut out, shared_modules);
-
-    for module in &project_modules {
-        let id = module_id(&module.path);
-        let label = module.path.to_string_lossy().into_owned();
-
-        out.push_str("// \u{2500}\u{2500} ");
-        out.push_str(&label);
-        out.push_str(" \u{2500}\u{2500}\n");
-
-        out.push_str("var ");
-        out.push_str(&id);
-        out.push_str(" = (function() {\n");
-        out.push_str("  \"use strict\";\n");
-        out.push_str("  var __exports = {};\n");
-        out.push_str("  var module = { exports: __exports };\n");
-        out.push_str("  var exports = module.exports;\n");
-        out.push_str(
-            "  var process = globalThis.process || { env: { NODE_ENV: \"production\" } };\n",
-        );
-
-        rewrite_module_into(
-            &module.js,
-            &DepIndex::new(&module.deps, &module.dependency_aliases),
-            dynamic_import_files,
-            &mut out,
-            true,
-            true,
-            &label,
-        )?;
-
-        out.push_str("  return module.exports;\n");
-        out.push_str("})();\n\n");
+    let mut line_origins: Vec<Option<LineOrigin>> = vec![None; count_lines(&code)];
+    for (index, segment) in segments.iter().enumerate() {
+        code.push_str(&segment.text);
+        line_origins.extend(segment.origins.iter().map(|origin| {
+            origin.map(|line| LineOrigin {
+                module: index as u32,
+                line,
+            })
+        }));
     }
 
     if matches!(input.target, BundleTarget::Ssr | BundleTarget::Edge) {
         let entry_id = module_id(&PathBuf::from("ruvyxa:bundle-entry.tsx"));
-        out.push_str("export const render = ");
-        out.push_str(&entry_id);
-        out.push_str(".render;\n");
+        code.push_str("export const render = ");
+        code.push_str(&entry_id);
+        code.push_str(".render;\n");
     }
+    line_origins.resize(count_lines(&code), None);
 
-    Ok(out)
+    LinkedBundle {
+        code,
+        modules: project_modules
+            .iter()
+            .map(|module| module.path.clone())
+            .collect(),
+        line_origins,
+    }
 }
 
 /// Link modules using parallel import/export rewriting.
@@ -236,96 +292,48 @@ pub(crate) fn link_parallel_with_dynamic_imports_and_shared_modules(
     dynamic_import_files: &BTreeMap<PathBuf, String>,
     shared_modules: &BTreeSet<PathBuf>,
 ) -> Result<String> {
+    Ok(link_with_origins(modules, input, dynamic_import_files, shared_modules)?.code)
+}
+
+/// Link a route graph and report where every emitted line came from.
+///
+/// Segment building is the parallel half — each module's IIFE body is
+/// independent, and the rewrite only references `module_id(dep)`, which is
+/// deterministic. Assembly is sequential because the output order is the whole
+/// point. Below a small graph size rayon costs more than it saves, so the same
+/// writer runs in a plain loop; the two paths produce identical bytes because
+/// they are now the same code, which they were not when the wrapper was
+/// written out twice.
+pub(crate) fn link_with_origins(
+    modules: &[CompiledModule],
+    input: &BundleInput,
+    dynamic_import_files: &BTreeMap<PathBuf, String>,
+    shared_modules: &BTreeSet<PathBuf>,
+) -> Result<LinkedBundle> {
     // Cycle detection runs regardless of graph size — cheap O(V+E) DFS.
     detect_cycles(modules)?;
 
     let project_modules = ordered_project_modules(modules);
+    const PARALLEL_SEGMENT_THRESHOLD: usize = 8;
 
-    // For small graphs, sequential is faster (avoids rayon overhead).
-    // Note: we already detected cycles above so pass directly to `link` internals.
-    if project_modules.len() < 8 {
-        return link_inner(modules, input, dynamic_import_files, shared_modules);
-    }
+    let segments: Vec<ModuleSegment> = if project_modules.len() < PARALLEL_SEGMENT_THRESHOLD {
+        project_modules
+            .iter()
+            .map(|module| write_module_segment(module, dynamic_import_files))
+            .collect::<Result<_>>()?
+    } else {
+        project_modules
+            .par_iter()
+            .map(|module| write_module_segment(module, dynamic_import_files))
+            .collect::<Result<_>>()?
+    };
 
-    // Phase 1: Compute external imports (sequential — cheap BTreeSet scan).
-    let external_imports = collect_external_imports(&project_modules, input.target);
-
-    // Phase 2: Parallel rewrite — each module's IIFE body is independent.
-    // The rewrite only references `module_id(dep)` which is deterministic.
-    let rewritten_segments: Vec<String> = project_modules
-        .par_iter()
-        .map(|module| {
-            let id = module_id(&module.path);
-            let label = module.path.to_string_lossy().into_owned();
-
-            // Pre-size the segment buffer.
-            let mut segment = String::with_capacity(module.js.len() + 200);
-
-            segment.push_str("// \u{2500}\u{2500} ");
-            segment.push_str(&label);
-            segment.push_str(" \u{2500}\u{2500}\n");
-
-            segment.push_str("var ");
-            segment.push_str(&id);
-            segment.push_str(" = (function() {\n");
-            segment.push_str("  \"use strict\";\n");
-            segment.push_str("  var __exports = {};\n");
-            segment.push_str("  var module = { exports: __exports };\n");
-            segment.push_str("  var exports = module.exports;\n");
-            segment.push_str(
-                "  var process = globalThis.process || { env: { NODE_ENV: \"production\" } };\n",
-            );
-
-            rewrite_module_into(
-                &module.js,
-                &DepIndex::new(&module.deps, &module.dependency_aliases),
-                dynamic_import_files,
-                &mut segment,
-                true,
-                true,
-                &label,
-            )?;
-
-            segment.push_str("  return module.exports;\n");
-            segment.push_str("})();\n\n");
-
-            Ok(segment)
-        })
-        .collect::<Result<_>>()?;
-
-    // Phase 3: Assemble the final output from segments (sequential concat).
-    let total_size: usize = external_imports.iter().map(|s| s.len() + 1).sum::<usize>()
-        + 64
-        + rewritten_segments.iter().map(|s| s.len()).sum::<usize>()
-        + 64;
-
-    let mut out = String::with_capacity(total_size);
-
-    for import in &external_imports {
-        out.push_str(import);
-        out.push('\n');
-    }
-    if !external_imports.is_empty() {
-        out.push('\n');
-    }
-
-    out.push_str("// Generated by ruvyxa_bundler \u{2014} do not edit\n");
-    out.push_str("\"use strict\";\n\n");
-
-    write_shared_module_bindings(&mut out, shared_modules);
-
-    for segment in &rewritten_segments {
-        out.push_str(segment);
-    }
-
-    if matches!(input.target, BundleTarget::Ssr | BundleTarget::Edge) {
-        let entry_id = module_id(&PathBuf::from("ruvyxa:bundle-entry.tsx"));
-        out.push_str("export const render = ");
-        out.push_str(&entry_id);
-        out.push_str(".render;\n");
-    }
-
-    Ok(out)
+    Ok(assemble_linked(
+        &project_modules,
+        &segments,
+        input,
+        shared_modules,
+    ))
 }
 
 /// Link project-local modules into an executable registry used by route
@@ -474,11 +482,19 @@ pub fn module_id(path: &Path) -> String {
 // Import/Export rewriting engine
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Rewrite all import/export statements in a module's source.
+/// Rewrite all import/export statements in a module's source into `out`, and
+/// report where each written line came from.
 ///
 /// - Project-local imports → namespace variable references
 /// - Exports → `__exports.name = …` assignments
 /// - External imports (not in deps) → left as-is (handled by the runtime)
+///
+/// The returned vector has one entry per line written: `Some(n)` for a line
+/// produced from line `n` of `source`, `None` for a line this function added.
+/// It is counted rather than assumed, because a rewrite is not always one line
+/// in and one line out — the namespace marker goes in front, deferred export
+/// assignments go at the end, and a rewriter may return text containing a
+/// newline of its own.
 fn rewrite_module_into(
     source: &str,
     deps: &DepIndex<'_>,
@@ -487,7 +503,7 @@ fn rewrite_module_into(
     indent: bool,
     drop_external_imports: bool,
     importer: &str,
-) -> Result<()> {
+) -> Result<Vec<Option<u32>>> {
     let mut pending_exports = Vec::new();
     let mut in_block_comment = false;
     let mut in_commonjs_block_comment = false;
@@ -496,12 +512,13 @@ fn rewrite_module_into(
     // Built separately from `out` so the whole rewritten body can be checked
     // before any of it is committed to the bundle.
     let body = &mut String::with_capacity(source.len() + 64);
+    let mut origins: Vec<Option<u32>> = Vec::new();
 
     if declares_esm_syntax(source, &module_ast) {
-        write_rewritten_line(body, ESM_NAMESPACE_MARKER, indent);
+        write_tracked_line(body, ESM_NAMESPACE_MARKER, indent, &mut origins, None);
     }
 
-    for (line, statement_start) in lines_with_statement_offsets(source) {
+    for (index, (line, statement_start)) in lines_with_statement_offsets(source).enumerate() {
         let trimmed = line.trim();
 
         // A line whose first non-whitespace byte sits inside a string,
@@ -543,16 +560,39 @@ fn rewrite_module_into(
             drop_external_imports,
             importer,
         );
-        write_rewritten_line(body, &commonjs_rewritten, indent);
+        write_tracked_line(
+            body,
+            &commonjs_rewritten,
+            indent,
+            &mut origins,
+            Some(index as u32),
+        );
     }
 
     for assignment in pending_exports {
-        write_rewritten_line(body, &assignment, indent);
+        write_tracked_line(body, &assignment, indent, &mut origins, None);
     }
 
     reject_surviving_esm(body, importer)?;
     out.push_str(body);
-    Ok(())
+    Ok(origins)
+}
+
+/// Write one rewritten line and record which source line produced it.
+///
+/// `write_rewritten_line` appends `content` plus a newline, so the lines it
+/// adds are one more than the newlines `content` already carries — including
+/// the empty-content case, which still ends a line.
+fn write_tracked_line(
+    body: &mut String,
+    content: &str,
+    indent: bool,
+    origins: &mut Vec<Option<u32>>,
+    origin: Option<u32>,
+) {
+    let added = 1 + content.matches('\n').count();
+    write_rewritten_line(body, content, indent);
+    origins.resize(origins.len() + added, origin);
 }
 
 /// Fail when an ESM statement survived rewriting into the module body.
@@ -583,6 +623,27 @@ fn reject_surviving_esm(body: &str, module_path: &str) -> Result<()> {
             .get(after)
             .is_none_or(|byte| !is_linker_identifier_byte(*byte));
         if !starts_token || !ends_token {
+            continue;
+        }
+        // A reserved word is still a legal property name, and neither position
+        // can begin a statement:
+        //
+        //   const conditions = { import: "./index.mjs", export: "./index.js" }
+        //   const entry = conditions.import
+        //
+        // Both are ordinary code the rewriter correctly left alone, and both
+        // used to fail the build here — this guard asked only whether the word
+        // appeared as a token anywhere, so it was strictly broader than the
+        // rewriter it was checking. A package.json `exports` conditions object
+        // written inline is exactly that shape.
+        let preceding = masked[..offset]
+            .bytes()
+            .rev()
+            .find(|byte| !byte.is_ascii_whitespace());
+        let following = masked[after..]
+            .bytes()
+            .find(|byte| !byte.is_ascii_whitespace());
+        if preceding == Some(b'.') || following == Some(b':') {
             continue;
         }
         // `import(…)` and `import.meta` are expressions and are legal here.
@@ -1319,7 +1380,12 @@ fn try_rewrite_export_statement(line: &str, deps: &DepIndex<'_>) -> Option<Rewri
     }
 
     // `export { a, b } from "./mod"` — re-export from another module
-    if line.contains(" from ") {
+    //
+    // Asked of the code, not of the text: a quoted ` from ` used to send an
+    // ordinary `export const` down this branch, which returns `None` on every
+    // path that is not a resolvable re-export and so never falls through to the
+    // declaration branch below. See `code_from_keyword`.
+    if code_from_keyword(line).is_some() {
         let (before_from, specifier) = split_from_specifier(line)?;
         let dep_path = deps.resolve(&specifier)?;
         let dep_id = module_id(dep_path);
@@ -1387,11 +1453,16 @@ fn try_rewrite_export_statement(line: &str, deps: &DepIndex<'_>) -> Option<Rewri
         return Some(Rewrite::Inline(decl.to_string()));
     }
 
-    // `export function name(…)` / `export class name`
-    if line.starts_with("export function ")
-        || line.starts_with("export class ")
-        || line.starts_with("export async function ")
-    {
+    // `export function name(…)` / `export class name` / `export function* gen(…)`
+    //
+    // Matched against the same forms `extract_declaration_name` decodes, rather
+    // than against a list of literal prefixes. The list had a trailing space in
+    // every entry, so a generator — `export function* stream()`, where `*`
+    // follows the keyword with no space — matched nothing and fell through to
+    // the end of this function. `extract_declaration_name` had known about
+    // `function* ` all along; only the dispatcher above it did not, so the
+    // `export` survived the link and `RUV1612` failed the build.
+    if is_exported_declaration(line) {
         let decl = line.strip_prefix("export ").unwrap_or(line);
         let name = extract_declaration_name(decl);
         if let Some(name) = name {
@@ -1404,7 +1475,11 @@ fn try_rewrite_export_statement(line: &str, deps: &DepIndex<'_>) -> Option<Rewri
     }
 
     // `export { a, b }` — named exports from current module (no `from`)
-    if line.starts_with("export {") && !line.contains(" from ") {
+    //
+    // Unreachable with a `from` today, because the branch above claims those
+    // first; asked of the code anyway so the two questions cannot answer
+    // differently if that order ever changes.
+    if line.starts_with("export {") && code_from_keyword(line).is_none() {
         let clause = line.strip_prefix("export ")?.trim().trim_end_matches(';');
         let names = parse_named_bindings(clause);
         let assignments: Vec<String> = names
@@ -1587,8 +1662,25 @@ fn parse_named_bindings(clause: &str) -> Vec<(String, String)> {
 
 /// Split a line at `from "specifier"` or `from 'specifier'`.
 /// Returns (everything before "from", the specifier string).
+/// Byte offset of the ESM `from` keyword on this line, if it has one.
+///
+/// Searched over [`crate::ast::masked_code`] rather than the raw line, because
+/// ` from ` is ordinary English and appears in strings people write:
+/// `export const note = "copied from here"` used to be read as a re-export.
+/// `try_rewrite_export_statement` then took the re-export branch, found no
+/// specifier, and returned `None` without ever reaching the declaration branch
+/// below it — so the `export` survived the link and `RUV1612` failed the whole
+/// build, with a message about minified dependencies that named nothing the
+/// author had written.
+///
+/// Masking preserves byte offsets, so the returned index addresses the original
+/// line.
+fn code_from_keyword(line: &str) -> Option<usize> {
+    crate::ast::masked_code(line).rfind(" from ")
+}
+
 fn split_from_specifier(line: &str) -> Option<(String, String)> {
-    let from_idx = line.rfind(" from ")?;
+    let from_idx = code_from_keyword(line)?;
     let before = line[..from_idx].to_string();
     let after = line[from_idx + 6..].trim();
 
@@ -1782,6 +1874,25 @@ pub(crate) fn find_dep_for_specifier<'a>(
 }
 
 /// Extract the declared name from `function Name(…)` or `class Name …`.
+/// Whether the line is `export` followed by a named function or class.
+///
+/// Kept beside [`extract_declaration_name`] and accepting exactly what it
+/// decodes: a generator's `*` binds to the keyword with no space, so a prefix
+/// list written with trailing spaces silently excluded every generator export.
+fn is_exported_declaration(line: &str) -> bool {
+    let Some(decl) = line.strip_prefix("export ") else {
+        return false;
+    };
+    let decl = decl
+        .trim_start()
+        .strip_prefix("async ")
+        .unwrap_or(decl.trim_start());
+    ["function", "class"].iter().any(|keyword| {
+        decl.strip_prefix(keyword)
+            .is_some_and(|rest| rest.starts_with([' ', '*']))
+    })
+}
+
 fn extract_declaration_name(decl: &str) -> Option<String> {
     let decl = decl.trim();
 
@@ -2050,6 +2161,8 @@ mod tests {
             project_root: PathBuf::from("/p"),
             app_dir: PathBuf::from("/p/app"),
             layouts: Vec::new(),
+            templates: Vec::new(),
+            slots: Vec::new(),
             request_path: "/".to_string(),
             target: BundleTarget::Client,
             options: crate::BundleOptions::default(),
@@ -2448,6 +2561,8 @@ mod tests {
             project_root: PathBuf::from("/app"),
             app_dir: PathBuf::from("/app/app"),
             layouts: Vec::new(),
+            templates: Vec::new(),
+            slots: Vec::new(),
             request_path: "/".to_string(),
             target: BundleTarget::Client,
             options: crate::BundleOptions::default(),
@@ -2547,6 +2662,8 @@ mod tests {
             project_root: PathBuf::from("/app"),
             app_dir: PathBuf::from("/app/app"),
             layouts: Vec::new(),
+            templates: Vec::new(),
+            slots: Vec::new(),
             request_path: "/".to_string(),
             target,
             options: crate::BundleOptions::default(),
@@ -2621,6 +2738,8 @@ mod tests {
             project_root: PathBuf::from("/app"),
             app_dir: PathBuf::from("/app/app"),
             layouts: Vec::new(),
+            templates: Vec::new(),
+            slots: Vec::new(),
             request_path: "/".to_string(),
             target: BundleTarget::Client,
             options: crate::BundleOptions::default(),
@@ -2918,6 +3037,8 @@ mod tests {
             project_root: PathBuf::from("/app"),
             app_dir: PathBuf::from("/app/app"),
             layouts: Vec::new(),
+            templates: Vec::new(),
+            slots: Vec::new(),
             request_path: "/".to_string(),
             target: BundleTarget::Client,
             options: crate::BundleOptions::default(),
@@ -2942,6 +3063,8 @@ mod tests {
             project_root: PathBuf::from("/app"),
             app_dir: PathBuf::from("/app/app"),
             layouts: Vec::new(),
+            templates: Vec::new(),
+            slots: Vec::new(),
             request_path: "/".to_string(),
             target: BundleTarget::Client,
             options: crate::BundleOptions::default(),
@@ -2975,6 +3098,8 @@ mod tests {
             project_root: PathBuf::from("/app"),
             app_dir: PathBuf::from("/app/app"),
             layouts: Vec::new(),
+            templates: Vec::new(),
+            slots: Vec::new(),
             request_path: "/".to_string(),
             target: BundleTarget::Client,
             options: crate::BundleOptions::default(),
@@ -3009,6 +3134,8 @@ export default function Layout({ children }) {
             project_root: PathBuf::from("/app"),
             app_dir: PathBuf::from("/app/app"),
             layouts: Vec::new(),
+            templates: Vec::new(),
+            slots: Vec::new(),
             request_path: "/".to_string(),
             target: BundleTarget::Ssr,
             options: crate::BundleOptions::default(),
@@ -3064,5 +3191,179 @@ export default function Layout({ children }) {
 
         // Diamond graph is NOT circular.
         assert!(detect_cycles(&modules).is_ok(), "diamond is not circular");
+    }
+
+    /// Link a source and prove the result is still JavaScript.
+    ///
+    /// The linker rewrites line by line over masked code, so its failure mode is
+    /// output that no longer parses — an Oxc diagnostic naming linked bytes the
+    /// author never wrote. Every regression recorded in this file was found that
+    /// way. Compiling the output is what turns "the rewrite looked right" into
+    /// "the browser can run it".
+    fn link_and_parse(source: &str) -> String {
+        let entry = PathBuf::from("/p/a.tsx");
+        let linked = link(
+            &[fixture(entry.clone(), source, Vec::new())],
+            &client_input(entry),
+        )
+        .unwrap_or_else(|error| panic!("link rejected the source: {error}\n---\n{source}"));
+        crate::compiler::transform(&linked, false)
+            .unwrap_or_else(|error| panic!("linked output does not parse: {error}\n---\n{linked}"));
+        linked
+    }
+
+    /// `from` is ordinary English, and a quoted one is not a re-export.
+    ///
+    /// `export const note = "copied from here"` failed the whole build. The
+    /// re-export branch was chosen by `line.contains(" from ")` over the raw
+    /// line, and every path out of that branch that is not a resolvable
+    /// re-export returns `None` — so the declaration branch below it was never
+    /// reached, the `export` survived the link, and `RUV1612` reported a
+    /// minified-dependency problem that named nothing the author wrote. The
+    /// question is now asked of `masked_code`, where a string holds no keywords.
+    #[test]
+    fn a_quoted_from_does_not_turn_a_declaration_into_a_re_export() {
+        for source in [
+            "export const note = \"copied from here\"\n",
+            "export const note = 'copied from here'\n",
+            "export const snippet = `import { readFile } from \"node:fs/promises\"`\n",
+            "export function label() {\n  return \"read from disk\"\n}\n",
+            "export class Reader {\n  origin = \"loaded from cache\"\n}\n",
+            "export let mutable = \"switched from A\"\n",
+            "export const help = \"pick from: a, b\" // from the docs\n",
+        ] {
+            let linked = link_and_parse(source);
+            assert!(
+                !linked.contains("\nexport "),
+                "an export survived the link:\n{linked}"
+            );
+            assert!(
+                linked.contains("__exports."),
+                "the declaration was never published:\n{linked}"
+            );
+        }
+    }
+
+    /// A real re-export still resolves, so the fix above narrowed nothing.
+    #[test]
+    fn a_real_re_export_still_resolves_through_the_masked_check() {
+        let entry = PathBuf::from("/p/a.tsx");
+        let dep = PathBuf::from("/p/m.ts");
+        let modules = [
+            fixture(dep.clone(), "export const a = 1\n", Vec::new()),
+            fixture(
+                entry.clone(),
+                "export { a } from \"./m\"\nexport * from \"./m\"\n",
+                vec![dep.clone()],
+            ),
+        ];
+        let linked = link(&modules, &client_input(entry)).unwrap();
+
+        assert!(
+            linked.contains(&format!("__exports.a = {}.a;", module_id(&dep))),
+            "{linked}"
+        );
+        assert!(
+            linked.contains(&format!("Object.assign(__exports, {});", module_id(&dep))),
+            "{linked}"
+        );
+    }
+
+    /// Constructs that have broken a line-based rewriter before, or would.
+    ///
+    /// The linker asks `ModuleAst::is_code_offset` before touching a line, so
+    /// text that merely reads like a statement has to survive untouched while
+    /// the statement beside it is still rewritten. Each case is one way a line
+    /// can lie about what it is.
+    #[test]
+    fn adversarial_module_shapes_survive_linking_as_parsable_javascript() {
+        for (name, source) in [
+            (
+                "import-line inside a template literal",
+                "export const doc = `\nimport { thing } from \"pkg\"\nexport default thing\n`\nexport const value = 1\n",
+            ),
+            (
+                "export-line inside a block comment",
+                "/*\nexport default nothing\nimport \"pkg\"\n*/\nexport const value = 1\n",
+            ),
+            (
+                "regular expression holding a quote and a slash",
+                "const pattern = /[\"'\\/]/g\nexport const value = pattern.source\n",
+            ),
+            (
+                "regular expression that looks like a division",
+                "const a = 1\nconst b = 2\nconst quotient = a / b / 2\nexport const value = quotient\n",
+            ),
+            (
+                "multi-line default export of an array",
+                "export default [\n  1,\n  2,\n]\n",
+            ),
+            (
+                "multi-line default export of a class",
+                "export default class Page {\n  render() {\n    return null\n  }\n}\n",
+            ),
+            (
+                "declaration whose value spans lines and holds a brace",
+                "export const config = {\n  pattern: \"}\",\n  nested: { deep: `}` },\n}\n",
+            ),
+            (
+                "template literal holding a dynamic import",
+                "export const doc = `await import(\"./other.js\")`\nexport const value = 1\n",
+            ),
+            (
+                "template literal holding a require call",
+                "export const doc = `require(\"./other.js\")`\nexport const value = 1\n",
+            ),
+            (
+                "nested template interpolation carrying a backtick",
+                "export const doc = `outer ${`inner ${1 + 1}`} end`\n",
+            ),
+            (
+                "string holding the sequence that ends a comment",
+                "export const doc = \"*/ export default 1\"\nexport const value = 1\n",
+            ),
+            (
+                "export keyword appearing as a property name",
+                "const registry = { export: 1, import: 2 }\nexport const value = registry.export\n",
+            ),
+            (
+                "line comment trailing a rewritten export",
+                "export const value = 1 // export default 2\n",
+            ),
+            (
+                "async generator yielding text that reads like a statement",
+                "export async function* stream() {\n  yield `export const x = 1`\n}\n",
+            ),
+        ] {
+            let linked = link_and_parse(source);
+            assert!(
+                !linked.contains("__ruvyxaMissingImport__"),
+                "{name}: text was mistaken for an import\n{linked}"
+            );
+        }
+    }
+
+    /// Text that reads like a statement must not become a dependency edge.
+    ///
+    /// The demo's own todos page carried a `<pre>` code sample; the import line
+    /// inside it was deleted out of the sample and its quoted package hoisted
+    /// into the bundle as a real dependency. Parsing alone would not have caught
+    /// that — the output still parsed, it just no longer said what the author
+    /// wrote and pulled in a package the project never installed.
+    #[test]
+    fn a_statement_quoted_inside_text_is_neither_rewritten_nor_hoisted() {
+        let sample = "import { readFile } from \"node:fs/promises\"";
+        let linked = link_and_parse(&format!(
+            "export const snippet = `{sample}`\nexport const value = 1\n"
+        ));
+
+        assert!(
+            linked.contains(sample),
+            "the quoted sample was rewritten out of the template literal:\n{linked}"
+        );
+        assert!(
+            !linked.contains("\nimport { readFile } from \"node:fs/promises\""),
+            "the quoted sample was hoisted as a real import:\n{linked}"
+        );
     }
 }

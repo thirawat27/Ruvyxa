@@ -290,6 +290,486 @@ gated implementations agreeing proved nothing about the deployed one.
 `tests/packages/ruvyxa/serverless-shared-tables.test.mjs` holds it to both fixtures now, and each
 fixture's own note says three implementations rather than two.
 
+### Parallel routes
+
+A `@name` folder beside a `layout.tsx` declares a slot that layout receives as a prop, alongside the
+page it already renders as `children` — the same convention Next.js uses, for the same reason: a
+dashboard whose panels are separate files rather than one page that renders everything.
+
+```tsx
+// app/dashboard/layout.tsx — app/dashboard/@team/ and @activity/ become props
+export default function Layout({ children, team, activity }) {
+  return (
+    <div>
+      {team}
+      {activity}
+      {children}
+    </div>
+  )
+}
+```
+
+Slots match the URL independently of the page: at `/dashboard/reports`, the page comes from
+`reports/page.tsx` and the team panel from `@team/reports/page.tsx`. A slot with nothing for the
+current URL renders its `default.tsx`, and a slot with neither is left out entirely — the layout
+does not receive the prop, rather than receiving an empty wrapper the author never wrote.
+
+Before this, a `@name` directory was pruned from the route walk and produced nothing at all: no
+route, no slot, and no diagnostic. A project that wrote one got silence.
+
+Slot props are ordered by slot name, so the emitted source does not depend on the order a filesystem
+listed the directories in — the same reason every other ordering in this repository is explicit.
+
+Both module graphs discover and compose them, and
+`tests/fixtures/entry-composition-conformance.json` pins the emitted source. What is **not**
+covered: a slot's own nested `layout.tsx`/`loading.tsx` is not composed into the slot subtree, and
+an unmatched slot falls back to `default.tsx` on every navigation rather than retaining what it last
+rendered — Next.js keeps the previous slot state on a soft navigation, which is a client-router
+behaviour rather than a composition one.
+
+### `template.tsx`
+
+A `template.tsx` beside a `layout.tsx` wraps that level's children the way the layout does, and
+differs in the one respect that is the whole reason the file exists: it is given a key derived from
+the request path, so navigating within the same layout remounts it — state resets and effects run
+again — while the layout above it stays mounted. Same convention, same semantics, and the same
+nesting as Next.js: `layout > template > children`, at every level.
+
+The two interleave by directory rather than being flattened. Putting every template inside every
+layout is the tempting shortcut and it is wrong: a layout below a template would end up outside it,
+which is observable the moment a template provides context. A level may have either file, both, or
+neither.
+
+Both module graphs emit it — the Rust bundler for `build`/`preview`, the Node entry templates for
+`dev` and the SSG path — and `tests/fixtures/entry-composition-conformance.json` now pins the
+composed source for the template shapes alongside the layout-only ones it already held. A route with
+no `template.tsx` emits exactly the loop it always did, so nothing about an ordinary route's bundle
+changes because the feature exists.
+
+The loading shell takes the same wrappers as the tree. It is painted during a navigation and then
+replaced by the tree, so a shell that wrapped the loading state differently would change the element
+structure under the user mid-navigation.
+
+### Source maps describe the file that was shipped
+
+`build.map: true` produced a map that did not correspond to the bundle beside it, in any
+configuration.
+
+`emit_prepared_bundle` told the source-map builder where each module began using three constants
+describing someone else's output: how many lines `output::wrap` prepends, how many the linker's
+header takes, and how many its per-module preamble adds. All three were wrong. The wrapper prepends
+nothing for a client bundle and one line for a server one, not two or three; the linker's header
+sits below a variable-length block of hoisted external imports; and the preamble is longer than the
+constant said. Measured on a two-module project, the first module's first statement was mapped to a
+blank line twelve lines too early, and the error compounded with every module after it. Tree-shaking
+and minification then rewrote the text those mappings described, and neither was accounted for at
+all. Finally the CLI prepended `import "./shared.<hash>.js";` to every route that reads the shared
+registry — after the map was built — shifting the whole file one line further.
+
+Nothing noticed, because the builder's own tests fed it offsets and read back what they fed, and the
+bundler's map tests read `sources` and `x_google_ignoreList`.
+
+Positions are now recorded while the text is produced, at every stage:
+
+- The linker returns the provenance of every line it emits, counted rather than assumed — a rewrite
+  is not always one line in and one line out.
+- Tree-shaking carries that provenance forward. A pass never deletes a line, so the output is a
+  line-for-line descendant of its input.
+- Minification hands back oxc's own positions, which is the only thing that can survive a pass that
+  rewrites the text wholesale.
+- The output wrapper's prefix is measured with `strip_suffix`, which proves the wrapper only
+  prepends instead of assuming it.
+- `sourcemap::shift_generated_lines` moves a finished map when a caller prepends to the bundle.
+
+Resolution is per line: the linker rewrites a module one line at a time, so a line is the finest
+position it can honestly report. `every_mapped_token_lands_on_the_line_that_produced_it` runs the
+whole pipeline in all four minify/tree-shake combinations and resolves each token the way a debugger
+does — the mapping with the greatest generated column at or before it — then requires the source
+line it names to be the line that token came from.
+
+Collapsing the sequential and parallel link paths onto one writer was part of the fix rather than a
+tidy-up: the module wrapper was written out twice, byte for byte, and the source map reads its
+shape.
+
+### Next.js route conventions no longer fail silently
+
+Two conventions a page brought over from Next.js relies on were read by nothing, and neither said
+so.
+
+`export const dynamic` is the route segment config that overrides the automatic strategy.
+`force-dynamic` on an otherwise-static page was discarded and the page was pre-rendered anyway — the
+opposite of what it asked for, with no diagnostic. It is honoured now: `force-dynamic` takes the
+route off the pre-render path, `force-static` and `error` put it on, and `auto` is the default it
+already was. It is read before the `revalidate` and `ppr` opt-ins, which is the precedence Next
+defines — a page carrying both `force-dynamic` and `revalidate` is dynamic.
+
+`generateStaticParams` is Next.js's name for the static parameter set, with the same contract:
+return the parameter objects to pre-render. It is accepted alongside `getStaticParams` and
+`staticParams`. Both halves that decide this had to learn it together — the route graph decides
+whether a page _has_ a parameter set and the worker decides what to call when it does, and a name
+recognised by one and not the other is a route that discovers as SSG and then pre-renders nothing.
+`tests/packages/ruvyxa/static-params-names.test.mjs` holds the two lists to each other.
+
+`export const metadata` is deliberately **not** aliased to `meta`. Next's metadata object is nested
+(`openGraph`, `twitter`, `alternates`) where Ruvyxa's is flat, so accepting the name would
+half-work, which is worse than not accepting it.
+
+### An aliased import made a page static that a relative one kept dynamic
+
+`detect_render_strategy` pre-renders a route with no dynamic segments when nothing in its reachable
+graph reads request-dependent data. The walk that produces that graph followed relative specifiers
+only, and dropped everything else without a word — so `import { getPosts } from '@/lib/posts'`
+produced no edge at all, and a page whose data fetching lived one alias away looked exactly like a
+page that fetched nothing. It was rendered once at build time and never again. Written
+`../../lib/posts`, the same file and the same `fetch` kept the route dynamic.
+
+The walk reads the bundler's `TsConfigPaths` now, so it resolves a project's aliases the way the
+bundler that compiles the page does. A bare package specifier is still outside it, and is asserted
+that way rather than left to chance: following `node_modules` would find `fetch(` in almost any
+dependency and take automatic pre-rendering away from every page.
+
+### A link prefetch was read as a data fetch
+
+The data markers that decide whether a route may be pre-rendered were matched with `contains`, and
+`prefetch(` contains `fetch(`. `prefetch` is an API this framework ships on `useRouter()`, so a page
+that warmed one link was classified as a page that fetched data and lost its static rendering — a
+collision with the ordinary case rather than a contrived one.
+
+A marker has to be its own identifier now. Only the leading edge is checked, because every marker
+already ends at a `(` or a `.`, and a member access has to keep counting: `globalThis.fetch(` is a
+fetch. A byte that begins a multi-byte character reads as a word boundary, so a non-ASCII identifier
+makes the marker count — the safe direction, since a false marker costs a static page while a missed
+one ships stale data.
+
+### Artifact keys are paired by module, not by position
+
+`prepare_bundle_with_parts` published one Resolve artifact per module in the resolved graph, then
+walked the compiled modules alongside them with `zip`. Every artifact key after that point depended
+on the compile pass returning the same modules in the same order — an invariant nothing stated and
+nothing checked, whose failure mode is silent: a module takes another module's Transform key, and
+the next incremental build reuses the wrong artifact. `zip` would also have dropped the tail of a
+longer list without a word. The keys are looked up by module path now, and a compiled module with no
+counterpart in the graph is an error instead of a mispairing.
+
+### Two framework routes a plugin could have crashed the server with
+
+`RESERVED_FRAMEWORK_ROUTES` exists so a plugin declaring a realtime or presence transport on a
+framework path gets RUV1701 instead of what axum does about it, which is to panic with
+`Overlapping method route` while the router is being built — the server dies at startup, before it
+can report anything. Its doc comment said it must stay in sync with the router chain, and that
+comment was the only thing holding the two together. It named eight of the ten routes the chain
+registers: `/__ruvyxa/hydration-loader.js` and `/__ruvyxa/client/route-manifest.json` were
+registered and not listed, so a transport on either passed the guard and reached the panic.
+
+Both are in the list now, in all three copies — the Rust array, `RESERVED_FRAMEWORK_PATHS` in
+`plugin-http.mjs`, and `tests/fixtures/framework-endpoint-conformance.json`.
+
+The two checks that existed both read the contract outwards: contract to the Rust array, and
+contract to the route chain. Neither read the chain inwards, which is the direction the guard
+depends on. `every_registered_route_is_reserved` reads the `.route("…")` literals out of
+`build_app_router` and requires each one to be reserved, so a route added without a matching entry
+fails here rather than in a user's terminal.
+
+### A stylesheet saved mid-collection was served a save behind
+
+`RuntimeCache::styles` reads its generation, drops the lock, collects off-thread, and installs the
+result only if the generation still matches. That is what makes a watcher event during a collection
+safe: the event bumps the generation and the stale result is refused.
+
+`invalidate_styles_for_paths` skipped the bump whenever the slot held no cached value, on the
+grounds that there was nothing to invalidate. But an in-flight collection is exactly the state where
+the slot holds none, and the file set it compares against does not exist until a collection has
+finished — so the one moment it needed to invalidate is the one moment it could not decide, and it
+answered no. The collection then installed CSS it had read before the save, and the dev server kept
+serving the previous stylesheet until the _next_ CSS change: the shape of "my edit did not show up,
+so I saved again and then it did".
+
+An empty slot is bumped now. The component-only optimisation this method exists for is untouched —
+that path has a cached value, which is what makes the question answerable.
+
+### The generated sitemap is parsed, not matched
+
+`site_discovery.rs` builds XML with string concatenation, and every test asserted on the text it
+produced — the generator and the assertion agreeing because they were written together. A search
+engine does not read the text. It parses the document, and a sitemap it cannot parse is rejected
+whole, silently, long after the build reported success.
+
+The emitted documents are checked against the rules a parser enforces now: escaping, nesting,
+namespace prefixes, and the XML 1.0 character range, over a corpus carrying every character
+`escape_xml` handles in every kind of field that reaches the document — element text, attribute
+values, and the `loc` built from a route path. Shards and the sitemap index are included, and
+`robots.txt` is held to its own line grammar.
+
+Namespace prefixes are the rule worth naming: `sitemap_header` declares `xhtml`, `image`, and
+`video` only when `sitemap_features` saw a reason to, and `sitemap_entry_xml` emits those prefixes
+from the same three fields. Nothing held those three functions together, and a prefix used without a
+declaration does not parse at all. Dropping the `xhtml` declaration now fails.
+
+Neither ecosystem here carries an XML parser and a dependency added for one test is a dependency the
+release has to keep, so the checks are written out — and held by
+`assert_the_checker_rejects_what_a_parser_would`, because a checker that accepted everything would
+have made all of this green.
+
+### Static files answer byte-range requests
+
+`public/` is where a project puts its video and audio, and the server had a streaming path added
+specifically for files that large — but nothing on either host spoke `Range`. A media element does
+not download a file and play it; it asks for the bytes it needs as it needs them. Every seek
+restarted the download from byte zero, and a strict player refuses a resource whose server will not
+answer its opening `Range: bytes=0-1` with a `206` at all. The streaming path could not play the
+files it existed for.
+
+Both hosts answer ranges now. A single range returns `206` with `Content-Range` and only the bytes
+asked for; a syntactically valid range past the end returns `416` with the real length; a
+multi-range request is answered with the whole file, which RFC 9110 permits and which is cheaper for
+everyone than a `multipart/byteranges` body no client of this server needs. `If-Range` is honoured,
+so a client resuming against a file that has since changed is handed the current one whole rather
+than a splice of two versions. Above the streaming threshold the reader seeks and is bounded, so a
+seek to the end of a large video reads its bytes rather than the whole file.
+
+`ruvyxa start` and a standalone/node deployment serve the same `public/` directory, so the rule is a
+shared table — `tests/fixtures/byte-range-conformance.json` — answered by `parse_single_byte_range`
+in Rust and `parseByteRange` in `serverless-handler.mjs`, the latter imported by the generated
+standalone server rather than copied into it.
+
+Writing the table down immediately caught a disagreement neither side would have noticed alone: the
+two languages had permissive number parsers that were permissive about different things. Rust's
+`u64::from_str` accepts a leading `+`; JavaScript's `Number()` accepts `1e1` and `0x2`. Both now
+take ASCII digits and nothing else, and a position too large to represent stays a position — it is
+past the end of any real file, so it is a `416`, not a reason to send the whole file.
+
+### A retired worker was nobody's to close
+
+Retiring a worker takes it out of `NodeWorkerPool::workers` and leaves a detached task to drain and
+close it. `NodeWorkerPool::shutdown` only ever walked `workers`, so from the moment of retirement
+the `node` child belonged to no one but that task — and both retirement paths are ordinary traffic,
+not edge cases. `ruvyxa build` retires a worker every `RUVYXA_PRERENDER_RECYCLE_AFTER` isolated
+renders, and `recycle` retires the whole generation whenever instrumentation changes, so creating
+these is among the last things a build does before it exits. A process that exits does not unwind
+that task, nothing drops the `Child`, and `kill_on_drop` never runs: the worker was orphaned, still
+holding its handles on the build directory.
+
+The pool now keeps a retiring worker until its drain finishes, and `shutdown` closes those too.
+Closing one also releases its pending set, which is what the drain task is waiting on — so shutting
+down unblocks the drain rather than racing it.
+
+`shutdown` also closes workers concurrently. Each one waits up to `WORKER_SHUTDOWN_TIMEOUT` for its
+process to exit, and one at a time that is two seconds per worker between Ctrl-C and the terminal
+coming back, for waits that have nothing to do with each other.
+
+### A stream frame the body rejects releases its pending entry
+
+Ending a stream and releasing the worker's pending entry are different things, and
+`WorkerBodyStream` was treating one as the other. The stdout reader only removes an entry it has
+seen a terminal frame for, and `api-start` is not terminal — so a worker that repeats it mid-stream
+ended the body while leaving the entry behind, with nothing left to remove it. `in_flight` never
+returned to zero after that: `select_worker` permanently read the worker as the busiest in the pool,
+and retiring it sat out the full `WORKER_DRAIN_TIMEOUT` before the process was closed.
+
+### The render cache is exercised under contention
+
+The index and the recency order live behind two locks, not one. Every method that needs both takes
+them index-first, and that ordering is the only thing between this cache and a deadlocked dev server
+— but every test in the file drove it from a single task, so nothing could have noticed if it broke.
+Inverting the two acquisitions in `put` now hangs
+`the_index_and_the_order_agree_under_concurrent_access` and leaves the other thirty-six green.
+
+The assertions are structural on purpose. Which writer wins a race is not the cache's promise; that
+the two halves still describe the same set afterwards, that capacity still holds, and that the cache
+still answers, are. A second test does the same for `revalidatePath()` claims, the one piece of this
+cache whose size an application controls.
+
+### Serving a prerendered document is held to the shared path table
+
+`settle_prerendered_artifact` had a test refusing to write outside the prerender directory. The
+reader — the half an unauthenticated request reaches, which turns a URL into a file path and returns
+the bytes — had none. It now replays `tests/fixtures/prerender-path-conformance.json`, the same
+table the static-asset handler and the deployed handler answer to, so a path the native server
+refuses is refused everywhere.
+
+Both of the reader's defences are pinned, which took two different cases. Deleting the path rule is
+caught by the conformance table. Deleting `contained_public_asset` is caught by nothing a
+written-out traversal can reach — `..`, `\`, and `:` are already refused one layer up — so the test
+also points a symlink out of the directory, which is exactly the shape the canonical containment
+check exists for. On Windows, where creating one needs a privilege an ordinary session lacks, that
+case is skipped rather than failed.
+
+### The byte scanner is checked against the real parser
+
+`crates/ruvyxa_bundler/src/ast.rs` is the crate's only byte scanner. Every masked-code decision in
+the linker, the minifier, the boundary check, and the route graph rests on it, so a miss there is a
+miss everywhere — and it has taken repeat regressions, each one a case where text was read as code.
+
+It now answers to oxc. Forty adversarial sources — a specifier quoted inside a template, a regex
+holding a comment opener, a division that follows a closing paren, JSX text with braces in it, a
+string ending in an escaped backslash, a generic arrow that reads like JSX — go through both the
+scanner and the real parser, and the static edges must match exactly. The one deliberate difference
+is named: a type-only import is erased at compile time and is not a dependency.
+
+Masking is checked as a separate property, because every caller reads an offset out of masked code
+and then slices the original at it: same length, same line breaks, every byte either kept or
+blanked, and no quoted specifier left readable.
+
+Sources whose regex holds something that matters are in the corpus on purpose. `skip_string` stops
+at a newline by design, so a mis-scanned regex cannot swallow the rest of a file — which means a
+case whose regex holds nothing consequential proves nothing about regex detection. The one that
+bites holds a whole `import` statement: read as division, it invents a dependency on a package the
+project never installed.
+
+`compiler.rs` gained the matching pair. Decorator stripping deletes bytes, so thirteen sources whose
+`@` is _not_ a decorator — a `@media` block inside a styled-components template, `@supports`,
+`@keyframes`, a JSDoc tag, an email address in a comment, `@scope/pkg` in a string, `@support` in
+JSX text, a regex holding `@` — must come through with every fragment intact. And the whole `.js`
+path is walked end to end: expand, link, parse. The two predicates gating expansion and the linker's
+one-statement-per-line requirement are three separate pieces of knowledge about one rule, and they
+had already drifted once.
+
+### A `NODE_ENV` guard with an `else if` broke the production bundle
+
+**Fixed.** `fold_production_node_env` removes development-only branches while a production client
+graph is being resolved — it is what keeps React from pulling both its development and production
+builds into one browser bundle. It took the consequent's closing brace as the end of the statement
+whatever followed, so
+
+```js
+if (process.env.NODE_ENV !== 'production') {
+  warn()
+} else if (flag) {
+  run()
+}
+```
+
+lost its `if` and left a bare `else if` behind. Both directions failed: a `!== 'production'` guard
+stranded the `else`, and a `=== 'production'` guard left the rest of the chain dangling after the
+branch it kept. The result was a bundle that does not parse, produced by a pass that runs during
+resolution and reports nothing.
+
+The fold now walks the whole `if`/`else` chain, so the branch that survives knows where the
+statement it replaces actually ends. A clause it cannot measure — a brace-less `else` — leaves the
+guard untouched rather than half-removed: the bundle still defines `process.env.NODE_ENV`, so an
+unfolded guard is correct, just larger. `else` is matched as a keyword now too, so an identifier
+like `elsewhere` is not mistaken for one.
+
+### A CommonJS build could beat the ESM build beside it
+
+Node matches `exports` conditions in the order the package author wrote them, and the first
+supported one wins. `require` sat in the same list as `import`, so
+
+```json
+{ "exports": { ".": { "require": "./cjs.js", "import": "./esm.mjs" } } }
+```
+
+handed `cjs.js` to a browser bundle that had `esm.mjs` sitting right beside it. Ruvyxa emits ESM, so
+`require` is now a second pass: a package that ships nothing else still resolves through it, and one
+that ships both gets the build that matches the output format. Author order still decides between
+conditions that legitimately compete — `browser` before `import` picks `browser`.
+
+`package_exports_resolution_matches_the_documented_rules` in `crates/ruvyxa_bundler/src/resolver.rs`
+pins sixteen shapes, including the two places this resolver **deliberately** differs from Node: an
+unlisted subpath falls through to the legacy fields instead of raising
+`ERR_PACKAGE_PATH_NOT_EXPORTED`, and only an explicit `null` blocks. Both are now arguments a change
+has to have with a test.
+
+### Four ordinary export shapes failed the build
+
+**Fixed.** Both linkers rewrite ESM a line at a time, and each decided what a line was by matching
+text rather than by asking the scanner. Four shapes a project writes without thinking about any of
+this failed:
+
+| Source                                                          | Before                                                                                                                                |
+| --------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------- |
+| `export const note = 'copied from here'`                        | `RUV1612`, build fails                                                                                                                |
+| `const conditions = { import: './index.mjs' }`                  | `RUV1612`, build fails                                                                                                                |
+| `export function* gen() {}` / `export async function* gen() {}` | `RUV1612` in the Rust bundler, `RUV1700 Unexpected token 'export'` in the Node graph                                                  |
+| A Prettier-wrapped `export {\n  a,\n  b,\n}` in a `.js` module  | Bundle emitted with a stray `a,` and `}` loose inside the module IIFE — **no build error at all**, and a browser that cannot parse it |
+
+Each had its own cause, and the last is the one that mattered most because nothing reported it:
+
+- **`from` is ordinary English.** The re-export branch was chosen by `line.contains(" from ")` over
+  the raw line, and every path out of that branch that is not a resolvable re-export returns early —
+  so the declaration branch below it was never reached. The question is now asked of `masked_code`,
+  where a string holds no keywords.
+- **A reserved word is a legal property name.** `reject_surviving_esm` flagged `export`/`import` as
+  a token anywhere in the module, which made it strictly broader than the rewriter it was checking.
+  A `.` before or a `:` after is a position no statement can occupy.
+- **A generator's `*` binds to the keyword.** Both graphs listed the declaration forms with a
+  trailing space, so no generator matched. The Rust helper `extract_declaration_name` had known
+  about `function* ` all along; only the dispatcher above it did not.
+- **The linker wants one statement per line.** A `.ts` module always gets that from the transform,
+  but `.js`/`.mjs`/`.cjs` is passed through, and the normalization only covered statements _sharing_
+  a line — the minified direction. Prettier produces the other one the moment a list outgrows the
+  print width. `has_esm_clause_spanning_lines` now covers it, restricted to the clause form so
+  `export default {` and `export const x = {`, which the linker spans deliberately, keep their exact
+  bytes.
+
+`crates/ruvyxa_bundler/src/linker.rs` grew an adversarial suite that links fifteen shapes and
+**parses the result**, because "the bundle does not parse" is the failure these produce;
+`tests/packages/ruvyxa/compiler.test.mjs` imports and runs the rewritten module for the Node half.
+
+### `ruvyxa dev` compiled server modules into the browser bundle
+
+**Fixed.** A module's lane — client, server, action, or shared — decides whether it may appear in a
+browser bundle. The Rust bundler read it from the leading directive and then from the file stem, so
+`'use server'`, `server.ts`, `server.js`, `server.mjs`, `action.ts`, and `actions.ts` were all
+server-side. The Node module graph matched one literal filename: `server.ts`.
+
+Everything else on that list therefore compiled cleanly into the client bundle under `ruvyxa dev`
+and the SSG render path, and was refused by `ruvyxa build` and `ruvyxa check` with
+`RUV1820 invalid client to server module crossing`. A project following the documented convention in
+JavaScript rather than TypeScript — `app/products/server.js` — had **no** client-boundary protection
+in development at all, and neither did any action module in any language. Server-only source was
+served to a browser in the one environment where a developer is looking at the page, and the error
+arrived at the end of the cycle instead of the start.
+
+`moduleLane()` in `packages/ruvyxa/runtime/compiler.mjs` now reads the directive and the file stem
+the same way, and `tests/fixtures/module-lane-conformance.json` holds both graphs to one table —
+which directive marks which lane, which stems mark which lane, and which crossings a client bundle
+may not contain. The action-imports-client crossing stays the Rust bundler's alone, because this
+graph has no hook on the server compile that could see it, and the fixture says so rather than
+implying a parity that does not exist.
+
+**If `ruvyxa dev` now reports RUV1007 on a file it accepted before**, that import was already
+failing `ruvyxa build`. Move the server work behind a route handler or a server action and pass
+serializable data to the client.
+
+### A retired worker is guaranteed to stop
+
+A worker being replaced is drained rather than killed, so an API stream still in flight finishes.
+That wait had no ceiling, and the task draining it held the last `Arc` to the process: one request
+that never reached a terminal frame kept a whole Node process — and its module graph — alive for the
+life of the server. `recycle` retires a full generation on every instrumentation change, so those
+accumulated. The drain now has a 60-second ceiling and shuts the process down either way, logging
+what was still pending.
+
+One request could produce exactly that stranded state. `send` answers single-frame requests, so the
+stdout reader removes the pending entry only when the frame it sees is terminal — and a worker that
+replied with a non-terminal frame left an entry whose receiver had just been dropped, which
+`wait_until_idle` can never observe as idle. `send` now clears its own entry on every path; removing
+one the reader already took is a no-op.
+
+### The generated-entry preludes and route composition are gated end to end
+
+`entry-prelude-parity.test.mjs` now covers the metadata prelude as well as the routing context and
+the error boundary: both copies are executed against one stand-in React and asked the same questions
+about merge order, `titleTemplate` depth, the `og:`/`twitter:` block, and the server-only
+`<html lang>` rewrite. Metadata decides every page's `<head>`, and the two copies were held together
+by a doc comment.
+
+Route composition is held by `tests/fixtures/entry-composition-conformance.json`, which carries the
+exact source each bundler emits for a route's tree and its loading shell. Order is the whole
+contract — the boundary inside the Suspense so a synchronous throw renders its own UI rather than
+the loading fallback, the layouts wrapping outward, the metadata a sibling rather than a wrapper —
+and a bundler that reordered any of it still produced a working-looking page, on half the
+deployments.
+
+### The worker protocol is its own module
+
+`crates/ruvyxa_dev_server/src/worker_protocol.rs` holds the NDJSON request and response types — the
+wire format `packages/ruvyxa/runtime/worker-pool.mjs` reads and writes, where every field name is a
+cross-language contract. It sat among the pool's scheduling, timeout, and recycling policy in a
+3,365-line file. `worker_pool.rs` keeps the policy and the worker process it manages; those two
+change together and stay together.
+
 ### The bootstrap block escapes its own payload
 
 `bootstrap_data_block` took the route parameters and the request path as already-serialized,

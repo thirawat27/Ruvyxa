@@ -74,6 +74,20 @@
         "query": "src=/a.png&w=64&q=80"
       },
       "note": "On-demand image optimization. Adapters that cannot optimize pass no optimizer and it answers 404, but the path is still claimed before routing."
+    },
+    {
+      "path": "/__ruvyxa/hydration-loader.js",
+      "reserved": true,
+      "native": "always",
+      "serverless": "none",
+      "note": "Deferred-hydration loader for `idle` and `visible` routes. `ruvyxa build` writes the same source to a content-hashed /__ruvyxa/client/hydration-<hash>.js instead, so a deployed build never asks for this path. The axum router registers it unconditionally, which is what makes it reserved: it was registered and not listed, so a plugin could take it and panic the router at startup."
+    },
+    {
+      "path": "/__ruvyxa/client/route-manifest.json",
+      "reserved": true,
+      "native": "always",
+      "serverless": "static",
+      "note": "Client route table, fetched by @ruvyxa/react's router. A build publishes the file under /__ruvyxa/client/ and a CDN or publish directory answers; the dev server has no such file and synthesizes an equivalent from the live manifest. Registered unconditionally on the axum router, so it is reserved for the same reason as the loader above."
     }
   ],
   "capabilities": [

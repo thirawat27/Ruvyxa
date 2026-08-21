@@ -2159,4 +2159,106 @@ mod tests {
             Some("<p>root</p>")
         );
     }
+
+    /// Reading a prerendered document obeys the same path table as writing one.
+    ///
+    /// `settling_refuses_to_write_outside_the_prerender_directory` covers the
+    /// writer. The reader is the half an unauthenticated request reaches: it
+    /// turns a URL into a file path and returns the bytes. Both derive that path
+    /// from `prerendered_document_path`, and both are held to
+    /// `tests/fixtures/prerender-path-conformance.json` — the same table the
+    /// static-asset handler and the deployed handler replay, so a request the
+    /// native server refuses is refused everywhere.
+    #[test]
+    fn serving_a_prerendered_document_replays_the_shared_path_table() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/prerender-path-conformance.json"
+        ))
+        .unwrap();
+
+        let temp = tempfile::tempdir().unwrap();
+        let prerender_dir = temp.path().join("prerender");
+        std::fs::create_dir_all(&prerender_dir).unwrap();
+
+        for case in fixture["cases"].as_array().unwrap() {
+            let path = case["path"].as_str().unwrap();
+            let safe = case["safe"].as_bool().unwrap();
+            let why = case["why"].as_str().unwrap_or_default();
+
+            let resolved = prerendered_document_path(&prerender_dir, &format!("/{path}"));
+            assert_eq!(resolved.is_some(), safe, "{path}: {why}");
+            if let Some(resolved) = resolved {
+                assert!(
+                    resolved.starts_with(&prerender_dir),
+                    "{path} resolved outside the prerender directory: {resolved:?}"
+                );
+            }
+        }
+    }
+
+    /// Create a directory symlink, or report that this host will not.
+    ///
+    /// Windows needs a privilege that an ordinary developer session does not
+    /// have, so the symlink case is skipped there rather than failing. It still
+    /// runs everywhere else, which is where the check it guards would otherwise
+    /// have no test at all.
+    fn link_dir(target: &Path, link: &Path) -> Option<()> {
+        #[cfg(unix)]
+        let created = std::os::unix::fs::symlink(target, link);
+        #[cfg(windows)]
+        let created = std::os::windows::fs::symlink_dir(target, link);
+        #[cfg(not(any(unix, windows)))]
+        let created: std::io::Result<()> = Err(std::io::Error::other("unsupported"));
+        created.ok()
+    }
+
+    /// A refused path is refused before anything is read from disk.
+    ///
+    /// The containment check runs on a canonical path, so it needs the file to
+    /// exist; a traversal that names a real file outside the directory is the
+    /// case that matters, and it has to be stopped by the rule rather than by
+    /// the file happening to be absent.
+    #[test]
+    fn a_traversal_never_reads_a_file_outside_the_prerender_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path();
+        let prerender_dir = root.join("prerender");
+        std::fs::create_dir_all(prerender_dir.join("blog")).unwrap();
+        std::fs::write(prerender_dir.join("blog").join("index.html"), "<p>blog</p>").unwrap();
+
+        // A real file the traversal is aiming at, next to the directory.
+        std::fs::create_dir_all(root.join("secret")).unwrap();
+        std::fs::write(root.join("secret").join("index.html"), "TOP SECRET").unwrap();
+
+        assert_eq!(
+            serve_prerendered_html(&prerender_dir, "/blog").as_deref(),
+            Some("<p>blog</p>"),
+            "an ordinary path must still be served"
+        );
+
+        // A segment the path rule has no reason to refuse, pointing somewhere
+        // else. This is the case the containment check exists for: removing the
+        // rule above is caught by the conformance table, but removing
+        // `contained_public_asset` is caught by nothing without a symlink.
+        if let Some(()) = link_dir(&root.join("secret"), &prerender_dir.join("linked")) {
+            assert!(
+                serve_prerendered_html(&prerender_dir, "/linked").as_deref() != Some("TOP SECRET"),
+                "a symlinked segment escaped the prerender directory"
+            );
+        }
+
+        for traversal in [
+            "/../secret",
+            "/blog/../../secret",
+            "/./../secret",
+            "/..%2Fsecret",
+            "/\\..\\secret",
+        ] {
+            let served = serve_prerendered_html(&prerender_dir, traversal);
+            assert!(
+                served.as_deref() != Some("TOP SECRET"),
+                "{traversal} escaped the prerender directory"
+            );
+        }
+    }
 }

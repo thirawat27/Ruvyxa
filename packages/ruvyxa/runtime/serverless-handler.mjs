@@ -1606,6 +1606,72 @@ export function prerenderRelativePath(pathname) {
 // ─── Static Asset Paths ─────────────────────────────────────────────────────
 
 /**
+ * Parse a single-range `bytes=` specifier against a known length.
+ *
+ * A media element does not download a file and play it; it asks for the bytes
+ * it needs as it needs them. A server that ignores `Range` restarts the
+ * download from zero on every seek, and a strict player refuses a resource
+ * whose server will not answer its opening `Range: bytes=0-1` with a 206 at
+ * all.
+ *
+ * Multi-range requests are answered whole: a `multipart/byteranges` body is
+ * more machinery than any client of this server needs, and RFC 9110 lets a
+ * server ignore a `Range` it does not wish to honour — which is why an
+ * unparsable specifier also falls back to the whole file rather than to 416.
+ * Only a syntactically valid range this file cannot satisfy is a 416.
+ *
+ * Mirrors `parse_single_byte_range` in
+ * `crates/ruvyxa_dev_server/src/static_assets.rs`; both answer
+ * `tests/fixtures/byte-range-conformance.json`.
+ *
+ * @param {string} value raw `Range` header value
+ * @param {number} length size of the file being served
+ * @returns {{kind: 'whole'} | {kind: 'unsatisfiable'} | {kind: 'partial', start: number, end: number}}
+ */
+export function parseByteRange(value, length) {
+  const whole = { kind: 'whole' }
+  const unsatisfiable = { kind: 'unsatisfiable' }
+  if (typeof value !== 'string') return whole
+  const trimmed = value.trim()
+  if (!trimmed.startsWith('bytes=')) return whole
+  const spec = trimmed.slice('bytes='.length).trim()
+  if (spec.includes(',')) return whole
+  const dash = spec.indexOf('-')
+  if (dash === -1) return whole
+  const first = spec.slice(0, dash).trim()
+  const last = spec.slice(dash + 1).trim()
+
+  // Integers only: Number() would accept '1e3', '0x10', and ' ' as positions
+  // the Rust side rejects.
+  const position = (text) => (/^\d+$/.test(text) ? Number(text) : null)
+
+  if (first === '') {
+    // `bytes=-N`: the final N bytes, clamped to the file.
+    const suffix = position(last)
+    if (suffix === null) return whole
+    // An empty file has no byte to name, and a zero-length suffix names none.
+    if (suffix === 0 || length === 0) return unsatisfiable
+    return { kind: 'partial', start: Math.max(0, length - suffix), end: length - 1 }
+  }
+
+  const start = position(first)
+  if (start === null) return whole
+  if (start >= length) return unsatisfiable
+  let end
+  if (last === '') {
+    end = length - 1
+  } else {
+    const parsed = position(last)
+    if (parsed === null) return whole
+    // A last-byte position past the end is clamped: a client asking for one
+    // megabyte from here should get whatever of it exists.
+    end = Math.min(parsed, length - 1)
+  }
+  if (end < start) return unsatisfiable
+  return { kind: 'partial', start, end }
+}
+
+/**
  * Extensions that only ever name a build or public asset. Kept to images,
  * fonts, media, and emitted web assets: these are never a plausible value for
  * a dynamic route parameter, so refusing them cannot swallow a real page.

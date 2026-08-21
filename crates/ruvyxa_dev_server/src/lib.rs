@@ -116,8 +116,11 @@ use static_assets::public_asset_links;
 #[cfg(test)]
 use static_assets::{is_safe_relative_path, resolve_public_asset};
 
+mod worker_protocol;
+
 mod worker_pool;
-pub use worker_pool::{NodeWorkerPool, StaticParamSegment, StaticParamsRoute};
+pub use worker_pool::NodeWorkerPool;
+pub use worker_protocol::{StaticParamSegment, StaticParamsRoute, WarmupRoute};
 
 mod render_pipeline;
 #[cfg(test)]
@@ -581,9 +584,17 @@ struct PresenceRuntime {
 }
 
 /// Framework endpoints registered on the router before the plugin realtime
-/// route. Must stay in sync with the `Router::new()` chain in [`serve`];
-/// registering a realtime transport on one of these would panic in axum.
-const RESERVED_FRAMEWORK_ROUTES: [&str; 8] = [
+/// route. Registering a transport on one of these panics axum with
+/// `Overlapping method route`, before the server can report anything.
+///
+/// This has to name every path [`build_app_router`] registers, and for a long
+/// time it named eight of ten: `/__ruvyxa/hydration-loader.js` and
+/// `/__ruvyxa/client/route-manifest.json` were registered and not listed, so a
+/// plugin declaring a transport there passed `validate_socket_path` and killed
+/// the server at startup instead of getting RUV1701. The comment claiming the
+/// two stayed in sync was the only thing holding them together;
+/// `every_registered_route_is_reserved` reads the route chain now.
+const RESERVED_FRAMEWORK_ROUTES: [&str; 10] = [
     "/__ruvyxa/hmr",
     "/__ruvyxa/client",
     "/__ruvyxa/action",
@@ -592,6 +603,8 @@ const RESERVED_FRAMEWORK_ROUTES: [&str; 8] = [
     "/__ruvyxa/devtools",
     "/__ruvyxa/devtools/data",
     "/__ruvyxa/image",
+    "/__ruvyxa/hydration-loader.js",
+    "/__ruvyxa/client/route-manifest.json",
 ];
 
 /// Process-wide startup hooks recognised by the JavaScript compiler/runtime.
@@ -811,16 +824,24 @@ impl RuntimeCache {
     /// Invalidate cached CSS only when a watched event changed a CSS source
     /// collected for the current style graph. This preserves the style cache
     /// for component-only HMR updates.
+    ///
+    /// An empty slot is not the same question. The file set is only known once
+    /// a collection has finished, so before that this cannot decide whether a
+    /// change matters — and answering "it does not" is what lets a collection
+    /// already in flight install CSS it read before the save. The generation is
+    /// exactly the mechanism for revoking that right, so an empty slot is
+    /// bumped rather than left alone.
     fn invalidate_styles_for_paths(&self, paths: &[PathBuf]) -> bool {
         let changed = paths
             .iter()
             .map(|path| normalize_cache_path(path))
             .collect::<BTreeSet<_>>();
         let mut styles = self.styles.blocking_write();
-        let intersects = styles
-            .value
-            .as_ref()
-            .is_some_and(|cached| !cached.files.is_disjoint(&changed));
+        let Some(cached) = styles.value.as_ref() else {
+            styles.invalidate();
+            return true;
+        };
+        let intersects = !cached.files.is_disjoint(&changed);
         if intersects {
             styles.invalidate();
         }
@@ -1245,7 +1266,7 @@ async fn shutdown_signal() -> &'static str {
 fn dependency_warmup_routes(
     config: &ServerConfig,
     manifest: &RouteManifest,
-) -> Vec<worker_pool::WarmupRoute> {
+) -> Vec<worker_protocol::WarmupRoute> {
     if !config.watch || !config.prebundle_dependencies {
         return Vec::new();
     }
@@ -1254,7 +1275,7 @@ fn dependency_warmup_routes(
         .routes
         .iter()
         .filter(|route| route.kind == RouteKind::Page)
-        .map(|route| worker_pool::WarmupRoute {
+        .map(|route| worker_protocol::WarmupRoute {
             page_file: route.file.display().to_string(),
             app_dir: config.app_dir.display().to_string(),
             route_path: route.path.clone(),
@@ -1627,6 +1648,68 @@ mod tests {
                 source.contains(&format!(".route(\"{path}\""))
                     || source.contains(&format!("\"{path}\",")),
                 "{path} is in the endpoint contract but is not registered by serve()"
+            );
+        }
+    }
+
+    /// Every path `build_app_router` registers is reserved against plugins.
+    ///
+    /// The two existing checks read the contract outwards: contract to
+    /// `RESERVED_FRAMEWORK_ROUTES`, and contract to the route chain. Neither
+    /// read the chain inwards, which is the direction `validate_socket_path`
+    /// depends on — a route registered and never listed is one a plugin may
+    /// take, and axum's answer to that is `Overlapping method route`, a panic
+    /// during startup rather than the RUV1701 the guard exists to produce.
+    /// `/__ruvyxa/hydration-loader.js` and
+    /// `/__ruvyxa/client/route-manifest.json` were both in that state.
+    ///
+    /// Read from the source for the same reason
+    /// `every_contract_endpoint_is_registered_on_the_native_router` does: axum
+    /// cannot enumerate its own paths, and a `ServerConfig` needs a project on
+    /// disk. The route chain is a literal list, so reading it is exact.
+    #[test]
+    fn every_registered_route_is_reserved() {
+        let source = include_str!("lib.rs");
+        let (_, body) = source
+            .split_once("fn build_app_router(")
+            .expect("build_app_router must exist");
+        let body = body
+            .split_once("\nfn ")
+            .map_or(body, |(function, _)| function);
+
+        let mut registered = Vec::new();
+        for fragment in body.split(".route(").skip(1) {
+            // Both spellings the chain uses: a literal, and `&path` for the
+            // plugin transports, which are the paths being guarded rather than
+            // guarding paths.
+            let Some(rest) = fragment.trim_start().strip_prefix('"') else {
+                continue;
+            };
+            let path = rest
+                .split_once('"')
+                .expect("a route literal must be closed")
+                .0;
+            registered.push(path.to_string());
+        }
+
+        assert!(
+            registered.len() >= RESERVED_FRAMEWORK_ROUTES.len(),
+            "only {} routes were read out of the chain; the parse missed some",
+            registered.len()
+        );
+        for path in &registered {
+            assert!(
+                RESERVED_FRAMEWORK_ROUTES.contains(&path.as_str()),
+                "{path} is registered on the router but is not in \
+                 RESERVED_FRAMEWORK_ROUTES, so a plugin transport may claim it \
+                 and panic axum at startup; add it there and to \
+                 tests/fixtures/framework-endpoint-conformance.json"
+            );
+        }
+        for reserved in RESERVED_FRAMEWORK_ROUTES {
+            assert!(
+                registered.iter().any(|path| path == reserved),
+                "{reserved} is reserved against plugins but nothing registers it"
             );
         }
     }
@@ -2909,6 +2992,8 @@ mod tests {
             file: temp.path().join("app/page.tsx"),
             kind: ruvyxa_graph::RouteKind::Page,
             layout_chain: Vec::new(),
+            template_chain: Vec::new(),
+            slots: Vec::new(),
             server_modules: Vec::new(),
             client_modules: Vec::new(),
             runtime: ruvyxa_graph::RuntimeTarget::Node,
@@ -2948,6 +3033,8 @@ mod tests {
             file: temp.path().join("app/page.tsx"),
             kind: ruvyxa_graph::RouteKind::Page,
             layout_chain: Vec::new(),
+            template_chain: Vec::new(),
+            slots: Vec::new(),
             server_modules: Vec::new(),
             client_modules: Vec::new(),
             runtime: ruvyxa_graph::RuntimeTarget::Node,
@@ -3071,6 +3158,67 @@ mod tests {
         let first = cache.asset_links(&config).await;
         let second = cache.asset_links(&config).await;
         assert!(Arc::ptr_eq(&first, &second));
+    }
+
+    /// A save during the first style collection is not silently discarded.
+    ///
+    /// `styles()` reads the generation, drops the lock, collects off-thread,
+    /// and installs only if the generation still matches — which is what makes
+    /// a watcher event during a collection safe. `invalidate_styles_for_paths`
+    /// used to skip the bump whenever the slot held no value, and an in-flight
+    /// collection is precisely the state where it holds none. The collection
+    /// then installed CSS it had read before the save, and the dev server
+    /// served the previous stylesheet until the *next* CSS change — the shape
+    /// of "my CSS edit did not show up, so I saved again and then it did".
+    ///
+    /// The interleaving is reproduced directly rather than raced: the two
+    /// halves of `styles()` around its off-thread collection are the two
+    /// `styles` accesses below, with the watcher event in between.
+    #[tokio::test]
+    async fn a_stylesheet_saved_during_a_collection_is_not_installed_stale() {
+        let cache = Arc::new(RuntimeCache::default());
+        let stylesheet = PathBuf::from("/project/styles/site.css");
+
+        // First half of `styles()`: no cached value, so remember the generation
+        // and start collecting.
+        let generation = {
+            let cached = cache.styles.read().await;
+            assert!(cached.value.is_none(), "the slot must start empty");
+            cached.generation
+        };
+
+        // The save lands while that collection is running.
+        let watcher_cache = Arc::clone(&cache);
+        let watched = stylesheet.clone();
+        let invalidated = tokio::task::spawn_blocking(move || {
+            watcher_cache.invalidate_styles_for_paths(&[watched])
+        })
+        .await
+        .unwrap();
+        assert!(
+            invalidated,
+            "a change that cannot be checked against a file set has to be treated as relevant"
+        );
+
+        // Second half of `styles()`: the collection finishes holding the bytes
+        // it read before the save, and must not become the cached answer.
+        let stale = StyleCacheEntry {
+            css: "body { color: navy; }".to_string(),
+            files: BTreeSet::from([normalize_cache_path(&stylesheet)]),
+        };
+        let installed = cache
+            .styles
+            .write()
+            .await
+            .insert_if_current(generation, stale);
+        assert!(
+            !installed,
+            "a collection that started before the save installed its stale CSS"
+        );
+        assert!(
+            cache.styles.read().await.value.is_none(),
+            "the slot must stay empty so the next request collects again"
+        );
     }
 
     #[tokio::test]

@@ -123,6 +123,12 @@ impl ArtifactFingerprintCache {
     }
 }
 
+/// Lines the shared-chunk import adds above a route bundle.
+///
+/// Named because the source map has to be shifted by exactly this much: the
+/// number is a fact about the emitted file, shared by the writer and the map.
+const PREPENDED_IMPORT_LINES: usize = 1;
+
 pub(crate) struct SharedRouteChunk {
     pub(crate) file_name: String,
     pub(crate) code: String,
@@ -724,13 +730,21 @@ pub(crate) fn bundle_client_route(
         tracing::warn!("{diagnostic}");
     }
 
-    let code = shared_chunk_file.map_or_else(
-        || output.code.clone(),
-        |file_name| format!("import \"./{file_name}\";\n{}", output.code),
-    );
+    // Prepending to the bundle moves every line the map describes, so the map
+    // moves with it. Without this the shared-chunk import shifted the whole
+    // file by one line and the map pointed one line short of everything.
+    let (code, source_map) = match shared_chunk_file {
+        Some(file_name) => (
+            format!("import \"./{file_name}\";\n{}", output.code),
+            output.source_map.as_deref().and_then(|map| {
+                ruvyxa_bundler::sourcemap::shift_generated_lines(map, PREPENDED_IMPORT_LINES)
+            }),
+        ),
+        None => (output.code.clone(), output.source_map.clone()),
+    };
     let hash = content_hash(&code);
     let file_name = format!("{hash}.js");
-    let source_map_file = output.source_map.as_ref().map(|_| format!("{hash}.js.map"));
+    let source_map_file = source_map.as_ref().map(|_| format!("{hash}.js.map"));
     let script = if let Some(source_map_file) = &source_map_file {
         format!("{code}\n//# sourceMappingURL={source_map_file}\n")
     } else {
@@ -766,7 +780,7 @@ pub(crate) fn bundle_client_route(
         file_name,
         script,
         source_map_file,
-        source_map: output.source_map,
+        source_map,
         output_bytes: code.len(),
         estimated_gz_bytes: (code.len() as f64 * 0.35) as usize,
         duration_ms: output.stats.duration_ms,
@@ -809,6 +823,29 @@ pub(crate) fn client_bundle_input(
         .iter()
         .filter_map(|layout_path| resolve_layout_file(&root, &app_dir, layout_path))
         .collect();
+    // Resolved the same way as layouts: the chain holds route ids, and the same
+    // resolver turns one into the file on disk regardless of which file it names.
+    let templates = route
+        .template_chain
+        .iter()
+        .filter_map(|template_path| resolve_layout_file(&root, &app_dir, template_path))
+        .collect();
+    // Slot files are already absolute paths from discovery; the level is a
+    // route id, resolved to a directory the same way a layout id is.
+    let slots = route
+        .slots
+        .iter()
+        .map(|slot| ruvyxa_bundler::RouteSlotInput {
+            level: app_dir.join(
+                slot.level
+                    .strip_prefix("app")
+                    .unwrap_or(&slot.level)
+                    .trim_start_matches('/'),
+            ),
+            name: slot.name.clone(),
+            file: ruvyxa_diagnostics::normalized_canonical_path(&slot.file),
+        })
+        .collect();
     let route_dir = entry.parent().unwrap_or(&app_dir).to_path_buf();
     let specials = resolve_route_specials(&app_dir, &route_dir);
 
@@ -817,6 +854,8 @@ pub(crate) fn client_bundle_input(
         project_root: root,
         app_dir,
         layouts,
+        templates,
+        slots,
         request_path: route.path.clone(),
         target: BundleTarget::Client,
         specials,

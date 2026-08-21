@@ -86,6 +86,20 @@ export default function Post({ params }: PageProps<{ slug: string }>) {
 }
 ```
 
+`generateStaticParams` และ `staticParams` ถูกยอมรับเป็นชื่อของ export เดียวกัน page ที่ย้ายมาจาก
+Next.js จึงประกาศ parameter ได้โดยไม่ต้องเปลี่ยนชื่อ
+
+## การกำหนด rendering strategy เอง
+
+Ruvyxa เลือก strategy ให้อัตโนมัติ และ `export const dynamic` ใช้ override ได้ — เป็น route segment
+config ตัวเดียวกับที่ Next.js ใช้ และลำดับความสำคัญเหมือนกัน `'force-dynamic'` จะพา route
+ออกจากเส้นทาง pre-render แม้จะ export `revalidate` ด้วยก็ตาม ส่วน `'force-static'` และ `'error'`
+จะพาเข้าไป และ `'auto'` คือค่าเริ่มต้น ใช้ `export const revalidate = <วินาที>` เพื่อเลือก ISR และ
+`export const ppr = true` เพื่อเลือก partial pre-rendering
+
+`export const metadata` **ไม่ถูกอ่าน** เพราะ metadata object ของ Next เป็นโครงซ้อนชั้น ขณะที่ `meta`
+ของ Ruvyxa เป็นโครงแบน ทั้งสองจึงใช้แทนกันไม่ได้ ให้ใช้ `export const meta` ด้านล่างแทน
+
 ## Route metadata และ boundary
 
 `export const meta` รับ `Meta` object หรือ `MetaFactory` metadata จาก layout merge จาก root ไป leaf;
@@ -107,6 +121,80 @@ export const meta = ({ params }: { params: Record<string, string> }) => ({
 หากต้องการเลือก `not-found.tsx` ที่ใกล้ที่สุด ให้ import `notFound` จาก `@ruvyxa/react` แล้วเรียกมัน
 (มัน throw tagged signal) อย่าสับสนกับ `notFound` จาก `ruvyxa/server` ซึ่งสร้าง HTTP `Response`
 สถานะ 404
+
+### `template.tsx`
+
+`template.tsx` ห่อ children ของระดับตัวเองแบบเดียวกับ layout
+ต่างกันตรงจุดเดียวซึ่งเป็นเหตุผลที่มีไฟล์นี้: มันถูกให้ key จาก request path ดังนั้นการ navigate
+ภายใน layout เดิมจะ **remount** มัน — state รีเซ็ต และ effect ทำงานใหม่ — ขณะที่ layout ด้านบนยังคง
+mount อยู่ ใช้กับ enter animation, `useEffect` ต่อการ navigate หนึ่งครั้ง หรือ state
+ที่ไม่ควรอยู่รอดข้าม sibling route
+
+```tsx
+// app/dashboard/template.tsx
+'use client'
+import { useEffect } from 'react'
+
+export default function DashboardTemplate({ children }: { children: React.ReactNode }) {
+  useEffect(() => {
+    // ทำงานใหม่ทุกครั้งที่ navigate ภายใน app/dashboard/ ต่างจาก layout
+  }, [])
+  return <section className="fade-in">{children}</section>
+}
+```
+
+layout กับ template ซ้อนกันเป็น `layout > template > children` ในแต่ละระดับ
+ระดับหนึ่งจึงมีไฟล์ใดไฟล์หนึ่ง มีทั้งคู่ หรือไม่มีเลยก็ได้ template ไม่ประกาศ metadata —
+`export const meta` เป็นของ layout หรือ page
+
+### Parallel routes
+
+โฟลเดอร์ `@name` ที่วางข้าง `layout.tsx` ประกาศ slot ที่ layout นั้นจะได้รับเป็น prop ควบคู่ไปกับ
+page ที่มันรับเป็น `children` อยู่แล้ว ใช้เมื่อหนึ่งหน้าจอประกอบด้วยหลาย panel ที่เป็นอิสระต่อกัน
+ไม่ใช่ page เดียวที่ render ทุกอย่าง
+
+```text
+app/dashboard/
+├── @activity/
+│   ├── default.tsx
+│   └── page.tsx
+├── @team/
+│   ├── page.tsx
+│   └── reports/page.tsx
+├── layout.tsx
+├── page.tsx
+└── reports/page.tsx
+```
+
+```tsx
+// app/dashboard/layout.tsx
+export default function DashboardLayout({
+  children,
+  team,
+  activity,
+}: {
+  children: React.ReactNode
+  team?: React.ReactNode
+  activity?: React.ReactNode
+}) {
+  return (
+    <div className="grid">
+      <aside>{team}</aside>
+      <aside>{activity}</aside>
+      <main>{children}</main>
+    </div>
+  )
+}
+```
+
+แต่ละ slot จับคู่กับ URL อย่างอิสระจาก page ที่ `/dashboard/reports` page มาจาก `reports/page.tsx`
+ส่วน `team` มาจาก `@team/reports/page.tsx`; `activity` ไม่มีอะไรสำหรับ URL นั้น จึง render
+`default.tsx` ของตัวเอง slot ที่ไม่มีทั้ง page ที่ตรงและ `default.tsx` จะถูกตัดออก — layout
+จะไม่ได้รับ prop นั้นเลย และโฟลเดอร์ `@name` ไม่เคยกลายเป็น route ของตัวเอง
+
+ข้อจำกัดสองข้อที่ควรรู้: `layout.tsx` หรือ `loading.tsx` ที่อยู่ภายใน slot จะไม่ถูกประกอบเข้า
+subtree ของ slot และ slot ที่ไม่ตรงจะกลับไปใช้ `default.tsx` ทุกครั้งที่ navigate แทนที่จะคงสิ่งที่
+render ไว้ล่าสุด
 
 ### boundary ของสถานะ route แบบครบชุด
 

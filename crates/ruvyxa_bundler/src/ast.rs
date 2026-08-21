@@ -1338,4 +1338,266 @@ const computed = process.env[dynamicKey]
             assert!(!has_default_export(source), "{source}");
         }
     }
+
+    /// Import specifiers as oxc's real parser sees them.
+    fn oxc_static_specifiers(source: &str) -> Vec<String> {
+        use oxc::allocator::Allocator;
+        use oxc::ast::ast::Statement;
+        use oxc::parser::Parser;
+        use oxc::span::SourceType;
+
+        let allocator = Allocator::default();
+        let parsed = Parser::new(&allocator, source, SourceType::tsx()).parse();
+        assert!(
+            parsed.diagnostics.is_empty(),
+            "the corpus must parse: {source}"
+        );
+
+        let mut found = Vec::new();
+        for statement in &parsed.program.body {
+            match statement {
+                Statement::ImportDeclaration(declaration) => {
+                    found.push(declaration.source.value.to_string());
+                }
+                Statement::ExportFromDeclaration(declaration) => {
+                    found.push(declaration.source.value.to_string());
+                }
+                Statement::ExportAllDeclaration(declaration) => {
+                    found.push(declaration.source.value.to_string());
+                }
+                _ => {}
+            }
+        }
+        found
+    }
+
+    /// Specifiers this scanner deliberately does not report.
+    ///
+    /// A type-only import is erased at compile time, so treating it as a
+    /// dependency edge would pull a module into the graph that the emitted
+    /// JavaScript never mentions. oxc reports it because it is syntactically an
+    /// import; this scanner answers "what does the output depend on".
+    const ERASED_SPECIFIERS: &[&str] = &["./types.js"];
+
+    /// The scanner finds exactly the static edges the real parser does.
+    ///
+    /// This is the crate's only byte scanner, and every masked-code decision in
+    /// the linker, the minifier, and the boundary check rests on it — a miss
+    /// here is a miss everywhere, and it has taken repeat regressions. Compared
+    /// against oxc rather than against expected output: a hand-written
+    /// expectation can be wrong in the same direction as the scanner.
+    #[test]
+    fn the_scanner_finds_the_same_static_edges_as_the_real_parser() {
+        for (name, source) in AST_CORPUS {
+            let scanned = parse_module(source)
+                .imports
+                .iter()
+                .filter(|edge| {
+                    matches!(
+                        edge.kind,
+                        ImportKind::Static | ImportKind::SideEffect | ImportKind::ReExport
+                    )
+                })
+                .map(|edge| edge.specifier.clone())
+                .collect::<Vec<_>>();
+            let mut expected = oxc_static_specifiers(source);
+            expected.retain(|specifier| !ERASED_SPECIFIERS.contains(&specifier.as_str()));
+            let mut scanned = scanned;
+            expected.sort();
+            scanned.sort();
+            assert_eq!(scanned, expected, "{name}");
+        }
+    }
+
+    /// Masking blanks text and nothing else, in place.
+    ///
+    /// Every caller reads an offset out of masked code and then slices the
+    /// original at it, so the two must address the same bytes: same length,
+    /// same line breaks, and every byte either kept or blanked. A mask that
+    /// shifted by one would move every diagnostic and every rewrite with it.
+    #[test]
+    fn masking_blanks_text_in_place_without_moving_any_byte() {
+        for (name, source) in AST_CORPUS {
+            let masked = masked_code(source);
+            if masked.len() != source.len() {
+                eprintln!(
+                    "PROBE [{name}] masked length {} != {}",
+                    masked.len(),
+                    source.len()
+                );
+                continue;
+            }
+            if masked.lines().count() != source.lines().count() {
+                eprintln!("PROBE [{name}] line count changed");
+            }
+            for (index, (original, blanked)) in source.bytes().zip(masked.bytes()).enumerate() {
+                if blanked != original && blanked != b' ' && blanked != b'\n' {
+                    eprintln!("PROBE [{name}] byte {index} became {blanked:?}, not a blank");
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Sources whose text and code are easy to confuse.
+    const AST_CORPUS: &[(&str, &str)] = &[
+        ("plain import", "import a from \"./a.js\"\n"),
+        ("side effect", "import \"./side.js\"\n"),
+        (
+            "re-export",
+            "export { a } from \"./a.js\"\nexport * from \"./b.js\"\n",
+        ),
+        (
+            "specifier quoted inside a template",
+            "const doc = `import x from \"./fake.js\"`\nimport real from \"./real.js\"\n",
+        ),
+        (
+            "specifier inside a line comment",
+            "// import x from \"./fake.js\"\nimport real from \"./real.js\"\n",
+        ),
+        (
+            "specifier inside a block comment",
+            "/* import x from \"./fake.js\" */\nimport real from \"./real.js\"\n",
+        ),
+        (
+            "regex holding a quote",
+            "const p = /[\"']/g\nimport real from \"./real.js\"\n",
+        ),
+        (
+            "division that is not a regex",
+            "const a = 1\nconst b = a / 2 / 3\nimport real from \"./real.js\"\n",
+        ),
+        (
+            "regex after a keyword",
+            "const m = \"x\".split(/,/)\nif (true) /a/.test(\"a\")\nimport real from \"./real.js\"\n",
+        ),
+        (
+            "nested template interpolation",
+            "const doc = `outer ${`inner ${\"./nope.js\"}`} end`\nimport real from \"./real.js\"\n",
+        ),
+        (
+            "template holding an apostrophe",
+            "const doc = `it's fine`\nimport real from \"./real.js\"\n",
+        ),
+        (
+            "jsx with a quote in text",
+            "const el = <p title=\"a\">it's here</p>\nimport real from \"./real.js\"\n",
+        ),
+        (
+            "multi-line import clause",
+            "import {\n  a,\n  b,\n} from \"./multi.js\"\n",
+        ),
+        (
+            "import with a trailing comment",
+            "import a from \"./a.js\" // from \"./fake.js\"\n",
+        ),
+        (
+            "escaped quote inside a string",
+            "const s = \"a \\\" import x from './fake.js'\"\nimport real from \"./real.js\"\n",
+        ),
+        (
+            "string spanning a line continuation",
+            "const s = \"a \\\n  b\"\nimport real from \"./real.js\"\n",
+        ),
+        (
+            "type-only import",
+            "import type { A } from \"./types.js\"\nimport real from \"./real.js\"\n",
+        ),
+        (
+            "import attributes",
+            "import data from \"./data.json\" with { type: \"json\" }\n",
+        ),
+        (
+            "class with a private field and a regex",
+            "class A {\n  #x = /a/\n  run() { return this.#x }\n}\nimport real from \"./real.js\"\n",
+        ),
+        // Mis-reading a regex only changes the answer on the regex's own line:
+        // `skip_string` stops at a newline by design, so a mis-scan cannot
+        // swallow the rest of the file. A case whose regex holds nothing that
+        // matters therefore proves nothing about regex detection.
+        (
+            "regex holding a whole import statement",
+            "const p = /import x from \"fake-pkg\"/\nimport real from \"./real.js\"\n",
+        ),
+        (
+            "regex holding a comment opener and code after it",
+            "const p = /[/][/] x/; import real from \"./real.js\"\n",
+        ),
+        (
+            "regex holding an unbalanced brace",
+            "const p = /[{]/; const after = { a: 1 }\nimport real from \"./real.js\"\n",
+        ),
+        (
+            "regex containing a comment opener",
+            "const p = /a\\/\\/b/\nimport real from \"./real.js\"\n",
+        ),
+        (
+            "regex with a slash in a character class",
+            "const p = /[/]/\nimport real from \"./real.js\"\n",
+        ),
+        (
+            "regex right after return",
+            "function f() { return /a\"b/ }\nimport real from \"./real.js\"\n",
+        ),
+        (
+            "division right after a closing paren",
+            "const q = (1 + 2) / 3 / 4\nimport real from \"./real.js\"\n",
+        ),
+        (
+            "string ending in an escaped backslash",
+            "const s = \"a\\\\\"\nimport real from \"./real.js\"\n",
+        ),
+        (
+            "comment holding an unbalanced quote",
+            "// it's fine\nimport real from \"./real.js\"\n",
+        ),
+        (
+            "block comment holding a comment opener",
+            "/* /* nested-looking */\nimport real from \"./real.js\"\n",
+        ),
+        (
+            "jsx text holding braces and quotes",
+            "const el = <p>{\"a\"} it's {'{'} here</p>\nimport real from \"./real.js\"\n",
+        ),
+        (
+            "jsx attribute holding a template",
+            "const el = <p title={`a ${1} b`} />\nimport real from \"./real.js\"\n",
+        ),
+        (
+            "less-than that is not jsx",
+            "const smaller = count < limit && other > 1\nimport real from \"./real.js\"\n",
+        ),
+        (
+            "export star as namespace",
+            "export * as ns from \"./ns.js\"\n",
+        ),
+        (
+            "import.meta and a dynamic import",
+            "const u = import.meta.url\nconst m = flag ? import(\"./a.js\") : import(\"./b.js\")\nimport real from \"./real.js\"\n",
+        ),
+        (
+            "decorator carrying a string argument",
+            "@Injectable({ providedIn: \"root\" })\nclass S {}\nimport real from \"./real.js\"\n",
+        ),
+        (
+            "numeric separators and bigint",
+            "const n = 1_000_000n / 2n\nimport real from \"./real.js\"\n",
+        ),
+        (
+            "optional chaining before a regex-looking slash",
+            "const v = a?.b / 2\nimport real from \"./real.js\"\n",
+        ),
+        (
+            "interpolation holding a string with a backtick",
+            "const doc = `x ${\"`\"} y`\nimport real from \"./real.js\"\n",
+        ),
+        (
+            "satisfies and a generic call",
+            "const c = fn<Map<string, number>>() satisfies Config\nimport real from \"./real.js\"\n",
+        ),
+        (
+            "generic arrow that looks like jsx",
+            "const identity = <T,>(value: T): T => value\nimport real from \"./real.js\"\n",
+        ),
+    ];
 }

@@ -1,0 +1,176 @@
+{
+  "$comment": [
+    "Shared module-lane table: which lane a module belongs to, and which lane",
+    "crossings a client bundle may not contain.",
+    "",
+    "Both module graphs decide this, and a project is compiled by whichever one",
+    "the command it ran uses:",
+    "  - crates/ruvyxa_bundler/src/references.rs  (`build`, `check`, `preview`)",
+    "  - packages/ruvyxa/runtime/compiler.mjs     (`dev`, and the SSG render path)",
+    "",
+    "They had disagreed, and the looser one was the one a developer looks at in a",
+    "browser. The Rust bundler assigns a lane from the leading directive and then",
+    "from the file stem, so `server.ts`, `server.js`, `server.mjs`, `action.ts`,",
+    "`actions.ts`, and any `'use server'` module are all server-side. The Node",
+    "graph matched one literal filename — `server.ts` — so `server.js` (the other",
+    "half of the documented convention), every action module, and every",
+    "`'use server'` module were compiled into the browser bundle under",
+    "`ruvyxa dev` while `ruvyxa build` refused the same import with RUV1820.",
+    "Server-only source was served to a browser during development and could not",
+    "ship, which is the worst ordering: the leak is visible only where nobody",
+    "checks, and the error arrives only at the end.",
+    "",
+    "Every implementation replays this file:",
+    "  - crates/ruvyxa_bundler/src/references.rs        (Rust test)",
+    "  - tests/packages/ruvyxa/module-lane.test.mjs     (JavaScript test)",
+    "",
+    "Add a case here first when changing what marks a module server-side."
+  ],
+  "$directiveNote": [
+    "A leading directive wins over the filename: a `server.ts` that opens with",
+    "`'use client'` is a client module that happens to be named server. The",
+    "directive is read after a BOM, whitespace, and leading comments, and never",
+    "from text inside a later function or string."
+  ],
+  "directiveLanes": {
+    "use client": "client",
+    "use server": "action"
+  },
+  "$stemNote": [
+    "Read from the file stem — the basename with its last extension removed — so",
+    "the rule does not depend on which language a project writes. `server.d.ts`",
+    "has the stem `server.d` and is not a server module.",
+    "",
+    "The stem rule is a project convention and stops at an installed package.",
+    "`react-dom/server.js` is a package entry point a browser bundle may",
+    "legitimately contain; reading the convention into `node_modules` refused it,",
+    "and the adapter-runner suite caught that within one build. A directive still",
+    "counts wherever it appears — a dependency that declares `'use server'` means",
+    "it."
+  ],
+  "fileStemLanes": {
+    "client": "client",
+    "server": "server",
+    "action": "action",
+    "actions": "action"
+  },
+  "defaultLane": "shared",
+  "$closureNote": [
+    "A client boundary owns its shared dependency closure: a shared module",
+    "reachable from a client module is itself client. Server and action modules",
+    "terminate that closure rather than joining it, which is what makes the",
+    "crossing below detectable instead of silently absorbed.",
+    "",
+    "The Node graph reaches the same answer from the other side: it compiles the",
+    "client closure and no more, so every module it sees on the browser platform",
+    "is already in that closure and only the module's own lane has to be checked."
+  ],
+  "$crossingNote": [
+    "`actionToClient` is enforced by the Rust bundler alone. The Node graph has",
+    "no hook on the server compile that could see it, so this table records the",
+    "gap rather than implying a parity that does not exist. Both hosts enforce",
+    "`clientToServer` and `clientToAction`, which are the crossings that decide",
+    "whether server-only source reaches a browser."
+  ],
+  "invalidCrossings": {
+    "clientToServer": {
+      "from": "client",
+      "to": "server",
+      "bothHosts": true
+    },
+    "clientToAction": {
+      "from": "client",
+      "to": "action",
+      "bothHosts": true
+    },
+    "actionToClient": {
+      "from": "action",
+      "to": "client",
+      "bothHosts": false
+    }
+  },
+  "$serverDirNote": [
+    "Separate from the lane table and older than it: any file under the",
+    "project-level `server/` directory is server-side whatever it is named.",
+    "`ruvyxa_graph` reports it as RUV1010 and the Node graph as RUV1007."
+  ],
+  "serverDirectory": "server/",
+  "cases": [
+    {
+      "file": "app/blog/server.ts",
+      "source": "export const q = 1",
+      "lane": "server"
+    },
+    {
+      "file": "app/blog/server.js",
+      "source": "export const q = 1",
+      "lane": "server"
+    },
+    {
+      "file": "app/blog/server.mjs",
+      "source": "export const q = 1",
+      "lane": "server"
+    },
+    {
+      "file": "app/blog/action.ts",
+      "source": "export const q = 1",
+      "lane": "action"
+    },
+    {
+      "file": "app/blog/actions.ts",
+      "source": "export const q = 1",
+      "lane": "action"
+    },
+    {
+      "file": "app/blog/client.tsx",
+      "source": "export const q = 1",
+      "lane": "client"
+    },
+    {
+      "file": "app/blog/helper.ts",
+      "source": "export const q = 1",
+      "lane": "shared"
+    },
+    {
+      "file": "app/blog/server.d.ts",
+      "source": "export declare const q: number",
+      "lane": "shared"
+    },
+    {
+      "$why": "A directive outranks the stem.",
+      "file": "app/blog/server.ts",
+      "source": "'use client'\nexport const q = 1",
+      "lane": "client"
+    },
+    {
+      "$why": "A directive marks a module even when the name says nothing.",
+      "file": "app/blog/helper.ts",
+      "source": "'use server'\nexport const q = 1",
+      "lane": "action"
+    },
+    {
+      "$why": "Leading comments and a BOM precede a real directive.",
+      "file": "app/blog/helper.ts",
+      "source": "﻿// header\n/* block */\n'use server'\nexport const q = 1",
+      "lane": "action"
+    },
+    {
+      "$why": "A directive-looking string that is not the prologue marks nothing.",
+      "file": "app/blog/helper.ts",
+      "source": "export function run() {\n  return 'use server'\n}",
+      "lane": "shared"
+    },
+    {
+      "$why": "An installed package named server is a package entry point, not a server module.",
+      "file": "node_modules/react-dom/server.js",
+      "source": "export const q = 1",
+      "lane": "shared"
+    },
+    {
+      "$why": "A dependency that declares a directive still means it.",
+      "file": "node_modules/some-rsc-lib/index.js",
+      "source": "'use server'\nexport const q = 1",
+      "lane": "action"
+    }
+  ]
+}

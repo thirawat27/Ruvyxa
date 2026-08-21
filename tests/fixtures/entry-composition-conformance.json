@@ -1,0 +1,312 @@
+{
+  "$comment": [
+    "Shared route-composition table: the exact source each bundler emits for a",
+    "route's element tree and its loading shell.",
+    "",
+    "Both bundlers generate a client entry, and a project renders through",
+    "whichever one built it:",
+    "  - crates/ruvyxa_bundler/src/output.rs        (`build`, `preview`)",
+    "  - packages/ruvyxa/runtime/entry-templates.mjs (`dev`, and the SSG path)",
+    "",
+    "Composition order is the whole contract. The boundary sits inside the",
+    "Suspense so a synchronous throw renders its own UI rather than making React",
+    "emit the loading fallback; the layouts wrap outward root-to-leaf; the",
+    "metadata is a sibling of the layouts rather than a wrapper, so a layout that",
+    "suspends cannot hold the document title back past the flushed shell. A",
+    "bundler that reordered any of those still produces a page — a differently",
+    "behaved one, only on the half of the deployments that used it.",
+    "",
+    "Every implementation replays this file:",
+    "  - crates/ruvyxa_bundler/src/output.rs                    (Rust test)",
+    "  - tests/packages/ruvyxa/entry-prelude-parity.test.mjs    (JavaScript test)"
+  ],
+  "$normalizationNote": [
+    "Compared with statement terminators removed. The Rust literals are written",
+    "with semicolons and the JavaScript templates without them — Prettier owns",
+    "the second and neither reaches a reader, so a byte comparison would fail on",
+    "the formatting while passing on a reordered composition. Each side strips a",
+    "`;` that ends a line before comparing, which is why no `routePath` in this",
+    "file may contain one."
+  ],
+  "$namesNote": [
+    "The Rust generator hardcodes the identifiers it emits; the Node generator",
+    "takes them as arguments. These are the values that make the two agree.",
+    "`layoutWrappers` is the already-joined list both sides interpolate."
+  ],
+  "names": {
+    "tree": "__ruvyxaTree",
+    "shell": "__ruvyxaShell",
+    "page": "Page",
+    "context": "__ruvyxaRouteContext",
+    "boundary": "__ruvyxaBoundary",
+    "resolveMeta": "__ruvyxaResolveMeta",
+    "metaElement": "__ruvyxaMetaElement"
+  },
+  "cases": [
+    {
+      "$why": "A page with nothing but layouts: the smallest tree either bundler emits.",
+      "kind": "tree",
+      "input": {
+        "routePath": "/blog",
+        "layoutNames": ["Layout0"],
+        "metaNames": [],
+        "errorName": null,
+        "loadingName": null,
+        "notFoundName": null
+      },
+      "source": [
+        "function __ruvyxaTree(ctx) {",
+        "  let tree = React.createElement(Page, { params: ctx.params ?? {}, requestPath: ctx.path })",
+        "  for (const Layout of [Layout0].reverse()) {",
+        "    tree = React.createElement(Layout, null, tree)",
+        "  }",
+        "  return React.createElement(__ruvyxaRouteContext.Provider, {",
+        "    value: { pathname: ctx.path, params: ctx.params ?? {}, route: \"/blog\", flight: ctx.flight },",
+        "  }, tree)",
+        "}"
+      ]
+    },
+    {
+      "$why": "Every special at once, which is what pins the wrapping order.",
+      "kind": "tree",
+      "input": {
+        "routePath": "/blog/[slug]",
+        "layoutNames": ["Layout0", "Layout1"],
+        "metaNames": ["__ruvyxaMeta0", "__ruvyxaMeta1"],
+        "errorName": "ErrorPage",
+        "loadingName": "LoadingPage",
+        "notFoundName": "NotFoundPage"
+      },
+      "source": [
+        "function __ruvyxaTree(ctx) {",
+        "  let tree = React.createElement(Page, { params: ctx.params ?? {}, requestPath: ctx.path })",
+        "  tree = React.createElement(__ruvyxaBoundary, { errorFallback: ErrorPage, notFound: NotFoundPage }, tree)",
+        "  tree = React.createElement(React.Suspense, { fallback: React.createElement(LoadingPage, null) }, tree)",
+        "  for (const Layout of [Layout0, Layout1].reverse()) {",
+        "    tree = React.createElement(Layout, null, tree)",
+        "  }",
+        "  return React.createElement(__ruvyxaRouteContext.Provider, {",
+        "    value: { pathname: ctx.path, params: ctx.params ?? {}, route: \"/blog/[slug]\", flight: ctx.flight },",
+        "  }, __ruvyxaMetaElement(__ruvyxaResolveMeta([__ruvyxaMeta0, __ruvyxaMeta1], ctx)), tree)",
+        "}"
+      ]
+    },
+    {
+      "$why": "An error page with no not-found still gets the boundary, with a null slot.",
+      "kind": "tree",
+      "input": {
+        "routePath": "/docs",
+        "layoutNames": [],
+        "metaNames": [],
+        "errorName": "ErrorPage",
+        "loadingName": null,
+        "notFoundName": null
+      },
+      "source": [
+        "function __ruvyxaTree(ctx) {",
+        "  let tree = React.createElement(Page, { params: ctx.params ?? {}, requestPath: ctx.path })",
+        "  tree = React.createElement(__ruvyxaBoundary, { errorFallback: ErrorPage, notFound: null }, tree)",
+        "  for (const Layout of [].reverse()) {",
+        "    tree = React.createElement(Layout, null, tree)",
+        "  }",
+        "  return React.createElement(__ruvyxaRouteContext.Provider, {",
+        "    value: { pathname: ctx.path, params: ctx.params ?? {}, route: \"/docs\", flight: ctx.flight },",
+        "  }, tree)",
+        "}"
+      ]
+    },
+    {
+      "$why": "The shell paints before any payload, so it carries no flight.",
+      "kind": "shell",
+      "input": {
+        "routePath": "/blog/[slug]",
+        "layoutNames": ["Layout0", "Layout1"],
+        "metaNames": ["__ruvyxaMeta0"],
+        "loadingName": "LoadingPage"
+      },
+      "source": [
+        "function __ruvyxaShell(ctx) {",
+        "  let tree = React.createElement(LoadingPage, null)",
+        "  for (const Layout of [Layout0, Layout1].reverse()) {",
+        "    tree = React.createElement(Layout, null, tree)",
+        "  }",
+        "  return React.createElement(__ruvyxaRouteContext.Provider, {",
+        "    value: { pathname: ctx.path, params: ctx.params ?? {}, route: \"/blog/[slug]\", flight: undefined },",
+        "  }, __ruvyxaMetaElement(__ruvyxaResolveMeta([__ruvyxaMeta0], ctx)), tree)",
+        "}"
+      ]
+    },
+    {
+      "$why": "A shell with no metadata sources omits the sibling entirely.",
+      "kind": "shell",
+      "input": {
+        "routePath": "/",
+        "layoutNames": ["Layout0"],
+        "metaNames": [],
+        "loadingName": "LoadingPage"
+      },
+      "source": [
+        "function __ruvyxaShell(ctx) {",
+        "  let tree = React.createElement(LoadingPage, null)",
+        "  for (const Layout of [Layout0].reverse()) {",
+        "    tree = React.createElement(Layout, null, tree)",
+        "  }",
+        "  return React.createElement(__ruvyxaRouteContext.Provider, {",
+        "    value: { pathname: ctx.path, params: ctx.params ?? {}, route: \"/\", flight: undefined },",
+        "  }, tree)",
+        "}"
+      ]
+    },
+    {
+      "$why": "A template beside a layout. The two interleave at their level, layout outside template, and the template carries a key derived from the request path — which is the whole reason the file exists: React remounts a keyed element when the key changes, so navigating within the same layout resets the template while the layout above it stays mounted.",
+      "kind": "tree",
+      "input": {
+        "routePath": "/dashboard",
+        "layoutNames": ["Layout0"],
+        "wrapperLevels": [
+          {
+            "layout": "Layout0",
+            "template": "Template0",
+            "slots": null
+          }
+        ],
+        "metaNames": [],
+        "errorName": null,
+        "loadingName": null,
+        "notFoundName": null
+      },
+      "source": [
+        "function __ruvyxaTree(ctx) {",
+        "  let tree = React.createElement(Page, { params: ctx.params ?? {}, requestPath: ctx.path })",
+        "  for (const [Layout, Template, slots] of [[Layout0, Template0, null]].reverse()) {",
+        "    if (Template) tree = React.createElement(Template, { key: ctx.path }, tree)",
+        "    if (Layout) tree = React.createElement(Layout, slots, tree)",
+        "  }",
+        "  return React.createElement(__ruvyxaRouteContext.Provider, {",
+        "    value: { pathname: ctx.path, params: ctx.params ?? {}, route: \"/dashboard\", flight: ctx.flight },",
+        "  }, tree)",
+        "}"
+      ]
+    },
+    {
+      "$why": "Levels that have only one of the two. A template with no layout beside it still wraps its own level, and a layout with no template is untouched — flattening this into \"every template inside every layout\" would put Layout1 outside Template0, which it should be inside.",
+      "kind": "tree",
+      "input": {
+        "routePath": "/dashboard/reports",
+        "layoutNames": ["Layout0", "Layout1"],
+        "wrapperLevels": [
+          {
+            "layout": "Layout0",
+            "template": "Template0",
+            "slots": null
+          },
+          {
+            "layout": "Layout1",
+            "template": null,
+            "slots": null
+          },
+          {
+            "layout": null,
+            "template": "Template1",
+            "slots": null
+          }
+        ],
+        "metaNames": ["__ruvyxaMeta0", "__ruvyxaMeta1"],
+        "errorName": null,
+        "loadingName": null,
+        "notFoundName": null
+      },
+      "source": [
+        "function __ruvyxaTree(ctx) {",
+        "  let tree = React.createElement(Page, { params: ctx.params ?? {}, requestPath: ctx.path })",
+        "  for (const [Layout, Template, slots] of [[Layout0, Template0, null], [Layout1, null, null], [null, Template1, null]].reverse()) {",
+        "    if (Template) tree = React.createElement(Template, { key: ctx.path }, tree)",
+        "    if (Layout) tree = React.createElement(Layout, slots, tree)",
+        "  }",
+        "  return React.createElement(__ruvyxaRouteContext.Provider, {",
+        "    value: { pathname: ctx.path, params: ctx.params ?? {}, route: \"/dashboard/reports\", flight: ctx.flight },",
+        "  }, __ruvyxaMetaElement(__ruvyxaResolveMeta([__ruvyxaMeta0, __ruvyxaMeta1], ctx)), tree)",
+        "}"
+      ]
+    },
+    {
+      "$why": "The loading shell takes the same wrappers as the tree. It is painted during a navigation and then replaced by the tree, so a shell that wrapped the loading state differently would change the element structure under the user mid-navigation.",
+      "kind": "shell",
+      "input": {
+        "routePath": "/dashboard",
+        "layoutNames": ["Layout0"],
+        "wrapperLevels": [
+          {
+            "layout": "Layout0",
+            "template": "Template0",
+            "slots": null
+          }
+        ],
+        "metaNames": [],
+        "loadingName": "LoadingPage"
+      },
+      "source": [
+        "function __ruvyxaShell(ctx) {",
+        "  let tree = React.createElement(LoadingPage, null)",
+        "  for (const [Layout, Template, slots] of [[Layout0, Template0, null]].reverse()) {",
+        "    if (Template) tree = React.createElement(Template, { key: ctx.path }, tree)",
+        "    if (Layout) tree = React.createElement(Layout, slots, tree)",
+        "  }",
+        "  return React.createElement(__ruvyxaRouteContext.Provider, {",
+        "    value: { pathname: ctx.path, params: ctx.params ?? {}, route: \"/dashboard\", flight: undefined },",
+        "  }, tree)",
+        "}"
+      ]
+    },
+    {
+      "$why": "Parallel routes. A `@name` folder beside a layout becomes a prop that layout receives, alongside the page it already renders as `children`. The elements are built inside the loop because they depend on `ctx`, and the props are ordered by slot name so the emitted source does not depend on the order the filesystem listed the directories in.",
+      "kind": "tree",
+      "input": {
+        "routePath": "/dashboard",
+        "layoutNames": ["Layout0", "Layout1"],
+        "wrapperLevels": [
+          {
+            "layout": "Layout0",
+            "template": null,
+            "slots": null
+          },
+          {
+            "layout": "Layout1",
+            "template": null,
+            "slots": {
+              "activity": "Slot0",
+              "team": "Slot1"
+            }
+          }
+        ],
+        "metaNames": [],
+        "errorName": null,
+        "loadingName": null,
+        "notFoundName": null
+      },
+      "source": [
+        "function __ruvyxaTree(ctx) {",
+        "  let tree = React.createElement(Page, { params: ctx.params ?? {}, requestPath: ctx.path })",
+        "  for (const [Layout, Template, slots] of [[Layout0, null, null], [Layout1, null, { \"activity\": React.createElement(Slot0, { params: ctx.params ?? {}, requestPath: ctx.path }), \"team\": React.createElement(Slot1, { params: ctx.params ?? {}, requestPath: ctx.path }) }]].reverse()) {",
+        "    if (Template) tree = React.createElement(Template, { key: ctx.path }, tree)",
+        "    if (Layout) tree = React.createElement(Layout, slots, tree)",
+        "  }",
+        "  return React.createElement(__ruvyxaRouteContext.Provider, {",
+        "    value: { pathname: ctx.path, params: ctx.params ?? {}, route: \"/dashboard\", flight: ctx.flight },",
+        "  }, tree)",
+        "}"
+      ]
+    }
+  ],
+  "$wrapperLevelsNote": [
+    "A case without `wrapperLevels` is a route with neither a `template.tsx` nor a",
+    "parallel-route slot, and both generators must emit the layout-only loop they",
+    "always did for it — the features existing change no ordinary route’s bundle.",
+    "",
+    "The levels are spelled out rather than derived from the layout chain, the",
+    "template chain, and the slot list, because deriving them is a separate rule",
+    "with its own test on each side (`route_wrapper_levels` in Rust,",
+    "`wrapperLevels()` in JavaScript). This table pins what a set of levels",
+    "*emits*."
+  ]
+}

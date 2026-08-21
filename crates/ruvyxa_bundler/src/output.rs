@@ -24,6 +24,8 @@
 //! export async function render(ctx) { … }
 //! ```
 
+use std::path::PathBuf;
+
 use crate::{BundleInput, BundleTarget};
 
 /// Encode a value as a JavaScript string literal.
@@ -62,6 +64,28 @@ pub fn build_entry_source(input: &BundleInput) -> (String, String) {
         .map(|i| format!("Layout{i}"))
         .collect::<Vec<_>>()
         .join(", ");
+
+    // `template.tsx` on the path to this route, imported alongside the layouts
+    // and interleaved with them by directory during composition.
+    let template_imports: String = input
+        .templates
+        .iter()
+        .enumerate()
+        .map(|(i, template)| {
+            let path = js_string(&template.display().to_string().replace('\\', "/"));
+            format!("import Template{i} from {path};\n")
+        })
+        .collect();
+    let slot_imports: String = input
+        .slots
+        .iter()
+        .enumerate()
+        .map(|(i, slot)| {
+            let path = js_string(&slot.file.display().to_string().replace('\\', "/"));
+            format!("import Slot{i} from {path};\n")
+        })
+        .collect();
+    let wrapper_levels = route_wrapper_levels(&input.layouts, &input.templates, &input.slots);
 
     // Special-file imports (error/loading/not-found), each optional. Absent
     // kinds contribute nothing, so a route without them emits the same bundle
@@ -111,6 +135,7 @@ pub fn build_entry_source(input: &BundleInput) -> (String, String) {
     let route_tree = route_tree_function(
         &route_pattern,
         &layout_wrappers,
+        &wrapper_levels,
         error_name.as_deref(),
         loading_name.as_deref(),
         not_found_name.as_deref(),
@@ -126,7 +151,13 @@ pub fn build_entry_source(input: &BundleInput) -> (String, String) {
 {}
 ;(globalThis.__RUVYXA_SHELLS__ ||= {{}})[{route_pattern}] = __ruvyxaShell;
 ",
-            route_shell_function(&route_pattern, &layout_wrappers, loading, &meta_names)
+            route_shell_function(
+                &route_pattern,
+                &layout_wrappers,
+                &wrapper_levels,
+                loading,
+                &meta_names
+            )
         ),
         _ => String::new(),
     };
@@ -137,7 +168,7 @@ pub fn build_entry_source(input: &BundleInput) -> (String, String) {
                 r#"import React from "react";
 import {{ createRoot, hydrateRoot }} from "react-dom/client";
 import Page from {page_path};
-{layout_imports}{special_imports}{meta_imports}
+{layout_imports}{template_imports}{slot_imports}{special_imports}{meta_imports}
 {ROUTE_CONTEXT_PRELUDE}{boundary_prelude}
 {META_PRELUDE}
 
@@ -418,6 +449,145 @@ function __ruvyxaApplyLang(html, lang) {
   return html.slice(0, match.index) + tag + html.slice(match.index + match[0].length);
 }"#;
 
+/// Emit the loop that wraps the page in its layouts and templates.
+///
+/// A route with no `template.tsx` emits exactly the loop it always did: nothing
+/// about an ordinary route's bundle changes because the feature exists.
+///
+/// With templates, the loop walks levels instead of layouts, because the two
+/// interleave — Next.js nests `layout > template > children` at each level, and
+/// a level may have either, both, or neither. Flattening that into "every
+/// template inside every layout" would put a layout outside a template that
+/// should have contained it, which is observable the moment a template provides
+/// context. `levels` is that interleaved list, already ordered root-first.
+///
+/// The template's `key` is the whole reason the file exists: React remounts a
+/// keyed element when the key changes, so navigating within the same layout
+/// resets the template's state and re-runs its effects, while the layout above
+/// it stays mounted.
+///
+/// Mirrors `wrapperLoop()` in `packages/ruvyxa/runtime/entry-templates.mjs`;
+/// both are pinned by `tests/fixtures/entry-composition-conformance.json`.
+fn wrapper_loop(layout_wrappers: &str, levels: &[WrapperLevel]) -> String {
+    if levels
+        .iter()
+        .all(|level| level.template.is_none() && level.slots.is_empty())
+    {
+        return format!(
+            "  for (const Layout of [{layout_wrappers}].reverse()) {{\n    tree = React.createElement(Layout, null, tree);\n  }}"
+        );
+    }
+
+    let triples = levels
+        .iter()
+        .map(|level| {
+            // Slots are built here rather than hoisted, because the elements
+            // depend on `ctx` and this loop runs once per render.
+            let slots = if level.slots.is_empty() {
+                "null".to_string()
+            } else {
+                let props = level
+                    .slots
+                    .iter()
+                    .map(|(name, component)| {
+                        format!(
+                            "{}: React.createElement({component}, {{ params: ctx.params ?? {{}}, requestPath: ctx.path }})",
+                            js_string(name)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{{ {props} }}")
+            };
+            format!(
+                "[{}, {}, {slots}]",
+                level.layout.as_deref().unwrap_or("null"),
+                level.template.as_deref().unwrap_or("null")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(
+        "  for (const [Layout, Template, slots] of [{triples}].reverse()) {{\n    if (Template) tree = React.createElement(Template, {{ key: ctx.path }}, tree);\n    if (Layout) tree = React.createElement(Layout, slots, tree);\n  }}"
+    )
+}
+
+/// One directory level of a route's wrapper chain.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct WrapperLevel {
+    pub(crate) layout: Option<String>,
+    pub(crate) template: Option<String>,
+    /// Parallel-route slots this level's layout receives, as
+    /// `(prop name, component identifier)` in name order.
+    pub(crate) slots: Vec<(String, String)>,
+}
+
+/// Interleave the layout and template chains into one root-first level list.
+///
+/// Both chains are ordered root-first and each entry names a file, so the
+/// directory holding it is the level. Merging on that directory is what keeps
+/// `layout > template` correct at every level even when only one of the two
+/// exists there.
+///
+/// Mirrors `wrapperLevels()` in `packages/ruvyxa/runtime/entry-templates.mjs`.
+pub(crate) fn route_wrapper_levels(
+    layouts: &[PathBuf],
+    templates: &[PathBuf],
+    slots: &[crate::RouteSlotInput],
+) -> Vec<WrapperLevel> {
+    let directory = |file: &PathBuf| {
+        file.parent()
+            .map(|parent| parent.display().to_string().replace('\\', "/"))
+            .unwrap_or_default()
+    };
+
+    let mut levels: Vec<(String, WrapperLevel)> = Vec::new();
+    let mut push = |key: String, assign: &dyn Fn(&mut WrapperLevel)| match levels
+        .iter_mut()
+        .find(|(existing, _)| *existing == key)
+    {
+        Some((_, level)) => assign(level),
+        None => {
+            let mut level = WrapperLevel::default();
+            assign(&mut level);
+            levels.push((key, level));
+        }
+    };
+
+    for (index, layout) in layouts.iter().enumerate() {
+        let name = format!("Layout{index}");
+        push(directory(layout), &|level: &mut WrapperLevel| {
+            level.layout = Some(name.clone());
+        });
+    }
+    for (index, template) in templates.iter().enumerate() {
+        let name = format!("Template{index}");
+        push(directory(template), &|level: &mut WrapperLevel| {
+            level.template = Some(name.clone());
+        });
+    }
+    // A slot names the directory holding its `@name` folder, which is the level
+    // whose layout receives it — the same key the two chains merge on.
+    for (index, slot) in slots.iter().enumerate() {
+        let entry = (slot.name.clone(), format!("Slot{index}"));
+        let key = slot
+            .level
+            .display()
+            .to_string()
+            .replace('\\', "/")
+            .trim_end_matches('/')
+            .to_string();
+        push(key, &|level: &mut WrapperLevel| {
+            level.slots.push(entry.clone());
+        });
+    }
+
+    // Root-first. A shorter directory is always an ancestor here, because every
+    // entry lies on one path from the app root to the route.
+    levels.sort_by_key(|(key, _)| key.matches('/').count());
+    levels.into_iter().map(|(_, level)| level).collect()
+}
+
 /// Build the function that composes a route's element tree.
 ///
 /// The page is wrapped, innermost to outermost: the error/not-found boundary
@@ -429,6 +599,7 @@ function __ruvyxaApplyLang(html, lang) {
 fn route_tree_function(
     route_path_literal: &str,
     layout_wrappers: &str,
+    template_levels: &[WrapperLevel],
     error_name: Option<&str>,
     loading_name: Option<&str>,
     not_found_name: Option<&str>,
@@ -450,9 +621,7 @@ fn route_tree_function(
             "  tree = React.createElement(React.Suspense, {{ fallback: React.createElement({loading}, null) }}, tree);"
         ));
     }
-    lines.push(format!(
-        "  for (const Layout of [{layout_wrappers}].reverse()) {{\n    tree = React.createElement(Layout, null, tree);\n  }}"
-    ));
+    lines.push(wrapper_loop(layout_wrappers, template_levels));
     // Metadata is a sibling of the layouts, not a wrapper around them: a layout
     // that suspends must not be able to hold the document title back past the
     // flushed shell. It is passed as an extra child of the provider — an element
@@ -483,6 +652,7 @@ fn route_tree_function(
 fn route_shell_function(
     route_path_literal: &str,
     layout_wrappers: &str,
+    levels: &[WrapperLevel],
     loading_name: &str,
     meta_names: &str,
 ) -> String {
@@ -491,8 +661,9 @@ fn route_shell_function(
     } else {
         format!("__ruvyxaMetaElement(__ruvyxaResolveMeta([{meta_names}], ctx)), ")
     };
+    let wrappers = wrapper_loop(layout_wrappers, levels);
     format!(
-        "function __ruvyxaShell(ctx) {{\n  let tree = React.createElement({loading_name}, null);\n  for (const Layout of [{layout_wrappers}].reverse()) {{\n    tree = React.createElement(Layout, null, tree);\n  }}\n  return React.createElement(__ruvyxaRouteContext.Provider, {{\n    value: {{ pathname: ctx.path, params: ctx.params ?? {{}}, route: {route_path_literal}, flight: undefined }},\n  }}, {meta_child}tree);\n}}"
+        "function __ruvyxaShell(ctx) {{\n  let tree = React.createElement({loading_name}, null);\n{wrappers}\n  return React.createElement(__ruvyxaRouteContext.Provider, {{\n    value: {{ pathname: ctx.path, params: ctx.params ?? {{}}, route: {route_path_literal}, flight: undefined }},\n  }}, {meta_child}tree);\n}}"
     )
 }
 
@@ -524,6 +695,8 @@ mod tests {
             project_root: PathBuf::from("/project"),
             app_dir: PathBuf::from("/project/app"),
             layouts: layouts.into_iter().map(PathBuf::from).collect(),
+            templates: Vec::new(),
+            slots: Vec::new(),
             request_path: request_path.to_string(),
             target: BundleTarget::Client,
             options: BundleOptions::default(),
@@ -890,5 +1063,250 @@ mod tests {
             // to re-render into, and the global would leak across requests.
             assert!(!source.contains("__RUVYXA_ROUTES__"), "{source}");
         }
+    }
+
+    /// Strip statement terminators so the two generators can be compared.
+    ///
+    /// These literals are written with semicolons and the Node templates
+    /// without them — Prettier owns the second and neither reaches a reader, so
+    /// a byte comparison would fail on formatting while passing on a reordered
+    /// composition. Only a `;` that ends a line goes, which is why the fixture
+    /// forbids one inside a route path.
+    fn without_terminators(source: &str) -> String {
+        source
+            .lines()
+            .map(|line| line.strip_suffix(';').unwrap_or(line))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    fn joined(value: &serde_json::Value) -> String {
+        value
+            .as_array()
+            .expect("fixture list")
+            .iter()
+            .map(|entry| entry.as_str().expect("fixture string"))
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+
+    /// Read a case's `wrapperLevels`, absent on every layout-only case.
+    ///
+    /// The levels are spelled out rather than derived from the two chains,
+    /// because deriving them is a separate rule with its own test on each side
+    /// — `route_wrapper_levels` here and `wrapperLevels()` in the Node
+    /// templates. This table pins what the levels *emit*.
+    fn fixture_wrapper_levels(value: &serde_json::Value) -> Vec<WrapperLevel> {
+        value
+            .as_array()
+            .map(|levels| {
+                levels
+                    .iter()
+                    .map(|level| WrapperLevel {
+                        layout: level["layout"].as_str().map(str::to_string),
+                        template: level["template"].as_str().map(str::to_string),
+                        slots: level["slots"]
+                            .as_object()
+                            .map(|slots| {
+                                slots
+                                    .iter()
+                                    .map(|(name, component)| {
+                                        (
+                                            name.clone(),
+                                            component.as_str().expect("slot component").to_string(),
+                                        )
+                                    })
+                                    .collect()
+                            })
+                            .unwrap_or_default(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// Composition order, held to the table the Node entry templates replay.
+    ///
+    /// Both bundlers emit a route's element tree, and a project renders through
+    /// whichever one built it. The order is the contract: the boundary inside
+    /// the Suspense so a synchronous throw renders its own UI rather than the
+    /// loading fallback, the layouts wrapping outward, and the metadata as a
+    /// sibling rather than a wrapper so a suspended layout cannot hold the
+    /// document title past the flushed shell.
+    #[test]
+    fn route_composition_matches_the_shared_conformance_contract() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/entry-composition-conformance.json"
+        ))
+        .unwrap();
+        let names = &fixture["names"];
+
+        // The Node generator takes these as arguments while this one writes
+        // them into its format strings; the fixture is where the two meet.
+        assert_eq!(names["tree"], "__ruvyxaTree");
+        assert_eq!(names["shell"], "__ruvyxaShell");
+        assert_eq!(names["page"], "Page");
+
+        for case in fixture["cases"].as_array().unwrap() {
+            let input = &case["input"];
+            let route_path = input["routePath"].as_str().unwrap();
+            assert!(
+                !route_path.contains(';'),
+                "a route path with a semicolon breaks the comparison"
+            );
+            let route_literal = js_string(route_path);
+            let layouts = joined(&input["layoutNames"]);
+            let meta_names = joined(&input["metaNames"]);
+            let levels = fixture_wrapper_levels(&input["wrapperLevels"]);
+
+            let generated = match case["kind"].as_str().unwrap() {
+                "tree" => route_tree_function(
+                    &route_literal,
+                    &layouts,
+                    &levels,
+                    input["errorName"].as_str(),
+                    input["loadingName"].as_str(),
+                    input["notFoundName"].as_str(),
+                    &meta_names,
+                ),
+                "shell" => route_shell_function(
+                    &route_literal,
+                    &layouts,
+                    &levels,
+                    input["loadingName"].as_str().unwrap(),
+                    &meta_names,
+                ),
+                other => panic!("unknown composition kind {other}"),
+            };
+
+            let expected = joined_lines(&case["source"]);
+            assert_eq!(
+                without_terminators(&generated),
+                expected,
+                "{}",
+                case["$why"].as_str().unwrap_or_default()
+            );
+        }
+    }
+
+    fn joined_lines(value: &serde_json::Value) -> String {
+        value
+            .as_array()
+            .expect("fixture source lines")
+            .iter()
+            .map(|entry| entry.as_str().expect("fixture string"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Layouts and templates merge on the directory that holds them.
+    ///
+    /// This is the rule that keeps `layout > template` correct at every level.
+    /// Flattening it into "every template inside every layout" is the tempting
+    /// shortcut and it is wrong: `Layout1` below would end up outside
+    /// `Template0`, when it belongs inside it, and a template that provides
+    /// context would stop reaching the layout beneath it.
+    #[test]
+    fn wrapper_levels_merge_a_layout_and_a_template_on_their_directory() {
+        let levels = route_wrapper_levels(
+            &[
+                PathBuf::from("/p/app/layout.tsx"),
+                PathBuf::from("/p/app/dash/layout.tsx"),
+            ],
+            &[
+                PathBuf::from("/p/app/template.tsx"),
+                PathBuf::from("/p/app/dash/reports/template.tsx"),
+            ],
+            &[],
+        );
+
+        assert_eq!(
+            levels,
+            vec![
+                WrapperLevel {
+                    layout: Some("Layout0".to_string()),
+                    template: Some("Template0".to_string()),
+                    slots: Vec::new(),
+                },
+                WrapperLevel {
+                    layout: Some("Layout1".to_string()),
+                    template: None,
+                    slots: Vec::new(),
+                },
+                WrapperLevel {
+                    layout: None,
+                    template: Some("Template1".to_string()),
+                    slots: Vec::new(),
+                },
+            ]
+        );
+    }
+
+    /// A route with no template emits exactly the loop it always did.
+    ///
+    /// The feature existing must not change one byte of an ordinary route's
+    /// bundle — every project that has never heard of `template.tsx` keeps the
+    /// output it had.
+    #[test]
+    fn a_route_without_templates_emits_the_layout_only_loop() {
+        let levels = route_wrapper_levels(
+            &[
+                PathBuf::from("/p/app/layout.tsx"),
+                PathBuf::from("/p/app/dash/layout.tsx"),
+            ],
+            &[],
+            &[],
+        );
+        assert_eq!(
+            wrapper_loop("Layout0, Layout1", &levels),
+            "  for (const Layout of [Layout0, Layout1].reverse()) {\n    tree = React.createElement(Layout, null, tree);\n  }"
+        );
+    }
+
+    /// A `template.tsx` reaches the emitted entry, keyed by request path.
+    ///
+    /// The key is the whole point of the file: React remounts a keyed element
+    /// when the key changes, so navigating within the same layout resets the
+    /// template while the layout above it stays mounted. Without it a template
+    /// would be a layout with a different filename.
+    #[test]
+    fn a_template_is_imported_and_keyed_by_the_request_path() {
+        let mut input = BundleInput {
+            entry: PathBuf::from("/p/app/dash/page.tsx"),
+            project_root: PathBuf::from("/p"),
+            app_dir: PathBuf::from("/p/app"),
+            layouts: vec![PathBuf::from("/p/app/layout.tsx")],
+            templates: vec![PathBuf::from("/p/app/dash/template.tsx")],
+            slots: Vec::new(),
+            request_path: "/dash".to_string(),
+            target: BundleTarget::Client,
+            options: BundleOptions::default(),
+            specials: RouteSpecials::default(),
+        };
+        let (source, _) = build_entry_source(&input);
+
+        assert!(
+            source.contains("import Template0 from \"/p/app/dash/template.tsx\""),
+            "{source}"
+        );
+        assert!(
+            source.contains("React.createElement(Template, { key: ctx.path }, tree)"),
+            "{source}"
+        );
+        assert!(
+            source.contains("[[Layout0, null, null], [null, Template0, null]].reverse()"),
+            "the template's own level has no layout: {source}"
+        );
+
+        // And the same route without the template is untouched. Matched on the
+        // emitted identifier rather than the word: `titleTemplate` lives in the
+        // metadata prelude and is not this.
+        input.templates.clear();
+        let (plain, _) = build_entry_source(&input);
+        assert!(!plain.contains("Template0"), "{plain}");
+        assert!(
+            plain.contains("for (const Layout of [Layout0].reverse())"),
+            "{plain}"
+        );
     }
 }

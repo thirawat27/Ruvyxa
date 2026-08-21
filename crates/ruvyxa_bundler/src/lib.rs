@@ -215,6 +215,8 @@ pub fn bundle_shared_route_modules(
         project_root,
         app_dir,
         layouts: Vec::new(),
+        templates: Vec::new(),
+        slots: Vec::new(),
         request_path: "/__ruvyxa/shared".to_string(),
         target: BundleTarget::Client,
         options,
@@ -347,7 +349,15 @@ fn prepare_bundle_with_parts(
     )?;
     let resolver_configuration_hash = graph_cache.configuration_hash(&input.project_root);
 
-    let mut resolve_keys = Vec::with_capacity(graph.len());
+    // Keyed by module path rather than by position. `compiled` comes back from
+    // a separate pass over `graph`, and pairing the two by index made every
+    // artifact key in the rest of this function depend on that pass returning
+    // the same modules in the same order — an invariant nothing stated and
+    // nothing checked, whose failure mode is silent: a module gets another
+    // module's Transform key, and the next incremental build reuses the wrong
+    // artifact. `zip` would also drop the tail of a longer `compiled` without
+    // a word.
+    let mut resolve_keys: BTreeMap<PathBuf, ArtifactKey> = BTreeMap::new();
     for module in &graph {
         let path = stable_path(&module.path);
         let source_key = artifacts.key(
@@ -425,7 +435,7 @@ fn prepare_bundle_with_parts(
             BTreeSet::from([ArtifactDependency::new(source_key, Some(source_hash))]),
             resolve_hash.clone(),
         )?;
-        resolve_keys.push(resolve_key);
+        resolve_keys.insert(module.path.clone(), resolve_key);
     }
 
     let watch_paths = graph
@@ -445,7 +455,13 @@ fn prepare_bundle_with_parts(
         BundleError::Compiler(format!("cannot fingerprint bundle options: {error}"))
     })?;
     let mut transform_dependencies = BTreeSet::new();
-    for (module, resolve_key) in compiled.iter().zip(&resolve_keys) {
+    for module in &compiled {
+        let Some(resolve_key) = resolve_keys.get(&module.path) else {
+            return Err(BundleError::Compiler(format!(
+                "compiled module {} has no resolved counterpart in the graph",
+                module.path.display()
+            )));
+        };
         let transform_key = artifacts.key(
             ArtifactKind::Transform,
             [
@@ -576,84 +592,76 @@ fn emit_prepared_bundle(
     };
 
     // 6. Link modules into a single concatenated script. This also detects circular dependencies
-    // and returns an error.
-    let mut linked = linker::link_parallel_with_dynamic_imports_and_shared_modules(
-        &linked_modules,
-        input,
-        dynamic_import_files,
-        shared_modules,
-    )?;
+    // and returns an error. The linker reports where every emitted line came
+    // from, which is what the source map below is built out of.
+    let linked_bundle =
+        linker::link_with_origins(&linked_modules, input, dynamic_import_files, shared_modules)?;
+    let mut linked = linked_bundle.code;
+    let mut linked_origins = linked_bundle.line_origins;
     if input.target == BundleTarget::Client {
         linked.push_str(&format!(
             "\n;(globalThis.__RUVYXA_ROUTE_ARTIFACTS__ ||= {{}})[{}] = {};\n",
             output::js_string(&input.request_path),
             output::js_string(&reference_manifest.artifact_version),
         ));
+        linked_origins.resize(newline_count(&linked), None);
     }
 
     // 7. Optionally tree-shake, then minify. Tree-shaking is controlled
-    // independently from whitespace/identifier minification.
-    let optimized_linked = if input.options.tree_shaking {
-        minifier::tree_shake_exports(&linked)
+    // independently from whitespace/identifier minification. Each pass carries
+    // the line provenance forward: a map that describes the text before a pass
+    // describes a document that is not what was shipped.
+    let (optimized_linked, optimized_origins) = if input.options.tree_shaking {
+        let (code, lines) = minifier::tree_shake_tracking_lines(&linked);
+        let origins = lines
+            .iter()
+            .map(|line| linked_origins.get(*line).copied().flatten())
+            .collect::<Vec<_>>();
+        (code, origins)
     } else {
-        linked.clone()
+        (linked.clone(), linked_origins)
     };
     let minify_output = input.options.minify;
-    let final_code = if minify_output {
-        minifier::minify_with_options(&optimized_linked, input.target, false)?
-    } else {
-        optimized_linked.clone()
+    // Minification rewrites the text wholesale, so only the minifier can carry
+    // positions across it. Asking for them costs codegen work, so a build
+    // without `build.map` does not.
+    let (final_code, minified_positions) = match (minify_output, input.options.source_map) {
+        (true, true) => {
+            let (code, positions) =
+                minifier::minify_tracking_positions(&optimized_linked, input.target)?;
+            (code, Some(positions))
+        }
+        (true, false) => (
+            minifier::minify_with_options(&optimized_linked, input.target, false)?,
+            None,
+        ),
+        (false, _) => (optimized_linked.clone(), None),
     };
 
     // 8. Wrap in the appropriate output format.
-    let code = output::wrap(final_code, input);
+    let code = output::wrap(final_code.clone(), input);
 
     // Count modules whose JS came from the compile cache, not freshly compiled.
     let cache_hits = compiled.iter().filter(|m| m.cache_hit).count();
 
     // 9. Generate source map if requested.
-    let source_map = if input.options.source_map {
+    let source_map = input.options.source_map.then(|| {
         let hash = blake3::hash(code.as_bytes()).to_hex();
         let map_file = format!("{}.js.map", &hash[..16]);
-        let mut builder = sourcemap::SourceMapBuilder::new(&map_file, &input.project_root);
-
-        let wrapper_lines = match input.target {
-            BundleTarget::Client => 2,
-            BundleTarget::Ssr | BundleTarget::Edge => 3,
-        };
-
-        let linker_header_lines: u32 = 3;
-        let total_offset = wrapper_lines + linker_header_lines;
-
-        let mut current_line = total_offset;
-        for module in linker::ordered_project_modules(&linked_modules) {
-            if module.is_external {
-                continue;
-            }
-            let source_idx = builder.add_source(&module.path, Some(&module.js));
-            // A bundled dependency is still a source in the map, so without this
-            // the emitter's `x_google_ignoreList` support never fired for a real
-            // build: the field was implemented and unit-tested, but nothing ever
-            // marked a source, so every shipped map left `node_modules` frames
-            // in the user's stack traces and step-through.
-            if is_dependency_source(&module.path) {
-                builder.add_to_ignore_list(source_idx);
-            }
-            let line_count = module.js.lines().count() as u32;
-            let imported_hook_map = hook_source_maps
-                .get(&module.path)
-                .map(String::as_str)
-                .is_some_and(|map| builder.add_source_map(map, current_line));
-            if !imported_hook_map {
-                builder.add_identity_mappings(source_idx, &module.js, current_line);
-            }
-            current_line += line_count + 5;
-        }
-
-        Some(builder.to_json())
-    } else {
-        None
-    };
+        build_source_map(
+            &map_file,
+            SourceMapInputs {
+                input,
+                code: &code,
+                final_code: &final_code,
+                modules: &linked_bundle.modules,
+                linked_modules: &linked_modules,
+                origins: &optimized_origins,
+                minified_positions: minified_positions.as_deref(),
+                hook_source_maps,
+            },
+        )
+    });
 
     // 10. Optionally emit a chunk manifest.
     let chunk_manifest =
@@ -849,6 +857,142 @@ fn stable_path(path: &std::path::Path) -> String {
     path.to_string_lossy().replace('\\', "/")
 }
 
+/// Newlines in a buffer every writer newline-terminates.
+fn newline_count(text: &str) -> usize {
+    text.bytes().filter(|byte| *byte == b'\n').count()
+}
+
+/// Everything the source map is assembled from.
+///
+/// Grouped rather than passed as nine arguments, four of which are slices of
+/// unrelated things.
+struct SourceMapInputs<'a> {
+    input: &'a BundleInput,
+    /// The bytes actually shipped.
+    code: &'a str,
+    /// The same bytes before [`output::wrap`], so the wrapper's own prefix can
+    /// be measured rather than assumed.
+    final_code: &'a str,
+    /// Modules in emit order, as `origins` indexes them.
+    modules: &'a [PathBuf],
+    /// The compiled modules those paths name, for `sourcesContent`.
+    linked_modules: &'a [compiler::CompiledModule],
+    /// One entry per line of the linked-and-shaken text.
+    origins: &'a [Option<linker::LineOrigin>],
+    /// Present only when minification ran: it is the only thing that can say
+    /// where a minified position came from.
+    minified_positions: Option<&'a [minifier::MinifiedPosition]>,
+    hook_source_maps: &'a BTreeMap<PathBuf, String>,
+}
+
+/// Build the bundle's source map from measured positions.
+///
+/// Every position here is recorded while the text is produced. The previous
+/// implementation derived them from three constants describing the emit format
+/// — how many lines the output wrapper prepends, how many the linker header
+/// takes, how many the per-module preamble adds — and all three were wrong:
+/// the wrapper prepends nothing for a client bundle and one line for a server
+/// one, the linker's header is preceded by a variable-length external-import
+/// block, and the preamble is longer than the constant said. The map named a
+/// blank line as the first statement of the first module and drifted further
+/// with every module after it. Tree-shaking and minification then rewrote the
+/// text the mappings described, and neither was accounted for at all.
+///
+/// Resolution is per line rather than per token. The linker rewrites a module
+/// one line at a time, so a line is the finest position it can honestly report;
+/// columns within a line are not tracked and are reported as zero.
+fn build_source_map(map_file: &str, parts: SourceMapInputs<'_>) -> String {
+    let mut builder = sourcemap::SourceMapBuilder::new(map_file, &parts.input.project_root);
+
+    // Register every module up front so a source index is stable regardless of
+    // which module the first mapping happens to land in.
+    let mut source_indices = Vec::with_capacity(parts.modules.len());
+    for path in parts.modules {
+        let content = parts
+            .linked_modules
+            .iter()
+            .find(|module| module.path == *path)
+            .map(|module| module.js.as_ref());
+        let source_index = builder.add_source(path, content);
+        // A bundled dependency is still a source in the map, so without this
+        // the emitter's `x_google_ignoreList` support never fires for a real
+        // build and every shipped map leaves `node_modules` frames in the
+        // user's stack traces and step-through.
+        if is_dependency_source(path) {
+            builder.add_to_ignore_list(source_index);
+        }
+        source_indices.push(source_index);
+    }
+
+    // The wrapper only prepends, and `strip_suffix` proves it rather than
+    // assuming it: a wrapper that started appending would report zero here
+    // instead of silently shifting every mapping.
+    let wrapper_lines = parts
+        .code
+        .strip_suffix(parts.final_code)
+        .map_or(0, |prefix| newline_count(prefix) as u32);
+
+    match parts.minified_positions {
+        Some(positions) => {
+            for position in positions {
+                let Some(origin) = parts
+                    .origins
+                    .get(position.source_line as usize)
+                    .copied()
+                    .flatten()
+                else {
+                    continue;
+                };
+                let Some(source_index) = source_indices.get(origin.module as usize).copied() else {
+                    continue;
+                };
+                builder.add_mapping(sourcemap::Mapping {
+                    gen_line: wrapper_lines + position.generated_line,
+                    gen_col: position.generated_column,
+                    source_idx: source_index,
+                    orig_line: origin.line,
+                    orig_col: 0,
+                });
+            }
+        }
+        None => {
+            for (generated_line, origin) in parts.origins.iter().enumerate() {
+                let Some(origin) = origin else { continue };
+                let Some(source_index) = source_indices.get(origin.module as usize).copied() else {
+                    continue;
+                };
+                builder.add_mapping(sourcemap::Mapping {
+                    gen_line: wrapper_lines + generated_line as u32,
+                    gen_col: 0,
+                    source_idx: source_index,
+                    orig_line: origin.line,
+                    orig_col: 0,
+                });
+            }
+        }
+    }
+
+    // A build hook that transformed a module can say where its output came
+    // from in the module's *own* source, which is a layer below anything above.
+    // Only meaningful while the text it describes is still line-addressable, so
+    // a minified bundle keeps the module-level mapping instead.
+    if parts.minified_positions.is_none() {
+        for (index, path) in parts.modules.iter().enumerate() {
+            let Some(hook_map) = parts.hook_source_maps.get(path) else {
+                continue;
+            };
+            let Some(body_start) = parts.origins.iter().position(|origin| {
+                origin.is_some_and(|origin| origin.module as usize == index && origin.line == 0)
+            }) else {
+                continue;
+            };
+            builder.add_source_map(hook_map, wrapper_lines + body_start as u32);
+        }
+    }
+
+    builder.to_json()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -867,6 +1011,8 @@ mod tests {
             project_root: root.to_path_buf(),
             app_dir: app_dir.to_path_buf(),
             layouts,
+            templates: Vec::new(),
+            slots: Vec::new(),
             request_path: request_path.to_string(),
             target: BundleTarget::Client,
             options: BundleOptions {
@@ -2289,5 +2435,246 @@ export default function Page() { return null }
             "the stub must still name the package and the importer: {}",
             &output.code[..output.code.len().min(600)]
         );
+    }
+
+    /// A Prettier-formatted `.js` dependency links into a parseable bundle.
+    ///
+    /// The mirror image of the minified case above, and the one that failed
+    /// silently. The linker expects a whole ESM statement per line; a `.ts`
+    /// module always gets that from the transform, but a `.js`/`.mjs`/`.cjs`
+    /// module is passed through untouched, and Prettier breaks an import or
+    /// export list across lines the moment it outgrows the print width.
+    ///
+    /// The multi-line `import` form failed the build with `RUV1612` — loud, but
+    /// pointing at minified dependencies. The `export` form was worse: the
+    /// clause line matched the local-named-export rewrite and disappeared,
+    /// leaving `readFile,` and a stray `}` loose inside the module IIFE. Nothing
+    /// said `export`, so `reject_surviving_esm` let it through and the browser
+    /// received a bundle that does not parse.
+    ///
+    /// Asserted by parsing the linked output, because that is the failure.
+    #[test]
+    fn a_multiline_esm_clause_in_a_javascript_dependency_links_into_a_parseable_bundle() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = ruvyxa_diagnostics::normalized_canonical_path(temp.path());
+        let app = root.join("app");
+        let pkg = root.join("node_modules").join("wide-pkg");
+        fs::create_dir_all(&app).unwrap();
+        fs::create_dir_all(&pkg).unwrap();
+        fs::write(
+            pkg.join("package.json"),
+            r#"{"type":"module","main":"index.js"}"#,
+        )
+        .unwrap();
+        // Exactly what Prettier emits once a list outgrows the print width.
+        fs::write(
+            pkg.join("names.js"),
+            "export const WIDE = 1\nexport const ALSO_WIDE = 2\n",
+        )
+        .unwrap();
+        fs::write(
+            pkg.join("index.js"),
+            "import {\n  WIDE,\n  ALSO_WIDE,\n} from \"./names.js\"\n\nconst combined = WIDE + ALSO_WIDE\n\nexport {\n  WIDE,\n  combined,\n}\n",
+        )
+        .unwrap();
+
+        let page = app.join("page.tsx");
+        fs::write(
+            &page,
+            "import { WIDE } from 'wide-pkg';\nexport default function Page() { return <b>{WIDE}</b>; }\n",
+        )
+        .unwrap();
+
+        let mut input = client_input(&root, &app, page, vec![], "/");
+        input.options.minify = false;
+        input.options.tree_shaking = false;
+        input.options.source_map = false;
+        input.options.emit_chunk_manifest = false;
+        let output = bundle(input).expect("a multi-line ESM clause must link");
+
+        assert!(
+            output.code.contains("__exports.WIDE"),
+            "the dependency's export must reach the module namespace:\n{}",
+            output.code
+        );
+        // The real assertion: the linked bundle is parseable JavaScript.
+        minifier::minify_with_options(&output.code, BundleTarget::Client, false)
+            .expect("the linked bundle must parse");
+    }
+
+    /// The clause form triggers a re-print; the forms the linker already spans
+    /// do not, so working output keeps its exact bytes.
+    #[test]
+    fn only_a_multiline_clause_asks_for_a_re_print() {
+        for source in [
+            "export {\n  a,\n  b,\n}\n",
+            "import {\n  a,\n} from \"./m.js\"\n",
+        ] {
+            assert!(
+                compiler::has_esm_clause_spanning_lines(source),
+                "must trigger a re-print: {source:?}"
+            );
+        }
+
+        for source in [
+            // Handled deliberately by the linker: the terminator is carried
+            // through so the literal finishes on the lines that follow.
+            "export default {\n  name: \"x\",\n}\n",
+            "export const config = {\n  name: \"x\",\n}\n",
+            "export default class Page {\n  render() {}\n}\n",
+            // One line each: nothing to expand.
+            "export { a, b }\nimport { c } from \"./m.js\"\n",
+            // Not ESM at all.
+            "const exporter = {\n  a: 1,\n}\n",
+            "// export {\n//   a,\n// }\n",
+            "const doc = `export {\n  a,\n}`\n",
+        ] {
+            assert!(
+                !compiler::has_esm_clause_spanning_lines(source),
+                "must not trigger a re-print: {source:?}"
+            );
+        }
+    }
+
+    /// A project whose modules each carry a token that appears nowhere else.
+    ///
+    /// The tokens are the evidence: whatever the linker and the minifier do to
+    /// the code around them, a position holding `BETA_FOUR` came from the line
+    /// that declares `BETA_FOUR`, and that is exactly what a debugger asks the
+    /// map.
+    fn source_map_probe_project(root: &std::path::Path) -> PathBuf {
+        let app = root.join("app");
+        fs::create_dir_all(&app).unwrap();
+        // The first two exports share one statement and only one of them is
+        // used, so tree-shaking splits that line in two and moves every line
+        // below it. A pipeline that forgets to carry line provenance across
+        // shaking maps `alpha-one` and `alpha-two` one line short.
+        fs::write(
+            app.join("alpha.ts"),
+            "const GAMMA_USED = 'gamma-used';\n\
+             const GAMMA_DEAD = 'gamma-dead';\n\
+             export { GAMMA_USED, GAMMA_DEAD };\n\
+             export const ALPHA_ONE = 'alpha-one';\n\
+             export const ALPHA_TWO = 'alpha-two';\n",
+        )
+        .unwrap();
+        fs::write(
+            app.join("beta.ts"),
+            "import { ALPHA_ONE } from './alpha';\n\
+             export const BETA_ONE = ALPHA_ONE;\n\
+             export const BETA_TWO = 'beta-two';\n\
+             export const BETA_THREE = 'beta-three';\n\
+             export const BETA_FOUR = 'beta-four';\n",
+        )
+        .unwrap();
+        let page = app.join("page.tsx");
+        fs::write(
+            &page,
+            "import { BETA_ONE, BETA_FOUR } from './beta';\n\
+             import { ALPHA_TWO, GAMMA_USED } from './alpha';\n\
+             export default function Page() {\n\
+             \x20 const PAGE_MARKER = BETA_ONE + BETA_FOUR + ALPHA_TWO + GAMMA_USED;\n\
+             \x20 return <main>{PAGE_MARKER}</main>;\n\
+             }\n",
+        )
+        .unwrap();
+        page
+    }
+
+    /// Every token in the bundle is mapped to the line that produced it.
+    ///
+    /// `emit_prepared_bundle` used to tell the source-map builder where each
+    /// module started using three constants describing someone else's output:
+    /// how many lines `output::wrap` prepends, how many the linker header
+    /// takes, and how many its per-module preamble adds. All three were wrong.
+    /// The wrapper prepends nothing for a client bundle, the linker's header is
+    /// preceded by a variable-length external-import block, and the preamble is
+    /// longer than the constant said — so the first module's first statement was
+    /// mapped to a blank line twelve lines too early, and the error compounded
+    /// with every module after it. Nothing noticed: the builder's own tests fed
+    /// it offsets and read back what they fed, and the bundler's map tests read
+    /// `sources` and `x_google_ignoreList`.
+    ///
+    /// Text equality is not the property, because the linker rewrites the
+    /// statements it copies — `export const X = …` becomes `const X = …`. What
+    /// has to hold is that a position holding a token came from the line that
+    /// produced that token, which is the question a stack trace asks.
+    #[test]
+    fn every_mapped_token_lands_on_the_line_that_produced_it() {
+        for (minify, tree_shaking) in [(false, false), (false, true), (true, true), (true, false)] {
+            let temp = tempfile::tempdir().unwrap();
+            let root = ruvyxa_diagnostics::normalized_canonical_path(temp.path());
+            let page = source_map_probe_project(&root);
+
+            let mut input = client_input(&root, &root.join("app"), page, vec![], "/");
+            input.options.minify = minify;
+            input.options.tree_shaking = tree_shaking;
+            input.options.emit_chunk_manifest = false;
+            let output = bundle(input).unwrap();
+            let context = format!("minify={minify} treeShaking={tree_shaking}");
+
+            let map: serde_json::Value =
+                serde_json::from_str(&output.source_map.expect("source map requested")).unwrap();
+            let contents = map["sourcesContent"]
+                .as_array()
+                .expect("mappings are useless without the text they point into")
+                .iter()
+                .map(|value| {
+                    value
+                        .as_str()
+                        .expect("every source carries its content")
+                        .lines()
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .collect::<Vec<_>>();
+            let sources = map["sources"].as_array().expect("sources");
+            let bundle_lines = output.code.lines().collect::<Vec<_>>();
+            let decoded = sourcemap::decode_mappings(map["mappings"].as_str().expect("mappings"));
+            assert!(
+                !decoded.is_empty(),
+                "{context}: the map carries no mappings at all"
+            );
+
+            // Tokens the pipeline keeps verbatim: identifiers can be mangled
+            // by the minifier, but a string literal it cannot prove dead
+            // survives, so a position holding one is evidence in every mode.
+            const TOKENS: &[&str] = &["alpha-one", "alpha-two", "beta-four", "beta-two"];
+            for token in TOKENS {
+                let (line_index, column) = bundle_lines
+                    .iter()
+                    .enumerate()
+                    .find_map(|(index, line)| line.find(token).map(|column| (index, column)))
+                    .unwrap_or_else(|| panic!("{context}: {token:?} is not in the bundle"));
+
+                // Resolve the position the way a debugger does: the mapping
+                // with the greatest generated column at or before it.
+                let resolved = decoded
+                    .iter()
+                    .filter(|mapping| {
+                        mapping.generated_line == line_index && mapping.generated_column <= column
+                    })
+                    .max_by_key(|mapping| mapping.generated_column)
+                    .unwrap_or_else(|| {
+                        panic!("{context}: nothing maps the position holding {token:?}")
+                    });
+
+                let original = contents
+                    .get(resolved.source)
+                    .and_then(|lines| lines.get(resolved.original_line))
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "{context}: {token:?} maps to line {} of {}, which is shorter",
+                            resolved.original_line, sources[resolved.source]
+                        )
+                    });
+                assert!(
+                    original.contains(token),
+                    "{context}: the position holding {token:?} maps to {} line {} — {original:?}",
+                    sources[resolved.source],
+                    resolved.original_line
+                );
+            }
+        }
     }
 }

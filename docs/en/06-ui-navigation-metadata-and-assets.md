@@ -135,6 +135,13 @@ export function Hero() {
 }
 ```
 
+Files in `public/` are served with byte-range support, so `<video>` and `<audio>` elements seek
+without re-downloading and interrupted downloads resume. `ruvyxa start` and a standalone/node
+deployment answer ranges identically; a single `Range: bytes=…` returns `206` with `Content-Range`,
+a range past the end of the file returns `416`, and a multi-range request is answered with the whole
+file. Assets over 8 MiB stream from disk instead of being buffered, and a ranged request for one
+reads only the bytes it asked for.
+
 Imported project CSS may live outside `app/`. To include global styles not imported by a module,
 list project-relative files/directories in `css.entries`. The runtime recognizes Sass as a package
 dependency; use styles that your build can resolve and run `npm run check` after changing

@@ -1505,4 +1505,151 @@ mod tests {
             MAX_ENV_RENDER_CACHE_CAPACITY
         );
     }
+
+    /// The cache stays live and self-consistent under contention.
+    ///
+    /// The index and the recency order live behind two locks, not one. Every
+    /// method that needs both takes them index-first, and that ordering is the
+    /// only thing standing between this cache and a deadlocked dev server —
+    /// nothing else in the file could notice if it were broken, because every
+    /// other test here drives the cache from a single task. Inverting the two
+    /// acquisitions in `put` makes this test hang and leaves all of them green.
+    ///
+    /// What it asserts is deliberately structural. Which writer wins a race is
+    /// not the cache's promise; that the two halves still describe the same set
+    /// afterwards, that capacity still holds, and that the cache still answers,
+    /// are.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn the_index_and_the_order_agree_under_concurrent_access() {
+        let cache = Arc::new(RenderCache::new(8, 60));
+        let paths = ["/a", "/b", "/c", "/d", "/e", "/f", "/g", "/h", "/i", "/j"];
+
+        let mut tasks = Vec::new();
+        for worker in 0..8u32 {
+            let cache = Arc::clone(&cache);
+            tasks.push(tokio::spawn(async move {
+                for round in 0..40u32 {
+                    let path = paths[((worker + round) as usize) % paths.len()];
+                    match (worker + round) % 6 {
+                        0 | 1 => {
+                            cache
+                                .put(ssr_cache_key(path, &RouteParams::new()), path.to_string())
+                                .await;
+                        }
+                        2 => {
+                            cache.get(&ssr_cache_key(path, &RouteParams::new())).await;
+                        }
+                        3 => {
+                            cache
+                                .get_stale_with_age(&ssr_cache_key(path, &RouteParams::new()))
+                                .await;
+                        }
+                        4 => {
+                            cache.invalidate_route(path).await;
+                        }
+                        _ => {
+                            cache.revalidate_path(path).await;
+                        }
+                    }
+                    // Yield so the interleavings are real rather than a queue of
+                    // whole tasks run one after another.
+                    tokio::task::yield_now().await;
+                }
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+
+        assert_index_and_order_consistent(&cache).await;
+
+        // One key, read and invalidated at the same time. A reader finds the
+        // entry, releases the index lock, and only then promotes; an
+        // invalidation landing inside that window leaves it promoting a key the
+        // index no longer has. Spreading the load over ten paths above almost
+        // never lands there, so this section aims every task at one.
+        let hot_key = ssr_cache_key("/hot", &RouteParams::new());
+        let mut contenders = Vec::new();
+        for worker in 0..8u32 {
+            let cache = Arc::clone(&cache);
+            let hot_key = hot_key.clone();
+            contenders.push(tokio::spawn(async move {
+                for _ in 0..250u32 {
+                    match worker % 4 {
+                        0 => {
+                            cache.put(hot_key.clone(), "hot".to_string()).await;
+                        }
+                        1 | 2 => {
+                            cache.get(&hot_key).await;
+                        }
+                        _ => {
+                            cache.invalidate_route("/hot").await;
+                        }
+                    }
+                    tokio::task::yield_now().await;
+                }
+            }));
+        }
+        for task in contenders {
+            task.await.unwrap();
+        }
+
+        assert_index_and_order_consistent(&cache).await;
+        let snapshot = cache.snapshot().await;
+        assert!(
+            snapshot.entries <= snapshot.capacity,
+            "the cache outgrew its capacity: {snapshot:?}"
+        );
+        assert_eq!(
+            snapshot.lru_keys.len(),
+            snapshot.entries,
+            "the order and the index describe different sets"
+        );
+
+        // The cache is still usable, not merely self-consistent: a wedged lock
+        // or a corrupted order would show up here rather than in the counts.
+        let key = ssr_cache_key("/after", &RouteParams::new());
+        cache.put(key.clone(), "after".to_string()).await;
+        assert_eq!(cache.get(&key).await.as_deref(), Some("after"));
+        assert_index_and_order_consistent(&cache).await;
+    }
+
+    /// Concurrent claims never exceed the bounded set, and a claim is retired
+    /// only by the render that owns its generation.
+    ///
+    /// `revalidatePath()` is reachable from an application, so the claim set is
+    /// the one piece of this cache whose size an outside caller influences.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn concurrent_revalidation_claims_stay_bounded() {
+        let cache = Arc::new(RenderCache::new(8, 60));
+
+        let mut tasks = Vec::new();
+        for worker in 0..8u32 {
+            let cache = Arc::clone(&cache);
+            tasks.push(tokio::spawn(async move {
+                for round in 0..50u32 {
+                    let path = format!("/p/{}", (worker * 50 + round) % 64);
+                    cache.revalidate_path(&path).await;
+                    if let Some(claim) = cache.forced_claim(&path).await {
+                        cache.acknowledge_forced(&path, claim).await;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            }));
+        }
+        for task in tasks {
+            task.await.unwrap();
+        }
+
+        let snapshot = cache.snapshot().await;
+        assert!(
+            snapshot.forced_pending <= MAX_FORCED_REVALIDATIONS,
+            "the claim set outgrew its bound: {snapshot:?}"
+        );
+        assert!(
+            !snapshot.bypass_prerendered,
+            "well-behaved traffic must not trip the global bypass: {snapshot:?}"
+        );
+        assert_index_and_order_consistent(&cache).await;
+    }
 }

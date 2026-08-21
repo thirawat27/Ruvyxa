@@ -1,0 +1,168 @@
+{
+  "$comment": "Shared table for HTTP byte-range parsing. Rust's parse_single_byte_range in crates/ruvyxa_dev_server/src/static_assets.rs and parseByteRange in packages/ruvyxa/runtime/serverless-handler.mjs both answer this file. `ruvyxa start` and a standalone/node deployment serve the same public/ directory, so a video that scrubs under one has to scrub under the other.",
+  "$kindNote": "whole = ignore the Range and send the complete representation, which RFC 9110 allows for any range a server does not wish to honour. unsatisfiable = 416 with `Content-Range: bytes */<len>`. partial = 206 with an inclusive [start, end].",
+  "cases": [
+    {
+      "value": "bytes=0-0",
+      "length": 10,
+      "kind": "partial",
+      "start": 0,
+      "end": 0,
+      "why": "one byte"
+    },
+    {
+      "value": "bytes=0-1",
+      "length": 10,
+      "kind": "partial",
+      "start": 0,
+      "end": 1,
+      "why": "the opening probe a media element makes before it will play anything"
+    },
+    {
+      "value": "bytes=2-5",
+      "length": 10,
+      "kind": "partial",
+      "start": 2,
+      "end": 5,
+      "why": "an interior span, end inclusive"
+    },
+    {
+      "value": "bytes=5-",
+      "length": 10,
+      "kind": "partial",
+      "start": 5,
+      "end": 9,
+      "why": "open-ended runs to the last byte"
+    },
+    {
+      "value": "bytes=0-99",
+      "length": 10,
+      "kind": "partial",
+      "start": 0,
+      "end": 9,
+      "why": "a last-byte position past the end is clamped, not refused"
+    },
+    {
+      "value": "bytes=-3",
+      "length": 10,
+      "kind": "partial",
+      "start": 7,
+      "end": 9,
+      "why": "a suffix is counted back from the end"
+    },
+    {
+      "value": "bytes=-99",
+      "length": 10,
+      "kind": "partial",
+      "start": 0,
+      "end": 9,
+      "why": "a suffix longer than the file is the whole file"
+    },
+    {
+      "value": "  bytes=1-2  ",
+      "length": 10,
+      "kind": "partial",
+      "start": 1,
+      "end": 2,
+      "why": "surrounding space is not part of the value"
+    },
+    {
+      "value": "bytes=10-",
+      "length": 10,
+      "kind": "unsatisfiable",
+      "why": "a start at the length names no byte"
+    },
+    {
+      "value": "bytes=99-100",
+      "length": 10,
+      "kind": "unsatisfiable",
+      "why": "wholly past the end"
+    },
+    {
+      "value": "bytes=-0",
+      "length": 10,
+      "kind": "unsatisfiable",
+      "why": "a zero-length suffix names no byte"
+    },
+    {
+      "value": "bytes=5-2",
+      "length": 10,
+      "kind": "unsatisfiable",
+      "why": "an end before the start"
+    },
+    {
+      "value": "bytes=0-0",
+      "length": 0,
+      "kind": "unsatisfiable",
+      "why": "an empty file satisfies nothing"
+    },
+    {
+      "value": "bytes=0-1,4-5",
+      "length": 10,
+      "kind": "whole",
+      "why": "multi-range is answered whole rather than refused; multipart/byteranges is machinery no client of this server needs"
+    },
+    {
+      "value": "items=0-1",
+      "length": 10,
+      "kind": "whole",
+      "why": "an unknown unit is not a byte range"
+    },
+    {
+      "value": "bytes=abc",
+      "length": 10,
+      "kind": "whole",
+      "why": "no dash at all"
+    },
+    {
+      "value": "bytes=x-2",
+      "length": 10,
+      "kind": "whole",
+      "why": "an unparsable first position"
+    },
+    {
+      "value": "bytes=1-y",
+      "length": 10,
+      "kind": "whole",
+      "why": "an unparsable last position"
+    },
+    {
+      "value": "",
+      "length": 10,
+      "kind": "whole",
+      "why": "an empty header value"
+    },
+    {
+      "value": "bytes=+1-",
+      "length": 10,
+      "kind": "whole",
+      "why": "a signed position is not a range specifier — Rust's integer parser accepts the leading plus and JavaScript's does not, so both are held to digits only"
+    },
+    {
+      "value": "bytes=1e1-",
+      "length": 10,
+      "kind": "whole",
+      "why": "exponent notation is a Number() spelling, not an HTTP one"
+    },
+    {
+      "value": "bytes=0x2-",
+      "length": 10,
+      "kind": "whole",
+      "why": "hexadecimal is a Number() spelling, not an HTTP one"
+    },
+    {
+      "value": "bytes=99999999999999999999999-",
+      "length": 10,
+      "kind": "unsatisfiable",
+      "why": "a position past any real file is still a position: refusing it as unparsable would send the whole file instead of a 416"
+    },
+    {
+      "value": "bytes=-99999999999999999999999",
+      "length": 10,
+      "kind": "partial",
+      "start": 0,
+      "end": 9,
+      "why": "a suffix past any real file is the whole file, as with any oversized suffix"
+    }
+  ]
+}
