@@ -109,8 +109,19 @@ pub struct CorsConfig {
     #[serde(default)]
     pub origins: Vec<String>,
 
-    /// Allowed methods.
-    #[serde(default = "default_cors_methods")]
+    /// Allowed methods, advertised on a preflight response.
+    ///
+    /// Empty when the project named none, and an empty list sends no
+    /// `Access-Control-Allow-Methods` header at all rather than an implicit
+    /// one. This defaulted to `GET, POST, PUT, DELETE, OPTIONS`, which the
+    /// serverless handler in `packages/ruvyxa/runtime/serverless-handler.mjs`
+    /// never had: one project answered a cross-origin `PUT` under `ruvyxa dev`
+    /// and had the browser block the same request once deployed. Both hosts now
+    /// replay `tests/fixtures/cors-conformance.json`, and the narrower of the
+    /// two is the shared behavior — `docs/en/13-security.md` already asks a
+    /// project to name its methods, and defaulting would have widened every
+    /// deployed application that had not.
+    #[serde(default)]
     pub methods: Vec<String>,
 
     /// Allowed headers.
@@ -146,16 +157,6 @@ pub struct RateLimitConfig {
 
 fn default_true() -> bool {
     true
-}
-
-fn default_cors_methods() -> Vec<String> {
-    vec![
-        "GET".to_string(),
-        "POST".to_string(),
-        "PUT".to_string(),
-        "DELETE".to_string(),
-        "OPTIONS".to_string(),
-    ]
 }
 
 fn default_cors_max_age() -> u64 {
@@ -205,5 +206,43 @@ mod tests {
             let error = config.plugin_timeout().unwrap_err();
             assert!(error.contains("middleware.timeoutMs"), "{error}");
         }
+    }
+
+    /// The CORS defaults this host applies to a config that names none.
+    ///
+    /// Held against the same file the serverless handler replays, because the
+    /// two hosts serve the same project and a default that exists in only one
+    /// of them is a cross-origin request that works in `ruvyxa dev` and is
+    /// blocked in production. See the fixture for the split this closed.
+    #[test]
+    fn cors_defaults_match_the_shared_conformance_contract() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/cors-conformance.json"
+        ))
+        .unwrap();
+        let defaults = &fixture["defaults"];
+
+        // An empty object: every field takes the default this host applies when
+        // a project writes `cors: {}` or names only its origins.
+        let cors: CorsConfig = serde_json::from_value(serde_json::json!({})).unwrap();
+
+        assert_eq!(
+            cors.methods,
+            string_list(&defaults["methods"]),
+            "an implicit method list here is one the deployed handler never sends"
+        );
+        assert_eq!(cors.headers, string_list(&defaults["headers"]));
+        assert_eq!(cors.origins, string_list(&defaults["origins"]));
+        assert_eq!(cors.credentials, defaults["credentials"].as_bool().unwrap());
+        assert_eq!(cors.max_age, defaults["maxAge"].as_u64().unwrap());
+    }
+
+    fn string_list(value: &serde_json::Value) -> Vec<String> {
+        value
+            .as_array()
+            .expect("fixture list")
+            .iter()
+            .map(|entry| entry.as_str().expect("fixture string").to_string())
+            .collect()
     }
 }

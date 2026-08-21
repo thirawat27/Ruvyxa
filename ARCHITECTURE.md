@@ -283,8 +283,10 @@ It packages the launcher, native-binary selection, runtime scripts such as the c
 pool, config renderer, serverless handler, and default adapter dependencies. Runtime files copied
 into deployment functions cannot safely rely on arbitrary bare package specifiers, so shared route
 matching has one TypeScript source at `packages/@ruvyxa/core/src/route-match.ts` and a committed
-runtime copy at `packages/ruvyxa/runtime/route-match.mjs`. Change the source, run
-`pnpm --filter ruvyxa sync:route-match`, and commit both outputs.
+runtime copy at `packages/ruvyxa/runtime/route-match.mjs`. Cross-site request policy is copied the
+same way, from `packages/@ruvyxa/core/src/origin-policy.ts` to
+`packages/ruvyxa/runtime/origin-policy.mjs`. Change the source, run
+`pnpm --filter ruvyxa sync:runtime`, and commit both outputs.
 
 #### Artifact and generated-file ownership
 
@@ -389,7 +391,7 @@ alphabetically. The table below maps each user-visible concern to its primary so
 | Configuration translation         | `crates/ruvyxa_cli/src/config.rs`, `packages/ruvyxa/runtime/config-renderer.mjs` | Config files, validation, runtime config hand-off                      | [CLI & Build Pipeline](#cli-architecture)           |
 | Route discovery and validation    | `crates/ruvyxa_graph/src/lib.rs`                                                 | File conventions, manifests, rendering detection, boundary diagnostics | [Route Discovery](#route-discovery-and-validation)  |
 | Client compilation and linking    | `crates/ruvyxa_bundler/src`                                                      | AST scanning, resolution, boundary checks, output                      | [Bundler](#bundler)                                 |
-| HTTP serving and rendering        | `crates/ruvyxa_dev_server/src/lib.rs`                                            | Axum routes, request dispatch, HMR, render cache, security application | [Dev Server](#dev-server)                           |
+| HTTP serving and rendering        | `crates/ruvyxa_dev_server/src`                                                   | Axum routes, request dispatch, HMR, render cache, security application | [Dev Server](#dev-server)                           |
 | Middleware and plugin bridge      | `crates/ruvyxa_middleware/src` and `packages/ruvyxa/runtime/plugin-runtime.mjs`  | Middleware stacking and JavaScript-plugin communication                | [Middleware](#middleware)                           |
 | Public TypeScript contract        | `packages/@ruvyxa/core/src`, `packages/@ruvyxa/react/src`                        | Config, server helpers, React components/hooks                         | [API Reference](docs/en/17-public-api-reference.md) |
 
@@ -1573,7 +1575,14 @@ The bundler returns a `BundleOutput`; writing it is the CLI's job (`client_bundl
 ## Dev Server
 
 **Crate**: `ruvyxa_dev_server` —
-`crates/ruvyxa_dev_server/src/{lib,router,render_cache,response,hmr_tracker,worker_pool,style,action_security,port_binding,render_pipeline,plugin_bridge,plugin_head,html_document,env_file,static_assets,cli_output}.rs`
+`crates/ruvyxa_dev_server/src/{lib,router,render_cache,response,hmr_tracker,worker_pool,style,action_security,port_binding,render_pipeline,plugin_bridge,plugin_head,html_document,env_file,static_assets,cli_output,watcher,framework_endpoints,realtime_endpoints}.rs`
+
+`lib.rs` is the crate root: configuration, `serve`, the router table, and the request path for
+project pages and API routes. The three newest modules were carved out of it — `watcher.rs` (the
+development file watcher and the HMR updates it produces), `framework_endpoints.rs` (the handlers
+behind the reserved `/__ruvyxa/*` paths, the same surface
+`tests/fixtures/framework-endpoint-conformance.json` lists), and `realtime_endpoints.rs` (the HMR,
+realtime, and presence WebSockets with their frame rules).
 
 Axum HTTP server with HMR (WebSocket), radix-trie route matching, LRU render cache with lazily-built
 compressed copies, persistent Node/Bun/Deno worker pool, style collection pipeline, action security
@@ -2718,11 +2727,12 @@ released without acquiring another.
 ## Protocols
 
 **Scope**: Cross-crate (dev server HMR, server actions, client module protocol) **Source**:
-`crates/ruvyxa_dev_server/src/lib.rs`
+`crates/ruvyxa_dev_server/src/{lib,framework_endpoints,realtime_endpoints}.rs`
 
-> Every endpoint below is verified against `lib.rs`'s route table and handler bodies. All framework
-> endpoints live under `/__ruvyxa/` (double underscore) — see the Framework Endpoints table in the
-> Dev Server section, which this section cross-checks against rather than restates.
+> Every endpoint below is verified against `lib.rs`'s route table and the handler bodies in
+> `framework_endpoints.rs` and `realtime_endpoints.rs`. All framework endpoints live under
+> `/__ruvyxa/` (double underscore) — see the Framework Endpoints table in the Dev Server section,
+> which this section cross-checks against rather than restates.
 
 ### Summary
 

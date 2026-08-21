@@ -11,7 +11,12 @@ work in the repository.
 - `crates/ruvyxa_bundler` owns TypeScript/JSX compilation, module resolution, linking, minification,
   source maps, and server/client boundary checks.
 - `crates/ruvyxa_dev_server` owns Axum serving, HMR, render cache, router, worker pool, style
-  collection, and action/API/client endpoints.
+  collection, and action/API/client endpoints. Its `lib.rs` is the crate root — configuration,
+  `serve`, the router table, and the request path for project pages and API routes. Handlers for the
+  reserved `/__ruvyxa/*` paths live in `framework_endpoints.rs`, the WebSockets in
+  `realtime_endpoints.rs`, and the development file watcher in `watcher.rs`. Add a new framework
+  endpoint to `framework_endpoints.rs` and its route to the table in `lib.rs`, not to `lib.rs`
+  alone; the conformance test there checks the two agree.
 - `crates/ruvyxa_graph` owns file-system route discovery, validation, rendering strategy detection,
   and route manifests.
 - `packages/` contains npm packages: `ruvyxa`, `create-ruvyxa`, `@ruvyxa/core`, `@ruvyxa/react`,
@@ -104,9 +109,12 @@ cargo run -p ruvyxa_cli -- test:parity --root examples/demo
 - Route matching has one JavaScript implementation, `packages/@ruvyxa/core/src/route-match.ts`.
   `packages/ruvyxa/runtime/route-match.mjs` is a committed copy of its compiled output, because the
   serverless handler is copied into function bundles that resolve no bare specifiers. After changing
-  the shared module run `pnpm --filter ruvyxa sync:route-match` and commit both; `ruvyxa`'s build
-  fails on a stale copy. The Rust router cannot share the module, so both languages are held to
-  `tests/fixtures/route-match-conformance.json` — add a case there before changing match behavior.
+  the shared module run `pnpm --filter ruvyxa sync:runtime` and commit both; `ruvyxa`'s build fails
+  on a stale copy. `packages/@ruvyxa/core/src/origin-policy.ts` is copied the same way, by the same
+  script — `scripts/sync-shared-runtime.mjs` takes a table of modules, so a new shared runtime
+  module is one entry there rather than a new script. The Rust router cannot share the module, so
+  both languages are held to `tests/fixtures/route-match-conformance.json` — add a case there before
+  changing match behavior.
 - `packages/ruvyxa/src/plugins.ts` is a barrel, not an implementation file: it re-exports the public
   plugin API by name from `packages/ruvyxa/src/plugins/`, one module per plugin family (`http`,
   `pwa`, `seo`, `search`, `content-engine`, `openapi`, `build`) plus `shared` for helpers two or
@@ -140,6 +148,22 @@ cargo run -p ruvyxa_cli -- test:parity --root examples/demo
   `DEFAULT_SECURITY_HEADERS` all drifted silently before gaining this. `env_read_is_private` was
   listed here while `tests/fixtures/env-policy-conformance.json` did not yet exist and the rule was
   still held by a comment alone — when this list names a fixture, check that the file is there.
+- Count the copies before trusting a fixture. `STATIC_ASSET_EXTENSIONS` and
+  `DEFAULT_SECURITY_HEADERS` each had a third copy in
+  `packages/ruvyxa/runtime/serverless-handler.mjs` — the one that runs in every deployed build —
+  while the fixture was replayed only by the Rust host and `@ruvyxa/core`, so two implementations
+  agreeing proved nothing about the third. `tests/packages/ruvyxa/serverless-shared-tables.test.mjs`
+  holds that host now. The built-in CORS layer had no fixture at all and had already drifted: the
+  Rust config filled `methods` with an implicit `GET, POST, PUT, DELETE, OPTIONS` that the
+  serverless handler never had, so a project that configured only `origins` answered a cross-origin
+  `PUT` under `ruvyxa dev` and had the browser block it in production.
+  `tests/fixtures/cors-conformance.json` holds both hosts now.
+- A gate a comment promises has to exist. `output.rs` said
+  `tests/packages/ruvyxa/entry-templates.test.mjs` asserted that its generated-entry preludes agreed
+  with `entry-templates.mjs`; that test never read `output.rs`, so the routing-context and
+  error-boundary preludes were two hand-maintained copies with nothing holding them together.
+  `tests/packages/ruvyxa/entry-prelude-parity.test.mjs` executes both copies against one stand-in
+  React. When a doc comment names the test that holds a contract, open that test.
 - Documentation changes should describe actual supported behavior, not intended future behavior.
 - If a check was already failing before your work, report it as baseline and do not weaken tests to
   pass.

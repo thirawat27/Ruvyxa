@@ -23,7 +23,7 @@ use serde::Deserialize;
 
 use crate::html_document::{
     bootstrap_data_block, client_hydration_script, compose_localized_document, error_page,
-    hmr_client_script, safe_json_for_script,
+    hmr_client_script,
 };
 use crate::plugin_head::render_plugin_head;
 use crate::render_cache::{CachedDocument, ForcedRevalidationClaim, RenderCache};
@@ -876,20 +876,15 @@ async fn render_page_csr(
     };
     let client_script = client_hydration_script(&state.config, route, request_path, params);
 
-    // Escaped, not merely serialized. `serde_json` escapes `"` and `\` but
-    // leaves `<` alone, and these parameters come from the request URL — so a
-    // path segment containing `</script>` used to close this element and run
-    // whatever followed it. The other two writers of this payload already went
-    // through `safe_json_for_script`; this one did not.
-    let params_json =
-        safe_json_for_script(&serde_json::to_string(params).unwrap_or_else(|_| "{}".to_string()));
-    let path_json = safe_json_for_script(
-        &serde_json::to_string(request_path).unwrap_or_else(|_| "\"\"".to_string()),
-    );
     // `csr: true` tells the client prelude to mount rather than hydrate: this
     // shell was not rendered from the route tree, so there is no markup to
     // hydrate against. See the bootstrap in `ruvyxa_bundler::output`.
-    let bootstrap = bootstrap_data_block(&params_json, &path_json, true);
+    //
+    // These parameters come from the request URL, and a segment containing
+    // `</script>` would close the element and run whatever followed it. The
+    // escaping lives inside `bootstrap_data_block` rather than here — this
+    // writer is the one that once forgot it.
+    let bootstrap = bootstrap_data_block(params, request_path, true);
 
     let shell = format!(
         r#"<!doctype html>
@@ -1453,9 +1448,11 @@ pub(crate) fn decode_realtime_event(value: &str) -> Result<String> {
         && payload.get("type").and_then(serde_json::Value::as_str) == Some("action")
         && !channels.is_empty()
         && channels.len() <= 16
-        && channels
-            .iter()
-            .all(|channel| channel.as_str().is_some_and(crate::valid_realtime_channel))
+        && channels.iter().all(|channel| {
+            channel
+                .as_str()
+                .is_some_and(crate::realtime_endpoints::valid_realtime_channel)
+        })
         && action.is_some_and(|action| !action.is_empty() && action.len() <= 256)
         && path.is_some_and(|path| path.starts_with('/') && path.len() <= 2_048)
         && invalidated.is_some_and(|keys| {

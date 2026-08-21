@@ -1,0 +1,82 @@
+{
+  "$comment": [
+    "Shared built-in CORS conformance table.",
+    "",
+    "The `middleware.builtin.cors` block is applied by two hosts that cannot share",
+    "code, and a project is served by whichever one it was deployed to:",
+    "  - crates/ruvyxa_middleware/src/{config,builtin}.rs   (`dev`, `start`, `preview`)",
+    "  - packages/ruvyxa/runtime/serverless-handler.mjs     (every serverless adapter)",
+    "",
+    "They had disagreed. The Rust config filled `methods` with an implicit",
+    "GET/POST/PUT/DELETE/OPTIONS when a project named none, and the JavaScript",
+    "handler had no such default — so `cors: { origins: [...] }` with no `methods`",
+    "answered a cross-origin PUT preflight with the method list under `ruvyxa dev`",
+    "and with no `Access-Control-Allow-Methods` at all once deployed, which the",
+    "browser reads as a blocked request. Nothing failed a build or appeared in a",
+    "log; the split only showed up in a browser pointed at production.",
+    "",
+    "The narrower behavior is the shared one. `docs/en/13-security.md` already asks",
+    "a project to name its origins, methods, and headers explicitly, and closing",
+    "the gap the other way would have widened the cross-origin surface of every",
+    "deployed application that had relied on the default without asking for it.",
+    "",
+    "Every implementation replays this file:",
+    "  - crates/ruvyxa_middleware/src/config.rs                (Rust test)",
+    "  - tests/packages/ruvyxa/cors-contract.test.mjs          (JavaScript test)",
+    "",
+    "Add a case here first when changing what the built-in CORS layer sends; a port",
+    "that drifts then fails in the language that drifted rather than in a browser."
+  ],
+
+  "$defaultsNote": [
+    "What each field means when the project's config omits it. `methods` and",
+    "`headers` are empty rather than populated: an empty list sends no header, so",
+    "neither host advertises an allowance the project never wrote down."
+  ],
+  "defaults": {
+    "origins": [],
+    "methods": [],
+    "headers": [],
+    "credentials": false,
+    "maxAge": 86400
+  },
+
+  "$placementNote": [
+    "`Allow-Methods`, `Allow-Headers`, and `Max-Age` answer a preflight question,",
+    "and the Fetch standard has the browser read them only from a preflight",
+    "response. Sending them on an actual response advertises the whole allowlist to",
+    "any origin that gets a response at all, and invites a shared cache to store a",
+    "`Max-Age` that was never negotiated. `Allow-Origin` and `Allow-Credentials` do",
+    "belong on both, because the browser checks those on the actual response too."
+  ],
+  "headerPlacement": {
+    "preflightOnly": [
+      "access-control-allow-methods",
+      "access-control-allow-headers",
+      "access-control-max-age"
+    ],
+    "both": ["access-control-allow-origin", "access-control-allow-credentials"]
+  },
+
+  "$varyNote": [
+    "The response body is identical but its CORS headers depend on the request",
+    "Origin, so `Vary: Origin` belongs on the rejected path as well. Without it a",
+    "shared cache can store the header-less response and replay it to an allowed",
+    "origin, which reads to the browser as a random CORS failure."
+  ],
+  "varyOriginOnRejectedOrigin": true,
+
+  "$credentialedWildcardNote": [
+    "`Access-Control-Allow-Credentials: true` alongside a reflected wildcard origin",
+    "lets any site read authenticated responses. Both hosts refuse, at the earliest",
+    "point each one can: the native server rejects the configuration before it",
+    "binds a port, and the handler — which is handed a config it cannot reject,",
+    "because a deployed function has no startup to fail in — treats no origin as",
+    "allowed and sends no CORS headers at all. Different mechanism, same outcome:",
+    "no origin is ever granted credentialed access through a wildcard."
+  ],
+  "credentialedWildcard": {
+    "allowsAnyOrigin": false,
+    "nativeRejectsAtStartup": true
+  }
+}

@@ -29,7 +29,10 @@ secret storage, upstream network control และ infrastructure policy ยั�
 - เก็บ `RUVYXA_AUTH_SECRET`, OAuth secret และ database credential นอก source control ห้ามใช้
   `RUVYXA_PUBLIC_` สำหรับสิ่งเหล่านี้
 - ระบุ CORS origin/method/header ให้ชัดเมื่อใช้ `middleware.builtin.cors`; อย่าเปิด credentialed
-  cross-origin access โดยไม่มี origin list ที่ review
+  cross-origin access โดยไม่มี origin list ที่ review ทั้งสามค่าไม่มี default — ถ้าไม่ระบุ `methods`
+  หรือ `headers` จะไม่ส่ง `Access-Control-Allow-Methods` หรือ `Access-Control-Allow-Headers` เลย
+  ดังนั้น cross-origin request ที่ใช้อะไรเกิน simple method จะถูกบล็อกจนกว่าจะระบุเอง และ
+  credentials คู่กับ `origins: ['*']` จะถูกปฏิเสธทันที
 - ใช้ route-scoped CSP, frame, referrer, COOP/COEP/CORP และ permissions policy ผ่าน
   `securityHeaders` หลังตรวจ asset ที่ต้องใช้
 - อย่าให้ structured log มี token, cookie, authorization header, request body หรือข้อมูลส่วนบุคคล

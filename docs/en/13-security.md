@@ -30,7 +30,10 @@ secret storage, upstream network controls, and infrastructure policy remain your
 - Store `RUVYXA_AUTH_SECRET`, OAuth secrets, and database credentials outside source control. Never
   use `RUVYXA_PUBLIC_` for them.
 - Define CORS origins/methods/headers explicitly when using `middleware.builtin.cors`; do not enable
-  credentialed cross-origin access without a reviewed origin list.
+  credentialed cross-origin access without a reviewed origin list. None of the three defaults to a
+  value — an unset `methods` or `headers` sends no `Access-Control-Allow-Methods` or
+  `Access-Control-Allow-Headers`, so a cross-origin request using anything beyond a simple method is
+  blocked until you name it. Credentials alongside `origins: ['*']` are refused outright.
 - Use route-scoped CSP, frame, referrer, COOP/COEP/CORP, and permissions policies via
   `securityHeaders` after verifying required assets.
 - Keep structured logs free of tokens, cookies, authorization headers, request bodies, and personal

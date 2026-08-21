@@ -222,7 +222,16 @@ fn special_import(file: &Option<std::path::PathBuf>, ident: &str) -> (String, Op
 ///
 /// Mirrors `routeContextPrelude()` in
 /// `packages/ruvyxa/runtime/entry-templates.mjs`;
-/// `tests/packages/ruvyxa/entry-templates.test.mjs` asserts the two agree.
+/// `tests/packages/ruvyxa/entry-prelude-parity.test.mjs` executes both copies
+/// against one stand-in React and asks them the same questions. It compares
+/// behaviour rather than bytes because the two are formatted by different
+/// tools — this literal carries statement terminators the Prettier-formatted
+/// template does not — and a byte comparison would fail on the formatting while
+/// passing on a prelude that published the wrong context.
+///
+/// This comment used to name `entry-templates.test.mjs`, which only ever
+/// exercised the JavaScript half; nothing read this file, so the gate it
+/// promised did not exist.
 const ROUTE_CONTEXT_PRELUDE: &str = "const __ruvyxaRouteContext = (globalThis.__RUVYXA_ROUTE_CONTEXT__ ||= React.createContext(null));";
 
 /// Read the bootstrap data block and publish it on `globalThis`.
@@ -259,7 +268,9 @@ if (__ruvyxaBootstrap.csr === true) globalThis.__RUVYXA_CSR__ = true"#;
 /// Inline error / not-found boundary class.
 ///
 /// Mirrors `routeBoundaryPrelude()` in
-/// `packages/ruvyxa/runtime/entry-templates.mjs`. Defined inline rather than
+/// `packages/ruvyxa/runtime/entry-templates.mjs`, and is held to it by
+/// `tests/packages/ruvyxa/entry-prelude-parity.test.mjs`, which runs both
+/// copies through the same boundary behaviour. Defined inline rather than
 /// imported because a generated entry cannot depend on `@ruvyxa/react`; it
 /// tells a `notFound()` signal apart from an ordinary error by the own property
 /// `error.__ruvyxaNotFound` that `notFound()` stamps.

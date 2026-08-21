@@ -7,39 +7,41 @@ use std::future::IntoFuture;
 use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use axum::Router;
-use axum::body::{Body, Bytes, to_bytes};
-use axum::extract::ws::{Message, WebSocketUpgrade};
-use axum::extract::{DefaultBodyLimit, Query, State};
-use axum::http::{HeaderMap, HeaderValue, Request, StatusCode, header};
+#[cfg(test)]
+use axum::body::Bytes;
+use axum::body::{Body, to_bytes};
+use axum::extract::{DefaultBodyLimit, State};
+#[cfg(test)]
+use axum::http::{HeaderMap, HeaderValue, header};
+use axum::http::{Request, StatusCode};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
-use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use ruvyxa_bundler::JsxRuntime;
 #[cfg(test)]
 use ruvyxa_diagnostics::Diagnostic;
 use ruvyxa_diagnostics::{Result, RuvyxaError};
+#[cfg(test)]
+use ruvyxa_graph::RouteEntry;
 use ruvyxa_graph::{
-    DiscoverOptions, I18nRouting, RenderStrategy, RouteEntry, RouteKind, RouteManifest,
-    RouteParams, discover_routes,
+    DiscoverOptions, I18nRouting, RenderStrategy, RouteKind, RouteManifest, discover_routes,
 };
 #[cfg(test)]
 use ruvyxa_middleware::PluginHttpResponse;
 use ruvyxa_middleware::{
     MiddlewareConfig, MiddlewareStack, PluginEnvironment, PluginHost, PluginHttpRequest,
 };
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 #[cfg(test)]
 use tokio::net::TcpListener;
 use tokio::sync::broadcast;
 use tracing::{error, info, warn};
 
 mod collab;
-use collab::{CollabRegistry, FrameRateLimiter, ParsedFrame, parse_client_frame};
+use collab::CollabRegistry;
 mod devtools;
 mod dynamic_image;
 mod env_file;
@@ -58,18 +60,17 @@ use env_file::parse_env_source;
 pub use env_file::project_env;
 
 mod action_security;
-use action_security::{
-    ActionRateLimiter, ActionReplayGuard, action_client_ip, action_rate_limit_key,
-    hmr_origin_is_cross_site, validate_action_payload, validate_action_request,
-};
+use action_security::{ActionRateLimiter, ActionReplayGuard};
 pub use action_security::{IpPrefix, TrustedProxies, action_reference_id};
 #[cfg(test)]
 use action_security::{
     action_content_type_is_supported, action_fetch_site_is_cross_site, action_origin_is_cross_site,
 };
-use devtools::{DevToolsMetrics, dashboard_html};
+#[cfg(test)]
+use action_security::{action_rate_limit_key, validate_action_payload, validate_action_request};
+use devtools::DevToolsMetrics;
+use dynamic_image::DynamicImageCache;
 pub use dynamic_image::DynamicImageConfig;
-use dynamic_image::{DynamicImageCache, DynamicImageError};
 
 mod cli_output;
 use cli_output::{
@@ -94,10 +95,7 @@ use html_document::{
     client_hydration_script, compose_document, dev_diagnostic_overlay, hmr_client_script,
     prebuilt_client_assets,
 };
-use html_document::{
-    dev_error_overlay, error_response, plain_error_page, public_internal_error,
-    url_encode_component,
-};
+use html_document::{dev_error_overlay, error_response, plain_error_page, public_internal_error};
 
 mod plugin_bridge;
 #[cfg(test)]
@@ -119,17 +117,13 @@ use static_assets::public_asset_links;
 use static_assets::{is_safe_relative_path, resolve_public_asset};
 
 mod worker_pool;
-use worker_pool::RenderFlightRequest;
 pub use worker_pool::{NodeWorkerPool, StaticParamSegment, StaticParamsRoute};
 
 mod render_pipeline;
-pub use render_pipeline::{RenderContext, find_runtime_script, render_request_with_context};
 #[cfg(test)]
-use render_pipeline::{decode_realtime_event, serve_prerendered_html};
-use render_pipeline::{
-    render_client_bundle_pooled, render_request_pooled, render_server_action_pooled, runtime_env,
-    runtime_trace_cached,
-};
+use render_pipeline::serve_prerendered_html;
+pub use render_pipeline::{RenderContext, find_runtime_script, render_request_with_context};
+use render_pipeline::{render_request_pooled, runtime_env};
 
 mod router;
 pub use router::RadixRouter;
@@ -141,11 +135,26 @@ mod response;
 pub use render_cache::RenderCache;
 pub(crate) use response::{
     apply_security_headers, cached_html_response, finalize_security_headers, html_response,
-    json_response, shared_text_body, with_security_headers,
+    with_security_headers,
 };
 
 mod hmr_tracker;
 pub use hmr_tracker::{HmrEventType, HmrTracker, HmrUpdate};
+
+mod watcher;
+use watcher::{WatcherRuntime, format_update_elapsed, start_watcher, watch_paths};
+
+mod realtime_endpoints;
+use realtime_endpoints::{hmr_ws, presence_ws, realtime_ws};
+
+mod framework_endpoints;
+// `ActionQuery` and the runtime-trace shapes are re-exported at the crate root
+// because `action_security` and `render_pipeline` name them through `crate::`.
+pub(crate) use framework_endpoints::{ActionQuery, RuntimeTrace, TraceAssets};
+use framework_endpoints::{
+    action_endpoint, client_bundle, client_manifest, devtools_dashboard, devtools_data,
+    dynamic_image_endpoint, flight_endpoint, hydration_loader, trace_ack_endpoint, trace_endpoint,
+};
 
 mod postcss;
 pub use postcss::PostcssRunner;
@@ -537,7 +546,7 @@ impl ServerConfig {
 }
 
 #[derive(Clone)]
-struct AppState {
+pub(crate) struct AppState {
     config: ServerConfig,
     reload_tx: broadcast::Sender<String>,
     runtime_cache: Arc<RuntimeCache>,
@@ -588,14 +597,14 @@ const RESERVED_FRAMEWORK_ROUTES: [&str; 8] = [
 /// Process-wide startup hooks recognised by the JavaScript compiler/runtime.
 /// Kept under a cross-language conformance test because changing one host alone
 /// makes development and deployed instrumentation disagree.
-const INSTRUMENTATION_FILES: [&str; 3] = [
+pub(crate) const INSTRUMENTATION_FILES: [&str; 3] = [
     "instrumentation.ts",
     "instrumentation.js",
     "instrumentation.mjs",
 ];
 
 #[derive(Default)]
-struct RuntimeCache {
+pub(crate) struct RuntimeCache {
     routes: tokio::sync::RwLock<CacheSlot<RouteCacheEntry>>,
     styles: tokio::sync::RwLock<CacheSlot<StyleCacheEntry>>,
     /// `<link>` tags derived from the public directory's contents.
@@ -877,7 +886,7 @@ fn observe_manifest(config: &ServerConfig, manifest: &RouteManifest) {
     }
 }
 
-fn discover_options(config: &ServerConfig) -> DiscoverOptions {
+pub(crate) fn discover_options(config: &ServerConfig) -> DiscoverOptions {
     DiscoverOptions::new(&config.app_dir)
         .with_rendering_defaults(config.default_render_strategy, config.default_revalidate)
         .with_i18n(config.i18n.clone())
@@ -1339,1392 +1348,6 @@ fn local_display_url(config: &ServerConfig, address: SocketAddr) -> String {
     format!("http://{}:{}", display_host, address.port())
 }
 
-struct WatcherRuntime {
-    config: ServerConfig,
-    reload_tx: broadcast::Sender<String>,
-    runtime_cache: Arc<RuntimeCache>,
-    worker_pool: Arc<NodeWorkerPool>,
-    render_cache: Arc<RenderCache>,
-    hmr_tracker: Arc<HmrTracker>,
-    plugin_runtime: Option<Arc<PluginHost>>,
-    edit_traces: Arc<trace::TraceStore>,
-    tokio_handle: tokio::runtime::Handle,
-}
-
-async fn refresh_hmr_manifest(
-    config: &ServerConfig,
-    runtime_cache: &RuntimeCache,
-    hmr_tracker: &HmrTracker,
-) -> Result<()> {
-    let (manifest, _) = runtime_cache.route_snapshot(config).await?;
-    hmr_tracker.populate_from_manifest(&manifest.routes);
-    Ok(())
-}
-
-fn start_watcher(
-    root: &Path,
-    watch_paths: &[PathBuf],
-    runtime: WatcherRuntime,
-) -> Result<RecommendedWatcher> {
-    let WatcherRuntime {
-        config,
-        reload_tx,
-        runtime_cache,
-        worker_pool,
-        render_cache,
-        hmr_tracker,
-        plugin_runtime,
-        edit_traces,
-        tokio_handle,
-    } = runtime;
-    let root = root.to_path_buf();
-    let mut watcher =
-        notify::recommended_watcher(move |event: notify::Result<notify::Event>| match event {
-            Ok(event) => {
-                if matches!(event.kind, notify::EventKind::Access(_)) {
-                    return;
-                }
-                let paths = event
-                    .paths
-                    .into_iter()
-                    .filter(|path| !ignored_watch_path(&root, path))
-                    .collect::<Vec<_>>();
-                if paths.is_empty() {
-                    return;
-                }
-                let instrumentation_changed = instrumentation_source_changed(&root, &paths);
-
-                // Use HmrTracker for selective invalidation.
-                let mut hmr_update = hmr_tracker.compute_update(&paths);
-                if hmr_update.full_reload || instrumentation_changed {
-                    hmr_update.full_reload = true;
-                    hmr_update.event_type = HmrEventType::FullReload;
-                }
-                // Selective cache invalidation based on affected routes.
-                if hmr_update.full_reload || hmr_update.affected_routes.is_empty() {
-                    // Full invalidation: manifest may have changed (new/deleted routes).
-                    runtime_cache.invalidate();
-                    render_cache.invalidate_all_blocking();
-                    let refresh_config = config.clone();
-                    let refresh_cache = runtime_cache.clone();
-                    let refresh_tracker = hmr_tracker.clone();
-                    tokio_handle.spawn(async move {
-                        if let Err(error) =
-                            refresh_hmr_manifest(&refresh_config, &refresh_cache, &refresh_tracker)
-                                .await
-                        {
-                            warn!(%error, "HMR route manifest refresh failed");
-                        }
-                    });
-                } else {
-                    // Selective invalidation: only evict affected route caches.
-                    // Refresh styles only when the current CSS dependency graph
-                    // intersects a changed path. Component-only updates retain it.
-                    runtime_cache.invalidate_styles_for_paths(&paths);
-
-                    // Selectively invalidate render cache for affected routes only.
-                    for route_path in &hmr_update.affected_routes {
-                        render_cache.invalidate_route_blocking(route_path);
-                    }
-                }
-
-                // Invalidate worker bundle caches for changed files.
-                let path_strings: Vec<String> = paths
-                    .iter()
-                    .map(|path| path.display().to_string())
-                    .collect();
-                let hmr_paths = paths
-                    .iter()
-                    .map(|path| {
-                        path.strip_prefix(&root)
-                            .unwrap_or(path)
-                            .to_string_lossy()
-                            .replace('\\', "/")
-                    })
-                    .collect::<Vec<_>>();
-                let trace_id = trace::edit_id(&hmr_paths);
-                let trace_kind = hmr_update_kind(&hmr_update, &hmr_paths);
-                edit_traces.start(
-                    &trace_id,
-                    &hmr_paths,
-                    &hmr_update.affected_routes,
-                    trace_kind,
-                );
-                edit_traces.record(
-                    &trace_id,
-                    "cache",
-                    if hmr_update.full_reload {
-                        "all route and render caches invalidated"
-                    } else {
-                        "affected route and style caches invalidated"
-                    },
-                );
-                info!(
-                    trace_id = %trace_id,
-                    files = hmr_paths.len(),
-                    routes = hmr_update.affected_routes.len(),
-                    "HMR edit accepted"
-                );
-                let worker_result = (!instrumentation_changed).then(|| {
-                    worker_pool.invalidate_from_watcher(path_strings.clone(), Some(&trace_id))
-                });
-                match &worker_result {
-                    Some(Ok(workers)) => {
-                        edit_traces.record(
-                            &trace_id,
-                            "worker",
-                            format!("queued invalidation for {workers} workers"),
-                        );
-                    }
-                    Some(Err(error)) => {
-                        edit_traces.record(
-                            &trace_id,
-                            "worker",
-                            format!("invalidation failed: {error}"),
-                        );
-                    }
-                    None => {
-                        edit_traces.record(
-                            &trace_id,
-                            "worker",
-                            "instrumentation change requires recycle",
-                        );
-                    }
-                }
-                if worker_result.as_ref().is_some_and(|result| result.is_err()) {
-                    hmr_update.full_reload = true;
-                    hmr_update.event_type = HmrEventType::FullReload;
-                }
-
-                if let Some(plugin_runtime) = plugin_runtime.clone() {
-                    let plugin_paths = plugin_watch_paths(&root, &paths);
-                    tokio_handle.spawn(async move {
-                        if let Err(error) = plugin_runtime.notify_file_change(&plugin_paths).await {
-                            warn!(%error, "plugin dev.fileChange hook failed");
-                        }
-                    });
-                }
-
-                if instrumentation_changed {
-                    let recycle_pool = Arc::clone(&worker_pool);
-                    let recycle_reload = reload_tx.clone();
-                    let restart_payload = hmr_payload(
-                        &hmr_update,
-                        &hmr_paths,
-                        &trace_id,
-                        config.debug_traces,
-                        None,
-                    );
-                    let issue_update = hmr_update.clone();
-                    let issue_paths = hmr_paths.clone();
-                    let issue_trace = trace_id.clone();
-                    let trace_store = Arc::clone(&edit_traces);
-                    let trace_ack = config.debug_traces;
-                    tokio_handle.spawn(async move {
-                        let payload = match recycle_pool.recycle().await {
-                            Ok(workers) => {
-                                info!(workers, "recycled workers after instrumentation change");
-                                trace_store.record(
-                                    &issue_trace,
-                                    "worker",
-                                    format!("recycled {workers} workers"),
-                                );
-                                restart_payload
-                            }
-                            Err(error) => {
-                                warn!(%error, "worker recycle after instrumentation change failed");
-                                trace_store.record(
-                                    &issue_trace,
-                                    "worker",
-                                    format!("recycle failed: {error}"),
-                                );
-                                hmr_payload(
-                                    &issue_update,
-                                    &issue_paths,
-                                    &issue_trace,
-                                    trace_ack,
-                                    Some((
-                                        "RUV1707",
-                                        "Worker restart failed; restart the development server.",
-                                    )),
-                                )
-                            }
-                        };
-                        let _ = recycle_reload.send(payload);
-                        trace_store.record(&issue_trace, "hmr", "message broadcast");
-                    });
-                } else if let Some(Err(error)) = worker_result {
-                    warn!(%error, "worker invalidation failed; recycling workers");
-                    let recycle_pool = Arc::clone(&worker_pool);
-                    let recycle_reload = reload_tx.clone();
-                    let issue_update = hmr_update.clone();
-                    let issue_paths = hmr_paths.clone();
-                    let issue_trace = trace_id.clone();
-                    let trace_store = Arc::clone(&edit_traces);
-                    let trace_ack = config.debug_traces;
-                    tokio_handle.spawn(async move {
-                        let issue = match recycle_pool.recycle().await {
-                            Ok(workers) => {
-                                info!(workers, "recycled workers after invalidation failure");
-                                trace_store.record(
-                                    &issue_trace,
-                                    "worker",
-                                    format!("recycled {workers} workers"),
-                                );
-                                (
-                                    "RUV1706",
-                                    "Worker cache invalidation failed; workers were restarted.",
-                                )
-                            }
-                            Err(error) => {
-                                warn!(%error, "worker recycle after invalidation failure failed");
-                                trace_store.record(
-                                    &issue_trace,
-                                    "worker",
-                                    format!("recycle failed: {error}"),
-                                );
-                                (
-                                    "RUV1707",
-                                    "Worker restart failed; restart the development server.",
-                                )
-                            }
-                        };
-                        let payload = hmr_payload(
-                            &issue_update,
-                            &issue_paths,
-                            &issue_trace,
-                            trace_ack,
-                            Some(issue),
-                        );
-                        let _ = recycle_reload.send(payload);
-                        trace_store.record(&issue_trace, "hmr", "message broadcast");
-                    });
-                } else {
-                    // Send targeted HMR payload with affected routes.
-                    let payload = hmr_payload(
-                        &hmr_update,
-                        &hmr_paths,
-                        &trace_id,
-                        config.debug_traces,
-                        None,
-                    );
-                    let _ = reload_tx.send(payload);
-                    edit_traces.record(&trace_id, "hmr", "message broadcast");
-                }
-            }
-            Err(error) => {
-                println!("✖ File watcher failed (0ms)");
-                println!("  Reason: {error}");
-                println!(
-                    "  Watcher remains active; refresh the browser after the next detected change."
-                );
-                warn!(%error, "file watcher error");
-            }
-        })
-        .map_err(|error| RuvyxaError::Message(format!("Failed to start file watcher: {error}")))?;
-
-    for path in watch_paths {
-        watcher
-            .watch(path, RecursiveMode::Recursive)
-            .map_err(|error| {
-                RuvyxaError::Message(format!("Failed to watch {}: {error}", path.display()))
-            })?;
-    }
-
-    Ok(watcher)
-}
-
-/// Serialize the HMR wire message in one place so the watcher, browser runtime,
-/// and shared contract fixture cannot drift independently.
-static NEXT_HMR_SEQUENCE: AtomicU64 = AtomicU64::new(1);
-
-fn hmr_update_kind(update: &HmrUpdate, paths: &[String]) -> &'static str {
-    if update.full_reload {
-        return "restart";
-    }
-    match update.event_type {
-        HmrEventType::CssUpdate => "css",
-        HmrEventType::ComponentUpdate => {
-            let server_route = paths.iter().any(|path| {
-                path.split('/').any(|segment| segment == "server")
-                    || path.ends_with("/action.ts")
-                    || path.ends_with("/action.js")
-                    || path.ends_with("/route.ts")
-                    || path.ends_with("/route.js")
-            });
-            if server_route {
-                "server-route"
-            } else {
-                "client-boundary"
-            }
-        }
-        HmrEventType::FullReload => "restart",
-    }
-}
-
-fn hmr_payload(
-    update: &HmrUpdate,
-    paths: &[String],
-    trace_id: &str,
-    trace_ack: bool,
-    issue: Option<(&'static str, &'static str)>,
-) -> String {
-    let sequence = NEXT_HMR_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    let (message_type, kind) = if issue.is_some() {
-        ("issues", "issues")
-    } else {
-        let kind = hmr_update_kind(update, paths);
-        if kind == "restart" {
-            ("restart", kind)
-        } else {
-            ("partial", kind)
-        }
-    };
-    let mut payload = serde_json::json!({
-        "protocol": "ruvyxa.hmr",
-        "protocolVersion": 1,
-        "sequence": sequence,
-        "traceId": trace_id,
-        "traceAck": trace_ack,
-        "type": message_type,
-        "kind": kind,
-        "modules": paths,
-        "paths": paths,
-        "affectedRoutes": update.affected_routes,
-        "fullReload": update.full_reload,
-    });
-    if let Some((code, message)) = issue {
-        payload["issues"] = serde_json::json!([{ "code": code, "message": message }]);
-    }
-    payload.to_string()
-}
-
-fn watch_paths(config: &ServerConfig) -> Vec<PathBuf> {
-    let mut paths = vec![config.root.clone()];
-    paths.retain(|path| path.exists());
-    paths.sort();
-    paths.dedup();
-    paths
-}
-
-fn ignored_watch_path(root: &Path, path: &Path) -> bool {
-    let canonical_root = ruvyxa_diagnostics::normalized_canonical_path(root);
-    let relative = if path.is_absolute() {
-        path.strip_prefix(&canonical_root)
-            .or_else(|_| path.strip_prefix(root))
-            .unwrap_or(path)
-    } else {
-        path.strip_prefix(Path::new(".")).unwrap_or(path)
-    };
-    let components = relative
-        .components()
-        .filter(|component| !matches!(component, std::path::Component::CurDir))
-        .map(|component| component.as_os_str().to_string_lossy())
-        .collect::<Vec<_>>();
-    let top_level_ignored = components.first().is_some_and(|component| {
-        matches!(
-            component.as_ref(),
-            ".git" | ".ruvyxa" | "target" | "dist" | ".npm-pack" | ".npm-smoke"
-        ) || component.starts_with(".ruvyxa-")
-    });
-    top_level_ignored
-        || components
-            .iter()
-            .any(|component| matches!(component.as_ref(), ".ruvyxa" | "node_modules"))
-}
-
-fn instrumentation_source_changed(root: &Path, paths: &[PathBuf]) -> bool {
-    let root = ruvyxa_diagnostics::normalized_canonical_path(root);
-    paths.iter().any(|path| {
-        let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-            return false;
-        };
-        if !INSTRUMENTATION_FILES.contains(&file_name) {
-            return false;
-        }
-        let absolute = if path.is_absolute() {
-            path.clone()
-        } else {
-            root.join(path)
-        };
-        absolute
-            .parent()
-            .map(ruvyxa_diagnostics::normalized_canonical_path)
-            .as_deref()
-            == Some(root.as_path())
-    })
-}
-
-fn plugin_watch_paths(root: &Path, paths: &[PathBuf]) -> Vec<String> {
-    paths
-        .iter()
-        .map(|path| path.strip_prefix(root).unwrap_or(path))
-        .map(|path| path.display().to_string().replace('\\', "/"))
-        .collect()
-}
-
-fn format_update_elapsed(elapsed: Duration) -> String {
-    if elapsed >= Duration::from_millis(1) {
-        return format!("{}ms", elapsed.as_millis());
-    }
-    let tenths = elapsed.as_micros().div_ceil(100).max(1);
-    format!("{}.{:01}ms", tenths / 10, tenths % 10)
-}
-
-async fn hmr_ws(
-    ws: WebSocketUpgrade,
-    State(state): State<Arc<AppState>>,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-) -> Response {
-    // Cross-site pages can open WebSockets to localhost and, unlike fetch,
-    // read the messages. Reject handshakes without same-origin evidence so
-    // project structure never leaks to other sites open in the browser.
-    if hmr_origin_is_cross_site(&headers, &state.config, peer.ip()) {
-        return with_security_headers(
-            (StatusCode::FORBIDDEN, "Cross-origin HMR connection blocked").into_response(),
-        );
-    }
-    ws.on_upgrade(move |mut socket| async move {
-        let mut reload_rx = state.reload_tx.subscribe();
-
-        while let Ok(payload) = reload_rx.recv().await {
-            if socket.send(Message::Text(payload.into())).await.is_err() {
-                break;
-            }
-        }
-    })
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct RealtimeQuery {
-    channels: Option<String>,
-}
-
-async fn realtime_ws(
-    ws: WebSocketUpgrade,
-    State(state): State<Arc<AppState>>,
-    Query(query): Query<RealtimeQuery>,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-) -> Response {
-    let Some(runtime) = state.realtime.clone() else {
-        return (StatusCode::NOT_FOUND, "Realtime is not enabled").into_response();
-    };
-    if hmr_origin_is_cross_site(&headers, &state.config, peer.ip()) {
-        return with_security_headers(
-            (
-                StatusCode::FORBIDDEN,
-                "Cross-origin realtime connection blocked",
-            )
-                .into_response(),
-        );
-    }
-    let channels = match parse_realtime_channels(query.channels.as_deref()) {
-        Ok(channels) => channels,
-        Err(message) => return (StatusCode::BAD_REQUEST, message).into_response(),
-    };
-    ws.on_upgrade(move |mut socket| async move {
-        let mut receiver = runtime.tx.subscribe();
-        let mut heartbeat = tokio::time::interval(runtime.heartbeat);
-        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-
-        loop {
-            tokio::select! {
-                received = receiver.recv() => {
-                    match received {
-                        Ok(payload) if realtime_payload_matches(&payload, &channels) => {
-                            if socket.send(Message::Text(payload.into())).await.is_err() {
-                                break;
-                            }
-                        }
-                        Ok(_) => {}
-                        Err(broadcast::error::RecvError::Lagged(_)) => {
-                            if socket.send(Message::Text(
-                                r#"{"version":1,"type":"resync","reason":"lagged"}"#.into(),
-                            )).await.is_err() {
-                                break;
-                            }
-                        }
-                        Err(broadcast::error::RecvError::Closed) => break,
-                    }
-                }
-                _ = heartbeat.tick() => {
-                    if socket.send(Message::Ping(Vec::new().into())).await.is_err() {
-                        break;
-                    }
-                }
-            }
-        }
-    })
-}
-
-#[derive(Deserialize)]
-struct PresenceQuery {
-    room: Option<String>,
-}
-
-/// Serve one collaboration room membership over a bidirectional socket.
-///
-/// Unlike the realtime transport, this socket reads. Everything a client sends
-/// is validated, rate limited, and applied to process-local room state before
-/// it is fanned out, so a peer can never make the server retain unbounded data
-/// or forward a frame the room's own encoder did not produce.
-async fn presence_ws(
-    ws: WebSocketUpgrade,
-    State(state): State<Arc<AppState>>,
-    Query(query): Query<PresenceQuery>,
-    axum::extract::ConnectInfo(peer_addr): axum::extract::ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-) -> Response {
-    let Some(runtime) = state.presence.clone() else {
-        return (StatusCode::NOT_FOUND, "Presence is not enabled").into_response();
-    };
-    if hmr_origin_is_cross_site(&headers, &state.config, peer_addr.ip()) {
-        return with_security_headers(
-            (
-                StatusCode::FORBIDDEN,
-                "Cross-origin presence connection blocked",
-            )
-                .into_response(),
-        );
-    }
-    let Some(room) = query.room.filter(|room| collab::valid_room_id(room)) else {
-        return (
-            StatusCode::BAD_REQUEST,
-            "Presence requires a room of 1-128 letters, digits, colon, dot, underscore, slash, or dash",
-        )
-            .into_response();
-    };
-    ws.on_upgrade(move |socket| async move {
-        use futures_util::{SinkExt, StreamExt};
-
-        let registry = runtime.registry;
-        let (mut sender, mut receiver) = socket.split();
-        // Seat the peer only once the upgrade succeeded, so a handshake that
-        // never completes cannot leave an occupant behind in the room.
-        let seat = match registry.join(&room) {
-            Ok(seat) => seat,
-            Err(message) => {
-                let _ = sender.send(Message::Text(error_frame(message).into())).await;
-                let _ = sender.close().await;
-                return;
-            }
-        };
-        if sender
-            .send(Message::Text(seat.welcome.clone().into()))
-            .await
-            .is_err()
-        {
-            registry.leave(&room, &seat.peer);
-            return;
-        }
-        let mut feed = seat.receiver;
-        let mut heartbeat = tokio::time::interval(runtime.heartbeat);
-        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let mut limiter = FrameRateLimiter::new(Instant::now());
-
-        loop {
-            tokio::select! {
-                broadcast = feed.recv() => {
-                    match broadcast {
-                        Ok(payload) => {
-                            if sender.send(Message::Text(payload.into())).await.is_err() {
-                                break;
-                            }
-                        }
-                        Err(broadcast::error::RecvError::Lagged(_)) => {
-                            // The peer fell behind the room's frame buffer, so
-                            // its view is now unreconstructable from the feed
-                            // alone; tell it to reconnect for a fresh snapshot.
-                            let _ = sender.send(Message::Text(
-                                r#"{"version":1,"type":"resync","reason":"lagged"}"#.into(),
-                            )).await;
-                            break;
-                        }
-                        Err(broadcast::error::RecvError::Closed) => break,
-                    }
-                }
-                inbound = receiver.next() => {
-                    let Some(Ok(message)) = inbound else { break };
-                    let Message::Text(payload) = message else { continue };
-                    if !limiter.allow(Instant::now()) {
-                        let _ = sender.send(Message::Text(
-                            error_frame("Collaboration frame rate exceeded").into(),
-                        )).await;
-                        break;
-                    }
-                    let frame = match parse_client_frame(&payload) {
-                        Ok(frame) => frame,
-                        Err(message) => {
-                            if sender.send(Message::Text(error_frame(message).into())).await.is_err() {
-                                break;
-                            }
-                            continue;
-                        }
-                    };
-                    match frame {
-                        ParsedFrame::Presence(presence) => {
-                            registry.update_presence(&room, &seat.peer, presence);
-                        }
-                        ParsedFrame::Set(entries) => {
-                            if let Err(message) = registry.write_state(&room, &seat.peer, entries)
-                                && sender.send(Message::Text(error_frame(message).into())).await.is_err()
-                            {
-                                break;
-                            }
-                        }
-                    }
-                }
-                _ = heartbeat.tick() => {
-                    if sender.send(Message::Ping(Vec::new().into())).await.is_err() {
-                        break;
-                    }
-                }
-            }
-        }
-        registry.leave(&room, &seat.peer);
-    })
-}
-
-fn error_frame(message: &str) -> String {
-    serde_json::json!({ "version": 1, "type": "error", "message": message }).to_string()
-}
-
-fn parse_realtime_channels(
-    value: Option<&str>,
-) -> std::result::Result<HashSet<String>, &'static str> {
-    let Some(value) = value else {
-        return Err("Realtime requires at least one channel");
-    };
-    let requested = value.split(',').collect::<Vec<_>>();
-    if requested.is_empty()
-        || requested.len() > 16
-        || requested.iter().any(|channel| channel.is_empty())
-    {
-        return Err("Realtime requires between 1 and 16 non-empty channels");
-    }
-    let channels = requested
-        .into_iter()
-        .map(str::to_string)
-        .collect::<HashSet<_>>();
-    if channels.len() > 16
-        || channels
-            .iter()
-            .any(|channel| !valid_realtime_channel(channel))
-    {
-        return Err("Realtime accepts at most 16 channels of 128 bytes each");
-    }
-    Ok(channels)
-}
-
-fn valid_realtime_channel(channel: &str) -> bool {
-    !channel.is_empty()
-        && channel.len() <= 128
-        && channel.bytes().all(|byte| {
-            byte.is_ascii_alphanumeric() || matches!(byte, b':' | b'.' | b'_' | b'/' | b'-')
-        })
-}
-
-fn realtime_payload_matches(payload: &str, subscriptions: &HashSet<String>) -> bool {
-    if subscriptions.is_empty() {
-        return false;
-    }
-    serde_json::from_str::<serde_json::Value>(payload)
-        .ok()
-        .and_then(|value| {
-            value
-                .get("channels")
-                .and_then(serde_json::Value::as_array)
-                .cloned()
-        })
-        .is_some_and(|channels| {
-            channels.iter().any(|channel| {
-                channel
-                    .as_str()
-                    .is_some_and(|channel| subscriptions.contains(channel))
-            })
-        })
-}
-
-#[derive(Debug, Deserialize)]
-struct ClientBundleQuery {
-    path: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct FlightQuery {
-    path: String,
-    artifact: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct DynamicImageQuery {
-    src: String,
-    #[serde(rename = "w")]
-    width: u32,
-    #[serde(rename = "q")]
-    quality: Option<u8>,
-}
-
-#[derive(Debug, Deserialize)]
-pub(crate) struct ActionQuery {
-    pub(crate) path: String,
-    pub(crate) name: String,
-    #[serde(default)]
-    pub(crate) id: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct TraceQuery {
-    #[serde(default)]
-    path: Option<String>,
-    #[serde(default)]
-    kind: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-#[serde(deny_unknown_fields)]
-struct TraceAck {
-    trace_id: String,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct EditTraceResponse {
-    contract: &'static str,
-    schema_version: u32,
-    traces: Vec<trace::EditTrace>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct RuntimeTrace {
-    path: String,
-    matched: bool,
-    route: Option<RouteEntry>,
-    params: RouteParams,
-    runtime: &'static str,
-    assets: TraceAssets,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct TraceAssets {
-    public_dir: String,
-    app_dir: String,
-}
-
-/// Serve the client route table so the browser router can match and load
-/// routes without a document load, the same as a production build.
-///
-/// Production publishes this file to `/__ruvyxa/client/route-manifest.json`;
-/// the dev server has no such static file, so it synthesizes an equivalent from
-/// the live route manifest. Each page route points at the on-demand bundle
-/// endpoint keyed by its pattern — the generated bundle registers itself under
-/// that pattern, which is what `@ruvyxa/react`'s router looks up.
-async fn client_manifest(State(state): State<Arc<AppState>>) -> Response {
-    let routes = match state.runtime_cache.router(&state.config).await {
-        Ok((manifest, _)) => {
-            let eligible = manifest
-                .routes
-                .iter()
-                .filter(|route| route.kind == RouteKind::Page && route.render.ships_client_bundle())
-                .cloned()
-                .collect::<Vec<_>>();
-            let mut entries = Vec::with_capacity(eligible.len());
-            for route in eligible {
-                let Ok(script) = render_client_bundle_pooled(&state, &route.path).await else {
-                    continue;
-                };
-                let artifact = &blake3::hash(script.html.as_bytes()).to_hex()[..16];
-                let source = tokio::fs::read_to_string(&route.file)
-                    .await
-                    .unwrap_or_default();
-                let module = ruvyxa_bundler::ast::parse_module(&source);
-                entries.push(serde_json::json!({
-                    "path": route.path,
-                    "src": format!(
-                        "/__ruvyxa/client?path={}",
-                        url_encode_component(&route.path)
-                    ),
-                    "artifactVersion": artifact,
-                    "flight": ruvyxa_bundler::ast::has_named_runtime_export(&source, &module, "flight"),
-                    "cache": ruvyxa_bundler::reference_manifest::has_module_directive(&source, "use cache"),
-                }));
-            }
-            entries
-        }
-        Err(error) => {
-            error!(%error, "client manifest request failed");
-            Vec::new()
-        }
-    };
-
-    let body = serde_json::json!({ "routes": routes }).to_string();
-    let mut response = body.into_response();
-    response.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("application/json; charset=utf-8"),
-    );
-    // Never cache: routes appear and disappear as files are added during dev.
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    with_security_headers(response)
-}
-
-/// Serve the same public Flight contract in dev/start that deployment adapters expose.
-async fn flight_endpoint(
-    State(state): State<Arc<AppState>>,
-    Query(query): Query<FlightQuery>,
-    headers: HeaderMap,
-) -> Response {
-    if headers.contains_key(header::AUTHORIZATION) || headers.contains_key(header::COOKIE) {
-        return with_security_headers(
-            (
-                StatusCode::FORBIDDEN,
-                "Flight requests must not include private request state",
-            )
-                .into_response(),
-        );
-    }
-    if headers
-        .get("x-ruvyxa-flight")
-        .and_then(|value| value.to_str().ok())
-        != Some("1")
-    {
-        return with_security_headers(
-            (
-                StatusCode::BAD_REQUEST,
-                "Flight requests require the Ruvyxa navigation header",
-            )
-                .into_response(),
-        );
-    }
-    if query.artifact.len() != 16
-        || !query
-            .artifact
-            .bytes()
-            .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
-    {
-        return with_security_headers(
-            (
-                StatusCode::BAD_REQUEST,
-                "Flight request has an invalid artifact",
-            )
-                .into_response(),
-        );
-    }
-    let request_path = match canonical_request_path(&query.path) {
-        Ok(path) => path,
-        Err(_) => {
-            return with_security_headers(
-                (
-                    StatusCode::BAD_REQUEST,
-                    "Flight request has an invalid route",
-                )
-                    .into_response(),
-            );
-        }
-    };
-    let (manifest, router) = match state.runtime_cache.router(&state.config).await {
-        Ok(snapshot) => snapshot,
-        Err(error) => {
-            error!(%error, "Flight route snapshot failed");
-            return with_security_headers(StatusCode::INTERNAL_SERVER_ERROR.into_response());
-        }
-    };
-    let Some(route_match) = router.find(&manifest, &request_path) else {
-        return with_security_headers(StatusCode::NOT_FOUND.into_response());
-    };
-    if route_match.route.kind != RouteKind::Page {
-        return with_security_headers(StatusCode::NOT_FOUND.into_response());
-    }
-    let source = tokio::fs::read_to_string(&route_match.route.file)
-        .await
-        .unwrap_or_default();
-    let module = ruvyxa_bundler::ast::parse_module(&source);
-    if !ruvyxa_bundler::ast::has_named_runtime_export(&source, &module, "flight") {
-        return with_security_headers(
-            (
-                StatusCode::NOT_IMPLEMENTED,
-                "This route does not expose a Flight payload",
-            )
-                .into_response(),
-        );
-    }
-    let script = match render_client_bundle_pooled(&state, &route_match.route.path).await {
-        Ok(script) => script,
-        Err(error) => {
-            error!(%error, path = %request_path, "Flight client artifact failed");
-            return with_security_headers(StatusCode::INTERNAL_SERVER_ERROR.into_response());
-        }
-    };
-    let current_artifact = &blake3::hash(script.html.as_bytes()).to_hex()[..16];
-    if current_artifact != query.artifact {
-        return with_security_headers(
-            (StatusCode::CONFLICT, "Flight artifact is stale or invalid").into_response(),
-        );
-    }
-    let response = state
-        .worker_pool
-        .render_flight(RenderFlightRequest {
-            project_root: &state.config.root,
-            app_dir: &state.config.app_dir,
-            page_file: &route_match.route.file,
-            request_path: &request_path,
-            route_path: &route_match.route.path,
-            params: &route_match.params,
-            artifact_version: current_artifact,
-        })
-        .await;
-    match response {
-        Ok(response) if response.ok => {
-            let Some(payload) = response.flight else {
-                return with_security_headers(StatusCode::INTERNAL_SERVER_ERROR.into_response());
-            };
-            let mut response = payload.into_response();
-            response.headers_mut().insert(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("application/vnd.ruvyxa.flight+json; charset=utf-8"),
-            );
-            response.headers_mut().insert(
-                header::CACHE_CONTROL,
-                HeaderValue::from_static("private, no-store"),
-            );
-            response
-                .headers_mut()
-                .insert(header::VARY, HeaderValue::from_static("x-ruvyxa-flight"));
-            with_security_headers(response)
-        }
-        Ok(response) => {
-            error!(code = ?response.code, message = ?response.message, path = %request_path, "Flight render failed");
-            with_security_headers(StatusCode::INTERNAL_SERVER_ERROR.into_response())
-        }
-        Err(error) => {
-            error!(%error, path = %request_path, "Flight worker failed");
-            with_security_headers(StatusCode::INTERNAL_SERVER_ERROR.into_response())
-        }
-    }
-}
-
-async fn client_bundle(
-    State(state): State<Arc<AppState>>,
-    Query(query): Query<ClientBundleQuery>,
-) -> Response {
-    let response = match render_client_bundle_pooled(&state, &query.path).await {
-        Ok(script) => {
-            if state.config.watch {
-                state.devtools.record_bundle(&query.path, script.html.len());
-            }
-            // The client bundle is cached behind an `Arc<str>`; serve that
-            // allocation instead of copying the whole script per request.
-            let mut response = shared_text_body(script.html).into_response();
-            response.headers_mut().insert(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("text/javascript; charset=utf-8"),
-            );
-            response
-        }
-        Err(error) => {
-            error!(%error, path = %query.path, "client bundle request failed");
-            let message = public_internal_error(&state.config, &error);
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("console.error({message:?});"),
-            )
-                .into_response()
-        }
-    };
-    with_security_headers(response)
-}
-
-async fn hydration_loader() -> Response {
-    let mut response = hydration_loader_source().into_response();
-    response.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("text/javascript; charset=utf-8"),
-    );
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-cache"));
-    with_security_headers(response)
-}
-
-async fn dynamic_image_endpoint(
-    State(state): State<Arc<AppState>>,
-    Query(query): Query<DynamicImageQuery>,
-    headers: HeaderMap,
-) -> Response {
-    if query
-        .quality
-        .is_some_and(|quality| !(1..=100).contains(&quality))
-    {
-        return with_security_headers(
-            (
-                StatusCode::BAD_REQUEST,
-                "image quality must be between 1 and 100",
-            )
-                .into_response(),
-        );
-    }
-    let bytes = match dynamic_image::optimize(
-        &state.config.public_dir,
-        &state.config.dynamic_images,
-        &state.dynamic_image_cache,
-        &query.src,
-        query.width,
-        query.quality,
-    )
-    .await
-    {
-        Ok(bytes) => bytes,
-        Err(DynamicImageError::InvalidRequest(message)) => {
-            return with_security_headers((StatusCode::BAD_REQUEST, message).into_response());
-        }
-        Err(DynamicImageError::NotFound) => {
-            return with_security_headers(StatusCode::NOT_FOUND.into_response());
-        }
-        Err(DynamicImageError::TooLarge) => {
-            return with_security_headers(
-                (
-                    StatusCode::PAYLOAD_TOO_LARGE,
-                    "image exceeds runtime limits",
-                )
-                    .into_response(),
-            );
-        }
-        Err(DynamicImageError::Decode) => {
-            return with_security_headers(
-                (
-                    StatusCode::UNSUPPORTED_MEDIA_TYPE,
-                    "image could not be decoded",
-                )
-                    .into_response(),
-            );
-        }
-        Err(DynamicImageError::Io(error)) => {
-            error!(%error, src = %query.src, "dynamic image read failed");
-            return with_security_headers(StatusCode::NOT_FOUND.into_response());
-        }
-        Err(DynamicImageError::Worker) => {
-            error!(src = %query.src, "dynamic image worker failed");
-            return with_security_headers(StatusCode::INTERNAL_SERVER_ERROR.into_response());
-        }
-    };
-    let etag = static_assets::compute_etag(&bytes);
-    if headers
-        .get(header::IF_NONE_MATCH)
-        .is_some_and(|value| static_assets::etag_matches(value, &etag))
-    {
-        let mut response = StatusCode::NOT_MODIFIED.into_response();
-        response.headers_mut().insert(
-            header::CACHE_CONTROL,
-            HeaderValue::from_static("public, max-age=60, stale-while-revalidate=86400"),
-        );
-        response.headers_mut().insert(
-            header::ETAG,
-            HeaderValue::from_str(&etag).unwrap_or_else(|_| HeaderValue::from_static("")),
-        );
-        return with_security_headers(response);
-    }
-    let mut response = bytes.as_ref().to_vec().into_response();
-    response
-        .headers_mut()
-        .insert(header::CONTENT_TYPE, HeaderValue::from_static("image/webp"));
-    response.headers_mut().insert(
-        header::CACHE_CONTROL,
-        HeaderValue::from_static("public, max-age=60, stale-while-revalidate=86400"),
-    );
-    response.headers_mut().insert(
-        header::ETAG,
-        HeaderValue::from_str(&etag).unwrap_or_else(|_| HeaderValue::from_static("")),
-    );
-    with_security_headers(response)
-}
-
-async fn action_endpoint(
-    State(state): State<Arc<AppState>>,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<SocketAddr>,
-    Query(query): Query<ActionQuery>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    if let Some(response) = validate_action_request(&headers, body.len(), &state.config, peer) {
-        return with_security_headers(response);
-    }
-
-    let (content_type, payload) = match validate_action_payload(&headers, &body) {
-        Ok(payload) => payload,
-        Err(response) => return with_security_headers(*response),
-    };
-
-    let rate_key = action_rate_limit_key(peer, &headers, &query, &state.config);
-    let retry_after = {
-        let Ok(mut limiter) = state.action_limiter.lock() else {
-            error!("action rate limiter mutex poisoned; rejecting request");
-            return with_security_headers(
-                (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    "Service temporarily unavailable",
-                )
-                    .into_response(),
-            );
-        };
-        (!limiter.allow(&rate_key)).then(|| limiter.retry_after_seconds(&rate_key))
-    };
-    if let Some(retry_after) = retry_after {
-        return with_security_headers(
-            (
-                StatusCode::TOO_MANY_REQUESTS,
-                [(header::RETRY_AFTER, retry_after.to_string())],
-                "Action rate limit exceeded",
-            )
-                .into_response(),
-        );
-    }
-
-    if let Some(provided_reference) = query.id.as_deref() {
-        let (manifest, router) = match state.runtime_cache.route_snapshot(&state.config).await {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                error!(%error, "action reference route snapshot failed");
-                return with_security_headers(
-                    (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error").into_response(),
-                );
-            }
-        };
-        let Some(route_match) = router.find(&manifest, &query.path) else {
-            return with_security_headers(
-                (StatusCode::NOT_FOUND, "Route not found for action").into_response(),
-            );
-        };
-        let Some(action_file) = render_pipeline::action_file_for(route_match.route) else {
-            return with_security_headers(
-                (StatusCode::NOT_FOUND, "Route action file was not found").into_response(),
-            );
-        };
-        let source = match tokio::fs::read_to_string(&action_file).await {
-            Ok(source) => source,
-            Err(error) => {
-                error!(%error, file = %action_file.display(), "action reference source read failed");
-                return with_security_headers(
-                    (StatusCode::INTERNAL_SERVER_ERROR, "Internal Server Error").into_response(),
-                );
-            }
-        };
-        if action_reference_id(&route_match.route.id, &source) != provided_reference {
-            return with_security_headers(
-                (StatusCode::CONFLICT, "Action reference is stale or invalid").into_response(),
-            );
-        }
-        // A poisoned lock is recovered rather than refused. `ActionReplayGuard`
-        // records a nonce in `seen` before `order`, so a panic under this lock
-        // cannot leave state that accepts a replay — and `std::sync` poisoning
-        // never clears, so failing on it took every versioned action out for the
-        // life of the process. This matches how `collab.rs` treats its own room
-        // lock.
-        let replay = state
-            .action_replays
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .consume(
-                &headers,
-                provided_reference,
-                action_client_ip(peer, &headers, &state.config),
-            );
-        if let Err(rejection) = replay {
-            return with_security_headers(
-                (rejection.status(), rejection.message()).into_response(),
-            );
-        }
-    }
-
-    let action_started = Instant::now();
-    let (response, action_error) = match render_server_action_pooled(
-        &state,
-        &query.path,
-        &query.name,
-        &payload,
-        content_type,
-        &headers,
-    )
-    .await
-    {
-        Ok(response) => (response, false),
-        Err(error) => {
-            error!(
-                %error,
-                path = %query.path,
-                action = %query.name,
-                "server action request failed"
-            );
-            let message = public_internal_error(&state.config, &error);
-            (
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    format!("console.error({message:?});"),
-                )
-                    .into_response(),
-                true,
-            )
-        }
-    };
-    if state.config.watch {
-        state.devtools.record_action(
-            &query.path,
-            &query.name,
-            action_started.elapsed(),
-            action_error,
-        );
-    }
-    with_security_headers(response)
-}
-
-async fn devtools_dashboard(State(state): State<Arc<AppState>>) -> Response {
-    if !state.config.watch {
-        return with_security_headers(StatusCode::NOT_FOUND.into_response());
-    }
-    let mut response = dashboard_html().into_response();
-    response.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("text/html; charset=utf-8"),
-    );
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    with_security_headers(response)
-}
-
-async fn devtools_data(
-    State(state): State<Arc<AppState>>,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-) -> Response {
-    if !state.config.watch || hmr_origin_is_cross_site(&headers, &state.config, peer.ip()) {
-        return with_security_headers(StatusCode::NOT_FOUND.into_response());
-    }
-    let routes = match state.runtime_cache.router(&state.config).await {
-        Ok((manifest, _)) => manifest
-            .routes
-            .iter()
-            .map(|route| {
-                serde_json::json!({
-                    "path": route.path,
-                    "kind": format!("{:?}", route.kind).to_lowercase(),
-                    "strategy": format!("{:?}", route.render.strategy).to_lowercase(),
-                    "file": route.file.strip_prefix(&state.config.root)
-                        .unwrap_or(&route.file).display().to_string(),
-                })
-            })
-            .collect::<Vec<_>>(),
-        Err(error) => {
-            error!(%error, "devtools route snapshot failed");
-            Vec::new()
-        }
-    };
-    let snapshot = state.devtools.snapshot(
-        serde_json::Value::Array(routes),
-        state.render_cache.snapshot().await,
-    );
-    let mut response = json_response(StatusCode::OK, &snapshot);
-    response
-        .headers_mut()
-        .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-    with_security_headers(response)
-}
-
-async fn trace_endpoint(
-    State(state): State<Arc<AppState>>,
-    Query(query): Query<TraceQuery>,
-) -> Response {
-    if !debug_traces_enabled(&state.config) {
-        return with_security_headers(StatusCode::NOT_FOUND.into_response());
-    }
-    if query.kind.as_deref() == Some("edits") {
-        let snapshot = EditTraceResponse {
-            contract: "ruvyxa.edit-trace",
-            schema_version: 1,
-            traces: state.edit_traces.snapshot(query.path.as_deref()),
-        };
-        let mut response = json_response(StatusCode::OK, &snapshot);
-        response
-            .headers_mut()
-            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
-        return with_security_headers(response);
-    }
-    if query.kind.is_some() {
-        return with_security_headers(
-            (StatusCode::BAD_REQUEST, "Unknown trace kind").into_response(),
-        );
-    }
-    let Some(path) = query.path.as_deref() else {
-        return with_security_headers(
-            (StatusCode::BAD_REQUEST, "Trace path is required").into_response(),
-        );
-    };
-    let response = match runtime_trace_cached(&state.config, &state.runtime_cache, path).await {
-        Ok(trace) => json_response(StatusCode::OK, &trace),
-        Err(error) => {
-            error!(%error, path, "runtime trace request failed");
-            (
-                StatusCode::INTERNAL_SERVER_ERROR,
-                format!("console.error({:?});", error.to_string()),
-            )
-                .into_response()
-        }
-    };
-    with_security_headers(response)
-}
-
-async fn trace_ack_endpoint(
-    State(state): State<Arc<AppState>>,
-    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<SocketAddr>,
-    headers: HeaderMap,
-    body: Bytes,
-) -> Response {
-    if !debug_traces_enabled(&state.config) {
-        return with_security_headers(StatusCode::NOT_FOUND.into_response());
-    }
-    if hmr_origin_is_cross_site(&headers, &state.config, peer.ip()) {
-        return with_security_headers(
-            (
-                StatusCode::FORBIDDEN,
-                "Cross-origin trace acknowledgement blocked",
-            )
-                .into_response(),
-        );
-    }
-    let acknowledgement = match serde_json::from_slice::<TraceAck>(&body) {
-        Ok(value) if valid_trace_id(&value.trace_id) => value,
-        _ => {
-            return with_security_headers(
-                (StatusCode::BAD_REQUEST, "Invalid trace acknowledgement").into_response(),
-            );
-        }
-    };
-    if !state
-        .edit_traces
-        .record(&acknowledgement.trace_id, "browser", "message received")
-    {
-        return with_security_headers(StatusCode::NOT_FOUND.into_response());
-    }
-    with_security_headers(StatusCode::NO_CONTENT.into_response())
-}
-
-fn valid_trace_id(value: &str) -> bool {
-    value.len() == 32
-        && value
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-}
-
-fn debug_traces_enabled(config: &ServerConfig) -> bool {
-    config.watch && config.debug_traces
-}
-
 async fn handle_request(
     State(state): State<Arc<AppState>>,
     request: Request<Body>,
@@ -2936,44 +1559,9 @@ fn status_text(status: StatusCode) -> String {
 }
 
 #[cfg(test)]
-fn classify_hmr_event(paths: &[PathBuf]) -> &'static str {
-    if paths.is_empty() {
-        return "full-reload";
-    }
-
-    if paths.iter().all(|path| extension_is(path, "css")) {
-        return "css-update";
-    }
-
-    let has_component = paths.iter().any(|path| {
-        ["tsx", "jsx", "ts", "js", "md", "mdx"]
-            .into_iter()
-            .any(|extension| extension_is(path, extension))
-            && path.components().any(|component| {
-                let segment = component.as_os_str().to_string_lossy();
-                segment == "app" || segment == "components"
-            })
-    });
-
-    if has_component {
-        "component-update"
-    } else {
-        "full-reload"
-    }
-}
-
-#[cfg(test)]
-fn extension_is(path: &Path, expected: &str) -> bool {
-    path.extension()
-        .and_then(|extension| extension.to_str())
-        .is_some_and(|extension| extension.eq_ignore_ascii_case(expected))
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
     use axum::http::HeaderName;
-    use base64::Engine;
     use std::time::SystemTime;
 
     /// Both hosts answer to the same table of framework endpoints.
@@ -3041,25 +1629,6 @@ mod tests {
                 "{path} is in the endpoint contract but is not registered by serve()"
             );
         }
-    }
-
-    #[test]
-    fn validates_realtime_event_metadata_and_channel_filters() {
-        let payload = r#"{"version":1,"type":"action","channels":["todos"],"action":"save","path":"/todos","invalidated":[]}"#;
-        let encoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload);
-        assert_eq!(decode_realtime_event(&encoded).unwrap(), payload);
-        assert!(decode_realtime_event("not-base64!").is_err());
-
-        let subscriptions = HashSet::from(["todos".to_string()]);
-        assert!(realtime_payload_matches(payload, &subscriptions));
-        assert!(!realtime_payload_matches(
-            r#"{"version":1,"type":"action","channels":["users"]}"#,
-            &subscriptions
-        ));
-        assert!(parse_realtime_channels(Some("todos,users")).is_ok());
-        assert!(parse_realtime_channels(None).is_err());
-        assert!(parse_realtime_channels(Some("todos,,users")).is_err());
-        assert!(parse_realtime_channels(Some(&"a".repeat(129))).is_err());
     }
 
     #[test]
@@ -3162,29 +1731,6 @@ mod tests {
         assert!(html.contains("This page could not be found."));
     }
 
-    #[tokio::test]
-    async fn builds_runtime_trace_for_matched_routes() {
-        let temp = tempfile::tempdir().unwrap();
-        let app = temp.path().join("app/blog/[slug]");
-        std::fs::create_dir_all(&app).unwrap();
-        std::fs::write(
-            app.join("page.tsx"),
-            "export default function BlogPost() { return <main /> }",
-        )
-        .unwrap();
-        std::fs::write(app.join("action.ts"), "export const save = {}").unwrap();
-
-        let config = ServerConfig::dev(temp.path(), "localhost", 3000);
-        let trace = runtime_trace_cached(&config, &RuntimeCache::default(), "/blog/hello")
-            .await
-            .unwrap();
-
-        assert!(trace.matched);
-        assert_eq!(trace.params.get("slug"), Some(&serde_json::json!("hello")));
-        assert_eq!(trace.runtime, "dev");
-        assert!(trace.route.unwrap().server_modules[0].ends_with("action.ts"));
-    }
-
     #[test]
     fn parses_env_sources() {
         let env = parse_env_source(
@@ -3214,91 +1760,6 @@ mod tests {
         assert_eq!(env.get("EXPORTED_TOKEN"), Some(&"shell-style".to_string()));
         assert!(!env.contains_key("export EXPORTED_TOKEN"));
         assert_eq!(env.get("export"), Some(&"literal-export-key".to_string()));
-    }
-
-    #[test]
-    fn classifies_hmr_events_by_changed_file_type() {
-        assert_eq!(
-            classify_hmr_event(&[PathBuf::from("app/global.css")]),
-            "css-update"
-        );
-        assert_eq!(
-            classify_hmr_event(&[PathBuf::from("components/Nav.tsx")]),
-            "component-update"
-        );
-        assert_eq!(
-            classify_hmr_event(&[PathBuf::from("server/db.ts")]),
-            "full-reload"
-        );
-        assert_eq!(
-            classify_hmr_event(&[PathBuf::from("app/docs/page.mdx")]),
-            "component-update"
-        );
-    }
-
-    #[test]
-    fn hmr_payload_matches_the_shared_wire_contract() {
-        let fixture: serde_json::Value =
-            serde_json::from_str(include_str!("../../../tests/fixtures/hmr-contract.json"))
-                .unwrap();
-        assert_eq!(fixture["protocol"], "ruvyxa.hmr");
-        assert_eq!(fixture["protocolVersion"], 1);
-        assert_eq!(fixture["fallback"], "reload");
-        let required_fields = fixture["requiredFields"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|field| field.as_str().unwrap())
-            .collect::<BTreeSet<_>>();
-
-        for event in fixture["messages"].as_array().unwrap() {
-            let (event_type, full_reload, path) = match event["event"].as_str().unwrap() {
-                "css" => (HmrEventType::CssUpdate, false, "app/global.css"),
-                "client" => (HmrEventType::ComponentUpdate, false, "app/Button.tsx"),
-                "server" => (HmrEventType::ComponentUpdate, false, "app/server/data.ts"),
-                "structural" => (HmrEventType::FullReload, true, "app/layout.tsx"),
-                "failure" => (HmrEventType::FullReload, true, "app/page.tsx"),
-                kind => panic!("unknown fixture HMR event: {kind}"),
-            };
-            let update = HmrUpdate {
-                affected_routes: vec!["/docs".to_string()],
-                full_reload,
-                changed_files: vec![PathBuf::from(path)],
-                event_type,
-            };
-            let payload: serde_json::Value = serde_json::from_str(&hmr_payload(
-                &update,
-                &[path.to_string()],
-                "0123456789abcdef0123456789abcdef",
-                false,
-                (event["event"] == "failure").then_some((
-                    "RUV1706",
-                    "Worker cache invalidation failed; workers were restarted.",
-                )),
-            ))
-            .unwrap();
-            let actual_fields: BTreeSet<&str> = payload
-                .as_object()
-                .unwrap()
-                .keys()
-                .map(String::as_str)
-                .collect();
-            assert!(required_fields.is_subset(&actual_fields));
-            assert_eq!(payload["protocol"], fixture["protocol"]);
-            assert_eq!(payload["protocolVersion"], fixture["protocolVersion"]);
-            assert_eq!(payload["traceId"], "0123456789abcdef0123456789abcdef");
-            assert_eq!(payload["type"], event["type"]);
-            assert_eq!(payload["kind"], event["kind"]);
-            if event["event"] == "failure" {
-                assert_eq!(payload["issues"][0]["code"], "RUV1706");
-                assert_eq!(payload["fullReload"], true);
-            }
-            assert!(
-                payload["sequence"]
-                    .as_u64()
-                    .is_some_and(|sequence| sequence > 0)
-            );
-        }
     }
 
     #[test]
@@ -4581,54 +3042,6 @@ mod tests {
         assert!(matched.route.file.ends_with("z/page.tsx"));
     }
 
-    #[tokio::test]
-    async fn refresh_hmr_manifest_reconciles_routes_without_losing_bundle_inputs() {
-        let temp = tempfile::tempdir().unwrap();
-        let app = temp.path().join("app");
-        std::fs::create_dir_all(&app).unwrap();
-        let home_page = app.join("page.tsx");
-        std::fs::write(
-            &home_page,
-            "export default function Home() { return <main /> }",
-        )
-        .unwrap();
-
-        let config = ServerConfig::dev(temp.path(), "localhost", 3000);
-        let initial = discover_routes(discover_options(&config)).unwrap();
-        let cache = RuntimeCache::with_manifest(initial.clone());
-        let tracker = HmrTracker::new();
-        tracker.populate_from_manifest(&initial.routes);
-
-        let server_dependency = temp.path().join("lib").join("home-data.ts");
-        tracker.register_route("/", std::slice::from_ref(&server_dependency));
-
-        let about = app.join("about");
-        std::fs::create_dir_all(&about).unwrap();
-        let about_page = about.join("page.tsx");
-        std::fs::write(
-            &about_page,
-            "export default function About() { return <main /> }",
-        )
-        .unwrap();
-
-        cache.invalidate_async().await;
-        refresh_hmr_manifest(&config, &cache, &tracker)
-            .await
-            .unwrap();
-
-        assert_eq!(tracker.tracked_route_count(), 2);
-        assert_eq!(
-            tracker.compute_update(&[server_dependency]).affected_routes,
-            vec!["/".to_string()],
-            "refreshing route discovery must preserve a live route's worker graph"
-        );
-        assert_eq!(
-            tracker.compute_update(&[about_page]).affected_routes,
-            vec!["/about".to_string()],
-            "new routes must become targetable immediately after manifest refresh"
-        );
-    }
-
     /// The favicon link is derived from a filesystem stat, and every page render
     /// used to redo it. Caching it means the answer is computed once and only
     /// recomputed when the watcher invalidates the runtime cache.
@@ -4747,37 +3160,6 @@ mod tests {
         assert_eq!(local_display_url(&config, address), "http://localhost:3001");
     }
 
-    #[test]
-    fn runtime_traces_require_both_dev_mode_and_debug_flag() {
-        let mut dev = ServerConfig::dev(".", "localhost", 3000);
-        assert!(!debug_traces_enabled(&dev));
-        dev.debug_traces = true;
-        assert!(debug_traces_enabled(&dev));
-
-        let mut production = ServerConfig::production(".", "localhost", 3000);
-        production.debug_traces = true;
-        assert!(!debug_traces_enabled(&production));
-    }
-
-    #[test]
-    fn trace_acknowledgements_require_lowercase_w3c_ids() {
-        assert!(valid_trace_id("0123456789abcdef0123456789abcdef"));
-        assert!(!valid_trace_id("0123456789ABCDEF0123456789ABCDEF"));
-        assert!(!valid_trace_id("0123456789abcdef"));
-        assert!(!valid_trace_id("zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"));
-
-        assert!(
-            serde_json::from_str::<TraceAck>(r#"{"traceId":"0123456789abcdef0123456789abcdef"}"#)
-                .is_ok()
-        );
-        assert!(
-            serde_json::from_str::<TraceAck>(
-                r#"{"traceId":"0123456789abcdef0123456789abcdef","extra":true}"#
-            )
-            .is_err()
-        );
-    }
-
     #[tokio::test]
     async fn bind_listener_uses_next_available_port_when_requested_port_is_busy() {
         let occupied = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -4847,99 +3229,6 @@ mod tests {
                 .unwrap()
                 .contains("3000-3100")
         );
-    }
-
-    #[test]
-    fn watches_the_project_root_for_imported_modules_and_styles() {
-        let temp = tempfile::tempdir().unwrap();
-        let app = temp.path().join("app");
-        let styles = temp.path().join("styles");
-        std::fs::create_dir_all(&app).unwrap();
-        std::fs::create_dir_all(&styles).unwrap();
-        std::fs::write(app.join("page.tsx"), "import '../styles/site.css'").unwrap();
-        std::fs::write(styles.join("site.css"), "body { color: green; }").unwrap();
-        let config = ServerConfig::dev(temp.path(), "localhost", 3000);
-
-        assert_eq!(watch_paths(&config), vec![temp.path().to_path_buf()]);
-        assert!(!ignored_watch_path(temp.path(), &styles.join("site.css")));
-        assert!(!ignored_watch_path(
-            temp.path(),
-            &temp.path().join("lib/utils.ts")
-        ));
-        assert!(ignored_watch_path(
-            temp.path(),
-            &temp.path().join("node_modules/react/index.js")
-        ));
-        assert!(ignored_watch_path(
-            temp.path(),
-            &temp.path().join(".ruvyxa/cache/client.js")
-        ));
-        assert!(ignored_watch_path(
-            temp.path(),
-            &Path::new(".")
-                .join(".ruvyxa")
-                .join("cache")
-                .join("ssr")
-                .join("page.mjs")
-        ));
-        assert!(ignored_watch_path(
-            temp.path(),
-            &temp
-                .path()
-                .join(".ruvyxa-action-test-BW9IHB")
-                .join("app/todos/action.ts")
-        ));
-        assert!(!ignored_watch_path(
-            temp.path(),
-            &temp.path().join("app/.ruvyxa-action-test-helper.ts")
-        ));
-    }
-
-    #[test]
-    fn instrumentation_watcher_filenames_match_the_shared_contract() {
-        let fixture: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../tests/fixtures/instrumentation-files-conformance.json"
-        ))
-        .unwrap();
-        let files = fixture["files"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|value| value.as_str().unwrap())
-            .collect::<Vec<_>>();
-
-        assert_eq!(files, INSTRUMENTATION_FILES);
-
-        let temp = tempfile::tempdir().unwrap();
-        let root = temp.path();
-        for file in INSTRUMENTATION_FILES {
-            assert!(instrumentation_source_changed(root, &[root.join(file)]));
-        }
-        assert!(!instrumentation_source_changed(
-            root,
-            &[root.join("app/instrumentation.ts")]
-        ));
-        assert!(!instrumentation_source_changed(
-            root,
-            &[root.join("instrumentation.ts.bak")]
-        ));
-    }
-
-    #[test]
-    fn plugin_file_change_paths_are_project_relative_and_portable() {
-        let root = PathBuf::from("C:/workspace/app");
-        let paths = vec![root.join("content/guide.md"), root.join("app/page.tsx")];
-
-        assert_eq!(
-            plugin_watch_paths(&root, &paths),
-            vec!["content/guide.md", "app/page.tsx"]
-        );
-    }
-
-    #[test]
-    fn dev_hmr_logs_keep_submillisecond_timing_visible() {
-        assert_eq!(format_update_elapsed(Duration::from_micros(42)), "0.1ms");
-        assert_eq!(format_update_elapsed(Duration::from_millis(1)), "1ms");
     }
 
     #[test]

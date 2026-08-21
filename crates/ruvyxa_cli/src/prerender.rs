@@ -813,11 +813,7 @@ pub(crate) fn csr_shell_html(
         // `params` is empty rather than the route's: this shell is written once
         // per route pattern, not per request, so it has no concrete parameters
         // to carry. The client bundle falls back to reading `location`.
-        bootstrap = ruvyxa_dev_server::bootstrap_data_block(
-            "{}",
-            &inline_script_json(route_path, "\"\""),
-            true,
-        ),
+        bootstrap = ruvyxa_dev_server::bootstrap_data_block(&RouteParams::new(), route_path, true),
     )
 }
 
@@ -932,15 +928,13 @@ pub(crate) fn inject_prerender_client_assets(
     } else {
         module_preload_links(&assets.preloads)
     };
-    let request_path_json = inline_script_json(request_path, "\"/\"");
-    let params_json = inline_script_json(params, "{}");
     let script_src = assets.hydration_loader.as_deref().map_or_else(
         || assets.src.clone(),
         |loader| ruvyxa_dev_server::hydration_loader_url(loader, &assets.src, assets.hydration),
     );
     let scripts = format!(
         r#"{}<script type="module" src="{}"></script>"#,
-        ruvyxa_dev_server::bootstrap_data_block(&params_json, &request_path_json, false),
+        ruvyxa_dev_server::bootstrap_data_block(params, request_path, false),
         escape_html_attribute(&script_src)
     );
     let lower = html.to_ascii_lowercase();
@@ -959,17 +953,12 @@ pub(crate) fn inject_prerender_client_assets(
     format!("<!doctype html><html><head>{preload_links}</head><body>{html}{scripts}</body></html>")
 }
 
-pub(crate) fn inline_script_json<T: serde::Serialize + ?Sized>(
-    value: &T,
-    fallback: &str,
-) -> String {
-    // Escaping is `ruvyxa_dev_server`'s, not a copy of it: the dev server and
-    // this writer put the same payload in the same `<script>` element, so a rule
-    // that lived in both could protect one and not the other.
-    ruvyxa_dev_server::safe_json_for_script(
-        &serde_json::to_string(value).unwrap_or_else(|_| fallback.to_string()),
-    )
-}
+// `inline_script_json` lived here: it serialized a value and handed the result
+// to `ruvyxa_dev_server::safe_json_for_script` before either of this module's
+// two writers passed it on. Both now hand `bootstrap_data_block` the value
+// itself and it does the serializing and escaping, so the helper had no callers
+// and, more to the point, no reason to exist — a payload that escapes itself
+// cannot be embedded unescaped.
 
 #[cfg(test)]
 mod csr_shell_tests {

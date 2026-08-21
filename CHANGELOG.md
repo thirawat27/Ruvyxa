@@ -248,6 +248,100 @@ registered in the package's `files`, in `HANDLER_RUNTIME_FILES`, and in `WORKER_
 last because extracting code out of `action-runtime.mjs` would otherwise have taken it out of the
 prerender cache's identity, letting the rule change while every hash stayed equal.
 
+### CORS answered the same request differently in development and production
+
+**Breaking for a project that configured `middleware.builtin.cors` without naming `methods`.**
+
+The native server filled an unset `methods` with an implicit `GET, POST, PUT, DELETE, OPTIONS`. The
+serverless handler had no such default. A project that wrote
+
+```ts
+middleware: {
+  builtin: {
+    cors: {
+      origins: ['https://app.example']
+    }
+  }
+}
+```
+
+therefore answered a cross-origin `PUT` preflight with a method allowance under `ruvyxa dev`,
+`start`, and `preview`, and with no `Access-Control-Allow-Methods` at all once deployed to a
+serverless adapter — which the browser reads as a blocked request. Nothing failed a build or
+appeared in a log; the split only showed up in a browser pointed at production.
+
+`methods` now defaults to empty in both hosts, and an empty list sends no header. The narrower
+behaviour won because `docs/en/13-security.md` already asks a project to name its origins, methods,
+and headers explicitly, and closing the gap the other way would have widened the cross-origin
+surface of every deployed application that had relied on a default it never wrote down. **Name the
+methods you serve cross-origin**; `ruvyxa dev` now shows what production will do.
+
+Both hosts replay `tests/fixtures/cors-conformance.json`, which also pins where each negotiation
+header belongs, `Vary: Origin` on a rejected origin, and the refusal to grant credentialed access
+through a wildcard — the native server rejecting that configuration before it binds a port, the
+handler treating no origin as allowed because a deployed function has no startup to fail in.
+
+### Shared tables the serverless handler was never held to
+
+`STATIC_ASSET_EXTENSIONS` and `DEFAULT_SECURITY_HEADERS` each had a fixture, replayed by the Rust
+host and by `@ruvyxa/core` — and a third copy in `packages/ruvyxa/runtime/serverless-handler.mjs`
+that nothing replayed. That copy is the one running in every deployed serverless build, so the two
+gated implementations agreeing proved nothing about the deployed one.
+`tests/packages/ruvyxa/serverless-shared-tables.test.mjs` holds it to both fixtures now, and each
+fixture's own note says three implementations rather than two.
+
+### The bootstrap block escapes its own payload
+
+`bootstrap_data_block` took the route parameters and the request path as already-serialized,
+already-escaped strings. Four writers across three modules called it, all four escaped correctly —
+and the signature accepted an unescaped string just as readily. These values come from the request
+URL, so one writer that forgot would let a path segment close the `<script>` element. That writer
+had already existed once: the CSR shell interpolated raw `serde_json` output, which escapes `"` and
+`\` but not `<`.
+
+It now takes the values themselves and does the serializing and the escaping, assembling the payload
+as a JSON document rather than formatting it as text. There is no longer a way to reach the element
+unescaped, and `inline_script_json` in the CLI's prerender writer — which existed only to apply the
+escaping before handing the result on — is gone. The escaping test passes the dangerous value
+straight in, in both the parameter and the path position.
+
+### `ruvyxa_dev_server`'s crate root is half its former size
+
+`lib.rs` held 4,973 lines and had taken more commits than any other file in the repository:
+configuration, `serve`, the router, the development file watcher, three WebSocket endpoints, ten
+HTTP handlers, and the tests for all of it. The crate already had twenty-three focused modules
+beside it, so the seams existed and `lib.rs` was what had not been moved through them.
+
+Three modules came out of it, each with the tests that pin it:
+
+- `watcher.rs` — the development file watcher and the HMR updates it produces: the watch loop, what
+  a changed path means, the wire payload, and the rules for which paths are worth waking up for.
+- `framework_endpoints.rs` — the handlers behind the reserved `/__ruvyxa/*` paths. This is the same
+  surface `tests/fixtures/framework-endpoint-conformance.json` lists, so the module and the contract
+  now describe the same thing.
+- `realtime_endpoints.rs` — the HMR, realtime, and presence WebSockets, with the origin check,
+  channel validation, and subscription filter that decide what a socket may see.
+
+`lib.rs` is 3,262 lines and keeps what a crate root should: configuration, `serve`, the router
+table, and the request path for project pages and API routes. Its implementation half went from
+2,973 lines to 1,561. Behaviour is unchanged — the same 298 tests pass before and after, and no
+handler, route, or public export moved.
+
+### The generated-entry preludes had no gate
+
+`crates/ruvyxa_bundler/src/output.rs` said `tests/packages/ruvyxa/entry-templates.test.mjs` asserted
+that its routing-context and error-boundary preludes agreed with
+`packages/ruvyxa/runtime/entry-templates.mjs`. That test never read `output.rs`. The two bundlers
+each emit a route's client entry, so the preludes were two hand-maintained copies of the same source
+text with nothing but a doc comment between them — and a drift would have shown up as a boundary
+that swallowed a `notFound()` in one build and rethrew it in the other.
+
+`tests/packages/ruvyxa/entry-prelude-parity.test.mjs` executes both copies against one stand-in
+React and asks them the same questions: what `getDerivedStateFromError` returns, what a `notFound()`
+signal renders with and without a `not-found.tsx`, what the error fallback receives, and what
+`retry()` does with and without a mounted router. Behaviour rather than bytes, because the Rust
+literal carries statement terminators the Prettier-formatted template does not.
+
 ### Plugins can tell development from production
 
 `register(api)` receives `api.environment`. A host that does not state one reports `production`, so
