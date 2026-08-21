@@ -15,6 +15,14 @@ secret storage, upstream network control และ infrastructure policy ยั�
   input schema ทำงานก่อน action handler
 - `security.trustedProxyIps` เป็น allow-list สำหรับ forwarded IP/protocol header; loopback proxy
   ได้รับความเชื่อถือโดยปริยาย อย่าเชื่อ forwarded header จาก client ทั่วไป
+- `middleware.builtin.rate` จำกัดอัตราให้ทุก route ไม่ใช่เฉพาะ action key ปริยาย `ip` คือ transport
+  peer เว้นแต่ peer นั้นเป็น loopback หรืออยู่ใน `security.trustedProxyIps` กรณีนั้นจะไล่ chain ของ
+  forwarded header จากขวาหา address แรกที่ไม่ใช่ proxy ของคุณ — client ที่ไม่ใช่ proxy
+  จึงเปลี่ยนชื่อ ตัวเองไม่ได้ เมื่ออยู่หลัง reverse proxy ให้ใช้ `ip` นี่แหละ: ระบุ proxy ใน
+  `trustedProxyIps` แล้ว ปล่อย key ไว้ตามเดิม ส่วน `header:<name>` เป็นทางออกสำหรับ identity ที่
+  application กำหนดเอง เช่น API key และถูกใช้ตามค่าที่ส่งมาตรง ๆ การชี้ไปที่ `x-forwarded-for`
+  จึงเท่ากับยกกุญแจ bucket ให้ผู้เรียก และ client เดียวหมุนค่าเพื่อขอโควตาไม่จำกัดได้
+  เซิร์ฟเวอร์จะเตือนตอน startup เมื่อพบการตั้งค่าแบบนั้น
 - first-party `redirects` plugin validate destination ต่อ scheme-relative, backslash และ
   invalid-origin form ที่ไม่ปลอดภัย `securityHeaders` validate CSP directive map และให้ HSTS เป็น
   default
@@ -42,9 +50,10 @@ secret storage, upstream network control และ infrastructure policy ยั�
 
 terminate TLS, จำกัด inbound network, ตั้ง process memory/time limit, patch Node/Rust/dependency
 และให้ secret manager ใส่เฉพาะ proxy address/CIDR ที่รู้จักใน `trustedProxyIps` ทดสอบ authentication
-redirect ด้วย production origin ไม่พบหลักฐานว่ามี CSRF middleware ในตัว, generic rate limiting
-สำหรับ arbitrary API route, malware scanning, WAF หรือ automatic dependency-vulnerability
-remediation; เพิ่ม control เหล่านี้เมื่อ threat model ต้องการ
+redirect ด้วย production origin การป้องกัน cross-site สำหรับ route handler คือ plugin `originGuard`
+ซึ่งเปิดใช้เองตาม route scope ส่วน rate limiting ทั่วไปคือ `middleware.builtin.rate`
+ซึ่งปิดอยู่จนกว่าจะ ตั้งค่า ไม่พบหลักฐานว่ามี malware scanning, WAF หรือ automatic
+dependency-vulnerability remediation; เพิ่ม control เหล่านี้เมื่อ threat model ต้องการ
 
 **ก่อนหน้า:** [Development และ testing](12-development-testing.md) · **ถัดไป:**
 [Observability และ performance](14-observability-performance.md)

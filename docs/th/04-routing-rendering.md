@@ -196,6 +196,21 @@ export default function DashboardLayout({
 subtree ของ slot และ slot ที่ไม่ตรงจะกลับไปใช้ `default.tsx` ทุกครั้งที่ navigate แทนที่จะคงสิ่งที่
 render ไว้ล่าสุด
 
+### Intercepting route ยังไม่รองรับ
+
+Ruvyxa ไม่ได้ implement convention ของโฟลเดอร์ `(.)`, `(..)`, `(..)(..)` และ `(...)` โฟลเดอร์ที่ชื่อ
+ขึ้นต้นด้วยรูปแบบเหล่านี้จะทำให้ route discovery ล้มเหลวด้วย **RUV1005** ไม่ว่าจะอยู่ตรงไหนใต้
+`app/` รวมถึงภายในโฟลเดอร์ `@slot` ด้วย
+
+การตรวจนี้มีอยู่เพราะก่อนหน้านี้ convention ดังกล่าวไปทำอย่างอื่นแบบเงียบ ๆ route group
+ต้องลงท้ายด้วย `)` ดังนั้น `app/feed/(.)photo/` จึงไม่ถูกตัดออกในฐานะ group แต่กลายเป็น URL segment
+ตรงตัวและเผยแพร่ page จริงที่ `/feed/(.)photo` — view ที่เขียนไว้เพื่อซ้อนทับ route อื่นกลับได้
+address สาธารณะเป็นของ ตัวเอง ส่วนภายใน `@slot` โฟลเดอร์เดียวกันไม่ตรงกับ URL ใดเลยและไม่ render
+อะไรออกมา
+
+ให้เปลี่ยนชื่อโฟลเดอร์เป็น segment ปกติ แล้ว render overlay จาก route ที่ layout ประกอบอยู่แล้ว —
+เช่น parallel slot หรือ client state ที่คง page ด้านล่างไว้
+
 ### boundary ของสถานะ route แบบครบชุด
 
 วาง special file ทั้งสามไว้ข้าง segment ที่ต้องการครอบคลุม ระบบจะเลือกไฟล์ที่อยู่ใกล้ที่สุด ดังนั้น

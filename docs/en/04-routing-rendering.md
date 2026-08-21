@@ -197,6 +197,20 @@ Two limits worth knowing: a slot's own nested `layout.tsx` or `loading.tsx` is n
 slot subtree, and an unmatched slot falls back to `default.tsx` on every navigation rather than
 keeping what it last rendered.
 
+### Intercepting routes are not implemented
+
+Ruvyxa does not implement the `(.)`, `(..)`, `(..)(..)`, and `(...)` folder conventions. A folder
+whose name opens with one of them fails route discovery with **RUV1005**, wherever it sits under
+`app/` — including inside a `@slot` folder.
+
+The check exists because the convention used to do something else quietly. A route group needs a
+trailing `)`, so `app/feed/(.)photo/` was not stripped as one: it became a literal URL segment and
+published a real page at `/feed/(.)photo` — a view written to be shown over another route, given its
+own public address. Inside a `@slot` the same folder matched no URL and rendered nothing at all.
+
+Rename the folder to an ordinary segment, and render the overlay from a route the layout already
+composes — a parallel slot, or client state that keeps the underlying page mounted.
+
 ### A complete route-state boundary
 
 Put the three special files beside the segment they should protect. The closest matching file wins,

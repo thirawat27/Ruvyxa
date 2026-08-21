@@ -8,11 +8,12 @@ use tower_http::compression::{
     CompressionLayer,
     predicate::{DefaultPredicate, Predicate},
 };
-use tracing::info;
+use tracing::{info, warn};
 
 use crate::builtin::{
     CorsLayer, CustomHeadersLayer, RateLimitLayerWithKey, RequestLoggingLayer, TimingLayer,
 };
+use crate::client_ip::TrustedProxies;
 use crate::config::MiddlewareConfig;
 
 /// Compress only response bodies whose complete size is already known.
@@ -36,16 +37,45 @@ impl Predicate for CompleteBodyCompressionPredicate {
     }
 }
 
+/// Rate-limit key selectors that hand the bucket key to the caller.
+///
+/// `header:` mode is verbatim by design — an API key is not an address and
+/// must not be parsed as one — so a forwarding header selected here is used
+/// exactly as sent. These are the names for which that is a bypass rather than
+/// a choice.
+const FORWARDING_HEADER_KEYS: [&str; 5] = [
+    "header:x-forwarded-for",
+    "header:x-real-ip",
+    "header:cf-connecting-ip",
+    "header:x-vercel-forwarded-for",
+    "header:true-client-ip",
+];
+
 /// A compiled middleware stack ready to be applied to an axum Router.
 #[derive(Default)]
 pub struct MiddlewareStack {
     config: MiddlewareConfig,
+    trusted_proxies: TrustedProxies,
 }
 
 impl MiddlewareStack {
     /// Create a new middleware stack from configuration.
     pub fn new(config: MiddlewareConfig) -> Self {
-        Self { config }
+        Self {
+            config,
+            trusted_proxies: TrustedProxies::default(),
+        }
+    }
+
+    /// Reverse proxies whose forwarded client header the rate limiter believes.
+    ///
+    /// This is `security.trustedProxyIps`, the same list the server-action
+    /// limiter reads. It is a separate builder step rather than a field on
+    /// `MiddlewareConfig` because it is a security policy the host owns, not
+    /// part of the `middleware` block a project writes.
+    pub fn with_trusted_proxies(mut self, trusted_proxies: TrustedProxies) -> Self {
+        self.trusted_proxies = trusted_proxies;
+        self
     }
 
     /// Apply the middleware stack to an axum Router.
@@ -89,15 +119,7 @@ impl MiddlewareStack {
         }
 
         // Apply rate limiting
-        if let Some(ref rate_config) = self.config.builtin.rate_limit {
-            app = app.layer(RateLimitLayerWithKey::from_config(rate_config));
-            info!(
-                max = rate_config.max_requests,
-                window_secs = rate_config.window_secs,
-                key = %rate_config.key_by,
-                "rate limiting enabled"
-            );
-        }
+        app = self.apply_rate_limit(app);
 
         // Apply CORS
         if let Some(ref cors_config) = self.config.builtin.cors {
@@ -165,8 +187,10 @@ impl MiddlewareStack {
                 return Err("Rate limit 'window' must be greater than 0".to_string());
             }
             if rate.key_by == "ip" {
-                // The transport peer is the only implicit key source. Forwarded
-                // client identity remains opt-in through an explicit header.
+                // `ip` asks `crate::client_ip`: the transport peer, unless that
+                // peer is loopback or listed in `security.trustedProxyIps`, in
+                // which case the forwarded chain names the client. A client
+                // that is not a proxy still cannot rename itself.
             } else if let Some(header_name) = rate.key_by.strip_prefix("header:") {
                 if header_name.is_empty()
                     || axum::http::HeaderName::from_bytes(header_name.as_bytes()).is_err()
@@ -185,6 +209,38 @@ impl MiddlewareStack {
         }
 
         Ok(())
+    }
+
+    /// Install the rate limiter, and say so when its key is one a caller writes.
+    fn apply_rate_limit<S: Clone + Send + Sync + 'static>(&self, app: Router<S>) -> Router<S> {
+        let Some(rate_config) = &self.config.builtin.rate_limit else {
+            return app;
+        };
+        // `header:` is the escape hatch for an application-defined identity
+        // such as an API key, and it is used verbatim — no parsing, no
+        // trusted-hop scan. Pointing it at a forwarding header hands the bucket
+        // key to the caller: one client rotating the value collects a fresh
+        // allowance every request. `ip` is the proxy-aware mode and is what a
+        // deployment behind a proxy wants.
+        if FORWARDING_HEADER_KEYS
+            .iter()
+            .any(|name| rate_config.key_by.eq_ignore_ascii_case(name))
+        {
+            warn!(
+                key = %rate_config.key_by,
+                "rate limit key uses a client-writable forwarding header verbatim, which one caller can rotate to bypass the limit; use key: \"ip\" with security.trustedProxyIps instead"
+            );
+        }
+        info!(
+            max = rate_config.max_requests,
+            window_secs = rate_config.window_secs,
+            key = %rate_config.key_by,
+            "rate limiting enabled"
+        );
+        app.layer(RateLimitLayerWithKey::from_config(
+            rate_config,
+            self.trusted_proxies.clone(),
+        ))
     }
 
     fn count_builtin_layers(&self) -> usize {

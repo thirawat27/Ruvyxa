@@ -5,6 +5,7 @@ import { createRequire, isBuiltin } from 'node:module'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { compareCodeUnits } from './order.mjs'
+import { directivePrologueEnd } from './scanner.mjs'
 const JS_EXTENSIONS = ['', '.ts', '.tsx', '.js', '.jsx', '.mts', '.mjs', '.md', '.mdx']
 export const MDX_COMPONENT_EXTENSIONS = ['.tsx', '.ts', '.jsx', '.js', '.mts', '.mjs']
 const ASSET_EXTENSIONS = new Set(['.css', '.scss', '.sass', '.less'])
@@ -2016,6 +2017,81 @@ async function writeIfChanged(file, contents) {
   await writeFile(file, contents)
 }
 
+/**
+ * JavaScript language levels `build.target` accepts.
+ *
+ * Mirrors `EsTarget::ALL` in `crates/ruvyxa_bundler/src/types.rs`; the two are
+ * held to `tests/fixtures/es-target-conformance.json`, because a project
+ * renders through whichever graph built it and the two must not disagree about
+ * what is configurable.
+ */
+const ES_TARGETS = [
+  'es2015',
+  'es2016',
+  'es2017',
+  'es2018',
+  'es2019',
+  'es2020',
+  'es2021',
+  'es2022',
+  'es2023',
+  'es2024',
+  'es2025',
+  'es2026',
+  'esnext',
+]
+
+/**
+ * The language level this process compiles to.
+ *
+ * Read from the environment for the same reason `RUVYXA_JSX_RUNTIME` is: a
+ * prerender worker and the dev server's render process are separate processes
+ * with no view of `ruvyxa.config.ts`. The Rust side validates the configured
+ * value before setting it, so an unusable value arriving here means this module
+ * was driven directly — worth failing on rather than quietly compiling to a
+ * different level than the client bundle used. An *unset* variable is the
+ * ordinary case and means the default; an empty one is a host that set it
+ * wrong, and is refused for the same reason `EsTarget::parse` refuses it.
+ */
+export function resolveEsTarget(value = process.env.RUVYXA_ES_TARGET) {
+  const raw = String(value ?? 'esnext')
+    .trim()
+    .toLowerCase()
+  if (raw === 'es6') return 'es2015'
+  if (!ES_TARGETS.includes(raw)) {
+    throw new Error(`RUV1601 build.target must be one of: ${ES_TARGETS.join(', ')}, got \`${raw}\``)
+  }
+  return raw
+}
+
+/** Specifier prefix oxc emits for every helper import it adds. */
+const HELPER_RUNTIME_PREFIX = '@oxc-project/runtime/helpers/'
+
+/**
+ * Helper-runtime imports in transformed output, or an empty list.
+ *
+ * oxc places these immediately after the directive prologue and before
+ * everything else, one `import <ident> from "<specifier>";` per line, so this
+ * walks that run and stops at the first line that is not such an import. A
+ * string literal cannot reach the run: for it to be there, every line above it
+ * would have to be an import statement and the string would have to sit inside
+ * one.
+ */
+export function runtimeHelperImports(code) {
+  const found = []
+  let cursor = directivePrologueEnd(code)
+  const importStatement = /^\s*import\s+[A-Za-z_$][\w$]*\s+from\s*(["'])([^"']+)\1;?/
+  for (;;) {
+    const match = importStatement.exec(code.slice(cursor))
+    if (!match) break
+    if (match[2].startsWith(HELPER_RUNTIME_PREFIX)) {
+      found.push(match[2].slice(HELPER_RUNTIME_PREFIX.length))
+    }
+    cursor += match.index + match[0].length
+  }
+  return found
+}
+
 /** Which oxc parser dialect an extension asks for. Anything unlisted is plain JS. */
 const TRANSFORM_LANG_BY_EXTENSION = {
   '.tsx': 'tsx',
@@ -2031,8 +2107,10 @@ function transformModuleSource(module) {
   const filename = String(module.filePath || module.key || 'ruvyxa:module.ts')
   const extension = path.extname(filename).toLowerCase()
   const lang = TRANSFORM_LANG_BY_EXTENSION[extension] ?? 'js'
+  const esTarget = resolveEsTarget()
   const transformKey = createHash('sha256')
     .update(lang)
+    .update(esTarget)
     .update('\0')
     .update(module.jsxRuntime)
     .update('\0')
@@ -2056,7 +2134,7 @@ function transformModuleSource(module) {
     lang,
     sourceType: 'module',
     sourcemap: true,
-    target: 'esnext',
+    target: esTarget,
     typescript: {
       onlyRemoveTypeImports: false,
       allowNamespaces: true,
@@ -2076,6 +2154,18 @@ function transformModuleSource(module) {
   if (result.errors.length > 0) {
     const detail = result.errors.map((error) => error.message).join('; ')
     throw new Error(`RUV1802 Oxc transform failed for ${filename}: ${detail}`)
+  }
+  // Downlevelling is not free of runtime support: oxc's helper loader defaults
+  // to emitting `@oxc-project/runtime/helpers/*` imports, Ruvyxa ships no helper
+  // runtime, and this graph leaves bare specifiers external — so the import
+  // would reach production as a module nothing can resolve. The Rust bundler
+  // refuses the same output in `compiler::reject_runtime_helpers`.
+  const helpers = runtimeHelperImports(result.code)
+  if (helpers.length > 0) {
+    const named = [...new Set(helpers)].sort(compareCodeUnits).join(', ')
+    throw new Error(
+      `RUV1802 build.target \`${esTarget}\` needs the runtime helpers ${named} for ${filename}, and Ruvyxa ships no helper runtime — raise build.target (ordinary application code compiles helper-free at es2022 and above) or remove the syntax that needs downlevelling`,
+    )
   }
   module.transformLineMap = composeLineMaps(result.map, reactCompiled?.rawMap)
   setBoundedCacheEntry(compilerCache.transforms, transformKey, {

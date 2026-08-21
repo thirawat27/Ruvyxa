@@ -2194,7 +2194,7 @@ mod tests {
             !linked.contains("= {;"),
             "the terminator must not be moved inside the literal: {linked}"
         );
-        crate::minifier::minify(&linked, BundleTarget::Client)
+        crate::minifier::minify(&linked, BundleTarget::Client, crate::EsTarget::EsNext)
             .expect("the linked bundle has to be parseable JavaScript");
     }
 

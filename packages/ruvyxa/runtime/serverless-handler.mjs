@@ -1291,7 +1291,7 @@ function rateLimitKey(request, configuredKey, trustedProxies) {
  * rotate fabricated addresses straight through the limiter, which is the bug
  * `forwarded_client_ip` in the native server exists to avoid.
  */
-function clientAddress(headers, trustedProxies) {
+export function clientAddress(headers, trustedProxies) {
   for (const name of ['cf-connecting-ip', 'x-vercel-forwarded-for', 'true-client-ip']) {
     const value = headers.get(name)
     if (typeof value === 'string' && value.trim() !== '') return value.trim()
@@ -1327,7 +1327,7 @@ function formatAddress(address) {
 }
 
 /** Parse `security.trustedProxyIps` into matchable prefixes, skipping bad entries. */
-function parseTrustedProxies(values) {
+export function parseTrustedProxies(values) {
   if (!Array.isArray(values)) return []
   const prefixes = []
   for (const value of values) {

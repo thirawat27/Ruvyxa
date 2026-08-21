@@ -916,35 +916,51 @@ fn rejects_invalid_ruvyxa_bundler_build_options() {
     assert!(parse_split_strategy(Some("vendor")).is_err());
 }
 
-/// `build.target` selects no transform, so it must stay *accepted* rather than
-/// validated or rejected. `deny_unknown_fields` means deleting the key would
-/// hard-fail every existing config that sets it, and validating it would go
-/// back to implying the setting takes effect. Both halves are asserted here so
-/// a future edit cannot quietly pick either one.
+/// `build.target` reaches the transform, and an unusable value is refused.
+///
+/// It spent several releases accepted-and-inert: validated, carried into
+/// `BundleOptions`, and consumed by neither compiler. The three halves that
+/// make it real are asserted together so a future edit cannot quietly drop one
+/// — it parses, it reaches the option struct the bundler reads, and a value the
+/// transformer cannot honour is named rather than accepted.
 #[test]
-fn build_target_is_accepted_and_reaches_no_bundle_option() {
+fn build_target_is_parsed_validated_and_reaches_the_bundle_option() {
     let build: BuildConfigOptions =
         serde_json::from_str(r#"{"target":"es2018","jsx":"automatic"}"#).unwrap();
     assert_eq!(
-        build._es_target,
-        Some(serde_json::Value::String("es2018".to_string()))
+        parse_es_target(build.es_target.as_ref()).unwrap(),
+        ruvyxa_bundler::EsTarget::Es2018
     );
 
-    // A value no ECMAScript target list contains is accepted too: an inert key
-    // has nothing to validate against.
-    let nonsense: BuildConfigOptions = serde_json::from_str(r#"{"target":"es5"}"#).unwrap();
+    // Absent means the level every project already emitted, so a config that
+    // says nothing keeps producing the bytes it always did.
+    let empty: BuildConfigOptions = serde_json::from_str("{}").unwrap();
     assert_eq!(
-        nonsense._es_target,
-        Some(serde_json::Value::String("es5".to_string()))
+        parse_es_target(empty.es_target.as_ref()).unwrap(),
+        ruvyxa_bundler::EsTarget::EsNext
     );
 
-    // The option struct handed to the bundler carries no target at all, so
-    // there is no field for a future change to leave silently unread.
+    // `es5` is the value a reader is most likely to try, and oxc does not
+    // implement it. Accepting it was the old behaviour and the whole defect.
+    let unusable: BuildConfigOptions = serde_json::from_str(r#"{"target":"es5"}"#).unwrap();
+    let error = parse_es_target(unusable.es_target.as_ref()).unwrap_err();
+    assert!(error.to_string().contains("RUV1601"), "{error}");
+    assert!(
+        error.to_string().contains("es5 is not implemented"),
+        "{error}"
+    );
+
+    let wrong_type: BuildConfigOptions = serde_json::from_str(r#"{"target":2018}"#).unwrap();
+    assert!(parse_es_target(wrong_type.es_target.as_ref()).is_err());
+
+    // The option struct handed to the bundler carries it, so there is no field
+    // for a future change to leave silently unread.
     let options = client_bundle_options(&build).unwrap();
     let encoded = serde_json::to_value(&options).unwrap();
-    assert!(encoded.get("es_target").is_none());
-    assert!(encoded.get("esTarget").is_none());
-    assert!(encoded.get("target").is_none());
+    assert_eq!(
+        encoded.get("es_target").and_then(serde_json::Value::as_str),
+        Some("es2018")
+    );
 }
 
 /// The written `.js` and the written `.js.map` describe the same file.
@@ -995,7 +1011,7 @@ fn an_emitted_bundle_and_its_source_map_agree_after_the_shared_import() {
         split_strategy: Some("route".to_string()),
         parallelism: Some(1),
         jsx_runtime: Some("classic".to_string()),
-        _es_target: None,
+        es_target: None,
         emit_chunk_manifest: Some(true),
         prebundle_dependencies: Some(true),
         prerender_cache: Some(true),
@@ -1106,7 +1122,7 @@ fn emit_client_bundles_writes_chunk_manifest_when_enabled() {
         split_strategy: Some("route".to_string()),
         parallelism: Some(1),
         jsx_runtime: Some("classic".to_string()),
-        _es_target: None,
+        es_target: None,
         emit_chunk_manifest: Some(true),
         prebundle_dependencies: Some(true),
         prerender_cache: Some(true),

@@ -127,6 +127,15 @@ pub(crate) async fn prerender_static_routes(
             ruvyxa_bundler::JsxRuntime::Automatic => "automatic".to_string(),
         },
     );
+    // `compiler.mjs` is the other half of `build.target`. It reads the value
+    // from here for the same reason it reads `RUVYXA_JSX_RUNTIME` from here:
+    // a prerender worker is a separate process with no view of the config.
+    worker_env.insert(
+        "RUVYXA_ES_TARGET".to_string(),
+        crate::client_bundle::parse_es_target(build.es_target.as_ref())?
+            .as_str()
+            .to_string(),
+    );
     worker_env.insert("RUVYXA_RUNTIME".to_string(), runtime.command().to_string());
     let render_context_hash =
         prerender_context_hash(root, styles, &client_assets, build, &worker_env);

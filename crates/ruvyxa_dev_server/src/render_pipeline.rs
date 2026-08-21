@@ -1735,6 +1735,10 @@ pub(crate) fn runtime_env(config: &ServerConfig) -> Result<BTreeMap<String, Stri
         jsx_runtime_name(config.jsx_runtime).to_string(),
     );
     env.insert(
+        "RUVYXA_ES_TARGET".to_string(),
+        config.es_target.as_str().to_string(),
+    );
+    env.insert(
         "RUVYXA_RUNTIME".to_string(),
         config.runtime.command().to_string(),
     );

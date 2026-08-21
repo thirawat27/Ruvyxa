@@ -20,10 +20,14 @@
 //! - `RUV1701`: TypeScript plugin protocol error
 
 pub mod builtin;
+pub mod client_ip;
 pub mod config;
 pub mod plugin_host;
 pub mod stack;
 
+pub use client_ip::{
+    IpPrefix, TrustedProxies, client_ip, forwarded_client_ip, is_trusted_proxy_ip, unmap_v4,
+};
 pub use config::MiddlewareConfig;
 pub use plugin_host::{
     NativeCapabilityDescriptor, PluginBuildDescriptor, PluginDevDescriptor,

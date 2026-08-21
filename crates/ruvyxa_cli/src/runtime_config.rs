@@ -46,6 +46,7 @@ pub(crate) fn dev_server_config(
     server.prebundle_dependencies = config.build.prebundle_dependencies.unwrap_or(true);
     server.runtime = config.javascript_runtime();
     server.jsx_runtime = parse_jsx_runtime(config.build.jsx_runtime.as_deref())?;
+    server.es_target = parse_es_target(config.build.es_target.as_ref())?;
     server.error_overlay = config.debug.overlay.unwrap_or(true);
     server.debug_traces = config.debug.traces.unwrap_or(false);
     server.action_body_limit_bytes = config
@@ -156,6 +157,7 @@ pub(crate) fn production_server_config(
     server.style_entries = config.style_entries(&out_dir.join("server"));
     server.runtime = config.javascript_runtime();
     server.jsx_runtime = parse_jsx_runtime(config.build.jsx_runtime.as_deref())?;
+    server.es_target = parse_es_target(config.build.es_target.as_ref())?;
     server.action_body_limit_bytes = config
         .security
         .action_body_limit_bytes

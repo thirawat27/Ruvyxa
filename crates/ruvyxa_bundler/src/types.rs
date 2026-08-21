@@ -27,6 +27,101 @@ pub enum JsxRuntime {
     Automatic,
 }
 
+/// JavaScript language level the emitted bundle is written down to.
+///
+/// `ruvyxa.config.ts` exposes this as `build.esTarget`. The value reaches
+/// `TransformOptions::from_target` here and the `target` option of
+/// `transformSync` in `packages/ruvyxa/runtime/compiler.mjs`, so a project
+/// renders the same way under `ruvyxa dev` and in a built bundle.
+///
+/// `es5` is absent because oxc does not implement it. Nothing below
+/// [`Self::EsNext`] is refused outright: what a target costs depends on the
+/// source, not on the number. Downlevelling private class fields needs runtime
+/// helpers from roughly es2021 down, and a `using` declaration needs one at
+/// every target below es2026 — so the guard is on the *emitted* code
+/// (`compiler::reject_runtime_helpers`) rather than on the configured value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum EsTarget {
+    Es2015,
+    Es2016,
+    Es2017,
+    Es2018,
+    Es2019,
+    Es2020,
+    Es2021,
+    Es2022,
+    Es2023,
+    Es2024,
+    Es2025,
+    Es2026,
+    #[default]
+    EsNext,
+}
+
+impl EsTarget {
+    /// Every accepted value, in the order the diagnostic lists them.
+    pub const ALL: [Self; 13] = [
+        Self::Es2015,
+        Self::Es2016,
+        Self::Es2017,
+        Self::Es2018,
+        Self::Es2019,
+        Self::Es2020,
+        Self::Es2021,
+        Self::Es2022,
+        Self::Es2023,
+        Self::Es2024,
+        Self::Es2025,
+        Self::Es2026,
+        Self::EsNext,
+    ];
+
+    /// The token both compilers hand their transformer.
+    ///
+    /// One spelling, so the Rust and JavaScript graphs cannot be pointed at
+    /// different language levels for the same configuration.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Es2015 => "es2015",
+            Self::Es2016 => "es2016",
+            Self::Es2017 => "es2017",
+            Self::Es2018 => "es2018",
+            Self::Es2019 => "es2019",
+            Self::Es2020 => "es2020",
+            Self::Es2021 => "es2021",
+            Self::Es2022 => "es2022",
+            Self::Es2023 => "es2023",
+            Self::Es2024 => "es2024",
+            Self::Es2025 => "es2025",
+            Self::Es2026 => "es2026",
+            Self::EsNext => "esnext",
+        }
+    }
+
+    /// Parse a configured value. `es6` is accepted as the alias oxc accepts.
+    pub fn parse(value: &str) -> Option<Self> {
+        let value = value.trim();
+        if value.eq_ignore_ascii_case("es6") {
+            return Some(Self::Es2015);
+        }
+        Self::ALL
+            .into_iter()
+            .find(|target| value.eq_ignore_ascii_case(target.as_str()))
+    }
+
+    /// Whether the transform can be skipped entirely.
+    pub fn is_default(self) -> bool {
+        matches!(self, Self::EsNext)
+    }
+}
+
+impl std::fmt::Display for EsTarget {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
 /// Code-splitting strategy for a bundle job.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -45,6 +140,9 @@ pub struct BundleOptions {
     pub source_map: bool,
     pub tree_shaking: bool,
     pub jsx_runtime: JsxRuntime,
+    /// JavaScript language level the emitted modules are written down to.
+    #[serde(default)]
+    pub es_target: EsTarget,
     pub split_strategy: SplitStrategy,
     pub emit_chunk_manifest: bool,
     /// Collect a module graph for internal multi-route coordination without
@@ -59,6 +157,7 @@ impl Default for BundleOptions {
             source_map: false,
             tree_shaking: true,
             jsx_runtime: JsxRuntime::Automatic,
+            es_target: EsTarget::EsNext,
             split_strategy: SplitStrategy::Single,
             emit_chunk_manifest: false,
             collect_module_manifest: false,

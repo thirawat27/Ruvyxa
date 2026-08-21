@@ -21,7 +21,7 @@ use crate::ast::ModuleAst;
 use crate::cache::{CacheLookup, CompileCache};
 use crate::hooks::{BuildHookContext, BuildHookPipeline};
 use crate::resolver::ResolvedModule;
-use crate::{BundleError, BundleInput, JsxRuntime, Result};
+use crate::{BundleError, BundleInput, EsTarget, JsxRuntime, Result};
 
 /// A compiled module: TypeScript/JSX has been converted to plain JavaScript.
 ///
@@ -447,8 +447,9 @@ fn compile_module(
     let transform_plan = ast::parse_module(&source);
     let has_jsx = matches!(ext, "tsx" | "jsx") || transform_plan.has_jsx;
     let jsx_runtime = input.options.jsx_runtime;
+    let es_target = input.options.es_target;
 
-    match cache.lookup_with_options(&source, has_jsx, jsx_runtime) {
+    match cache.lookup_with_options(&source, has_jsx, jsx_runtime, es_target) {
         CacheLookup::Hit(cached_js) => Ok(CompiledModuleOutput {
             module: CompiledModule::new(
                 module.path.clone(),
@@ -461,10 +462,14 @@ fn compile_module(
             hook_source_map,
         }),
         CacheLookup::Miss(key) => {
-            let js = transform_with_plan(&source, has_jsx, jsx_runtime, Some(&transform_plan))
-                .map_err(|msg| {
-                    BundleError::Compiler(format!("{}: {}", module.path.display(), msg))
-                })?;
+            let js = transform_with_plan(
+                &source,
+                has_jsx,
+                jsx_runtime,
+                es_target,
+                Some(&transform_plan),
+            )
+            .map_err(|msg| BundleError::Compiler(format!("{}: {}", module.path.display(), msg)))?;
 
             cache.store(&key, &js);
 
@@ -494,7 +499,7 @@ pub fn transform_with_options(
     has_jsx: bool,
     jsx_runtime: JsxRuntime,
 ) -> std::result::Result<String, String> {
-    transform_with_plan(source, has_jsx, jsx_runtime, None)
+    transform_with_plan(source, has_jsx, jsx_runtime, EsTarget::EsNext, None)
 }
 
 /// Transform, reusing a [`ModuleAst`] the caller already produced.
@@ -509,6 +514,7 @@ pub(crate) fn transform_with_plan(
     source: &str,
     has_jsx: bool,
     jsx_runtime: JsxRuntime,
+    es_target: EsTarget,
     plan: Option<&ModuleAst>,
 ) -> std::result::Result<String, String> {
     // Preserve Ruvyxa's historical decorator contract: decorators are accepted
@@ -538,7 +544,16 @@ pub(crate) fn transform_with_plan(
         ));
     }
 
-    let mut options = TransformOptions::default();
+    // `from_target` fills `env` and leaves every other field at its default,
+    // so the JSX and TypeScript settings below still apply. `EsNext` keeps the
+    // historical `default()` so a project that configures nothing pays no new
+    // analysis and emits the bytes it always did.
+    let mut options = if es_target.is_default() {
+        TransformOptions::default()
+    } else {
+        TransformOptions::from_target(es_target.as_str())
+            .map_err(|error| format!("Oxc rejected build.target `{es_target}`: {error}"))?
+    };
     options.jsx.runtime = match jsx_runtime {
         JsxRuntime::Classic => OxcJsxRuntime::Classic,
         JsxRuntime::Automatic => OxcJsxRuntime::Automatic,
@@ -558,8 +573,56 @@ pub(crate) fn transform_with_plan(
         ));
     }
 
-    Ok(Codegen::new().build(&program).code)
+    let code = Codegen::new().build(&program).code;
+    reject_runtime_helpers(&code, es_target)?;
+    Ok(code)
 }
+
+/// Refuse output that depends on a helper runtime Ruvyxa does not deliver.
+///
+/// Downlevelling is not free of runtime support: oxc's `HelperLoaderMode`
+/// defaults to `Runtime`, so a transform that needs a helper emits
+/// `import _x from "@oxc-project/runtime/helpers/x"`. That package is in
+/// neither module graph, `Inline` mode is `unreachable!()` inside oxc, and a
+/// deployed function bundle resolves no bare specifiers at all — so the import
+/// would reach production as a module that cannot be found.
+///
+/// Which targets need a helper is a property of the *source*, not of the
+/// number: ordinary application code compiles helper-free down to about
+/// es2022, private class fields pull helpers in from es2021 down, and a single
+/// `using` declaration needs one at every target below es2026. So the check is
+/// on what was emitted, and it names the helpers so the message says what the
+/// module actually used.
+///
+/// The scan goes through [`crate::ast`] rather than a substring test: a module
+/// whose *source* mentions the specifier in a string or a comment has not
+/// imported anything.
+fn reject_runtime_helpers(code: &str, es_target: EsTarget) -> std::result::Result<(), String> {
+    if es_target.is_default() {
+        return Ok(());
+    }
+    let mut helpers = ast::parse_module(code)
+        .import_specifiers()
+        .into_iter()
+        .filter_map(|specifier| {
+            specifier
+                .strip_prefix(HELPER_RUNTIME_PREFIX)
+                .map(str::to_string)
+        })
+        .collect::<Vec<_>>();
+    if helpers.is_empty() {
+        return Ok(());
+    }
+    helpers.sort_unstable();
+    helpers.dedup();
+    Err(format!(
+        "build.target `{es_target}` needs the runtime helpers {} for this module, and Ruvyxa ships no helper runtime — raise build.target (ordinary application code compiles helper-free at es2022 and above) or remove the syntax that needs downlevelling",
+        helpers.join(", ")
+    ))
+}
+
+/// Specifier prefix oxc emits for every helper import it adds.
+const HELPER_RUNTIME_PREFIX: &str = "@oxc-project/runtime/helpers/";
 
 /// True when some line's first non-blank character is `@`.
 ///
@@ -684,6 +747,137 @@ fn skip_decorator(bytes: &[u8], at: usize, ast: &ModuleAst) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Both compilers accept the same set of `build.target` values.
+    ///
+    /// The JavaScript half is
+    /// `tests/packages/ruvyxa/es-target-contract.test.mjs` over
+    /// `resolveEsTarget` in `packages/ruvyxa/runtime/compiler.mjs`. A value one
+    /// graph accepts and the other refuses is a build that succeeds on the
+    /// client and fails at prerender.
+    #[test]
+    fn accepted_targets_match_the_shared_conformance_table() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/es-target-conformance.json"
+        ))
+        .unwrap();
+
+        let accepted = fixture["accepted"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            accepted,
+            EsTarget::ALL
+                .iter()
+                .map(|target| target.as_str())
+                .collect::<Vec<_>>(),
+            "the accepted list and its order are part of the diagnostic both hosts print"
+        );
+
+        for (written, expected) in fixture["aliases"].as_object().unwrap() {
+            assert_eq!(
+                EsTarget::parse(written).map(EsTarget::as_str),
+                expected.as_str(),
+                "alias case disagrees with the shared fixture: {written:?}"
+            );
+        }
+
+        for value in fixture["rejected"].as_array().unwrap() {
+            let written = value.as_str().unwrap();
+            assert!(
+                EsTarget::parse(written).is_none(),
+                "the shared fixture refuses {written:?} and this host accepted it"
+            );
+        }
+    }
+
+    /// Every target this crate advertises is one oxc accepts.
+    ///
+    /// `EsTarget::ALL` mirrors oxc's `ESTarget`, and a list that mirrors
+    /// another construct has to be checked against that construct rather than
+    /// against a comment promising the two agree.
+    #[test]
+    fn every_accepted_es_target_is_one_oxc_accepts() {
+        for target in EsTarget::ALL {
+            assert_eq!(
+                EsTarget::parse(target.as_str()),
+                Some(target),
+                "{target} does not round-trip through parse"
+            );
+            assert!(
+                TransformOptions::from_target(target.as_str()).is_ok(),
+                "oxc rejects `{target}`, which this crate advertises as accepted"
+            );
+        }
+        // The alias oxc accepts, accepted here too so a config that uses it is
+        // not told the value is unknown.
+        assert_eq!(EsTarget::parse("ES6"), Some(EsTarget::Es2015));
+        // oxc does not implement es5, so advertising it would be a target that
+        // fails at transform time rather than at config time.
+        assert_eq!(EsTarget::parse("es5"), None);
+        assert!(TransformOptions::from_target("es5").is_err());
+    }
+
+    /// The target reaches the emitted bytes, and helper-dependent output is
+    /// refused rather than shipped.
+    ///
+    /// `es2021` was chosen because a private class field is the cheapest way to
+    /// make oxc reach for `@oxc-project/runtime`: nothing resolves that
+    /// specifier in either module graph, and a deployed function bundle
+    /// resolves no bare specifiers at all.
+    #[test]
+    fn a_downlevel_target_changes_the_output_and_refuses_helper_imports() {
+        let plain = "export const pick = (input) => { input.count ??= 0; return input }";
+        let esnext =
+            transform_with_plan(plain, false, JsxRuntime::Automatic, EsTarget::EsNext, None)
+                .unwrap();
+        let downlevel =
+            transform_with_plan(plain, false, JsxRuntime::Automatic, EsTarget::Es2020, None)
+                .unwrap();
+        assert!(esnext.contains("??="), "esnext must emit the source syntax");
+        assert!(
+            !downlevel.contains("??="),
+            "es2020 must downlevel logical assignment: {downlevel}"
+        );
+
+        let private_field =
+            "export class Counter { #value = 0; get value() { return this.#value } }";
+        let error = transform_with_plan(
+            private_field,
+            false,
+            JsxRuntime::Automatic,
+            EsTarget::Es2021,
+            None,
+        )
+        .expect_err("helper-dependent output must be refused, not emitted");
+        assert!(error.contains("build.target `es2021`"), "{error}");
+        assert!(error.contains("classPrivateFieldInitSpec"), "{error}");
+
+        // The same module at the default target is not affected.
+        transform_with_plan(
+            private_field,
+            false,
+            JsxRuntime::Automatic,
+            EsTarget::EsNext,
+            None,
+        )
+        .expect("esnext needs no helper");
+    }
+
+    /// A module that merely *mentions* the helper specifier has imported
+    /// nothing.
+    ///
+    /// The guard reads [`crate::ast`] rather than matching the output text,
+    /// because a string literal and an import are the same characters.
+    #[test]
+    fn the_helper_guard_reads_imports_rather_than_text() {
+        let source = "export const note = \"@oxc-project/runtime/helpers/typeof\"";
+        transform_with_plan(source, false, JsxRuntime::Automatic, EsTarget::Es2020, None)
+            .expect("a quoted specifier is not an import");
+    }
 
     #[test]
     fn strips_interface() {

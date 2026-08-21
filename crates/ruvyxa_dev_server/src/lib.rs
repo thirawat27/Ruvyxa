@@ -383,6 +383,12 @@ pub struct ServerConfig {
     pub runtime: JavaScriptRuntime,
     /// JSX transform runtime passed to every JavaScript renderer and worker.
     pub jsx_runtime: JsxRuntime,
+    /// JavaScript language level `compiler.mjs` writes its modules down to.
+    ///
+    /// Carried here so a dev render and a built bundle apply the same
+    /// `build.target`; the value is handed to the worker through
+    /// `RUVYXA_ES_TARGET`, the way the JSX runtime already is.
+    pub es_target: ruvyxa_bundler::EsTarget,
     /// Render actionable source-aware error overlays in development.
     pub error_overlay: bool,
     /// Expose runtime route traces from the development diagnostics endpoint.
@@ -484,6 +490,7 @@ impl ServerConfig {
             prebundle_dependencies: true,
             runtime: JavaScriptRuntime::detect(),
             jsx_runtime: JsxRuntime::Automatic,
+            es_target: ruvyxa_bundler::EsTarget::EsNext,
             error_overlay: true,
             debug_traces: false,
             action_body_limit_bytes: MAX_ACTION_BODY_BYTES,
@@ -524,6 +531,7 @@ impl ServerConfig {
             prebundle_dependencies: false,
             runtime: JavaScriptRuntime::detect(),
             jsx_runtime: JsxRuntime::Automatic,
+            es_target: ruvyxa_bundler::EsTarget::EsNext,
             error_overlay: false,
             debug_traces: false,
             action_body_limit_bytes: MAX_ACTION_BODY_BYTES,
@@ -1126,7 +1134,11 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
     let watcher_render_cache = render_cache.clone();
     let hmr_tracker = Arc::new(HmrTracker::new());
     hmr_tracker.populate_from_manifest(&manifest.routes);
-    let middleware_stack = MiddlewareStack::new(config.middleware.clone());
+    // The built-in rate limiter reads `security.trustedProxyIps` for the same
+    // reason the action limiter does: behind a reverse proxy the transport peer
+    // is the proxy, so keying on it alone gives every caller one shared bucket.
+    let middleware_stack = MiddlewareStack::new(config.middleware.clone())
+        .with_trusted_proxies(config.trusted_proxies.clone());
     middleware_stack.validate().map_err(RuvyxaError::Message)?;
     let plugin_runtime = start_plugin_runtime(&config).await?;
     let realtime = realtime_runtime(plugin_runtime.as_ref())?;

@@ -38,6 +38,28 @@ const pluginRuntime = path.join(workspaceRoot, 'packages/ruvyxa/runtime/plugin-r
 const fixtureWorkspace = await createFixtureWorkspace('ruvyxa-compiler-tests-', exampleRoot)
 after(() => rm(fixtureWorkspace, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }))
 
+/**
+ * A runtime module and every sibling it imports, transitively.
+ *
+ * Reads the relative specifiers out of the source instead of restating them,
+ * so a new sibling import cannot leave a copy of the module unable to load.
+ */
+async function runtimeModuleClosure(entry) {
+  const runtimeDir = path.join(workspaceRoot, 'packages/ruvyxa/runtime')
+  const seen = new Set()
+  const queue = [entry]
+  while (queue.length > 0) {
+    const name = queue.shift()
+    if (seen.has(name)) continue
+    seen.add(name)
+    const source = await readFile(path.join(runtimeDir, name), 'utf8')
+    for (const match of source.matchAll(/from\s+'\.\/([\w.-]+\.mjs)'/g)) {
+      queue.push(match[1])
+    }
+  }
+  return [...seen]
+}
+
 describe('runtime compiler', () => {
   it('runs the React Compiler only when explicitly enabled and remains deterministic', async (t) => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-react-compiler-'))
@@ -360,8 +382,12 @@ describe('runtime compiler', () => {
       await mkdir(runtimeDir, { recursive: true })
       await mkdir(sourceDir, { recursive: true })
       // compiler.mjs and the local modules it imports, since the copy is
-      // loaded as a module rather than read as text.
-      for (const runtimeFile of ['compiler.mjs', 'order.mjs']) {
+      // loaded as a module rather than read as text. The set is read out of
+      // the source rather than written down here: it was a literal pair, and
+      // the first sibling import added after that turned this into a
+      // module-not-found in a temp directory with a space in its name, which
+      // is a long way from the line that caused it.
+      for (const runtimeFile of await runtimeModuleClosure('compiler.mjs')) {
         await copyFile(
           path.join(workspaceRoot, 'packages/ruvyxa/runtime', runtimeFile),
           path.join(runtimeDir, runtimeFile),

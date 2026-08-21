@@ -2,6 +2,116 @@
 
 ## v1.0.32 (unreleased)
 
+### Benchmarks re-measured against this tree
+
+`README.md`'s comparison table was re-run on 2026-08-21 with
+[`scripts/bench-frameworks.mjs`](scripts/bench-frameworks.mjs) against Next.js 16.3.2 and Astro
+7.2.4, using a development build of this branch packed from source rather than a published release —
+the column is labelled `1.0.32-dev` for that reason. The previous table was measured on 2026-08-05
+against 1.0.28, a different Node/npm/pnpm set, and different Next/Astro versions, so the two runs
+are not comparable to each other; only the three columns _within_ each run are.
+
+`ruvyxa bench --baseline` also still passes `tests/fixtures/build-bench-contract.json` on the demo
+after the transform and minifier changes below, which is the check that a language-level pass added
+to both compilers did not quietly cost build time.
+
+### Intercepting-route folders are refused instead of published
+
+`(.)`, `(..)`, `(..)(..)`, and `(...)` are Next.js conventions Ruvyxa does not implement. Nothing
+stripped them either: the route-group branch needs a trailing `)`, so `app/feed/(.)photo/page.tsx`
+went straight through segment validation and mounted a real, publicly reachable page at
+`/feed/(.)photo`. A view written to be shown over another route got its own public address, and no
+diagnostic said so. Inside a `@slot` the same folder matched no URL and rendered nothing.
+
+Route discovery now fails with **RUV1005** for any folder under `app/` whose name opens with one of
+the four markers. The scan walks directories rather than the segments of discovered routes, because
+the route walk skips `@slot` folders and a marker inside one is just as wrong; `_`-prefixed folders
+are excluded, since they opt out of routing entirely and nothing in them can reach a URL. When more
+than one folder qualifies the reported one is chosen by sorted path, so two machines building the
+same project name the same file.
+
+A convention this framework does not implement has to fail loudly or work. This is the same rule
+that made `export const dynamic` and `generateStaticParams` honoured rather than silently ignored.
+
+### One answer to "who is this request from"
+
+Every per-client control in the framework keys on a client identity: the built-in `rate` middleware,
+the server-action rate limiter, and the action replay guard's per-client quota. Two implementations
+answered that question and they disagreed.
+
+`RateLimitLayer::extract_key` read the transport peer and never looked at a forwarded header, while
+`clientAddress` in `packages/ruvyxa/runtime/serverless-handler.mjs` scanned `X-Forwarded-For` from
+the right against `security.trustedProxyIps`. One project with one `middleware.builtin.rate` block
+was therefore limited per real client once deployed, and as **a single shared bucket** when the
+native server ran behind a reverse proxy — where every caller arrives with the proxy's address. The
+control meant to protect the service became the thing that denied it: one client exhausting the
+bucket answered 429 to everyone.
+
+The rule is now one module, `crates/ruvyxa_middleware/src/client_ip.rs`, which both Rust hosts call
+and which `tests/fixtures/client-ip-conformance.json` holds against the JavaScript host.
+`security.trustedProxyIps` reaches the middleware stack through
+`MiddlewareStack::with_trusted_proxies`, so `key: "ip"` means the transport peer unless that peer is
+loopback or a listed proxy, in which case the forwarded chain names the client. A client that is not
+a proxy still cannot rename itself.
+
+What stays outside the shared table is deliberate and mirrors `ForwardedScheme` in
+`@ruvyxa/core/origin-policy`: whether this request's upstream hop may be believed at all. The native
+server weighs the transport peer; a deployed function has no peer and treats its platform ingress as
+trusted by construction. Everything after that decision is identical.
+
+`key: "header:<name>"` is unchanged and still verbatim — an API key is not an address and must not
+be parsed as one — but pointing it at `x-forwarded-for`, `x-real-ip`, or a platform ingress header
+hands the bucket key to the caller, who can rotate it for an unlimited allowance. The server now
+warns at startup when it sees that, and names `ip` as the proxy-aware mode instead.
+
+`docs/{en,th}/13-security.md` also lost two claims that were no longer true: built-in CSRF-shaped
+protection exists as the `originGuard` plugin, and general rate limiting exists as
+`middleware.builtin.rate`. Both are opt-in, which is worth saying — but "no codebase evidence
+establishes" them was wrong.
+
+### `build.esTarget` compiles to the target it names
+
+`build.target` in `ruvyxa.config.ts` was accepted, validated, carried all the way into
+`BundleOptions` — and consumed by neither compiler. The Rust bundler built
+`TransformOptions::default()` with no `env`, and `runtime/compiler.mjs` hardcoded `target: 'esnext'`
+in its `transformSync` call. A project that set `es2018` got byte-identical esnext output and found
+out in a browser.
+
+Both compilers apply it now, from one spelling: `EsTarget` in `crates/ruvyxa_bundler/src/types.rs`
+reaches `TransformOptions::from_target` on the Rust side and the `target` option on the JavaScript
+side, carried to the worker in `RUVYXA_ES_TARGET` the way the JSX runtime already was. It is back in
+the compile cache key and in the prerender context hash, both of which it was deliberately left out
+of while it selected no transform. `tests/fixtures/es-target-conformance.json` holds the two graphs
+to one accepted list, because a value one accepts and the other refuses is a build that succeeds on
+the client and fails at prerender.
+
+**Downlevelling is not free of runtime support, and that is the reason this was inert for so long.**
+oxc's helper loader defaults to `Runtime`, so a transform that needs a helper emits
+`import _x from "@oxc-project/runtime/helpers/x"`. That package is in neither module graph, oxc's
+`Inline` mode is `unreachable!()`, and a deployed function bundle resolves no bare specifiers at all
+— the import would reach production as a module nothing can find.
+
+Which targets need a helper is a property of the source, not of the number: ordinary application
+code compiles helper-free at es2022 and above, a private class field pulls helpers in from es2021
+down, and a single `using` declaration needs one at every target below es2026. So the refusal is on
+the **emitted** code. Both compilers scan what they produced for a helper import and fail by name if
+one appears, rather than accepting the configuration and shipping something unresolvable. The scan
+reads imports rather than matching output text, so a module whose source merely quotes the specifier
+is not flagged.
+
+`es5` is not an accepted value: oxc does not implement it, and
+`every_accepted_es_target_is_one_oxc_accepts` checks the advertised list against the transformer
+rather than against a comment promising the two agree.
+
+The minifier had to learn the target too, and this is the half that only an end-to-end check finds.
+oxc's compressor rewrites toward the shortest equivalent form, and the shortest form is frequently
+newer syntax: it turns `a.b ?? (a.b = 0)` — which is exactly what the transform had just produced —
+back into `a.b ??= 0`. With `CompressOptions::target` left at its default, a project on
+`build.target: es2020` had a correct unminified build and shipped logical assignment in the minified
+one. The compressor is now held to the same level, and the profile the build already selected is
+unchanged: only `target` is set on it, so asking for a language level does not quietly change how
+much is compressed away.
+
 ### Navigation paints the destination immediately
 
 A soft navigation used to hold the previous page on screen until the target route's Flight payload

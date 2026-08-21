@@ -864,6 +864,7 @@ pub(crate) fn client_bundle_input(
             source_map: build.sourcemap.unwrap_or(false),
             tree_shaking: build.tree_shaking.unwrap_or(true),
             jsx_runtime: parse_jsx_runtime(build.jsx_runtime.as_deref())?,
+            es_target: parse_es_target(build.es_target.as_ref())?,
             split_strategy: parse_split_strategy(build.split_strategy.as_deref())?,
             emit_chunk_manifest: build.emit_chunk_manifest.unwrap_or(false),
             collect_module_manifest: parse_split_strategy(build.split_strategy.as_deref())?
@@ -988,6 +989,7 @@ pub(crate) fn client_bundle_options(
         source_map: false,
         tree_shaking: false,
         jsx_runtime: parse_jsx_runtime(build.jsx_runtime.as_deref())?,
+        es_target: parse_es_target(build.es_target.as_ref())?,
         split_strategy: parse_split_strategy(build.split_strategy.as_deref())?,
         emit_chunk_manifest: false,
         collect_module_manifest: false,
@@ -1142,6 +1144,37 @@ pub(crate) fn parse_jsx_runtime(value: Option<&str>) -> anyhow::Result<ruvyxa_bu
             "RUV1601 build.jsx must be `classic` or `automatic`, got `{other}`"
         ),
     }
+}
+
+/// Read `build.target` into the language level both compilers apply.
+///
+/// Absent means [`ruvyxa_bundler::EsTarget::EsNext`], which is what every
+/// project got while the key reached no transform — so a build that configures
+/// nothing keeps emitting exactly the bytes it did before.
+pub(crate) fn parse_es_target(
+    value: Option<&serde_json::Value>,
+) -> anyhow::Result<ruvyxa_bundler::EsTarget> {
+    let Some(value) = value else {
+        return Ok(ruvyxa_bundler::EsTarget::EsNext);
+    };
+    let accepted = ruvyxa_bundler::EsTarget::ALL
+        .iter()
+        .map(|target| target.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let Some(text) = value.as_str() else {
+        anyhow::bail!("RUV1601 build.target must be a string, one of: {accepted}");
+    };
+    ruvyxa_bundler::EsTarget::parse(text).ok_or_else(|| {
+        // `es5` is the one a reader is most likely to try, and oxc does not
+        // implement it, so say that rather than leaving it to the list.
+        let hint = if text.trim().eq_ignore_ascii_case("es5") {
+            " (es5 is not implemented by the transformer)"
+        } else {
+            ""
+        };
+        anyhow::anyhow!("RUV1601 build.target must be one of: {accepted}, got `{text}`{hint}")
+    })
 }
 
 pub(crate) fn parse_split_strategy(

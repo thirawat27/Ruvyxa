@@ -218,6 +218,8 @@ pub fn discover_routes(options: DiscoverOptions) -> Result<RouteManifest> {
             .into());
     }
 
+    reject_intercepting_routes(&app_dir)?;
+
     let mut routes = Vec::new();
     // Shared across every route: layouts and shared components are reachable
     // from many pages, and rendering-strategy detection walks that graph.
@@ -872,6 +874,67 @@ fn route_path_from_dir(relative_dir: &Path) -> Result<String> {
     } else {
         Ok(format!("/{}", segments.join("/")))
     }
+}
+
+/// Next.js intercepting-route markers, longest first.
+///
+/// Order is load-bearing: `(..)(..)` also starts with `(..)`, and `(...)` also
+/// starts with `(.`, so a shorter marker tested first would name the wrong
+/// convention in the diagnostic.
+const INTERCEPTING_ROUTE_MARKERS: [&str; 4] = ["(..)(..)", "(...)", "(..)", "(.)"];
+
+/// The intercepting-route marker a directory name opens with, if any.
+fn intercepting_route_marker(segment: &str) -> Option<&'static str> {
+    INTERCEPTING_ROUTE_MARKERS
+        .into_iter()
+        .find(|marker| segment.starts_with(marker))
+}
+
+/// Refuse intercepting-route directories before they become URL segments.
+///
+/// Ruvyxa does not implement `(.)`/`(..)`/`(..)(..)`/`(...)`, and nothing
+/// stripped them either: the route-group branch needs a trailing `)`, so
+/// `app/feed/(.)photo/page.tsx` passed straight through [`route_segment`] and
+/// mounted a real, publicly reachable page at `/feed/(.)photo` — a view the
+/// author wrote as an interception and never meant to publish on its own URL.
+/// Inside an `@slot` the same directory matched no URL and rendered nothing.
+/// A convention this framework does not implement has to fail loudly rather
+/// than quietly do something else.
+///
+/// This walks directories rather than checking the segments of discovered
+/// routes, because the route walk skips `@slot` folders and a marker inside one
+/// is just as wrong. `_`-prefixed folders are excluded: they opt out of routing
+/// entirely, so nothing there can reach a URL.
+fn reject_intercepting_routes(app_dir: &Path) -> Result<()> {
+    let mut offenders = WalkDir::new(app_dir)
+        .into_iter()
+        .filter_entry(|entry| {
+            !entry.file_type().is_dir()
+                || entry.path() == app_dir
+                || !entry.file_name().to_string_lossy().starts_with('_')
+        })
+        .filter_map(std::result::Result::ok)
+        .filter(|entry| entry.file_type().is_dir())
+        .filter_map(|entry| {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let marker = intercepting_route_marker(&name)?;
+            Some((entry.path().to_path_buf(), name, marker))
+        })
+        .collect::<Vec<_>>();
+    // Directory order is filesystem order, so which offender is reported would
+    // otherwise differ between machines building the same project.
+    offenders.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let Some((path, name, marker)) = offenders.into_iter().next() else {
+        return Ok(());
+    };
+    Err(Diagnostic::new("RUV1005", "Intercepting routes are not supported")
+        .explain(format!(
+            "`{name}` opens with the intercepting-route marker `{marker}`. Ruvyxa does not implement intercepting routes, and without this check the folder becomes a literal URL segment instead."
+        ))
+        .at_file(&path)
+        .suggest("Rename the folder to an ordinary route segment, and render the intercepted view from a route the layout already composes or from a client-side modal.")
+        .into())
 }
 
 fn route_segment(segment: &str, is_last: bool) -> Result<String> {
@@ -1923,6 +1986,100 @@ mod tests {
         let manifest = discover_routes(DiscoverOptions::new(&app)).unwrap();
         assert_eq!(manifest.routes.len(), 1);
         assert_eq!(manifest.routes[0].path, "/");
+    }
+
+    /// Every intercepting-route marker is refused, and refused as itself.
+    ///
+    /// Before this, none of the four was stripped or reported: the route-group
+    /// branch needs a trailing `)`, so the folder became a literal URL segment
+    /// and published a page the author wrote as an interception.
+    #[test]
+    fn rejects_every_intercepting_route_marker() {
+        for (folder, marker) in [
+            ("(.)photo", "(.)"),
+            ("(..)photo", "(..)"),
+            ("(..)(..)photo", "(..)(..)"),
+            ("(...)photo", "(...)"),
+        ] {
+            let temp = tempfile::tempdir().unwrap();
+            let app = temp.path().join("app");
+            fs::create_dir_all(app.join("feed").join(folder)).unwrap();
+            fs::write(app.join("page.tsx"), "export default function Home() {}").unwrap();
+            fs::write(
+                app.join("feed").join(folder).join("page.tsx"),
+                "export default function Photo() {}",
+            )
+            .unwrap();
+
+            let error = discover_routes(DiscoverOptions::new(&app)).unwrap_err();
+            let text = error.to_string();
+            assert!(text.contains("RUV1005"), "{folder} was accepted: {text}");
+            assert!(
+                text.contains(marker),
+                "{folder} was reported as some other convention: {text}"
+            );
+        }
+    }
+
+    /// A marker inside a parallel-route slot is refused too.
+    ///
+    /// The route walk skips `@slot` folders, so a check written over discovered
+    /// route paths would have missed the canonical Next.js modal shape
+    /// entirely — and there it silently rendered nothing rather than
+    /// publishing a URL, which is the same convention failing quietly in the
+    /// other direction.
+    #[test]
+    fn rejects_an_intercepting_route_inside_a_parallel_slot() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        fs::create_dir_all(app.join("@modal/(.)photo")).unwrap();
+        fs::write(app.join("page.tsx"), "export default function Home() {}").unwrap();
+        fs::write(
+            app.join("@modal/(.)photo/page.tsx"),
+            "export default function Photo() {}",
+        )
+        .unwrap();
+
+        let error = discover_routes(DiscoverOptions::new(&app)).unwrap_err();
+        assert!(error.to_string().contains("RUV1005"));
+    }
+
+    /// The marker scan must not swallow the conventions beside it.
+    ///
+    /// `(marketing)` opens with `(` and `@modal` is a slot; both were working
+    /// before the scan existed and a prefix test that is too loose would take
+    /// them away with no test noticing.
+    #[test]
+    fn route_groups_slots_and_private_folders_survive_the_intercept_scan() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        fs::create_dir_all(app.join("(marketing)/pricing")).unwrap();
+        fs::create_dir_all(app.join("@modal")).unwrap();
+        fs::create_dir_all(app.join("_drafts/(.)photo")).unwrap();
+        fs::write(app.join("page.tsx"), "export default function Home() {}").unwrap();
+        fs::write(
+            app.join("(marketing)/pricing/page.tsx"),
+            "export default function Pricing() {}",
+        )
+        .unwrap();
+        fs::write(
+            app.join("@modal/default.tsx"),
+            "export default function M() {}",
+        )
+        .unwrap();
+        fs::write(
+            app.join("_drafts/(.)photo/page.tsx"),
+            "export default function Draft() {}",
+        )
+        .unwrap();
+
+        let manifest = discover_routes(DiscoverOptions::new(&app)).unwrap();
+        let paths = manifest
+            .routes
+            .iter()
+            .map(|route| route.path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(paths, vec!["/", "/pricing"]);
     }
 
     #[test]

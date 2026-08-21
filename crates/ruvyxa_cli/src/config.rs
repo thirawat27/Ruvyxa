@@ -142,25 +142,30 @@ pub(crate) struct BuildConfigOptions {
     pub(crate) parallelism: Option<usize>,
     #[serde(rename = "jsx")]
     pub(crate) jsx_runtime: Option<String>,
-    /// Accepted so `deny_unknown_fields` does not reject a config that sets it,
-    /// and read by nothing — same reason as `ProjectConfig::_react`.
+    /// JavaScript language level the emitted modules are written down to.
     ///
-    /// It was validated and carried all the way into `BundleOptions`, but
-    /// neither transform ever consumed it: the Rust bundler builds
-    /// `TransformOptions::default()` (no `env`) and `runtime/compiler.mjs`
-    /// hardcodes `target: 'esnext'`. A project that set `target: "es2018"`
-    /// therefore got byte-identical esnext output, and only found out in the
-    /// browser. Validating an inert key is worse than not validating it,
-    /// because it reads as proof the setting took effect.
+    /// Held as raw JSON rather than `Option<String>` so a non-string value is
+    /// reported by `parse_es_target` with the accepted list beside it, instead
+    /// of as a serde type error naming a Rust field.
     ///
-    /// Do not wire this up without first deciding where the helpers come from:
-    /// oxc's `HelperLoaderMode` defaults to `Runtime`, which emits imports of
-    /// `@oxc-project/runtime/helpers/*`. That package is in neither module
-    /// graph, and serverless function bundles resolve no bare specifiers, so
-    /// downleveling is a feature with its own dependency decision — not a
-    /// one-line option pass-through.
+    /// This key was inert for several releases: it was validated and carried
+    /// into `BundleOptions`, and then neither transform consumed it — the Rust
+    /// bundler built `TransformOptions::default()` and `runtime/compiler.mjs`
+    /// hardcoded `target: 'esnext'`, so a project that set `target: "es2018"`
+    /// got byte-identical esnext output and found out in the browser. Both
+    /// compilers apply it now, and `tests/fixtures/es-target-conformance.json`
+    /// holds the two to one accepted list.
+    ///
+    /// Downlevelling is not free of runtime support: oxc emits
+    /// `@oxc-project/runtime/helpers/*` imports for transforms that need them
+    /// and Ruvyxa ships no helper runtime. Which targets need one depends on
+    /// the source rather than on the number — ordinary application code is
+    /// helper-free at es2022 and above, a private class field pulls helpers in
+    /// from es2021 down, and one `using` declaration needs one at every target
+    /// below es2026 — so the refusal is on the emitted code
+    /// (`compiler::reject_runtime_helpers`), not on the configured value.
     #[serde(rename = "target")]
-    pub(crate) _es_target: Option<serde_json::Value>,
+    pub(crate) es_target: Option<serde_json::Value>,
     #[serde(rename = "manifest")]
     pub(crate) emit_chunk_manifest: Option<bool>,
     #[serde(rename = "warm")]

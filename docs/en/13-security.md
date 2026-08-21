@@ -15,6 +15,14 @@ secret storage, upstream network controls, and infrastructure policy remain your
   with a maximum/window; action input schemas run before action handlers.
 - `security.trustedProxyIps` is an allow-list for forwarded IP/protocol headers; loopback proxies
   are trusted by default. Do not trust forwarded headers from arbitrary clients.
+- `middleware.builtin.rate` rate-limits every route, not only actions. Its default key, `ip`, is the
+  transport peer unless that peer is loopback or listed in `security.trustedProxyIps`, in which case
+  the forwarded chain is scanned from the right for the first address that is not one of your
+  proxies — a client that is not a proxy cannot rename itself. Behind a reverse proxy, `ip` is the
+  mode you want: name your proxies in `trustedProxyIps` and leave the key alone. `header:<name>` is
+  the escape hatch for an application-defined identity such as an API key and is used verbatim, so
+  pointing it at `x-forwarded-for` hands the bucket key to the caller and one client can rotate it
+  for an unlimited allowance; the server warns at startup when it sees that.
 - The first-party `redirects` plugin validates destinations against unsafe scheme-relative,
   backslash, and invalid-origin forms. `securityHeaders` validates CSP directive maps and defaults
   HSTS.
@@ -43,8 +51,9 @@ secret storage, upstream network controls, and infrastructure policy remain your
 
 Terminate TLS, restrict inbound network access, set process memory/time limits, patch
 Node/Rust/dependencies, and provide a secret manager. Place only known proxy addresses/CIDRs in
-`trustedProxyIps`. Test authentication redirects with production origins. No codebase evidence
-establishes built-in CSRF middleware, generic rate limiting for arbitrary API routes, malware
+`trustedProxyIps`. Test authentication redirects with production origins. Cross-site protection for
+route handlers is the `originGuard` plugin and is opt-in per route scope; general rate limiting is
+`middleware.builtin.rate` and is off until configured. No codebase evidence establishes malware
 scanning, WAF, or automatic dependency-vulnerability remediation; add those controls where your
 threat model needs them.
 

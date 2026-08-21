@@ -2,11 +2,14 @@
 //! parsing, and the per-key rate limiter.
 
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
+
+use ruvyxa_middleware::client_ip;
+pub use ruvyxa_middleware::client_ip::{IpPrefix, TrustedProxies};
 
 use crate::{ActionQuery, ServerConfig};
 
@@ -189,141 +192,6 @@ pub fn action_reference_id(route_id: &str, source: &str) -> String {
         hash = hash.wrapping_mul(0x100000001b3);
     }
     format!("a_{hash:016x}")
-}
-
-/// One trusted reverse-proxy address, expressed as a network prefix.
-///
-/// A bare address is stored as a host route (`/32` for IPv4, `/128` for IPv6),
-/// so exact addresses and ranges share one matching path.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct IpPrefix {
-    network: IpAddr,
-    prefix_len: u8,
-}
-
-impl IpPrefix {
-    /// Parse `10.0.0.0/8`, `2001:db8::/32`, or a bare `10.0.0.9`.
-    ///
-    /// Host bits outside the prefix are masked off rather than rejected, so
-    /// `10.1.2.3/8` and `10.0.0.0/8` describe the same range instead of one of
-    /// them failing a deployment at startup over a cosmetic difference.
-    pub fn parse(value: &str) -> Option<Self> {
-        let value = value.trim();
-        let (address, prefix_len) = match value.split_once('/') {
-            Some((address, length)) => {
-                let address = address.trim().parse::<IpAddr>().ok()?;
-                let prefix_len = length.trim().parse::<u8>().ok()?;
-                (address, prefix_len)
-            }
-            None => {
-                let address = value.parse::<IpAddr>().ok()?;
-                (address, host_prefix_len(address))
-            }
-        };
-        if prefix_len > host_prefix_len(address) {
-            return None;
-        }
-        Some(Self {
-            network: mask_address(address, prefix_len),
-            prefix_len,
-        })
-    }
-
-    /// Whether `candidate` falls inside this prefix.
-    pub fn contains(&self, candidate: IpAddr) -> bool {
-        // A dual-stack listener reports an IPv4 peer as `::ffff:10.0.0.9`.
-        // Comparing that against an IPv4 prefix byte-wise would never match, so
-        // a proxy allowlist written in IPv4 would silently stop working the
-        // moment the server bound an IPv6 socket.
-        let candidate = unmap_v4(candidate);
-        let network = unmap_v4(self.network);
-        match (network, candidate) {
-            (IpAddr::V4(_), IpAddr::V4(_)) | (IpAddr::V6(_), IpAddr::V6(_)) => {
-                mask_address(candidate, self.prefix_len) == network
-            }
-            _ => false,
-        }
-    }
-}
-
-/// Reverse proxies allowed to supply forwarded client and protocol headers.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct TrustedProxies {
-    prefixes: Vec<IpPrefix>,
-}
-
-impl TrustedProxies {
-    /// Parse every configured entry, naming the first invalid one.
-    pub fn parse_all<'a>(
-        values: impl IntoIterator<Item = &'a str>,
-    ) -> std::result::Result<Self, String> {
-        let mut prefixes = Vec::new();
-        for value in values {
-            let prefix = IpPrefix::parse(value)
-                .ok_or_else(|| format!("invalid IP or CIDR range `{value}`"))?;
-            prefixes.push(prefix);
-        }
-        Ok(Self { prefixes })
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.prefixes.is_empty()
-    }
-
-    /// Whether `ip` is a configured proxy. Loopback is handled by the caller.
-    pub fn contains(&self, ip: IpAddr) -> bool {
-        self.prefixes.iter().any(|prefix| prefix.contains(ip))
-    }
-}
-
-impl FromIterator<IpPrefix> for TrustedProxies {
-    fn from_iter<T: IntoIterator<Item = IpPrefix>>(iter: T) -> Self {
-        Self {
-            prefixes: iter.into_iter().collect(),
-        }
-    }
-}
-
-fn host_prefix_len(address: IpAddr) -> u8 {
-    match address {
-        IpAddr::V4(_) => 32,
-        IpAddr::V6(_) => 128,
-    }
-}
-
-/// Zero every bit below `prefix_len`.
-fn mask_address(address: IpAddr, prefix_len: u8) -> IpAddr {
-    match address {
-        IpAddr::V4(address) => {
-            let bits = u32::from(address);
-            let mask = if prefix_len == 0 {
-                0
-            } else {
-                u32::MAX << (32 - u32::from(prefix_len))
-            };
-            IpAddr::V4(Ipv4Addr::from(bits & mask))
-        }
-        IpAddr::V6(address) => {
-            let bits = u128::from(address);
-            let mask = if prefix_len == 0 {
-                0
-            } else {
-                u128::MAX << (128 - u32::from(prefix_len))
-            };
-            IpAddr::V6(std::net::Ipv6Addr::from(bits & mask))
-        }
-    }
-}
-
-/// Collapse an IPv4-mapped IPv6 address to its IPv4 form.
-fn unmap_v4(address: IpAddr) -> IpAddr {
-    match address {
-        IpAddr::V6(address) => match address.to_ipv4_mapped() {
-            Some(v4) => IpAddr::V4(v4),
-            None => IpAddr::V6(address),
-        },
-        address => address,
-    }
 }
 
 /// Number of counter slots the action rate limiter keeps.
@@ -637,6 +505,28 @@ pub(crate) fn parse_forwarded_scheme(value: Option<&str>) -> Option<&'static str
         })
 }
 
+/// Whether this request's transport peer may state who the client is.
+///
+/// The trust decision is this host's own — a deployed function has no peer to
+/// weigh — which is why `tests/fixtures/client-ip-conformance.json` and
+/// `tests/fixtures/origin-policy-conformance.json` both start after it.
+fn is_trusted_proxy_ip(config: &ServerConfig, ip: IpAddr) -> bool {
+    client_ip::is_trusted_proxy_ip(&config.trusted_proxies, ip)
+}
+
+/// The address an action request is attributed to.
+///
+/// Shared by the action rate limiter and the replay guard's per-client quota,
+/// and — through [`client_ip::client_ip`] — with the built-in `rate`
+/// middleware, so the three cannot disagree about who a request belongs to.
+pub(crate) fn action_client_ip(
+    peer: SocketAddr,
+    headers: &HeaderMap,
+    config: &ServerConfig,
+) -> IpAddr {
+    client_ip::client_ip(peer.ip(), headers, &config.trusted_proxies)
+}
+
 /// The request scheme as reported by a trusted proxy, when one vouched for it.
 fn forwarded_scheme(
     headers: &HeaderMap,
@@ -679,27 +569,6 @@ pub(crate) fn action_fetch_site_is_cross_site(headers: &HeaderMap) -> bool {
         .is_some_and(|value| value.eq_ignore_ascii_case("cross-site"))
 }
 
-/// The address an action request is attributed to.
-///
-/// Forwarded identity is untrusted unless the direct peer is loopback or
-/// explicitly allowlisted. Private ranges alone are not a trust boundary:
-/// a LAN client can otherwise forge X-Forwarded-For and bypass the limiter.
-///
-/// Shared by the rate limiter and the replay guard's per-client quota, so the
-/// two cannot disagree about who a request belongs to.
-pub(crate) fn action_client_ip(
-    peer: SocketAddr,
-    headers: &HeaderMap,
-    config: &ServerConfig,
-) -> IpAddr {
-    let peer_ip = peer.ip();
-    if is_trusted_proxy_ip(config, peer_ip) {
-        forwarded_client_ip(config, headers).unwrap_or(peer_ip)
-    } else {
-        peer_ip
-    }
-}
-
 pub(crate) fn action_rate_limit_key(
     peer: SocketAddr,
     headers: &HeaderMap,
@@ -710,34 +579,10 @@ pub(crate) fn action_rate_limit_key(
     format!("{client}:{}:{}", query.path, query.name)
 }
 
-/// Pick the client IP from forwarded headers, scanning from the right.
-///
-/// Each proxy appends the peer it actually saw, so rightmost entries are
-/// proxy-written while leftmost entries arrive from the client and are
-/// forgeable. Taking the leftmost entry would let a client behind a trusted
-/// proxy rotate fabricated addresses through the rate limiter; instead, skip
-/// trusted proxy addresses from the right and use the first address that is
-/// not one of ours.
-fn forwarded_client_ip(config: &ServerConfig, headers: &HeaderMap) -> Option<IpAddr> {
-    headers
-        .get("x-forwarded-for")
-        .or_else(|| headers.get("x-real-ip"))
-        .and_then(|value| value.to_str().ok())
-        .into_iter()
-        .flat_map(|value| value.split(',').rev())
-        .filter_map(|value| value.trim().parse::<IpAddr>().ok())
-        .find(|candidate| !is_trusted_proxy_ip(config, *candidate))
-}
-
-fn is_trusted_proxy_ip(config: &ServerConfig, ip: IpAddr) -> bool {
-    // `unmap_v4` so a dual-stack listener's `::ffff:127.0.0.1` peer is still
-    // recognized as loopback.
-    let ip = unmap_v4(ip);
-    ip.is_loopback() || config.trusted_proxies.contains(ip)
-}
-
 #[cfg(test)]
 mod tests {
+    use std::net::Ipv4Addr;
+
     use super::*;
     use axum::http::{HeaderName, HeaderValue};
 
@@ -985,94 +830,5 @@ mod tests {
             ActionReplayRejection::Saturated.status(),
             StatusCode::SERVICE_UNAVAILABLE
         );
-    }
-
-    fn ip(value: &str) -> IpAddr {
-        value.parse().expect("test address must parse")
-    }
-
-    #[test]
-    fn parses_bare_addresses_as_host_routes() {
-        let prefix = IpPrefix::parse("10.0.0.9").expect("a bare IPv4 address is valid");
-        assert!(prefix.contains(ip("10.0.0.9")));
-        assert!(!prefix.contains(ip("10.0.0.10")));
-
-        let prefix = IpPrefix::parse("2001:db8::2").expect("a bare IPv6 address is valid");
-        assert!(prefix.contains(ip("2001:db8::2")));
-        assert!(!prefix.contains(ip("2001:db8::3")));
-    }
-
-    #[test]
-    fn matches_documented_cidr_ranges() {
-        // These are the exact ranges the server-actions guide tells users to
-        // configure; before CIDR support they failed validation at startup.
-        let proxies = TrustedProxies::parse_all(["10.0.0.0/8", "172.16.0.0/12"])
-            .expect("documented ranges must parse");
-
-        assert!(proxies.contains(ip("10.255.255.254")));
-        assert!(proxies.contains(ip("172.18.0.4")));
-        assert!(!proxies.contains(ip("172.32.0.1")), "outside the /12");
-        assert!(!proxies.contains(ip("11.0.0.1")), "outside the /8");
-    }
-
-    #[test]
-    fn masks_host_bits_instead_of_rejecting_them() {
-        let sloppy = IpPrefix::parse("10.1.2.3/8").expect("host bits are masked, not rejected");
-        let canonical = IpPrefix::parse("10.0.0.0/8").expect("canonical form must parse");
-        assert_eq!(sloppy, canonical);
-    }
-
-    #[test]
-    fn rejects_malformed_and_oversized_prefixes() {
-        for value in [
-            "not-an-ip",
-            "10.0.0.0/33",
-            "2001:db8::/129",
-            "10.0.0.0/",
-            "10.0.0.0/8/8",
-            "",
-        ] {
-            assert!(IpPrefix::parse(value).is_none(), "{value} must not parse");
-        }
-        let error = TrustedProxies::parse_all(["10.0.0.0/8", "10.0.0.0/33"])
-            .expect_err("an invalid entry must be reported");
-        assert!(error.contains("10.0.0.0/33"), "{error}");
-    }
-
-    #[test]
-    fn a_zero_length_prefix_matches_every_address_of_its_family() {
-        let all_v4 = IpPrefix::parse("0.0.0.0/0").expect("/0 is a valid prefix");
-        assert!(all_v4.contains(ip("203.0.113.8")));
-        assert!(
-            !all_v4.contains(ip("2001:db8::2")),
-            "an IPv4 prefix must not swallow IPv6 peers"
-        );
-    }
-
-    #[test]
-    fn ipv4_prefixes_match_dual_stack_mapped_peers() {
-        // A server bound to an IPv6 wildcard socket reports an IPv4 client as
-        // `::ffff:a.b.c.d`. Without unmapping, an IPv4 proxy allowlist would
-        // silently stop matching the moment the listener became dual-stack.
-        let proxies = TrustedProxies::parse_all(["10.0.0.0/8"]).expect("range must parse");
-        assert!(proxies.contains(ip("::ffff:10.0.0.9")));
-        assert!(!proxies.contains(ip("::ffff:11.0.0.9")));
-    }
-
-    #[test]
-    fn families_never_cross_match() {
-        let v6 = TrustedProxies::parse_all(["2001:db8::/32"]).expect("range must parse");
-        assert!(v6.contains(ip("2001:db8::dead")));
-        assert!(!v6.contains(ip("10.0.0.9")));
-    }
-
-    #[test]
-    fn an_empty_allowlist_trusts_nothing_beyond_loopback() {
-        let proxies = TrustedProxies::default();
-        assert!(proxies.is_empty());
-        assert!(!proxies.contains(ip("10.0.0.9")));
-        // Loopback trust lives in `is_trusted_proxy_ip`, not in the allowlist,
-        // so the empty allowlist must not claim it.
-        assert!(!proxies.contains(ip("127.0.0.1")));
     }
 }

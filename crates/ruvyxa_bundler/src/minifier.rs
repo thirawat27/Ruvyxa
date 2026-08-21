@@ -15,13 +15,14 @@ use oxc::{
     minifier::{CompressOptions, Minifier, MinifierOptions},
     parser::Parser,
     span::SourceType,
+    transformer::EngineTargets,
 };
 
-use crate::{BundleError, BundleTarget, Result};
+use crate::{BundleError, BundleTarget, EsTarget, Result};
 
 /// Apply all minification passes to `source` and return the result.
-pub fn minify(source: &str, _target: BundleTarget) -> Result<String> {
-    minify_with_options(source, _target, true)
+pub fn minify(source: &str, _target: BundleTarget, es_target: EsTarget) -> Result<String> {
+    minify_with_options(source, _target, true, es_target)
 }
 
 /// Apply minification with explicit tree-shaking control.
@@ -29,13 +30,37 @@ pub fn minify_with_options(
     source: &str,
     _target: BundleTarget,
     tree_shaking: bool,
+    es_target: EsTarget,
 ) -> Result<String> {
     let stage0 = if tree_shaking {
         tree_shake(source)
     } else {
         source.to_string()
     };
-    minify_javascript(&stage0, tree_shaking)
+    minify_javascript(&stage0, tree_shaking, es_target)
+}
+
+/// Hold the compressor to `es_target` so it cannot reintroduce newer syntax.
+///
+/// oxc's compressor rewrites toward the shortest equivalent form, and the
+/// shortest form is often newer syntax: `a.b ?? (a.b = 0)` compresses to
+/// `a.b ??= 0`. Left at its default (every feature available) it undid the
+/// transform's work — the client bundle for a project on `build.target: es2020`
+/// went out with logical assignment in it, because the two passes had no shared
+/// idea of the language level.
+fn apply_es_target(options: &mut MinifierOptions, es_target: EsTarget) -> Result<()> {
+    if es_target.is_default() {
+        return Ok(());
+    }
+    // With compression off there is no rewriting to constrain: mangling and
+    // whitespace removal cannot introduce syntax the source did not have.
+    let Some(compress) = options.compress.as_mut() else {
+        return Ok(());
+    };
+    compress.target = EngineTargets::from_target(es_target.as_str()).map_err(|error| {
+        BundleError::Compiler(format!("Oxc rejected build.target `{es_target}`: {error}"))
+    })?;
+    Ok(())
 }
 
 /// One generated position and the input position it came from.
@@ -58,10 +83,11 @@ pub(crate) struct MinifiedPosition {
 pub(crate) fn minify_tracking_positions(
     source: &str,
     target: BundleTarget,
+    es_target: EsTarget,
 ) -> Result<(String, Vec<MinifiedPosition>)> {
     let _ = target;
     let allocator = Allocator::default();
-    let program = parse_for_minification(&allocator, source)?;
+    let program = parse_for_minification(&allocator, source, es_target)?;
     let (mut program, options) = program;
     let result = Minifier::new(options).minify(&allocator, &mut program);
 
@@ -91,6 +117,7 @@ pub(crate) fn minify_tracking_positions(
 fn parse_for_minification<'a>(
     allocator: &'a Allocator,
     source: &'a str,
+    es_target: EsTarget,
 ) -> Result<(oxc::ast::ast::Program<'a>, MinifierOptions)> {
     let parsed = Parser::new(allocator, source, SourceType::unambiguous()).parse();
     if !parsed.diagnostics.is_empty() {
@@ -102,16 +129,15 @@ fn parse_for_minification<'a>(
     // `treeShaking: false` must still preserve otherwise-unused bindings, and
     // the bundler shakes before this runs, so the map-producing path always
     // takes the safest profile for the same reason `minify_javascript` does.
-    Ok((
-        parsed.program,
-        MinifierOptions {
-            compress: Some(CompressOptions::safest()),
-            ..MinifierOptions::default()
-        },
-    ))
+    let mut options = MinifierOptions {
+        compress: Some(CompressOptions::safest()),
+        ..MinifierOptions::default()
+    };
+    apply_es_target(&mut options, es_target)?;
+    Ok((parsed.program, options))
 }
 
-fn minify_javascript(source: &str, tree_shaking: bool) -> Result<String> {
+fn minify_javascript(source: &str, tree_shaking: bool, es_target: EsTarget) -> Result<String> {
     let allocator = Allocator::default();
     let parsed = Parser::new(&allocator, source, SourceType::unambiguous()).parse();
 
@@ -123,7 +149,7 @@ fn minify_javascript(source: &str, tree_shaking: bool) -> Result<String> {
     }
 
     let mut program = parsed.program;
-    let options = if tree_shaking {
+    let mut options = if tree_shaking {
         MinifierOptions::default()
     } else {
         // `treeShaking: false` must still preserve otherwise-unused bindings.
@@ -140,6 +166,7 @@ fn minify_javascript(source: &str, tree_shaking: bool) -> Result<String> {
             ..MinifierOptions::default()
         }
     };
+    apply_es_target(&mut options, es_target)?;
     let result = Minifier::new(options).minify(&allocator, &mut program);
 
     Ok(Codegen::new()
@@ -809,7 +836,7 @@ const url = "https://example.test/a//b";
 const template = `keep // text and ${url.length}`;
 const pattern = /\\n( *(at)?)[a-z/]+/gi;
 export { url, template, pattern };"#;
-        let out = minify(src, BundleTarget::Ssr).unwrap();
+        let out = minify(src, BundleTarget::Ssr, EsTarget::EsNext).unwrap();
 
         assert!(out.len() < src.len());
         assert!(out.contains("https://example.test/a//b"));
@@ -822,16 +849,44 @@ export { url, template, pattern };"#;
     fn oxc_minifies_esm_without_erasing_module_syntax() {
         let src = r#"import { createElement } from "react";
 export const view = createElement("main", null, "Ruvyxa");"#;
-        let out = minify(src, BundleTarget::Ssr).unwrap();
+        let out = minify(src, BundleTarget::Ssr, EsTarget::EsNext).unwrap();
 
         assert!(out.contains("import"));
         assert!(out.contains("from\"react\""));
         assert!(out.contains("export"));
     }
 
+    /// The compressor may not put back what the transform took out.
+    ///
+    /// oxc rewrites toward the shortest equivalent form and the shortest form
+    /// is often newer syntax, so `a.b ?? (a.b = 0)` compresses to `a.b ??= 0`.
+    /// Left at its default the minifier undid the downlevel: a project on
+    /// `build.target: es2020` shipped a client bundle with logical assignment
+    /// in it, and only the unminified build looked correct.
+    #[test]
+    fn the_minifier_does_not_reintroduce_syntax_the_target_excludes() {
+        let downlevelled = "export function probe(input) { input.count ?? (input.count = 0); input.count || (input.count = 41); return input.count }";
+
+        let at_default =
+            minify_with_options(downlevelled, BundleTarget::Client, false, EsTarget::EsNext)
+                .unwrap();
+        assert!(
+            at_default.contains("??="),
+            "the default profile is expected to compress this: {at_default}"
+        );
+
+        let at_es2020 =
+            minify_with_options(downlevelled, BundleTarget::Client, false, EsTarget::Es2020)
+                .unwrap();
+        assert!(
+            !at_es2020.contains("??=") && !at_es2020.contains("||="),
+            "es2020 output must not carry logical assignment: {at_es2020}"
+        );
+    }
+
     #[test]
     fn oxc_parse_failures_abort_the_bundle() {
-        let error = minify("const = ;", BundleTarget::Client).unwrap_err();
+        let error = minify("const = ;", BundleTarget::Client, EsTarget::EsNext).unwrap_err();
         assert!(
             matches!(error, BundleError::Compiler(message) if message.contains("Oxc could not parse"))
         );
@@ -840,7 +895,7 @@ export const view = createElement("main", null, "Ruvyxa");"#;
     #[test]
     fn compresses_comments_and_whitespace() {
         let src = "const   x = 1; // this is a comment\nconst y = 2;";
-        let out = minify(src, BundleTarget::Client).unwrap();
+        let out = minify(src, BundleTarget::Client, EsTarget::EsNext).unwrap();
         assert!(!out.contains("this is a comment"), "{out}");
         // Oxc merges adjacent declarations; the retired text compressor could
         // only drop whitespace between them.
@@ -855,7 +910,7 @@ export const view = createElement("main", null, "Ruvyxa");"#;
         let src = r#"const url = "https://example.test/a//b";
 const template = `keep // text and  spaces`;
 const pattern = /\n( *(at)?)[a-z/]+/gi; /* remove me */"#;
-        let out = minify(src, BundleTarget::Client).unwrap();
+        let out = minify(src, BundleTarget::Client, EsTarget::EsNext).unwrap();
         assert!(out.contains("https://example.test/a//b"), "{out}");
         assert!(out.contains("keep // text and  spaces"), "{out}");
         assert!(out.contains(r#"/\n( *(at)?)[a-z/]+/gi"#), "{out}");
@@ -870,7 +925,7 @@ const pattern = /\n( *(at)?)[a-z/]+/gi; /* remove me */"#;
     #[test]
     fn preserves_automatic_semicolon_insertion_boundaries() {
         let src = "function value() { return\n{ ok: true }; }\nlet count = 1\n++count;";
-        let out = minify(src, BundleTarget::Client).unwrap();
+        let out = minify(src, BundleTarget::Client, EsTarget::EsNext).unwrap();
         assert!(
             !out.contains("return{") && !out.contains("return {"),
             "the block after `return` must not become its return value: {out}"
@@ -890,7 +945,7 @@ const pattern = /\n( *(at)?)[a-z/]+/gi; /* remove me */"#;
     #[test]
     fn preserves_legal_comments() {
         let src = "/*! library license */ const value = 1; //! directive\nvalue;";
-        let out = minify(src, BundleTarget::Client).unwrap();
+        let out = minify(src, BundleTarget::Client, EsTarget::EsNext).unwrap();
         assert!(out.contains("library license"), "{out}");
         assert!(out.contains("directive"), "{out}");
     }
@@ -904,7 +959,7 @@ const pattern = /\n( *(at)?)[a-z/]+/gi; /* remove me */"#;
     #[test]
     fn a_jsdoc_license_banner_survives_its_anchor_being_compressed_away() {
         let src = "/**\n * @license Example\n * Copyright (c) Example.\n */\n\"use strict\";\nvar x = 1;\nexport default x;";
-        let out = minify(src, BundleTarget::Client).unwrap();
+        let out = minify(src, BundleTarget::Client, EsTarget::EsNext).unwrap();
         assert!(out.contains("@license Example"), "{out:?}");
         assert!(out.contains("Copyright (c) Example."), "{out:?}");
         assert!(
@@ -918,7 +973,7 @@ const pattern = /\n( *(at)?)[a-z/]+/gi; /* remove me */"#;
     #[test]
     fn ordinary_and_jsdoc_comments_are_still_dropped() {
         let src = "/** @param {number} n */\nfunction f(n) { /* inner */ return n; }\nf(1);";
-        let out = minify(src, BundleTarget::Client).unwrap();
+        let out = minify(src, BundleTarget::Client, EsTarget::EsNext).unwrap();
         assert!(!out.contains("@param"), "{out}");
         assert!(!out.contains("inner"), "{out}");
     }
@@ -974,13 +1029,15 @@ function checkDCE() {
             "the branch keeps its block: {out}"
         );
         // Parsing is the real assertion: a leaked binding is a syntax error.
-        minify_javascript(&out, false).expect("the folded output must still parse");
+        minify_javascript(&out, false, EsTarget::EsNext)
+            .expect("the folded output must still parse");
 
         // The `else` branch is kept the same way.
         let with_else = "if (process.env.NODE_ENV !== \"production\") { const y = 1; } else { const y = 2; use(y); }\nconst y = 3;\n";
         let folded = fold_production_node_env(with_else);
         assert!(folded.contains("const y = 2"), "{folded}");
-        minify_javascript(&folded, false).expect("the folded else branch must still parse");
+        minify_javascript(&folded, false, EsTarget::EsNext)
+            .expect("the folded else branch must still parse");
     }
 
     #[test]
@@ -1159,7 +1216,8 @@ var __ruv_cccc3333cccc3333__ = (function() {
   return __exports;
 })();
 "#;
-        let result = minify_with_options(src, BundleTarget::Client, false).unwrap();
+        let result =
+            minify_with_options(src, BundleTarget::Client, false, EsTarget::EsNext).unwrap();
 
         assert!(result.contains("unused"));
         assert!(!result.contains("[tree-shaken]"));

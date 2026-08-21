@@ -16,6 +16,7 @@ use axum::http::{HeaderName, HeaderValue, Request, Response, StatusCode, header}
 use tower::{Layer, Service};
 use tracing::info;
 
+use crate::client_ip::{TrustedProxies, client_ip};
 use crate::config::RateLimitConfig;
 
 const MAX_TRACKED_RATE_LIMIT_KEYS: usize = 10_000;
@@ -462,7 +463,7 @@ impl RateLimitLayer {
         }
     }
 
-    fn extract_key(request: &Request<Body>, key_by: &str) -> String {
+    fn extract_key(request: &Request<Body>, key_by: &str, trusted: &TrustedProxies) -> String {
         if let Some(header_name) = key_by.strip_prefix("header:")
             && let Some(value) = request
                 .headers()
@@ -472,22 +473,24 @@ impl RateLimitLayer {
         {
             return value.to_string();
         }
-        // Falling back to the transport peer, not to a shared literal. A
+        // Falling back to the client address, not to a shared literal. A
         // request that is missing the configured header is not the *same*
         // client as every other request missing it, and bucketing them together
         // turns the limiter into an outage: one caller that never sends the
         // header drains a bucket every other such caller has to share, so the
-        // control meant to protect the service is what denies it. The peer
-        // address is the identity the default mode already uses and is not
-        // client-supplied.
+        // control meant to protect the service is what denies it.
         //
-        // Forwarded headers stay untrusted unless a deployment explicitly
-        // selects one with `key: "header:x-forwarded-for"`.
-        request
-            .extensions()
-            .get::<std::net::SocketAddr>()
-            .map(|addr| addr.ip().to_string())
-            .unwrap_or_else(|| "unknown".to_string())
+        // Who the client *is* comes from [`crate::client_ip`], which is also
+        // what the server-action limiter and the deployed handler ask. This
+        // used to be the transport peer and nothing else, so behind any reverse
+        // proxy every caller shared one bucket here while the same
+        // configuration limited per real client once deployed. A forwarded
+        // header is still believed only when the peer that sent it is loopback
+        // or listed in `security.trustedProxyIps`.
+        let Some(peer) = request.extensions().get::<std::net::SocketAddr>() else {
+            return "unknown".to_string();
+        };
+        client_ip(peer.ip(), request.headers(), trusted).to_string()
     }
 
     fn allow(&self, key: &str) -> bool {
@@ -558,6 +561,9 @@ impl<S> Layer<S> for RateLimitLayer {
             inner,
             limiter: self.clone(),
             key_by: "ip".to_string(),
+            // A direct Tower user configured no proxy allowlist, so only a
+            // loopback peer may state a forwarded identity.
+            trusted: TrustedProxies::default(),
         }
     }
 }
@@ -567,13 +573,16 @@ impl<S> Layer<S> for RateLimitLayer {
 pub struct RateLimitLayerWithKey {
     pub limiter: RateLimitLayer,
     pub key_by: String,
+    /// Reverse proxies whose forwarded client header may be believed.
+    pub trusted: TrustedProxies,
 }
 
 impl RateLimitLayerWithKey {
-    pub fn from_config(config: &RateLimitConfig) -> Self {
+    pub fn from_config(config: &RateLimitConfig, trusted: TrustedProxies) -> Self {
         Self {
             limiter: RateLimitLayer::from_config(config),
             key_by: config.key_by.clone(),
+            trusted,
         }
     }
 }
@@ -586,6 +595,7 @@ impl<S> Layer<S> for RateLimitLayerWithKey {
             inner,
             limiter: self.limiter.clone(),
             key_by: self.key_by.clone(),
+            trusted: self.trusted.clone(),
         }
     }
 }
@@ -595,6 +605,7 @@ pub struct RateLimitService<S> {
     inner: S,
     limiter: RateLimitLayer,
     key_by: String,
+    trusted: TrustedProxies,
 }
 
 impl<S> Service<Request<Body>> for RateLimitService<S>
@@ -611,7 +622,7 @@ where
     }
 
     fn call(&mut self, request: Request<Body>) -> Self::Future {
-        let key = RateLimitLayer::extract_key(&request, &self.key_by);
+        let key = RateLimitLayer::extract_key(&request, &self.key_by, &self.trusted);
         let allowed = self.limiter.allow(&key);
         let retry_after = (!allowed).then(|| self.limiter.retry_after_seconds(&key));
         let mut inner = self.inner.clone();
@@ -829,17 +840,65 @@ mod tests {
         );
     }
 
+    /// A client cannot rename itself, and a proxy can.
+    ///
+    /// `ip` used to mean the transport peer and nothing else, which is safe
+    /// against forgery and useless behind a reverse proxy: every caller arrives
+    /// with the proxy's address, so one bucket serves the whole internet while
+    /// the same configuration limited per real client once deployed. It now
+    /// asks [`crate::client_ip`], the rule the action limiter and the deployed
+    /// handler already used.
     #[test]
-    fn default_rate_limit_key_does_not_trust_forwarded_headers() {
+    fn the_default_key_believes_a_forwarded_header_only_from_a_trusted_peer() {
+        let trusted = TrustedProxies::parse_all(["10.0.0.9"]).unwrap();
+        let forged = |peer: &str| {
+            let mut request = Request::builder()
+                .header("x-forwarded-for", "203.0.113.8")
+                .body(Body::empty())
+                .unwrap();
+            request
+                .extensions_mut()
+                .insert(peer.parse::<std::net::SocketAddr>().unwrap());
+            request
+        };
+
+        // An ordinary client claiming to be someone else stays itself.
+        assert_eq!(
+            RateLimitLayer::extract_key(&forged("198.51.100.7:44321"), "ip", &trusted),
+            "198.51.100.7"
+        );
+        // The configured proxy is believed, and so is loopback.
+        assert_eq!(
+            RateLimitLayer::extract_key(&forged("10.0.0.9:44321"), "ip", &trusted),
+            "203.0.113.8"
+        );
+        assert_eq!(
+            RateLimitLayer::extract_key(&forged("127.0.0.1:44321"), "ip", &trusted),
+            "203.0.113.8"
+        );
+        // With no allowlist configured, only loopback is a proxy.
+        assert_eq!(
+            RateLimitLayer::extract_key(
+                &forged("10.0.0.9:44321"),
+                "ip",
+                &TrustedProxies::default()
+            ),
+            "10.0.0.9"
+        );
+
+        // `header:` is the application's own key and stays verbatim.
         let request = Request::builder()
             .header("x-forwarded-for", "203.0.113.8")
             .body(Body::empty())
             .unwrap();
-
-        assert_eq!(RateLimitLayer::extract_key(&request, "ip"), "unknown");
         assert_eq!(
-            RateLimitLayer::extract_key(&request, "header:x-forwarded-for"),
+            RateLimitLayer::extract_key(&request, "header:x-forwarded-for", &trusted),
             "203.0.113.8"
+        );
+        // No peer and no configured header leaves nothing to attribute.
+        assert_eq!(
+            RateLimitLayer::extract_key(&request, "ip", &trusted),
+            "unknown"
         );
     }
 
@@ -858,7 +917,11 @@ mod tests {
         // one bucket, or either of them can rate-limit the other.
         for request in [&absent, &empty] {
             assert_eq!(
-                RateLimitLayer::extract_key(request, "header:x-api-key"),
+                RateLimitLayer::extract_key(
+                    request,
+                    "header:x-api-key",
+                    &TrustedProxies::default()
+                ),
                 "198.51.100.7"
             );
         }
@@ -866,7 +929,7 @@ mod tests {
         // Only a peer that cannot be determined either is unattributable.
         let anonymous = Request::builder().body(Body::empty()).unwrap();
         assert_eq!(
-            RateLimitLayer::extract_key(&anonymous, "header:x-api-key"),
+            RateLimitLayer::extract_key(&anonymous, "header:x-api-key", &TrustedProxies::default()),
             "unknown"
         );
     }

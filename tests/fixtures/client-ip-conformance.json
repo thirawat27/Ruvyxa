@@ -1,0 +1,143 @@
+{
+  "contract": "ruvyxa.client-ip",
+  "schemaVersion": 1,
+  "why": [
+    "Two implementations decide which forwarded hop is the client, and every",
+    "per-client control in the framework is keyed on the answer: the built-in",
+    "`rate` middleware, the server-action rate limiter, and the action replay",
+    "guard's per-client quota. The native host is",
+    "crates/ruvyxa_middleware/src/client_ip.rs and the deployed host is",
+    "`clientAddress` in packages/ruvyxa/runtime/serverless-handler.mjs.",
+    "",
+    "They disagreed. `RateLimitLayer::extract_key` read the transport peer and",
+    "never looked at a forwarded header, so one project with one",
+    "`middleware.builtin.rate` block was limited per real client once deployed",
+    "and as a single shared bucket when the native server ran behind a reverse",
+    "proxy — every caller draining one counter, which turns the control meant to",
+    "protect the service into the thing that denies it.",
+    "",
+    "The table starts *after* the trust decision about this request's own",
+    "upstream hop, the same way `trustedScheme` is an input to",
+    "origin-policy-conformance.json rather than something that table derives.",
+    "The native server believes a forwarded header only when the transport peer",
+    "is loopback or listed in security.trustedProxyIps; a deployed function has",
+    "no peer and is reachable only through its platform ingress, so it reads",
+    "cf-connecting-ip / x-vercel-forwarded-for / true-client-ip first. Those",
+    "platform headers are therefore deliberately absent from every case here.",
+    "",
+    "Addresses are IPv4 only. Which hop is selected is the shared decision and",
+    "is what this table pins; how the selected address is spelled back out is",
+    "host-local — a bucket key never leaves the process that made it — and the",
+    "two hosts do format IPv6 differently. Each host covers IPv6 selection in",
+    "its own suite.",
+    "",
+    "`client: null` means no hop could be attributed. The native host reports",
+    "that as None and falls back to the transport peer; the deployed host",
+    "reports the literal \"unknown\", which buckets more aggressively than the",
+    "traffic warrants — the direction a limiter is allowed to be wrong in."
+  ],
+  "cases": [
+    {
+      "name": "no forwarded header attributes nothing",
+      "headers": { "host": "app.test" },
+      "trustedProxyIps": [],
+      "client": null
+    },
+    {
+      "name": "an empty forwarded header attributes nothing",
+      "headers": { "x-forwarded-for": "" },
+      "trustedProxyIps": [],
+      "client": null
+    },
+    {
+      "name": "a single hop is the client",
+      "headers": { "x-forwarded-for": "203.0.113.9" },
+      "trustedProxyIps": [],
+      "client": "203.0.113.9"
+    },
+    {
+      "name": "surrounding whitespace is not part of the identity",
+      "headers": { "x-forwarded-for": "  203.0.113.9  " },
+      "trustedProxyIps": [],
+      "client": "203.0.113.9"
+    },
+    {
+      "name": "the rightmost hop wins over a hop the client wrote itself",
+      "headers": { "x-forwarded-for": "198.51.100.1, 203.0.113.9" },
+      "trustedProxyIps": [],
+      "client": "203.0.113.9"
+    },
+    {
+      "name": "a forged run of hops cannot displace the one the proxy appended",
+      "headers": { "x-forwarded-for": "1.1.1.1, 2.2.2.2, 3.3.3.3, 203.0.113.9" },
+      "trustedProxyIps": [],
+      "client": "203.0.113.9"
+    },
+    {
+      "name": "a trusted proxy hop is skipped and the hop before it is the client",
+      "headers": { "x-forwarded-for": "203.0.113.9, 10.0.0.9" },
+      "trustedProxyIps": ["10.0.0.0/8"],
+      "client": "203.0.113.9"
+    },
+    {
+      "name": "every trusted hop in a chain is skipped",
+      "headers": { "x-forwarded-for": "203.0.113.9, 10.0.0.9, 10.4.4.4" },
+      "trustedProxyIps": ["10.0.0.0/8"],
+      "client": "203.0.113.9"
+    },
+    {
+      "name": "loopback is a trusted hop without being configured",
+      "headers": { "x-forwarded-for": "203.0.113.9, 127.0.0.1" },
+      "trustedProxyIps": [],
+      "client": "203.0.113.9"
+    },
+    {
+      "name": "a chain of nothing but trusted hops attributes nothing",
+      "headers": { "x-forwarded-for": "10.0.0.9, 10.4.4.4" },
+      "trustedProxyIps": ["10.0.0.0/8"],
+      "client": null
+    },
+    {
+      "name": "a bare address in the trusted list matches only that address",
+      "headers": { "x-forwarded-for": "203.0.113.9, 10.0.0.9" },
+      "trustedProxyIps": ["10.0.0.9"],
+      "client": "203.0.113.9"
+    },
+    {
+      "name": "a bare address in the trusted list does not cover its neighbours",
+      "headers": { "x-forwarded-for": "203.0.113.9, 10.0.0.8" },
+      "trustedProxyIps": ["10.0.0.9"],
+      "client": "10.0.0.8"
+    },
+    {
+      "name": "text that is not an address is not an identity",
+      "headers": { "x-forwarded-for": "203.0.113.9, not-an-address" },
+      "trustedProxyIps": [],
+      "client": "203.0.113.9"
+    },
+    {
+      "name": "a header of nothing but junk attributes nothing",
+      "headers": { "x-forwarded-for": "unknown, <script>, -" },
+      "trustedProxyIps": [],
+      "client": null
+    },
+    {
+      "name": "x-real-ip is read when x-forwarded-for is absent",
+      "headers": { "x-real-ip": "203.0.113.9" },
+      "trustedProxyIps": [],
+      "client": "203.0.113.9"
+    },
+    {
+      "name": "x-forwarded-for is preferred when both are present",
+      "headers": { "x-forwarded-for": "203.0.113.9", "x-real-ip": "198.51.100.1" },
+      "trustedProxyIps": [],
+      "client": "203.0.113.9"
+    },
+    {
+      "name": "host bits outside a configured prefix do not narrow it",
+      "headers": { "x-forwarded-for": "203.0.113.9, 10.1.2.3" },
+      "trustedProxyIps": ["10.1.2.3/8"],
+      "client": "203.0.113.9"
+    }
+  ]
+}

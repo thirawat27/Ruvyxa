@@ -309,7 +309,7 @@ fn emit_shared_route_modules(
 ) -> Result<SharedRouteBundleOutput> {
     let linked = linker::link_shared_route_modules(&shared_modules, &input)?;
     let code = if input.options.minify {
-        minifier::minify_with_options(&linked, input.target, false)?
+        minifier::minify_with_options(&linked, input.target, false, input.options.es_target)?
     } else {
         linked
     };
@@ -627,12 +627,20 @@ fn emit_prepared_bundle(
     // without `build.map` does not.
     let (final_code, minified_positions) = match (minify_output, input.options.source_map) {
         (true, true) => {
-            let (code, positions) =
-                minifier::minify_tracking_positions(&optimized_linked, input.target)?;
+            let (code, positions) = minifier::minify_tracking_positions(
+                &optimized_linked,
+                input.target,
+                input.options.es_target,
+            )?;
             (code, Some(positions))
         }
         (true, false) => (
-            minifier::minify_with_options(&optimized_linked, input.target, false)?,
+            minifier::minify_with_options(
+                &optimized_linked,
+                input.target,
+                false,
+                input.options.es_target,
+            )?,
             None,
         ),
         (false, _) => (optimized_linked.clone(), None),
@@ -1754,6 +1762,7 @@ export default function Page() { return null }
             source_map: false,
             tree_shaking: false,
             jsx_runtime: JsxRuntime::Automatic,
+            es_target: EsTarget::EsNext,
             split_strategy: SplitStrategy::Route,
             emit_chunk_manifest: false,
             collect_module_manifest: false,
@@ -2192,7 +2201,7 @@ export default function Page() { return null }
             output.code
         );
         // The real assertion: the linked bundle is parseable JavaScript.
-        minifier::minify_with_options(&output.code, BundleTarget::Client, false)
+        minifier::minify_with_options(&output.code, BundleTarget::Client, false, EsTarget::EsNext)
             .expect("the linked bundle must parse");
     }
 
@@ -2498,7 +2507,7 @@ export default function Page() { return null }
             output.code
         );
         // The real assertion: the linked bundle is parseable JavaScript.
-        minifier::minify_with_options(&output.code, BundleTarget::Client, false)
+        minifier::minify_with_options(&output.code, BundleTarget::Client, false, EsTarget::EsNext)
             .expect("the linked bundle must parse");
     }
 

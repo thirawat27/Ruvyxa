@@ -40,7 +40,9 @@ pub(crate) fn analyze_client_bundle(
         split_strategy: config.build.split_strategy.clone(),
         parallelism: config.build.parallelism,
         jsx_runtime: config.build.jsx_runtime.clone(),
-        _es_target: None,
+        // Carried, not defaulted: the analyzer reports bundle sizes, and since
+        // `build.target` reaches the transform it also reaches those bytes.
+        es_target: config.build.es_target.clone(),
         emit_chunk_manifest: Some(true),
         prebundle_dependencies: config.build.prebundle_dependencies,
         prerender_cache: config.build.prerender_cache,

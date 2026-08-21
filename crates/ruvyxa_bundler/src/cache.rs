@@ -26,7 +26,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
-use crate::JsxRuntime;
+use crate::{EsTarget, JsxRuntime};
 
 /// Maximum number of entries kept in the in-process memory cache.
 const MEMORY_CACHE_LIMIT: usize = 512;
@@ -234,7 +234,7 @@ impl CompileCache {
 
     /// Look up a source file's compiled output in the cache (classic JSX mode).
     pub fn lookup(&self, source: &str, has_jsx: bool) -> CacheLookup {
-        self.lookup_with_options(source, has_jsx, JsxRuntime::Classic)
+        self.lookup_with_options(source, has_jsx, JsxRuntime::Classic, EsTarget::EsNext)
     }
 
     /// Look up with explicit JSX runtime selection.
@@ -246,11 +246,13 @@ impl CompileCache {
         source: &str,
         has_jsx: bool,
         jsx_runtime: JsxRuntime,
+        es_target: EsTarget,
     ) -> CacheLookup {
         let key = Self::cache_key_with_options_and_namespace(
             source,
             has_jsx,
             jsx_runtime,
+            es_target,
             &self.namespace,
         );
 
@@ -327,6 +329,7 @@ impl CompileCache {
             source,
             has_jsx,
             JsxRuntime::Classic,
+            EsTarget::EsNext,
             &self.namespace,
         );
         if let Ok(mut memory) = self.memory.lock() {
@@ -351,14 +354,19 @@ impl CompileCache {
 
     /// Compute the cache key for a given source and JSX flag (classic mode).
     pub fn cache_key(source: &str, has_jsx: bool) -> String {
-        Self::cache_key_with_options(source, has_jsx, JsxRuntime::Classic)
+        Self::cache_key_with_options(source, has_jsx, JsxRuntime::Classic, EsTarget::EsNext)
     }
 
     /// Compute the cache key for a given source, JSX flag, and JSX runtime mode.
     ///
     /// Key = blake3(source || "\0" || jsx_flag || "\0" || jsx_runtime || "\0" || compiler_version)[..32] as hex.
-    pub fn cache_key_with_options(source: &str, has_jsx: bool, jsx_runtime: JsxRuntime) -> String {
-        Self::cache_key_with_options_and_namespace(source, has_jsx, jsx_runtime, "")
+    pub fn cache_key_with_options(
+        source: &str,
+        has_jsx: bool,
+        jsx_runtime: JsxRuntime,
+        es_target: EsTarget,
+    ) -> String {
+        Self::cache_key_with_options_and_namespace(source, has_jsx, jsx_runtime, es_target, "")
     }
 
     /// Compute a cache key with an additional build-input namespace.
@@ -366,6 +374,7 @@ impl CompileCache {
         source: &str,
         has_jsx: bool,
         jsx_runtime: JsxRuntime,
+        es_target: EsTarget,
         namespace: &str,
     ) -> String {
         let mut hasher = blake3::Hasher::new();
@@ -377,6 +386,11 @@ impl CompileCache {
             JsxRuntime::Classic => b"classic",
             JsxRuntime::Automatic => b"automatic",
         });
+        hasher.update(b"\0");
+        // The language level is part of what the transform emits, so two
+        // targets must not share an entry. It was left out of this key while
+        // the option reached no transform; it does not any more.
+        hasher.update(es_target.as_str().as_bytes());
         hasher.update(b"\0");
         hasher.update(COMPILER_VERSION.as_bytes());
         hasher.update(b"\0");
@@ -500,8 +514,18 @@ mod tests {
 
     #[test]
     fn cache_key_differs_by_jsx_runtime() {
-        let k1 = CompileCache::cache_key_with_options("const x = 1;", true, JsxRuntime::Classic);
-        let k2 = CompileCache::cache_key_with_options("const x = 1;", true, JsxRuntime::Automatic);
+        let k1 = CompileCache::cache_key_with_options(
+            "const x = 1;",
+            true,
+            JsxRuntime::Classic,
+            EsTarget::EsNext,
+        );
+        let k2 = CompileCache::cache_key_with_options(
+            "const x = 1;",
+            true,
+            JsxRuntime::Automatic,
+            EsTarget::EsNext,
+        );
         assert_ne!(k1, k2);
     }
 
@@ -737,18 +761,23 @@ mod tests {
         let source = "const el = <div/>;";
         let compiled_auto = "_jsx(\"div\", {})";
 
-        let key = CompileCache::cache_key_with_options(source, true, JsxRuntime::Automatic);
+        let key = CompileCache::cache_key_with_options(
+            source,
+            true,
+            JsxRuntime::Automatic,
+            EsTarget::EsNext,
+        );
         cache.store(&key, compiled_auto);
 
         // Automatic mode should hit.
-        match cache.lookup_with_options(source, true, JsxRuntime::Automatic) {
+        match cache.lookup_with_options(source, true, JsxRuntime::Automatic, EsTarget::EsNext) {
             CacheLookup::Hit(v) => assert_eq!(v, compiled_auto),
             CacheLookup::Miss(_) => panic!("should be hit for automatic mode"),
         }
 
         // Classic mode should miss (different cache key).
         assert!(matches!(
-            cache.lookup_with_options(source, true, JsxRuntime::Classic),
+            cache.lookup_with_options(source, true, JsxRuntime::Classic, EsTarget::EsNext),
             CacheLookup::Miss(_)
         ));
     }
