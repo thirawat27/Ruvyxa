@@ -2448,6 +2448,7 @@ fn server_only_route(path: &str, kind: ruvyxa_graph::RouteKind) -> ruvyxa_graph:
         layout_chain: Vec::new(),
         template_chain: Vec::new(),
         slots: Vec::new(),
+        intercepts: Vec::new(),
         server_modules: Vec::new(),
         client_modules: Vec::new(),
         runtime: ruvyxa_graph::RuntimeTarget::Node,

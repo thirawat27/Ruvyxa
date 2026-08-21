@@ -85,7 +85,30 @@ pub fn build_entry_source(input: &BundleInput) -> (String, String) {
             format!("import Slot{i} from {path};\n")
         })
         .collect();
-    let wrapper_levels = route_wrapper_levels(&input.layouts, &input.templates, &input.slots);
+    let intercept_imports: String = input
+        .intercepts
+        .iter()
+        .enumerate()
+        .map(|(i, intercept)| {
+            let path = js_string(&intercept.file.display().to_string().replace('\\', "/"));
+            format!("import Intercept{i} from {path};\n")
+        })
+        .collect();
+    let wrapper_levels = route_wrapper_levels(
+        &input.layouts,
+        &input.templates,
+        &input.slots,
+        &input.intercepts,
+    );
+    // A route with no interceptions emits neither the resolver nor the table,
+    // so its bundle stays byte-identical to the one it produced before the
+    // feature existed. Both are client-only: an interception is a soft
+    // navigation, and a server render has no previous page to overlay.
+    let slot_prelude = if input.intercepts.is_empty() {
+        String::new()
+    } else {
+        ROUTE_SLOT_PRELUDE.to_string()
+    };
 
     // Special-file imports (error/loading/not-found), each optional. Absent
     // kinds contribute nothing, so a route without them emits the same bundle
@@ -108,6 +131,7 @@ pub fn build_entry_source(input: &BundleInput) -> (String, String) {
     // bundle serves every concrete URL of a dynamic route, so there is no single
     // request path to embed. The binding is named for what it holds.
     let route_pattern = js_string(&input.request_path);
+    let intercept_registry = intercept_registry_statement(&route_pattern, &input.intercepts);
 
     // Route metadata is read from namespace re-imports of the same modules: a
     // default import cannot see a sibling `export const meta`. Ordered root
@@ -168,13 +192,14 @@ pub fn build_entry_source(input: &BundleInput) -> (String, String) {
                 r#"import React from "react";
 import {{ createRoot, hydrateRoot }} from "react-dom/client";
 import Page from {page_path};
-{layout_imports}{template_imports}{slot_imports}{special_imports}{meta_imports}
-{ROUTE_CONTEXT_PRELUDE}{boundary_prelude}
+{layout_imports}{template_imports}{slot_imports}{intercept_imports}{special_imports}{meta_imports}
+{ROUTE_CONTEXT_PRELUDE}{boundary_prelude}{slot_prelude}
 {META_PRELUDE}
 
 {route_tree}
 ;(globalThis.__RUVYXA_ROUTES__ ||= {{}})[{route_pattern}] = __ruvyxaTree;
 globalThis.__RUVYXA_ROUTE_PATTERN__ = {route_pattern};
+{intercept_registry}
 {route_shell}
 
 {CLIENT_BOOTSTRAP_PRELUDE}
@@ -305,6 +330,38 @@ if (__ruvyxaBootstrap.csr === true) globalThis.__RUVYXA_CSR__ = true"#;
 /// imported because a generated entry cannot depend on `@ruvyxa/react`; it
 /// tells a `notFound()` signal apart from an ordinary error by the own property
 /// `error.__ruvyxaNotFound` that `notFound()` stamps.
+/// The slot resolver a route with interceptions emits.
+///
+/// A slot normally renders one fixed component. An interception replaces that
+/// content for as long as the URL names it, while the page underneath stays
+/// mounted — so the slot has to be decided per render rather than baked in.
+/// `ctx.intercept` is set by the client router and is absent on the server and
+/// on a hard load, which is what makes a refresh show the real page.
+///
+/// A slot may carry an interception without having a default of its own, so
+/// `Default` is nullable rather than assumed.
+///
+/// Mirrored by `ROUTE_SLOT_PRELUDE` in
+/// `packages/ruvyxa/runtime/entry-templates.mjs` and held to it by
+/// `tests/packages/ruvyxa/entry-prelude-parity.test.mjs`.
+const ROUTE_SLOT_PRELUDE: &str = r#"function __ruvyxaSlot(ctx, level, name, Default, intercepts) {
+  const active = ctx.intercept;
+  if (active && active.level === level && active.name === name) {
+    for (const entry of intercepts) {
+      if (entry[0] === active.target) {
+        return React.createElement(entry[1], {
+          params: active.params ?? {},
+          requestPath: active.path ?? ctx.path,
+        });
+      }
+    }
+  }
+  return Default
+    ? React.createElement(Default, { params: ctx.params ?? {}, requestPath: ctx.path })
+    : null;
+}
+"#;
+
 const ROUTE_BOUNDARY_PRELUDE: &str = r#"class __ruvyxaBoundary extends React.Component {
   constructor(props) {
     super(props);
@@ -469,10 +526,9 @@ function __ruvyxaApplyLang(html, lang) {
 /// Mirrors `wrapperLoop()` in `packages/ruvyxa/runtime/entry-templates.mjs`;
 /// both are pinned by `tests/fixtures/entry-composition-conformance.json`.
 fn wrapper_loop(layout_wrappers: &str, levels: &[WrapperLevel]) -> String {
-    if levels
-        .iter()
-        .all(|level| level.template.is_none() && level.slots.is_empty())
-    {
+    if levels.iter().all(|level| {
+        level.template.is_none() && level.slots.is_empty() && level.intercepts.is_empty()
+    }) {
         return format!(
             "  for (const Layout of [{layout_wrappers}].reverse()) {{\n    tree = React.createElement(Layout, null, tree);\n  }}"
         );
@@ -483,22 +539,7 @@ fn wrapper_loop(layout_wrappers: &str, levels: &[WrapperLevel]) -> String {
         .map(|level| {
             // Slots are built here rather than hoisted, because the elements
             // depend on `ctx` and this loop runs once per render.
-            let slots = if level.slots.is_empty() {
-                "null".to_string()
-            } else {
-                let props = level
-                    .slots
-                    .iter()
-                    .map(|(name, component)| {
-                        format!(
-                            "{}: React.createElement({component}, {{ params: ctx.params ?? {{}}, requestPath: ctx.path }})",
-                            js_string(name)
-                        )
-                    })
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                format!("{{ {props} }}")
-            };
+            let slots = wrapper_level_slots(level);
             format!(
                 "[{}, {}, {slots}]",
                 level.layout.as_deref().unwrap_or("null"),
@@ -520,6 +561,115 @@ pub(crate) struct WrapperLevel {
     /// Parallel-route slots this level's layout receives, as
     /// `(prop name, component identifier)` in name order.
     pub(crate) slots: Vec<(String, String)>,
+    /// Interceptions this level's slots can show, as
+    /// `(prop name, route id, target pattern, component identifier)`.
+    ///
+    /// A slot can carry an interception without having a default page of its
+    /// own — `@modal` holding nothing but `(.)photo` is the ordinary shape — so
+    /// this is not a lookup into `slots`.
+    pub(crate) intercepts: Vec<WrapperIntercept>,
+}
+
+/// One interception a level's slot can render instead of its default.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub(crate) struct WrapperIntercept {
+    pub(crate) name: String,
+    pub(crate) level_id: String,
+    pub(crate) target: String,
+    pub(crate) component: String,
+}
+
+/// Publish what this route can intercept, for the client router to match.
+///
+/// Only the metadata travels: the router needs to know *whether* a URL is
+/// intercepted from here, and the component that answers it is already in this
+/// bundle behind `__ruvyxaSlot`. Putting components in a global would duplicate
+/// references the route's own tree already holds.
+///
+/// Mirrors `interceptRegistryStatement()` in
+/// `packages/ruvyxa/runtime/entry-templates.mjs`.
+fn intercept_registry_statement(
+    route_pattern: &str,
+    intercepts: &[crate::RouteInterceptInput],
+) -> String {
+    if intercepts.is_empty() {
+        return String::new();
+    }
+    let entries = intercepts
+        .iter()
+        .map(|intercept| {
+            format!(
+                "{{ level: {}, name: {}, target: {} }}",
+                js_string(&intercept.level_id),
+                js_string(&intercept.name),
+                js_string(&intercept.target)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!(";(globalThis.__RUVYXA_INTERCEPTS__ ||= {{}})[{route_pattern}] = [{entries}];")
+}
+
+/// The `slots` prop object one level's layout receives, or `null`.
+///
+/// A slot with no interception emits exactly the element it always did, so a
+/// project that uses parallel routes and nothing else produces the bundle it
+/// produced before interceptions existed. A slot that *can* be intercepted goes
+/// through `__ruvyxaSlot`, which decides per render — and a slot that exists
+/// only to hold an interception has no default at all, which is the ordinary
+/// `@modal` shape.
+///
+/// Mirrors `levelSlots()` in `packages/ruvyxa/runtime/entry-templates.mjs`.
+fn wrapper_level_slots(level: &WrapperLevel) -> String {
+    if level.slots.is_empty() && level.intercepts.is_empty() {
+        return "null".to_string();
+    }
+
+    let mut names: Vec<&str> = level
+        .slots
+        .iter()
+        .map(|(name, _)| name.as_str())
+        .chain(level.intercepts.iter().map(|entry| entry.name.as_str()))
+        .collect();
+    names.sort_unstable();
+    names.dedup();
+
+    let props = names
+        .into_iter()
+        .map(|name| {
+            let default = level
+                .slots
+                .iter()
+                .find(|(slot_name, _)| slot_name == name)
+                .map(|(_, component)| component.as_str());
+            let intercepts = level
+                .intercepts
+                .iter()
+                .filter(|entry| entry.name == name)
+                .collect::<Vec<_>>();
+            if intercepts.is_empty() {
+                let component = default.unwrap_or("null");
+                return format!(
+                    "{}: React.createElement({component}, {{ params: ctx.params ?? {{}}, requestPath: ctx.path }})",
+                    js_string(name)
+                );
+            }
+            let table = intercepts
+                .iter()
+                .map(|entry| format!("[{}, {}]", js_string(&entry.target), entry.component))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!(
+                "{}: __ruvyxaSlot(ctx, {}, {}, {}, [{table}])",
+                js_string(name),
+                js_string(&intercepts[0].level_id),
+                js_string(name),
+                default.unwrap_or("null")
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("{{ {props} }}")
 }
 
 /// Interleave the layout and template chains into one root-first level list.
@@ -534,6 +684,7 @@ pub(crate) fn route_wrapper_levels(
     layouts: &[PathBuf],
     templates: &[PathBuf],
     slots: &[crate::RouteSlotInput],
+    intercepts: &[crate::RouteInterceptInput],
 ) -> Vec<WrapperLevel> {
     let directory = |file: &PathBuf| {
         file.parent()
@@ -579,6 +730,27 @@ pub(crate) fn route_wrapper_levels(
             .to_string();
         push(key, &|level: &mut WrapperLevel| {
             level.slots.push(entry.clone());
+        });
+    }
+    // An interception merges on the same key as a slot: it replaces that slot's
+    // content while the page underneath stays mounted, so it belongs to the
+    // level whose layout receives the prop.
+    for (index, intercept) in intercepts.iter().enumerate() {
+        let entry = WrapperIntercept {
+            name: intercept.name.clone(),
+            level_id: intercept.level_id.clone(),
+            target: intercept.target.clone(),
+            component: format!("Intercept{index}"),
+        };
+        let key = intercept
+            .level
+            .display()
+            .to_string()
+            .replace('\\', "/")
+            .trim_end_matches('/')
+            .to_string();
+        push(key, &|level: &mut WrapperLevel| {
+            level.intercepts.push(entry.clone());
         });
     }
 
@@ -685,6 +857,27 @@ pub fn wrap(linked: String, input: &BundleInput) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// Read a fixture level's `intercepts` list.
+    ///
+    /// The fixture carries the shape the JavaScript generator consumes
+    /// directly, so one spelling feeds both replays.
+    fn fixture_intercepts(value: &serde_json::Value) -> Vec<WrapperIntercept> {
+        value
+            .as_array()
+            .map(|entries| {
+                entries
+                    .iter()
+                    .map(|entry| WrapperIntercept {
+                        name: entry["name"].as_str().unwrap_or_default().to_string(),
+                        level_id: entry["level"].as_str().unwrap_or_default().to_string(),
+                        target: entry["target"].as_str().unwrap_or_default().to_string(),
+                        component: entry["component"].as_str().unwrap_or_default().to_string(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     use super::*;
     use crate::{BundleOptions, BundleTarget, RouteSpecials};
     use std::path::PathBuf;
@@ -697,6 +890,7 @@ mod tests {
             layouts: layouts.into_iter().map(PathBuf::from).collect(),
             templates: Vec::new(),
             slots: Vec::new(),
+            intercepts: Vec::new(),
             request_path: request_path.to_string(),
             target: BundleTarget::Client,
             options: BundleOptions::default(),
@@ -1105,6 +1299,7 @@ mod tests {
                     .map(|level| WrapperLevel {
                         layout: level["layout"].as_str().map(str::to_string),
                         template: level["template"].as_str().map(str::to_string),
+                        intercepts: fixture_intercepts(&level["intercepts"]),
                         slots: level["slots"]
                             .as_object()
                             .map(|slots| {
@@ -1218,6 +1413,7 @@ mod tests {
                 PathBuf::from("/p/app/dash/reports/template.tsx"),
             ],
             &[],
+            &[],
         );
 
         assert_eq!(
@@ -1227,16 +1423,19 @@ mod tests {
                     layout: Some("Layout0".to_string()),
                     template: Some("Template0".to_string()),
                     slots: Vec::new(),
+                    intercepts: Vec::new(),
                 },
                 WrapperLevel {
                     layout: Some("Layout1".to_string()),
                     template: None,
                     slots: Vec::new(),
+                    intercepts: Vec::new(),
                 },
                 WrapperLevel {
                     layout: None,
                     template: Some("Template1".to_string()),
                     slots: Vec::new(),
+                    intercepts: Vec::new(),
                 },
             ]
         );
@@ -1254,6 +1453,7 @@ mod tests {
                 PathBuf::from("/p/app/layout.tsx"),
                 PathBuf::from("/p/app/dash/layout.tsx"),
             ],
+            &[],
             &[],
             &[],
         );
@@ -1278,6 +1478,7 @@ mod tests {
             layouts: vec![PathBuf::from("/p/app/layout.tsx")],
             templates: vec![PathBuf::from("/p/app/dash/template.tsx")],
             slots: Vec::new(),
+            intercepts: Vec::new(),
             request_path: "/dash".to_string(),
             target: BundleTarget::Client,
             options: BundleOptions::default(),

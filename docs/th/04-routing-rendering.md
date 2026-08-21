@@ -196,22 +196,48 @@ export default function DashboardLayout({
 subtree ของ slot และ slot ที่ไม่ตรงจะกลับไปใช้ `default.tsx` ทุกครั้งที่ navigate แทนที่จะคงสิ่งที่
 render ไว้ล่าสุด
 
-### Intercepting route ยังไม่รองรับ
+### Intercepting route
 
-Ruvyxa ไม่ได้ implement convention ของโฟลเดอร์ `(.)`, `(..)`, `(..)(..)` และ `(...)` โฟลเดอร์ที่ชื่อ
-ขึ้นต้นด้วยรูปแบบเหล่านี้จะทำให้ route discovery ล้มเหลวด้วย **RUV1005** ไม่ว่าจะอยู่ตรงไหนใต้
-`app/` รวมถึงภายในโฟลเดอร์ `@slot` ด้วย
+`(.)`, `(..)`, `(..)(..)` และ `(...)` ทำเครื่องหมายให้โฟลเดอร์เป็น **overlay** ทับ route
+ที่มีอยู่แล้ว การ navigate แบบ soft ไปยัง URL ที่มันระบุจะ render โฟลเดอร์นั้นลงใน parallel-route
+slot โดยที่หน้า ด้านล่างยังคง mount อยู่ ส่วนการโหลดแบบ hard ที่ URL เดียวกันจะ render หน้าปกติ
 
-การตรวจนี้มีอยู่เพราะก่อนหน้านี้ convention ดังกล่าวไปทำอย่างอื่นแบบเงียบ ๆ route group
-ต้องลงท้ายด้วย `)` ดังนั้น `app/feed/(.)photo/` จึงไม่ถูกตัดออกในฐานะ group แต่กลายเป็น URL segment
-ตรงตัวและเผยแพร่ page จริงที่ `/feed/(.)photo` — view ที่เขียนไว้เพื่อซ้อนทับ route อื่นกลับได้
-address สาธารณะเป็นของ ตัวเอง ส่วนภายใน `@slot` โฟลเดอร์เดียวกันไม่ตรงกับ URL ใดเลยและไม่ render
-อะไรออกมา
+```text
+app/gallery/
+├── @modal/
+│   ├── (.)photo/page.tsx   ← แสดงทับ /gallery เมื่อ router ไปที่ /gallery/photo
+│   └── default.tsx         ← แสดงในเวลาอื่น
+├── layout.tsx              ← รับ `modal` มาพร้อมกับ `children`
+├── page.tsx
+└── photo/page.tsx          ← สิ่งที่ /gallery/photo render ด้วยตัวเอง
+```
 
-ให้เปลี่ยนชื่อโฟลเดอร์เป็น segment ปกติ แล้ว render overlay จาก route ที่ layout ประกอบอยู่แล้ว —
-เช่น parallel slot หรือ client state ที่คง page ด้านล่างไว้
+marker บอกว่า segment ที่ตามหลังอยู่ที่ระดับใด นับเป็นระดับของ **URL** — route group และโฟลเดอร์
+slot ไม่นับเป็นระดับ สำหรับ `app/gallery/@modal/(.)photo` นั้น `(.)` หมายถึงระดับ `app/gallery`
+เป้าหมายจึงเป็น `/gallery/photo` ส่วน `(..)` ขึ้นไปหนึ่งระดับ `(..)(..)` สองระดับ และ `(...)`
+เริ่มจาก root ของ app
 
-### boundary ของสถานะ route แบบครบชุด
+มีกฎสามข้อที่ทำให้พฤติกรรมนี้คาดเดาได้แทนที่จะเป็นเวทมนตร์:
+
+- **route จริงต้องมีอยู่** เพราะ interception คือ overlay การ reload, การแชร์ลิงก์
+  หรือการเปิดแท็บใหม่ ก็ยังต้อง render อะไรสักอย่าง marker ที่เป้าหมายไม่มีหน้าใดตอบจะทำให้ build
+  ล้มเหลวด้วย **RUV1006**
+- **โฟลเดอร์ต้องอยู่ภายใน slot `@name`** เพราะนั่นคือสิ่งที่ overlay เข้าไปแทนที่ ถ้าอยู่นอก slot
+  ก็ไม่มี ที่ให้วาง และ build จะล้มเหลวด้วย **RUV1005**
+- **เฉพาะ soft navigation เท่านั้นที่ intercept** overlay ถูก ship อยู่ใน bundle
+  ของหน้าที่คุณยืนอยู่ นั่นคือเหตุผลที่มันเปิดได้โดยไม่ต้องยิง request เลย
+  และเป็นเหตุผลเดียวกันที่การเข้ามาจากที่อื่นจะเห็นหน้าจริง
+
+`router.back()` ปิด overlay ได้: interception push history entry ไว้หนึ่งรายการ การ pop มันจึงพา URL
+กลับไปยังหน้าที่ยัง mount อยู่ด้านล่าง
+
+ขณะที่ overlay เปิดอยู่ `usePathname()` **ภายใน route tree** ยังรายงานหน้าที่ mount อยู่
+เพราะหน้านั้น คือสิ่งที่ mount จริง และ `template.tsx` ใช้ค่านั้นเป็น key การรายงาน URL ของ overlay
+จึงจะทำให้หน้าที่ overlay ทับอยู่ถูก remount ส่วนคอมโพเนนต์ overlay จะได้รับ URL และ parameter
+ที่ถูก intercept ผ่าน prop `requestPath` และ `params` ของตัวเอง และ router snapshot
+(สิ่งที่คอมโพเนนต์นอก tree เห็น) จะตามแถบที่อยู่
+
+### boundary ของสถานะ route แบบครบชุด### boundary ของสถานะ route แบบครบชุด
 
 วาง special file ทั้งสามไว้ข้าง segment ที่ต้องการครอบคลุม ระบบจะเลือกไฟล์ที่อยู่ใกล้ที่สุด ดังนั้น
 โครงสร้างนี้ทำให้ทุกหน้า product มี loading UI, ปุ่มลองใหม่เมื่อ error และ 404 เฉพาะส่วน โดยไม่ต้อง

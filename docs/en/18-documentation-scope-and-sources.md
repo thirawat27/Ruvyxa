@@ -34,6 +34,12 @@ undocumented private implementation is public API.
 
 ## Explicitly unverified / not implemented as framework features
 
+Ruvyxa does not implement **React Server Components**. There is no `react-server` module graph, no
+client-reference manifest, and no React Flight wire format; `'use client'` marks a module lane the
+bundler enforces, not a client reference React resolves. Ruvyxa's own `flight` export and
+`useFlight()` are a per-route JSON payload for soft navigation and share nothing with RSC but the
+name — see [Data, actions, and API routes](05-data-actions-api.md).
+
 The codebase has no public generic dependency-injection API, generic queue, scheduler, framework
 event bus, database migration service, managed metrics backend, alert manager, backup/recovery
 implementation, container/orchestrator manifests, or universal readiness endpoint. This

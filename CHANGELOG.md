@@ -2,6 +2,94 @@
 
 ## v1.0.32 (unreleased)
 
+### Intercepting routes are implemented
+
+`(.)`, `(..)`, `(..)(..)`, and `(...)` are real now, rather than refused. A folder carrying one is
+an **overlay** on a route that already exists: a soft navigation to the URL it names renders it into
+a parallel-route slot while the page underneath stays mounted, and a hard load of the same URL
+renders the ordinary page.
+
+```text
+app/gallery/
+├── @modal/
+│   ├── (.)photo/page.tsx   ← over /gallery when the router navigates to /gallery/photo
+│   └── default.tsx
+├── layout.tsx              ← receives `modal` alongside `children`
+├── page.tsx
+└── photo/page.tsx          ← what a reload or a shared link renders
+```
+
+The target is computed from the **level's** URL, never from the slot folder, because a slot
+contributes no URL segment: for `app/gallery/@modal/(.)photo`, `(.)` names the level `app/gallery`
+and the target is `/gallery/photo`. Route groups contribute none either. Getting that wrong is
+invisible until a modal silently never opens, so it is pinned by
+`tests/fixtures/intercepting-route-conformance.json`, which both discovery implementations replay —
+`route_intercepts()` in `crates/ruvyxa_graph` for `ruvyxa build`, and `collectIntercepts()` in the
+new `packages/ruvyxa/runtime/route-intercepts.mjs` for `ruvyxa dev`.
+
+**The interception is carried by the route you are standing on, not by the route it covers.** That
+is what lets the overlay open with no request at all — its component is already in the running
+bundle — and it is the same fact that makes a reload show the real page: nothing else publishes a
+table for that URL. The intercepted route's own entry is untouched.
+
+Two things fail the build rather than doing nothing:
+
+- **RUV1006** — a marker whose target no page answers, or one that climbs above the app root. An
+  overlay with no real route behind it is a modal that never opens and a URL that 404s.
+- **RUV1005** — a marker outside an `@name` slot. There is nothing to render it into. (This code was
+  introduced earlier in this release to refuse every marker; it now refuses only the ones no slot
+  can show.)
+
+A slot that can be intercepted is emitted as `__ruvyxaSlot(ctx, level, name, Default, table)` rather
+than a fixed element, because the overlay is decided per render and a slot may hold nothing but an
+interception. Both entry generators emit it identically — two new cases in
+`tests/fixtures/entry-composition-conformance.json` pin that — and a route with no interceptions
+emits neither the resolver nor the table, so its bundle is byte-identical to before.
+
+The tree is rendered with the **mounted** page's pathname while an overlay is open. `template.tsx`
+is keyed on it, so handing the tree the overlay's URL would remount every template on the chain —
+and with them the page the overlay exists to sit on top of. The overlay component receives the
+intercepted URL and its parameters as its own props, and the router snapshot follows the address bar
+so `usePathname()` outside the tree and `useSearchParams()` agree with what the user sees.
+`examples/demo/app/gallery` exercises the whole path.
+
+### One rule decides which file a bare import names
+
+Ruvyxa resolves every import twice: `crates/ruvyxa_bundler/src/resolver.rs` walks the graph for
+`ruvyxa build`, and `packages/ruvyxa/runtime/compiler.mjs` walks it again for the dev server, the
+prerender workers, and every function artifact an adapter assembles. The two disagreed, and not at
+an edge — at the centre.
+
+`compiler.mjs` answered bare specifiers with `createRequire(...).resolve(specifier)`. That is Node's
+**CommonJS** resolver: it matches the conditions `["node", "require"]` and nothing else. Against a
+package exporting
+`{ "require": "./cjs.js", "browser": "./browser.js", "worker": "./worker.js", "import": "./esm.js" }`
+it picked `cjs.js` — for a browser bundle, for an edge Worker, for everything. The Rust bundler,
+resolving the same import for the same build, picked `browser.js`, `worker.js`, or `esm.js`
+according to the bundle target. Neither side raised anything. The build reported one bundle and the
+other graph shipped a different one.
+
+The `exports` decision now lives in one place, `packages/ruvyxa/runtime/package-exports.mjs`, and
+`tests/fixtures/module-resolution-conformance.json` holds both languages to it: condition order per
+target, the two-pass treatment of `require`, subpath patterns and their longest-prefix tie-break,
+explicit `null` blocking, the legacy `browser`/`module`/`main` order, and which package-relative
+paths may be joined at all. The fixture stores each `exports` field as source _text_ rather than as
+parsed JSON, because condition order is what the rule reads and a map that sorts its keys would lose
+it.
+
+Writing the table found a defect neither implementation knew it had. An `exports` map with no
+`.`-prefixed key is sugar for `{ ".": <that map> }` — it defines the root entry and nothing else —
+and both hosts were answering _subpaths_ from it. `import x from 'pkg/sub'` therefore resolved to
+the package's **root** file: not an error, just the wrong module. Both now leave it unmatched, which
+falls through to the legacy branch and probes `pkg/sub` itself. Node refuses the subpath outright
+here; falling through is the documented divergence, taking the wrong file was not.
+
+`compileBundleWithMetadata` gained a `bundleTarget` option (`client` / `ssr` / `edge`) because
+`platform` was answering two questions at once. An edge artifact is compiled with
+`platform: 'browser'` — a Worker has no Node resolver at runtime — but it must read `worker` and
+`edge-light`, not `browser`. `adapter-runner.mjs` states its target; everything else takes the
+default derived from `platform`, so no existing caller changes behaviour except by being right.
+
 ### Benchmarks re-measured against this tree
 
 `README.md`'s comparison table was re-run on 2026-08-21 with

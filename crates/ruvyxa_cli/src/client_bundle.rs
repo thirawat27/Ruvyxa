@@ -846,6 +846,26 @@ pub(crate) fn client_bundle_input(
             file: ruvyxa_diagnostics::normalized_canonical_path(&slot.file),
         })
         .collect();
+    // Interception files are absolute paths from discovery; the level is a
+    // route id, resolved to a directory the way a slot's level is, and carried
+    // through as an id as well because the emitted source names it.
+    let intercepts = route
+        .intercepts
+        .iter()
+        .map(|intercept| ruvyxa_bundler::RouteInterceptInput {
+            level: app_dir.join(
+                intercept
+                    .level
+                    .strip_prefix("app")
+                    .unwrap_or(&intercept.level)
+                    .trim_start_matches('/'),
+            ),
+            level_id: intercept.level.clone(),
+            name: intercept.name.clone(),
+            target: intercept.target.clone(),
+            file: ruvyxa_diagnostics::normalized_canonical_path(&intercept.file),
+        })
+        .collect();
     let route_dir = entry.parent().unwrap_or(&app_dir).to_path_buf();
     let specials = resolve_route_specials(&app_dir, &route_dir);
 
@@ -856,6 +876,7 @@ pub(crate) fn client_bundle_input(
         layouts,
         templates,
         slots,
+        intercepts,
         request_path: route.path.clone(),
         target: BundleTarget::Client,
         specials,

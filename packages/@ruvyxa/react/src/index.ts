@@ -41,7 +41,13 @@ export type {
   RuvyxaRouteRegistry,
 } from './route-types.js'
 export { getRouterInstance } from './router.js'
-export type { NavigateOptions, RouteContextValue, RouterInstance, RuvyxaRouter } from './router.js'
+export type {
+  NavigateOptions,
+  RouteContextValue,
+  RouteInterceptState,
+  RouterInstance,
+  RuvyxaRouter,
+} from './router.js'
 export { isNotFoundError, notFound, NOT_FOUND_PROPERTY } from './not-found.js'
 export type { NotFoundError } from './not-found.js'
 export type { RouteErrorProps } from './special-files.js'

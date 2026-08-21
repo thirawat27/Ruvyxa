@@ -33,6 +33,11 @@ export const products = loader(async ({ cache }) =>
 
 ## Public Flight payload
 
+> **ไม่ใช่ React Server Components** Flight ของ Ruvyxa เป็นคนละอย่าง: เป็น JSON payload ต่อ route
+> ที่ page เลือกเปิดใช้เอง และถูก fetch ระหว่าง soft navigation ไม่ใช่ wire format ของ React Flight,
+> `flight` ไม่ใช่ server component และโมดูล `'use client'` ไม่ได้ถูกแปลงเป็น client reference Ruvyxa
+> ยังไม่ได้ implement RSC — ดู [ขอบเขตเอกสาร](18-documentation-scope-and-sources.md)
+
 page สามารถ export `flight` เพื่อส่งข้อมูลสาธารณะที่ผูกกับ artifact version ได้ function นี้รับเฉพาะ
 canonical path และ route params และต้องคืนข้อมูลที่ serialize เป็น JSON ได้ Client component อ่าน
 payload ของ route ปัจจุบันผ่าน `useFlight<T>()` จาก `@ruvyxa/react` เมื่อ request ล้มเหลวหรือ

@@ -62,6 +62,7 @@ import {
   nodeSsrEntrySource,
   wrapperLevels,
 } from './entry-templates.mjs'
+import { collectIntercepts } from './route-intercepts.mjs'
 import { WorkerAdmissionController } from './worker-admission.mjs'
 import { CachePressureController, LruCache } from './cache-budget.mjs'
 import { encodeFlightPayload } from './flight.mjs'
@@ -1268,6 +1269,7 @@ async function handleClient(request) {
   const layouts = collectLayouts(appDir, path.dirname(pageFile))
   const templates = collectTemplates(appDir, path.dirname(pageFile))
   const slots = collectSlots(appDir, path.dirname(pageFile))
+  const intercepts = collectIntercepts(appDir, path.dirname(pageFile))
   const specials = collectSpecials(appDir, path.dirname(pageFile))
   const { outfile, inputsVersion, inputs } = await bundleClientModule(
     resolvedRoot,
@@ -1277,7 +1279,7 @@ async function handleClient(request) {
     JSON.stringify(params || {}),
     routePath || requestPath,
     specials,
-    { templates, slots },
+    { templates, slots, intercepts },
   )
   const script = await readFile(outfile, 'utf8')
 
@@ -1437,7 +1439,7 @@ function collectNested(appDir, routeDir, fileName) {
  * together is what keeps `Layout0`/`Template0` pointing at the files
  * `wrapperLevels()` names.
  */
-function wrapperEntryParts(layouts, templates, slots = []) {
+function wrapperEntryParts(layouts, templates, slots = [], intercepts = []) {
   const imports = []
   const layoutNames = []
   layouts.forEach((file, index) => {
@@ -1450,7 +1452,14 @@ function wrapperEntryParts(layouts, templates, slots = []) {
   slots.forEach((slot, index) => {
     imports.push(`import Slot${index} from ${JSON.stringify(toImportPath(slot.file))}`)
   })
-  return { imports, layoutNames, levels: wrapperLevels(layouts, templates, slots) }
+  intercepts.forEach((intercept, index) => {
+    imports.push(`import Intercept${index} from ${JSON.stringify(toImportPath(intercept.file))}`)
+  })
+  return {
+    imports,
+    layoutNames,
+    levels: wrapperLevels(layouts, templates, slots, intercepts),
+  }
 }
 
 /**
@@ -1726,7 +1735,7 @@ async function bundleClientModule(
   specials = null,
   nested = {},
 ) {
-  const { templates = [], slots = [] } = nested
+  const { templates = [], slots = [], intercepts = [] } = nested
   const cacheDir = path.join(projectRoot, '.ruvyxa', 'cache', 'client')
   await ensureDir(cacheDir)
 
@@ -1735,7 +1744,7 @@ async function bundleClientModule(
     imports: wrapperImports,
     layoutNames: wrappers,
     levels,
-  } = wrapperEntryParts(layouts, templates, slots)
+  } = wrapperEntryParts(layouts, templates, slots, intercepts)
   imports.push(...wrapperImports)
 
   const { imports: specialImports, names } = specialEntryParts(specials)
@@ -1751,6 +1760,7 @@ async function bundleClientModule(
     pageName: 'Page',
     layoutNames: wrappers,
     levels,
+    intercepts,
     routePath,
     requestPathLiteral: JSON.stringify(requestPath),
     paramsLiteral: paramsJson,

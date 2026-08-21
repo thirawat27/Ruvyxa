@@ -718,6 +718,12 @@ async function compileRegistry(entrySource, outfile, target) {
     sourcefile: 'ruvyxa:serverless-route-registry.tsx',
     outfile,
     platform: target === 'edge' ? 'browser' : serverPlatform(),
+    // `platform` says which host runs the artifact; `bundleTarget` says which
+    // `exports` conditions apply, and an edge artifact needs both answers. It
+    // is compiled as `browser` because a Worker has no Node resolver at
+    // runtime, but it must read `worker`/`edge-light` rather than `browser` —
+    // stated here because the default derives `client` from `platform`.
+    bundleTarget: target === 'edge' ? 'edge' : 'ssr',
     bundlePackages: true,
     reactCompiler: projectConfig?.reactCompiler === true,
     aliases: runtimeAliases(runtimeDir),

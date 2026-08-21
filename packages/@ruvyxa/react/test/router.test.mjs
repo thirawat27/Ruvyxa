@@ -61,6 +61,7 @@ function withGlobals(values, run) {
     '__RUVYXA_ROUTE_PATTERN__',
     '__RUVYXA_ROUTE_ARTIFACTS__',
     '__RUVYXA_ROUTER_INSTANCE__',
+    '__RUVYXA_INTERCEPTS__',
   ]
   const previous = new Map(
     keys.map((key) => [key, Object.getOwnPropertyDescriptor(globalThis, key)]),
@@ -383,5 +384,132 @@ describe('client router view transitions', () => {
         if (descriptor) Object.defineProperty(globalThis, key, descriptor)
       }
     }
+  })
+})
+
+describe('intercepting routes', () => {
+  /** A gallery that intercepts `/gallery/photo` into its `modal` slot. */
+  function galleryGlobals(pathname, rendered, historyLog) {
+    const window = browserWindow(pathname)
+    window.history = {
+      pushState(_state, _title, href) {
+        historyLog.push(['push', href])
+      },
+      replaceState(_state, _title, href) {
+        historyLog.push(['replace', href])
+      },
+      back() {},
+      forward() {},
+    }
+    return {
+      window,
+      __RUVYXA_REQUEST_PATH__: pathname,
+      __RUVYXA_ROUTE_PATTERN__: '/gallery',
+      __RUVYXA_ROUTE_PARAMS__: {},
+      __RUVYXA_ROUTE_MANIFEST__: {
+        routes: [
+          { path: '/gallery', src: '/gallery.js' },
+          { path: '/gallery/photo', src: '/photo.js' },
+          { path: '/settings', src: '/settings.js' },
+        ],
+      },
+      __RUVYXA_INTERCEPTS__: {
+        '/gallery': [{ level: 'app/gallery', name: 'modal', target: '/gallery/photo' }],
+      },
+      __RUVYXA_ROUTES__: {
+        '/gallery': (context) => ({ ...context }),
+        '/settings': (context) => ({ ...context }),
+      },
+      __RUVYXA_ROOT__: {
+        render(tree) {
+          rendered.push(tree)
+        },
+      },
+    }
+  }
+
+  it('opens the overlay without leaving the mounted route', async () => {
+    // The whole point: the bundle already running answers the navigation, so
+    // the page underneath keeps its state and nothing is fetched. The tree is
+    // rendered with the *mounted* pathname — `template.tsx` is keyed on it, and
+    // a new one would remount the page the overlay sits on.
+    const rendered = []
+    const history = []
+    await withGlobals(galleryGlobals('/gallery', rendered, history), async () => {
+      const router = getRouterInstance()
+      await router.navigate('/gallery/photo', {})
+
+      assert.equal(rendered.length, 1)
+      assert.equal(rendered[0].route, '/gallery', 'the mounted route does not change')
+      assert.equal(rendered[0].pathname, '/gallery', 'the tree keeps the mounted pathname')
+      assert.deepEqual(rendered[0].intercept, {
+        level: 'app/gallery',
+        name: 'modal',
+        target: '/gallery/photo',
+        params: {},
+        path: '/gallery/photo',
+      })
+      assert.deepEqual(history, [['push', 'https://example.test/gallery/photo']])
+      // The address bar moved, so anything reading the router agrees with it.
+      assert.equal(router.getSnapshot().pathname, '/gallery/photo')
+      assert.equal(router.getSnapshot().route, '/gallery')
+    })
+  })
+
+  it('closes the overlay when the URL goes back to the mounted route', async () => {
+    const rendered = []
+    const history = []
+    await withGlobals(galleryGlobals('/gallery', rendered, history), async () => {
+      const router = getRouterInstance()
+      await router.navigate('/gallery/photo', {})
+      await router.navigate('/gallery', {})
+
+      assert.equal(rendered.length, 2)
+      assert.equal(rendered[1].intercept, undefined, 'the overlay is gone')
+      assert.equal(rendered[1].route, '/gallery')
+    })
+  })
+
+  it('does not intercept for a route that publishes no table', async () => {
+    // A visitor arriving from anywhere else gets the real page. The overlay
+    // lives in the gallery's bundle, so nothing else can render it — which is
+    // also why a reload and a shared link show the page rather than the modal.
+    const rendered = []
+    const history = []
+    const globals = galleryGlobals('/settings', rendered, history)
+    globals.__RUVYXA_ROUTE_PATTERN__ = '/settings'
+    globals.__RUVYXA_REQUEST_PATH__ = '/settings'
+    await withGlobals(globals, async () => {
+      const router = getRouterInstance()
+      await router.navigate('/gallery/photo', {})
+      // `/gallery/photo` has no registered tree factory here, so the router
+      // falls through to a document load rather than overlaying anything.
+      assert.deepEqual(
+        rendered.map((tree) => tree.intercept),
+        [],
+      )
+    })
+  })
+
+  it('never overlays a route on itself', async () => {
+    // Standing on the real page and following a link to it again is a refresh,
+    // not an interception — the table is inherited by every route below the
+    // level, including the intercepted one.
+    const rendered = []
+    const history = []
+    const globals = galleryGlobals('/gallery/photo', rendered, history)
+    globals.__RUVYXA_ROUTE_PATTERN__ = '/gallery/photo'
+    globals.__RUVYXA_REQUEST_PATH__ = '/gallery/photo'
+    globals.__RUVYXA_INTERCEPTS__['/gallery/photo'] = [
+      { level: 'app/gallery', name: 'modal', target: '/gallery/photo' },
+    ]
+    globals.__RUVYXA_ROUTES__['/gallery/photo'] = (context) => ({ ...context })
+    await withGlobals(globals, async () => {
+      const router = getRouterInstance()
+      await router.navigate('/gallery/photo', {})
+      for (const tree of rendered) {
+        assert.equal(tree.intercept, undefined)
+      }
+    })
   })
 })

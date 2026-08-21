@@ -1,10 +1,17 @@
 import { createHash } from 'node:crypto'
-import { existsSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createRequire, isBuiltin } from 'node:module'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { compareCodeUnits } from './order.mjs'
+import {
+  isSafePackageRelativePath,
+  legacyEntryCandidates,
+  packageNameAndExportKey,
+  PACKAGE_EXPORT_TARGETS,
+  resolveExportsEntry,
+} from './package-exports.mjs'
 import { directivePrologueEnd } from './scanner.mjs'
 const JS_EXTENSIONS = ['', '.ts', '.tsx', '.js', '.jsx', '.mts', '.mjs', '.md', '.mdx']
 export const MDX_COMPONENT_EXTENSIONS = ['.tsx', '.ts', '.jsx', '.js', '.mts', '.mjs']
@@ -155,6 +162,7 @@ export async function compileBundleWithMetadata({
   sourcefile = 'ruvyxa:entry.ts',
   outfile,
   platform = 'node',
+  bundleTarget,
   bundlePackages = false,
   bundleAliasDependencies = false,
   external = [],
@@ -167,6 +175,7 @@ export async function compileBundleWithMetadata({
 }) {
   const { loadTsconfigPaths } = await loadCompilerSupport()
   const normalizedJsxRuntime = normalizeJsxRuntime(jsxRuntime)
+  const resolvedBundleTarget = normalizeBundleTarget(bundleTarget, platform)
   const root = path.resolve(projectRoot)
   const modules = []
   const byKey = new Map()
@@ -188,6 +197,7 @@ export async function compileBundleWithMetadata({
     externalSet,
     aliases,
     platform,
+    bundleTarget: resolvedBundleTarget,
     bundlePackages,
     bundleAliasDependencies,
     bundleDependencies: false,
@@ -478,6 +488,7 @@ async function visitModule(context) {
     externalSet,
     aliases,
     platform,
+    bundleTarget,
     bundlePackages,
     bundleAliasDependencies,
     bundleDependencies,
@@ -537,7 +548,9 @@ async function visitModule(context) {
     const resolvedAlias = aliases[specifier]
     const resolved = resolveSpecifierPath(specifier, resolvedAlias, {
       baseDir,
+      root,
       platform,
+      bundleTarget,
       bundlePackages,
       bundleDependencies,
       tsconfigPaths,
@@ -567,6 +580,7 @@ async function visitModule(context) {
         externalSet,
         aliases,
         platform,
+        bundleTarget,
         bundlePackages,
         bundleAliasDependencies,
         bundleDependencies:
@@ -632,7 +646,16 @@ async function classifyModuleSource(
 function resolveSpecifierPath(
   specifier,
   resolvedAlias,
-  { baseDir, platform, bundlePackages, bundleDependencies, tsconfigPaths, resolveTsconfigPath },
+  {
+    baseDir,
+    root,
+    platform,
+    bundleTarget,
+    bundlePackages,
+    bundleDependencies,
+    tsconfigPaths,
+    resolveTsconfigPath,
+  },
 ) {
   if (resolvedAlias) return resolveFile(path.resolve(resolvedAlias))
   const resolvedTsconfig = resolveTsconfigPath(tsconfigPaths, specifier, resolveFile)
@@ -640,7 +663,7 @@ function resolveSpecifierPath(
   const local = resolveLocalSpecifier(baseDir, specifier)
   if (local) return local
   if (platform === 'browser' || bundlePackages || bundleDependencies) {
-    return resolvePackage(baseDir, specifier)
+    return resolvePackage(baseDir, specifier, bundleTarget, root)
   }
   return null
 }
@@ -1134,13 +1157,175 @@ function resolveLocalSpecifier(baseDir, specifier) {
   return resolveFile(base)
 }
 
-function resolvePackage(baseDir, specifier) {
+/**
+ * Which bundle target a caller's `platform` means, when it did not say.
+ *
+ * `platform` describes the JavaScript host; the bundle target decides which
+ * `exports` conditions apply, and the two are not the same question. An edge
+ * artifact is compiled with `platform: 'browser'` because it has no Node
+ * resolver at runtime, but it must still read `worker`/`edge-light` rather than
+ * `browser` — so `adapter-runner.mjs` states its target explicitly and
+ * everything else takes the default.
+ */
+function normalizeBundleTarget(bundleTarget, platform) {
+  if (bundleTarget === undefined || bundleTarget === null) {
+    return platform === 'browser' ? 'client' : 'ssr'
+  }
+  if (!PACKAGE_EXPORT_TARGETS.includes(bundleTarget)) {
+    throw new Error(
+      `RUV1810 unknown bundleTarget \`${bundleTarget}\`; expected one of ${PACKAGE_EXPORT_TARGETS.join(', ')}`,
+    )
+  }
+  return bundleTarget
+}
+
+/**
+ * File extensions probed when a package path names no file directly.
+ *
+ * Mirrors `resolve_file_candidate` in `crates/ruvyxa_bundler/src/resolver.rs`,
+ * including its order: a `.ts` source beside a `.js` build is the one this
+ * project meant to compile. `.cts`/`.cjs` are here and not in `JS_EXTENSIONS`
+ * because only a published package ships them.
+ */
+const PACKAGE_FILE_EXTENSIONS = [
+  '',
+  '.ts',
+  '.tsx',
+  '.js',
+  '.jsx',
+  '.mts',
+  '.cts',
+  '.mjs',
+  '.cjs',
+  '.md',
+  '.mdx',
+]
+
+/**
+ * `node_modules` directories to probe, nearest importer first.
+ *
+ * Mirrors `node_modules_candidates`: every ancestor of the importer that is not
+ * itself named `node_modules`, then the project root's own chain. The second
+ * chain is what makes a pnpm store on another path resolve for an importer that
+ * lives outside the project root.
+ */
+function nodeModulesCandidates(importerDir, projectRoot) {
+  const candidates = []
+  const seen = new Set()
+  for (const start of [importerDir, projectRoot]) {
+    if (typeof start !== 'string' || start === '') continue
+    let current = path.resolve(start)
+    for (;;) {
+      if (path.basename(current) !== 'node_modules') {
+        const candidate = path.join(current, 'node_modules')
+        if (!seen.has(candidate)) {
+          seen.add(candidate)
+          candidates.push(candidate)
+        }
+      }
+      const parent = path.dirname(current)
+      if (parent === current) break
+      current = parent
+    }
+  }
+  return candidates
+}
+
+/** Probe a package-relative path, refusing anything that escapes the package. */
+function resolvePackageRelative(pkgDir, relative) {
+  if (!isSafePackageRelativePath(relative)) return null
+  const joined = path.join(pkgDir, relative)
+  for (const extension of PACKAGE_FILE_EXTENSIONS) {
+    const candidate = extension
+      ? `${joined.slice(0, joined.length - path.extname(joined).length)}${extension}`
+      : joined
+    if (existsSync(candidate) && !isDirectory(candidate)) return path.resolve(candidate)
+  }
+  for (const extension of PACKAGE_FILE_EXTENSIONS.slice(1)) {
+    const candidate = path.join(joined, `index${extension}`)
+    if (existsSync(candidate) && !isDirectory(candidate)) return path.resolve(candidate)
+  }
+  return null
+}
+
+/** An `exports` target names an exact file: no extension probing applies. */
+function resolveExportTarget(pkgDir, target) {
+  if (!target.startsWith('./')) return null
+  const relative = target.slice('./'.length)
+  if (!isSafePackageRelativePath(relative)) return null
+  const candidate = path.join(pkgDir, relative)
+  return existsSync(candidate) && !isDirectory(candidate) ? path.resolve(candidate) : null
+}
+
+/**
+ * Resolve a bare package specifier with the rule the Rust bundler uses.
+ *
+ * This used to be `createRequire(...).resolve(specifier)` — Node's *CommonJS*
+ * resolver, which matches the conditions `["node", "require"]` and nothing
+ * else. For any dual package the two module graphs then picked different files
+ * for the same import: the Rust client bundler took `browser`/`import` while
+ * this graph inlined the CommonJS build into the very same browser bundle, and
+ * an edge function artifact never saw `worker` or `edge-light`. Neither
+ * disagreement raised anything; each produced a bundle that ran different code
+ * than the build reported. The decision lives in `./package-exports.mjs` now,
+ * and `tests/fixtures/module-resolution-conformance.json` holds the two hosts
+ * to it.
+ */
+function resolvePackage(baseDir, specifier, bundleTarget, projectRoot) {
   if (isBuiltin(specifier)) return null
+  const split = packageNameAndExportKey(specifier)
+  if (!split) return null
+
+  for (const modulesDir of nodeModulesCandidates(baseDir, projectRoot)) {
+    const pkgDir = path.join(modulesDir, split.name)
+    if (existsSync(path.join(pkgDir, 'package.json'))) {
+      // The nearest package with this name wins, exactly as in Node: once a
+      // manifest is found the walk stops, successfully or not.
+      return resolveInsidePackage(pkgDir, split.key, bundleTarget)
+    }
+    // No manifest here. A bare directory can still satisfy a deep subpath
+    // import (`pkg/dist/thing.js`); anything else means this is not the
+    // package and the walk continues.
+    if (split.key === '.') continue
+    const deep = resolvePackageRelative(pkgDir, split.key.slice('./'.length))
+    if (deep) return deep
+  }
+
+  return null
+}
+
+/** Read a package manifest, treating unreadable JSON as no manifest at all. */
+function readPackageManifest(pkgDir) {
   try {
-    return createRequire(path.join(baseDir, '__ruvyxa-resolve__.cjs')).resolve(specifier)
+    return JSON.parse(readFileSync(path.join(pkgDir, 'package.json'), 'utf8'))
   } catch {
     return null
   }
+}
+
+/** Apply the shared rule inside one package directory. */
+function resolveInsidePackage(pkgDir, key, bundleTarget) {
+  const manifest = readPackageManifest(pkgDir)
+  if (manifest && Object.hasOwn(manifest, 'exports')) {
+    const resolved = resolveExportsEntry(manifest.exports, key, bundleTarget)
+    if (resolved.kind === 'blocked') return null
+    if (resolved.kind === 'targets') {
+      return firstMatch(resolved.targets, (target) => resolveExportTarget(pkgDir, target))
+    }
+    // `unmatched` falls through to the legacy fields rather than failing.
+  }
+  return firstMatch(legacyEntryCandidates(manifest ?? {}, key, bundleTarget), (candidate) =>
+    resolvePackageRelative(pkgDir, candidate),
+  )
+}
+
+/** First candidate that probes to a real file, or null. */
+function firstMatch(candidates, probe) {
+  for (const candidate of candidates) {
+    const file = probe(candidate)
+    if (file) return file
+  }
+  return null
 }
 
 function resolveFile(base) {

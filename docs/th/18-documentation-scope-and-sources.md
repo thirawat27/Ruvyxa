@@ -34,6 +34,12 @@ implementation ที่ไม่อยู่ในเอกสารเป็�
 
 ## สิ่งที่ยืนยันว่าไม่มี/ยังไม่ใช่ framework feature
 
+Ruvyxa ยังไม่ได้ implement **React Server Components** ไม่มี module graph แบบ `react-server` ไม่มี
+client-reference manifest และไม่มี wire format ของ React Flight ส่วน `'use client'` เป็นการระบุ
+module lane ที่ bundler บังคับใช้ ไม่ใช่ client reference ที่ React resolve เอง ส่วน `flight` export
+และ `useFlight()` ของ Ruvyxa เป็น JSON payload ต่อ route สำหรับ soft navigation ซึ่งไม่มีอะไรร่วมกับ
+RSC นอกจากชื่อ — ดู [Data, action และ API route](05-data-actions-api.md)
+
 codebase ไม่มี public generic dependency-injection API, generic queue, scheduler, framework event
 bus, database migration service, managed metrics backend, alert manager, backup/recovery
 implementation, container/orchestrator manifest หรือ universal readiness endpoint

@@ -18,7 +18,13 @@
     "",
     "Every implementation replays this file:",
     "  - crates/ruvyxa_bundler/src/output.rs                    (Rust test)",
-    "  - tests/packages/ruvyxa/entry-prelude-parity.test.mjs    (JavaScript test)"
+    "  - tests/packages/ruvyxa/entry-prelude-parity.test.mjs    (JavaScript test)",
+    "",
+    "An intercepting route is emitted as `__ruvyxaSlot(ctx, level, name, Default,",
+    "table)` rather than as a fixed element, because the overlay is decided per",
+    "render from `ctx.intercept` and the slot may have no default of its own. A",
+    "route with no interceptions emits exactly what it always did, which the",
+    "earlier cases here still pin."
   ],
   "$normalizationNote": [
     "Compared with statement terminators removed. The Rust literals are written",
@@ -293,6 +299,93 @@
         "  }",
         "  return React.createElement(__ruvyxaRouteContext.Provider, {",
         "    value: { pathname: ctx.path, params: ctx.params ?? {}, route: \"/dashboard\", flight: ctx.flight },",
+        "  }, tree)",
+        "}"
+      ]
+    },
+    {
+      "$why": "A slot that can be intercepted goes through the resolver; the interception replaces it only while the router says the URL names it.",
+      "kind": "tree",
+      "input": {
+        "routePath": "/feed",
+        "layoutNames": ["Layout0"],
+        "wrapperLevels": [
+          {
+            "layout": "Layout0",
+            "template": null,
+            "slots": null,
+            "intercepts": [
+              {
+                "name": "modal",
+                "level": "app/feed",
+                "target": "/feed/photo",
+                "component": "Intercept0"
+              }
+            ]
+          }
+        ],
+        "metaNames": [],
+        "errorName": null,
+        "loadingName": null,
+        "notFoundName": null
+      },
+      "source": [
+        "function __ruvyxaTree(ctx) {",
+        "  let tree = React.createElement(Page, { params: ctx.params ?? {}, requestPath: ctx.path })",
+        "  for (const [Layout, Template, slots] of [[Layout0, null, { \"modal\": __ruvyxaSlot(ctx, \"app/feed\", \"modal\", null, [[\"/feed/photo\", Intercept0]]) }]].reverse()) {",
+        "    if (Template) tree = React.createElement(Template, { key: ctx.path }, tree)",
+        "    if (Layout) tree = React.createElement(Layout, slots, tree)",
+        "  }",
+        "  return React.createElement(__ruvyxaRouteContext.Provider, {",
+        "    value: { pathname: ctx.path, params: ctx.params ?? {}, route: \"/feed\", flight: ctx.flight },",
+        "  }, tree)",
+        "}"
+      ]
+    },
+    {
+      "$why": "A slot with both a default page and interceptions keeps the default as the resolver's fallback, and an ordinary slot beside it still emits the plain element.",
+      "kind": "tree",
+      "input": {
+        "routePath": "/feed",
+        "layoutNames": ["Layout0"],
+        "wrapperLevels": [
+          {
+            "layout": "Layout0",
+            "template": null,
+            "slots": {
+              "modal": "Slot0",
+              "sidebar": "Slot1"
+            },
+            "intercepts": [
+              {
+                "name": "modal",
+                "level": "app/feed",
+                "target": "/feed/photo",
+                "component": "Intercept0"
+              },
+              {
+                "name": "modal",
+                "level": "app/feed",
+                "target": "/feed/album/[id]",
+                "component": "Intercept1"
+              }
+            ]
+          }
+        ],
+        "metaNames": [],
+        "errorName": null,
+        "loadingName": null,
+        "notFoundName": null
+      },
+      "source": [
+        "function __ruvyxaTree(ctx) {",
+        "  let tree = React.createElement(Page, { params: ctx.params ?? {}, requestPath: ctx.path })",
+        "  for (const [Layout, Template, slots] of [[Layout0, null, { \"modal\": __ruvyxaSlot(ctx, \"app/feed\", \"modal\", Slot0, [[\"/feed/photo\", Intercept0], [\"/feed/album/[id]\", Intercept1]]), \"sidebar\": React.createElement(Slot1, { params: ctx.params ?? {}, requestPath: ctx.path }) }]].reverse()) {",
+        "    if (Template) tree = React.createElement(Template, { key: ctx.path }, tree)",
+        "    if (Layout) tree = React.createElement(Layout, slots, tree)",
+        "  }",
+        "  return React.createElement(__ruvyxaRouteContext.Provider, {",
+        "    value: { pathname: ctx.path, params: ctx.params ?? {}, route: \"/feed\", flight: ctx.flight },",
         "  }, tree)",
         "}"
       ]

@@ -1234,6 +1234,7 @@ mod tests {
                     layout_chain: Vec::new(),
                     template_chain: Vec::new(),
                     slots: Vec::new(),
+                    intercepts: Vec::new(),
                     server_modules: Vec::new(),
                     client_modules: Vec::new(),
                     runtime: RuntimeTarget::Node,

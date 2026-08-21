@@ -479,16 +479,16 @@ describe('route composition emitted by the Node entry templates', () => {
         ['/p/app/template.tsx', '/p/app/dash/reports/template.tsx'],
       ),
       [
-        { layout: 'Layout0', template: 'Template0', slots: null },
-        { layout: 'Layout1', template: null, slots: null },
-        { layout: null, template: 'Template1', slots: null },
+        { layout: 'Layout0', template: 'Template0', slots: null, intercepts: [] },
+        { layout: 'Layout1', template: null, slots: null, intercepts: [] },
+        { layout: null, template: 'Template1', slots: null, intercepts: [] },
       ],
     )
 
     // Windows separators name the same directories.
     assert.deepEqual(
       wrapperLevels(['C:\\p\\app\\layout.tsx'], ['C:\\p\\app\\template.tsx']),
-      [{ layout: 'Layout0', template: 'Template0', slots: null }],
+      [{ layout: 'Layout0', template: 'Template0', slots: null, intercepts: [] }],
       'a Windows separator names the same directory a forward slash does',
     )
   })

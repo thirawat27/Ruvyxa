@@ -190,6 +190,23 @@ pub struct RouteSlotInput {
     pub file: PathBuf,
 }
 
+/// One intercepting route handed to the entry generator.
+///
+/// `level` is the directory holding the `@name` folder, so this merges into the
+/// same wrapper level a slot does. `level_id` is that directory as a route id
+/// (`app/feed`) and is what the emitted source carries: the client router names
+/// the slot it is filling, and a route id is the one spelling both languages
+/// and both hosts already agree on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RouteInterceptInput {
+    pub level: PathBuf,
+    pub level_id: String,
+    pub name: String,
+    /// Route pattern this interception covers, matched against the URL.
+    pub target: String,
+    pub file: PathBuf,
+}
+
 /// Input descriptor for a single bundle job.
 #[derive(Debug, Clone)]
 pub struct BundleInput {
@@ -208,6 +225,12 @@ pub struct BundleInput {
     /// The level is the directory holding the `@name` folder; its layout is the
     /// one that receives the slot as a prop.
     pub slots: Vec<RouteSlotInput>,
+    /// Interceptions this route can render into one of its slots.
+    ///
+    /// Carried by the route the user is standing on rather than by the route
+    /// being intercepted: the overlay has to be in the bundle that is already
+    /// running, or opening it would cost the round trip it exists to avoid.
+    pub intercepts: Vec<RouteInterceptInput>,
     pub request_path: String,
     pub target: BundleTarget,
     pub options: BundleOptions,

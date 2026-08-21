@@ -1291,8 +1291,24 @@ fn resolve_legacy_entry(
     export_key: &str,
     target: BundleTarget,
 ) -> Option<PathBuf> {
+    legacy_entry_candidates(manifest, export_key, target)
+        .into_iter()
+        .find_map(|field| resolve_package_relative(pkg_dir, &field))
+}
+
+/// Package-relative candidates a package offers when `exports` answers nothing.
+///
+/// Split out from the probe so `tests/fixtures/module-resolution-conformance.json`
+/// can compare the *order* against the JavaScript graph without needing a
+/// package on disk. `legacyEntryCandidates` in
+/// `packages/ruvyxa/runtime/package-exports.mjs` is the other half.
+fn legacy_entry_candidates(
+    manifest: &PackageManifest,
+    export_key: &str,
+    target: BundleTarget,
+) -> Vec<String> {
     if export_key != "." {
-        return resolve_package_relative(pkg_dir, export_key);
+        return vec![strip_dot_slash(export_key).to_string()];
     }
 
     let mut fields: Vec<&str> = Vec::new();
@@ -1313,7 +1329,12 @@ fn resolve_legacy_entry(
 
     fields
         .into_iter()
-        .find_map(|field| resolve_package_relative(pkg_dir, field))
+        .map(|field| strip_dot_slash(field).to_string())
+        .collect()
+}
+
+fn strip_dot_slash(value: &str) -> &str {
+    value.strip_prefix("./").unwrap_or(value)
 }
 
 /// Join a package-relative path and probe it, refusing anything that escapes
@@ -1411,8 +1432,18 @@ fn resolve_exports_entry(
         PackageJsonValue::Object(map) => {
             if map.iter().any(|(entry, _)| entry.starts_with('.')) {
                 resolve_exports_subpath(map, key, target)
-            } else {
+            } else if key == "." {
                 resolve_exports_value(exports, target, None)
+            } else {
+                // A map with no `.`-prefixed key is sugar for `{ ".": <map> }`:
+                // it defines the root entry and nothing else. Answering a
+                // subpath from it resolved `pkg/sub` to the package's *root*
+                // file — a wrong file, silently — where leaving it unmatched
+                // falls through to the legacy branch and probes `pkg/sub`
+                // itself. Node refuses the subpath outright here
+                // (`ERR_PACKAGE_PATH_NOT_EXPORTED`); falling through is the
+                // documented divergence, taking the wrong file was a defect.
+                ExportTargets::Unmatched
             }
         }
         PackageJsonValue::Unsupported => ExportTargets::Unmatched,
@@ -3166,6 +3197,120 @@ export default function Card() { return <div className={cn("card")} /> }"#,
         EndsWith(&'static str),
         Blocked,
         Unavailable,
+    }
+
+    /// The bundle target each fixture name stands for.
+    fn conformance_target(name: &str) -> BundleTarget {
+        match name {
+            "client" => BundleTarget::Client,
+            "ssr" => BundleTarget::Ssr,
+            "edge" => BundleTarget::Edge,
+            other => panic!("the shared fixture names a target this host does not have: {other}"),
+        }
+    }
+
+    /// How the shared fixture spells one outcome.
+    fn conformance_outcome(resolved: &ExportTargets) -> serde_json::Value {
+        match resolved {
+            ExportTargets::Blocked => serde_json::Value::String("blocked".to_string()),
+            ExportTargets::Unmatched => serde_json::Value::String("unmatched".to_string()),
+            ExportTargets::Targets(targets) => serde_json::Value::Array(
+                targets
+                    .iter()
+                    .map(|target| serde_json::Value::String(target.clone()))
+                    .collect(),
+            ),
+        }
+    }
+
+    /// Both module graphs answer a bare specifier the same way.
+    ///
+    /// The JavaScript half is
+    /// `tests/packages/ruvyxa/module-resolution-contract.test.mjs` over
+    /// `packages/ruvyxa/runtime/package-exports.mjs`, which `compiler.mjs`
+    /// reads. They used to disagree outright: `compiler.mjs` answered bare
+    /// specifiers with `createRequire().resolve()`, Node's *CommonJS* resolver,
+    /// which matches only `["node", "require"]` — so for any dual package the
+    /// client bundle built here took `browser`/`import` while the same import
+    /// inlined by the other graph took the CommonJS build, and an edge artifact
+    /// never saw `worker` or `edge-light` at all.
+    ///
+    /// `exportsJson` is fixture *text*, parsed here rather than read through
+    /// `serde_json::Value`: condition order is what the rule reads, and a map
+    /// that sorts its keys would lose it.
+    #[test]
+    fn package_exports_resolution_matches_the_shared_table() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/module-resolution-conformance.json"
+        ))
+        .unwrap();
+
+        for case in fixture["exports"].as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            let exports: PackageJsonValue =
+                serde_json::from_str(case["exportsJson"].as_str().unwrap()).unwrap();
+            let key = case["key"].as_str().unwrap();
+            for (target_name, expected) in case["results"].as_object().unwrap() {
+                let resolved =
+                    resolve_exports_entry(&exports, key, conformance_target(target_name));
+                assert_eq!(
+                    &conformance_outcome(&resolved),
+                    expected,
+                    "{name} disagrees with the shared fixture for target {target_name}"
+                );
+            }
+        }
+
+        for case in fixture["specifiers"].as_array().unwrap() {
+            let specifier = case["specifier"].as_str().unwrap();
+            let split = package_name_and_export_key(specifier);
+            match case["package"].as_str() {
+                None => assert!(
+                    split.is_none(),
+                    "{specifier:?} is not a package specifier in the shared fixture"
+                ),
+                Some(package) => {
+                    let (name, key) =
+                        split.unwrap_or_else(|| panic!("{specifier:?} must split into a package"));
+                    assert_eq!(name, package, "{specifier:?} package name");
+                    assert_eq!(
+                        key,
+                        case["key"].as_str().unwrap(),
+                        "{specifier:?} export key"
+                    );
+                }
+            }
+        }
+
+        for case in fixture["legacyEntries"].as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            let manifest =
+                parse_package_manifest(&case["manifest"].to_string()).expect("manifest parses");
+            let key = case["key"].as_str().unwrap();
+            for (target_name, expected) in case["results"].as_object().unwrap() {
+                let candidates =
+                    legacy_entry_candidates(&manifest, key, conformance_target(target_name));
+                assert_eq!(
+                    &serde_json::Value::Array(
+                        candidates
+                            .into_iter()
+                            .map(serde_json::Value::String)
+                            .collect()
+                    ),
+                    expected,
+                    "{name} disagrees with the shared fixture for target {target_name}"
+                );
+            }
+        }
+
+        for value in fixture["unsafeRelativePaths"].as_array().unwrap() {
+            let relative = value.as_str().unwrap();
+            let temp = tempfile::tempdir().unwrap();
+            assert!(
+                resolve_package_relative(temp.path(), relative).is_none(),
+                "the shared fixture refuses {relative:?} and this host joined it onto a package"
+            );
+        }
     }
 
     /// `exports` shapes real packages ship, and what each must resolve to.

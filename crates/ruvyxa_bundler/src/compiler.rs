@@ -1362,6 +1362,7 @@ mod tests {
                 layouts: Vec::new(),
                 templates: Vec::new(),
                 slots: Vec::new(),
+                intercepts: Vec::new(),
                 request_path: "/".to_string(),
                 target: crate::BundleTarget::Client,
                 options: crate::BundleOptions::default(),

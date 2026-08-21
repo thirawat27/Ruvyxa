@@ -197,21 +197,48 @@ Two limits worth knowing: a slot's own nested `layout.tsx` or `loading.tsx` is n
 slot subtree, and an unmatched slot falls back to `default.tsx` on every navigation rather than
 keeping what it last rendered.
 
-### Intercepting routes are not implemented
+### Intercepting routes
 
-Ruvyxa does not implement the `(.)`, `(..)`, `(..)(..)`, and `(...)` folder conventions. A folder
-whose name opens with one of them fails route discovery with **RUV1005**, wherever it sits under
-`app/` — including inside a `@slot` folder.
+`(.)`, `(..)`, `(..)(..)`, and `(...)` mark a folder as an **overlay** on a route that already
+exists. A soft navigation to the URL it names renders it into a parallel-route slot while the page
+underneath stays mounted; a hard load of the same URL renders the ordinary page.
 
-The check exists because the convention used to do something else quietly. A route group needs a
-trailing `)`, so `app/feed/(.)photo/` was not stripped as one: it became a literal URL segment and
-published a real page at `/feed/(.)photo` — a view written to be shown over another route, given its
-own public address. Inside a `@slot` the same folder matched no URL and rendered nothing at all.
+```text
+app/gallery/
+├── @modal/
+│   ├── (.)photo/page.tsx   ← shown over /gallery when the router navigates to /gallery/photo
+│   └── default.tsx         ← shown the rest of the time
+├── layout.tsx              ← receives `modal` alongside `children`
+├── page.tsx
+└── photo/page.tsx          ← what /gallery/photo renders on its own
+```
 
-Rename the folder to an ordinary segment, and render the overlay from a route the layout already
-composes — a parallel slot, or client state that keeps the underlying page mounted.
+The marker says which level the segment after it belongs to, counted in **URL** levels — a route
+group or a slot folder contributes none. For `app/gallery/@modal/(.)photo`, `(.)` means the level
+`app/gallery`, so the target is `/gallery/photo`. `(..)` climbs one level, `(..)(..)` two, and
+`(...)` starts from the app root.
 
-### A complete route-state boundary
+Three rules make this predictable rather than magic:
+
+- **The real route must exist.** An interception is an overlay, so a reload, a shared link, or a new
+  tab still has to render something. A marker whose target no page answers fails the build with
+  **RUV1006**.
+- **The folder must live inside an `@name` slot.** That is the thing an overlay replaces; outside
+  one there is nowhere to put it, and the build fails with **RUV1005**.
+- **Only a soft navigation intercepts.** The overlay ships inside the bundle of the page you are
+  standing on, which is what lets it open with no request at all — and also why arriving from
+  anywhere else shows the real page.
+
+`router.back()` closes an overlay: the interception pushed one history entry, so popping it returns
+the URL to the page still mounted underneath.
+
+While an overlay is open, `usePathname()` **inside the route tree** still reports the mounted page —
+that page is what is mounted, and `template.tsx` is keyed on it, so reporting the overlay's URL
+would remount the very page the overlay sits on. The overlay component receives the intercepted URL
+and its parameters as its own `requestPath` and `params` props, and the router snapshot (what a
+component outside the tree sees) follows the address bar.
+
+### A complete route-state boundary### A complete route-state boundary
 
 Put the three special files beside the segment they should protect. The closest matching file wins,
 so this structure gives all product pages a loading UI, error retry, and product-specific 404

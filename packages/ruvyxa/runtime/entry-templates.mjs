@@ -14,6 +14,8 @@
  * step.
  */
 
+import { compareCodeUnits } from './order.mjs'
+
 /** Global that carries the shared routing React context across bundles. */
 export const ROUTE_CONTEXT_GLOBAL = '__RUVYXA_ROUTE_CONTEXT__'
 
@@ -65,6 +67,15 @@ export const ROUTE_REGISTRY_GLOBAL = '__RUVYXA_ROUTES__'
 const SHELL_REGISTRY_GLOBAL = '__RUVYXA_SHELLS__'
 
 /**
+ * Global registry of route pattern to the URLs that route can intercept.
+ *
+ * Separate from the tree registry because the router reads it *before* it
+ * decides whether a navigation is a route change at all: an intercepted URL
+ * never swaps the mounted route.
+ */
+export const INTERCEPT_REGISTRY_GLOBAL = '__RUVYXA_INTERCEPTS__'
+
+/**
  * Global carrying the route pattern this document was served from.
  *
  * The registry above is keyed by pattern (`/blog/[slug]`), not by URL, so the
@@ -77,6 +88,41 @@ export const ROUTE_CONTEXT_LOCAL = '__ruvyxaRouteContext'
 
 /** Local name the emitted prelude binds the error/not-found boundary class to. */
 export const ROUTE_BOUNDARY_LOCAL = '__ruvyxaBoundary'
+
+/** Local name the emitted prelude binds the interception-aware slot resolver to. */
+export const ROUTE_SLOT_LOCAL = '__ruvyxaSlot'
+
+/**
+ * The slot resolver a route with interceptions emits.
+ *
+ * A slot normally renders one fixed component. An interception replaces that
+ * content for as long as the URL names it, while the page underneath stays
+ * mounted — so the slot has to be decided per render rather than baked in.
+ * `ctx.intercept` is set by the client router and is absent on the server and
+ * on a hard load, which is what makes a refresh show the real page.
+ *
+ * A slot may carry an interception without having a default of its own, so
+ * `Default` is nullable rather than assumed.
+ *
+ * Mirrors `ROUTE_SLOT_PRELUDE` in `crates/ruvyxa_bundler/src/output.rs`.
+ */
+export const ROUTE_SLOT_PRELUDE = `function ${'__ruvyxaSlot'}(ctx, level, name, Default, intercepts) {
+  const active = ctx.intercept
+  if (active && active.level === level && active.name === name) {
+    for (const entry of intercepts) {
+      if (entry[0] === active.target) {
+        return React.createElement(entry[1], {
+          params: active.params ?? {},
+          requestPath: active.path ?? ctx.path,
+        })
+      }
+    }
+  }
+  return Default
+    ? React.createElement(Default, { params: ctx.params ?? {}, requestPath: ctx.path })
+    : null
+}
+`
 
 /** Local name bound to the route-metadata merge helper. */
 export const META_RESOLVE_LOCAL = '__ruvyxaResolveMeta'
@@ -355,12 +401,14 @@ export function routeContextPrelude() {
  * @param {string[]} templatePaths `template.tsx` files, root first.
  * @returns {{ layout: string|null, template: string|null }[]}
  */
-export function wrapperLevels(layoutPaths = [], templatePaths = [], slots = []) {
+export function wrapperLevels(layoutPaths = [], templatePaths = [], slots = [], intercepts = []) {
   const normalize = (value) => value.replace(/\\/g, '/').replace(/\/+$/, '')
   const directory = (file) => normalize(file).replace(/\/[^/]*$/, '')
   const levels = new Map()
   const at = (key) => {
-    if (!levels.has(key)) levels.set(key, { layout: null, template: null, slots: null })
+    if (!levels.has(key)) {
+      levels.set(key, { layout: null, template: null, slots: null, intercepts: [] })
+    }
     return levels.get(key)
   }
 
@@ -376,6 +424,18 @@ export function wrapperLevels(layoutPaths = [], templatePaths = [], slots = []) 
     const level = at(normalize(slot.level))
     level.slots ??= {}
     level.slots[slot.name] = `Slot${index}`
+  })
+  // An interception merges on the same key a slot does: it replaces that slot's
+  // content while the page underneath stays mounted, so it belongs to the level
+  // whose layout receives the prop. `levelDir` is only the merge key; `level` in
+  // the emitted entry is the route id both hosts spell the same way.
+  intercepts.forEach((intercept, index) => {
+    at(normalize(intercept.levelDir)).intercepts.push({
+      name: intercept.name,
+      level: intercept.levelId,
+      target: intercept.target,
+      component: `Intercept${index}`,
+    })
   })
 
   // Root-first. A shorter directory is always an ancestor here, because every
@@ -403,7 +463,7 @@ export function wrapperLevels(layoutPaths = [], templatePaths = [], slots = []) 
  * @param {{ layout: string|null, template: string|null }[]} levels
  */
 export function wrapperLoop(layoutNames, levels = []) {
-  if (levels.every((level) => !level.template && !hasSlots(level))) {
+  if (levels.every((level) => !level.template && !hasSlots(level) && !hasIntercepts(level))) {
     return `  for (const Layout of [${layoutNames.join(', ')}].reverse()) {
     tree = React.createElement(Layout, null, tree)
   }`
@@ -421,6 +481,10 @@ function hasSlots(level) {
   return Boolean(level.slots) && Object.keys(level.slots).length > 0
 }
 
+function hasIntercepts(level) {
+  return Array.isArray(level.intercepts) && level.intercepts.length > 0
+}
+
 /**
  * The slot props one level's layout receives, or `null`.
  *
@@ -429,15 +493,47 @@ function hasSlots(level) {
  * source does not depend on the order a filesystem listed the directories in.
  */
 function slotProps(level) {
-  if (!hasSlots(level)) return 'null'
-  const props = Object.keys(level.slots)
-    .sort()
-    .map(
-      (name) =>
-        `${JSON.stringify(name)}: React.createElement(${level.slots[name]}, { params: ctx.params ?? {}, requestPath: ctx.path })`,
-    )
+  if (!hasSlots(level) && !hasIntercepts(level)) return 'null'
+  const defaults = level.slots ?? {}
+  const intercepts = level.intercepts ?? []
+  const names = [...new Set([...Object.keys(defaults), ...intercepts.map((entry) => entry.name)])]
+  names.sort(compareCodeUnits)
+  const props = names
+    .map((name) => {
+      const matching = intercepts.filter((entry) => entry.name === name)
+      // A slot nothing can intercept emits exactly the element it always did,
+      // so a project using parallel routes and nothing else keeps its bundle.
+      if (matching.length === 0) {
+        return `${JSON.stringify(name)}: React.createElement(${defaults[name]}, { params: ctx.params ?? {}, requestPath: ctx.path })`
+      }
+      const table = matching
+        .map((entry) => `[${JSON.stringify(entry.target)}, ${entry.component}]`)
+        .join(', ')
+      return `${JSON.stringify(name)}: ${ROUTE_SLOT_LOCAL}(ctx, ${JSON.stringify(matching[0].level)}, ${JSON.stringify(name)}, ${defaults[name] ?? 'null'}, [${table}])`
+    })
     .join(', ')
   return `{ ${props} }`
+}
+
+/**
+ * Publish what this route can intercept, for the client router to match.
+ *
+ * Only the metadata travels: the router needs to know *whether* a URL is
+ * intercepted from here, and the component that answers it is already in this
+ * bundle behind the emitted slot resolver.
+ *
+ * Mirrors `intercept_registry_statement()` in
+ * `crates/ruvyxa_bundler/src/output.rs`.
+ */
+export function interceptRegistryStatement(routePath, intercepts = []) {
+  if (intercepts.length === 0) return ''
+  const entries = intercepts
+    .map(
+      (intercept) =>
+        `{ level: ${JSON.stringify(intercept.level)}, name: ${JSON.stringify(intercept.name)}, target: ${JSON.stringify(intercept.target)} }`,
+    )
+    .join(', ')
+  return `;(globalThis.${INTERCEPT_REGISTRY_GLOBAL} ||= {})[${JSON.stringify(routePath)}] = [${entries}];`
 }
 
 export function routeTreeFunction({
@@ -616,6 +712,7 @@ export function clientEntrySource({
   pageName,
   layoutNames,
   routePath,
+  intercepts = [],
   requestPathLiteral,
   paramsLiteral,
   errorName = null,
@@ -633,14 +730,19 @@ export function clientEntrySource({
   const shell = loadingName
     ? `${routeShellFunction({ name: '__ruvyxaShell', layoutNames, routePath, loadingName, metaNames, levels })}\n${routeShellRegistration({ name: '__ruvyxaShell', routePath })}\n`
     : ''
+  // A route with no interceptions emits neither the resolver nor the table, so
+  // a project that has never heard of the convention keeps the bundle it had.
+  const slotResolver = intercepts.length > 0 ? `\n${ROUTE_SLOT_PRELUDE}` : ''
+  const interceptRegistry = interceptRegistryStatement(routePath, intercepts)
   return `import React from "react"
 import { hydrateRoot } from "react-dom/client"
 ${imports.join('\n')}
 
 ${routeContextPrelude()}
-${boundary}${meta}
+${boundary}${slotResolver}${meta}
 ${routeTreeFunction({ name: '__ruvyxaTree', pageName, layoutNames, routePath, errorName, loadingName, notFoundName, metaNames, levels })}
 ${routeRegistration({ name: '__ruvyxaTree', routePath })}
+${interceptRegistry}
 ${shell}
 
 ${clientBootstrapPrelude()}

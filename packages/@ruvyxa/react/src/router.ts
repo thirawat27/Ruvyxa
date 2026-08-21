@@ -53,6 +53,35 @@ export interface RouteContextValue {
   route: string
   /** Public server-component data for this exact route artifact, when enabled. */
   flight?: FlightValue
+  /**
+   * The intercepting route showing over this one, when a soft navigation
+   * opened it.
+   *
+   * Absent on the server and on a hard load, which is what makes a refresh
+   * render the intercepted URL's real page instead of the overlay.
+   */
+  intercept?: RouteInterceptState
+}
+
+/** An intercepting route the client router has opened over the mounted page. */
+export interface RouteInterceptState {
+  /** Route id of the level whose layout holds the slot (`app/feed`). */
+  level: string
+  /** Slot name the overlay replaces. */
+  name: string
+  /** Route pattern the interception covers. */
+  target: string
+  /** Parameters matched from the intercepted URL. */
+  params: RouteParams
+  /** The intercepted URL's pathname. */
+  path: string
+}
+
+/** What a route's bundle publishes about the URLs it can intercept. */
+interface InterceptRegistryEntry {
+  level: string
+  name: string
+  target: string
 }
 
 /** Options accepted by the imperative navigation methods. */
@@ -109,6 +138,7 @@ interface RouterGlobals {
    * would suspend immediately".
    */
   __RUVYXA_SHELLS__?: Record<string, TreeFactory>
+  __RUVYXA_INTERCEPTS__?: Record<string, InterceptRegistryEntry[]>
   __RUVYXA_ROOT__?: { render(tree: unknown): void }
   __RUVYXA_ROUTE_PARAMS__?: RouteParams
   __RUVYXA_REQUEST_PATH__?: string
@@ -332,6 +362,59 @@ function createRouter(): RouterInstance {
    * Returns whether the shell went up, which is what tells the rest of the
    * navigation that history has already been pushed for it.
    */
+  /**
+   * The interception this navigation opens, or `null` for an ordinary one.
+   *
+   * The table belongs to the route the user is *standing on*: an interception
+   * is an overlay that the mounted bundle already contains, which is what lets
+   * it open without a round trip. A visitor arriving at the same URL from
+   * anywhere else — a shared link, a reload, a route with no such table — gets
+   * the ordinary page, because nothing here answers.
+   */
+  function matchIntercept(
+    currentRoute: string,
+    target: string,
+    params: RouteParams,
+    pathname: string,
+  ): RouteInterceptState | null {
+    // Never overlay a route on itself: standing on the real page and following
+    // a link to it again is a refresh, not an interception.
+    if (currentRoute === target) return null
+    const entry = globals.__RUVYXA_INTERCEPTS__?.[currentRoute]?.find(
+      (candidate) => candidate.target === target,
+    )
+    if (!entry) return null
+    return { level: entry.level, name: entry.name, target, params, path: pathname }
+  }
+
+  /**
+   * Open an interception over the mounted page.
+   *
+   * The route, its parameters, and its payload are the ones already on screen —
+   * only the overlay and the URL change — so the page underneath keeps its
+   * state and its scroll position, and no bundle or payload is fetched.
+   */
+  function renderIntercept(
+    intercept: RouteInterceptState,
+    url: URL,
+    historyMode: 'push' | 'replace' | 'none',
+  ): boolean {
+    // The tree is rendered with the *mounted* page's pathname, not the
+    // intercepted one. `template.tsx` is keyed on it, so handing the tree a new
+    // path would remount every template on the chain — and with them the page
+    // the overlay exists to sit on top of. The overlay receives the intercepted
+    // URL and its parameters as props instead.
+    const rendered: RouteContextValue = { ...snapshot, intercept }
+    if (!renderRoute(rendered)) return false
+    pushHistoryEntry(url, historyMode)
+    // The snapshot follows the address bar, so `usePathname()` outside the
+    // route tree and `useSearchParams()` agree with what the user can see.
+    snapshot = { ...rendered, pathname: intercept.path }
+    search = url.search
+    emit()
+    return true
+  }
+
   function commitShell(
     context: RouteContextValue,
     url: URL,
@@ -517,8 +600,21 @@ function createRouter(): RouterInstance {
       return
     }
 
+    const pathname = canonicalRoutePath(url.pathname) ?? url.pathname
+
+    // Checked before anything is fetched: an interception renders from the
+    // bundle that is already running, so a navigation it answers costs no
+    // request at all.
+    const intercept = matchIntercept(snapshot.route, matched.route.path, matched.params, pathname)
+    if (intercept) {
+      pendingNavigationId = null
+      if (renderIntercept(intercept, url, historyMode)) return
+      // The mounted route could not re-render — fall through and treat this as
+      // the ordinary navigation it would have been without the overlay.
+    }
+
     const context: RouteContextValue = {
-      pathname: canonicalRoutePath(url.pathname) ?? url.pathname,
+      pathname,
       params: matched.params,
       route: matched.route.path,
     }

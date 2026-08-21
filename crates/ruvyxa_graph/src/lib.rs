@@ -54,6 +54,14 @@ pub struct RouteEntry {
     /// Parallel-route slots this route composes into its layouts.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub slots: Vec<RouteSlot>,
+    /// Interceptions reachable from this route, by the URL each one covers.
+    ///
+    /// Carried on the route the user is *standing on* rather than on the route
+    /// being intercepted, because that is the bundle that has to be able to
+    /// render the overlay without a round trip. The intercepted route keeps its
+    /// own entry untouched, which is what makes a hard load show the real page.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub intercepts: Vec<RouteIntercept>,
     pub server_modules: Vec<String>,
     pub client_modules: Vec<String>,
     pub runtime: RuntimeTarget,
@@ -256,6 +264,7 @@ pub fn discover_routes(options: DiscoverOptions) -> Result<RouteManifest> {
         let layout_chain = layout_chain(&app_dir, route_dir);
         let template_chain = template_chain(&app_dir, route_dir);
         let slots = route_slots(&app_dir, route_dir);
+        let intercepts = route_intercepts(&app_dir, route_dir)?;
 
         routes.push(RouteEntry {
             id,
@@ -265,6 +274,7 @@ pub fn discover_routes(options: DiscoverOptions) -> Result<RouteManifest> {
             layout_chain: layout_chain.clone(),
             template_chain,
             slots,
+            intercepts,
             server_modules: sibling_modules(
                 route_dir,
                 &["server.ts", "server.js", "action.ts", "action.js"],
@@ -289,6 +299,7 @@ pub fn discover_routes(options: DiscoverOptions) -> Result<RouteManifest> {
             .then_with(|| left.id.cmp(&right.id))
     });
     detect_conflicts(&routes)?;
+    detect_unreachable_intercepts(&routes)?;
 
     Ok(RouteManifest {
         app_dir,
@@ -890,21 +901,41 @@ fn intercepting_route_marker(segment: &str) -> Option<&'static str> {
         .find(|marker| segment.starts_with(marker))
 }
 
-/// Refuse intercepting-route directories before they become URL segments.
+/// How many route levels a marker climbs before the segment it names.
 ///
-/// Ruvyxa does not implement `(.)`/`(..)`/`(..)(..)`/`(...)`, and nothing
-/// stripped them either: the route-group branch needs a trailing `)`, so
-/// `app/feed/(.)photo/page.tsx` passed straight through [`route_segment`] and
-/// mounted a real, publicly reachable page at `/feed/(.)photo` — a view the
-/// author wrote as an interception and never meant to publish on its own URL.
-/// Inside an `@slot` the same directory matched no URL and rendered nothing.
-/// A convention this framework does not implement has to fail loudly rather
-/// than quietly do something else.
+/// `(...)` is the odd one: it restarts from the app root rather than climbing a
+/// fixed number of levels, so it is reported separately.
+fn intercept_climb(marker: &str) -> Option<usize> {
+    match marker {
+        "(.)" => Some(0),
+        "(..)" => Some(1),
+        "(..)(..)" => Some(2),
+        _ => None,
+    }
+}
+
+/// Whether a project-relative directory sits inside a parallel-route slot.
+fn is_inside_slot(relative: &Path) -> bool {
+    relative.components().any(|component| {
+        matches!(component, Component::Normal(name) if name.to_string_lossy().starts_with('@'))
+    })
+}
+
+/// Refuse intercepting-route directories that no slot can render.
 ///
-/// This walks directories rather than checking the segments of discovered
-/// routes, because the route walk skips `@slot` folders and a marker inside one
-/// is just as wrong. `_`-prefixed folders are excluded: they opt out of routing
-/// entirely, so nothing there can reach a URL.
+/// An interception is an overlay: it replaces a parallel-route slot while the
+/// page underneath stays mounted, so it only means something inside an `@name`
+/// folder. Outside one there is nothing to render it into, and the folder used
+/// to become a literal URL segment instead — the route-group branch needs a
+/// trailing `)`, so `app/feed/(.)photo/page.tsx` passed straight through
+/// [`route_segment`] and mounted a real, publicly reachable page at
+/// `/feed/(.)photo`, a view the author wrote as an interception and never meant
+/// to publish on its own URL.
+///
+/// This walks directories rather than the segments of discovered routes,
+/// because the route walk skips `@slot` folders. `_`-prefixed folders are
+/// excluded: they opt out of routing entirely, so nothing there can reach a
+/// URL.
 fn reject_intercepting_routes(app_dir: &Path) -> Result<()> {
     let mut offenders = WalkDir::new(app_dir)
         .into_iter()
@@ -918,6 +949,12 @@ fn reject_intercepting_routes(app_dir: &Path) -> Result<()> {
         .filter_map(|entry| {
             let name = entry.file_name().to_string_lossy().into_owned();
             let marker = intercepting_route_marker(&name)?;
+            let relative = entry.path().strip_prefix(app_dir).ok()?;
+            // Inside a slot the folder is a real interception, resolved by
+            // `route_intercepts`. Everywhere else it is a mistake.
+            if is_inside_slot(relative) {
+                return None;
+            }
             Some((entry.path().to_path_buf(), name, marker))
         })
         .collect::<Vec<_>>();
@@ -928,12 +965,12 @@ fn reject_intercepting_routes(app_dir: &Path) -> Result<()> {
     let Some((path, name, marker)) = offenders.into_iter().next() else {
         return Ok(());
     };
-    Err(Diagnostic::new("RUV1005", "Intercepting routes are not supported")
+    Err(Diagnostic::new("RUV1005", "Intercepting route is outside a parallel-route slot")
         .explain(format!(
-            "`{name}` opens with the intercepting-route marker `{marker}`. Ruvyxa does not implement intercepting routes, and without this check the folder becomes a literal URL segment instead."
+            "`{name}` opens with the intercepting-route marker `{marker}`, but it does not live inside an `@name` folder. An interception replaces a slot while the page underneath stays mounted, so there is nowhere to render this one."
         ))
         .at_file(&path)
-        .suggest("Rename the folder to an ordinary route segment, and render the intercepted view from a route the layout already composes or from a client-side modal.")
+        .suggest("Move the folder inside a parallel-route slot beside the layout that should show it, such as `@modal`, or rename it to an ordinary route segment.")
         .into())
 }
 
@@ -1010,6 +1047,29 @@ fn layout_chain(app_dir: &Path, route_dir: &Path) -> Vec<String> {
     nested_chain(app_dir, route_dir, "layout.tsx")
 }
 
+/// One intercepting route reachable from a particular route.
+///
+/// `app/feed/@modal/(.)photo/page.tsx` declares that a soft navigation to
+/// `/feed/photo` should render `page.tsx` into the `modal` slot of the layout
+/// at `app/feed`, leaving whatever is already on screen mounted underneath. A
+/// hard load of `/feed/photo` is unaffected: it renders `app/feed/photo`, the
+/// ordinary route, which must exist for the interception to be accepted at all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RouteIntercept {
+    /// Directory holding the `@name` folder, as a route id (`app/feed`).
+    pub level: String,
+    /// Slot name without the `@`, which is the prop the layout receives.
+    pub name: String,
+    /// Route pattern this interception covers, in the same shape as
+    /// [`RouteEntry::path`] so one matcher answers both.
+    pub target: String,
+    /// The marker the author wrote, kept for diagnostics.
+    pub marker: String,
+    /// File that renders the interception.
+    pub file: PathBuf,
+}
+
 /// One parallel-route slot resolved for a particular route.
 ///
 /// A `@name` directory beside a `layout.tsx` declares a slot that layout
@@ -1058,6 +1118,170 @@ fn route_slots(app_dir: &Path, route_dir: &Path) -> Vec<RouteSlot> {
         slots.extend(slots_at_level(app_dir, &level, remaining));
     }
     slots
+}
+
+/// Interceptions in scope for a route, level order then slot name then target.
+///
+/// Walks the same directory chain the layout, template, and slot chains do. At
+/// each level, every `@name` folder is searched for children whose first
+/// segment carries an intercepting-route marker, and each one is resolved to
+/// the URL it covers.
+///
+/// The target is computed from the *level's* URL rather than from the slot
+/// folder, because a slot contributes no URL segment: for
+/// `app/feed/@modal/(.)photo`, `(.)` means "the level `app/feed` is on", so the
+/// target is `/feed/photo`.
+fn route_intercepts(app_dir: &Path, route_dir: &Path) -> Result<Vec<RouteIntercept>> {
+    let Ok(relative) = route_dir.strip_prefix(app_dir) else {
+        return Ok(Vec::new());
+    };
+    let segments = relative
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value.to_os_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+
+    let mut intercepts = Vec::new();
+    let mut level = app_dir.to_path_buf();
+    for depth in 0..=segments.len() {
+        if depth > 0 {
+            level.push(&segments[depth - 1]);
+        }
+        intercepts.extend(intercepts_at_level(app_dir, &level)?);
+    }
+    // Directory order is filesystem order, and this list decides the order the
+    // generated entry emits its lookup table in.
+    intercepts.sort_by(|left, right| {
+        (&left.level, &left.name, &left.target).cmp(&(&right.level, &right.name, &right.target))
+    });
+    intercepts.dedup();
+    Ok(intercepts)
+}
+
+/// Every interception declared by an `@name` folder directly inside `level`.
+fn intercepts_at_level(app_dir: &Path, level: &Path) -> Result<Vec<RouteIntercept>> {
+    let Ok(entries) = fs::read_dir(level) else {
+        return Ok(Vec::new());
+    };
+    let level_relative = level.strip_prefix(app_dir).unwrap_or(Path::new(""));
+    let level_path = route_path_from_dir(level_relative)?;
+
+    let mut slots = entries
+        .filter_map(std::result::Result::ok)
+        .filter(|entry| entry.file_type().is_ok_and(|kind| kind.is_dir()))
+        .filter_map(|entry| {
+            let raw = entry.file_name();
+            let name = raw.to_string_lossy();
+            let name = name.strip_prefix('@')?.to_string();
+            (!name.is_empty()).then(|| (name, entry.path()))
+        })
+        .collect::<Vec<_>>();
+    slots.sort_by(|left, right| left.0.cmp(&right.0));
+
+    let mut intercepts = Vec::new();
+    for (name, slot_dir) in slots {
+        for (file, marker, target_segments) in intercept_pages(&slot_dir) {
+            let target = intercept_target_path(&level_path, marker, &target_segments)
+                .ok_or_else(|| intercept_climbs_past_root(&file, marker, &level_path))?;
+            intercepts.push(RouteIntercept {
+                level: directory_id(app_dir, level),
+                name: name.clone(),
+                target,
+                marker: marker.to_string(),
+                file,
+            });
+        }
+    }
+    Ok(intercepts)
+}
+
+/// Page files under a slot whose first segment carries a marker.
+///
+/// Returns the page, the marker, and the URL segments it contributes — the
+/// first segment with the marker stripped, then everything below it.
+fn intercept_pages(slot_dir: &Path) -> Vec<(PathBuf, &'static str, Vec<String>)> {
+    let mut found = Vec::new();
+    for entry in WalkDir::new(slot_dir)
+        .into_iter()
+        .filter_map(std::result::Result::ok)
+    {
+        if !entry.file_type().is_file() {
+            continue;
+        }
+        if !matches!(
+            entry.file_name().to_string_lossy().as_ref(),
+            "page.tsx" | "page.jsx" | "page.md" | "page.mdx"
+        ) {
+            continue;
+        }
+        let Some(page_dir) = entry.path().parent() else {
+            continue;
+        };
+        let Ok(relative) = page_dir.strip_prefix(slot_dir) else {
+            continue;
+        };
+        let mut segments = relative
+            .components()
+            .filter_map(|component| match component {
+                Component::Normal(value) => Some(value.to_string_lossy().into_owned()),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        let Some(first) = segments.first().cloned() else {
+            continue;
+        };
+        let Some(marker) = intercepting_route_marker(&first) else {
+            continue;
+        };
+        let head = first[marker.len()..].to_string();
+        if head.is_empty() {
+            continue;
+        }
+        segments[0] = head;
+        found.push((entry.path().to_path_buf(), marker, segments));
+    }
+    found
+}
+
+/// The URL an interception covers, or `None` when the marker climbs past root.
+fn intercept_target_path(level_path: &str, marker: &str, segments: &[String]) -> Option<String> {
+    let base = match intercept_climb(marker) {
+        // `(...)` restarts from the app root rather than climbing levels.
+        None => "/".to_string(),
+        Some(climb) => drop_route_segments(level_path, climb)?,
+    };
+    let mut parts = base
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    parts.extend(segments.iter().cloned());
+    Some(format!("/{}", parts.join("/")))
+}
+
+/// Drop `count` trailing segments from a route path, or `None` if it cannot.
+fn drop_route_segments(path: &str, count: usize) -> Option<String> {
+    let mut parts = path
+        .split('/')
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if parts.len() < count {
+        return None;
+    }
+    parts.truncate(parts.len() - count);
+    Some(format!("/{}", parts.join("/")))
+}
+
+fn intercept_climbs_past_root(file: &Path, marker: &str, level_path: &str) -> RuvyxaError {
+    Diagnostic::new("RUV1006", "Intercepting route climbs above the app root")
+        .explain(format!(
+            "`{marker}` asks for a level above `{level_path}`, and there is nothing there. A marker can only climb as many levels as the slot's own route has."
+        ))
+        .at_file(file)
+        .suggest("Use a shorter marker, or `(...)` to name a path from the app root.")
+        .into()
 }
 
 /// Every `@name` folder directly inside `level`, resolved against `remaining`.
@@ -1643,6 +1867,51 @@ fn has_static_params_export(code: &str) -> bool {
         .any(|name| has_export_function(code, name))
 }
 
+/// Refuse an interception whose target no route serves.
+///
+/// An interception is an overlay on an ordinary route: a hard load, a refresh,
+/// or a shared link has to render the real page, so the real page has to exist.
+/// Without this check `app/feed/@modal/(.)phto/page.tsx` — one typo — would be
+/// a modal that never opens and a URL that 404s, with nothing said at build
+/// time.
+///
+/// Targets are compared by match shape rather than by text, so
+/// `(.)photo/[id]` and `app/feed/photo/[photoId]` are the same URL to this
+/// check, exactly as they are to the router.
+fn detect_unreachable_intercepts(routes: &[RouteEntry]) -> Result<()> {
+    let pages = routes
+        .iter()
+        .filter(|route| route.kind == RouteKind::Page)
+        .map(|route| route_match_shape(&route.path))
+        .collect::<BTreeSet<_>>();
+
+    // One route can carry the same interception as another; report the first
+    // by sorted file path so two machines name the same file.
+    let mut unreachable = routes
+        .iter()
+        .flat_map(|route| route.intercepts.iter())
+        .filter(|intercept| !pages.contains(&route_match_shape(&intercept.target)))
+        .collect::<Vec<_>>();
+    unreachable
+        .sort_by(|left, right| (&left.file, &left.target).cmp(&(&right.file, &right.target)));
+    unreachable.dedup_by(|left, right| left.file == right.file && left.target == right.target);
+
+    let Some(intercept) = unreachable.into_iter().next() else {
+        return Ok(());
+    };
+    Err(Diagnostic::new("RUV1006", "Intercepting route has no route to intercept")
+        .explain(format!(
+            "`{}` intercepts `{}`, and no page answers that URL. An interception is an overlay: a hard load or a shared link still has to render the real page.",
+            intercept.marker, intercept.target
+        ))
+        .at_file(&intercept.file)
+        .suggest(format!(
+            "Add the page the interception stands in for, at the route `{}`, or correct the folder name.",
+            intercept.target
+        ))
+        .into())
+}
+
 fn detect_conflicts(routes: &[RouteEntry]) -> Result<()> {
     let mut seen = BTreeMap::<String, &RouteEntry>::new();
 
@@ -1988,6 +2257,255 @@ mod tests {
         assert_eq!(manifest.routes[0].path, "/");
     }
 
+    /// Both hosts discover the same interceptions from the same tree.
+    ///
+    /// The JavaScript half is
+    /// `tests/packages/ruvyxa/intercepting-routes-contract.test.mjs` over
+    /// `collectIntercepts` in `packages/ruvyxa/runtime/worker-pool.mjs`, which
+    /// is what `ruvyxa dev` builds its client entries from. An interception one
+    /// host composes and the other does not is a modal that opens in
+    /// production and does nothing locally.
+    #[test]
+    fn interception_discovery_matches_the_shared_conformance_table() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/intercepting-route-conformance.json"
+        ))
+        .unwrap();
+
+        for case in fixture["cases"].as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            let temp = tempfile::tempdir().unwrap();
+            let app = temp.path().join("app");
+            for file in case["tree"].as_array().unwrap() {
+                let path = app.join(file.as_str().unwrap());
+                fs::create_dir_all(path.parent().unwrap()).unwrap();
+                fs::write(&path, "export default function Fixture() {}").unwrap();
+            }
+            let route_dir = match case["routeDir"].as_str().unwrap() {
+                "" => app.clone(),
+                relative => app.join(relative),
+            };
+
+            let actual = route_intercepts(&app, &route_dir)
+                .unwrap_or_else(|error| panic!("{name} failed discovery: {error}"))
+                .into_iter()
+                .map(|intercept| {
+                    serde_json::json!({
+                        "level": intercept.level,
+                        "name": intercept.name,
+                        "target": intercept.target,
+                        "file": intercept
+                            .file
+                            .strip_prefix(&app)
+                            .unwrap_or(&intercept.file)
+                            .display()
+                            .to_string()
+                            .replace('\\', "/"),
+                    })
+                })
+                .collect::<Vec<_>>();
+            assert_eq!(
+                &serde_json::Value::Array(actual),
+                &case["intercepts"],
+                "{name} disagrees with the shared fixture"
+            );
+        }
+    }
+
+    /// Each marker resolves to the URL it actually covers.
+    ///
+    /// The target comes from the *level* the slot sits on, not from the slot
+    /// folder, because a slot contributes no URL segment of its own. Getting
+    /// that wrong is invisible until a modal silently never opens.
+    #[test]
+    fn every_marker_resolves_to_the_url_it_covers() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        // The ordinary routes the interceptions stand in for.
+        for real in ["photo", "feed/photo", "feed/albums/photo"] {
+            fs::create_dir_all(app.join(real)).unwrap();
+            fs::write(
+                app.join(real).join("page.tsx"),
+                "export default function Real() {}",
+            )
+            .unwrap();
+        }
+        fs::create_dir_all(app.join("feed/albums")).unwrap();
+        fs::write(app.join("page.tsx"), "export default function Home() {}").unwrap();
+        fs::write(
+            app.join("feed/albums/page.tsx"),
+            "export default function Albums() {}",
+        )
+        .unwrap();
+        fs::write(
+            app.join("feed/layout.tsx"),
+            "export default function L() {}",
+        )
+        .unwrap();
+
+        // One slot on `app/feed/albums`, so every climb has somewhere to go.
+        for (folder, _expected) in [
+            ("(.)photo", "/feed/albums/photo"),
+            ("(..)photo", "/feed/photo"),
+            ("(..)(..)photo", "/photo"),
+            ("(...)photo", "/photo"),
+        ] {
+            fs::create_dir_all(app.join("feed/albums/@modal").join(folder)).unwrap();
+            fs::write(
+                app.join("feed/albums/@modal").join(folder).join("page.tsx"),
+                "export default function Modal() {}",
+            )
+            .unwrap();
+        }
+        fs::create_dir_all(app.join("feed/albums/photo")).unwrap();
+        fs::write(
+            app.join("feed/albums/photo/page.tsx"),
+            "export default function Real() {}",
+        )
+        .unwrap();
+
+        let manifest = discover_routes(DiscoverOptions::new(&app)).unwrap();
+        let albums = manifest
+            .routes
+            .iter()
+            .find(|route| route.path == "/feed/albums")
+            .expect("the level's own route is discovered");
+        let mut targets = albums
+            .intercepts
+            .iter()
+            .map(|intercept| (intercept.marker.as_str(), intercept.target.as_str()))
+            .collect::<Vec<_>>();
+        targets.sort_unstable();
+        assert_eq!(
+            targets,
+            vec![
+                ("(.)", "/feed/albums/photo"),
+                ("(..)", "/feed/photo"),
+                ("(..)(..)", "/photo"),
+                ("(...)", "/photo"),
+            ]
+        );
+        assert!(
+            albums
+                .intercepts
+                .iter()
+                .all(|intercept| intercept.name == "modal"),
+            "every interception names the slot it renders into"
+        );
+    }
+
+    /// An interception is carried by the routes that can show it, not by the
+    /// route it covers.
+    ///
+    /// The intercepted route keeps its own entry untouched, which is what makes
+    /// a hard load render the real page instead of the overlay.
+    #[test]
+    fn an_interception_is_carried_by_the_routes_below_its_level() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        fs::create_dir_all(app.join("feed/@modal/(.)photo")).unwrap();
+        fs::create_dir_all(app.join("feed/photo")).unwrap();
+        fs::create_dir_all(app.join("elsewhere")).unwrap();
+        fs::write(app.join("page.tsx"), "export default function Home() {}").unwrap();
+        fs::write(
+            app.join("feed/layout.tsx"),
+            "export default function L() {}",
+        )
+        .unwrap();
+        fs::write(
+            app.join("feed/page.tsx"),
+            "export default function Feed() {}",
+        )
+        .unwrap();
+        fs::write(
+            app.join("feed/photo/page.tsx"),
+            "export default function Photo() {}",
+        )
+        .unwrap();
+        fs::write(
+            app.join("feed/@modal/(.)photo/page.tsx"),
+            "export default function Modal() {}",
+        )
+        .unwrap();
+        fs::write(
+            app.join("elsewhere/page.tsx"),
+            "export default function Elsewhere() {}",
+        )
+        .unwrap();
+
+        let manifest = discover_routes(DiscoverOptions::new(&app)).unwrap();
+        let by_path = |path: &str| {
+            manifest
+                .routes
+                .iter()
+                .find(|route| route.path == path)
+                .unwrap_or_else(|| panic!("{path} must be discovered"))
+        };
+
+        assert_eq!(by_path("/feed").intercepts.len(), 1, "the level itself");
+        assert_eq!(
+            by_path("/feed/photo").intercepts.len(),
+            1,
+            "a route below the level composes the same layout"
+        );
+        assert!(
+            by_path("/").intercepts.is_empty(),
+            "a route above the level has no layout to render it into"
+        );
+        assert!(
+            by_path("/elsewhere").intercepts.is_empty(),
+            "a sibling route never composes that layout"
+        );
+    }
+
+    /// An interception with no real route behind it fails the build.
+    #[test]
+    fn rejects_an_interception_whose_target_no_route_serves() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        fs::create_dir_all(app.join("feed/@modal/(.)phto")).unwrap();
+        fs::write(app.join("page.tsx"), "export default function Home() {}").unwrap();
+        fs::write(
+            app.join("feed/layout.tsx"),
+            "export default function L() {}",
+        )
+        .unwrap();
+        fs::write(
+            app.join("feed/page.tsx"),
+            "export default function Feed() {}",
+        )
+        .unwrap();
+        fs::write(
+            app.join("feed/@modal/(.)phto/page.tsx"),
+            "export default function Modal() {}",
+        )
+        .unwrap();
+
+        let error = discover_routes(DiscoverOptions::new(&app)).unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("RUV1006"), "{text}");
+        assert!(text.contains("/feed/phto"), "{text}");
+    }
+
+    /// A marker cannot climb above the app root.
+    #[test]
+    fn rejects_an_interception_that_climbs_past_the_app_root() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        fs::create_dir_all(app.join("@modal/(..)photo")).unwrap();
+        fs::create_dir_all(app.join("photo")).unwrap();
+        fs::write(app.join("page.tsx"), "export default function Home() {}").unwrap();
+        fs::write(app.join("photo/page.tsx"), "export default function P() {}").unwrap();
+        fs::write(
+            app.join("@modal/(..)photo/page.tsx"),
+            "export default function Modal() {}",
+        )
+        .unwrap();
+
+        let error = discover_routes(DiscoverOptions::new(&app)).unwrap_err();
+        assert!(error.to_string().contains("RUV1006"), "{error}");
+    }
+
     /// Every intercepting-route marker is refused, and refused as itself.
     ///
     /// Before this, none of the four was stripped or reported: the route-group
@@ -2021,27 +2539,48 @@ mod tests {
         }
     }
 
-    /// A marker inside a parallel-route slot is refused too.
+    /// A marker inside a parallel-route slot is an interception, not an error.
     ///
-    /// The route walk skips `@slot` folders, so a check written over discovered
-    /// route paths would have missed the canonical Next.js modal shape
-    /// entirely — and there it silently rendered nothing rather than
-    /// publishing a URL, which is the same convention failing quietly in the
-    /// other direction.
+    /// This is the shape the convention exists for — `@modal/(.)photo` is the
+    /// canonical Next.js modal — and it is the one place the folder has
+    /// somewhere to render into. It used to be rejected along with every other
+    /// marker, and before that it silently matched no URL and rendered nothing.
     #[test]
-    fn rejects_an_intercepting_route_inside_a_parallel_slot() {
+    fn an_intercepting_route_inside_a_parallel_slot_is_resolved() {
         let temp = tempfile::tempdir().unwrap();
         let app = temp.path().join("app");
         fs::create_dir_all(app.join("@modal/(.)photo")).unwrap();
+        fs::create_dir_all(app.join("photo")).unwrap();
         fs::write(app.join("page.tsx"), "export default function Home() {}").unwrap();
+        fs::write(app.join("layout.tsx"), "export default function L() {}").unwrap();
         fs::write(
-            app.join("@modal/(.)photo/page.tsx"),
+            app.join("photo/page.tsx"),
             "export default function Photo() {}",
         )
         .unwrap();
+        fs::write(
+            app.join("@modal/(.)photo/page.tsx"),
+            "export default function Modal() {}",
+        )
+        .unwrap();
 
-        let error = discover_routes(DiscoverOptions::new(&app)).unwrap_err();
-        assert!(error.to_string().contains("RUV1005"));
+        let manifest = discover_routes(DiscoverOptions::new(&app)).unwrap();
+        let home = manifest
+            .routes
+            .iter()
+            .find(|route| route.path == "/")
+            .expect("the root route is discovered");
+        assert_eq!(home.intercepts.len(), 1);
+        assert_eq!(home.intercepts[0].target, "/photo");
+        assert_eq!(home.intercepts[0].name, "modal");
+        assert_eq!(home.intercepts[0].marker, "(.)");
+        // The slot folder still contributes no URL of its own.
+        let paths = manifest
+            .routes
+            .iter()
+            .map(|route| route.path.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(paths, vec!["/", "/photo"]);
     }
 
     /// The marker scan must not swallow the conventions beside it.

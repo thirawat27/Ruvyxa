@@ -217,6 +217,7 @@ pub fn bundle_shared_route_modules(
         layouts: Vec::new(),
         templates: Vec::new(),
         slots: Vec::new(),
+        intercepts: Vec::new(),
         request_path: "/__ruvyxa/shared".to_string(),
         target: BundleTarget::Client,
         options,
@@ -1021,6 +1022,7 @@ mod tests {
             layouts,
             templates: Vec::new(),
             slots: Vec::new(),
+            intercepts: Vec::new(),
             request_path: request_path.to_string(),
             target: BundleTarget::Client,
             options: BundleOptions {

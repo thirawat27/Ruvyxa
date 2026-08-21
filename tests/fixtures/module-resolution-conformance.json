@@ -1,0 +1,305 @@
+{
+  "contract": "ruvyxa.module-resolution",
+  "schemaVersion": 1,
+  "why": [
+    "Ruvyxa resolves every import twice. crates/ruvyxa_bundler/src/resolver.rs",
+    "walks the graph for `ruvyxa build`; packages/ruvyxa/runtime/compiler.mjs",
+    "walks it again for the dev server, the prerender workers, and every",
+    "function artifact an adapter assembles. A specifier the two answer",
+    "differently is not a build error — it is a bundle that runs different code",
+    "than the one the build reported.",
+    "",
+    "They did answer differently. compiler.mjs used createRequire().resolve(),",
+    "which is Node's CommonJS resolver and matches only the conditions",
+    "[\"node\", \"require\"]. For any dual package the Rust client bundler took",
+    "browser/import while the JavaScript graph inlined the require build into",
+    "the same browser bundle, and an edge function artifact never saw `worker`",
+    "or `edge-light` at all.",
+    "",
+    "`exportsJson` holds the exports field as source text rather than as parsed",
+    "JSON, because condition order is load-bearing and a JSON object read into",
+    "a sorted map would lose it. Both hosts parse the text themselves.",
+    "",
+    "Two departures from Node are deliberate and are asserted here rather than",
+    "described in a comment: `require` is a second pass instead of a peer of",
+    "`import` (Node takes the first supported condition in author order, which",
+    "hands CommonJS to a bundler that emits ESM), and a subpath the map does",
+    "not cover falls through to the legacy fields instead of failing, with only",
+    "an explicit null blocking.",
+    "",
+    "Two behaviours here are asserted because both hosts share them rather than",
+    "because Node agrees. A star that expands to nothing produces a target that",
+    "does not exist on disk, so the probe fails harmlessly rather than being",
+    "refused up front. And a subpath is matched against the map alone: neither",
+    "host implements Node's separate refusal of a specifier ending in `/`.",
+    "",
+    "`result` is the ordered list of package-relative targets, or the string",
+    "\"blocked\" for an explicit null, or \"unmatched\" when the map answers",
+    "nothing and the legacy fields take over. Existence on disk is not part of",
+    "this table: each host probes the file system its own way."
+  ],
+  "exports": [
+    {
+      "name": "author order decides between conditions that compete",
+      "exportsJson": "{\"browser\":\"./browser.js\",\"import\":\"./esm.js\",\"default\":\"./fallback.js\"}",
+      "key": ".",
+      "results": {
+        "client": ["./browser.js"],
+        "ssr": ["./esm.js"],
+        "edge": ["./esm.js"]
+      }
+    },
+    {
+      "name": "require is a second pass even when the author writes it first",
+      "exportsJson": "{\"require\":\"./cjs.js\",\"import\":\"./esm.mjs\"}",
+      "key": ".",
+      "results": {
+        "client": ["./esm.mjs"],
+        "ssr": ["./esm.mjs"],
+        "edge": ["./esm.mjs"]
+      }
+    },
+    {
+      "name": "a package that ships only CommonJS still resolves off the edge target",
+      "exportsJson": "{\"require\":\"./cjs.js\"}",
+      "key": ".",
+      "results": {
+        "client": ["./cjs.js"],
+        "ssr": ["./cjs.js"],
+        "edge": "unmatched"
+      }
+    },
+    {
+      "name": "node wins for ssr and is invisible to the browser",
+      "exportsJson": "{\"node\":\"./node.js\",\"browser\":\"./browser.js\",\"default\":\"./default.js\"}",
+      "key": ".",
+      "results": {
+        "client": ["./browser.js"],
+        "ssr": ["./node.js"],
+        "edge": ["./default.js"]
+      }
+    },
+    {
+      "name": "worker and edge-light are the edge target's own conditions",
+      "exportsJson": "{\"node\":\"./node.js\",\"worker\":\"./worker.js\",\"browser\":\"./browser.js\",\"default\":\"./default.js\"}",
+      "key": ".",
+      "results": {
+        "client": ["./browser.js"],
+        "ssr": ["./node.js"],
+        "edge": ["./worker.js"]
+      }
+    },
+    {
+      "name": "edge-light answers when worker is absent",
+      "exportsJson": "{\"edge-light\":\"./edge.js\",\"node\":\"./node.js\",\"default\":\"./default.js\"}",
+      "key": ".",
+      "results": {
+        "client": ["./default.js"],
+        "ssr": ["./node.js"],
+        "edge": ["./edge.js"]
+      }
+    },
+    {
+      "name": "an explicit null blocks the subpath outright",
+      "exportsJson": "{\"./internal\":null,\"./public\":\"./public.js\"}",
+      "key": "./internal",
+      "results": { "client": "blocked", "ssr": "blocked", "edge": "blocked" }
+    },
+    {
+      "name": "a subpath the map does not cover is unmatched, not blocked",
+      "exportsJson": "{\"./public\":\"./public.js\"}",
+      "key": "./private",
+      "results": { "client": "unmatched", "ssr": "unmatched", "edge": "unmatched" }
+    },
+    {
+      "name": "a bare condition map answers only the root key",
+      "exportsJson": "{\"import\":\"./esm.js\"}",
+      "key": "./sub",
+      "results": { "client": "unmatched", "ssr": "unmatched", "edge": "unmatched" }
+    },
+    {
+      "name": "a string exports field answers only the root key",
+      "exportsJson": "\"./index.js\"",
+      "key": ".",
+      "results": {
+        "client": ["./index.js"],
+        "ssr": ["./index.js"],
+        "edge": ["./index.js"]
+      }
+    },
+    {
+      "name": "a string exports field does not answer a subpath",
+      "exportsJson": "\"./index.js\"",
+      "key": "./sub",
+      "results": { "client": "unmatched", "ssr": "unmatched", "edge": "unmatched" }
+    },
+    {
+      "name": "an array offers its entries in order",
+      "exportsJson": "{\".\":[\"./first.js\",\"./second.js\"]}",
+      "key": ".",
+      "results": {
+        "client": ["./first.js", "./second.js"],
+        "ssr": ["./first.js", "./second.js"],
+        "edge": ["./first.js", "./second.js"]
+      }
+    },
+    {
+      "name": "a target that is not package-relative is not a target",
+      "exportsJson": "{\".\":\"lodash\"}",
+      "key": ".",
+      "results": { "client": "unmatched", "ssr": "unmatched", "edge": "unmatched" }
+    },
+    {
+      "name": "nested condition objects are walked",
+      "exportsJson": "{\".\":{\"browser\":{\"import\":\"./browser.mjs\",\"require\":\"./browser.cjs\"},\"default\":\"./node.js\"}}",
+      "key": ".",
+      "results": {
+        "client": ["./browser.mjs"],
+        "ssr": ["./node.js"],
+        "edge": ["./node.js"]
+      }
+    },
+    {
+      "name": "a wildcard subpath substitutes every star in the target",
+      "exportsJson": "{\"./features/*\":\"./dist/features/*.js\"}",
+      "key": "./features/alpha",
+      "results": {
+        "client": ["./dist/features/alpha.js"],
+        "ssr": ["./dist/features/alpha.js"],
+        "edge": ["./dist/features/alpha.js"]
+      }
+    },
+    {
+      "name": "the longest matching prefix wins over a catch-all star",
+      "exportsJson": "{\"./*\":\"./dist/*.js\",\"./features/*\":\"./features/*.mjs\"}",
+      "key": "./features/alpha",
+      "results": {
+        "client": ["./features/alpha.mjs"],
+        "ssr": ["./features/alpha.mjs"],
+        "edge": ["./features/alpha.mjs"]
+      }
+    },
+    {
+      "name": "a longer suffix breaks a prefix tie",
+      "exportsJson": "{\"./a/*\":\"./short/*.js\",\"./a/*.css\":\"./long/*.css\"}",
+      "key": "./a/theme.css",
+      "results": {
+        "client": ["./long/theme.css"],
+        "ssr": ["./long/theme.css"],
+        "edge": ["./long/theme.css"]
+      }
+    },
+    {
+      "name": "an exact subpath beats a wildcard that also matches",
+      "exportsJson": "{\"./*\":\"./dist/*.js\",\"./client\":\"./client-entry.js\"}",
+      "key": "./client",
+      "results": {
+        "client": ["./client-entry.js"],
+        "ssr": ["./client-entry.js"],
+        "edge": ["./client-entry.js"]
+      }
+    },
+    {
+      "name": "a star may expand to nothing, and the path it builds simply is not there",
+      "exportsJson": "{\"./a*\":\"./dist/*.js\"}",
+      "key": "./a",
+      "results": {
+        "client": ["./dist/.js"],
+        "ssr": ["./dist/.js"],
+        "edge": ["./dist/.js"]
+      }
+    },
+    {
+      "name": "a pattern with two stars is not a pattern",
+      "exportsJson": "{\"./*/*\":\"./dist/*.js\"}",
+      "key": "./a/b",
+      "results": { "client": "unmatched", "ssr": "unmatched", "edge": "unmatched" }
+    },
+    {
+      "name": "an unknown condition is skipped rather than taken",
+      "exportsJson": "{\"deno\":\"./deno.js\",\"bun\":\"./bun.js\",\"default\":\"./default.js\"}",
+      "key": ".",
+      "results": {
+        "client": ["./default.js"],
+        "ssr": ["./default.js"],
+        "edge": ["./default.js"]
+      }
+    },
+    {
+      "name": "a condition map with no supported condition is unmatched",
+      "exportsJson": "{\"deno\":\"./deno.js\",\"bun\":\"./bun.js\"}",
+      "key": ".",
+      "results": { "client": "unmatched", "ssr": "unmatched", "edge": "unmatched" }
+    },
+    {
+      "name": "module competes inside the first pass, ahead of require",
+      "exportsJson": "{\"require\":\"./cjs.js\",\"module\":\"./esm.js\"}",
+      "key": ".",
+      "results": {
+        "client": ["./esm.js"],
+        "ssr": ["./esm.js"],
+        "edge": ["./esm.js"]
+      }
+    }
+  ],
+  "specifiers": [
+    { "specifier": "react", "package": "react", "key": "." },
+    { "specifier": "react/jsx-runtime", "package": "react", "key": "./jsx-runtime" },
+    { "specifier": "@scope/pkg", "package": "@scope/pkg", "key": "." },
+    { "specifier": "@scope/pkg/sub/path", "package": "@scope/pkg", "key": "./sub/path" },
+    { "specifier": "pkg/deep/nested/file.js", "package": "pkg", "key": "./deep/nested/file.js" },
+    { "specifier": "./relative", "package": null, "key": null },
+    { "specifier": "/absolute", "package": null, "key": null },
+    { "specifier": "", "package": null, "key": null },
+    { "specifier": "@scope", "package": null, "key": null }
+  ],
+  "legacyEntries": [
+    {
+      "name": "browser competes only for a browser bundle",
+      "manifest": { "browser": "./browser.js", "module": "./esm.js", "main": "./cjs.js" },
+      "key": ".",
+      "results": {
+        "client": ["browser.js", "esm.js", "cjs.js", "index"],
+        "ssr": ["esm.js", "cjs.js", "index"],
+        "edge": ["esm.js", "cjs.js", "index"]
+      }
+    },
+    {
+      "name": "module is preferred to main on every target",
+      "manifest": { "module": "./esm.js", "main": "./cjs.js" },
+      "key": ".",
+      "results": {
+        "client": ["esm.js", "cjs.js", "index"],
+        "ssr": ["esm.js", "cjs.js", "index"],
+        "edge": ["esm.js", "cjs.js", "index"]
+      }
+    },
+    {
+      "name": "a package with no entry fields falls back to the directory layout",
+      "manifest": {},
+      "key": ".",
+      "results": { "client": ["index"], "ssr": ["index"], "edge": ["index"] }
+    },
+    {
+      "name": "a subpath is taken literally and the fields do not apply",
+      "manifest": { "main": "./cjs.js" },
+      "key": "./deep/file.js",
+      "results": {
+        "client": ["deep/file.js"],
+        "ssr": ["deep/file.js"],
+        "edge": ["deep/file.js"]
+      }
+    },
+    {
+      "name": "the object form of browser names no entry point",
+      "manifest": { "browser": { "./a.js": "./b.js" }, "main": "./cjs.js" },
+      "key": ".",
+      "results": {
+        "client": ["cjs.js", "index"],
+        "ssr": ["cjs.js", "index"],
+        "edge": ["cjs.js", "index"]
+      }
+    }
+  ],
+  "unsafeRelativePaths": ["", "../escape.js", "a/../../escape.js", "/absolute.js", "a\\b.js", "./"]
+}

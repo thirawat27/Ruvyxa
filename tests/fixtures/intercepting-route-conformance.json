@@ -1,0 +1,284 @@
+{
+  "contract": "ruvyxa.intercepting-routes",
+  "schemaVersion": 1,
+  "why": [
+    "An intercepting route is discovered twice. `route_intercepts()` in",
+    "crates/ruvyxa_graph/src/lib.rs answers for `ruvyxa build`, and",
+    "`collectIntercepts()` in packages/ruvyxa/runtime/worker-pool.mjs answers",
+    "for `ruvyxa dev`. An interception one host composes and the other does not",
+    "is a modal that opens in production and does nothing locally — or the",
+    "reverse, which is worse.",
+    "",
+    "Parallel-route slots already had this shape and no table; that gap is why",
+    "the two `collectSlots`/`route_slots` implementations are only kept in step",
+    "by a comment. This file covers the interception half.",
+    "",
+    "The target is computed from the *level's* URL, never from the slot folder:",
+    "a slot contributes no URL segment, so for `app/feed/@modal/(.)photo` the",
+    "marker `(.)` means the level `app/feed`, and the target is `/feed/photo`.",
+    "Getting that wrong is invisible until a modal silently never opens.",
+    "",
+    "`tree` lists files to create under the app directory; every one is written",
+    "with placeholder contents. `routeDir` is the directory of the route being",
+    "resolved, relative to the app directory (empty string for the root route).",
+    "`intercepts` is the expected result in emission order — level route id,",
+    "slot name, target pattern, and the file relative to the app directory.",
+    "",
+    "One rule is deliberately absent: a marker that climbs above the app root is",
+    "a build error (RUV1006) on the Rust side and is skipped by the worker,",
+    "which never sees such a tree because discovery already refused it. Each",
+    "host covers that in its own suite."
+  ],
+  "cases": [
+    {
+      "name": "a marker at the root level targets a root route",
+      "tree": ["page.tsx", "layout.tsx", "photo/page.tsx", "@modal/(.)photo/page.tsx"],
+      "routeDir": "",
+      "intercepts": [
+        {
+          "level": "app",
+          "name": "modal",
+          "target": "/photo",
+          "file": "@modal/(.)photo/page.tsx"
+        }
+      ]
+    },
+    {
+      "name": "the level's own URL is the base, not the slot folder",
+      "tree": [
+        "page.tsx",
+        "feed/layout.tsx",
+        "feed/page.tsx",
+        "feed/photo/page.tsx",
+        "feed/@modal/(.)photo/page.tsx"
+      ],
+      "routeDir": "feed",
+      "intercepts": [
+        {
+          "level": "app/feed",
+          "name": "modal",
+          "target": "/feed/photo",
+          "file": "feed/@modal/(.)photo/page.tsx"
+        }
+      ]
+    },
+    {
+      "name": "a route below the level inherits the same interception",
+      "tree": [
+        "page.tsx",
+        "feed/layout.tsx",
+        "feed/page.tsx",
+        "feed/photo/page.tsx",
+        "feed/@modal/(.)photo/page.tsx"
+      ],
+      "routeDir": "feed/photo",
+      "intercepts": [
+        {
+          "level": "app/feed",
+          "name": "modal",
+          "target": "/feed/photo",
+          "file": "feed/@modal/(.)photo/page.tsx"
+        }
+      ]
+    },
+    {
+      "name": "a route above the level composes no layout that could show it",
+      "tree": [
+        "page.tsx",
+        "feed/layout.tsx",
+        "feed/page.tsx",
+        "feed/photo/page.tsx",
+        "feed/@modal/(.)photo/page.tsx"
+      ],
+      "routeDir": "",
+      "intercepts": []
+    },
+    {
+      "name": "one level up",
+      "tree": [
+        "photo/page.tsx",
+        "feed/layout.tsx",
+        "feed/page.tsx",
+        "feed/@modal/(..)photo/page.tsx"
+      ],
+      "routeDir": "feed",
+      "intercepts": [
+        {
+          "level": "app/feed",
+          "name": "modal",
+          "target": "/photo",
+          "file": "feed/@modal/(..)photo/page.tsx"
+        }
+      ]
+    },
+    {
+      "name": "two levels up",
+      "tree": [
+        "photo/page.tsx",
+        "feed/albums/layout.tsx",
+        "feed/albums/page.tsx",
+        "feed/albums/@modal/(..)(..)photo/page.tsx"
+      ],
+      "routeDir": "feed/albums",
+      "intercepts": [
+        {
+          "level": "app/feed/albums",
+          "name": "modal",
+          "target": "/photo",
+          "file": "feed/albums/@modal/(..)(..)photo/page.tsx"
+        }
+      ]
+    },
+    {
+      "name": "from the app root, however deep the slot is",
+      "tree": [
+        "photo/page.tsx",
+        "feed/albums/layout.tsx",
+        "feed/albums/page.tsx",
+        "feed/albums/@modal/(...)photo/page.tsx"
+      ],
+      "routeDir": "feed/albums",
+      "intercepts": [
+        {
+          "level": "app/feed/albums",
+          "name": "modal",
+          "target": "/photo",
+          "file": "feed/albums/@modal/(...)photo/page.tsx"
+        }
+      ]
+    },
+    {
+      "name": "segments below the marker extend the target",
+      "tree": [
+        "feed/layout.tsx",
+        "feed/page.tsx",
+        "feed/album/[id]/page.tsx",
+        "feed/@modal/(.)album/[id]/page.tsx"
+      ],
+      "routeDir": "feed",
+      "intercepts": [
+        {
+          "level": "app/feed",
+          "name": "modal",
+          "target": "/feed/album/[id]",
+          "file": "feed/@modal/(.)album/[id]/page.tsx"
+        }
+      ]
+    },
+    {
+      "name": "a route group in the level contributes no URL segment",
+      "tree": [
+        "(marketing)/feed/layout.tsx",
+        "(marketing)/feed/page.tsx",
+        "feed/photo/page.tsx",
+        "(marketing)/feed/@modal/(.)photo/page.tsx"
+      ],
+      "routeDir": "(marketing)/feed",
+      "intercepts": [
+        {
+          "level": "app/(marketing)/feed",
+          "name": "modal",
+          "target": "/feed/photo",
+          "file": "(marketing)/feed/@modal/(.)photo/page.tsx"
+        }
+      ]
+    },
+    {
+      "name": "two slots at one level are ordered by slot name",
+      "tree": [
+        "feed/layout.tsx",
+        "feed/page.tsx",
+        "feed/photo/page.tsx",
+        "feed/preview/page.tsx",
+        "feed/@modal/(.)photo/page.tsx",
+        "feed/@aside/(.)preview/page.tsx"
+      ],
+      "routeDir": "feed",
+      "intercepts": [
+        {
+          "level": "app/feed",
+          "name": "aside",
+          "target": "/feed/preview",
+          "file": "feed/@aside/(.)preview/page.tsx"
+        },
+        {
+          "level": "app/feed",
+          "name": "modal",
+          "target": "/feed/photo",
+          "file": "feed/@modal/(.)photo/page.tsx"
+        }
+      ]
+    },
+    {
+      "name": "one slot carrying two interceptions is ordered by target",
+      "tree": [
+        "feed/layout.tsx",
+        "feed/page.tsx",
+        "feed/album/page.tsx",
+        "feed/photo/page.tsx",
+        "feed/@modal/(.)photo/page.tsx",
+        "feed/@modal/(.)album/page.tsx"
+      ],
+      "routeDir": "feed",
+      "intercepts": [
+        {
+          "level": "app/feed",
+          "name": "modal",
+          "target": "/feed/album",
+          "file": "feed/@modal/(.)album/page.tsx"
+        },
+        {
+          "level": "app/feed",
+          "name": "modal",
+          "target": "/feed/photo",
+          "file": "feed/@modal/(.)photo/page.tsx"
+        }
+      ]
+    },
+    {
+      "name": "a slot page with no marker is a parallel route, not an interception",
+      "tree": [
+        "feed/layout.tsx",
+        "feed/page.tsx",
+        "feed/@modal/default.tsx",
+        "feed/@modal/page.tsx"
+      ],
+      "routeDir": "feed",
+      "intercepts": []
+    },
+    {
+      "name": "a marker with nothing after it names no segment",
+      "tree": ["feed/layout.tsx", "feed/page.tsx", "feed/@modal/(.)/page.tsx"],
+      "routeDir": "feed",
+      "intercepts": []
+    },
+    {
+      "name": "interceptions at two different levels both reach a deep route",
+      "tree": [
+        "layout.tsx",
+        "page.tsx",
+        "photo/page.tsx",
+        "feed/layout.tsx",
+        "feed/page.tsx",
+        "feed/photo/page.tsx",
+        "@modal/(.)photo/page.tsx",
+        "feed/@modal/(.)photo/page.tsx"
+      ],
+      "routeDir": "feed/photo",
+      "intercepts": [
+        {
+          "level": "app",
+          "name": "modal",
+          "target": "/photo",
+          "file": "@modal/(.)photo/page.tsx"
+        },
+        {
+          "level": "app/feed",
+          "name": "modal",
+          "target": "/feed/photo",
+          "file": "feed/@modal/(.)photo/page.tsx"
+        }
+      ]
+    }
+  ]
+}

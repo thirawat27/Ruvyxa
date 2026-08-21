@@ -44,11 +44,18 @@ const WORKER_RUNTIME_FILES: &[&str] = &[
     // identity: the rule could change while every hash above stayed equal.
     "origin-policy.mjs",
     "compiler.mjs",
+    // Which file a bare specifier names. `compiler.mjs` delegates that whole
+    // decision here, so a change to a condition list changes which modules a
+    // prerendered page was built from — the definition of stale output.
+    "package-exports.mjs",
     // The ordering rule the worker's cache keys and fingerprints sort by. A
     // change here reorders key material, so it belongs in cache identity.
     "order.mjs",
     "paths.mjs",
     "entry-templates.mjs",
+    // Which interceptions a route composes. A change here changes the client
+    // entry the worker emits, so prerendered output built from it is stale.
+    "route-intercepts.mjs",
     "flight.mjs",
     "react-compiler.mjs",
 ];

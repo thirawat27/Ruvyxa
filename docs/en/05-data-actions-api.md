@@ -34,6 +34,11 @@ the complete process cache. Call `cacheStats()` to obtain `{ size, maxEntries }`
 
 ## Public Flight payloads
 
+> **Not React Server Components.** Ruvyxa's Flight is its own thing: a per-route JSON payload a page
+> opts into, fetched during soft navigation. It is not React's Flight wire format, `flight` is not a
+> server component, and `'use client'` modules are not turned into client references. Ruvyxa does
+> not implement RSC — see [Documentation scope](18-documentation-scope-and-sources.md).
+
 A page can opt into a version-bound public payload by exporting `flight`. The function receives only
 the canonical path and route params, and must return JSON-safe data. Client components read the
 matched payload with `useFlight<T>()` from `@ruvyxa/react`. Ruvyxa rejects Flight requests with
