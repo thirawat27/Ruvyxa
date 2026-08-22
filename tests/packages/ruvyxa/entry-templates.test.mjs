@@ -1,5 +1,10 @@
 import assert from 'node:assert/strict'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { createRequire } from 'node:module'
+import os from 'node:os'
+import path from 'node:path'
 import { describe, it } from 'node:test'
+import { pathToFileURL } from 'node:url'
 
 import {
   clientEntrySource,
@@ -134,6 +139,58 @@ describe('entry-templates route composition', () => {
     })
     assert.match(ppr, /onShellReady\(\)/)
     assert.doesNotMatch(ppr, /onShellReady\(\)[\s\S]*reject\(error\)[\s\S]*onShellError/)
+  })
+
+  it('renders an async component when react-dom/server has only the web renderer', async () => {
+    // Bun and Deno resolve `react-dom/server` to an entry point that exports
+    // `renderToReadableStream` and no `renderToPipeableStream`. The legacy
+    // `renderToString` this entry used to fall back to is synchronous: a
+    // component that awaits anything makes it throw "A component suspended
+    // while responding to synchronous input" instead of rendering, which is
+    // every async server component on those two runtimes.
+    const dir = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-web-stream-'))
+    try {
+      const require = createRequire(import.meta.url)
+      const reactUrl = pathToFileURL(require.resolve('react')).href
+      const serverUrl = pathToFileURL(require.resolve('react-dom/server')).href
+
+      // The shape Bun and Deno hand the entry: the web renderer and the legacy
+      // string renderer, with no pipeable one to prefer.
+      await writeFile(
+        path.join(dir, 'web-server.mjs'),
+        `import * as server from ${JSON.stringify(serverUrl)}\n` +
+          `export const renderToReadableStream = server.renderToReadableStream\n` +
+          `export const renderToString = server.renderToString\n`,
+      )
+      await writeFile(
+        path.join(dir, 'page.mjs'),
+        `import React from ${JSON.stringify(reactUrl)}\n` +
+          `export default async function Page() {\n` +
+          `  const note = await Promise.resolve("awaited on the server")\n` +
+          `  return React.createElement("html", null, React.createElement("body", null, note))\n` +
+          `}\n`,
+      )
+      const source = nodeSsrEntrySource({
+        imports: ['import Page from "./page.mjs"'],
+        pageName: 'Page',
+        layoutNames: [],
+        routePath: '/',
+      })
+        .replace('"react"', JSON.stringify(reactUrl))
+        .replace('"react-dom/server"', '"./web-server.mjs"')
+      await writeFile(path.join(dir, 'entry.mjs'), source)
+
+      const { render } = await import(pathToFileURL(path.join(dir, 'entry.mjs')).href)
+      const html = await render({ path: '/', params: {} })
+
+      assert.match(html, /^<!doctype html>/i)
+      assert.match(html, /awaited on the server/)
+      // Nothing was read until the render finished, so the document holds the
+      // finished markup rather than a fallback and the script that replaces it.
+      assert.doesNotMatch(html, /\$RC/)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
   })
 })
 
