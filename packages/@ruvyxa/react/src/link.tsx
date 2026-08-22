@@ -1,3 +1,10 @@
+'use client'
+
+// A link is interactive: it holds refs, subscribes to hover and
+// viewport, and hands the click to the router. None of that exists in the
+// react-server build, so a server component importing it must get a
+// reference to the browser module rather than the module itself.
+
 import {
   useCallback,
   useEffect,

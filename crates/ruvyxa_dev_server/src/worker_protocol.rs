@@ -67,6 +67,18 @@ pub enum WorkerRequest {
         /// right answer for a worker that could not render it at all.
         #[serde(rename = "serverComponents")]
         server_components: bool,
+        /// A `<form action={fn}>` submitted by a browser running no JavaScript.
+        ///
+        /// Absent for every ordinary render, which is what keeps this request
+        /// retryable — see [`WorkerRequest::is_idempotent`]. Present, it makes
+        /// the render run a server function first, and running it twice is
+        /// exactly what a retry must not do.
+        #[serde(rename = "formContentType", skip_serializing_if = "Option::is_none")]
+        form_content_type: Option<String>,
+        /// The submitted bytes, base64-encoded because a multipart body is not
+        /// text and the worker protocol is line-delimited JSON.
+        #[serde(rename = "formBody", skip_serializing_if = "Option::is_none")]
+        form_body: Option<String>,
     },
     #[serde(rename = "flight")]
     Flight {
@@ -164,6 +176,116 @@ pub enum WorkerRequest {
         #[serde(rename = "serverComponents")]
         server_components: bool,
     },
+    /// Compile one shared browser module — React and its family.
+    ///
+    /// A build gives every route one shared chunk; an on-demand bundle has no
+    /// cross-route analysis to build one from, so each would otherwise inline
+    /// its own React and a soft navigation would render a component from one
+    /// copy into a root owned by another.
+    #[serde(rename = "clientVendor")]
+    ClientVendor {
+        id: String,
+        #[serde(rename = "projectRoot")]
+        project_root: String,
+        name: String,
+    },
+    /// Render a server-components route's Flight payload, with no HTML.
+    ///
+    /// What a soft navigation asks for: the browser already has a document and
+    /// a running React root, so the SSR pass would render markup nothing reads.
+    /// Unlike the `flight` request above — Ruvyxa's own public, cacheable route
+    /// payload — this one is request-scoped and carries the visitor's headers,
+    /// because a server component may read `cookies()` exactly as it does on a
+    /// full render.
+    #[serde(rename = "rscPayload")]
+    RscPayload {
+        id: String,
+        #[serde(rename = "projectRoot")]
+        project_root: String,
+        #[serde(rename = "appDir")]
+        app_dir: String,
+        #[serde(rename = "pageFile")]
+        page_file: String,
+        #[serde(rename = "requestPath")]
+        request_path: String,
+        #[serde(rename = "requestTarget")]
+        request_target: String,
+        #[serde(rename = "routePath")]
+        route_path: String,
+        params: RouteParams,
+        #[serde(rename = "headerPairs")]
+        header_pairs: Vec<(String, String)>,
+        method: String,
+    },
+    /// Render a server-components document as a stream.
+    ///
+    /// The same render as `Ssr` with `server_components`, framed as a body the
+    /// host can pass through as it arrives. Only for a route whose document is
+    /// produced per request: anything cached or pre-rendered has to become a
+    /// string, and a stream is the wrong shape for that.
+    #[serde(rename = "rscDocument")]
+    RscDocument {
+        id: String,
+        #[serde(rename = "projectRoot")]
+        project_root: String,
+        #[serde(rename = "appDir")]
+        app_dir: String,
+        #[serde(rename = "pageFile")]
+        page_file: String,
+        #[serde(rename = "requestPath")]
+        request_path: String,
+        #[serde(rename = "requestTarget")]
+        request_target: String,
+        #[serde(rename = "routePath")]
+        route_path: String,
+        params: RouteParams,
+        #[serde(rename = "headerPairs")]
+        header_pairs: Vec<(String, String)>,
+        method: String,
+        /// A `<form action={fn}>` submitted without JavaScript. See the same
+        /// pair on [`WorkerRequest::Ssr`].
+        #[serde(rename = "formContentType", skip_serializing_if = "Option::is_none")]
+        form_content_type: Option<String>,
+        #[serde(rename = "formBody", skip_serializing_if = "Option::is_none")]
+        form_body: Option<String>,
+    },
+    /// Run one of a server-components route's server functions.
+    ///
+    /// The reference names the function; the route names the graphs searched
+    /// for it. Both are needed because a server function is reachable from the
+    /// route whose page or client components import it, and there is no
+    /// build-wide index of every action in the application to consult instead.
+    ///
+    /// The body arrives base64-encoded because React's own encoder produces
+    /// either UTF-8 text or multipart bytes depending on the arguments, and this
+    /// protocol is line-delimited JSON: one encoding that survives both is
+    /// cheaper than a second framing.
+    #[serde(rename = "rscAction")]
+    RscAction {
+        id: String,
+        #[serde(rename = "projectRoot")]
+        project_root: String,
+        #[serde(rename = "appDir")]
+        app_dir: String,
+        #[serde(rename = "pageFile")]
+        page_file: String,
+        #[serde(rename = "requestPath")]
+        request_path: String,
+        #[serde(rename = "requestTarget")]
+        request_target: String,
+        #[serde(rename = "routePath")]
+        route_path: String,
+        params: RouteParams,
+        #[serde(rename = "headerPairs")]
+        header_pairs: Vec<(String, String)>,
+        method: String,
+        /// The `"<module>#<export>"` id the browser asked to call.
+        reference: String,
+        #[serde(rename = "contentType")]
+        content_type: String,
+        /// Base64 of the request body exactly as it arrived.
+        body: String,
+    },
     /// Ask for a server-components route's browser entry *source*, not a bundle.
     ///
     /// The build compiles it with the Rust bundler, which is where `NODE_ENV`
@@ -252,6 +374,10 @@ impl WorkerRequest {
             | Self::Ping { id, .. }
             | Self::Warmup { id, .. }
             | Self::Ssg { id, .. }
+            | Self::ClientVendor { id, .. }
+            | Self::RscPayload { id, .. }
+            | Self::RscDocument { id, .. }
+            | Self::RscAction { id, .. }
             | Self::RscClientEntry { id, .. }
             | Self::StaticParams { id, .. } => id,
         }
@@ -266,14 +392,22 @@ impl WorkerRequest {
 
     /// Returns `true` if this request type is safe to retry without risk of
     /// duplicate side effects. Actions and API calls are NOT idempotent.
+    ///
+    /// A page render normally is: it reads and returns markup. One carrying a
+    /// posted form is not, because the server function runs before the render
+    /// — the same reason `Action` and `RscAction` are excluded.
     pub fn is_idempotent(&self) -> bool {
         matches!(
             self,
-            Self::Ssr { .. }
-                | Self::Flight { .. }
+            Self::Ssr {
+                form_body: None,
+                ..
+            } | Self::Flight { .. }
                 | Self::Ssg { .. }
                 | Self::StaticParams { .. }
                 | Self::Client { .. }
+                | Self::ClientVendor { .. }
+                | Self::RscPayload { .. }
                 | Self::RscClientEntry { .. }
                 | Self::Ping { .. }
                 | Self::Warmup { .. }
@@ -358,6 +492,16 @@ pub struct WorkerResponse {
     pub inputs_version: Option<String>,
     /// Absolute source files used by the compiled bundle.
     pub inputs: Option<Vec<PathBuf>>,
+    /// `'use server'` modules the browser graph reaches, with the source that
+    /// must stand in for each of them there.
+    ///
+    /// The build compiles that graph with the Rust bundler, which would
+    /// otherwise walk the real file — server code, in the action lane, and
+    /// rejected as `RUV1820` the moment a client component imports it. The text
+    /// travels rather than the rule so there is one implementation of what a
+    /// server reference looks like.
+    #[serde(rename = "serverReferences")]
+    pub server_references: Option<Vec<ServerReferenceSource>>,
     /// Browser entry source for a server-components route, from `rscClientEntry`.
     pub entry_source: Option<String>,
     /// React Flight payload for a server-components render.
@@ -367,6 +511,17 @@ pub struct WorkerResponse {
     /// on the wire because both things exist; naming this one `flight` too
     /// would have made one of the two silently win.
     pub rsc_payload: Option<String>,
+}
+
+/// One `'use server'` module and the source a browser graph must see instead.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct ServerReferenceSource {
+    /// The `ruv:s_…` id the module's exports are registered under.
+    pub id: String,
+    /// Absolute path of the real module, as the compiling graph resolved it.
+    pub file: PathBuf,
+    /// The stand-in source: references that post their arguments to the server.
+    pub source: String,
 }
 
 impl WorkerResponse {
@@ -428,6 +583,8 @@ mod tests {
             header_pairs: Vec::new(),
             method: "GET".to_string(),
             server_components: true,
+            form_content_type: None,
+            form_body: None,
         };
         let ssg = WorkerRequest::Ssg {
             id: "2".to_string(),
@@ -460,6 +617,44 @@ mod tests {
                 "{json}"
             );
         }
+    }
+
+    /// A page render is retryable; one that runs a server function first is not.
+    ///
+    /// The pool retries an idempotent request against a fresh worker when one
+    /// dies mid-flight. A `<form action={fn}>` submission is a page render by
+    /// shape and an action by effect, and retrying it would run the action a
+    /// second time — charge the card twice, send the mail twice. The absent
+    /// body is what tells the two apart, so the pattern below matches on it
+    /// rather than on the variant.
+    #[test]
+    fn a_page_render_carrying_a_submitted_form_is_not_retried() {
+        let render = |form_body: Option<String>| WorkerRequest::Ssr {
+            id: "1".to_string(),
+            project_root: "/project".to_string(),
+            app_dir: "/project/app".to_string(),
+            page_file: "/project/app/page.tsx".to_string(),
+            request_path: "/".to_string(),
+            request_target: "/".to_string(),
+            route_path: "/".to_string(),
+            params: BTreeMap::new(),
+            header_pairs: Vec::new(),
+            method: "POST".to_string(),
+            server_components: true,
+            form_content_type: form_body
+                .as_ref()
+                .map(|_| "multipart/form-data; boundary=x".to_string()),
+            form_body,
+        };
+
+        assert!(render(None).is_idempotent());
+        assert!(!render(Some("LS14".to_string())).is_idempotent());
+
+        // Absent rather than null on the wire: a worker that predates form
+        // actions reads the same object it always did.
+        let json = serde_json::to_value(render(None)).unwrap();
+        assert!(json.get("formBody").is_none(), "{json}");
+        assert!(json.get("formContentType").is_none(), "{json}");
     }
 
     /// The browser entry for a server-components route comes back as source,
@@ -510,6 +705,8 @@ mod tests {
             server_components: false,
             header_pairs: Vec::new(),
             method: "GET".to_string(),
+            form_content_type: None,
+            form_body: None,
         };
 
         let value = serde_json::to_value(request).unwrap();

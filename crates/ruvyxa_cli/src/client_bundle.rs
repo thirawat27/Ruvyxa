@@ -60,7 +60,10 @@ pub(crate) struct CachedClientPlan {
     pub(crate) version: u8,
     pub(crate) dependency_hash: String,
     pub(crate) files: BTreeMap<PathBuf, String>,
-    pub(crate) module_paths: BTreeSet<PathBuf>,
+    /// Ordered, because the shared chunk is emitted in this order and a plan
+    /// read from disk has to place its modules where a freshly prepared one
+    /// would. Version 3 is where it stopped being a sorted set.
+    pub(crate) module_paths: Vec<PathBuf>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -85,7 +88,10 @@ pub(crate) struct CachedPrerenderArtifact {
 #[derive(Clone)]
 pub(crate) struct ClientRoutePlan {
     pub(crate) path: String,
-    pub(crate) module_paths: BTreeSet<PathBuf>,
+    /// This route's static modules in the order it evaluates them. See
+    /// [`ruvyxa_bundler::PreparedBundle::module_paths`] for why the order is
+    /// carried rather than sorted away.
+    pub(crate) module_paths: Vec<PathBuf>,
     pub(crate) prepared: Option<Arc<ruvyxa_bundler::PreparedBundle>>,
 }
 
@@ -162,6 +168,8 @@ pub(crate) fn emit_client_bundles(
         plugins,
         cache,
         &plugin_session,
+        // The analyzer path has no worker, so no server-components entries.
+        &ServerComponentEntries::default(),
     )
 }
 
@@ -175,7 +183,16 @@ pub(crate) fn emit_client_bundles_with_session(
     plugins: &[BuildPluginConfig],
     cache: RuvyxaBuildCache<'_>,
     plugin_session: &TypeScriptPluginBuildSession,
+    rsc_entries: &ServerComponentEntries,
 ) -> anyhow::Result<serde_json::Value> {
+    // A server-components route's browser bundle holds the `'use client'`
+    // modules its payload references, not the page — and only the
+    // `react-server` graph knows which those are, so it wrote the entry. The
+    // route is bundled here with every other one anyway: its modules have to
+    // join the shared-chunk analysis, or its bundle inlines a second copy of
+    // React and a soft navigation into it renders with two Reacts on the page.
+    let entry_source_for =
+        |route: &RouteEntry| rsc_entries.entries.get(&route.path).map(String::as_str);
     let page_routes = manifest
         .routes
         .iter()
@@ -183,16 +200,23 @@ pub(crate) fn emit_client_bundles_with_session(
         // `export const hydrate = false` pages ship no client bundle at all;
         // prerender injection and the serve path skip them via the same flag.
         .filter(|route| route.render.ships_client_bundle())
-        // A server-components route's browser bundle holds the modules its
-        // payload references, not the page — and only the `react-server` graph
-        // knows which those are. `emit_server_component_client_bundles` builds
-        // them through the graph that produced the payload.
-        .filter(|route| !route.render.server_components)
+        // A server-components route without its entry is skipped rather than
+        // bundled from the generated one, which imports the page — the module
+        // this pipeline exists to keep out of the browser. `ruvyxa analyze`
+        // takes that branch and omits such routes from its report; `ruvyxa
+        // build` always supplies them.
+        .filter(|route| {
+            !route.render.server_components || rsc_entries.entries.contains_key(&route.path)
+        })
         .cloned()
         .collect::<Vec<_>>();
     let parallelism = build_parallelism(build.parallelism, page_routes.len());
-    let bundle_context =
-        bundle_context_for_build(cache.dependency_hash, cache.directory, plugin_session)?;
+    let bundle_context = bundle_context_for_build(
+        cache.dependency_hash,
+        cache.directory,
+        plugin_session,
+        &rsc_entries.server_references,
+    )?;
     let artifact_cache_dir = cache.directory.to_path_buf();
     let artifact_dependency_hash = cache.dependency_hash.to_string();
     let artifact_fingerprints = ArtifactFingerprintCache::default();
@@ -214,6 +238,7 @@ pub(crate) fn emit_client_bundles_with_session(
                 &artifact_dependency_hash,
                 &plan_variant,
                 &artifact_fingerprints,
+                entry_source_for(route),
             )
         })?;
         let plans_by_route = plans
@@ -239,6 +264,7 @@ pub(crate) fn emit_client_bundles_with_session(
                     &artifact_dependency_hash,
                     "base",
                     &artifact_fingerprints,
+                    entry_source_for(route),
                 )
             })?;
             (bundles, Vec::new())
@@ -299,9 +325,12 @@ pub(crate) fn emit_client_bundles_with_session(
             )?;
             let bundles = bundle_routes_parallel(&page_routes, parallelism, |route| {
                 let plan = plans_by_route.get(&route.path);
+                // A set, not a list: this one answers "does this route read
+                // that module from the registry", and nothing about order.
                 let route_shared_modules = plan.map_or_else(BTreeSet::new, |plan| {
                     plan.module_paths
-                        .intersection(&executable_modules)
+                        .iter()
+                        .filter(|module| executable_modules.contains(*module))
                         .cloned()
                         .collect::<BTreeSet<_>>()
                 });
@@ -320,6 +349,7 @@ pub(crate) fn emit_client_bundles_with_session(
                     &artifact_dependency_hash,
                     &shared_chunk.file_name,
                     &artifact_fingerprints,
+                    entry_source_for(route),
                 )
             })?;
             (bundles, vec![shared_chunk])
@@ -339,6 +369,7 @@ pub(crate) fn emit_client_bundles_with_session(
                 &artifact_dependency_hash,
                 "base",
                 &artifact_fingerprints,
+                entry_source_for(route),
             )
         })?;
         (bundles, Vec::new())
@@ -449,12 +480,17 @@ pub(crate) fn emit_client_bundles_with_session(
             .and_then(|value| value.as_str())
             .unwrap_or("/")
             .to_string();
-        let hydration = page_routes
-            .iter()
-            .find(|entry| entry.path == route_path)
+        let page_route = page_routes.iter().find(|entry| entry.path == route_path);
+        let hydration = page_route
             .map(|entry| entry.render.hydration)
             .unwrap_or_default();
         route["hydration"] = serde_json::to_value(hydration)?;
+        // Read by the client router: a navigation into such a route fetches a
+        // Flight payload instead of calling a registered tree factory, because
+        // the page it would build a tree from is not in the bundle.
+        if page_route.is_some_and(|entry| entry.render.server_components) {
+            route["serverComponents"] = serde_json::Value::Bool(true);
+        }
         if matches!(hydration, HydrationMode::Idle | HydrationMode::Visible)
             && let Some(loader) = &hydration_loader
         {
@@ -712,6 +748,7 @@ pub(crate) fn bundle_client_route(
     dependency_hash: &str,
     cache_variant: &str,
     artifact_fingerprints: &ArtifactFingerprintCache,
+    entry_source: Option<&str>,
 ) -> anyhow::Result<ClientBundle> {
     if let Some(bundle) = load_client_artifact(
         cache_dir,
@@ -726,7 +763,17 @@ pub(crate) fn bundle_client_route(
         ruvyxa_bundler::bundle_prepared(prepared, shared_modules)
     } else {
         let input = client_bundle_input(root, app_dir, route, build)?;
-        ruvyxa_bundler::bundle_with_shared_modules(input, bundle_context, shared_modules)
+        match entry_source {
+            // A server-components route with no cached plan: the entry the
+            // `react-server` graph wrote is the only description of what its
+            // browser bundle contains.
+            Some(source) => {
+                ruvyxa_bundler::bundle_entry_source(source, input, bundle_context, shared_modules)
+            }
+            None => {
+                ruvyxa_bundler::bundle_with_shared_modules(input, bundle_context, shared_modules)
+            }
+        }
     }
     .map_err(|e| anyhow::anyhow!("Ruvyxa Bundler error for {}: {e}", route.path))?;
 
@@ -951,6 +998,7 @@ pub(crate) fn prepare_client_route_plan(
     dependency_hash: &str,
     cache_variant: &str,
     fingerprints: &ArtifactFingerprintCache,
+    entry_source: Option<&str>,
 ) -> anyhow::Result<ClientRoutePlan> {
     if let Some(module_paths) = load_client_plan(
         cache_dir,
@@ -968,14 +1016,19 @@ pub(crate) fn prepare_client_route_plan(
 
     let input = client_bundle_input(root, app_dir, route, build)?;
     let prepared = Arc::new(
-        ruvyxa_bundler::prepare_bundle(input, bundle_context)
-            .map_err(|error| anyhow::anyhow!("Ruvyxa Bundler error for {}: {error}", route.path))?,
+        match entry_source {
+            Some(source) => {
+                ruvyxa_bundler::prepare_bundle_entry_source(source, input, bundle_context)
+            }
+            None => ruvyxa_bundler::prepare_bundle(input, bundle_context),
+        }
+        .map_err(|error| anyhow::anyhow!("Ruvyxa Bundler error for {}: {error}", route.path))?,
     );
     let module_paths = prepared
         .module_paths()
         .into_iter()
         .map(|path| ruvyxa_diagnostics::normalized_canonical_path(&path))
-        .collect();
+        .collect::<Vec<_>>();
     let dependency_paths = prepared
         .dependency_paths()
         .into_iter()
@@ -1022,19 +1075,49 @@ pub(crate) fn client_bundle_options(
     })
 }
 
-pub(crate) fn shared_route_module_paths(plans: &[(usize, ClientRoutePlan)]) -> BTreeSet<PathBuf> {
-    let mut module_routes = BTreeMap::<PathBuf, BTreeSet<String>>::new();
+/// Modules more than one route evaluates, in the order the routes evaluate them.
+///
+/// Two answers in one pass, and the second is the one that used to be missing.
+/// *Which* modules is a counting question and order-free. *In what order* is
+/// not: a route bundle `import`s the shared chunk, so the whole chunk runs
+/// before the route's own first statement, and the route's import order stops
+/// deciding anything about the modules inside it. Whatever order this returns
+/// is the order the browser evaluates them in.
+///
+/// Sorting them by pathname — which is what collecting into a `BTreeSet` did —
+/// is a real reordering of the browser's work, and it is invisible until two
+/// modules have a load-order dependency the graph cannot express. One does:
+/// `react-server-dom-webpack/client.browser` reads a global that
+/// `rsc-client-install.mjs` defines, with no import between them, and sorted by
+/// path the reader came first and every server-components page stopped
+/// hydrating in production.
+///
+/// The order is taken from the routes themselves, first occurrence winning.
+/// Each route's list is already dependency-ordered, so a module lands ahead of
+/// everything that depends on it, and the routes are walked in a fixed order so
+/// two builds of one tree agree.
+pub(crate) fn shared_route_module_paths(plans: &[(usize, ClientRoutePlan)]) -> Vec<PathBuf> {
+    let mut module_routes = BTreeMap::<&PathBuf, BTreeSet<&str>>::new();
     for (_, plan) in plans {
         for module in &plan.module_paths {
             module_routes
-                .entry(module.clone())
+                .entry(module)
                 .or_default()
-                .insert(plan.path.clone());
+                .insert(plan.path.as_str());
         }
     }
-    module_routes
-        .into_iter()
-        .filter_map(|(module, routes)| (routes.len() >= 2 && module.is_file()).then_some(module))
+    let mut seen = BTreeSet::new();
+    plans
+        .iter()
+        .flat_map(|(_, plan)| plan.module_paths.iter())
+        .filter(|module| {
+            module_routes
+                .get(*module)
+                .is_some_and(|routes| routes.len() >= 2)
+                && module.is_file()
+        })
+        .filter(|module| seen.insert((*module).clone()))
+        .cloned()
         .collect()
 }
 
@@ -1106,6 +1189,17 @@ pub(crate) fn write_client_route_manifest(
                 "flight": route.get("flight").and_then(|value| value.as_bool()).unwrap_or(false),
                 "cache": route.get("cache").and_then(|value| value.as_bool()).unwrap_or(false)
             });
+            // Present only when true. The router reads it to decide whether a
+            // navigation renders a registered tree factory or a Flight payload
+            // fetched from `/__ruvyxa/rsc`; every other route keeps the entry it
+            // had.
+            if route
+                .get("serverComponents")
+                .and_then(serde_json::Value::as_bool)
+                == Some(true)
+            {
+                entry["serverComponents"] = serde_json::Value::Bool(true);
+            }
             if let Some(artifact_version) = artifact_version {
                 entry["artifactVersion"] = serde_json::Value::String(artifact_version.to_string());
             }
@@ -1215,37 +1309,33 @@ pub(crate) fn parse_split_strategy(
     }
 }
 
-/// Emit the browser bundles for server-components routes, and register them.
+/// Ask a worker for every server-components route's browser entry source.
 ///
-/// These routes are excluded from the bundling above because the Rust bundler
-/// has no `react-server` graph, and therefore no way to know which of a route's
-/// modules are client references. The JavaScript graph does know — it produced
-/// the payload that names them — so it writes the entry, and the Rust bundler
-/// compiles it. One authority for "which modules are client modules", one
-/// authority for how a browser bundle is emitted.
+/// These entries cannot be generated here: only the `react-server` graph knows
+/// which of a route's modules are client references, and it is the graph that
+/// produced the payload naming them. It writes the entry; the Rust bundler
+/// compiles it alongside every other route, which is what puts its modules into
+/// the shared-chunk analysis and gives the page one React.
 ///
-/// Building the bundle in the worker instead was tried and rejected: this
-/// package's JavaScript compiler deliberately does not minify, and it does not
-/// fold `process.env.NODE_ENV`, so the output carried both of React's builds and
-/// came to 1.5 MB for a page with one button on it.
+/// Building the bundle in the worker instead was tried and rejected twice: this
+/// package's JavaScript compiler does not minify and does not fold
+/// `process.env.NODE_ENV`, so the output carried both of React's builds and came
+/// to 1.5 MB for a page with one button on it; and a bundle emitted outside the
+/// shared-chunk analysis inlines its own React, which a soft navigation into the
+/// route then renders beside the mounted page's copy.
 ///
-/// Returns the number of routes bundled. Zero starts no worker, so an app that
-/// uses no server components pays nothing for this.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn emit_server_component_client_bundles(
+/// Returns an empty map — starting no worker — for an app that uses no server
+/// components.
+pub(crate) async fn collect_server_component_entries(
     root: &Path,
     app_dir: &Path,
     manifest: &RouteManifest,
-    client_dir: &Path,
     build: &BuildConfigOptions,
-    cache: RuvyxaBuildCache<'_>,
-    plugin_session: &TypeScriptPluginBuildSession,
     runtime: ruvyxa_dev_server::JavaScriptRuntime,
-    client_manifest: &mut serde_json::Value,
-) -> anyhow::Result<usize> {
+) -> anyhow::Result<ServerComponentEntries> {
     let routes = server_component_page_routes(manifest);
     if routes.is_empty() {
-        return Ok(0);
+        return Ok(ServerComponentEntries::default());
     }
 
     let worker_env = crate::prerender::build_worker_env(root, build, runtime)?;
@@ -1258,7 +1348,7 @@ pub(crate) async fn emit_server_component_client_bundles(
     .await
     .map_err(|error| anyhow::anyhow!(error.to_string()))?;
 
-    let mut sources = Vec::with_capacity(routes.len());
+    let mut collected = ServerComponentEntries::default();
     for route in &routes {
         let response = pool
             .rsc_client_entry(root, app_dir, &route.file, &route.path)
@@ -1274,6 +1364,7 @@ pub(crate) async fn emit_server_component_client_bundles(
             let message = response
                 .message
                 .unwrap_or_else(|| "unknown error".to_string());
+            pool.shutdown().await;
             anyhow::bail!(
                 "Server-components client entry failed for {}: {code} {message}",
                 route.path
@@ -1285,87 +1376,29 @@ pub(crate) async fn emit_server_component_client_bundles(
                 route.path
             )
         })?;
-        sources.push(source);
+        collected.entries.insert(route.path.clone(), source);
+        collected
+            .server_references
+            .extend(response.server_references.unwrap_or_default());
     }
     pool.shutdown().await;
+    Ok(collected)
+}
 
-    let bundle_context =
-        bundle_context_for_build(cache.dependency_hash, cache.directory, plugin_session)?;
-    let mut entries = Vec::with_capacity(routes.len());
-    for (route, source) in routes.iter().zip(&sources) {
-        let input = client_bundle_input(root, app_dir, route, build)?;
-        let output = ruvyxa_bundler::bundle_entry_source(source, input, &bundle_context)
-            .map_err(|error| anyhow::anyhow!("Ruvyxa Bundler error for {}: {error}", route.path))?;
-        for diagnostic in &output.diagnostics {
-            tracing::warn!("{diagnostic}");
-        }
-        let hash = content_hash(&output.code);
-        let file_name = format!("{hash}.js");
-        let source_map_file = output.source_map.as_ref().map(|_| format!("{hash}.js.map"));
-        let script = match (&source_map_file, &output.source_map) {
-            (Some(name), Some(map)) => {
-                fs::write(client_dir.join(name), map.as_bytes())?;
-                format!("{}\n//# sourceMappingURL={name}\n", output.code)
-            }
-            _ => output.code.clone(),
-        };
-        fs::write(client_dir.join(&file_name), script.as_bytes())?;
-        entries.push(serde_json::json!({
-            "path": route.path,
-            "entry": route.file,
-            "file": file_name,
-            "src": format!("/__ruvyxa/client/{file_name}"),
-            "sourceMap": source_map_file,
-            "bytes": script.len(),
-            "outputBytes": output.stats.output_bytes,
-            "estimatedGzBytes": output.stats.estimated_gz_bytes,
-            "durationMs": output.stats.duration_ms,
-            "moduleCount": output.stats.module_count,
-            "cacheHits": output.stats.cache_hits,
-            "artifactCacheHit": false,
-            "treeShakenModules": output.stats.tree_shaken_modules,
-            "hydration": serde_json::to_value(route.render.hydration)?,
-            // A server-components route ships one bundle holding every client
-            // module it references, so there is nothing to preload separately
-            // and nothing to split out.
-            "sharedChunks": [],
-            "chunks": [],
-            // Ruvyxa's own Flight transport and `'use cache'` apply to a page's
-            // `flight(context)` export, which a server-components page does not
-            // have: its data is already in the React payload.
-            "flight": false,
-            "cache": false,
-            "serverComponents": true,
-            "optimized": true,
-            "treeShaken": build.tree_shaking.unwrap_or(true),
-            "chunkStrategy": build.split_strategy.as_deref().unwrap_or("route"),
-        }));
-    }
-    bundle_context
-        .save_incremental()
-        .context("failed to persist incremental module graph")?;
-
-    let bundled = entries.len();
-    let all_routes = client_manifest
-        .get_mut("routes")
-        .and_then(|routes| routes.as_array_mut())
-        .ok_or_else(|| anyhow::anyhow!("client manifest has no routes array"))?;
-    all_routes.extend(entries);
-    all_routes.sort_by(|left, right| {
-        let key = |route: &serde_json::Value| {
-            route
-                .get("path")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or_default()
-                .to_string()
-        };
-        key(left).cmp(&key(right))
-    });
-    // Rewritten rather than appended to: the lean sibling manifest was already
-    // emitted for the routes the Rust bundler produced above, and a server that
-    // read the stale copy would serve a server-components route with no bundle.
-    write_client_route_manifest(client_dir, all_routes)?;
-    Ok(bundled)
+/// What the `react-server` graph reported about every server-components route.
+///
+/// Two answers, collected in one pass because they come from one compile: the
+/// browser entry each route needs, and the `'use server'` modules that entry's
+/// graph will reach. Both have to be in hand before the shared-chunk analysis
+/// runs, and only a worker can produce either.
+#[derive(Debug, Default)]
+pub(crate) struct ServerComponentEntries {
+    /// Browser entry source, keyed by route pattern.
+    pub(crate) entries: BTreeMap<String, String>,
+    /// Every `'use server'` module those entries reach, with its stand-in
+    /// source. Accumulated across routes; two routes reaching one actions file
+    /// report the same id and the same text.
+    pub(crate) server_references: Vec<ruvyxa_dev_server::ServerReferenceSource>,
 }
 
 /// Page routes that render through the server-components pipeline and ship JS.

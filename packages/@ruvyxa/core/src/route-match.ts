@@ -38,6 +38,15 @@ export interface RouteManifestEntry {
   flight?: boolean
   /** The route's Flight producer uses the bounded deployment cache contract. */
   cache?: boolean
+  /**
+   * This route renders through the React Server Components pipeline.
+   *
+   * Present only when true. A navigation into such a route fetches a Flight
+   * payload and renders it through `__RUVYXA_RSC_ROUTES__`, rather than calling
+   * a tree factory the bundle registered — the page itself is not in the
+   * bundle, so there is no tree for a factory to build.
+   */
+  serverComponents?: boolean
 }
 
 /** A successful match of a URL against a route. */

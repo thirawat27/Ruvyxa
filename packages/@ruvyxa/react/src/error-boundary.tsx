@@ -1,3 +1,10 @@
+'use client'
+
+// A class component with `componentDidCatch`: the react-server build
+// ships no `Component` to extend, and a layout importing this package used to
+// fail the whole server-components render with `Class extends value
+// undefined`.
+
 import { Component, type ErrorInfo, type ReactNode } from 'react'
 
 /**

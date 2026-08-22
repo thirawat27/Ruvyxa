@@ -1,3 +1,10 @@
+'use client'
+
+// `createContext`, `useContext`, and `useSyncExternalStore` are all
+// absent from the react-server build. The routing hooks belong to the browser
+// half of a render by definition — a server component has no live route
+// subscription to read.
+
 /**
  * Routing hooks backed by the context every Ruvyxa route bundle provides.
  *

@@ -44,6 +44,17 @@
       "note": "Public, version-bound Flight navigation payloads. Invalid or stale requests fail before ordinary route matching."
     },
     {
+      "path": "/__ruvyxa/rsc",
+      "reserved": true,
+      "native": "always",
+      "serverless": "dispatch",
+      "probe": {
+        "method": "GET",
+        "query": "path=/"
+      },
+      "note": "React Server Components payloads for a soft navigation. Unlike /__ruvyxa/flight this is a render and carries the visitor's headers, so it is never cacheable. A deployed function answers 501: it serves pages through modules built by the ordinary SSR entry, which is why adapter-runner refuses a server-components route that still needs a server (RUV2213)."
+    },
+    {
       "path": "/__ruvyxa/trace",
       "reserved": true,
       "native": "dev",
@@ -88,6 +99,13 @@
       "native": "always",
       "serverless": "static",
       "note": "Client route table, fetched by @ruvyxa/react's router. A build publishes the file under /__ruvyxa/client/ and a CDN or publish directory answers; the dev server has no such file and synthesizes an equivalent from the live manifest. Registered unconditionally on the axum router, so it is reserved for the same reason as the loader above."
+    },
+    {
+      "path": "/__ruvyxa/client/vendor",
+      "reserved": true,
+      "native": "always",
+      "serverless": "none",
+      "note": "React and its family, compiled once and imported by URL from every bundle this host compiles on demand. A build gives those routes a shared chunk instead, so a deployed function never emits these URLs and never serves them."
     }
   ],
   "capabilities": [

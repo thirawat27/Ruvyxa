@@ -10,6 +10,7 @@ import {
   realpath,
   rm,
   stat,
+  symlink,
   writeFile,
 } from 'node:fs/promises'
 import os from 'node:os'
@@ -23,8 +24,10 @@ import {
   compileBundle,
   compileBundleWithMetadata,
   compileContentSource,
+  inlineServerFunctions,
   invalidateCompilerCache,
   MDX_COMPONENT_EXTENSIONS,
+  runtimeAliases,
   toImportPath,
 } from '../../../packages/ruvyxa/runtime/compiler.mjs'
 import { createFixtureWorkspace } from './fixture-workspace.mjs'
@@ -61,6 +64,334 @@ async function runtimeModuleClosure(entry) {
 }
 
 describe('runtime compiler', () => {
+  /**
+   * A dependency reachable only through the importer's *real* path.
+   *
+   * This is the shape every pnpm install has: `node_modules/pkg` is a link into
+   * a store directory whose siblings are that package's own dependencies.
+   * Walking the link path instead of the real one reaches the project's
+   * `node_modules`, where a transitive dependency was never installed — so the
+   * bundler emitted a bare `import "dep"` that no browser can resolve, and
+   * every hydration in `ruvyxa dev` failed on it silently.
+   */
+  it('resolves a dependency through a linked package, as Node does', async () => {
+    await withFixture(async ({ root, outDir }) => {
+      const store = path.join(root, 'store', 'pkg-a@1', 'node_modules')
+      await mkdir(path.join(store, 'pkg-a'), { recursive: true })
+      await mkdir(path.join(store, 'dep'), { recursive: true })
+      await writeFile(
+        path.join(store, 'pkg-a', 'package.json'),
+        JSON.stringify({ name: 'pkg-a', main: 'index.js' }),
+      )
+      await writeFile(
+        path.join(store, 'pkg-a', 'index.js'),
+        "const dep = require('dep')\nmodule.exports = dep.value\n",
+      )
+      // No `main`: `index.js` is found by the directory-layout fallback, the
+      // same way `scheduler` is.
+      await writeFile(path.join(store, 'dep', 'package.json'), JSON.stringify({ name: 'dep' }))
+      await writeFile(path.join(store, 'dep', 'index.js'), "module.exports = { value: 'linked' }\n")
+
+      const projectModules = path.join(root, 'node_modules')
+      await mkdir(projectModules, { recursive: true })
+      await symlink(path.join(store, 'pkg-a'), path.join(projectModules, 'pkg-a'), 'junction')
+
+      const outfile = path.join(outDir, 'linked.js')
+      await compileBundleWithMetadata({
+        projectRoot: root,
+        entrySource: "import value from 'pkg-a'\nexport const x = value\n",
+        sourcefile: 'ruvyxa:entry.ts',
+        outfile,
+        platform: 'browser',
+        sourceMap: false,
+      })
+      const code = await readFile(outfile, 'utf8')
+
+      assert.ok(code.includes('linked'), 'the linked package pulled its dependency in')
+      const bare = code.split('\n').filter((line) => /^import .* from "[^./]/.test(line))
+      assert.deepEqual(bare, [], 'a browser bundle must carry no bare specifier')
+    })
+  })
+
+  /**
+   * Which functions a module declares `'use server'` on, and which it refuses.
+   *
+   * The table is the contract. The scan decides whether a function becomes
+   * callable from a browser, and the two ways to be wrong are opposites: miss
+   * one and a mutation silently never reaches a server, accept one it cannot
+   * make callable and the call fails at run time with values from a render that
+   * ended long ago. Every refusal below is a case where the second would happen.
+   */
+  it('finds module-scope server functions and refuses the ones it cannot hoist', () => {
+    const supported = [
+      ['async function save(fd) { "use server"; }', 'declaration'],
+      ['/** doc */\nexport async function save(fd) { "use server" }', 'after a doc comment'],
+      ['const save = async (fd) => { "use server" }', 'arrow'],
+      ['const save = async fd => { "use server" }', 'unparenthesised arrow parameter'],
+      ['export const save = async function (fd) { "use server" }', 'function expression'],
+      ['async function save(x = (1)) { "use server" }', 'parenthesised default'],
+      ['const r = /[{]/; async function save() { "use server" }', 'after a regex literal'],
+    ]
+    for (const [source, label] of supported) {
+      assert.deepEqual(inlineServerFunctions(source), { names: ['save'], unsupported: [] }, label)
+    }
+
+    const refused = [
+      // Closes over the enclosing call's variables. Hoisting it means binding
+      // what it captured, which needs a scope-resolving parser.
+      ['function outer() { async function save() { "use server" } }', 'nested'],
+      ['const o = { async save() { "use server" } }', 'object method'],
+      ['export default async function () { "use server" }', 'anonymous default export'],
+      ['doSomething(function save() { "use server" })', 'callback'],
+    ]
+    for (const [source, label] of refused) {
+      const found = inlineServerFunctions(source)
+      assert.deepEqual(found.names, [], label)
+      assert.deepEqual(found.unsupported, [1], label)
+    }
+
+    // Neither a string nor a comment is a directive, whatever it spells.
+    for (const source of [
+      'const s = "function f() { use server }"',
+      '// async function f() { "use server" }',
+      '/* async function f() { "use server" } */',
+    ]) {
+      assert.deepEqual(inlineServerFunctions(source), { names: [], unsupported: [] }, source)
+    }
+  })
+
+  /**
+   * A `'use server'` module is compiled by the server graph and referenced by
+   * every other one — the mirror image of `'use client'`.
+   */
+  it('keeps a server-function module on the server and references it from a browser', async () => {
+    await withFixture(async ({ root, outDir }) => {
+      await mkdir(path.join(root, 'app'), { recursive: true })
+      await writeFile(
+        path.join(root, 'app', 'actions.ts'),
+        '"use server"\nexport async function save(value) { return `saved ${value}` }\n',
+      )
+      await writeFile(
+        path.join(root, 'app', 'button.tsx'),
+        '"use client"\nimport { save } from "./actions"\nexport const run = () => save(1)\n',
+      )
+
+      const server = await compileBundleWithMetadata({
+        projectRoot: root,
+        entrySource: 'import { save } from "./app/actions"\nexport const call = save\n',
+        sourcefile: 'ruvyxa:server.tsx',
+        outfile: path.join(outDir, 'server.mjs'),
+        platform: 'node',
+        bundleTarget: 'react-server',
+        bundlePackages: false,
+        external: ['react-server-dom-webpack/server.edge'],
+        aliases: runtimeAliases(),
+        sourceMap: false,
+      })
+      const serverCode = await readFile(path.join(outDir, 'server.mjs'), 'utf8')
+      assert.ok(serverCode.includes('saved '), 'the server graph compiles the real function')
+      assert.match(serverCode, /__ruvyxaEnqueueServer/)
+      assert.equal(server.serverReferences.length, 1)
+      assert.equal(server.serverReferences[0].relativePath, 'app/actions.ts')
+
+      const browser = await compileBundleWithMetadata({
+        projectRoot: root,
+        entrySource: 'import { run } from "./app/button"\nexport const go = run\n',
+        sourcefile: 'ruvyxa:client.tsx',
+        outfile: path.join(outDir, 'client.js'),
+        platform: 'browser',
+        serverReferenceClient: 'react-server-dom-webpack/client.browser',
+        externalUrls: {
+          react: '/react',
+          'react/jsx-runtime': '/jsx',
+          'react-server-dom-webpack/client.browser': '/rsc',
+        },
+        aliases: runtimeAliases(),
+        sourceMap: false,
+      })
+      const browserCode = await readFile(path.join(outDir, 'client.js'), 'utf8')
+      assert.ok(
+        !browserCode.includes('saved '),
+        'the server function body must not reach the browser',
+      )
+      assert.match(browserCode, /createServerReference/)
+      assert.deepEqual(
+        browser.serverReferences.map((reference) => reference.id),
+        server.serverReferences.map((reference) => reference.id),
+        'both graphs must name the module the same way, or a call cannot be routed',
+      )
+    })
+  })
+
+  /**
+   * `RUV1007` still describes a real mistake: a route with no Flight machinery
+   * has no way to call a server function, so importing one into its bundle is
+   * exactly the crossing that check exists to refuse.
+   */
+  it('still refuses a server module in a browser bundle that cannot call one', async () => {
+    await withFixture(async ({ root, outDir }) => {
+      await mkdir(path.join(root, 'app'), { recursive: true })
+      await writeFile(
+        path.join(root, 'app', 'actions.ts'),
+        '"use server"\nexport async function save() {}\n',
+      )
+      await assert.rejects(
+        compileBundleWithMetadata({
+          projectRoot: root,
+          entrySource: 'import { save } from "./app/actions"\nexport const go = save\n',
+          sourcefile: 'ruvyxa:client.tsx',
+          outfile: path.join(outDir, 'plain.js'),
+          platform: 'browser',
+          sourceMap: false,
+        }),
+        /RUV1007/,
+      )
+    })
+  })
+
+  /**
+   * `external` decides, even when the bundle was told to carry its packages.
+   *
+   * The option used to hold only by accident: a server bundle leaves
+   * `node_modules` alone anyway, so nothing noticed the list was never
+   * consulted. The server-components SSR registry then asked for both — it
+   * inlines client modules lifted out of their own packages, so it has to
+   * carry their dependencies — and resolved its own React despite listing it.
+   * Client components rendered against that second copy read a null dispatcher
+   * and threw on the first hook.
+   */
+  it('keeps a listed external external even when packages are bundled', async () => {
+    await withFixture(async ({ root, outDir }) => {
+      const modules = path.join(root, 'node_modules')
+      await mkdir(path.join(modules, 'keep-me'), { recursive: true })
+      await mkdir(path.join(modules, 'carry-me'), { recursive: true })
+      await writeFile(
+        path.join(modules, 'keep-me', 'package.json'),
+        JSON.stringify({ name: 'keep-me', main: 'index.js' }),
+      )
+      await writeFile(
+        path.join(modules, 'keep-me', 'index.js'),
+        "module.exports = { marker: 'KEEP_ME_INLINED' }\n",
+      )
+      await writeFile(
+        path.join(modules, 'carry-me', 'package.json'),
+        JSON.stringify({ name: 'carry-me', main: 'index.js' }),
+      )
+      await writeFile(
+        path.join(modules, 'carry-me', 'index.js'),
+        "module.exports = { marker: 'CARRY_ME_INLINED' }\n",
+      )
+
+      const outfile = path.join(outDir, 'externals.js')
+      await compileBundleWithMetadata({
+        projectRoot: root,
+        entrySource:
+          "import keep from 'keep-me'\nimport carry from 'carry-me'\nexport const x = [keep, carry]\n",
+        sourcefile: 'ruvyxa:entry.ts',
+        outfile,
+        platform: 'node',
+        bundlePackages: true,
+        external: ['keep-me'],
+        sourceMap: false,
+      })
+      const code = await readFile(outfile, 'utf8')
+
+      assert.ok(!code.includes('KEEP_ME_INLINED'), 'the listed external must not be inlined')
+      assert.ok(code.includes('CARRY_ME_INLINED'), 'the unlisted package must be carried along')
+      assert.match(code, /^import \* as \w+ from "keep-me";$/m)
+    })
+  })
+
+  /**
+   * A browser bundle sees the `NODE_ENV` the process compiling it sees.
+   *
+   * Browsers have no `process`, so every wrapped module gets a stand-in, and it
+   * used to say `production` unconditionally. React reads it to choose between
+   * the two builds it ships, so `ruvyxa dev` — which deliberately leaves
+   * `NODE_ENV` unset and therefore renders with development React — served a
+   * bundle that hydrated with production React. Ordinary hydration tolerated
+   * the mismatch; a Flight payload did not, and the server-components route
+   * failed with React refusing to read a development payload on a production
+   * client.
+   */
+  it('gives a browser bundle the NODE_ENV the compiling process has', async () => {
+    await withFixture(async ({ root, outDir }) => {
+      const previous = process.env.NODE_ENV
+      try {
+        for (const [value, expected] of [
+          ['production', 'production'],
+          ['development', 'development'],
+          [undefined, 'development'],
+        ]) {
+          if (value === undefined) delete process.env.NODE_ENV
+          else process.env.NODE_ENV = value
+
+          const outfile = path.join(outDir, `node-env-${expected}-${String(value)}.js`)
+          await compileBundleWithMetadata({
+            projectRoot: root,
+            entrySource: 'export const mode = process.env.NODE_ENV\n',
+            sourcefile: 'ruvyxa:entry.ts',
+            outfile,
+            platform: 'browser',
+            sourceMap: false,
+          })
+          const code = await readFile(outfile, 'utf8')
+          assert.match(
+            code,
+            new RegExp(`globalThis\\.process \\?\\? \\{ env: \\{ NODE_ENV: "${expected}" \\} \\}`),
+            `NODE_ENV=${String(value)} must compile to ${expected}`,
+          )
+        }
+      } finally {
+        if (previous === undefined) delete process.env.NODE_ENV
+        else process.env.NODE_ENV = previous
+      }
+    })
+  })
+
+  /**
+   * A module imported only for its side effect runs where the source put it.
+   *
+   * The specifier scan runs one regex per import *form*, and the side-effect
+   * form is the last of them. Appending each pattern's matches ordered the
+   * forms rather than the imports, so `import './first.js'` written first was
+   * evaluated last — after everything it was there to prepare. That is how the
+   * server-components entry, whose first import installs the globals React's
+   * decoder reads while it loads, ended up installing them afterwards.
+   */
+  it('evaluates a side-effect import where the source wrote it', async () => {
+    await withFixture(async ({ root, outDir }) => {
+      await writeFile(path.join(root, 'first.js'), "globalThis.__order = ['first']\n")
+      await writeFile(
+        path.join(root, 'second.js'),
+        "globalThis.__order = [...(globalThis.__order ?? []), 'second']\nexport const value = 2\n",
+      )
+
+      const outfile = path.join(outDir, 'ordered.mjs')
+      await compileBundleWithMetadata({
+        projectRoot: root,
+        entrySource: [
+          "import './first.js'",
+          "import { value } from './second.js'",
+          'export const total = value',
+          '',
+        ].join('\n'),
+        sourcefile: 'ruvyxa:entry.ts',
+        outfile,
+        platform: 'node',
+        sourceMap: false,
+      })
+
+      // Executed rather than read: the contract is evaluation order, and the
+      // emitted text normalises quotes and spacing in ways an index comparison
+      // would be reading by accident.
+      delete globalThis.__order
+      await import(`${pathToFileURL(outfile).href}?order`)
+      assert.deepEqual(globalThis.__order, ['first', 'second'])
+      delete globalThis.__order
+    })
+  })
+
   it('runs the React Compiler only when explicitly enabled and remains deterministic', async (t) => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-react-compiler-'))
     t.after(() => rm(root, { recursive: true, force: true }))

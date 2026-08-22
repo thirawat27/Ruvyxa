@@ -37,9 +37,10 @@ use crate::dynamic_image::{self, DynamicImageError};
 use crate::html_document::{hydration_loader_source, public_internal_error, url_encode_component};
 use crate::plugin_bridge::canonical_request_path;
 use crate::render_pipeline::{
-    render_client_bundle_pooled, render_server_action_pooled, runtime_trace_cached,
+    apply_revalidations, client_artifact_version, render_client_bundle_pooled,
+    render_server_action_pooled, runtime_trace_cached, stamp_client_artifact,
 };
-use crate::response::{json_response, shared_text_body, with_security_headers};
+use crate::response::{json_response, with_security_headers};
 use crate::worker_pool::RenderFlightRequest;
 use crate::{AppState, ServerConfig, render_pipeline, static_assets, trace};
 
@@ -52,6 +53,18 @@ pub(crate) struct ClientBundleQuery {
 pub(crate) struct FlightQuery {
     path: String,
     artifact: String,
+}
+
+/// Which shared browser module `/__ruvyxa/client/vendor` should answer with.
+#[derive(Debug, Deserialize)]
+pub(crate) struct ClientVendorQuery {
+    name: String,
+}
+
+/// The URL a soft navigation into a server-components route asks for.
+#[derive(Debug, Deserialize)]
+pub(crate) struct RscPayloadQuery {
+    path: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -115,12 +128,31 @@ pub(crate) struct TraceAssets {
 /// Serve the client route table so the browser router can match and load
 /// routes without a document load, the same as a production build.
 ///
-/// Production publishes this file to `/__ruvyxa/client/route-manifest.json`;
-/// the dev server has no such static file, so it synthesizes an equivalent from
-/// the live route manifest. Each page route points at the on-demand bundle
-/// endpoint keyed by its pattern — the generated bundle registers itself under
-/// that pattern, which is what `@ruvyxa/react`'s router looks up.
+/// A build publishes this file to `client/route-manifest.json`, and that copy is
+/// served verbatim when it exists. It has to be: its entries point at the
+/// content-addressed bundles the build emitted, which link React out of the
+/// shared chunk the served document already loaded. The synthesized table below
+/// points every route at `/__ruvyxa/client?path=…` instead — a bundle compiled
+/// on demand, carrying its own React — so a soft navigation rendered a
+/// component from one React copy into a root owned by another, and every hook
+/// in it threw. The router caught the failure and fell back to a document load,
+/// which is why the pages still worked and the client router quietly did
+/// nothing in production.
+///
+/// `ruvyxa dev` has no such file, so it keeps the synthesized table.
 pub(crate) async fn client_manifest(State(state): State<Arc<AppState>>) -> Response {
+    if let Some(prebuilt) = prebuilt_route_manifest(&state.config).await {
+        let mut response = prebuilt.into_response();
+        response.headers_mut().insert(
+            header::CONTENT_TYPE,
+            HeaderValue::from_static("application/json; charset=utf-8"),
+        );
+        response
+            .headers_mut()
+            .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+        return with_security_headers(response);
+    }
+
     let routes = match state.runtime_cache.router(&state.config).await {
         Ok((manifest, _)) => {
             let eligible = manifest
@@ -131,15 +163,18 @@ pub(crate) async fn client_manifest(State(state): State<Arc<AppState>>) -> Respo
                 .collect::<Vec<_>>();
             let mut entries = Vec::with_capacity(eligible.len());
             for route in eligible {
-                let Ok(script) = render_client_bundle_pooled(&state, &route.path).await else {
+                let Ok(bundle) = render_client_bundle_pooled(&state, &route.path).await else {
                     continue;
                 };
-                let artifact = &blake3::hash(script.html.as_bytes()).to_hex()[..16];
+                // Hashed unstamped, exactly as `client_bundle` hashes it before
+                // appending the stamp, so the version this manifest advertises
+                // is the one the browser reads back out of the bundle.
+                let artifact = client_artifact_version(&bundle.document.html);
                 let source = tokio::fs::read_to_string(&route.file)
                     .await
                     .unwrap_or_default();
                 let module = ruvyxa_bundler::ast::parse_module(&source);
-                entries.push(serde_json::json!({
+                let mut entry = serde_json::json!({
                     "path": route.path,
                     "src": format!(
                         "/__ruvyxa/client?path={}",
@@ -148,7 +183,13 @@ pub(crate) async fn client_manifest(State(state): State<Arc<AppState>>) -> Respo
                     "artifactVersion": artifact,
                     "flight": ruvyxa_bundler::ast::has_named_runtime_export(&source, &module, "flight"),
                     "cache": ruvyxa_bundler::reference_manifest::has_module_directive(&source, "use cache"),
-                }));
+                });
+                // Held to the same shape the build writes, in
+                // `write_client_route_manifest`: present only when true.
+                if route.render.server_components {
+                    entry["serverComponents"] = serde_json::Value::Bool(true);
+                }
+                entries.push(entry);
             }
             entries
         }
@@ -169,6 +210,21 @@ pub(crate) async fn client_manifest(State(state): State<Arc<AppState>>) -> Respo
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     with_security_headers(response)
+}
+
+/// The route table a build published, or `None` when there is not one.
+///
+/// Read per request rather than cached: the file is written once by a build and
+/// then never again, the router asks for it at most once per document, and a
+/// cache here would be a third copy of the same bytes after the OS page cache
+/// and the browser's.
+async fn prebuilt_route_manifest(config: &ServerConfig) -> Option<String> {
+    if config.watch {
+        return None;
+    }
+    tokio::fs::read_to_string(config.client_dir.join("route-manifest.json"))
+        .await
+        .ok()
 }
 
 /// Serve the same public Flight contract in dev/start that deployment adapters expose.
@@ -251,14 +307,14 @@ pub(crate) async fn flight_endpoint(
                 .into_response(),
         );
     }
-    let script = match render_client_bundle_pooled(&state, &route_match.route.path).await {
-        Ok(script) => script,
+    let bundle = match render_client_bundle_pooled(&state, &route_match.route.path).await {
+        Ok(bundle) => bundle,
         Err(error) => {
             error!(%error, path = %request_path, "Flight client artifact failed");
             return with_security_headers(StatusCode::INTERNAL_SERVER_ERROR.into_response());
         }
     };
-    let current_artifact = &blake3::hash(script.html.as_bytes()).to_hex()[..16];
+    let current_artifact = client_artifact_version(&bundle.document.html);
     if current_artifact != query.artifact {
         return with_security_headers(
             (StatusCode::CONFLICT, "Flight artifact is stale or invalid").into_response(),
@@ -273,7 +329,7 @@ pub(crate) async fn flight_endpoint(
             request_path: &request_path,
             route_path: &route_match.route.path,
             params: &route_match.params,
-            artifact_version: current_artifact,
+            artifact_version: &current_artifact,
         })
         .await;
     match response {
@@ -306,18 +362,352 @@ pub(crate) async fn flight_endpoint(
     }
 }
 
+/// Header that keeps `/__ruvyxa/rsc` out of reach of a cross-origin page.
+///
+/// Spelled once here and once in `rsc-client-runtime.mjs`, which is the browser
+/// half of the same request.
+const RSC_REQUEST_HEADER: &str = "x-ruvyxa-rsc";
+
+/// One server-components route, resolved and owned.
+///
+/// Owned rather than borrowed because the router snapshot it came from is a
+/// temporary: the two endpoints below hold this across an await on the worker,
+/// which a `RouteMatch` borrowing the manifest could not survive.
+struct ServerComponentsRoute {
+    file: std::path::PathBuf,
+    /// The canonical request path, after normalisation.
+    path: String,
+    /// The route pattern, which is what keys every registry the browser holds.
+    route_path: String,
+    params: RouteParams,
+}
+
+/// Resolve `/__ruvyxa/rsc`'s route, or the response explaining why it cannot.
+///
+/// The same-origin header check lives here rather than in each endpoint so the
+/// `GET` and the `POST` cannot come to differ about it. A cross-origin page
+/// cannot set a custom header without a preflight, and nothing here answers one,
+/// so a third-party site cannot reach either verb even with credentials
+/// attached.
+async fn resolve_server_components_route(
+    state: &AppState,
+    headers: &HeaderMap,
+    path: &str,
+) -> Result<ServerComponentsRoute, Response> {
+    if headers
+        .get(RSC_REQUEST_HEADER)
+        .and_then(|value| value.to_str().ok())
+        != Some("1")
+    {
+        return Err(with_security_headers(
+            (
+                StatusCode::BAD_REQUEST,
+                "Server-components requests require the Ruvyxa navigation header",
+            )
+                .into_response(),
+        ));
+    }
+    let Ok(request_path) = canonical_request_path(path) else {
+        return Err(with_security_headers(
+            (
+                StatusCode::BAD_REQUEST,
+                "Server-components request has an invalid route",
+            )
+                .into_response(),
+        ));
+    };
+    let (manifest, router) = match state.runtime_cache.router(&state.config).await {
+        Ok(snapshot) => snapshot,
+        Err(error) => {
+            error!(%error, "Server-components route snapshot failed");
+            return Err(with_security_headers(
+                StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+            ));
+        }
+    };
+    let Some(route_match) = router.find(&manifest, &request_path) else {
+        return Err(with_security_headers(StatusCode::NOT_FOUND.into_response()));
+    };
+    // A route that never opted in has no payload to give and no server function
+    // to run, and answering either would mean going through a pipeline it was
+    // not written for.
+    if route_match.route.kind != RouteKind::Page || !route_match.route.render.server_components {
+        return Err(with_security_headers(StatusCode::NOT_FOUND.into_response()));
+    }
+    Ok(ServerComponentsRoute {
+        file: route_match.route.file.clone(),
+        path: request_path,
+        route_path: route_match.route.path.clone(),
+        params: route_match.params.clone(),
+    })
+}
+
+/// The visitor's headers, in the shape the worker protocol carries them.
+fn forwarded_header_pairs(headers: &HeaderMap) -> Vec<(String, String)> {
+    headers
+        .iter()
+        .filter_map(|(name, value)| {
+            value
+                .to_str()
+                .ok()
+                .map(|value| (name.as_str().to_string(), value.to_string()))
+        })
+        .collect()
+}
+
+/// Wrap a Flight payload in the response both `/__ruvyxa/rsc` verbs return.
+///
+/// A render, not a cacheable document: it may have read this visitor's cookies,
+/// so no shared cache may hold it. `Vary` names the header that decides whether
+/// the path answers at all.
+fn flight_payload_response(payload: String) -> Response {
+    let mut response = payload.into_response();
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("text/x-component; charset=utf-8"),
+    );
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    response
+        .headers_mut()
+        .insert(header::VARY, HeaderValue::from_static(RSC_REQUEST_HEADER));
+    response
+}
+
+/// Serve one server-components route's Flight payload for a soft navigation.
+///
+/// Deliberately *not* the same contract as [`flight_endpoint`] above, which
+/// serves Ruvyxa's own public per-route JSON and therefore refuses a request
+/// carrying credentials. This payload is a render: a server component may read
+/// `cookies()` and `headers()` exactly as it does on a full document request,
+/// so the visitor's headers are forwarded and the response is marked private
+/// and uncacheable.
+///
+/// The custom header is what keeps it same-origin. A cross-origin page cannot
+/// set it without a preflight, and nothing here answers one — so a third-party
+/// site cannot read a visitor's rendered page even with credentials attached.
+pub(crate) async fn rsc_payload_endpoint(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<RscPayloadQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let route_match = match resolve_server_components_route(&state, &headers, &query.path).await {
+        Ok(resolved) => resolved,
+        Err(response) => return response,
+    };
+    let request_path = route_match.path.clone();
+    let header_pairs = forwarded_header_pairs(&headers);
+
+    let response = state
+        .worker_pool
+        .render_rsc_payload(crate::worker_pool::RenderSsrRequest {
+            project_root: &state.config.root,
+            app_dir: &state.config.app_dir,
+            page_file: &route_match.file,
+            request_path: &request_path,
+            request_target: &request_path,
+            route_path: &route_match.route_path,
+            params: &route_match.params,
+            headers: &header_pairs,
+            method: "GET",
+            server_components: true,
+            // A payload render is a read. The no-JavaScript form post is the
+            // only page request that carries one, and it never comes here.
+            form_action: None,
+        })
+        .await;
+
+    match response {
+        Ok(response) if response.ok => {
+            let Some(payload) = response.rsc_payload else {
+                return with_security_headers(StatusCode::INTERNAL_SERVER_ERROR.into_response());
+            };
+            with_security_headers(flight_payload_response(payload))
+        }
+        Ok(response) => {
+            error!(code = ?response.code, message = ?response.message, path = %request_path, "Server-components payload render failed");
+            with_security_headers(StatusCode::INTERNAL_SERVER_ERROR.into_response())
+        }
+        Err(error) => {
+            error!(%error, path = %request_path, "Server-components payload worker failed");
+            with_security_headers(StatusCode::INTERNAL_SERVER_ERROR.into_response())
+        }
+    }
+}
+
+/// Header naming the server function a `POST` to `/__ruvyxa/rsc` should call.
+///
+/// Spelled once here and once in `rsc-client-runtime.mjs`, which is the browser
+/// half of the same request. There is no third reader.
+const SERVER_ACTION_HEADER: &str = "x-ruvyxa-action";
+
+/// Largest server-function call body this host will read into memory.
+///
+/// A call is arguments, not an upload: React encodes them as text unless one is
+/// a file, and a file large enough to matter belongs in a route handler that can
+/// stream it. The bound exists because the body is buffered before the worker
+/// sees it, so without one a single request could size the process.
+const MAX_SERVER_ACTION_BODY: usize = 4 * 1024 * 1024;
+
+/// Run one of a server-components route's server functions.
+///
+/// The same path that serves a route's payload, because it is the same question
+/// asked twice: `GET` renders the route, `POST` runs one of the functions it
+/// exposes and returns what that function produced. A second path would mean a
+/// second reserved route and a second place the same-origin header is checked.
+///
+/// The reply is itself a Flight payload, so a server function may return an
+/// element tree — including client components — and not only data.
+pub(crate) async fn rsc_action_endpoint(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<RscPayloadQuery>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let Some(reference) = headers
+        .get(SERVER_ACTION_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+    else {
+        return with_security_headers(
+            (
+                StatusCode::BAD_REQUEST,
+                "Server-function calls must name a reference",
+            )
+                .into_response(),
+        );
+    };
+    if body.len() > MAX_SERVER_ACTION_BODY {
+        return with_security_headers(
+            (
+                StatusCode::PAYLOAD_TOO_LARGE,
+                "Server-function call too large",
+            )
+                .into_response(),
+        );
+    }
+    let route_match = match resolve_server_components_route(&state, &headers, &query.path).await {
+        Ok(resolved) => resolved,
+        Err(response) => return response,
+    };
+
+    let content_type = headers
+        .get(header::CONTENT_TYPE)
+        .and_then(|value| value.to_str().ok())
+        .unwrap_or("text/plain;charset=UTF-8")
+        .to_string();
+    let header_pairs = forwarded_header_pairs(&headers);
+
+    let response = state
+        .worker_pool
+        .render_rsc_action(
+            crate::worker_pool::RenderSsrRequest {
+                project_root: &state.config.root,
+                app_dir: &state.config.app_dir,
+                page_file: &route_match.file,
+                request_path: &route_match.path,
+                request_target: &route_match.path,
+                route_path: &route_match.route_path,
+                params: &route_match.params,
+                headers: &header_pairs,
+                method: "POST",
+                server_components: true,
+                form_action: None,
+            },
+            reference,
+            &content_type,
+            &body,
+        )
+        .await;
+
+    match response {
+        Ok(worker) if worker.ok => {
+            let Some(payload) = worker.rsc_payload else {
+                return with_security_headers(StatusCode::INTERNAL_SERVER_ERROR.into_response());
+            };
+            apply_revalidations(&state, worker.revalidate).await;
+            with_security_headers(flight_payload_response(payload))
+        }
+        Ok(worker) => {
+            error!(code = ?worker.code, message = ?worker.message, reference = %reference, "server function failed");
+            with_security_headers(
+                (StatusCode::INTERNAL_SERVER_ERROR, "Server function failed").into_response(),
+            )
+        }
+        Err(error) => {
+            error!(%error, reference = %reference, "server function worker failed");
+            with_security_headers(StatusCode::INTERNAL_SERVER_ERROR.into_response())
+        }
+    }
+}
+
+/// Serve one shared browser module for bundles this host compiles on demand.
+///
+/// A build gives every route a shared chunk, so a page holds one React however
+/// many route bundles it loads. A bundle compiled per request has no such
+/// analysis behind it and used to inline its own copy — so a soft navigation
+/// rendered a component from one React into a root owned by another, every hook
+/// in it threw, and the router fell back to a document load. Every such bundle
+/// imports these modules by URL instead; the names are decided by
+/// `CLIENT_VENDOR_MODULES` in `packages/ruvyxa/runtime/compiler.mjs`, and an
+/// unknown one is rejected there rather than compiled.
+pub(crate) async fn client_vendor(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<ClientVendorQuery>,
+) -> Response {
+    let response = state
+        .worker_pool
+        .render_client_vendor(&state.config.root, &query.name)
+        .await;
+    match response {
+        Ok(response) if response.ok => {
+            let Some(script) = response.script else {
+                return with_security_headers(StatusCode::INTERNAL_SERVER_ERROR.into_response());
+            };
+            let mut response = script.into_response();
+            response.headers_mut().insert(
+                header::CONTENT_TYPE,
+                HeaderValue::from_static("text/javascript; charset=utf-8"),
+            );
+            // Never cached: the module is recompiled when its package changes,
+            // and a stale copy would be a second React on the page — the exact
+            // failure this endpoint exists to prevent.
+            response
+                .headers_mut()
+                .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+            with_security_headers(response)
+        }
+        Ok(response) => {
+            error!(code = ?response.code, message = ?response.message, name = %query.name, "shared browser module failed");
+            with_security_headers(
+                (StatusCode::NOT_FOUND, "Unknown shared browser module").into_response(),
+            )
+        }
+        Err(error) => {
+            error!(%error, name = %query.name, "shared browser module worker failed");
+            with_security_headers(StatusCode::INTERNAL_SERVER_ERROR.into_response())
+        }
+    }
+}
+
 pub(crate) async fn client_bundle(
     State(state): State<Arc<AppState>>,
     Query(query): Query<ClientBundleQuery>,
 ) -> Response {
     let response = match render_client_bundle_pooled(&state, &query.path).await {
-        Ok(script) => {
+        Ok(bundle) => {
             if state.config.watch {
-                state.devtools.record_bundle(&query.path, script.html.len());
+                state
+                    .devtools
+                    .record_bundle(&query.path, bundle.document.html.len());
             }
-            // The client bundle is cached behind an `Arc<str>`; serve that
-            // allocation instead of copying the whole script per request.
-            let mut response = shared_text_body(script.html).into_response();
+            // Stamped here rather than cached stamped: the version is a hash of
+            // the unstamped script, and the route manifest and the Flight
+            // endpoint both have to hash the same text this one does.
+            let stamped = stamp_client_artifact(&bundle.document.html, &bundle.route_path);
+            let mut response = stamped.into_response();
             response.headers_mut().insert(
                 header::CONTENT_TYPE,
                 HeaderValue::from_static("text/javascript; charset=utf-8"),

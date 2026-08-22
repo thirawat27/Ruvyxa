@@ -178,13 +178,161 @@ route อื่น ๆ
 ที่ใช้ server components ทั้งสองไฟล์ต้องเป็น module `'use client'` — เป็นกฎเดียวกับที่ React
 กำหนดเอง
 
-ฟังก์ชัน `'use server'` แบบ inline ของ React **ยังไม่ได้** implement ส่วน server action ของ Ruvyxa
-ทำงานได้ตามปกติจาก component `'use client'` บน route ที่ใช้ server components เพราะมันเป็น client
-module ธรรมดาที่เรียก action endpoint — ดู [Data, action และ API route](05-data-actions-api.md)
+`@ruvyxa/react` import จาก server component ได้อย่างปลอดภัย เพราะ `Link`, routing hook ต่าง ๆ,
+`Script`, `RuvyxaErrorBoundary` และ `useRuvyxaLoader` ประกาศ `'use client'` ไว้ในตัวเองแล้ว ดังนั้น
+root layout จึงเรนเดอร์ nav ที่เป็น `<Link>` บน route ที่ใช้ server components
+ได้โดยไม่ต้องแก้อะไรเลย — server graph ได้ reference ส่วนเบราว์เซอร์เป็นคน resolve ให้ ส่วน `Image`,
+`Seo` และ `notFound()` ไม่มีฝั่งเบราว์เซอร์ จึงถูกเรนเดอร์โดย server component เอง
 
-payload ถูกสร้างเป็นสตรีมแล้ว inline ทั้งก้อน ดังนั้น server component ที่ช้าจะหน่วงทั้งเอกสาร
-แทนที่จะสตรีมตามมาทีหลังหลัง `Suspense` boundary ส่วน `loading.tsx` ยังเรนเดอร์ fallback ลงใน
-payload ตามปกติ เพียงแต่ไม่ได้มาถึงแยกต่างหาก
+แพ็กเกจอื่นที่คุณติดตั้งก็ใช้กฎเดียวกัน: component ที่ใช้ hook ต้องประกาศ `'use client'`
+ไว้ในไฟล์ที่เผยแพร่ ไม่เช่นนั้น server graph จะคอมไพล์มันกับ React build ที่ไม่มี hook อยู่เลย
+
+### Server function
+
+ฟังก์ชันที่อยู่หลัง `'use server'` จะรันบนเซิร์ฟเวอร์ และเรียกจากเบราว์เซอร์ได้ Ruvyxa
+รองรับทั้งสองรูปแบบที่ React มี
+
+แบบทั้งโมดูล ซึ่งเป็นรูปแบบที่ component `'use client'` import เข้าไปใช้:
+
+```ts
+// app/dashboard/actions.ts
+'use server'
+
+export async function rename(id: string, name: string) {
+  await db.rename(id, name)
+  return db.get(id)
+}
+```
+
+```tsx
+// app/dashboard/row.tsx
+'use client'
+import { rename } from './actions'
+
+export function Row({ id }: { id: string }) {
+  return <button onClick={() => rename(id, 'new')}>Rename</button>
+}
+```
+
+โค้ดใน `actions.ts` ไม่มีอยู่ใน browser bundle เลย `rename` ที่นั่นคือ _reference_:
+การเรียกมันคือการ POST อาร์กิวเมนต์ไปที่เซิร์ฟเวอร์ รันฟังก์ชันจริง แล้วได้ค่าที่มัน return กลับมา —
+รวมถึง element tree ด้วย เพราะคำตอบเป็น Flight payload ไม่ใช่ JSON
+
+หรือแบบฟังก์ชันเดียวภายใน server component ที่ใช้มัน ซึ่งไม่ต้องมีไฟล์ที่สอง:
+
+```tsx
+// app/dashboard/page.tsx
+export const serverComponents = true
+
+export async function markAllRead(userId: string) {
+  'use server'
+  await db.markAllRead(userId)
+}
+
+export default async function Dashboard() {
+  return <Toolbar onClear={markAllRead} />
+}
+```
+
+ฟังก์ชันถูกส่งให้ component `'use client'` เป็น prop ธรรมดา และไปถึงที่นั่นในรูป reference
+เหมือนกับแบบที่ import เข้ามาทุกประการ
+
+**server function แบบ inline ต้องอยู่ที่ระดับบนสุดของโมดูล**
+ฟังก์ชันที่ประกาศไว้ข้างในฟังก์ชันอื่นจะ closure ตัวแปรของการเรียกครั้งนั้นไว้
+และการเรียกที่มาถึงทีหลัง — จาก request อื่น ใน process อื่น —
+ไม่มีทางสร้างค่าเหล่านั้นขึ้นมาใหม่ได้ Ruvyxa จึงปฏิเสธด้วย `RUV1867` พร้อมบอกบรรทัด
+แทนที่จะคอมไพล์เป็น ฟังก์ชันที่อ่านค่าจากการเรนเดอร์ที่จบไปแล้ว ให้ย้ายไปไว้ระดับบนสุด
+หรือย้ายไปโมดูลที่ขึ้นต้นด้วย directive
+
+การเรียกจะไปที่ `POST /__ruvyxa/rsc` ซึ่งเป็น endpoint เดียวกับที่ให้ payload ของ route โดยแนบ
+cookie ของผู้ใช้ไปด้วย และมี header แบบ same-origin ที่หน้าเว็บ cross-origin ตั้งไม่ได้ server
+function หนึ่งตัวจะเรียกได้จาก route ที่ page หรือ client component ของมัน import ฟังก์ชันนั้น
+
+`<form action={fn}>` ทำงาน **ตั้งแต่ก่อน JavaScript ของหน้าจะโหลดเสร็จ และทำงานได้แม้ไม่มี
+JavaScript เลย** React เขียน reference ของฟังก์ชันลงใน hidden field ตอนเรนเดอร์ฟอร์ม
+เบราว์เซอร์ที่ยังไม่ได้รัน bundle ของหน้านั้นเลยจึง submit ได้ตามปกติ — โพสต์ไปที่ URL ของหน้าเอง
+Ruvyxa อ่าน field เหล่านั้น เรียกฟังก์ชัน
+แล้วตอบกลับเป็นเอกสารที่เรนเดอร์ใหม่ซึ่งมีผลลัพธ์อยู่ในนั้นแล้ว ตัวที่พาผลลัพธ์เข้ามาใน markup คือ
+`useActionState` — ค่าที่ action คืนจะถูกเล่นซ้ำเข้าไปใน hook ดังนั้น component
+เดียวกันจะเรนเดอร์คำตอบเดียวกัน ไม่ว่าจะมาทาง `fetch` หรือมาทางการ submit ฟอร์ม
+
+```tsx
+// app/search/form.tsx
+'use client'
+
+import { useActionState } from 'react'
+
+import { lookup } from './actions'
+
+export default function Search() {
+  const [answer, submit] = useActionState(lookup, null)
+  return (
+    <form action={submit}>
+      <input name="q" />
+      <output>{answer ?? 'nothing looked up yet'}</output>
+    </form>
+  )
+}
+```
+
+เมื่อ bundle โหลดเสร็จแล้ว React จะดักการ submit แทน เรียกฟังก์ชันเดิมผ่าน `fetch`
+แล้วอัปเดตเฉพาะส่วนที่เปลี่ยน ไม่มีอะไรในฟอร์มที่ต้องเขียนสองแบบ
+
+ฟอร์มที่ถูก submit จะถูกตอบด้วยการเรนเดอร์ของ route เอง ไม่ใช่ตามกลยุทธ์การเรนเดอร์ของมัน
+เพราะเอกสารที่ prerender หรือ cache ไว้ถูกสร้างก่อนที่ action จะรัน response จึงถูกเรนเดอร์ใหม่และมี
+`Cache-Control: no-store` ส่วนอะไรก็ตามที่ action ส่งให้ `revalidatePath()` จะถูกนำไปใช้ก่อนที่
+response จะถูกส่งกลับ server function ต้องมี graph แบบ `react-server` ไว้ให้ resolve reference
+ดังนั้นทั้งหมดนี้ใช้กับ route ที่เป็น server components ส่วน `POST`
+ไปหน้าอื่นยังเรนเดอร์เหมือนเดิมทุกอย่าง
+
+ส่วน server action ของ Ruvyxa ยังเหมือนเดิม และยังเรียกได้จาก component `'use client'` บน route
+ที่ใช้ server components — ดู [Data, action และ API route](05-data-actions-api.md)
+
+### การสตรีมเอกสาร
+
+route ที่ใช้ server components และสร้างเอกสารใหม่ทุก request จะถูก **สตรีม** React ส่ง shell
+ออกไปทันทีที่มี และส่งแต่ละ `Suspense` boundary ตามมาเมื่อเซิร์ฟเวอร์ทำเสร็จ ดังนั้น server
+component ที่ช้าจะหน่วงเฉพาะส่วนที่รอมันอยู่ ไม่ใช่ทั้งหน้า
+
+```tsx
+// app/dashboard/page.tsx
+import { Suspense } from 'react'
+
+export const serverComponents = true
+export const dynamic = 'force-dynamic'
+
+async function Revenue() {
+  return <Chart rows={await db.revenue()} />
+}
+
+export default function Dashboard() {
+  return (
+    <main>
+      <h1>Dashboard</h1>
+      <Suspense fallback={<Skeleton />}>
+        <Revenue />
+      </Suspense>
+    </main>
+  )
+}
+```
+
+ถ้าไม่มี `Suspense` ทั้งเอกสารก็ยังต้องรอ `db.revenue()` อยู่ดี — boundary
+คือสิ่งที่ทำให้เซิร์ฟเวอร์มีอะไรส่งออกไปก่อน
+
+**เฉพาะเอกสารที่สร้างใหม่ทุก request เท่านั้นที่สตรีม** `export const dynamic = 'force-dynamic'`
+หรืออะไรก็ตามที่ทำให้ route เป็น dynamic คือสิ่งที่เลือกโหมดนี้ ส่วน route ที่ prerender, ใช้
+`revalidate` หรือเรนเดอร์แบบ static ต้องกลายเป็นสตริงเพื่อเขียนลงดิสก์หรือเก็บใน cache
+ซึ่งสตรีมไม่ใช่รูปแบบที่ทำแบบนั้นได้ — route เหล่านั้นจึงยังถูกส่งทั้งก้อน และ route ที่ไม่ได้ใช้
+server components ก็ไม่สตรีมเช่นกัน เพราะการเรนเดอร์ของมันจบในขั้นตอนเดียว ไม่มีอะไรให้ส่งก่อน
+
+response ที่สตรีมจะมี `Cache-Control: no-store` ไม่มี `Content-Length` และไม่ถูกเก็บใน render cache
+ทั้งหมดนี้มาจากข้อเท็จจริงเดียวกัน: เอกสารไม่เคยมีตัวตนเป็นสตริงที่เซิร์ฟเวอร์จะเก็บได้
+
+Flight payload ยังถูกเขียนลงในเอกสารเหมือนเดิม โดยอยู่ท้ายสุด ใน data block
+`<script type="application/json">` ก้อนเดิม เพราะมันสมบูรณ์ก็ต่อเมื่อการเรนเดอร์เสร็จ
+และเบราว์เซอร์ต้องใช้มันตอน hydrate ไม่ใช่ตอนวาดหน้า — hydration เริ่มไม่ได้จนกว่าเอกสารจะถูก parse
+จบ ซึ่งก็คือหลังไบต์สุดท้ายอยู่แล้ว
 
 ### ชุดที่ Ruvyxa ปฏิเสธ
 
@@ -196,9 +344,11 @@ payload ตามปกติ เพียงแต่ไม่ได้มา�
 | `export const ppr = true` + `serverComponents`   | partial pre-rendering สตรีม shell ผ่าน entry ที่ไปป์ไลน์นี้ไม่ได้สร้าง         |
 | intercepting route + `serverComponents`          | การ intercept ถูกจับคู่จาก client route registry ที่ไปป์ไลน์นี้ไม่ได้ประกาศไว้ |
 
-การนำทางฝั่งไคลเอนต์ระหว่าง route อื่น ๆ ไม่ได้รับผลกระทบ แต่การเข้า route ที่ใช้ server components
-จะเป็นการร้องขอเอกสารใหม่ ไม่ใช่ soft navigation: bundle ฝั่งเบราว์เซอร์ของมันลงทะเบียน client
-module ไม่ใช่ route tree
+การนำทางฝั่งไคลเอนต์ใช้ได้ทั้งสองทิศทาง การเข้า route ที่ใช้ server components จะดึง payload จาก
+`/__ruvyxa/rsc` แล้วเรนเดอร์แทนที่ทันที ไม่มีการโหลดเอกสารใหม่ และหน้าเดิมถูกแทนที่แบบเดียวกับการ
+เปลี่ยน route ปกติ endpoint นั้นคือการ _เรนเดอร์_: มันพา cookie ของผู้ใช้ไปเหมือนคำขอเต็ม ๆ ดังนั้น
+response จึงแคชไม่ได้ และต้องมี header แบบ same-origin ที่หน้าเว็บข้าม origin ตั้งไม่ได้ถ้าไม่ผ่าน
+preflight
 
 ### การ deploy
 
@@ -207,6 +357,10 @@ adapter คัดลอกไปอยู่แล้ว ส่วน route ท�
 `export const dynamic = 'force-dynamic'` — จะถูกปฏิเสธตอน build ด้วย `RUV2213` เพราะ adapter ทุกตัว
 เสิร์ฟหน้าเว็บผ่าน module ที่สร้างจาก entry แบบ SSR ปกติ ให้เสิร์ฟ route เหล่านั้นด้วย
 `ruvyxa start` หรือปล่อยให้มัน pre-render
+
+ฟังก์ชันที่ deploy แล้วจะตอบ `/__ruvyxa/rsc` ด้วย 501 ด้วยเหตุผลเดียวกัน ดังนั้นบนเป้าหมายเหล่านั้น
+การนำทางเข้า route ที่ใช้ server components จะย้อนไปโหลดเอกสารแทน ซึ่งสำหรับ route ที่ pre-render
+ไว้แล้วก็คือไฟล์สแตติกที่ CDN ถืออยู่แล้ว
 
 ## Route metadata และ boundary
 

@@ -1,5 +1,6 @@
 import Counter from './counter'
 import releases from './releases.json'
+import ReleaseForm from './release-form'
 
 /**
  * Render this route through the React Server Components pipeline.
@@ -20,6 +21,19 @@ export const meta = {
 /** Stand-in for a query, a file read, or anything else that needs a server. */
 async function loadReleases() {
   return releases.entries.filter((entry) => entry.channel === releases.channel)
+}
+
+/**
+ * A server function declared inside the server component that uses it.
+ *
+ * React's other spelling: the directive goes in the function body rather than
+ * at the top of a whole module. It has to be at the top level of the file —
+ * a function nested inside a component closes over that render's variables, and
+ * a call arriving later has no way to reconstruct them.
+ */
+export async function countReleases(channel: string) {
+  'use server'
+  return releases.entries.filter((entry) => entry.channel === channel).length
 }
 
 export default async function ServerComponentsPage() {
@@ -48,7 +62,14 @@ export default async function ServerComponentsPage() {
         route in the browser bundle. The page itself was serialised into a payload instead of being
         shipped.
       </p>
-      <Counter start={0} />
+      <Counter start={0} count={countReleases} />
+      <p>
+        The form below has a server function for its <code>action</code>, not a URL. Disable
+        JavaScript and submit it: the browser posts to this page, the function runs, and the answer
+        is in the document that comes back. With the bundle loaded React intercepts the submit
+        instead and only the answer changes.
+      </p>
+      <ReleaseForm />
       <p className="hint">
         The payload rides in a <code>&lt;script type=&quot;application/json&quot;&gt;</code> data
         block, so no <code>unsafe-inline</code> is needed in a Content-Security-Policy.

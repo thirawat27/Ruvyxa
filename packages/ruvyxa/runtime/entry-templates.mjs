@@ -21,6 +21,7 @@
 
 import {
   RSC_BROWSER_PACKAGE,
+  RSC_CLIENT_RUNTIME_SPECIFIER,
   RSC_SERVER_PACKAGE,
   clientReferenceInstallPath,
   clientReferenceRuntimePath,
@@ -103,6 +104,23 @@ export const ROUTE_BOUNDARY_LOCAL = '__ruvyxaBoundary'
 
 /** Local name the emitted prelude binds the interception-aware slot resolver to. */
 export const ROUTE_SLOT_LOCAL = '__ruvyxaSlot'
+
+/**
+ * Global registry of route pattern to a server-components tree factory.
+ *
+ * Separate from {@link ROUTE_REGISTRY_GLOBAL} because the two answer different
+ * shapes: an ordinary factory takes a route context and returns a tree it can
+ * build on the spot, while this one also needs the Flight payload the route was
+ * rendered from. One registry holding both would make "which kind of route is
+ * this" a guess at every call site that reads it.
+ */
+export const RSC_ROUTE_REGISTRY_GLOBAL = '__RUVYXA_RSC_ROUTES__'
+
+/** Local name the server-components entry binds its root component to. */
+export const RSC_ROOT_LOCAL = '__ruvyxaRscRoot'
+
+/** Local name the server-components entry binds its registered factory to. */
+export const RSC_TREE_LOCAL = '__ruvyxaRscTree'
 
 /**
  * The slot resolver a route with interceptions emits.
@@ -986,11 +1004,17 @@ export function rscServerEntrySource({
   })
   return `import React from "react"
 import { renderToReadableStream as __ruvyxaRenderFlight } from ${JSON.stringify(RSC_SERVER_PACKAGE)}
+import { flushServerModules as __ruvyxaFlushServer } from ${JSON.stringify(RSC_CLIENT_RUNTIME_SPECIFIER)}
 ${imports.join('\n')}
 ${metaPrelude}
 ${tree}
 
 export function flight(ctx, manifest, options) {
+  // Before the first serialisation, never at module scope: a "use server"
+  // module enqueues itself at the bottom of its own body, and this linker emits
+  // that module's export assignments after the body — so its exports are only
+  // readable once the whole bundle has evaluated, which is here.
+  __ruvyxaFlushServer()
   return __ruvyxaRenderFlight(__ruvyxaTree(ctx), manifest, options)
 }
 `
@@ -1003,11 +1027,19 @@ export function flight(ctx, manifest, options) {
  * a server-components route the page never reaches the browser, which is the
  * point. What it imports is the set of `'use client'` modules the server graph
  * turned into references, so `__webpack_require__` can answer for each id, plus
- * the decoder that turns the payload the document was served with back into an
- * element tree.
+ * the decoder that turns a payload into an element tree.
  *
- * The tree is wrapped in the same routing-context provider the SSR pass wraps
- * it in, with the same value, so hydration sees the markup it rendered.
+ * It publishes that tree twice over. Once immediately, against the payload the
+ * document was served with, to hydrate. And once into
+ * `__RUVYXA_RSC_ROUTES__` — a registry keyed by route pattern, which the client
+ * router calls with a payload it fetched, so a navigation *into* this route
+ * replaces the tree instead of reloading the document. The registry is separate
+ * from `__RUVYXA_ROUTES__` because those factories are synchronous and take no
+ * payload; one registry answering two shapes would make "which kind of route is
+ * this" a guess at the call site.
+ *
+ * The tree is wrapped in the same routing-context provider the SSR pass wraps it
+ * in, with the same value, so hydration sees the markup it rendered.
  *
  * A document served without a payload — a route that opted in but was rendered
  * by an older server, or a response an error replaced — leaves the page as
@@ -1035,7 +1067,8 @@ ${registry.imports.join('\n')}
 import { payloadStream as __ruvyxaPayloadStream, readInlinePayload as __ruvyxaReadPayload } from ${JSON.stringify(runtimePath)}
 import React from "react"
 import { hydrateRoot } from "react-dom/client"
-import { createFromReadableStream as __ruvyxaDecodeFlight } from ${JSON.stringify(RSC_BROWSER_PACKAGE)}
+import { createFromReadableStream as __ruvyxaDecodeFlight, createFromFetch as __ruvyxaFromFetch, encodeReply as __ruvyxaEncodeReply } from ${JSON.stringify(RSC_BROWSER_PACKAGE)}
+import { createServerCaller as __ruvyxaServerCaller } from ${JSON.stringify(runtimePath)}
 
 ${registry.statements.join('\n')}
 
@@ -1043,25 +1076,159 @@ ${routeContextPrelude()}
 
 ${clientBootstrapPrelude()}
 
+// One decode per payload. React's decoder consumes the stream it is given, so
+// calling it again for a re-render would hand React a reader that is already
+// drained. Only the newest payload is kept: an older one belongs to a route
+// that is no longer mounted.
+let __ruvyxaDecodedPayload = null
+let __ruvyxaDecodedResponse = null
+// A server function reaches the browser two ways: imported from a "use server"
+// module, where the proxy carries its own caller, and inside a payload, where
+// the decoder mints the reference and calls whatever this option names. Both
+// end up in the same place; without this one React throws "the callServer
+// option was not implemented in your router runtime" the first time a page
+// passes a server function down as a prop.
+const __ruvyxaCallServer = __ruvyxaServerCaller({
+  encodeReply: __ruvyxaEncodeReply,
+  createFromFetch: __ruvyxaFromFetch,
+})
+
+function __ruvyxaResponseFor(payload) {
+  if (payload !== __ruvyxaDecodedPayload) {
+    __ruvyxaDecodedPayload = payload
+    __ruvyxaDecodedResponse = __ruvyxaDecodeFlight(__ruvyxaPayloadStream(payload), {
+      callServer: __ruvyxaCallServer,
+    })
+  }
+  return __ruvyxaDecodedResponse
+}
+
+// A component declared once, at module scope. Building it inside the factory
+// below would make every render a new component *type*, which React unmounts
+// and remounts — losing the state of every client component on the page.
+function ${RSC_ROOT_LOCAL}({ payload, path, params }) {
+  return React.createElement(
+    ${ROUTE_CONTEXT_LOCAL}.Provider,
+    { value: { pathname: path, params: params ?? {}, route: ${JSON.stringify(routePath)}, flight: undefined } },
+    React.use(__ruvyxaResponseFor(payload)),
+  )
+}
+
+function ${RSC_TREE_LOCAL}(payload, ctx) {
+  return React.createElement(${RSC_ROOT_LOCAL}, {
+    payload,
+    path: ctx.path,
+    params: ctx.params,
+  })
+}
+
+;(globalThis.${RSC_ROUTE_REGISTRY_GLOBAL} ||= {})[${JSON.stringify(routePath)}] = ${RSC_TREE_LOCAL};
+
 const __ruvyxaCtx = {
   path: globalThis.__RUVYXA_REQUEST_PATH__ ?? ${requestPathLiteral},
   params: globalThis.__RUVYXA_ROUTE_PARAMS__ ?? ${paramsLiteral},
 }
+globalThis.${ROUTE_PATTERN_GLOBAL} = ${JSON.stringify(routePath)}
 const __ruvyxaPayload = __ruvyxaReadPayload()
 
 if (__ruvyxaPayload !== null) {
-  const __ruvyxaResponse = __ruvyxaDecodeFlight(__ruvyxaPayloadStream(__ruvyxaPayload))
-  const __ruvyxaRoot = () =>
-    React.createElement(${ROUTE_CONTEXT_LOCAL}.Provider, {
-      value: { pathname: __ruvyxaCtx.path, params: __ruvyxaCtx.params ?? {}, route: ${JSON.stringify(routePath)}, flight: undefined },
-    }, React.use(__ruvyxaResponse))
-
+  const __ruvyxaElement = ${RSC_TREE_LOCAL}(__ruvyxaPayload, __ruvyxaCtx)
   if (globalThis.__RUVYXA_ROOT__) {
-    globalThis.__RUVYXA_ROOT__.render(React.createElement(__ruvyxaRoot))
+    globalThis.__RUVYXA_ROOT__.render(__ruvyxaElement)
   } else {
-    globalThis.__RUVYXA_ROOT__ = hydrateRoot(document, React.createElement(__ruvyxaRoot))
+    globalThis.__RUVYXA_ROOT__ = hydrateRoot(document, __ruvyxaElement)
   }
   window.__RUVYXA_HYDRATED = true
+}
+`
+}
+
+/**
+ * Build the entry that runs one of a route's server functions.
+ *
+ * A `POST` to `/__ruvyxa/rsc` names a reference; this module is what turns that
+ * name back into a call. It is separate from the route's render entry for one
+ * reason: an actions file imported only by a `'use client'` component is not in
+ * the render entry's graph at all — the component is a reference there, and a
+ * reference's own imports are never walked — so the render entry could not
+ * resolve half the functions a page can call.
+ *
+ * Every `'use server'` module either graph reported is imported, not just the
+ * one the call names. React resolves a reference that appears *inside* the
+ * arguments through the same registry, which is how `remove.bind(null, id)`
+ * reaches the server, and a bundle holding only the called module would fail on
+ * the first such argument.
+ *
+ * Decoding, calling, and re-encoding all happen here rather than in the host
+ * because all three need the `react-server` build of React and of
+ * `react-server-dom-webpack`: the host process has the ordinary one, and a
+ * reply encoded by the wrong instance names references the caller cannot
+ * resolve.
+ *
+ * @param {object} options
+ * @param {{ id: string, file: string }[]} options.references `'use server'` modules to link.
+ */
+export function rscActionEntrySource({ references }) {
+  const imports = references.map(
+    (reference, index) =>
+      `import * as __ruvyxaAction${index} from ${JSON.stringify(String(reference.file).replaceAll('\\', '/'))}`,
+  )
+  // Referenced so a tree-shaking pass cannot decide the namespaces are unused
+  // and drop the modules whose evaluation is the entire point of importing them.
+  const touched = references.map((_reference, index) => `__ruvyxaAction${index}`).join(', ')
+  return `import { decodeAction, decodeFormState, decodeReply, renderToReadableStream as __ruvyxaRenderFlight } from ${JSON.stringify(RSC_SERVER_PACKAGE)}
+import { flushServerModules as __ruvyxaFlushServer, installClientReferenceRuntime as __ruvyxaInstallRefs, resolveServerReference as __ruvyxaResolveServer } from ${JSON.stringify(RSC_CLIENT_RUNTIME_SPECIFIER)}
+${imports.join('\n')}
+
+export const linkedModules = [${touched}]
+
+/**
+ * Call the function \`reference\` names and encode what it returned.
+ *
+ * The reply is a Flight payload rather than JSON so a server function may
+ * return an element tree — including client components, which is why it needs
+ * the same manifest a page render uses.
+ */
+export async function callServerFunction({ reference, body, manifest, serverManifest, options }) {
+  __ruvyxaFlushServer()
+  const target = __ruvyxaResolveServer(reference)
+  const args = await decodeReply(body, serverManifest, options)
+  const returnValue = await target(...args)
+  return __ruvyxaRenderFlight(returnValue, manifest, options)
+}
+
+/**
+ * Run the action a plain form post named, for a browser with no JavaScript.
+ *
+ * React writes the reference and its bound arguments into hidden fields when it
+ * renders \`<form action={fn}>\`, so the submission carries everything needed to
+ * find and call the function. \`decodeAction\` reads those fields and hands back
+ * a thunk; the page is then re-rendered normally, which is what makes the
+ * result visible without a payload ever reaching the browser.
+ *
+ * \`null\` when the post named no action. That is the ordinary answer for any
+ * other form on the page — a search box posting to the same URL, say — and the
+ * caller renders the route as it would have without a body.
+ *
+ * The second half is \`useActionState\`. React writes an extra \`$ACTION_KEY\`
+ * field for a form whose action came from that hook, and \`decodeFormState\`
+ * turns the return value into the token the HTML renderer replays it from. Any
+ * other form decodes to \`null\` here and the hook keeps its initial state,
+ * which is the same thing the hook does on a first load.
+ */
+export async function runFormAction({ formData, serverManifest }) {
+  __ruvyxaFlushServer()
+  // \`decodeAction\` resolves the reference itself, through the same
+  // \`__webpack_require__\` a payload resolves a client component with — a
+  // hidden field is decoded by React, not by this framework, so the id in it
+  // takes React's route rather than \`resolveServerReference\`'s. Installing
+  // here rather than at module scope keeps the claim deliberate, which is what
+  // the runtime's own comment asks for.
+  __ruvyxaInstallRefs()
+  const action = await decodeAction(formData, serverManifest)
+  if (typeof action !== 'function') return null
+  const result = await action()
+  return { result, formState: await decodeFormState(result, formData, serverManifest) }
 }
 `
 }

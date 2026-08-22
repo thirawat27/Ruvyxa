@@ -475,6 +475,7 @@ pub(crate) fn bundle_context_for_build(
     config_dependency_hash: &str,
     cache_dir: &Path,
     plugin_session: &TypeScriptPluginBuildSession,
+    server_references: &[ruvyxa_dev_server::ServerReferenceSource],
 ) -> anyhow::Result<ruvyxa_bundler::BundleContext> {
     let artifact_graph_enabled = !matches!(
         std::env::var("RUVYXA_DISABLE_ARTIFACT_CACHE").as_deref(),
@@ -485,7 +486,19 @@ pub(crate) fn bundle_context_for_build(
         true,
         config_dependency_hash,
     );
-    let Some(bridge) = plugin_session.bridge() else {
+    // Ordered before any project plugin: a `'use server'` module is not the
+    // file on disk as far as a browser bundle is concerned, so a plugin that
+    // transforms it should see the reference, not the server code it replaced.
+    let mut hosts: Vec<Arc<dyn ruvyxa_bundler::hooks::BuildHooks>> = Vec::new();
+    let substitutions =
+        crate::server_references::ServerReferenceSources::new(server_references.iter().cloned());
+    if !substitutions.is_empty() {
+        hosts.push(Arc::new(substitutions));
+    }
+    if let Some(bridge) = plugin_session.bridge() {
+        hosts.push(Arc::new(bridge.clone()));
+    }
+    if hosts.is_empty() {
         return Ok(ruvyxa_bundler::BundleContext::for_build_with_artifacts(
             compile_cache,
             ruvyxa_bundler::resolver::ResolveGraphCache::for_build(),
@@ -493,13 +506,13 @@ pub(crate) fn bundle_context_for_build(
             config_dependency_hash,
             artifact_graph_enabled,
         ));
-    };
+    }
 
     Ok(ruvyxa_bundler::BundleContext::with_build_hooks_for_build(
         compile_cache,
         ruvyxa_bundler::resolver::ResolveGraphCache::for_build(),
         ruvyxa_bundler::incremental::IncrementalGraphCache::disabled(),
-        ruvyxa_bundler::hooks::BuildHookPipeline::new(vec![Arc::new(bridge.clone())]),
+        ruvyxa_bundler::hooks::BuildHookPipeline::new(hosts),
         cache_dir,
         config_dependency_hash,
         artifact_graph_enabled,

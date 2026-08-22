@@ -27,7 +27,7 @@ const { compileBundleWithMetadata, runtimeAliases, serverPlatform, toImportPath 
   await load('compiler.mjs')
 const { rscClientEntrySource, rscServerEntrySource } = await load('entry-templates.mjs')
 const { clientModuleId, clientRegistrySource } = await load('client-references.mjs')
-const { renderServerComponents } = await load('server-components.mjs')
+const { renderServerComponents, renderServerComponentsStream } = await load('server-components.mjs')
 
 const scratchRoot = path.join(workspaceRoot, '.test-build')
 await mkdir(scratchRoot, { recursive: true })
@@ -195,6 +195,51 @@ describe('the SSR pass', () => {
   })
 })
 
+describe('client reference identity across trees', () => {
+  /**
+   * `ruvyxa build` compiles a route from the project's own sources; `ruvyxa
+   * start` compiles the same route from the copy the build stages under
+   * `<out>/server/`. Measured from the project root those two give
+   * `app/counter.tsx` and `.ruvyxa/server/app/counter.tsx` — different ids for
+   * one module, so the payload a running server rendered named a reference the
+   * browser bundle had never registered, and the page went blank on the first
+   * soft navigation into it.
+   *
+   * The base both trees share is the directory holding the app directory.
+   */
+  it('is the same for the source tree and the build staging copy', async () => {
+    const { cp } = await import('node:fs/promises')
+    const stagedRoot = path.join(projectRoot, '.ruvyxa/server')
+    await cp(appDir, path.join(stagedRoot, 'app'), { recursive: true })
+
+    const idsFor = async (dir, label) => {
+      const built = await compileBundleWithMetadata({
+        projectRoot,
+        entrySource: rscServerEntrySource({
+          imports: [`import Page from ${JSON.stringify(toImportPath(path.join(dir, 'page.tsx')))}`],
+          pageName: 'Page',
+          layoutNames: [],
+          routePath: '/',
+        }),
+        sourcefile: 'ruvyxa:rsc-id.tsx',
+        outfile: path.join(projectRoot, `.ruvyxa/cache/rsc/id-${label}.mjs`),
+        platform: serverPlatform(),
+        bundleTarget: 'react-server',
+        clientReferenceBase: path.dirname(dir),
+        aliases: runtimeAliases(runtimeDir),
+        sourceMap: false,
+      })
+      return built.clientReferences.map((reference) => [reference.id, reference.relativePath])
+    }
+
+    const fromSource = await idsFor(appDir, 'source')
+    const fromStaged = await idsFor(path.join(stagedRoot, 'app'), 'staged')
+
+    assert.deepEqual(fromSource, [[clientModuleId('app/counter.tsx'), 'app/counter.tsx']])
+    assert.deepEqual(fromStaged, fromSource)
+  })
+})
+
 describe('the browser entry', () => {
   const source = rscClientEntrySource({
     references: [{ id: clientModuleId('app/counter.tsx'), file: counterFile }],
@@ -218,5 +263,66 @@ describe('the browser entry', () => {
 
   it('leaves a document served without a payload alone', () => {
     assert.match(source, /if \(__ruvyxaPayload !== null\)/)
+  })
+})
+
+describe('streaming the document', () => {
+  /**
+   * The whole point: the shell has to be readable before the render is over.
+   *
+   * A boundary that resolves late is what makes the difference visible. The
+   * buffered render returns one string and can only return it at the end; this
+   * one hands back a stream whose first chunk is available while the slow part
+   * of the page is still being awaited.
+   */
+  it('yields the shell before the slow boundary has resolved', async () => {
+    const streamed = await renderServerComponentsStream({
+      serverModule,
+      references: serverBundle.clientReferences,
+      ctx: { path: '/', params: {} },
+      routePath: '/',
+    })
+
+    const reader = streamed.stream.getReader()
+    const first = await reader.read()
+    assert.equal(first.done, false)
+    const shell = new TextDecoder().decode(first.value)
+    assert.ok(shell.toLowerCase().startsWith('<!doctype html>'), shell.slice(0, 40))
+
+    let rest = ''
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      rest += new TextDecoder().decode(value)
+    }
+    const document = shell + rest
+    assert.match(document, /<\/html>/)
+    // Exactly one, whoever wrote it. Prepending unconditionally produced two.
+    assert.equal(document.toLowerCase().split('<!doctype').length - 1, 1)
+
+    // The payload settles after the body, which is why the host writes it into
+    // the tail rather than the head.
+    const payload = await streamed.payload
+    assert.ok(payload.length > 0)
+    assert.deepEqual(streamed.failures, [])
+  })
+
+  it('produces the same document the buffered render does', async () => {
+    // Two renders of one route, through the two paths. A difference here is a
+    // hydration mismatch on every streamed page.
+    const streamed = await renderServerComponentsStream({
+      serverModule,
+      references: serverBundle.clientReferences,
+      ctx: { path: '/', params: {} },
+      routePath: '/',
+    })
+    const reader = streamed.stream.getReader()
+    let document = ''
+    for (;;) {
+      const { done, value } = await reader.read()
+      if (done) break
+      document += new TextDecoder().decode(value)
+    }
+    assert.equal(document, rendered.html)
   })
 })

@@ -85,10 +85,17 @@ pub struct PreparedBundle {
 }
 
 impl PreparedBundle {
-    /// Project modules in the static entry graph, using the same ordering and
-    /// selection rules as the emitted chunk manifest.
+    /// Project modules in the static entry graph, **in evaluation order**.
+    ///
+    /// The order is the point, not a detail of the return type. These modules
+    /// are what a route evaluates and the sequence is what a route evaluates
+    /// them in, which is the only record of a load-order dependency the graph
+    /// itself cannot express: a module that reads a global another module
+    /// installs has no import edge to it, and nothing but this order says which
+    /// runs first. Collecting into a sorted set — as this used to — reads as
+    /// harmless and silently reorders the browser's work by pathname.
     #[must_use]
-    pub fn module_paths(&self) -> BTreeSet<PathBuf> {
+    pub fn module_paths(&self) -> Vec<PathBuf> {
         linker::ordered_project_modules(&self.static_modules)
             .into_iter()
             .filter(|module| !module.is_external)
@@ -157,6 +164,30 @@ pub fn bundle_with_shared_modules(
     Ok(output)
 }
 
+/// Resolve and compile a caller-supplied entry so it can be emitted later.
+///
+/// The planning half of [`bundle_entry_source`]. A server-components route
+/// needs both: its module set has to join the shared-chunk analysis with every
+/// other route, or its browser bundle inlines a second copy of React and a soft
+/// navigation into it renders with two Reacts on the page.
+pub fn prepare_bundle_entry_source(
+    entry_source: &str,
+    input: BundleInput,
+    context: &BundleContext,
+) -> Result<PreparedBundle> {
+    let prepared = prepare_bundle_with_parts(
+        input,
+        Some(entry_source),
+        context.compile_cache(),
+        context.graph_cache(),
+        context.incremental(),
+        context.build_hooks(),
+        context.artifacts(),
+    )?;
+    context.enforce_cache_budget();
+    Ok(prepared)
+}
+
 /// Bundle a caller-supplied entry instead of the generated route entry.
 ///
 /// `input` still supplies the project root, target, and options — everything
@@ -175,6 +206,7 @@ pub fn bundle_entry_source(
     entry_source: &str,
     input: BundleInput,
     context: &BundleContext,
+    shared_modules: &BTreeSet<PathBuf>,
 ) -> Result<BundleOutput> {
     let prepared = prepare_bundle_with_parts(
         input,
@@ -185,7 +217,12 @@ pub fn bundle_entry_source(
         context.build_hooks(),
         context.artifacts(),
     )?;
-    let output = bundle_prepared(&prepared, &BTreeSet::new())?;
+    // The shared set is not optional here. A server-components route whose plan
+    // came back from the artifact cache reaches this path with no prepared
+    // bundle, and dropping the set made that route link its own React while
+    // every other route read one from the shared chunk — two Reacts on the page
+    // as soon as a soft navigation put them together.
+    let output = bundle_prepared(&prepared, shared_modules)?;
     context.enforce_cache_budget();
     Ok(output)
 }
@@ -216,13 +253,20 @@ pub fn bundle_prepared(
 
 /// Compile shared route modules into one executable browser registry.
 ///
-/// The caller supplies paths already proven common to multiple routes. Their
-/// static closure is linked dependency-first so a route bundle can safely read
-/// the registry after importing this output.
+/// The caller supplies paths already proven common to multiple routes, **in the
+/// order the routes evaluate them**. Their static closure is linked
+/// dependency-first so a route bundle can safely read the registry after
+/// importing this output.
+///
+/// The given order decides the order of everything the dependency graph leaves
+/// free. A route bundle `import`s this registry, so the whole registry runs
+/// before the first statement of the route — the route's own import order can
+/// no longer separate two modules once they are both in here, and this
+/// sequence is the only thing left that can.
 pub fn bundle_shared_route_modules(
     project_root: PathBuf,
     app_dir: PathBuf,
-    module_paths: &BTreeSet<PathBuf>,
+    module_paths: &[PathBuf],
     options: BundleOptions,
     context: &BundleContext,
 ) -> Result<SharedRouteBundleOutput> {
@@ -287,11 +331,17 @@ pub fn bundle_shared_route_modules(
 /// Emit a shared-route registry directly from routes prepared in the same
 /// immutable build snapshot.
 ///
-/// This preserves the legacy synthetic-entry breadth-first module order while
-/// avoiding a second resolve and compile pass for the selected closure.
+/// The same registry [`bundle_shared_route_modules`] produces, without a second
+/// resolve and compile pass for the selected closure. It has to be the same
+/// one: a build where every route was prepared takes this path and a build with
+/// a cached plan or a build hook takes the other, and two orders would give the
+/// two builds different chunks for identical sources.
+///
+/// `module_paths` is walked in the order given, so the caller's order is what
+/// the registry runs in.
 pub fn bundle_shared_prepared_route_modules(
     prepared_routes: &[&PreparedBundle],
-    module_paths: &BTreeSet<PathBuf>,
+    module_paths: &[PathBuf],
     options: BundleOptions,
 ) -> Result<SharedRouteBundleOutput> {
     let Some(first) = prepared_routes.first() else {
@@ -1768,24 +1818,38 @@ export default function Page() { return null }
         );
     }
 
+    /// The two shared-registry emitters must agree, module for module and byte
+    /// for byte.
+    ///
+    /// A build takes the prepared path when every route was prepared in this
+    /// process and the synthetic-entry path when a plan came from the artifact
+    /// cache or a build hook is installed. Both are reached by ordinary builds
+    /// of the same tree, so a disagreement would mean the shared chunk changes
+    /// content — and therefore filename — depending on what was cached.
+    ///
+    /// The two shared modules are named so that sorting by path reverses the
+    /// order the routes evaluate them in, which is what makes this test say
+    /// something about order rather than only about content.
     #[test]
     fn prepared_shared_registry_matches_the_legacy_synthetic_entry() {
         let temp = tempfile::tempdir().unwrap();
         let root = ruvyxa_diagnostics::normalized_canonical_path(temp.path());
         let app = root.join("app");
         fs::create_dir_all(&app).unwrap();
-        let shared = app.join("shared.ts");
+        let shared = app.join("zz-shared.ts");
+        let reader = app.join("aa-reader.ts");
         let page_a = app.join("a.tsx");
         let page_b = app.join("b.tsx");
-        fs::write(&shared, "export const label = 'shared';").unwrap();
+        fs::write(&shared, "export const label = 'zz-shared-token';").unwrap();
+        fs::write(&reader, "export const seen = 'aa-reader-token';").unwrap();
         fs::write(
             &page_a,
-            "import { label } from './shared'; export default function A() { return <main>{label}</main> }",
+            "import { label } from './zz-shared'; import { seen } from './aa-reader'; export default function A() { return <main>{label}{seen}</main> }",
         )
         .unwrap();
         fs::write(
             &page_b,
-            "import { label } from './shared'; export default function B() { return <aside>{label}</aside> }",
+            "import { label } from './zz-shared'; import { seen } from './aa-reader'; export default function B() { return <aside>{label}{seen}</aside> }",
         )
         .unwrap();
         let context = BundleContext::new(&root);
@@ -1793,12 +1857,17 @@ export default function Page() { return null }
             prepare_bundle(client_input(&root, &app, page_a, vec![], "/a"), &context).unwrap();
         let prepared_b =
             prepare_bundle(client_input(&root, &app, page_b, vec![], "/b"), &context).unwrap();
+        // Ordered by what `/a` evaluates, filtered to what `/b` also holds —
+        // the same rule the build applies across every route.
+        let in_b = prepared_b
+            .module_paths()
+            .into_iter()
+            .collect::<BTreeSet<_>>();
         let shared_paths = prepared_a
             .module_paths()
-            .intersection(&prepared_b.module_paths())
-            .filter(|path| path.is_file())
-            .cloned()
-            .collect::<BTreeSet<_>>();
+            .into_iter()
+            .filter(|path| in_b.contains(path) && path.is_file())
+            .collect::<Vec<_>>();
         let options = BundleOptions {
             minify: false,
             source_map: false,
@@ -1827,6 +1896,15 @@ export default function Page() { return null }
 
         assert_eq!(prepared.modules, legacy.modules);
         assert_eq!(prepared.code, legacy.code);
+
+        // Both emitters honour the order they were handed rather than sorting
+        // it, which is the only thing that can order two modules with no import
+        // between them.
+        for (label, code) in [("prepared", &prepared.code), ("legacy", &legacy.code)] {
+            let installs = code.find("zz-shared-token").expect(label);
+            let reads = code.find("aa-reader-token").expect(label);
+            assert!(installs < reads, "{label} sorted the modules by path");
+        }
     }
 
     #[test]

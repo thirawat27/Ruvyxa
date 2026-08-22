@@ -39,6 +39,26 @@ pub(crate) fn compose_document(rendered: &str, head_content: &str, hmr: &str) ->
     )
 }
 
+/// Compose the head of a document that is still arriving.
+///
+/// The streaming counterpart of [`compose_localized_document`], applied to the
+/// prefix through `</head>` rather than to a whole document. The locale is
+/// resolved by the caller before the stream starts, because by the time this
+/// runs the request is no longer in reach — and because resolving it once per
+/// response beats resolving it once per chunk.
+pub(crate) fn compose_document_head(
+    prefix: &str,
+    head_content: &str,
+    locale: Option<(&str, &str)>,
+) -> String {
+    let with_head = insert_before_ascii_case(prefix, "</head>", head_content);
+    let Some((locale, locale_head)) = locale else {
+        return with_head;
+    };
+    let with_locale = insert_before_ascii_case(&with_head, "</head>", locale_head);
+    set_document_lang(&with_locale, locale)
+}
+
 pub(crate) fn compose_localized_document(
     rendered: &str,
     head_content: &str,

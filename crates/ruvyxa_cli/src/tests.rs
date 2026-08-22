@@ -1101,6 +1101,116 @@ fn an_emitted_bundle_and_its_source_map_agree_after_the_shared_import() {
     );
 }
 
+/// The shared chunk runs its modules in the order the routes run them.
+///
+/// A route bundle `import`s the shared chunk, so the whole chunk is evaluated
+/// before the route's own first statement. Once two modules are both in there,
+/// the route's import order has no say left — the chunk's own order is the only
+/// thing deciding which runs first, and it therefore has to be the route's.
+///
+/// The pair below has a load-order dependency the module graph cannot express:
+/// one writes a global and the other reads it, with no import between them. The
+/// filenames are chosen so that sorting by path reverses the routes' order,
+/// because sorting is exactly what used to happen — the shared module list was
+/// collected into a `BTreeSet` — and it put React's server-components decoder
+/// ahead of the module that installs the globals it reads at load time. Every
+/// server-components page stopped hydrating in production and nothing failed
+/// anywhere else.
+#[test]
+fn the_shared_chunk_keeps_the_order_the_routes_evaluate_in() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let app = root.join("app");
+    let client_dir = root.join(".ruvyxa").join("client");
+    std::fs::create_dir_all(app.join("second")).unwrap();
+    std::fs::create_dir_all(&client_dir).unwrap();
+
+    // Sorts last, must run first.
+    std::fs::write(
+        app.join("zz-install.ts"),
+        "export const INSTALLED = 'zz-install-token';\n\
+         globalThis.__ruvyxaOrderProbe = INSTALLED;\n",
+    )
+    .unwrap();
+    // Sorts first, must run second: it reads at module scope what the other one
+    // wrote at module scope.
+    std::fs::write(
+        app.join("aa-reader.ts"),
+        "export const SEEN = 'aa-reader-token' + String(globalThis.__ruvyxaOrderProbe);\n",
+    )
+    .unwrap();
+
+    for (file, marker) in [
+        (app.join("page.tsx"), "route-alpha"),
+        (app.join("second/page.tsx"), "route-beta"),
+    ] {
+        let prefix = if file.ends_with("second/page.tsx") {
+            ".."
+        } else {
+            "."
+        };
+        std::fs::write(
+            &file,
+            format!(
+                "import {{ INSTALLED }} from '{prefix}/zz-install';\n\
+                 import {{ SEEN }} from '{prefix}/aa-reader';\n\
+                 export default function Page() {{ return <main>{{INSTALLED}}{{SEEN}}{{\"{marker}\"}}</main>; }}\n"
+            ),
+        )
+        .unwrap();
+    }
+
+    let manifest = discover_routes(DiscoverOptions::new(&app)).unwrap();
+    let build = BuildConfigOptions {
+        minify: Some(false),
+        sourcemap: Some(false),
+        tree_shaking: Some(false),
+        split_strategy: Some("route".to_string()),
+        parallelism: Some(1),
+        jsx_runtime: Some("classic".to_string()),
+        es_target: None,
+        emit_chunk_manifest: Some(false),
+        prebundle_dependencies: Some(true),
+        prerender_cache: Some(true),
+    };
+
+    emit_client_bundles(
+        root,
+        &app,
+        &manifest,
+        &client_dir,
+        &build,
+        &[],
+        RuvyxaBuildCache {
+            dependency_hash: "no-config",
+            directory: &root.join(".ruvyxa/cache/bundler"),
+        },
+    )
+    .unwrap();
+
+    let shared = std::fs::read_dir(&client_dir)
+        .unwrap()
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .find(|path| {
+            path.file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with("shared."))
+        })
+        .expect("two routes sharing two modules must produce a shared chunk");
+    let code = std::fs::read_to_string(&shared).unwrap();
+
+    let installs = code
+        .find("zz-install-token")
+        .expect("the shared chunk must contain the installing module");
+    let reads = code
+        .find("aa-reader-token")
+        .expect("the shared chunk must contain the reading module");
+    assert!(
+        installs < reads,
+        "the shared chunk evaluates the reader before the installer, which is \
+         what sorting the module list by path does: {shared:?}"
+    );
+}
+
 #[test]
 fn emit_client_bundles_writes_chunk_manifest_when_enabled() {
     let temp = tempfile::tempdir().unwrap();
@@ -1671,6 +1781,7 @@ export default config({
             directory: &build_cache_dir(root, &config.cache),
         },
         &session,
+        &crate::client_bundle::ServerComponentEntries::default(),
     )
     .unwrap();
     let route_file = client_manifest["routes"][0]["file"].as_str().unwrap();

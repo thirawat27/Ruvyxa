@@ -177,14 +177,163 @@ props. `Suspense` works in both graphs, so `loading.tsx` behaves as it does on a
 `error.tsx` and `not-found.tsx` are class-based boundaries, which the server graph cannot run. On a
 server-components route they must be `'use client'` modules — the same rule React itself imposes.
 
-React's inline `'use server'` functions are **not** implemented. Ruvyxa's own server actions are,
-and they work unchanged from a `'use client'` component on a server-components route: they are
-ordinary client modules calling the action endpoint — see
-[Data, actions, and API routes](05-data-actions-api.md).
+`@ruvyxa/react` is safe to import from a server component. `Link`, the routing hooks, `Script`,
+`RuvyxaErrorBoundary`, and `useRuvyxaLoader` declare `'use client'` themselves, so a root layout can
+render its `<Link>` nav on a server-components route with no change at all — the server graph gets a
+reference and the browser resolves it. `Image`, `Seo`, and `notFound()` have no browser half and are
+rendered by the server component itself.
 
-The payload is produced as a stream and inlined whole, so a slow server component delays the whole
-document rather than streaming in behind a `Suspense` boundary. `loading.tsx` still renders its
-fallback into the payload; it just does not arrive separately.
+The same applies to any package you install: a component that uses hooks has to declare
+`'use client'` in its published files, or the server graph will compile it against a build of React
+that has no hooks in it.
+
+### Server functions
+
+A function behind `'use server'` runs on the server and is callable from the browser. Ruvyxa
+supports both of React's spellings.
+
+A whole module, which is the form a `'use client'` component imports:
+
+```ts
+// app/dashboard/actions.ts
+'use server'
+
+export async function rename(id: string, name: string) {
+  await db.rename(id, name)
+  return db.get(id)
+}
+```
+
+```tsx
+// app/dashboard/row.tsx
+'use client'
+import { rename } from './actions'
+
+export function Row({ id }: { id: string }) {
+  return <button onClick={() => rename(id, 'new')}>Rename</button>
+}
+```
+
+None of `actions.ts` is in the browser bundle. `rename` there is a _reference_: calling it posts the
+arguments to the server, runs the real function, and resolves to what it returned — including an
+element tree, because the reply is a Flight payload rather than JSON.
+
+Or one function inside the server component that uses it, which is the form that needs no second
+file:
+
+```tsx
+// app/dashboard/page.tsx
+export const serverComponents = true
+
+export async function markAllRead(userId: string) {
+  'use server'
+  await db.markAllRead(userId)
+}
+
+export default async function Dashboard() {
+  return <Toolbar onClear={markAllRead} />
+}
+```
+
+The function is handed to a `'use client'` component as an ordinary prop and arrives there as a
+reference, exactly as an imported one does.
+
+**An inline server function has to be at the top level of its module.** One declared inside another
+function closes over that call's variables, and a call arriving later — from a different request, in
+a different process — has no way to reconstruct them. Rather than compile such a function into one
+that reads values from a render that ended, Ruvyxa refuses it with `RUV1867` and names the line.
+Move it to the top level, or into a module that opens with the directive.
+
+Calls go to `POST /__ruvyxa/rsc`, the same endpoint that serves a route's payload, with the
+visitor's cookies attached and a same-origin header a cross-origin page cannot set. A server
+function is reachable from the route whose page or client components import it.
+
+A `<form action={fn}>` works **before its JavaScript has loaded, and without any**. React writes the
+function's reference into hidden fields while rendering the form, so a browser that has run none of
+the page's bundle can still submit it: the post goes to the page's own URL, Ruvyxa recognises the
+fields, runs the function, and answers with a freshly rendered document that already contains the
+result. `useActionState` is what carries that result into the markup — the value the action returned
+is replayed into the hook, so the same component renders the same answer whether it was reached over
+`fetch` or over a form submission.
+
+```tsx
+// app/search/form.tsx
+'use client'
+
+import { useActionState } from 'react'
+
+import { lookup } from './actions'
+
+export default function Search() {
+  const [answer, submit] = useActionState(lookup, null)
+  return (
+    <form action={submit}>
+      <input name="q" />
+      <output>{answer ?? 'nothing looked up yet'}</output>
+    </form>
+  )
+}
+```
+
+Once the bundle has loaded React intercepts the submit instead, calls the same function over
+`fetch`, and updates only what changed. Nothing about the form is written twice.
+
+A submitted form is answered by the route's own render rather than by its rendering strategy: a
+pre-rendered or cached document was produced before the action ran, so the response is rendered
+fresh and carries `Cache-Control: no-store`. Anything the action passed to `revalidatePath()` is
+applied before the response is returned. Server functions need a `react-server` graph to be resolved
+against, so this applies to server-components routes; a `POST` to any other page renders it exactly
+as it always did.
+
+Ruvyxa's own server actions are unchanged and still available from a `'use client'` component on a
+server-components route: see [Data, actions, and API routes](05-data-actions-api.md).
+
+### Streaming the document
+
+A server-components route whose document is produced per request is **streamed**. React sends the
+shell as soon as it has it and each `Suspense` boundary as the server resolves it, so a slow server
+component delays the part of the page waiting on it and nothing else.
+
+```tsx
+// app/dashboard/page.tsx
+import { Suspense } from 'react'
+
+export const serverComponents = true
+export const dynamic = 'force-dynamic'
+
+async function Revenue() {
+  return <Chart rows={await db.revenue()} />
+}
+
+export default function Dashboard() {
+  return (
+    <main>
+      <h1>Dashboard</h1>
+      <Suspense fallback={<Skeleton />}>
+        <Revenue />
+      </Suspense>
+    </main>
+  )
+}
+```
+
+Without `Suspense` the whole document still waits for `db.revenue()` — a boundary is what gives the
+server something to send first.
+
+**Only a per-request document streams.** `export const dynamic = 'force-dynamic'`, or anything else
+that makes a route dynamic, is what selects it. A pre-rendered, `revalidate`, or statically rendered
+route has to become a string to be written to disk or held in a cache, and a stream is the wrong
+shape for that — those routes are still sent whole. A route without server components does not
+stream either: its render resolves in one step, so there is nothing to send early.
+
+A streamed response carries `Cache-Control: no-store` and no `Content-Length`, and it is not held in
+the render cache. That follows from the same fact: the document never exists as a string the server
+could store.
+
+The Flight payload is still written into the document, at the end, in the same
+`<script type="application/json">` data block. It is complete only when the render is, and the
+browser needs it to hydrate rather than to paint — hydration cannot start until the document has
+been parsed, which is after the last byte either way.
 
 ### Combinations Ruvyxa refuses
 
@@ -196,9 +345,11 @@ Each of these would build cleanly and then do nothing, so discovery fails instea
 | `export const ppr = true` + `serverComponents` | partial pre-rendering streams a shell through an entry this pipeline does not build |
 | an intercepting route + `serverComponents`     | interception is matched from a client route registry this pipeline does not publish |
 
-Client-side navigation between routes is unaffected, but a server-components route is entered with a
-document request rather than a soft navigation: its browser bundle registers client modules, not a
-route tree.
+Client-side navigation works in both directions. Entering a server-components route fetches its
+payload from `/__ruvyxa/rsc` and renders it in place — no document load, and the page underneath is
+replaced the way any other route change replaces it. That endpoint is a _render_: it carries the
+visitor's cookies exactly as a full request would, so its response is never cacheable, and it
+requires a same-origin header a cross-origin page cannot set without a preflight.
 
 ### Deploying
 
@@ -207,6 +358,10 @@ the adapter copies. A route that still needs a server at request time — `ssr`,
 `export const dynamic = 'force-dynamic'` — is refused at build time with `RUV2213`, because every
 adapter serves pages through a generated module built by the ordinary SSR entry. Serve those routes
 with `ruvyxa start`, or let them pre-render.
+
+A deployed function answers `/__ruvyxa/rsc` with 501 for the same reason, so on those targets a
+navigation into a server-components route falls back to a document load — which, for a pre-rendered
+route, is a static file the CDN already holds.
 
 ## Route metadata and boundaries
 

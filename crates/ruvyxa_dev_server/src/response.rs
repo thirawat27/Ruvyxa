@@ -246,6 +246,35 @@ pub(crate) fn shared_text_body(text: Arc<str>) -> Body {
     Body::from(Bytes::from_owner(SharedText(text)))
 }
 
+/// Serve an HTML document that is still being produced.
+///
+/// `no-store` because there is nothing to store: the document is assembled per
+/// request and never becomes a string this process holds. Marked explicitly
+/// rather than left to default, so nothing between here and the browser decides
+/// on its own that a `200` without a length is reusable.
+pub(crate) fn streamed_html_response(body: Body) -> Response {
+    let mut response = html_response_from_body(StatusCode::OK, body);
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, max-age=0"),
+    );
+    response
+}
+
+/// The same response, marked as belonging to this one request.
+///
+/// For an answer that is correct only for the request that asked: a page
+/// rendered after a form post ran a server function, say. It overrides whatever
+/// caching the route's strategy would otherwise have declared, because the
+/// strategy describes the route and this describes one response to it.
+pub(crate) fn uncacheable(mut response: Response) -> Response {
+    response.headers_mut().insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("no-store, max-age=0"),
+    );
+    response
+}
+
 fn html_response_from_body(status: StatusCode, body: Body) -> Response {
     let mut response = (status, Html(body)).into_response();
     if status.is_client_error() || status.is_server_error() {

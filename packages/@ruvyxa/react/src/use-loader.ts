@@ -1,3 +1,8 @@
+'use client'
+
+// State and effects over a loader's lifecycle: the react-server build
+// has neither.
+
 import { useCallback, useEffect, useRef, useState } from 'react'
 
 /**

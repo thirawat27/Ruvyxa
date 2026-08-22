@@ -32,7 +32,16 @@ import { fileURLToPath } from 'node:url'
 // Re-exported rather than restated: the browser half of this contract lives in
 // a module with no imports, because it is inlined into the client bundle, and
 // two spellings of the registry global would be two registries.
-export { CLIENT_MODULE_REGISTRY_GLOBAL, RSC_PAYLOAD_ELEMENT_ID } from './rsc-client-runtime.mjs'
+import { isServerModuleId, parseServerReference } from './rsc-client-runtime.mjs'
+
+export {
+  CLIENT_MODULE_REGISTRY_GLOBAL,
+  RSC_PAYLOAD_ELEMENT_ID,
+  RSC_ENDPOINT,
+  RSC_REQUEST_HEADER,
+  SERVER_ACTION_HEADER,
+} from './rsc-client-runtime.mjs'
+export { isServerModuleId, parseServerReference }
 
 /** Prefix every Ruvyxa client-reference id carries, so a stray id is obvious. */
 export const CLIENT_MODULE_ID_PREFIX = 'ruv:'
@@ -112,9 +121,25 @@ export function clientReferenceRuntimePath() {
  * reached as `app/x.tsx` on one host and `app\x.tsx` on the other gets one id.
  * Case is left alone: two files differing only in case are two files on the
  * platforms that matter, and folding it would collide them.
+ *
+ * A module inside a package is named by the package instead: everything up to
+ * and including the last `node_modules/` is dropped, and one `node_modules/`
+ * is put back so a dependency can never collide with a project file of the
+ * same shape. The relative path to a dependency is not stable — `ruvyxa build`
+ * measures from the project and `ruvyxa start` measures from the tree staged
+ * under `.ruvyxa/server`, two directories deeper — so a framework component
+ * used by a layout got one id in the browser bundle and a different one in the
+ * payload rendered at request time. A direct load of such a page worked and a
+ * soft navigation into it failed with RUV1861.
  */
 export function normalizeClientModulePath(relativePath) {
-  return String(relativePath).replaceAll('\\', '/').replace(/^\.\//, '').replace(/^\/+/, '')
+  const slashed = String(relativePath)
+    .replaceAll('\\', '/')
+    .replace(/^\.\//, '')
+    .replace(/^\/+/, '')
+  const marker = slashed.lastIndexOf('node_modules/')
+  if (marker === -1) return slashed
+  return `node_modules/${slashed.slice(marker + 'node_modules/'.length)}`
 }
 
 /**
@@ -134,6 +159,21 @@ export function clientModuleId(relativePath) {
 /** Whether a string is an id this framework produced. */
 export function isClientModuleId(value) {
   return typeof value === 'string' && /^ruv:m_[a-f0-9]{16}$/.test(value)
+}
+
+/**
+ * The stable id for one `'use server'` module.
+ *
+ * `s_` rather than `m_`, over the same normalised path, so the two kinds of
+ * reference cannot be confused for one another. They travel through the same
+ * registry and the same `__webpack_require__`, and a client reference invoked
+ * as a server function — or the reverse — would otherwise fail somewhere inside
+ * React with an id that looks valid.
+ */
+export function serverModuleId(relativePath) {
+  const normalized = normalizeClientModulePath(relativePath)
+  const digest = createHash('sha256').update(normalized).digest('hex').slice(0, 16)
+  return `${CLIENT_MODULE_ID_PREFIX}s_${digest}`
 }
 
 /**
@@ -157,6 +197,131 @@ export function clientProxyModuleSource(id) {
     `module.exports = __ruvyxaClientProxy(${JSON.stringify(id)})`,
     '',
   ].join('\n')
+}
+
+/**
+ * What the `react-server` graph appends to a `'use server'` module.
+ *
+ * Unlike a `'use client'` module — which is *replaced* by a proxy, because its
+ * code belongs to the other graph — a server function's code belongs here and
+ * runs here. All that is added is the registration React needs to recognise its
+ * exports as callable references when they appear in a payload.
+ *
+ * Appended rather than prefixed so the module's own line numbers, and therefore
+ * its source map, are untouched. Import declarations are hoisted, so the
+ * position of the one below is a formatting question rather than a semantic one.
+ *
+ * It enqueues rather than registers, and hands over a thunk rather than the
+ * exports object, for one reason each. Ruvyxa's linker is line-based and emits
+ * every `__exports.name = name` assignment *after* the module body, so code at
+ * the bottom of that body sees an exports object that is still empty — the
+ * enqueued thunk is read later, from `flushServerModules()`, which the entry
+ * calls before it renders anything. And a module that assigns `module.exports`
+ * wholesale replaces the object, so capturing the object rather than the way to
+ * reach it would register the wrong one.
+ *
+ * The registration reads the exports instead of a list of export names, for the
+ * same reason `createClientModuleProxy` needs no list: enumerating them would
+ * mean scanning declarations, and every scanner in this repository that had to
+ * agree with another one has drifted at least once.
+ */
+export function serverRegistrationSource(id, names = null) {
+  if (!isServerModuleId(id)) {
+    throw new Error(`RUV1864 invalid server reference id: ${JSON.stringify(id)}`)
+  }
+  // `module.exports` when the whole module is behind the directive, and a
+  // literal of just the named functions when only some of them are. The second
+  // form is what keeps a page component — which lives in the same file as an
+  // inline server function and is emphatically not callable from a browser —
+  // from being registered alongside it.
+  const exposed = names === null ? 'module.exports' : `({ ${names.join(', ')} })`
+  return [
+    '',
+    `import { registerServerReference as __ruvyxaServerRef } from ${JSON.stringify(RSC_SERVER_PACKAGE)}`,
+    `import { enqueueServerModule as __ruvyxaEnqueueServer } from ${JSON.stringify(RSC_CLIENT_RUNTIME_SPECIFIER)}`,
+    `__ruvyxaEnqueueServer(${JSON.stringify(id)}, () => ${exposed}, __ruvyxaServerRef)`,
+    '',
+  ].join('\n')
+}
+
+/**
+ * The module a *client* graph compiles in place of a `'use server'` module.
+ *
+ * The mirror image of {@link clientProxyModuleSource}: there, the browser owns
+ * the code and the server holds a reference; here the server owns the code and
+ * the browser holds a reference. A component that imports `save` from an
+ * actions file gets a function that posts its arguments and resolves to what
+ * the server returned.
+ *
+ * Both client-side realms use this. The browser passes
+ * `react-server-dom-webpack/client.browser`, and the SSR pass passes
+ * `client.edge` — so a `<form action={save}>` renders the same markup in both,
+ * which is the whole reason hydration matches.
+ *
+ * References are memoised per export name. React compares a form action by
+ * identity across renders, and a proxy that minted a new function on every
+ * property read would make every re-render look like a different action.
+ */
+export function serverProxyModuleSource(id, clientPackage) {
+  if (!isServerModuleId(id)) {
+    throw new Error(`RUV1864 invalid server reference id: ${JSON.stringify(id)}`)
+  }
+  return [
+    // The proxy *is* a client module: it holds references and runs in the
+    // browser. Saying so is not a trick to get past the lane rules — it is what
+    // both of them read first, ahead of the filename, and the file this
+    // replaced is named `actions.ts` in every codebase that follows React's own
+    // convention. Without it `ruvyxa build` refuses the bundle with RUV1820 for
+    // a crossing that no longer exists.
+    `'use client'`,
+    `import { createServerReference as __ruvyxaServerRef, createFromFetch as __ruvyxaFromFetch, encodeReply as __ruvyxaEncodeReply } from ${JSON.stringify(clientPackage)}`,
+    `import { createServerCaller as __ruvyxaServerCaller, serverReferenceProxy as __ruvyxaServerProxy } from ${JSON.stringify(serverProxyRuntimeSpecifier(clientPackage))}`,
+    `const __ruvyxaCallServer = __ruvyxaServerCaller({ encodeReply: __ruvyxaEncodeReply, createFromFetch: __ruvyxaFromFetch })`,
+    `module.exports = __ruvyxaServerProxy(${JSON.stringify(id)}, __ruvyxaServerRef, __ruvyxaCallServer)`,
+    '',
+  ].join('\n')
+}
+
+/**
+ * How a server-reference proxy names the runtime it calls into.
+ *
+ * Derived from the decoder package rather than passed in, because the two
+ * always answer together: `client.browser` appears only in a browser graph and
+ * `client.edge` only in a server one. A browser graph is compiled by two
+ * different bundlers — this package's during `ruvyxa dev`, the Rust one during
+ * `ruvyxa build` — and only the first knows the `ruvyxa:` alias, so that graph
+ * gets the absolute path both understand. A server graph is only ever compiled
+ * here, where an absolute path to a file outside the project would resolve but
+ * stay external and leave a bare `D:/…` import behind.
+ */
+function serverProxyRuntimeSpecifier(clientPackage) {
+  return clientPackage === RSC_BROWSER_PACKAGE
+    ? clientReferenceRuntimePath()
+    : RSC_CLIENT_RUNTIME_SPECIFIER
+}
+
+/**
+ * The manifest `decodeReply` resolves a server reference in its arguments with.
+ *
+ * A client may pass one action to another — `<form action={remove.bind(null, id)}>`
+ * is the ordinary way that happens — so the arguments React decodes can name a
+ * reference of their own. Answering anything, like {@link clientManifest} does,
+ * is what lets that work without a build-time table: `__webpack_require__`
+ * resolves the module id against the same registry the registration wrote into,
+ * and an id no module registered fails there with `RUV1861` rather than here
+ * with a missing manifest entry.
+ */
+export function serverManifest() {
+  return new Proxy(Object.create(null), {
+    get(_target, property) {
+      const parsed = parseServerReference(typeof property === 'string' ? property : '')
+      if (!parsed) return undefined
+      return { id: parsed.module, chunks: [], name: parsed.name }
+    },
+    has(_target, property) {
+      return parseServerReference(typeof property === 'string' ? property : '') !== null
+    },
+  })
 }
 
 /**

@@ -21,6 +21,7 @@ use ruvyxa_graph::{
 };
 use serde::Deserialize;
 
+use crate::document_stream::StreamedDocument;
 use crate::html_document::{
     bootstrap_data_block, client_hydration_script, compose_localized_document, error_page,
     hmr_client_script,
@@ -32,12 +33,13 @@ use crate::static_assets::{
     contained_public_asset, is_safe_relative_path, is_static_asset_request, public_asset_links,
     serve_client_file, serve_client_file_sync, serve_public_file, serve_public_file_sync,
 };
-use crate::worker_pool::{RenderActionRequest, RenderApiRequest, WorkerApiResponse};
+use crate::worker_pool::{PostedForm, RenderActionRequest, RenderApiRequest, WorkerApiResponse};
 use crate::{
     AppState, RuntimeCache, RuntimeTrace, ServerConfig, TraceAssets, cached_html_response,
-    html_response, project_env, with_security_headers,
+    html_response, project_env, streamed_html_response, uncacheable, with_security_headers,
 };
 use crate::{render_cache, style::collect_styles};
+use futures_util::StreamExt;
 
 fn worker_request_headers(headers: &HeaderMap) -> Vec<(String, String)> {
     headers
@@ -315,12 +317,38 @@ pub(crate) async fn render_request_pooled(
         RouteKind::Page => {
             let styles = state.runtime_cache.styles(&state.config).await?;
             let page_headers = worker_request_headers(request_headers);
+            let form_action = posted_form(route_match.route, method, request_headers, request_body);
             let page_request = PageRequestContext {
                 path: request_path,
                 target: request_target,
                 headers: &page_headers,
                 method,
+                form_action,
             };
+            // A submitted form is answered by the route's own render, not by its
+            // strategy: whatever the strategy would have served is a document
+            // produced before this action ran. Every other request goes through
+            // the strategy exactly as before.
+            if form_action.is_some() {
+                return render_page_form_action(
+                    state,
+                    route_match.route,
+                    &page_request,
+                    &route_match.params,
+                    &styles,
+                )
+                .await;
+            }
+            if streams_document(route_match.route) {
+                return render_page_streamed(
+                    state,
+                    route_match.route,
+                    &page_request,
+                    &route_match.params,
+                    &styles,
+                )
+                .await;
+            }
             let html = render_page_by_strategy(
                 state,
                 route_match.route,
@@ -351,6 +379,177 @@ pub(crate) async fn render_request_pooled(
     }
 }
 
+/// Whether this route's document is produced per request and can therefore stream.
+///
+/// Server components and `Ssr` together. Every other strategy has to produce a
+/// string — a pre-render writes one to disk, an ISR or SSG entry puts one in a
+/// cache — and a stream is the wrong shape for that. An ordinary SSR route
+/// could stream too, but its render already resolves in one step: there is no
+/// `Suspense` boundary for the server to fill in later, so there would be
+/// nothing to stream except the loss of its document cache.
+pub(crate) fn streams_document(route: &RouteEntry) -> bool {
+    route.render.server_components && route.render.strategy == RenderStrategy::Ssr
+}
+
+/// Answer a `<form action={fn}>` submitted by a browser with no JavaScript.
+///
+/// The form posted to the page it is on, so the answer is that page — rendered
+/// after its server function ran, which is what makes the result visible
+/// without a single byte of JavaScript having executed. It is the same document
+/// a `GET` would produce; only the state it reads has changed.
+///
+/// Streamed when the route streams anyway, and buffered otherwise, because the
+/// choice belongs to the route rather than to the method. Either way the
+/// response is `no-store`: it is one visitor's answer to one submission, and the
+/// route's own strategy — which may be `Ssg`, and may have a file on disk — has
+/// nothing to say about a POST.
+async fn render_page_form_action(
+    state: &AppState,
+    route: &RouteEntry,
+    request: &PageRequestContext<'_>,
+    params: &RouteParams,
+    styles: &str,
+) -> Result<Response> {
+    if streams_document(route) {
+        return render_page_streamed(state, route, request, params, styles).await;
+    }
+    let document = render_page_pooled(state, route, request, params, styles).await?;
+    Ok(uncacheable(cached_html_response(
+        StatusCode::OK,
+        &document,
+        None,
+    )))
+}
+
+/// Serve a server-components document as it is rendered.
+///
+/// The shell leaves as soon as React has it, and each `Suspense` boundary
+/// follows when the server resolves it — so a slow server component delays the
+/// part of the page waiting on it and nothing else. The buffered path a few
+/// functions up holds the first byte until the last one is ready.
+///
+/// Nothing is cached, and that is inherent rather than an omission: the document
+/// never exists as a string this process could store, and a route that declared
+/// itself `Ssr` said its document is not reusable anyway.
+///
+/// The head is injected once `</head>` has been seen and the tail at the end,
+/// both by [`StreamedDocument`]. The Flight payload is part of that tail: it is
+/// complete only when the render is, and it arrives on the frame that ends the
+/// body.
+async fn render_page_streamed(
+    state: &AppState,
+    route: &RouteEntry,
+    request: &PageRequestContext<'_>,
+    params: &RouteParams,
+    styles: &str,
+) -> Result<Response> {
+    let mut streamed = state
+        .worker_pool
+        .render_rsc_document(crate::worker_pool::RenderSsrRequest {
+            project_root: &state.config.root,
+            app_dir: &state.config.app_dir,
+            page_file: &route.file,
+            request_path: request.path,
+            request_target: request.target,
+            route_path: &route.path,
+            params,
+            headers: request.headers,
+            method: request.method,
+            server_components: true,
+            form_action: request.form_action,
+        })
+        .await?;
+
+    if !streamed.response.ok {
+        let code = streamed
+            .response
+            .code
+            .clone()
+            .unwrap_or_else(|| "RUV1500".to_string());
+        let message = streamed
+            .response
+            .message
+            .clone()
+            .unwrap_or_else(|| "Server-components render failed".to_string());
+        return Err(
+            Diagnostic::new("RUV1500", "Server-components render failed")
+                .explain(format!("{code}: {message}"))
+                .at_file(&route.file)
+                .into(),
+        );
+    }
+
+    register_server_hmr_inputs(
+        state,
+        &route.path,
+        streamed.response.inputs_version.as_deref(),
+        streamed.response.inputs.as_deref(),
+    );
+
+    // A submitted form's server function has already run by the time the first
+    // frame arrives, so anything it revalidated is known now rather than at the
+    // end of the body.
+    if request.form_action.is_some() {
+        apply_revalidations(state, streamed.response.revalidate.take()).await;
+    }
+
+    let body = streamed.body.ok_or_else(|| {
+        RuvyxaError::Message("Server-components stream started without a body".to_string())
+    })?;
+
+    let asset_links = state.runtime_cache.asset_links(&state.config).await;
+    let plugin_head = render_plugin_head(&state.config.plugin_head);
+    let head_content =
+        format!(r#"{asset_links}{plugin_head}<style data-ruvyxa-css>{styles}</style>"#);
+    // Resolved before the stream starts: the request is out of reach by the time
+    // the head prefix arrives, and the answer is the same for every chunk.
+    let locale = crate::i18n::localized_head(
+        state.config.i18n.as_ref(),
+        &route.path,
+        request.path,
+        params,
+    );
+    let compose = move |prefix: &str| {
+        crate::html_document::compose_document_head(
+            prefix,
+            &head_content,
+            locale
+                .as_ref()
+                .map(|(locale, head)| (locale.as_str(), head.as_str())),
+        )
+    };
+
+    let hmr = if state.config.watch {
+        hmr_client_script()
+    } else {
+        ""
+    };
+    let client_script = client_hydration_script(&state.config, route, request.path, params);
+    let trailer = streamed.trailer;
+    let tail = move || {
+        // The payload the SSR pass rendered from, so the browser hydrates the
+        // tree that is already on screen. Absent only if the worker ended the
+        // stream without it, which leaves the page server-rendered and inert
+        // rather than blank — the browser entry declines to hydrate nothing.
+        let payload = trailer
+            .get()
+            .and_then(|frame| frame.rsc_payload.as_deref())
+            .map(crate::html_document::rsc_payload_block)
+            .unwrap_or_default();
+        format!("{payload}{client_script}{hmr}")
+    };
+
+    // `Body::into_data_stream` reports `axum::Error`; the composer works in
+    // `io::Error` because that is what the worker body stream produces. One
+    // conversion here keeps both sides in the error type they already use.
+    let source = body
+        .into_data_stream()
+        .map(|chunk| chunk.map_err(std::io::Error::other));
+    Ok(streamed_html_response(Body::from_stream(
+        StreamedDocument::new(source, compose, tail),
+    )))
+}
+
 /// Dispatch page rendering based on the route's declared rendering strategy.
 ///
 /// Returns the document as an `Arc<str>` so a cache hit — the common case in
@@ -361,6 +560,51 @@ struct PageRequestContext<'a> {
     target: &'a str,
     headers: &'a [(String, String)],
     method: &'a str,
+    /// Set when this request is a `<form action={fn}>` submitted without
+    /// JavaScript. The render then runs that server function first.
+    form_action: Option<PostedForm<'a>>,
+}
+
+/// The bytes of a no-JavaScript `<form action={fn}>` submission, if this is one.
+///
+/// Three questions, all answerable from the request line and one header, and
+/// none of them "does the body actually name an action" — that needs a
+/// multipart parser and the server function registry, both of which live in the
+/// worker. A POST that turns out to name nothing renders the page exactly as a
+/// POST always did here, so guessing wide costs a body forwarded and nothing
+/// else.
+///
+/// Server components are required because they are what a server function
+/// needs: the reference in the form's hidden field is resolved against the
+/// route's `react-server` graph, and a route without one has no such graph.
+///
+/// A hydrated page never reaches this. Its form posts to `/__ruvyxa/rsc`
+/// instead, and gets a payload back to patch itself with rather than a whole
+/// new document.
+fn posted_form<'a>(
+    route: &RouteEntry,
+    method: &str,
+    headers: &'a HeaderMap,
+    body: Option<&'a [u8]>,
+) -> Option<PostedForm<'a>> {
+    if !route.render.server_components || !method.eq_ignore_ascii_case("POST") {
+        return None;
+    }
+    let body = body.filter(|bytes| !bytes.is_empty())?;
+    let content_type = headers.get(header::CONTENT_TYPE)?.to_str().ok()?;
+    let essence = content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    // The two encodings a `<form>` can be submitted with. React asks for the
+    // first when it writes the hidden fields; the second is what a form that
+    // overrode `encType` sends, and both decode to `FormData` on the far side.
+    if essence != "multipart/form-data" && essence != "application/x-www-form-urlencoded" {
+        return None;
+    }
+    Some(PostedForm { content_type, body })
 }
 
 async fn render_page_by_strategy(
@@ -1042,9 +1286,13 @@ async fn render_page_pooled(
     params: &RouteParams,
     styles: &str,
 ) -> Result<CachedDocument> {
-    // Check render cache first
+    // Check render cache first. A submitted form skips it in both directions:
+    // a stored document was rendered before this action ran, and the one this
+    // produces answers a submission nobody else made.
     let cache_key = render_cache::ssr_cache_key(request.path, params);
-    if let Some(cached) = state.render_cache.get_document(&cache_key).await {
+    if request.form_action.is_none()
+        && let Some(cached) = state.render_cache.get_document(&cache_key).await
+    {
         return Ok(cached);
     }
 
@@ -1055,7 +1303,7 @@ async fn render_page_pooled(
     // every cache miss in production, to answer a question the worker's own
     // module load already answers. `missing_default_export_diagnostic` below
     // keeps the actionable RUV1004 message without the read.
-    let response = state
+    let mut response = state
         .worker_pool
         .render_ssr(crate::worker_pool::RenderSsrRequest {
             project_root: &state.config.root,
@@ -1068,6 +1316,7 @@ async fn render_page_pooled(
             headers: request.headers,
             method: request.method,
             server_components: route.render.server_components,
+            form_action: request.form_action,
         })
         .await?;
 
@@ -1101,7 +1350,14 @@ async fn render_page_pooled(
     // Reported by the worker when the render actually read a cookie, a header,
     // or draft mode. Such a document is one user's page: putting it in the
     // shared render cache would serve it to the next visitor of the same URL.
-    let request_scoped = response.request_scoped.unwrap_or(false);
+    let request_scoped = response.request_scoped.unwrap_or(false) || request.form_action.is_some();
+
+    // A server function the submitted form ran may have called
+    // `revalidatePath()`. Applied before the response is returned so a visitor
+    // who follows a link on this page cannot beat the invalidation to the cache.
+    if request.form_action.is_some() {
+        apply_revalidations(state, response.revalidate.take()).await;
+    }
 
     let rendered = response
         .html
@@ -1149,7 +1405,7 @@ async fn render_page_pooled(
 /// cache. Paths are bounded and validated here rather than trusted: they cross
 /// a process boundary, and a handler that loops could otherwise ask the server
 /// to walk an unbounded list on the request path.
-async fn apply_revalidations(state: &AppState, paths: Option<Vec<String>>) {
+pub(crate) async fn apply_revalidations(state: &AppState, paths: Option<Vec<String>>) {
     let Some(paths) = paths else { return };
     if paths.len() > MAX_REVALIDATED_PATHS {
         let dropped = state.render_cache.revalidate_all_paths().await;
@@ -1190,6 +1446,7 @@ pub(crate) async fn render_api_pooled(
     let WorkerApiResponse {
         mut response,
         body: streamed_body,
+        trailer: _,
     } = state
         .worker_pool
         .render_api(RenderApiRequest {
@@ -1257,10 +1514,54 @@ pub(crate) async fn render_api_pooled(
     Ok(with_security_headers(http_response))
 }
 
+/// A development client bundle together with the route it registers itself under.
+///
+/// The route pattern travels with the document because the bundle has to be
+/// stamped with that pattern before it is served, and the pattern is not
+/// recoverable from the request path once a dynamic segment has been filled in.
+pub(crate) struct ClientBundle {
+    pub document: CachedDocument,
+    /// The route the bundle registers itself under, dynamic segments and all.
+    pub route_path: String,
+}
+
+/// The version a development client bundle is advertised and stamped with.
+///
+/// A build hashes the reference manifest and the bundler writes that hash into
+/// the bundle it produced. Development has no build to hash, so the bundle text
+/// is its own identity — computed over the *unstamped* script, because a script
+/// cannot contain a hash of itself. Every caller therefore hashes before
+/// `stamp_client_artifact` runs, and the route manifest and the served bundle
+/// arrive at the same string without either having to tell the other.
+pub(crate) fn client_artifact_version(script: &str) -> String {
+    blake3::hash(script.as_bytes()).to_hex()[..16].to_string()
+}
+
+/// A client bundle with the line that tells the router which build it is.
+///
+/// `ruvyxa build` appends this in the bundler; development compiles browser
+/// bundles in the Node worker, which never wrote it. The router imported a
+/// route bundle, found no stamp under the route, read that as a stale artifact
+/// and fell back to a document load — so every soft navigation in `ruvyxa dev`
+/// was a full page load while the pages themselves looked fine.
+///
+/// Emitted at serve time rather than in the worker because the version is a
+/// hash of the worker's own output, which the worker cannot know while it is
+/// still producing it.
+pub(crate) fn stamp_client_artifact(script: &str, route_path: &str) -> String {
+    // JSON string syntax is a subset of JavaScript string syntax, so a JSON
+    // literal is always a correctly escaped JS literal — the same reasoning the
+    // bundler's `js_string` is built on.
+    let route = serde_json::to_string(route_path).unwrap_or_else(|_| "\"\"".to_string());
+    let version = serde_json::to_string(&client_artifact_version(script))
+        .unwrap_or_else(|_| "\"\"".to_string());
+    format!("{script}\n;(globalThis.__RUVYXA_ROUTE_ARTIFACTS__ ||= {{}})[{route}] = {version};\n")
+}
+
 pub(crate) async fn render_client_bundle_pooled(
     state: &AppState,
     request_path: &str,
-) -> Result<CachedDocument> {
+) -> Result<ClientBundle> {
     let (manifest, router) = state.runtime_cache.router(&state.config).await?;
     let Some(route_match) = router.find(&manifest, request_path) else {
         return Err(Diagnostic::new("RUV1303", "Client route was not found")
@@ -1282,7 +1583,10 @@ pub(crate) async fn render_client_bundle_pooled(
     // Check render cache for client bundles
     let cache_key = render_cache::client_cache_key(request_path, &route_match.params);
     if let Some(cached) = state.render_cache.get_document(&cache_key).await {
-        return Ok(cached);
+        return Ok(ClientBundle {
+            document: cached,
+            route_path: route_match.route.path.clone(),
+        });
     }
 
     let response = state
@@ -1330,9 +1634,12 @@ pub(crate) async fn render_client_bundle_pooled(
     })?;
 
     // Cache the bundled client script
-    let script = state.render_cache.put(cache_key, script).await;
+    let document = state.render_cache.put(cache_key, script).await;
 
-    Ok(script)
+    Ok(ClientBundle {
+        document,
+        route_path: route_match.route.path.clone(),
+    })
 }
 
 pub(crate) async fn render_server_action_pooled(
@@ -1899,6 +2206,162 @@ pub(crate) fn action_file_for(route: &RouteEntry) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Which routes stream, spelled out.
+    ///
+    /// The dividing line is not "server components" but "produced per request".
+    /// A pre-rendered, cached, or revalidated document has to become a string
+    /// to be stored, and a route without server components has no `Suspense`
+    /// boundary for the server to fill in later — so both would trade a real
+    /// document cache for nothing.
+    #[test]
+    fn only_a_per_request_server_components_document_streams() {
+        let mut route = ruvyxa_graph::RouteEntry {
+            id: "page:/x".to_string(),
+            path: "/x".to_string(),
+            kind: RouteKind::Page,
+            file: std::path::PathBuf::from("app/x/page.tsx"),
+            layout_chain: Vec::new(),
+            template_chain: Vec::new(),
+            slots: Vec::new(),
+            intercepts: Vec::new(),
+            server_modules: Vec::new(),
+            client_modules: Vec::new(),
+            runtime: ruvyxa_graph::RuntimeTarget::Node,
+            render: Default::default(),
+        };
+
+        route.render.server_components = true;
+        route.render.strategy = RenderStrategy::Ssr;
+        assert!(streams_document(&route));
+
+        for stored in [
+            RenderStrategy::Ssg,
+            RenderStrategy::Isr,
+            RenderStrategy::Ppr,
+            RenderStrategy::Csr,
+        ] {
+            route.render.strategy = stored;
+            assert!(!streams_document(&route), "{stored:?}");
+        }
+
+        route.render.strategy = RenderStrategy::Ssr;
+        route.render.server_components = false;
+        assert!(!streams_document(&route));
+    }
+
+    /// Which requests are treated as a form submission, spelled out.
+    ///
+    /// Recognising one too eagerly costs a body forwarded to the worker and a
+    /// `no-store` on a page that would have cached; missing one leaves the form
+    /// silently inert for every visitor without JavaScript. The rule is
+    /// deliberately wide within server-components routes and never leaves them,
+    /// because a route with no `react-server` graph cannot resolve a reference
+    /// at all.
+    #[test]
+    fn only_a_form_shaped_post_to_a_server_components_route_runs_an_action() {
+        let mut route = ruvyxa_graph::RouteEntry {
+            id: "page:/x".to_string(),
+            path: "/x".to_string(),
+            kind: RouteKind::Page,
+            file: std::path::PathBuf::from("app/x/page.tsx"),
+            layout_chain: Vec::new(),
+            template_chain: Vec::new(),
+            slots: Vec::new(),
+            intercepts: Vec::new(),
+            server_modules: Vec::new(),
+            client_modules: Vec::new(),
+            runtime: ruvyxa_graph::RuntimeTarget::Node,
+            render: Default::default(),
+        };
+        route.render.server_components = true;
+
+        let headers = |value: &str| {
+            let mut headers = HeaderMap::new();
+            headers.insert(header::CONTENT_TYPE, HeaderValue::from_str(value).unwrap());
+            headers
+        };
+        let body: &[u8] = b"--x--";
+
+        for content_type in [
+            "multipart/form-data; boundary=x",
+            "MULTIPART/FORM-DATA; boundary=x",
+            "application/x-www-form-urlencoded",
+        ] {
+            assert!(
+                posted_form(&route, "POST", &headers(content_type), Some(body)).is_some(),
+                "{content_type}"
+            );
+        }
+
+        // A read, whatever it carries.
+        assert!(
+            posted_form(
+                &route,
+                "GET",
+                &headers("multipart/form-data; boundary=x"),
+                Some(body)
+            )
+            .is_none()
+        );
+        // A server function call from a hydrated page. It posts JSON-ish bodies
+        // to `/__ruvyxa/rsc`, never a form encoding to the page itself.
+        assert!(posted_form(&route, "POST", &headers("application/json"), Some(body)).is_none());
+        // Nothing to decode.
+        assert!(
+            posted_form(
+                &route,
+                "POST",
+                &headers("multipart/form-data; boundary=x"),
+                Some(b"")
+            )
+            .is_none()
+        );
+        assert!(posted_form(&route, "POST", &headers("multipart/form-data"), None).is_none(),);
+        // No `react-server` graph, so no reference the fields could name.
+        route.render.server_components = false;
+        assert!(
+            posted_form(
+                &route,
+                "POST",
+                &headers("multipart/form-data; boundary=x"),
+                Some(body)
+            )
+            .is_none()
+        );
+    }
+
+    /// The stamp a development bundle carries must be the version the route
+    /// manifest advertises for it, or the router treats every freshly imported
+    /// bundle as stale and falls back to a document load.
+    #[test]
+    fn a_stamped_bundle_registers_the_version_the_manifest_advertises() {
+        let script = "console.log(1);";
+        let version = client_artifact_version(script);
+        let stamped = stamp_client_artifact(script, "/blog/[slug]");
+
+        assert!(stamped.starts_with(script), "the script is served intact");
+        assert!(
+            stamped.contains(&format!(
+                r#"(globalThis.__RUVYXA_ROUTE_ARTIFACTS__ ||= {{}})["/blog/[slug]"] = "{version}";"#
+            )),
+            "{stamped}"
+        );
+        // Hashed before the stamp is appended, so the manifest endpoint — which
+        // only ever sees the unstamped script — reaches the same string.
+        assert_ne!(version, client_artifact_version(&stamped));
+    }
+
+    /// A route path is interpolated into JavaScript, so it is emitted as a JSON
+    /// literal rather than pasted between quotes.
+    #[test]
+    fn a_stamp_escapes_a_route_that_would_close_its_own_string() {
+        let stamped = stamp_client_artifact("", r#"/a");globalThis.pwned=1;//"#);
+        assert!(
+            stamped.contains(r#"["/a\");globalThis.pwned=1;//"]"#),
+            "{stamped}"
+        );
+    }
 
     #[test]
     fn revalidation_bounds_match_the_shared_host_contract() {

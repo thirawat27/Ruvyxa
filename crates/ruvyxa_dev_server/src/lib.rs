@@ -83,6 +83,7 @@ use port_binding::bind_listener;
 #[cfg(test)]
 use port_binding::{PORT_FALLBACK_SCAN_LIMIT, port_conflict_diagnostic};
 
+mod document_stream;
 mod html_document;
 mod i18n;
 mod trace;
@@ -120,7 +121,9 @@ mod worker_protocol;
 
 mod worker_pool;
 pub use worker_pool::{NodeWorkerPool, RenderSsgRequest};
-pub use worker_protocol::{StaticParamSegment, StaticParamsRoute, WarmupRoute};
+pub use worker_protocol::{
+    ServerReferenceSource, StaticParamSegment, StaticParamsRoute, WarmupRoute,
+};
 
 mod render_pipeline;
 #[cfg(test)]
@@ -140,7 +143,7 @@ mod response;
 pub use render_cache::RenderCache;
 pub(crate) use response::{
     apply_security_headers, cached_html_response, finalize_security_headers, html_response,
-    with_security_headers,
+    streamed_html_response, uncacheable, with_security_headers,
 };
 
 mod hmr_tracker;
@@ -157,8 +160,9 @@ mod framework_endpoints;
 // because `action_security` and `render_pipeline` name them through `crate::`.
 pub(crate) use framework_endpoints::{ActionQuery, RuntimeTrace, TraceAssets};
 use framework_endpoints::{
-    action_endpoint, client_bundle, client_manifest, devtools_dashboard, devtools_data,
-    dynamic_image_endpoint, flight_endpoint, hydration_loader, trace_ack_endpoint, trace_endpoint,
+    action_endpoint, client_bundle, client_manifest, client_vendor, devtools_dashboard,
+    devtools_data, dynamic_image_endpoint, flight_endpoint, hydration_loader, rsc_action_endpoint,
+    rsc_payload_endpoint, trace_ack_endpoint, trace_endpoint,
 };
 
 mod postcss;
@@ -604,17 +608,19 @@ struct PresenceRuntime {
 /// the server at startup instead of getting RUV1701. The comment claiming the
 /// two stayed in sync was the only thing holding them together;
 /// `every_registered_route_is_reserved` reads the route chain now.
-const RESERVED_FRAMEWORK_ROUTES: [&str; 10] = [
+const RESERVED_FRAMEWORK_ROUTES: [&str; 12] = [
     "/__ruvyxa/hmr",
     "/__ruvyxa/client",
     "/__ruvyxa/action",
     "/__ruvyxa/flight",
+    "/__ruvyxa/rsc",
     "/__ruvyxa/trace",
     "/__ruvyxa/devtools",
     "/__ruvyxa/devtools/data",
     "/__ruvyxa/image",
     "/__ruvyxa/hydration-loader.js",
     "/__ruvyxa/client/route-manifest.json",
+    "/__ruvyxa/client/vendor",
 ];
 
 /// Process-wide startup hooks recognised by the JavaScript compiler/runtime.
@@ -1071,7 +1077,12 @@ fn build_app_router(config: &ServerConfig, state: Arc<AppState>) -> Router {
         .route("/__ruvyxa/client", get(client_bundle))
         .route("/__ruvyxa/hydration-loader.js", get(hydration_loader))
         .route("/__ruvyxa/client/route-manifest.json", get(client_manifest))
+        .route("/__ruvyxa/client/vendor", get(client_vendor))
         .route("/__ruvyxa/flight", get(flight_endpoint))
+        .route(
+            "/__ruvyxa/rsc",
+            get(rsc_payload_endpoint).post(rsc_action_endpoint),
+        )
         .route("/__ruvyxa/image", get(dynamic_image_endpoint))
         .route(
             "/__ruvyxa/action",

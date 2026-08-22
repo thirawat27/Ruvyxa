@@ -60,6 +60,7 @@ const MAX_ACTION_NONCES_PER_CLIENT = MAX_ACTION_NONCES / 10
 /** Endpoint the framework's own server actions are posted to. */
 const ACTION_PATH = '/__ruvyxa/action'
 const FLIGHT_PATH = '/__ruvyxa/flight'
+const RSC_PATH = '/__ruvyxa/rsc'
 
 /** Defaults matching `ruvyxa build`'s validated `security` block. */
 const DEFAULT_API_BODY_LIMIT = 10 * 1024 * 1024
@@ -408,6 +409,22 @@ export function createHandler(options) {
 
     if (pathname === FLIGHT_PATH) {
       return handleFlight(request, url)
+    }
+
+    // Answered explicitly rather than left to fall through to the router,
+    // where it would 404 and read as a missing route. A deployed function
+    // serves pages through modules built by the ordinary SSR entry — which is
+    // why `adapter-runner.mjs` refuses a server-components route that still
+    // needs a server (RUV2213) — so it has no payload to render. A pre-rendered
+    // one deploys fine and its soft navigation falls back to a document load,
+    // which for a static file is a cache hit.
+    if (pathname === RSC_PATH) {
+      return textResponse(
+        501,
+        'This deployment serves pages through the ordinary render pipeline and cannot produce a ' +
+          'server-components payload. Pre-rendered routes navigate as documents; serve dynamic ' +
+          'ones with `ruvyxa start`.',
+      )
     }
 
     const match = matchRoute(pathname)

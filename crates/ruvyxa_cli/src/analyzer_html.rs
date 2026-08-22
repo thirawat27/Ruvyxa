@@ -66,6 +66,11 @@ pub(crate) fn analyze_client_bundle(
             directory: &build_cache_dir(root, &config.cache),
         },
         &plugin_session,
+        // The analyzer has no worker to ask for a server-components entry, so
+        // those routes are absent from its report rather than measured wrong.
+        // `ruvyxa analyze` reports on the bundles it can build without a
+        // worker, so it has no server-components entries and omits those routes.
+        &crate::client_bundle::ServerComponentEntries::default(),
     )?;
 
     let mut module_bytes = BTreeMap::new();

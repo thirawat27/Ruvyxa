@@ -54,9 +54,21 @@ import { installClientReferenceRuntime } from './rsc-client-runtime.mjs'
  *   because the caller owns the module cache.
  * @param {{ path: string, params: object }} options.ctx Render context.
  * @param {string} options.routePath Route pattern, for the routing context.
- * @returns {Promise<{ html: string, payload: string }>}
+ * @param {boolean} [options.html] Also render the payload to HTML. A soft
+ *   navigation asks for the payload alone: the browser already has a document,
+ *   and rendering markup it will throw away would run the SSR pass for nothing.
+ * @param {unknown} [options.formState] What a `useActionState` form posted
+ *   without JavaScript returned, for the HTML renderer to replay.
+ * @returns {Promise<{ html: string|null, payload: string }>}
  */
-export async function renderServerComponents({ serverModule, references, ctx, routePath }) {
+export async function renderServerComponents({
+  serverModule,
+  references,
+  ctx,
+  routePath,
+  html: withHtml = true,
+  formState = null,
+}) {
   if (typeof serverModule?.flight !== 'function') {
     throw new Error(
       'RUV1862 the server-components bundle exports no flight(); the route was compiled without the react-server entry',
@@ -77,13 +89,68 @@ export async function renderServerComponents({ serverModule, references, ctx, ro
   // One render, two readers: the payload the browser will replay, and the HTML
   // it will hydrate. Rendering twice would run every server component twice and
   // could produce two different trees.
+  //
+  // A payload-only render reads the stream once. `tee()` on a stream whose
+  // second branch is never read buffers every chunk waiting for it, so the
+  // branch is not created rather than created and dropped.
+  if (!withHtml) {
+    const payload = await readStreamText(stream)
+    if (failure) throw failure
+    return { html: null, payload }
+  }
   const [forHtml, forPayload] = stream.tee()
   const [html, payload] = await Promise.all([
-    flightStreamToHtml(forHtml, ctx, routePath),
+    flightStreamToHtml(forHtml, ctx, routePath, { formState }),
     readStreamText(forPayload),
   ])
   if (failure) throw failure
   return { html, payload }
+}
+
+/**
+ * Render one server-components route as a stream, plus the payload behind it.
+ *
+ * The streaming half of {@link renderServerComponents}, for a route whose
+ * document is produced per request and cached by nobody. Nothing waits for the
+ * whole tree: React emits the shell as soon as it is ready and each `Suspense`
+ * boundary as it resolves, so a slow server component delays the part of the
+ * page that is waiting on it and nothing else.
+ *
+ * The payload is returned as a *promise* rather than a value because it is only
+ * complete when the Flight render is, which is after the caller has already
+ * started sending bytes. The host awaits it at the end of the stream and writes
+ * the data block then — the browser needs it before hydration, not before the
+ * first paint, and hydration cannot begin until the document has been parsed.
+ *
+ * @returns {Promise<{ stream: ReadableStream, payload: Promise<string> }>}
+ */
+export async function renderServerComponentsStream({
+  serverModule,
+  references,
+  ctx,
+  routePath,
+  formState = null,
+}) {
+  if (typeof serverModule?.flight !== 'function') {
+    throw new Error(
+      'RUV1862 the server-components bundle exports no flight(); the route was compiled without the react-server entry',
+    )
+  }
+  // A server component that throws after the shell has been sent cannot change
+  // the response: the status line is already gone. React writes what it can and
+  // reports here, which is the only place left that can log it.
+  const failures = []
+  const flight = await serverModule.flight(ctx, flightManifest(references), {
+    onError(error) {
+      failures.push(error)
+    },
+  })
+  const [forHtml, forPayload] = flight.tee()
+  // Started now, awaited by the caller at the end. Not awaited here: the point
+  // of this function is to return before the render has finished.
+  const payload = readStreamText(forPayload)
+  const stream = await flightStreamToHtmlStream(forHtml, ctx, routePath, { formState })
+  return { stream, payload, failures }
 }
 
 /**
@@ -94,7 +161,37 @@ export async function renderServerComponents({ serverModule, references, ctx, ro
  * context read is a client concern. The browser entry wraps the decoded element
  * in the same provider with the same value, so the markup matches.
  */
-export async function flightStreamToHtml(stream, ctx, routePath) {
+export async function flightStreamToHtml(stream, ctx, routePath, { formState = null } = {}) {
+  const html = await flightStreamToHtmlStream(stream, ctx, routePath, { complete: true, formState })
+  return await readStreamText(html)
+}
+
+/**
+ * The same render, handed back as a stream instead of a string.
+ *
+ * The difference is one `await`. `renderToReadableStream` resolves as soon as
+ * the shell is ready and keeps emitting as each `Suspense` boundary resolves;
+ * waiting for `allReady` throws that away and makes the slowest server
+ * component decide when the *first* byte leaves. A caller that can pass bytes
+ * through as they arrive should not wait, and a caller that has to produce one
+ * string — a prerender writing a file, an ISR entry going into a cache — has no
+ * choice, which is what `complete` selects.
+ *
+ * @param {object} [options]
+ * @param {boolean} [options.complete] Wait for every boundary before returning.
+ * @param {unknown} [options.formState] What the `useActionState` form on this
+ *   page returned when it was posted without JavaScript. React writes a marker
+ *   comment beside each such hook and replays the value into the one the post
+ *   named, which is how a no-JS submission shows its result. `null` — every
+ *   render that is not answering a form post — leaves each hook at its initial
+ *   state.
+ */
+export async function flightStreamToHtmlStream(
+  stream,
+  ctx,
+  routePath,
+  { complete = false, formState = null } = {},
+) {
   // Installed here rather than when this module loads. `__webpack_require__` is
   // how a library decides it is running inside webpack — `sass` reads it and
   // then reaches for `__non_webpack_require__` — so the claim is made only once
@@ -107,6 +204,13 @@ export async function flightStreamToHtml(stream, ctx, routePath) {
   // dependency is used — nothing static names it anywhere in the tree.
   const { createFromReadableStream } = await import(RSC_SSR_PACKAGE)
   const element = await createFromReadableStream(stream, {
+    // The SSR pass renders a payload; it never *acts* on one. A server function
+    // in the tree is markup here — React writes the reference into the form and
+    // the browser calls it — so reaching this is a bug worth naming rather than
+    // a call worth making.
+    callServer() {
+      throw new Error('RUV1868 a server function was called during the server-side render pass')
+    },
     serverConsumerManifest: {
       moduleMap: ssrModuleMap(),
       // Every client module a server-components route reaches is linked into
@@ -123,10 +227,44 @@ export async function flightStreamToHtml(stream, ctx, routePath) {
     element,
   )
 
-  const htmlStream = await renderHtmlStream(tree)
-  await htmlStream.allReady
-  const html = await readStreamText(htmlStream)
-  return html.trimStart().toLowerCase().startsWith('<!doctype') ? html : `<!doctype html>${html}`
+  const htmlStream = await renderHtmlStream(tree, { formState })
+  if (complete) await htmlStream.allReady
+  return withDoctype(htmlStream)
+}
+
+/**
+ * The same stream, guaranteed to open with a doctype.
+ *
+ * React writes one itself when the tree it was handed starts at `<html>`, which
+ * a route with a root layout always does — and writes none when it does not, so
+ * a document that opens at `<main>` would be served in quirks mode. Only the
+ * first chunk is inspected, and only far enough to answer that: prepending
+ * unconditionally is what produced two of them.
+ */
+function withDoctype(stream) {
+  const reader = stream.getReader()
+  const encoder = new TextEncoder()
+  let first = true
+  return new ReadableStream({
+    async pull(controller) {
+      const { done, value } = await reader.read()
+      if (done) {
+        controller.close()
+        return
+      }
+      if (first) {
+        first = false
+        const opening = new TextDecoder().decode(value.slice(0, 15)).trimStart().toLowerCase()
+        if (!opening.startsWith('<!doctype')) {
+          controller.enqueue(encoder.encode('<!doctype html>'))
+        }
+      }
+      controller.enqueue(value)
+    },
+    cancel(reason) {
+      return reader.cancel(reason)
+    },
+  })
 }
 
 /** The context value both the SSR pass and the browser entry provide. */
@@ -148,7 +286,7 @@ export function routeContextValue(ctx, routePath) {
  * this feature needs no chunk URLs, no chunk manifest file, and no second
  * static route to serve them from.
  */
-function flightManifest(references) {
+export function flightManifest(references) {
   return clientManifest(references.map((reference) => ({ id: reference.id, chunks: [] })))
 }
 

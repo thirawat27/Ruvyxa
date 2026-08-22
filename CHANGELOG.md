@@ -61,6 +61,312 @@ the id a `'use client'` module carries across the three graphs that must agree a
 `runtime/rsc-client-runtime.mjs`, the browser half, which has no imports at all because the client
 bundle inlines it.
 
+### Server-components documents stream
+
+A server-components route whose document is produced per request no longer waits for the whole tree
+before its first byte leaves. React sends the shell as soon as it has it and each `Suspense`
+boundary as the server resolves it. Measured on `examples/demo/app/streaming`, whose two boundaries
+wait 300ms and 1200ms:
+
+```text
+buffered   first byte 1.79s   complete 1.79s
+streamed   first byte 0.62s   complete 1.81s
+```
+
+**Only a per-request document streams**, which is the same dividing line as everything else about
+caching: a pre-rendered, `revalidate`, or statically rendered route has to become a _string_ to be
+written to disk or held in a cache, and a stream is not one. A route without server components does
+not stream either — its render resolves in one step, so it would trade a working document cache for
+nothing. `streams_document()` is where that is decided, and a test spells out every strategy.
+
+A streamed response is `Cache-Control: no-store`, has no `Content-Length`, and is not stored in the
+render cache. That is inherent rather than an omission, and it is why the rule above is narrow.
+
+**The host still composes the document, on a stream instead of a string.** `StreamedDocument` makes
+the same two edits [`compose_localized_document`](crates/ruvyxa_dev_server/src/html_document.rs)
+makes: the asset links and stylesheet go in once `</head>` has been seen, and the hydration script
+goes in before `</body>`, found in a rolling window of the last kilobyte. Neither the head bound nor
+the tail window can hang the response — a document with no head is forwarded unedited, and a
+document with no closing tag gets its tail appended.
+
+**The Flight payload rides in the frame that ends the body.** It is complete only when the render
+is, by which time the first frame is long gone, so `emitApiStream` grew a `streamTrailer` and the
+body stream fills a slot the composer reads at the end. The payload therefore stays exactly where it
+was — one `<script type="application/json">` data block near `</body>` — because the browser needs
+it to _hydrate_, not to paint, and hydration cannot begin before the document has been parsed.
+
+The doctype is emitted only when React did not emit one itself, which is the difference between a
+tree that starts at `<html>` and one that does not. Prepending unconditionally produced two.
+
+One thing worth knowing when testing this: React defers revealing a completed boundary to a
+`requestAnimationFrame`, and a hidden document never runs one. A streamed page in a background tab
+shows its fallbacks until the tab is looked at. That is React's scheduling, not this framework's.
+
+### React server functions
+
+`'use server'` is implemented, in both of the shapes React defines. A whole module behind the
+directive, which is what a `'use client'` component imports:
+
+```ts
+// app/dashboard/actions.ts
+'use server'
+export async function rename(id: string, name: string) {
+  await db.rename(id, name)
+  return db.get(id)
+}
+```
+
+and one function inside the server component that uses it, handed down as a prop:
+
+```tsx
+export async function markAllRead(userId: string) {
+  'use server'
+  await db.markAllRead(userId)
+}
+```
+
+Either way the browser gets a _reference_, never the code. Calling it posts the arguments to
+`POST /__ruvyxa/rsc` — the same endpoint that already serves a route's payload, because it is the
+same question asked twice — runs the real function in the `react-server` realm, and resolves to what
+it returned. The reply is a Flight payload rather than JSON, so a server function may return an
+element tree containing client components.
+
+**A `'use server'` module is the mirror image of a `'use client'` one, and the machinery is
+deliberately the same shape.** The server graph compiles it and registers its exports; every client
+graph replaces it with a proxy of `createServerReference` calls. The id is computed by the one rule
+in `runtime/client-references.mjs` that already answers for client references, with an `s_` prefix
+so the two can share a registry and a `__webpack_require__` without ever being confused.
+
+Registration is enqueued and flushed rather than run in place: Ruvyxa's linker emits a module's
+`__exports.name = name` assignments _after_ its body, so code at the bottom of that body sees an
+exports object that is still empty. The generated entry flushes before it renders anything.
+
+**An inline server function must be at the top level of its module** (`RUV1867`). One declared
+inside another function closes over that call's variables, and making it callable from a later
+request means hoisting it and binding what it captured — which needs a scope-resolving parser this
+graph does not have. Compiling it anyway would produce a function that reads values from a render
+that ended, so it is refused with the file and line instead. Anonymous default exports, object
+methods, and callbacks are refused for the same reason: the registration has to name a binding that
+is still in scope where it is emitted.
+
+**Three things the work uncovered, each a real defect on its own:**
+
+_`ruvyxa build` could not compile a browser bundle that reached one._ The Rust bundler walks the
+real file, and a module behind the directive — or merely _named_ `actions.ts`, which is the action
+lane by filename in both graphs — is `RUV1820` inside a client bundle. That answer is right for
+every route with no way to call a server function and wrong for a server-components route. The
+worker now reports the stand-in source per file and a build hook serves it in place of what is on
+disk, so there is still one implementation of what a reference looks like; and the proxy declares
+`'use client'`, which is not a trick to get past the lane rules but a true statement both of them
+read ahead of the filename.
+
+_Only the server graph measured reference ids from a stable base._ `ruvyxa build` compiles a route
+from the project's sources and `ruvyxa start` compiles it from the copy staged under
+`<out>/server/`, two directories deeper, so an id measured from the project root differs between
+them. The server graph already used the directory holding the app directory; the browser and SSR
+graphs did not, because until now they computed no ids of their own. In development the two bases
+coincide, so this surfaced only under `ruvyxa start`, as `RUV1865` for a function the process was
+holding all along.
+
+_`compiler.mjs` never consulted its `external` option._ It held by accident: a server bundle leaves
+`node_modules` to Node's resolver anyway. The SSR client registry then needed both `external` and
+`bundlePackages` — it inlines client modules lifted out of their packages, so it must carry their
+dependencies — and resolved its own React despite listing it. Client components rendered against
+that second copy read a null dispatcher and threw on the first hook.
+
+### A form action works without JavaScript
+
+`<form action={fn}>` no longer waits for the page's bundle, and no longer needs it at all. React
+writes the function's reference into hidden fields while rendering the form; a submission from a
+browser that has run none of the bundle posts those fields to the page's own URL, and Ruvyxa runs
+the function before rendering the response. The result is in the document that comes back.
+
+`useActionState` is what puts it there. React writes an extra key beside the hook and
+`decodeFormState` turns the return value into the token the HTML renderer replays it from, so one
+component renders one answer whether it was reached over `fetch` or over a form post. A form using
+anything else still runs its action; it just has nowhere to show the return value, which is what
+that spelling means.
+
+**A submitted form is answered by the route's own render, not by its strategy.** Whatever a
+pre-rendered or cached document holds was produced before this action ran, so the render is fresh
+and the response is `Cache-Control: no-store` — and a `Ssg` route with a form is now a route that
+serves a file to readers and renders to submitters. Anything the action passed to `revalidatePath()`
+is applied before the response is returned, so a visitor following a link on the answering page
+cannot beat the invalidation to the cache.
+
+The request carrying a form is also the one page render that is **not retried**. The pool replaces a
+worker that dies mid-flight and re-sends anything idempotent; a render that runs a server function
+first is not, and `is_idempotent` now matches on the absent body rather than on the variant.
+
+**Recognising one is three questions, none of which is "does this name an action".** `POST`, a form
+content type, and a server-components route — all answerable from the request line and one header.
+Whether the body actually names a reference needs a multipart parser and the function registry, both
+of which live in the worker, and a post that turns out to name nothing renders the page exactly as a
+post always did there. Guessing wide costs a body forwarded; guessing narrow leaves a form silently
+inert for every visitor without JavaScript.
+
+`decodeAction` resolves the reference through React's own `__webpack_require__` rather than through
+Ruvyxa's resolver — a hidden field is decoded by React, so the id takes React's route — which is why
+the action entry now installs the reference runtime before decoding. The `'use server'` module
+itself is unchanged: the same function answers a click handler and a form post, because
+`useActionState` calls an action with the previous state and a `FormData`, which is also what a
+browser submits.
+
+### The shared browser chunk sorted its modules by pathname
+
+A production build lifts every module used by more than one route into one shared chunk, and route
+bundles `import` it — so the whole chunk is evaluated before a route's own first statement. The list
+of modules in it was collected into a `BTreeSet`, which sorted them by path. That is a real
+reordering of the browser's work, and it is invisible until two modules have a load-order dependency
+the module graph cannot express.
+
+One does. `react-server-dom-webpack/client.browser` reads `__webpack_require__.u` while its own
+module body runs, and the module that defines that global is `rsc-client-install.mjs` — with no
+import between them, because the vendor package has never heard of Ruvyxa. The route entry imports
+the install module first and a test asserts that it does, but sorted by path
+`node_modules/react-server-dom-webpack/…` comes before `packages/ruvyxa/runtime/…`, and the entry's
+order stopped mattering the moment both landed in the shared chunk. **Every server-components page
+threw `__webpack_require__ is not defined` and never hydrated in production** — no `useState`, no
+server function, no form. `ruvyxa dev` builds one bundle per route and was unaffected, which is why
+it survived a full round of browser verification.
+
+The shared chunk now evaluates modules in the order the routes evaluate them.
+`PreparedBundle::module_paths()` returns a `Vec` — it always computed the order, through
+`ordered_project_modules`, and then threw it away on the last line — and `shared_route_module_paths`
+walks the routes in build order, taking each module the first time it is seen. Each route's list is
+already dependency-first, so nothing lands ahead of what it depends on.
+
+Both registry emitters take the order they are given: `bundle_shared_prepared_route_modules` seeds
+its walk from it, and `bundle_shared_route_modules` writes its synthetic entry in it. They have to
+agree — a build where every route was prepared in-process takes the first and a build with a cached
+plan or a build hook takes the second — and the test that pins them together now compares order as
+well as bytes.
+
+Two cache formats moved with it. The client plan is version 3, because a version 2 entry holds the
+same modules sorted by path and that is a different answer; and the shared-chunk artifact key
+includes the order, because the order is in the output. A cold build and a warm build of the demo
+produce the same shared chunk filename.
+
+### Server-components routes are navigable
+
+`router.push('/dashboard')` into a route that opted into server components now renders it in place.
+The router fetches the route's Flight payload from the new `/__ruvyxa/rsc` endpoint and hands it to
+a factory the route's browser bundle registered, instead of the tree factory an ordinary route
+publishes — a server-components route has no page in the browser for a factory to build a tree from.
+Navigating back out works the same way it always did.
+
+The endpoint is deliberately not the same contract as `/__ruvyxa/flight`. That one serves Ruvyxa's
+own public, cacheable route payload and refuses a request carrying credentials; this one is a
+_render_, so it forwards the visitor's headers — a server component may read `cookies()` exactly as
+it does on a full request — and its response is `private, no-store`. A same-origin header keeps it
+out of reach of a cross-origin page, which cannot set one without a preflight nothing answers.
+
+A deployed function answers it with 501: it serves pages through modules built by the ordinary SSR
+entry, which is why `adapter-runner.mjs` already refuses a server-components route that still needs
+a server (RUV2213). On those targets the navigation falls back to a document load, which for a
+pre-rendered route is a static file the CDN already holds.
+
+### Every soft navigation in `ruvyxa dev` was a full page load
+
+Client-side routing worked in a build and never once worked in development. Nothing reported it,
+because a document load renders the same page: the address bar changed, the content changed, and
+only the round trip and the lost client state gave it away. Two independent causes, each sufficient
+on its own.
+
+**The route manifest claimed a Flight export on pages that had none.** `has_named_runtime_export`
+strips the export keyword and a declaration prefix off the source, then asks whether the remainder
+starts with the name it is looking for — and answered "yes" when the strip _failed_. Any
+`export const meta = …` therefore matched every query, so the dev manifest advertised `flight: true`
+for pages with no `flight(context)` anywhere in them, the router prefetched a payload the route
+cannot produce, the request came back 501, and the navigation fell back. The same predicate gates
+`RUV1842` at build time, which consequently never fired.
+
+**A development bundle never said which build it was.** The bundler appends
+`__RUVYXA_ROUTE_ARTIFACTS__[route] = version` to every browser bundle it emits, and the router reads
+it back after importing a route to prove the bundle matches the version the manifest named. The dev
+server compiles browser bundles in the Node worker, which never wrote it, so the check found nothing
+and treated every freshly imported bundle as stale. `/__ruvyxa/client` stamps at serve time now,
+with the version hashed from the unstamped script — the route manifest and the Flight endpoint hash
+the same text, so all three agree without any of them having to tell the others.
+
+### A server component could not use the framework's own components
+
+A root layout that renders a `<Link>` nav is the ordinary case, and it took down the entire
+server-components render with `Class extends value undefined is not a constructor or null`: nothing
+in `@ruvyxa/react` declared a client boundary, so the `react-server` graph compiled `Link`,
+`RuvyxaErrorBoundary`, the routing hooks, `Script`, and `useRuvyxaLoader` for real — against a build
+of React that has no `Component` to extend, no `createContext`, and no effects. Those five modules
+carry `'use client'` now and become references; `Image`, `Seo`, `notFound()`, and the barrel itself
+stay server-side, so a server component still renders them itself.
+`packages/@ruvyxa/react/test/client-boundary.test.mjs` asserts the split against `dist`, because the
+directive only does anything if it survives `tsc`.
+
+Marking them surfaced two more, both in the graph rather than the package:
+
+**A dependency's client reference had a different id in each tree.** The id was the module's path
+relative to the directory holding the app directory — stable for a project file, which is what the
+earlier fix measured, and not stable at all for a package: `ruvyxa build` reaches it from the
+project and `ruvyxa start` reaches it from the tree staged under `.ruvyxa/server`, two directories
+deeper. A direct load of such a page worked and every soft navigation into it failed with `RUV1861`.
+A module inside a package is named by the package now — everything up to the last `node_modules/` is
+dropped and one is put back, which also makes pnpm's store layout and npm's flat one agree.
+
+**`external` was never consulted.** The option held only by accident: a server bundle leaves
+`node_modules` to Node's resolver anyway, so nobody noticed the list was unread. The SSR client
+registry then needed both — it inlines client modules lifted _out_ of their packages, so it must
+carry their dependencies or a bare specifier resolves from `.ruvyxa/cache/rsc/` and comes back
+"Cannot find package" — and with `bundlePackages` on it resolved its own React despite listing it.
+Client components rendered against that second copy read a null dispatcher and threw on the first
+hook. A listed external is now answered before resolution, exactly where a rewritten one already
+was.
+
+### A development browser bundle hydrated with the wrong build of React
+
+Browsers have no `process`, so every module the JavaScript compiler wraps gets a stand-in — and it
+said `NODE_ENV: 'production'` unconditionally. `ruvyxa dev` deliberately leaves `NODE_ENV` unset and
+therefore _renders_ with development React, so the two halves of every development page disagreed
+about which build they were. Ordinary hydration tolerated it. A Flight payload does not: the
+server-components route failed with React refusing to read a development payload on a production
+client. The stand-in mirrors the compiling process now, which is the invariant that matters — both
+halves of one render come from one worker.
+
+It also means a development bundle finally reports React's real error text instead of a minified
+error code.
+
+### Three bugs the work above uncovered
+
+**No `ruvyxa dev` client bundle could hydrate.** `react-dom/client` came out of the JavaScript
+compiler with a bare `import "scheduler"` in it, which no browser can resolve, so the module never
+evaluated and hydration never started. The cause is pnpm's layout: `node_modules/react-dom` is a
+link into a store directory whose siblings are react-dom's own dependencies, and the resolver walked
+the link path — where `scheduler` was never installed — instead of the real one. Node resolves from
+a module's real path, and the Rust resolver did too because everything reaching it has already been
+through `normalized_canonical_path`. This graph now does the same.
+
+**A side-effect import ran last, whatever the source said.** The specifier scan uses one regex per
+import _form_ and appends each pattern's matches, so the bare `import './polyfill.js'` form — the
+last pattern — always sorted after every `… from …` import. Matches are ordered by where their
+specifier appears now. The first pattern can also start at one `import` keyword and run past a
+side-effect import to reach the next `from`, so the position used is the capture group's, not the
+match's.
+
+**`ruvyxa start` served on-demand development bundles to the client router.**
+`/__ruvyxa/client/route-manifest.json` was synthesized from the live route table in every mode, and
+its entries pointed at `/__ruvyxa/client?path=…` — a bundle compiled per request, carrying its own
+React. Soft navigation therefore rendered a component from one React copy into a root owned by
+another, every hook in it threw, and the router fell back to a document load. Pages still worked,
+which is why nothing reported it. A build's `route-manifest.json` is served verbatim when one
+exists.
+
+### A client reference had two ids
+
+`ruvyxa build` compiles a route from the project's sources; `ruvyxa start` compiles the same route
+from the copy the build stages under `<out>/server/`. Measured from the project root those give
+`app/counter.tsx` and `.ruvyxa/server/app/counter.tsx` — two ids for one module — so the payload a
+running server rendered named a reference the browser bundle had never registered, and the first
+navigation into the route rendered nothing. Ids are measured from the directory holding the app
+directory, which is the position both trees share.
+
 ### Server renders were using React's development build
 
 Nothing set `NODE_ENV` for a rendering worker, so `ruvyxa build` and `ruvyxa start` both loaded the

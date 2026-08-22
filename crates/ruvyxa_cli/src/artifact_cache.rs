@@ -106,9 +106,15 @@ pub(crate) fn client_plan_cache_file(cache_dir: &Path, route_path: &str, variant
         .join(format!("{key}.json"))
 }
 
+/// Where the shared chunk built from exactly these modules, in exactly this
+/// order, is cached.
+///
+/// Order belongs in the key because it is in the output: the registry runs its
+/// modules in the sequence it was handed, so two orders are two different
+/// chunks and must not answer to one key.
 pub(crate) fn shared_route_artifact_cache_file(
     cache_dir: &Path,
-    module_paths: &BTreeSet<PathBuf>,
+    module_paths: &[PathBuf],
     variant: &str,
 ) -> PathBuf {
     let mut key_source = String::from(variant);
@@ -258,7 +264,7 @@ pub(crate) fn store_prerender_artifact(
 pub(crate) fn load_shared_route_artifact(
     cache_dir: &Path,
     dependency_hash: &str,
-    module_paths: &BTreeSet<PathBuf>,
+    module_paths: &[PathBuf],
     variant: &str,
     fingerprints: &ArtifactFingerprintCache,
 ) -> Option<ruvyxa_bundler::SharedRouteBundleOutput> {
@@ -289,7 +295,7 @@ pub(crate) fn load_shared_route_artifact(
 pub(crate) fn store_shared_route_artifact(
     cache_dir: &Path,
     dependency_hash: &str,
-    module_paths: &BTreeSet<PathBuf>,
+    module_paths: &[PathBuf],
     variant: &str,
     output: &ruvyxa_bundler::SharedRouteBundleOutput,
     fingerprints: &ArtifactFingerprintCache,
@@ -328,10 +334,13 @@ pub(crate) fn load_client_plan(
     route_path: &str,
     variant: &str,
     fingerprints: &ArtifactFingerprintCache,
-) -> Option<BTreeSet<PathBuf>> {
+) -> Option<Vec<PathBuf>> {
     let source = fs::read_to_string(client_plan_cache_file(cache_dir, route_path, variant)).ok()?;
     let plan: CachedClientPlan = serde_json::from_str(&source).ok()?;
-    if plan.version != 2
+    // Version 3 carries the module list in evaluation order. A version 2 entry
+    // holds the same modules sorted by path, which is not the same answer, so
+    // it is discarded rather than read.
+    if plan.version != 3
         || plan.dependency_hash != dependency_hash
         || plan.files.is_empty()
         || plan.module_paths.is_empty()
@@ -349,7 +358,7 @@ pub(crate) fn store_client_plan(
     dependency_hash: &str,
     route_path: &str,
     variant: &str,
-    module_paths: &BTreeSet<PathBuf>,
+    module_paths: &[PathBuf],
     dependency_paths: &BTreeSet<PathBuf>,
     fingerprints: &ArtifactFingerprintCache,
 ) {
@@ -365,10 +374,10 @@ pub(crate) fn store_client_plan(
         return;
     }
     let plan = CachedClientPlan {
-        version: 2,
+        version: 3,
         dependency_hash: dependency_hash.to_string(),
         files,
-        module_paths: module_paths.clone(),
+        module_paths: module_paths.to_vec(),
     };
     let Ok(source) = serde_json::to_vec(&plan) else {
         return;
@@ -471,7 +480,7 @@ mod tests {
             assert_eq!(stem, versioned_key("/blog\0base"));
         }
 
-        let modules = BTreeSet::from([PathBuf::from("/app/app/page.tsx")]);
+        let modules = [PathBuf::from("/app/app/page.tsx")];
         let shared = shared_route_artifact_cache_file(cache_dir, &modules, "base");
         let mut expected = String::from("base");
         expected.push('\0');

@@ -153,10 +153,22 @@ fn is_identifier_boundary(source: &str, start: usize, length: usize) -> bool {
         && !after.is_some_and(|byte| is_identifier_byte(*byte))
 }
 
+/// Whether the text after an export keyword and its declaration prefix names
+/// exactly `name`.
+///
+/// `is_some_and`, not `is_none_or`: a failed `strip_prefix` means the export
+/// declares some *other* binding, and reporting that as a match made every
+/// `export const meta = ...` page claim whichever runtime export was asked
+/// about. The dev route manifest then advertised `flight: true` for routes
+/// with no flight export, so the router's Flight fetch 500'd and every soft
+/// navigation fell back to a document load.
 fn is_export_name(rest: &str, name: &str) -> bool {
-    rest.strip_prefix(name)
-        .and_then(|remaining| remaining.as_bytes().first())
-        .is_none_or(|byte| !is_identifier_byte(*byte))
+    rest.strip_prefix(name).is_some_and(|remaining| {
+        remaining
+            .as_bytes()
+            .first()
+            .is_none_or(|byte| !is_identifier_byte(*byte))
+    })
 }
 
 fn is_identifier_byte(byte: u8) -> bool {
@@ -1011,6 +1023,13 @@ mod tests {
             "exports.flight = true\n",
             "reexport const flight = true\n",
             "export const flightPlan = true\n",
+            // A different binding entirely: the export exists, the name
+            // does not. This is what an ordinary page looks like, and
+            // accepting it advertised runtime exports no module had.
+            "export const meta = { title: 1 }\n",
+            "export function loader() {}\n",
+            "export async function generateStaticParams() {}\n",
+            "export class Widget {}\n",
             "// export const flight = true\n",
             "const doc = 'export const flight = true'\n",
         ] {

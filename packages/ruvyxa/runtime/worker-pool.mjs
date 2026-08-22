@@ -37,6 +37,9 @@ import {
 } from './request-context.mjs'
 import {
   clearCompilerCache,
+  clientVendorEntrySource,
+  clientVendorSpecifier,
+  clientVendorUrls,
   collectSpecials,
   compileBundleWithMetadata,
   compilerCacheStats,
@@ -60,17 +63,29 @@ import {
   clientEntrySource,
   metaSourceImports,
   nodeSsrEntrySource,
+  rscActionEntrySource,
   rscClientEntrySource,
   rscServerEntrySource,
   wrapperLevels,
 } from './entry-templates.mjs'
-import { clientRegistrySource } from './client-references.mjs'
-import { renderServerComponents } from './server-components.mjs'
+import {
+  RSC_BROWSER_PACKAGE,
+  RSC_SSR_PACKAGE,
+  clientRegistrySource,
+  serverManifest,
+  serverProxyModuleSource,
+} from './client-references.mjs'
+import {
+  flightManifest,
+  readStreamText,
+  renderServerComponents,
+  renderServerComponentsStream,
+} from './server-components.mjs'
 import { collectIntercepts } from './route-intercepts.mjs'
 import { WorkerAdmissionController } from './worker-admission.mjs'
 import { CachePressureController, LruCache } from './cache-budget.mjs'
 import { encodeFlightPayload } from './flight.mjs'
-import { compareEntryKeys } from './order.mjs'
+import { compareCodeUnits, compareEntryKeys } from './order.mjs'
 
 /**
  * Names a page may use to declare its static parameter set, most specific
@@ -169,7 +184,7 @@ const serverComponentDepsChecked = new Set()
 // because the browser build needs the list without recompiling the server
 // graph, and a second scan of the route's imports would be a second answer to
 // which modules are client modules.
-const rscClientReferences = new Map()
+const rscBundleReferences = new Map()
 
 // Performance: Request coalescing — collapse duplicate concurrent renders.
 // Key: coalesce_key (route+params hash), Value: Promise of result.
@@ -345,8 +360,18 @@ async function dispatchRequest(request) {
       return handleAction(request)
     case 'client':
       return handleClient(request)
+    case 'clientVendor':
+      return handleClientVendor(request)
     case 'rscClientEntry':
       return handleServerComponentsEntry(request)
+    case 'rscPayload':
+      // A soft navigation into a server-components route. The browser already
+      // has a document, so only the payload is rendered.
+      return handleServerComponents(request, { html: false })
+    case 'rscAction':
+      return handleRscAction(request)
+    case 'rscDocument':
+      return handleServerComponentsDocument(request)
     case 'warmup':
       if (enforceWorkerCacheBudget().stopSpeculation) {
         return { ok: true, warmed: 0, skipped: 'memory-pressure' }
@@ -410,8 +435,17 @@ async function writeWorkerMessage(message) {
   }
 }
 
+/**
+ * Frame a streamed response as `api-start`, `api-chunk`s, and `api-end`.
+ *
+ * `streamTrailer` is for a value that does not exist yet when the first frame
+ * has to go out. A server-components document is the case: its Flight payload
+ * is only complete once the render is, and the host needs it to write the data
+ * block the browser hydrates from — which belongs at the *end* of the document
+ * anyway. The thunk is awaited after the last chunk and merged into `api-end`.
+ */
 async function emitApiStream(id, result) {
-  const { streamResponse, ...head } = result
+  const { streamResponse, streamTrailer, ...head } = result
   await writeWorkerMessage({
     id,
     frame: 'api-start',
@@ -419,14 +453,17 @@ async function emitApiStream(id, result) {
     retainedModuleUrls: registeredModuleUrls.size,
   })
 
+  const endFrame = async () => ({
+    id,
+    frame: 'api-end',
+    ok: true,
+    ...(streamTrailer ? await streamTrailer() : null),
+    retainedModuleUrls: registeredModuleUrls.size,
+  })
+
   const reader = streamResponse.body?.getReader()
   if (!reader) {
-    await writeWorkerMessage({
-      id,
-      frame: 'api-end',
-      ok: true,
-      retainedModuleUrls: registeredModuleUrls.size,
-    })
+    await writeWorkerMessage(await endFrame())
     return
   }
 
@@ -449,12 +486,7 @@ async function emitApiStream(id, result) {
         })
       }
     }
-    await writeWorkerMessage({
-      id,
-      frame: 'api-end',
-      ok: true,
-      retainedModuleUrls: registeredModuleUrls.size,
-    })
+    await writeWorkerMessage(await endFrame())
   } catch (error) {
     try {
       await reader.cancel(error)
@@ -1315,6 +1347,56 @@ async function handleClient(request) {
   return { ok: true, script, inputsVersion, inputs }
 }
 
+/**
+ * Compile one shared browser module — React and its family — for development.
+ *
+ * Built with its *siblings* rewritten to their own URLs, so the browser holds
+ * one instance of each no matter how many route bundles import them. A build
+ * achieves the same thing with a shared chunk; development compiles per route
+ * on demand and has no cross-route analysis to build one from.
+ */
+async function handleClientVendor(request) {
+  const { projectRoot, name } = request
+  const resolvedRoot = path.resolve(projectRoot || process.cwd())
+  const specifier = clientVendorSpecifier(name)
+  if (!specifier) {
+    const error = new Error(`RUV1305 unknown shared browser module ${JSON.stringify(name)}`)
+    error.code = 'RUV1305'
+    throw error
+  }
+  ensureReactDeps(resolvedRoot)
+
+  const cacheDir = path.join(resolvedRoot, '.ruvyxa', 'cache', 'client')
+  await ensureDir(cacheDir)
+  // `export *` cannot enumerate a CommonJS module's names, so the shared module
+  // publishes its exports object on a registry instead.
+  const moduleCode = clientVendorEntrySource(specifier)
+  const hash = createHash('sha256').update(moduleCode).digest('hex').slice(0, 16)
+  const outfile = path.join(cacheDir, `vendor.${name}.${hash}.js`)
+  const cacheKey = `vendor:${name}:${hash}`
+
+  const cached = bundleCache.get(cacheKey)
+  if (cached) return { ok: true, script: await readFile(cached, 'utf8') }
+
+  return withBuildLock(cacheKey, async () => {
+    const rechecked = bundleCache.get(cacheKey)
+    if (rechecked) return { ok: true, script: await readFile(rechecked, 'utf8') }
+
+    const bundle = await compileBundleWithMetadata({
+      projectRoot: resolvedRoot,
+      entrySource: moduleCode,
+      sourcefile: `ruvyxa:vendor-${name}.ts`,
+      outfile,
+      platform: 'browser',
+      minify: process.env.RUVYXA_CLIENT_MINIFY === '1',
+      externalUrls: clientVendorUrls(specifier),
+      aliases: runtimeAliases(runtimeDir),
+    })
+    cacheBundle(cacheKey, outfile, resolvedRoot, bundle.inputs, null, bundle.contentHash)
+    return { ok: true, script: await readFile(outfile, 'utf8') }
+  })
+}
+
 // --- Bundle Cache Invalidation ---
 function invalidateBundleCache(paths) {
   invalidateCompilerCache(paths)
@@ -1326,7 +1408,7 @@ function invalidateBundleCache(paths) {
     bundleInputVersions.clear()
     bundleFingerprints.clear()
     bundleVersions.clear()
-    rscClientReferences.clear()
+    rscBundleReferences.clear()
     moduleCache.clear()
     buildLocks.clear()
     return { invalidated }
@@ -1346,7 +1428,7 @@ function invalidateBundleCache(paths) {
     )
     if (entryMatches || dependencyMatches) {
       deleteBundleCacheEntry(key)
-      rscClientReferences.delete(key)
+      rscBundleReferences.delete(key)
       invalidated++
     }
   }
@@ -1829,6 +1911,11 @@ async function bundleClientModule(
       outfile,
       platform: 'browser',
       minify: process.env.RUVYXA_CLIENT_MINIFY === '1',
+      // React comes from one shared URL rather than being inlined here. Two
+      // route bundles each carrying their own copy is what made a soft
+      // navigation render a component from one React into a root owned by
+      // another, and every hook in it threw.
+      externalUrls: clientVendorUrls(),
       aliases: runtimeAliases(runtimeDir),
     })
 
@@ -1866,6 +1953,7 @@ async function bundleClientModule(
  */
 async function bundleRscServerModule(
   projectRoot,
+  appDir,
   pageFile,
   layouts,
   routePath = '/',
@@ -1873,6 +1961,9 @@ async function bundleRscServerModule(
   nested = {},
 ) {
   const { templates = [], slots = [] } = nested
+  // See `clientReferenceBase` below: the app directory's parent is the one
+  // position the project's own tree and the build's staged copy share.
+  const referenceBase = rscReferenceBase(appDir)
   const cacheDir = path.join(projectRoot, '.ruvyxa', 'cache', 'rsc')
   await ensureDir(cacheDir)
 
@@ -1904,7 +1995,14 @@ async function bundleRscServerModule(
     metaNames,
   })
 
-  const hash = createHash('sha256').update(moduleCode).update(pageFile).digest('hex').slice(0, 16)
+  // The base is part of the key: it decides which ids the compile reports, and
+  // two bases would otherwise share one cache entry and one set of references.
+  const hash = createHash('sha256')
+    .update(moduleCode)
+    .update(pageFile)
+    .update(referenceBase)
+    .digest('hex')
+    .slice(0, 16)
   const outfile = path.join(cacheDir, `server.${hash}.mjs`)
   const cacheKey = `rsc:server:${pageFile}:${hash}`
 
@@ -1922,6 +2020,13 @@ async function bundleRscServerModule(
       outfile,
       platform: serverPlatform(),
       bundleTarget: 'react-server',
+      // Client-reference ids are measured from the directory holding the app
+      // directory, not from the project root. `ruvyxa build` compiles this
+      // route from the project's own sources while `ruvyxa start` compiles it
+      // from the copy staged under `<out>/server/`; measured from the root
+      // those two produce different ids, and the payload a running server
+      // rendered then named a reference the browser bundle never registered.
+      clientReferenceBase: referenceBase,
       // The one graph in this framework that carries its dependencies. Leaving
       // them external would resolve `react` through Node, which has no way to
       // know this module wants the `react-server` build — the process is
@@ -1938,12 +2043,16 @@ async function bundleRscServerModule(
       bundle.dependencyHash,
       bundle.contentHash,
     )
-    rscClientReferences.set(cacheKey, bundle.clientReferences)
+    rscBundleReferences.set(cacheKey, {
+      client: bundle.clientReferences,
+      server: bundle.serverReferences,
+    })
     return {
       outfile,
       version: bundle.contentHash,
       dependencyHash: bundle.dependencyHash,
       clientReferences: bundle.clientReferences,
+      serverReferences: bundle.serverReferences,
       ...bundleInputMetadata(cacheKey),
     }
   })
@@ -1956,13 +2065,39 @@ async function bundleRscServerModule(
  * the SSR pass render a client component's markup instead of leaving a hole in
  * the document.
  */
-async function bundleRscSsrRegistry(projectRoot, references) {
+/**
+ * The directory every server-components reference id is measured from.
+ *
+ * Not the project root: the same route is compiled from two trees — the
+ * project's own sources during `ruvyxa build`, and the copy staged under
+ * `<out>/server/` which `ruvyxa start` serves from — and measured from the root
+ * those give different ids for one module. The directory holding the app
+ * directory is the position both trees share.
+ *
+ * Every graph that computes an id has to ask this, not just the server one.
+ * When only the server graph did, a `'use server'` module got one id there and
+ * another in the browser graph, and `ruvyxa start` answered a call with
+ * `RUV1865` for a function it was holding all along — while `ruvyxa dev`, where
+ * the two bases happen to coincide, worked.
+ */
+function rscReferenceBase(appDir) {
+  return path.dirname(path.resolve(appDir))
+}
+
+async function bundleRscSsrRegistry(projectRoot, appDir, references) {
   const cacheDir = path.join(projectRoot, '.ruvyxa', 'cache', 'rsc')
   await ensureDir(cacheDir)
 
+  const referenceBase = rscReferenceBase(appDir)
   const { imports, statements } = clientRegistrySource(references)
   const moduleCode = `${imports.join('\n')}\n${statements.join('\n')}\n`
-  const hash = createHash('sha256').update(moduleCode).digest('hex').slice(0, 16)
+  // The base is part of the key: it decides which ids the compile reports,
+  // and two bases would otherwise share one entry and one set of references.
+  const hash = createHash('sha256')
+    .update(moduleCode)
+    .update(referenceBase)
+    .digest('hex')
+    .slice(0, 16)
   const outfile = path.join(cacheDir, `registry.${hash}.mjs`)
   const cacheKey = `rsc:registry:${hash}`
 
@@ -1979,30 +2114,66 @@ async function bundleRscSsrRegistry(projectRoot, references) {
       sourcefile: 'ruvyxa:rsc-registry.tsx',
       outfile,
       platform: serverPlatform(),
-      // `react` external, so these components share the instance `react-dom/server`
-      // renders them with. Bundling it here would put two Reacts in one render
-      // and every hook would throw.
-      external: ['react', 'react/jsx-runtime'],
+      // A server bundle normally leaves packages to Node's resolver, but this
+      // one lifts client modules *out* of their packages and inlines them into
+      // a file under `.ruvyxa/cache/rsc/`. A bare specifier left behind then
+      // resolves from the cache directory instead of from the package that
+      // wrote it — `@ruvyxa/react` importing `@ruvyxa/core` came back
+      // "Cannot find package" the moment a layout used `<Link>`, because pnpm
+      // keeps that dependency under the react package rather than the app.
+      // Carrying the dependencies along also keeps this registry and the
+      // browser bundle built from the same references symmetric: both render
+      // the same components, so both must contain the same modules.
+      bundlePackages: true,
+      // React and the DOM renderer stay external so these components share the
+      // instance `react-dom/server` renders them with. Bundling either would
+      // put two copies in one render and every hook would throw.
+      external: ['react', 'react/jsx-runtime', 'react-dom', 'react-dom/client', 'react-dom/server'],
+      // This bundle is the *client* side of the boundary that happens to run on
+      // a server, so a `'use server'` module it reaches becomes a reference
+      // here exactly as it does in the browser. `<form action={save}>` renders
+      // React's hidden reference fields either way, which is what makes the
+      // server-rendered markup and the hydrated markup agree.
+      serverReferenceClient: RSC_SSR_PACKAGE,
+      clientReferenceBase: referenceBase,
       aliases: runtimeAliases(runtimeDir),
     })
 
     cacheBundle(cacheKey, outfile, projectRoot, bundle.inputs, null, bundle.contentHash)
-    return { outfile, version: bundle.contentHash, ...bundleInputMetadata(cacheKey) }
+    rscBundleReferences.set(cacheKey, { client: references, server: bundle.serverReferences })
+    return {
+      outfile,
+      version: bundle.contentHash,
+      serverReferences: bundle.serverReferences,
+      ...bundleInputMetadata(cacheKey),
+    }
   })
 }
 
 /** Compile the browser bundle for a server-components route. */
-async function bundleRscClientModule(projectRoot, references, routePath, requestPath, paramsJson) {
+async function bundleRscClientModule(
+  projectRoot,
+  appDir,
+  references,
+  routePath,
+  requestPath,
+  paramsJson,
+) {
   const cacheDir = path.join(projectRoot, '.ruvyxa', 'cache', 'client')
   await ensureDir(cacheDir)
 
+  const referenceBase = rscReferenceBase(appDir)
   const moduleCode = rscClientEntrySource({
     references,
     routePath,
     requestPathLiteral: JSON.stringify(requestPath),
     paramsLiteral: paramsJson,
   })
-  const hash = createHash('sha256').update(moduleCode).digest('hex').slice(0, 16)
+  const hash = createHash('sha256')
+    .update(moduleCode)
+    .update(referenceBase)
+    .digest('hex')
+    .slice(0, 16)
   const outfile = path.join(cacheDir, `rsc.${hash}.js`)
   const cacheKey = `rsc:client:${hash}`
 
@@ -2020,23 +2191,270 @@ async function bundleRscClientModule(projectRoot, references, routePath, request
       outfile,
       platform: 'browser',
       minify: process.env.RUVYXA_CLIENT_MINIFY === '1',
+      externalUrls: clientVendorUrls(),
+      serverReferenceClient: RSC_BROWSER_PACKAGE,
+      clientReferenceBase: referenceBase,
       aliases: runtimeAliases(runtimeDir),
     })
 
     cacheBundle(cacheKey, outfile, projectRoot, bundle.inputs, null, bundle.contentHash)
-    return { outfile, version: bundle.contentHash, ...bundleInputMetadata(cacheKey) }
+    rscBundleReferences.set(cacheKey, { client: references, server: bundle.serverReferences })
+    return {
+      outfile,
+      version: bundle.contentHash,
+      serverReferences: bundle.serverReferences,
+      ...bundleInputMetadata(cacheKey),
+    }
   })
+}
+
+/**
+ * Compile the bundle that can run this route's server functions.
+ *
+ * Keyed by the reference list rather than by the route: two routes that reach
+ * the same actions file share one bundle, and one route whose actions change
+ * gets a new one. The list arrives already sorted from the compiler, so the key
+ * is stable across processes.
+ */
+async function bundleRscActionModule(projectRoot, appDir, references) {
+  const cacheDir = path.join(projectRoot, '.ruvyxa', 'cache', 'rsc')
+  await ensureDir(cacheDir)
+
+  const referenceBase = rscReferenceBase(appDir)
+  const moduleCode = rscActionEntrySource({ references })
+  const hash = createHash('sha256')
+    .update(moduleCode)
+    .update(referenceBase)
+    .digest('hex')
+    .slice(0, 16)
+  const outfile = path.join(cacheDir, `action.${hash}.mjs`)
+  const cacheKey = `rsc:action:${hash}`
+
+  const hit = rscBundleCacheHit(cacheKey)
+  if (hit) return hit
+
+  return withBuildLock(cacheKey, async () => {
+    const rechecked = rscBundleCacheHit(cacheKey)
+    if (rechecked) return rechecked
+
+    const bundle = await compileBundleWithMetadata({
+      projectRoot,
+      entrySource: moduleCode,
+      sourcefile: 'ruvyxa:rsc-action.tsx',
+      outfile,
+      platform: serverPlatform(),
+      // The server functions run in the same realm the page renders in, so this
+      // bundle carries the `react-server` build for the same reason the render
+      // entry does: an action that returns an element tree must produce one the
+      // page's own React can serialise.
+      bundleTarget: 'react-server',
+      clientReferenceBase: referenceBase,
+      bundlePackages: true,
+      aliases: runtimeAliases(runtimeDir),
+    })
+
+    cacheBundle(
+      cacheKey,
+      outfile,
+      projectRoot,
+      bundle.inputs,
+      bundle.dependencyHash,
+      bundle.contentHash,
+    )
+    rscBundleReferences.set(cacheKey, {
+      client: bundle.clientReferences,
+      server: bundle.serverReferences,
+    })
+    return {
+      outfile,
+      version: bundle.contentHash,
+      dependencyHash: bundle.dependencyHash,
+      clientReferences: bundle.clientReferences,
+      serverReferences: bundle.serverReferences,
+      ...bundleInputMetadata(cacheKey),
+    }
+  })
+}
+
+/**
+ * Every `'use server'` module a route can reach, from both sides of it.
+ *
+ * The union is not an optimisation. An actions file imported by the page is in
+ * the `react-server` graph and nowhere else; one imported only by a
+ * `'use client'` component is in the browser graph and nowhere else, because a
+ * client reference's own imports are never walked by the server graph. A call
+ * may name either, so a bundle built from one list alone cannot answer half of
+ * them.
+ */
+function mergeServerReferences(...lists) {
+  const merged = new Map()
+  for (const list of lists) {
+    for (const reference of list ?? []) merged.set(reference.id, reference)
+  }
+  return [...merged.values()].sort((left, right) => compareCodeUnits(left.id, right.id))
+}
+
+/**
+ * Turn the bytes a server-function call arrived with back into React's shape.
+ *
+ * `encodeReply` produces a string for plain arguments and `FormData` when one
+ * of them is a file or a stream, and `decodeReply` needs to be handed the same
+ * kind back. `Response` is the parser for the second case — reimplementing
+ * multipart parsing to avoid constructing one would be a second answer to a
+ * question the runtime already answers.
+ */
+async function decodeActionBody(contentType, bodyBase64) {
+  const bytes = Buffer.from(bodyBase64 ?? '', 'base64')
+  if ((contentType ?? '').toLowerCase().startsWith('multipart/form-data')) {
+    return await new Response(bytes, { headers: { 'content-type': contentType } }).formData()
+  }
+  return bytes.toString('utf8')
+}
+
+/**
+ * Turn a submitted form's bytes into `FormData`.
+ *
+ * Separate from {@link decodeActionBody} because the two decode different
+ * things. That one decodes what React's own encoder produced, which is a string
+ * unless an argument forced multipart; this one decodes what a *browser*
+ * produced from a `<form>`, which is multipart or url-encoded and never a
+ * string. `Response` parses both from their content type, so neither case needs
+ * a parser written here.
+ */
+async function decodeFormBody(contentType, bodyBase64) {
+  const bytes = Buffer.from(bodyBase64 ?? '', 'base64')
+  return await new Response(bytes, { headers: { 'content-type': contentType } }).formData()
+}
+
+/**
+ * Run the server function a plain form post named, before the page is rendered.
+ *
+ * This is what `<form action={save}>` does in a browser with no JavaScript. The
+ * hydrated page posts to `/__ruvyxa/rsc` and patches itself from the reply; a
+ * page whose bundle has not loaded — or never will — submits the form the way
+ * HTML always has, to the URL it is on. React put the reference id and any
+ * bound arguments in hidden fields when it rendered the form, so the submission
+ * carries everything needed to find the function.
+ *
+ * The action runs *before* the render and inside the same request context, so
+ * what it wrote is what the page reads, and a `revalidatePath()` it called is
+ * collected with the render's own.
+ *
+ * `null` unless a form post actually named an action. Any other POST to a page
+ * — a search form, a probe, a stray request — renders the route unchanged,
+ * which is what it did before this existed.
+ */
+async function runPostedFormAction({ projectRoot, appDir, request, server, registry }) {
+  if (!request.formBody) return null
+  const formData = await decodeFormBody(request.formContentType, request.formBody)
+  const references = mergeServerReferences(server.serverReferences, registry.serverReferences)
+  if (references.length === 0) return null
+  const action = await bundleRscActionModule(projectRoot, appDir, references)
+  const actionModule = await importModule(action.outfile, action.version)
+  return await actionModule.runFormAction({ formData, serverManifest: serverManifest() })
+}
+
+/**
+ * Run one server function and encode what it returned.
+ *
+ * The reply is a Flight payload, not JSON, so the function may return an
+ * element tree containing client components — which is why it is serialised
+ * against the same manifest a page render uses.
+ *
+ * The route travels with the call because it decides which graphs are searched
+ * for the reference. A server function is reachable from the route whose page
+ * or client components import it, and resolving it that way costs one compile
+ * the host has usually already done, where a build-wide table of every action
+ * in the application would be a second index to keep current.
+ */
+async function handleRscAction(request) {
+  const {
+    projectRoot,
+    appDir,
+    pageFile,
+    requestPath,
+    requestTarget,
+    params,
+    routePath,
+    reference,
+  } = request
+  const resolvedRoot = path.resolve(projectRoot || process.cwd())
+  ensureReactDeps(resolvedRoot)
+  ensureServerComponentDeps(resolvedRoot)
+  await ensureInstrumentation(resolvedRoot)
+
+  const layouts = collectLayouts(appDir, path.dirname(pageFile))
+  const templates = collectTemplates(appDir, path.dirname(pageFile))
+  const slots = collectSlots(appDir, path.dirname(pageFile))
+  const specials = collectSpecials(appDir, path.dirname(pageFile))
+
+  const server = await bundleRscServerModule(
+    resolvedRoot,
+    appDir,
+    pageFile,
+    layouts,
+    routePath || requestPath,
+    specials,
+    { templates, slots },
+  )
+  // Compiled for its reference list, not for its output: this is the graph that
+  // sees the actions a `'use client'` component imports.
+  const registry = await bundleRscSsrRegistry(resolvedRoot, appDir, server.clientReferences)
+  const references = mergeServerReferences(server.serverReferences, registry.serverReferences)
+  if (references.length === 0) {
+    const error = new Error(
+      `RUV1866 ${routePath || requestPath} declares no server functions, so ${reference} cannot be called on it`,
+    )
+    error.code = 'RUV1866'
+    throw error
+  }
+
+  const action = await bundleRscActionModule(resolvedRoot, appDir, references)
+  const actionModule = await importModule(action.outfile, action.version)
+
+  const context = requestContext({
+    headerPairs: request.headerPairs,
+    method: request.method || 'POST',
+    url: requestTarget || requestPath,
+    params: params || {},
+  })
+
+  let failure = null
+  const stream = await runWithRequestContext(context, async () =>
+    actionModule.callServerFunction({
+      reference,
+      body: await decodeActionBody(request.contentType, request.body),
+      manifest: flightManifest(server.clientReferences),
+      serverManifest: serverManifest(),
+      options: {
+        onError(error) {
+          failure ??= error
+        },
+      },
+    }),
+  )
+  const payload = await readStreamText(stream)
+  if (failure) throw failure
+
+  return {
+    ok: true,
+    rscPayload: payload,
+    requestScoped: usedRequestContext(context),
+    revalidate: collectRevalidations(context),
+  }
 }
 
 /** A cached RSC bundle, carrying back the references the server graph reported. */
 function rscBundleCacheHit(cacheKey) {
   const cached = bundleCache.get(cacheKey)
   if (!cached) return null
+  const references = rscBundleReferences.get(cacheKey)
   return {
     outfile: cached,
     version: bundleVersions.get(cacheKey),
     dependencyHash: bundleFingerprints.get(cacheKey),
-    clientReferences: rscClientReferences.get(cacheKey) ?? [],
+    clientReferences: references?.client ?? [],
+    serverReferences: references?.server ?? [],
     ...bundleInputMetadata(cacheKey),
   }
 }
@@ -2051,7 +2469,7 @@ function rscBundleCacheHit(cacheKey) {
  * which is what a build's per-path isolation needs and what `handleSsg` already
  * asks for on the ordinary path.
  */
-async function handleServerComponents(request, { fresh = false } = {}) {
+async function handleServerComponents(request, { fresh = false, html = true } = {}) {
   const { projectRoot, appDir, pageFile, requestPath, requestTarget, params, routePath } = request
   const resolvedRoot = path.resolve(projectRoot || process.cwd())
   ensureReactDeps(resolvedRoot)
@@ -2065,16 +2483,21 @@ async function handleServerComponents(request, { fresh = false } = {}) {
 
   const server = await bundleRscServerModule(
     resolvedRoot,
+    appDir,
     pageFile,
     layouts,
     routePath || requestPath,
     specials,
     { templates, slots },
   )
-  const registry = await bundleRscSsrRegistry(resolvedRoot, server.clientReferences)
-  // Importing the registry is what registers each client module under its id;
-  // the SSR pass below resolves references through it.
-  await importModule(registry.outfile, registry.version)
+  // The registry is only needed by the SSR pass: it is what turns a reference
+  // id into a module whose markup can be rendered. A payload-only render never
+  // resolves one, so a soft navigation does not pay to compile it.
+  let registry = null
+  if (html) {
+    registry = await bundleRscSsrRegistry(resolvedRoot, appDir, server.clientReferences)
+    await importModule(registry.outfile, registry.version)
+  }
   const serverModule = await importModule(
     server.outfile,
     fresh ? isolatedVersion(server.version) : server.version,
@@ -2086,20 +2509,117 @@ async function handleServerComponents(request, { fresh = false } = {}) {
     url: requestTarget || requestPath,
     params: params || {},
   })
-  const { html, payload } = await runWithRequestContext(context, () =>
-    renderServerComponents({
+  const rendered = await runWithRequestContext(context, async () => {
+    // Inside the context, before the render: an action that set a cookie or
+    // wrote a row must have done so by the time the page reads either.
+    const posted = registry
+      ? await runPostedFormAction({ projectRoot: resolvedRoot, appDir, request, server, registry })
+      : null
+    return await renderServerComponents({
       serverModule,
       references: server.clientReferences,
       ctx: { path: requestPath, params: params || {} },
       routePath: routePath || requestPath,
-    }),
-  )
+      html,
+      formState: posted?.formState ?? null,
+    })
+  })
 
   return {
     ok: true,
-    html,
-    rscPayload: payload,
+    html: rendered.html ?? undefined,
+    rscPayload: rendered.payload,
     requestScoped: usedRequestContext(context),
+    revalidate: collectRevalidations(context),
+    dependencyHash: server.dependencyHash,
+    inputsVersion: server.inputsVersion,
+    inputs: server.inputs,
+  }
+}
+
+/**
+ * Render a server-components document as a stream.
+ *
+ * The same render as `handleServerComponents`, returned before it has finished.
+ * Nothing here waits for the whole tree, so a `Suspense` boundary around a slow
+ * server component sends its fallback with the shell and its content whenever
+ * the server has it — instead of holding the first byte of the document until
+ * the slowest part of the page is done.
+ *
+ * Only a route whose document is produced per request can do this. One that is
+ * pre-rendered, cached, or revalidated has to become a string somewhere, and
+ * that is `handleServerComponents` a few lines up.
+ *
+ * The payload rides out in the `api-end` trailer rather than in the first frame:
+ * it is complete only when the render is, and the host writes it into the
+ * document at the point the stream ends.
+ */
+async function handleServerComponentsDocument(request) {
+  const { projectRoot, appDir, pageFile, requestPath, requestTarget, params, routePath } = request
+  const resolvedRoot = path.resolve(projectRoot || process.cwd())
+  ensureReactDeps(resolvedRoot)
+  ensureServerComponentDeps(resolvedRoot)
+  await ensureInstrumentation(resolvedRoot)
+
+  const layouts = collectLayouts(appDir, path.dirname(pageFile))
+  const templates = collectTemplates(appDir, path.dirname(pageFile))
+  const slots = collectSlots(appDir, path.dirname(pageFile))
+  const specials = collectSpecials(appDir, path.dirname(pageFile))
+
+  const server = await bundleRscServerModule(
+    resolvedRoot,
+    appDir,
+    pageFile,
+    layouts,
+    routePath || requestPath,
+    specials,
+    { templates, slots },
+  )
+  const registry = await bundleRscSsrRegistry(resolvedRoot, appDir, server.clientReferences)
+  await importModule(registry.outfile, registry.version)
+  const serverModule = await importModule(server.outfile, server.version)
+
+  const context = requestContext({
+    headerPairs: request.headerPairs,
+    method: request.method,
+    url: requestTarget || requestPath,
+    params: params || {},
+  })
+  const rendered = await runWithRequestContext(context, async () => {
+    const posted = await runPostedFormAction({
+      projectRoot: resolvedRoot,
+      appDir,
+      request,
+      server,
+      registry,
+    })
+    return await renderServerComponentsStream({
+      serverModule,
+      references: server.clientReferences,
+      ctx: { path: requestPath, params: params || {} },
+      routePath: routePath || requestPath,
+      formState: posted?.formState ?? null,
+    })
+  })
+
+  return {
+    ok: true,
+    streamResponse: new Response(rendered.stream),
+    async streamTrailer() {
+      const payload = await rendered.payload
+      for (const failure of rendered.failures) {
+        // Reported, never thrown: the response left before this was known, and
+        // the only thing left to do with it is put it in the log.
+        console.error('[ruvyxa] server component failed after the shell was sent', failure)
+      }
+      return { rscPayload: payload }
+    },
+    // Read from the `api-start` frame, so the host can keep its dependency
+    // bookkeeping current without waiting for the body. A form action has
+    // already run by this point, which is why its `revalidatePath()` calls can
+    // travel here rather than in the trailer.
+    requestScoped: usedRequestContext(context),
+    revalidate: collectRevalidations(context),
     dependencyHash: server.dependencyHash,
     inputsVersion: server.inputsVersion,
     inputs: server.inputs,
@@ -2125,10 +2645,20 @@ async function handleServerComponentsEntry(request) {
   const templates = collectTemplates(appDir, path.dirname(pageFile))
   const slots = collectSlots(appDir, path.dirname(pageFile))
   const specials = collectSpecials(appDir, path.dirname(pageFile))
-  const server = await bundleRscServerModule(resolvedRoot, pageFile, layouts, routePath, specials, {
-    templates,
-    slots,
-  })
+  const server = await bundleRscServerModule(
+    resolvedRoot,
+    appDir,
+    pageFile,
+    layouts,
+    routePath,
+    specials,
+    { templates, slots },
+  )
+  // Compiled for its reference list, not for its output. This is the graph that
+  // walks the client components, so it is the only one that sees the
+  // `'use server'` modules they import — the server graph turned those
+  // components into references and never followed their imports.
+  const registry = await bundleRscSsrRegistry(resolvedRoot, appDir, server.clientReferences)
 
   return {
     ok: true,
@@ -2140,9 +2670,33 @@ async function handleServerComponentsEntry(request) {
       requestPathLiteral: JSON.stringify(routePath),
       paramsLiteral: '{}',
     }),
+    // Every `'use server'` module the browser graph reaches, with the source
+    // that must stand in for it there. The Rust bundler compiles that graph and
+    // would otherwise walk the real file — which is server code, in the action
+    // lane, and rejected as `RUV1820` the moment a client component imports it.
+    // Handing over the text rather than the rule keeps one implementation of
+    // what a server reference looks like.
+    serverReferences: browserServerReferences(registry.serverReferences),
     inputsVersion: server.inputsVersion,
     inputs: server.inputs,
   }
+}
+
+/**
+ * The stand-in source for each `'use server'` module, for a *browser* graph.
+ *
+ * The reference list is discovered by compiling the SSR registry, which is the
+ * same set of client modules the browser bundle contains — but that compile
+ * makes its proxies against `client.edge`, and the browser needs
+ * `client.browser`. The ids are what the two graphs must agree on, and they do;
+ * only the package differs.
+ */
+function browserServerReferences(references) {
+  return (references ?? []).map((reference) => ({
+    id: reference.id,
+    file: reference.file,
+    source: serverProxyModuleSource(reference.id, RSC_BROWSER_PACKAGE),
+  }))
 }
 
 /** Build the browser bundle for a server-components route. */
@@ -2161,6 +2715,7 @@ async function handleServerComponentsClient(request) {
   // the route's imports — two scans would be two answers.
   const server = await bundleRscServerModule(
     resolvedRoot,
+    appDir,
     pageFile,
     layouts,
     routePath || requestPath,
@@ -2169,6 +2724,7 @@ async function handleServerComponentsClient(request) {
   )
   const client = await bundleRscClientModule(
     resolvedRoot,
+    appDir,
     server.clientReferences,
     routePath || requestPath,
     requestPath,

@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto'
-import { existsSync, readFileSync, statSync } from 'node:fs'
+import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createRequire, isBuiltin } from 'node:module'
 import path from 'node:path'
@@ -8,6 +8,9 @@ import {
   RSC_CLIENT_RUNTIME_SPECIFIER,
   clientModuleId,
   clientProxyModuleSource,
+  serverModuleId,
+  serverProxyModuleSource,
+  serverRegistrationSource,
 } from './client-references.mjs'
 import { compareCodeUnits } from './order.mjs'
 import {
@@ -17,7 +20,7 @@ import {
   PACKAGE_EXPORT_TARGETS,
   resolveExportsEntry,
 } from './package-exports.mjs'
-import { directivePrologueEnd } from './scanner.mjs'
+import { createCodeIndex, directivePrologueEnd } from './scanner.mjs'
 const JS_EXTENSIONS = ['', '.ts', '.tsx', '.js', '.jsx', '.mts', '.mjs', '.md', '.mdx']
 export const MDX_COMPONENT_EXTENSIONS = ['.tsx', '.ts', '.jsx', '.js', '.mts', '.mjs']
 const ASSET_EXTENSIONS = new Set(['.css', '.scss', '.sass', '.less'])
@@ -168,6 +171,9 @@ export async function compileBundleWithMetadata({
   outfile,
   platform = 'node',
   bundleTarget,
+  clientReferenceBase,
+  serverReferenceClient = null,
+  externalUrls,
   bundlePackages = false,
   bundleAliasDependencies = false,
   external = [],
@@ -182,13 +188,31 @@ export async function compileBundleWithMetadata({
   const normalizedJsxRuntime = normalizeJsxRuntime(jsxRuntime)
   const resolvedBundleTarget = normalizeBundleTarget(bundleTarget, platform)
   const root = path.resolve(projectRoot)
+  // The directory client-reference ids are measured from. It is *not* the
+  // project root, because the same module is compiled from two trees: the
+  // project's own sources during `ruvyxa build`, and the copy the build stages
+  // under `<out>/server/` which `ruvyxa start` serves from. Measured from the
+  // root those two give different paths — `app/x.tsx` and
+  // `.ruvyxa/server/app/x.tsx` — and therefore different ids, so the payload a
+  // running server rendered named a reference the browser bundle never
+  // registered. The caller passes the directory holding the app directory,
+  // which is the position both trees share.
+  const referenceBase = clientReferenceBase ? path.resolve(clientReferenceBase) : root
   const modules = []
   const byKey = new Map()
   // Every `'use client'` module the server-components graph turned into a
   // reference. Empty for every other bundle target, so nothing else changes.
   const clientReferences = new Map()
+  // Every `'use server'` module this graph reached, whichever side of the
+  // boundary it was compiled for. A client graph only fills this when
+  // `serverReferenceClient` names the package its references are made with;
+  // the `react-server` graph always does, because a server function it can see
+  // is one this build must be able to call.
+  const serverReferences = new Map()
   const externals = new Map()
-  const externalSet = new Set(external)
+  // A rewritten specifier is external by definition: the bundle imports it by
+  // URL instead of inlining it, so the caller does not have to list it twice.
+  const externalSet = new Set([...external, ...Object.keys(externalUrls ?? {})])
   const tsconfigPaths = loadTsconfigPaths(root)
   const entryKey = sourcefile
 
@@ -203,10 +227,14 @@ export async function compileBundleWithMetadata({
     byKey,
     externals,
     externalSet,
+    externalUrls,
     aliases,
     platform,
     bundleTarget: resolvedBundleTarget,
     clientReferences,
+    serverReferences,
+    serverReferenceClient,
+    referenceBase,
     bundlePackages,
     bundleAliasDependencies,
     bundleDependencies: false,
@@ -216,7 +244,7 @@ export async function compileBundleWithMetadata({
     tsconfigPaths,
   })
 
-  const linked = linkModules(modules, externals, { minify, outfile, sourceMap })
+  const linked = linkModules(modules, externals, { minify, outfile, sourceMap, externalUrls })
   await mkdir(path.dirname(outfile), { recursive: true })
   await writeIfChanged(outfile, linked.code)
   if (linked.map) {
@@ -230,6 +258,13 @@ export async function compileBundleWithMetadata({
     // modules need their own browser chunk, and the render reads it to build
     // the manifest React serialises references against.
     clientReferences: [...clientReferences.values()].sort((left, right) =>
+      compareCodeUnits(left.id, right.id),
+    ),
+    // Every `'use server'` module, in the same stable order and for the same
+    // reasons: the host reads it to know which files a server-function call may
+    // resolve to, and a call naming a module no graph reported is refused
+    // rather than loaded.
+    serverReferences: [...serverReferences.values()].sort((left, right) =>
       compareCodeUnits(left.id, right.id),
     ),
     // Hash of the emitted bundle, used as the ESM import version token. Two
@@ -445,6 +480,80 @@ export const INSTRUMENTATION_FILES = Object.freeze([
   'instrumentation.mjs',
 ])
 
+/**
+ * Where a development browser bundle imports its shared React from.
+ *
+ * A build gives every route one shared chunk, so a page holds one React no
+ * matter how many route bundles it loads. Development compiles a bundle per
+ * route on demand and has no such analysis, so each one inlined its own React —
+ * and rendering a component from one copy into a root owned by another makes
+ * every hook in it throw. Soft navigation therefore failed on the first route
+ * change and the router fell back to a document load, which is why the pages
+ * still worked and client-side routing quietly did nothing.
+ *
+ * Each module below is served separately and built with the *others* rewritten
+ * the same way, so the browser ends up with exactly one instance of each.
+ */
+export const CLIENT_VENDOR_PATH = '/__ruvyxa/client/vendor'
+
+/**
+ * Global the shared browser modules are published on, keyed by specifier.
+ *
+ * Deliberately not `__RUVYXA_SHARED_MODULES__`, which a build's shared chunk
+ * uses with module-id keys: the two never appear on one page, and one global
+ * holding two key rules is a collision waiting for the day they do.
+ */
+export const VENDOR_REGISTRY_GLOBAL = '__RUVYXA_VENDOR_MODULES__'
+
+/** The module source that publishes one shared browser module. */
+export function clientVendorEntrySource(specifier) {
+  return [
+    `import * as __ruvyxaVendor from ${JSON.stringify(specifier)}`,
+    `;(globalThis.${VENDOR_REGISTRY_GLOBAL} ??= {})[${JSON.stringify(specifier)}] = __ruvyxaVendor`,
+    '',
+  ].join('\n')
+}
+
+/**
+ * The shared modules, keyed by the `name` their URL carries.
+ *
+ * A query parameter rather than a path segment, matching `/__ruvyxa/client`:
+ * a parameterised route could not be named exactly in the reserved-path lists
+ * that keep plugins from colliding with framework endpoints.
+ */
+export const CLIENT_VENDOR_MODULES = Object.freeze({
+  react: 'react',
+  'react-jsx-runtime': 'react/jsx-runtime',
+  'react-dom': 'react-dom',
+  'react-dom-client': 'react-dom/client',
+})
+
+// `scheduler` is deliberately absent. It is a transitive dependency of
+// `react-dom/client` and of nothing else here, so the one module that needs it
+// carries it — and it could not be a vendor entry anyway: under pnpm it is a
+// sibling of react-dom inside the store and is not reachable from a project's
+// own `node_modules` at all.
+
+/**
+ * Specifier-to-URL map for a bundle that should share these modules.
+ *
+ * `exclude` is the specifier the caller is *building*: a vendor module must
+ * inline itself and externalise only its siblings, or it would import itself.
+ */
+export function clientVendorUrls(exclude = null) {
+  const urls = {}
+  for (const [name, specifier] of Object.entries(CLIENT_VENDOR_MODULES)) {
+    if (specifier === exclude) continue
+    urls[specifier] = `${CLIENT_VENDOR_PATH}?name=${name}`
+  }
+  return urls
+}
+
+/** The specifier one vendor `name` stands for, or `null` for an unknown name. */
+export function clientVendorSpecifier(name) {
+  return Object.hasOwn(CLIENT_VENDOR_MODULES, name) ? CLIENT_VENDOR_MODULES[name] : null
+}
+
 export function runtimeAliases(runtimeDir = path.dirname(fileURLToPath(import.meta.url))) {
   const packageRoot = path.resolve(runtimeDir, '..')
   const workspaceRoot = path.resolve(packageRoot, '..')
@@ -509,10 +618,14 @@ async function visitModule(context) {
     byKey,
     externals,
     externalSet,
+    externalUrls,
     aliases,
     platform,
     bundleTarget,
     clientReferences,
+    serverReferences,
+    serverReferenceClient,
+    referenceBase,
     bundlePackages,
     bundleAliasDependencies,
     bundleDependencies,
@@ -524,24 +637,16 @@ async function visitModule(context) {
 
   if (byKey.has(key)) return byKey.get(key)
 
-  // A `'use client'` module is not compiled into the server-components graph at
-  // all: React needs a *reference* to it, and the real module belongs to the
-  // browser graph, which is a different React instance. Swapping the source
-  // here rather than after classification is deliberate — the module's own
-  // imports must not be walked, or the server graph would pull in browser-only
-  // code and a `useState` that does not exist in the react-server build.
-  const clientReference =
-    bundleTarget === 'react-server' && filePath && hasModuleDirective(source, 'use client')
-      ? clientModuleId(path.relative(root, filePath))
-      : null
-  if (clientReference) {
-    clientReferences.set(clientReference, {
-      id: clientReference,
-      file: filePath,
-      relativePath: path.relative(root, filePath).replaceAll('\\', '/'),
-    })
-  }
-  const moduleSource = clientReference ? clientProxyModuleSource(clientReference) : source
+  const { clientReference, serverReference, moduleSource } = moduleBoundary({
+    source,
+    filePath,
+    root,
+    referenceBase,
+    bundleTarget,
+    clientReferences,
+    serverReferences,
+    serverReferenceClient,
+  })
 
   const { jsonModule, styleModule, contentModule, compiledSource, globExpansion } =
     await classifyModuleSource(
@@ -575,7 +680,13 @@ async function visitModule(context) {
     return module
   }
 
-  if (platform === 'browser') {
+  // Not for a module this graph replaced with references. The check reads the
+  // module's lane, and a `'use server'` file is in the action lane by both the
+  // directive rule and — for the `actions.ts` name React's own convention
+  // uses — the filename rule. Neither says anything about the proxy that took
+  // its place: the server code is gone, and what is left is the reference
+  // machinery the browser is supposed to have.
+  if (platform === 'browser' && !serverReference) {
     checkClientBoundary(root, filePath, module.source)
   }
 
@@ -583,10 +694,42 @@ async function visitModule(context) {
   // like ordinary dependencies. Oxc adds `react/jsx-runtime` during transform;
   // scanning only the source would otherwise drop those bindings in wrapped
   // Node bundles and leave `_jsx` undefined at render time.
-  const transformedSource = transformModuleSource(module)
+  // React's other way of declaring a server function: the directive inside one
+  // function's body rather than at the top of a whole module. Scanned after the
+  // transform, on TypeScript-free source, so a return-type annotation between
+  // the parameter list and the body cannot be misread as part of either.
+  const transformedSource = withInlineServerFunctions(transformModuleSource(module), {
+    filePath,
+    root,
+    referenceBase,
+    bundleTarget,
+    serverReferenceClient,
+    serverReferences,
+    alreadyRegistered: serverReference !== null || clientReference !== null,
+  })
   module.transformedSource = transformedSource
   for (const specifier of extractSpecifiers(transformedSource)) {
     if (isAssetSpecifier(specifier) && !isCssModuleSpecifier(specifier)) continue
+
+    // A rewritten specifier is answered before resolution, not after. A browser
+    // bundle inlines everything it can reach — that is what `platform:
+    // 'browser'` means — so asking `shouldBundleResolved` about React would
+    // always bundle it, and the URL the caller supplied would never be emitted.
+    if (externalUrls?.[specifier]) {
+      registerExternalDependency(module, specifier, null, externals, externalUrls)
+      continue
+    }
+
+    // A specifier the caller named external is answered here for the same
+    // reason. `external` used to hold only by accident: a server bundle leaves
+    // packages alone anyway, so nobody noticed the list was never consulted —
+    // until one asked for `bundlePackages` as well, resolved its own React
+    // despite listing it, and rendered client components against a second copy
+    // whose dispatcher was null.
+    if (externalSet.has(specifier)) {
+      registerExternalDependency(module, specifier, null, externals, externalUrls)
+      continue
+    }
 
     const resolvedAlias = aliases[specifier]
     const resolved = resolveSpecifierPath(specifier, resolvedAlias, {
@@ -621,10 +764,14 @@ async function visitModule(context) {
         byKey,
         externals,
         externalSet,
+        externalUrls,
         aliases,
         platform,
         bundleTarget,
         clientReferences,
+        serverReferences,
+        serverReferenceClient,
+        referenceBase,
         bundlePackages,
         bundleAliasDependencies,
         bundleDependencies:
@@ -638,7 +785,7 @@ async function visitModule(context) {
       continue
     }
 
-    registerExternalDependency(module, specifier, resolvedAlias, externals)
+    registerExternalDependency(module, specifier, resolvedAlias, externals, externalUrls)
 
     if (!externalSet.has(specifier) && specifier.startsWith('.')) {
       throw new Error(`RUV1801 cannot resolve '${specifier}' from ${filePath || sourcefile}`)
@@ -646,6 +793,313 @@ async function visitModule(context) {
   }
 
   return module
+}
+
+/**
+ * Which side of the React boundary a module is on, and what to compile for it.
+ *
+ * The two directives are mirror images. A `'use client'` module belongs to the
+ * browser, so the server graph gets a proxy and never walks its imports — or it
+ * would pull in browser-only code and a `useState` the react-server build does
+ * not have. A `'use server'` module belongs to the server, so it is compiled
+ * for real there and every client graph gets references instead.
+ *
+ * Decided before classification rather than after, because for both of them the
+ * substituted source is what the rest of the pipeline must see: its dependency
+ * walk, its lane check, and its transform.
+ */
+function moduleBoundary({
+  source,
+  filePath,
+  root,
+  referenceBase,
+  bundleTarget,
+  clientReferences,
+  serverReferences,
+  serverReferenceClient,
+}) {
+  const clientReference =
+    bundleTarget === 'react-server' && filePath && hasModuleDirective(source, 'use client')
+      ? clientModuleId(path.relative(referenceBase ?? root, filePath))
+      : null
+  if (clientReference) {
+    clientReferences.set(clientReference, {
+      id: clientReference,
+      file: filePath,
+      // Reported from the same base the id was computed from, so a diagnostic
+      // that prints one and a lookup that uses the other cannot disagree.
+      relativePath: path.relative(referenceBase ?? root, filePath).replaceAll('\\', '/'),
+    })
+  }
+  // Both graphs record a server module, because either may be the only one that
+  // reaches it: an actions file imported solely by a `'use client'` component
+  // never appears in the server graph at all.
+  const serverReference =
+    !clientReference && filePath && hasModuleDirective(source, 'use server')
+      ? serverReferenceFor({
+          filePath,
+          root,
+          referenceBase,
+          bundleTarget,
+          serverReferenceClient,
+          serverReferences,
+        })
+      : null
+  return {
+    clientReference,
+    serverReference,
+    moduleSource: serverModuleSource(
+      clientReference ? clientProxyModuleSource(clientReference) : source,
+      serverReference,
+    ),
+  }
+}
+
+/**
+ * Record one `'use server'` module and say what to do with its source.
+ *
+ * Returns `null` for a graph that has no server-function machinery — an
+ * ordinary SSR bundle, an ordinary client bundle — which leaves the module
+ * exactly as it was and lets the existing lane rules judge it. That is what
+ * keeps `RUV1007` firing for a server action imported into a browser bundle on
+ * a route that never opted into server components: nothing there could call it.
+ */
+function serverReferenceFor({
+  filePath,
+  root,
+  referenceBase,
+  bundleTarget,
+  serverReferenceClient,
+  serverReferences,
+}) {
+  const owned = bundleTarget === 'react-server'
+  if (!owned && !serverReferenceClient) return null
+  const relativePath = path.relative(referenceBase ?? root, filePath)
+  const id = serverModuleId(relativePath)
+  serverReferences.set(id, {
+    id,
+    file: filePath,
+    // From the same base the id was computed from, so a diagnostic that prints
+    // one and a lookup that uses the other cannot disagree.
+    relativePath: relativePath.replaceAll('\\', '/'),
+  })
+  return owned ? { id, own: true } : { id, own: false, client: serverReferenceClient }
+}
+
+/**
+ * Find the functions in a module that declare `'use server'` in their body.
+ *
+ * React's other way of writing a server function: instead of a whole module
+ * behind the directive, one function inside a server component declares it and
+ * becomes callable from the browser.
+ *
+ * Only functions at **module scope** are supported. A function nested inside
+ * another one closes over that one's variables, and making it callable later —
+ * from a different request, in a different process — means hoisting it and
+ * binding what it captured, which needs a scope-resolving parser this graph does
+ * not have. Rather than compile such a function into one that reads stale or
+ * missing values at call time, it is refused: `unsupported` carries the lines,
+ * and the caller turns them into `RUV1867`.
+ *
+ * The scan runs on the *transformed* source, after TypeScript is stripped, so a
+ * return-type annotation between the parameter list and the body cannot be
+ * mistaken for part of either.
+ *
+ * @param {string} source Transformed module source.
+ * @returns {{ names: string[], unsupported: number[] }} Exported-in-place
+ *   function names, and the 1-based lines of directives that cannot be honoured.
+ */
+export function inlineServerFunctions(source) {
+  // Everything below reads the masked copy: comments and string bodies become
+  // spaces, so a doc comment between two statements cannot hide the boundary a
+  // header match anchors on, and a brace inside a string cannot move the depth.
+  const masked = maskToCode(source)
+  const names = []
+  const unsupported = []
+  let depth = 0
+  for (let at = 0; at < masked.length; at += 1) {
+    const char = masked[at]
+    if (char === '}') {
+      depth -= 1
+      continue
+    }
+    if (char !== '{') continue
+    const bodyDepth = depth
+    depth += 1
+    // The cheap test first, against the original: `hasModuleDirective` slices,
+    // and calling it for every brace in a large module would be quadratic.
+    if (!opensWithQuote(source, at + 1)) continue
+    if (!hasModuleDirective(source.slice(at + 1), 'use server')) continue
+    const name = bodyDepth === 0 ? functionNameBefore(masked, at) : null
+    if (name) names.push(name)
+    else unsupported.push(lineNumberAt(source, at))
+  }
+  return { names: [...new Set(names)], unsupported }
+}
+
+/**
+ * `source` with everything that is not code replaced by spaces.
+ *
+ * Offsets are preserved, so a position found here names the same character in
+ * the original — which is what lets the directive test run against the real
+ * text while the structure is read from this one.
+ */
+function maskToCode(source) {
+  const index = createCodeIndex(source)
+  let masked = ''
+  for (let at = 0; at < source.length; at += 1) {
+    const char = source[at]
+    masked += index.isCode(at) || char === '\n' ? char : ' '
+  }
+  return masked
+}
+
+/** Whether the first non-whitespace character at `start` could open a directive. */
+function opensWithQuote(source, start) {
+  let at = start
+  while (at < source.length && /\s/.test(source[at])) at += 1
+  return source[at] === "'" || source[at] === '"'
+}
+
+/**
+ * The name of the function whose body opens at `braceOffset`, or `null`.
+ *
+ * `null` for every shape this cannot name with certainty — an anonymous default
+ * export, a method in an object literal, a function passed as an argument.
+ * Refusing is the point: a name that is wrong, or a binding that is not in
+ * scope where the registration is emitted, would fail at call time instead of
+ * at build time.
+ */
+function functionNameBefore(source, braceOffset) {
+  let at = skipBackWhitespace(source, braceOffset - 1)
+  if (source[at] === '>' && source[at - 1] === '=') {
+    at = skipBackWhitespace(source, at - 2)
+  }
+  if (source[at] === ')') {
+    const open = matchingOpenParen(source, at)
+    if (open < 0) return null
+    at = skipBackWhitespace(source, open - 1)
+  } else if (/[\w$]/.test(source[at] ?? '')) {
+    // A single unparenthesised arrow parameter: `async x => { … }`.
+    while (at >= 0 && /[\w$]/.test(source[at])) at -= 1
+    at = skipBackWhitespace(source, at)
+  } else {
+    return null
+  }
+  const header = source.slice(statementStart(source, at), at + 1).trim()
+  for (const pattern of HEADER_PATTERNS) {
+    const match = pattern.exec(header)
+    if (match) return match[1]
+  }
+  return null
+}
+
+/**
+ * Header shapes a server function may be written in, and only these.
+ *
+ * Each ends at the token before the parameter list, so the name is the last
+ * thing they capture. `export default function name` is here because the local
+ * binding is what the registration reads; whether it is also the default export
+ * makes no difference to that.
+ */
+const HEADER_PATTERNS = [
+  /(?:^|[;{}])\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)$/,
+  /(?:^|[;{}])\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?$/,
+  /(?:^|[;{}])\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?function\s*\*?\s*[A-Za-z_$]*$/,
+]
+
+function skipBackWhitespace(source, from) {
+  let at = from
+  while (at >= 0 && /\s/.test(source[at])) at -= 1
+  return at
+}
+
+/** Offset of the `(` matching the `)` at `closeOffset`, or `-1`. */
+function matchingOpenParen(source, closeOffset) {
+  let depth = 0
+  for (let at = closeOffset; at >= 0; at -= 1) {
+    if (source[at] === ')') depth += 1
+    else if (source[at] === '(') {
+      depth -= 1
+      if (depth === 0) return at
+    }
+  }
+  return -1
+}
+
+/** Offset just past the previous statement boundary before `from`. */
+function statementStart(source, from) {
+  for (let at = from; at >= 0; at -= 1) {
+    if (source[at] === ';' || source[at] === '{' || source[at] === '}') return at
+  }
+  return 0
+}
+
+function lineNumberAt(source, offset) {
+  let line = 1
+  for (let at = 0; at < offset; at += 1) {
+    if (source[at] === '\n') line += 1
+  }
+  return line
+}
+
+/**
+ * Register the module-scope functions that declare `'use server'` themselves.
+ *
+ * Only the `react-server` graph registers them, because that is the graph their
+ * code belongs to. A client graph runs the same scan for one reason: to refuse.
+ * A `'use client'` module that declares a server function inside itself gets a
+ * plain function that runs in the browser — no error, no reference, and a
+ * mutation that never reaches a server — so it is rejected rather than compiled.
+ *
+ * `alreadyRegistered` covers a module the graph has already decided about: one
+ * behind a module-level directive has every export registered already, and a
+ * client reference has been replaced by a proxy whose body is not the user's.
+ */
+function withInlineServerFunctions(
+  source,
+  {
+    filePath,
+    root,
+    referenceBase,
+    bundleTarget,
+    serverReferenceClient,
+    serverReferences,
+    alreadyRegistered,
+  },
+) {
+  const owned = bundleTarget === 'react-server'
+  if (!filePath || alreadyRegistered || (!owned && !serverReferenceClient)) return source
+  const found = inlineServerFunctions(source)
+  if (found.unsupported.length > 0) {
+    throw new Error(
+      `RUV1867 ${filePath}:${found.unsupported[0]} declares 'use server' inside a function this graph cannot make callable. ` +
+        'A server function must be declared at the top level of its module, or moved into a module that opens with the directive.',
+    )
+  }
+  if (found.names.length === 0) return source
+  if (!owned) {
+    throw new Error(
+      `RUV1867 ${filePath} declares 'use server' inside a client module. ` +
+        'Move the function into a module that opens with the directive and import it.',
+    )
+  }
+  const relativePath = path.relative(referenceBase ?? root, filePath)
+  const id = serverModuleId(relativePath)
+  serverReferences.set(id, {
+    id,
+    file: filePath,
+    relativePath: relativePath.replaceAll('\\', '/'),
+  })
+  return source + serverRegistrationSource(id, found.names)
+}
+
+/** Apply whichever half of the server-function transform this graph needs. */
+function serverModuleSource(source, serverReference) {
+  if (!serverReference) return source
+  return serverReference.own
+    ? source + serverRegistrationSource(serverReference.id)
+    : serverProxyModuleSource(serverReference.id, serverReference.client)
 }
 
 /**
@@ -734,9 +1188,24 @@ function shouldBundleResolved(
   )
 }
 
-/** Record a specifier the bundle will import rather than inline. */
-function registerExternalDependency(module, specifier, resolvedAlias, externals) {
-  const externalSpecifier = resolvedAlias ? toImportPath(resolvedAlias) : specifier
+/**
+ * Record a specifier the bundle will import rather than inline.
+ *
+ * `externalUrls` rewrites the specifier the emitted import names. A browser
+ * cannot resolve a bare `react`, so leaving one in a browser bundle produces a
+ * module that never loads — but inlining React into every bundle instead gives
+ * each of them its own copy, and rendering a component from one into a root
+ * owned by another makes every hook in it throw. Pointing them all at one URL
+ * is what keeps a page on a single React while still emitting one bundle per
+ * route.
+ */
+function registerExternalDependency(module, specifier, resolvedAlias, externals, externalUrls) {
+  // A shared module keeps its own name as the key. The URL is where the browser
+  // loads it from; the key is what the registry stores it under, and both ends
+  // of that lookup are generated from this one string.
+  const shared = Boolean(externalUrls?.[specifier])
+  let externalSpecifier = specifier
+  if (!shared && resolvedAlias) externalSpecifier = toImportPath(resolvedAlias)
   if (!externals.has(externalSpecifier)) {
     externals.set(externalSpecifier, `__ext${externals.size}`)
   }
@@ -747,7 +1216,27 @@ function registerExternalDependency(module, specifier, resolvedAlias, externals)
   })
 }
 
-function linkModules(modules, externals, { minify, outfile, sourceMap }) {
+/**
+ * The `NODE_ENV` a browser bundle from this compiler sees.
+ *
+ * Browsers have no `process`, so every wrapped module gets a stand-in — and it
+ * used to be hardcoded to `production`. React reads it to choose between the
+ * two builds it ships, so a page rendered by this worker (development React,
+ * because `ruvyxa dev` deliberately does not set `NODE_ENV`) hydrated against
+ * production React. Ordinary hydration tolerated it; a Flight payload does not,
+ * and `/server-components` failed with React refusing to read a development
+ * payload with a production client.
+ *
+ * Mirroring the worker's own value is what keeps the two halves of one render
+ * on the same build: `ruvyxa dev` leaves it unset and both halves are
+ * development, `ruvyxa build` and `ruvyxa start` set it and both are
+ * production.
+ */
+function browserNodeEnv() {
+  return process.env.NODE_ENV || 'development'
+}
+
+function linkModules(modules, externals, { minify, outfile, sourceMap, externalUrls }) {
   const out = []
   const lineMappings = []
   const mapSources = new Map()
@@ -757,9 +1246,28 @@ function linkModules(modules, externals, { minify, outfile, sourceMap }) {
   }
 
   for (const [specifier, alias] of externals) {
-    push(`import * as ${alias} from ${JSON.stringify(specifier)};`)
+    const sharedUrl = externalUrls?.[specifier]
+    if (!sharedUrl) {
+      push(`import * as ${alias} from ${JSON.stringify(specifier)};`)
+      continue
+    }
+    // Read out of a runtime registry rather than imported by name. These are
+    // CommonJS packages, and a generated `export *` cannot enumerate a CommonJS
+    // module's names — a re-exporting shim gave consumers a namespace with only
+    // `default` on it, and every `__ext0.useState` came back undefined. The
+    // registry holds the module's own exports object, so a named read and a
+    // `default ?? namespace` read both find what they are looking for.
+    push(`import ${JSON.stringify(sharedUrl)};`)
+    push(
+      `const ${alias} = (globalThis.${VENDOR_REGISTRY_GLOBAL} ?? {})[${JSON.stringify(specifier)}];`,
+    )
+    push(
+      `if (!${alias}) throw new Error(${JSON.stringify(`RUV1306 shared browser module ${specifier} was not loaded`)});`,
+    )
   }
-  const reactAlias = externals.get('react')
+  // The rewritten specifier when one is in play: with `externalUrls` the map is
+  // keyed by the URL the import names, not by `react`.
+  const reactAlias = externals.get('react') ?? externals.get(externalUrls?.react)
   if (reactAlias) push(`const React = ${reactAlias}.default ?? ${reactAlias};`)
   if (externals.size > 0) push('')
 
@@ -775,7 +1283,9 @@ function linkModules(modules, externals, { minify, outfile, sourceMap }) {
     push(`  const __exports = {};`)
     push(`  const module = { exports: __exports };`)
     push(`  const exports = module.exports;`)
-    push(`  const process = globalThis.process ?? { env: { NODE_ENV: 'production' } };`)
+    push(
+      `  const process = globalThis.process ?? { env: { NODE_ENV: ${JSON.stringify(browserNodeEnv())} } };`,
+    )
     const codeLines = rewritten.code.split('\n')
     for (let index = 0; index < codeLines.length; index++) {
       const line = codeLines[index]
@@ -1172,27 +1682,47 @@ function parseNamedBindings(clause) {
     })
 }
 
+/**
+ * Every specifier a module imports, in the order the source imports them.
+ *
+ * Order is the contract, not a detail: the linker evaluates a module's
+ * dependencies in this order, and ESM evaluates them in source order. Five
+ * patterns are needed because one regex cannot cover the static, re-export,
+ * dynamic, `require`, and side-effect forms — but running them in sequence and
+ * appending each pattern's matches sorted the *forms*, not the imports. The
+ * side-effect form is the last pattern, so `import './polyfill.js'` written
+ * first was evaluated last, after everything it existed to prepare.
+ *
+ * Sorting by match position restores source order. The `Set` then keeps the
+ * first occurrence of a repeated specifier, which is the one ESM evaluates.
+ */
 function extractSpecifiers(source) {
   const codeOnly = maskNonCode(source, {
     preserveImportExportSpecifiers: true,
     preserveImportCallSpecifiers: true,
     preserveRequireCallSpecifiers: true,
   })
-  const specifiers = []
+  const found = []
+  // `d` so each match reports where its *specifier* is. Ordering by where the
+  // match began would be wrong: the first pattern's `[\s\S]*?` can start at one
+  // `import` keyword and run past a side-effect import to reach the next
+  // `from`, which would give that later specifier the earlier position.
   const patterns = [
-    /\bimport\s+(?:type\s+)?[\s\S]*?\s+from\s+["']([^"']+)["']/g,
-    /\bexport\s+[\s\S]*?\s+from\s+["']([^"']+)["']/g,
-    /\bimport\s*\(\s*["']([^"']+)["']\s*\)/g,
-    /\brequire\s*\(\s*["']([^"']+)["']\s*\)/g,
-    /^\s*import\s+["']([^"']+)["']/gm,
+    /\bimport\s+(?:type\s+)?[\s\S]*?\s+from\s+["']([^"']+)["']/dg,
+    /\bexport\s+[\s\S]*?\s+from\s+["']([^"']+)["']/dg,
+    /\bimport\s*\(\s*["']([^"']+)["']\s*\)/dg,
+    /\brequire\s*\(\s*["']([^"']+)["']\s*\)/dg,
+    /^\s*import\s+["']([^"']+)["']/dgm,
   ]
   for (const pattern of patterns) {
     for (const match of codeOnly.matchAll(pattern)) {
-      if (isTypeOnlySpecifier(codeOnly, match.index ?? 0)) continue
-      specifiers.push(match[1])
+      const at = match.index ?? 0
+      if (isTypeOnlySpecifier(codeOnly, at)) continue
+      found.push({ at: match.indices?.[1]?.[0] ?? at, specifier: match[1] })
     }
   }
-  return [...new Set(specifiers)]
+  found.sort((left, right) => left.at - right.at)
+  return [...new Set(found.map((entry) => entry.specifier))]
 }
 
 function resolveLocalSpecifier(baseDir, specifier) {
@@ -1246,6 +1776,32 @@ const PACKAGE_FILE_EXTENSIONS = [
 ]
 
 /**
+ * The importer directory a `node_modules` walk starts from.
+ *
+ * Node resolves from a module's *real* path, and under pnpm that is the whole
+ * difference between finding a package and not: `node_modules/react-dom` is a
+ * symlink into a store directory whose siblings are react-dom's own
+ * dependencies. Walking the link path instead reaches the project's
+ * `node_modules`, where a transitive dependency like `scheduler` was never
+ * installed — so `react-dom/client` came out of the bundler with a bare
+ * `import "scheduler"` in it, and no browser could load the result.
+ *
+ * The Rust resolver does not need this because every path reaching it has
+ * already been through `normalized_canonical_path`. This is the same rule,
+ * applied where this graph's paths arrive unresolved.
+ *
+ * Failure is not an error: a caller may pass a directory that does not exist —
+ * unit tests do — and the literal path is the right answer for those.
+ */
+function realImporterDir(importerDir) {
+  try {
+    return realpathSync(importerDir)
+  } catch {
+    return importerDir
+  }
+}
+
+/**
  * `node_modules` directories to probe, nearest importer first.
  *
  * Mirrors `node_modules_candidates`: every ancestor of the importer that is not
@@ -1256,7 +1812,7 @@ const PACKAGE_FILE_EXTENSIONS = [
 function nodeModulesCandidates(importerDir, projectRoot) {
   const candidates = []
   const seen = new Set()
-  for (const start of [importerDir, projectRoot]) {
+  for (const start of [realImporterDir(importerDir), projectRoot]) {
     if (typeof start !== 'string' || start === '') continue
     let current = path.resolve(start)
     for (;;) {

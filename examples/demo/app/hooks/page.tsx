@@ -63,6 +63,12 @@ export default function HooksPage() {
         <button type="button" onClick={() => router.refresh()}>
           router.refresh()
         </button>
+        {/* A server-components route. Nothing about the call changes: the
+            router fetches its Flight payload instead of a tree factory, and
+            the page underneath is replaced without a document load. */}
+        <button type="button" onClick={() => router.push('/server-components')}>
+          push into a server-components route
+        </button>
       </section>
 
       <section>

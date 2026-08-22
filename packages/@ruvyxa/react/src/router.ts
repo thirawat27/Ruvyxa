@@ -127,9 +127,19 @@ export interface RuvyxaRouter {
 }
 
 type TreeFactory = (context: RouteContextValue) => unknown
+type RscTreeFactory = (payload: string, context: RouteContextValue) => unknown
 
 interface RouterGlobals {
   __RUVYXA_ROUTES__?: Record<string, TreeFactory>
+  /**
+   * Server-components tree factories, keyed by route pattern.
+   *
+   * Separate from `__RUVYXA_ROUTES__` because the shapes differ: an ordinary
+   * factory builds a tree from a context alone, while this one also needs the
+   * Flight payload the route was rendered from. One registry answering both
+   * would make "which kind of route is this" a guess at every call site.
+   */
+  __RUVYXA_RSC_ROUTES__?: Record<string, RscTreeFactory>
   /**
    * Loading shells, keyed by route pattern.
    *
@@ -165,6 +175,8 @@ const globals = globalThis as unknown as RouterGlobals
  */
 const MANIFEST_URL = '/__ruvyxa/client/route-manifest.json'
 const FLIGHT_URL = '/__ruvyxa/flight'
+/** Where a soft navigation asks for a server-components route's payload. */
+const RSC_URL = '/__ruvyxa/rsc'
 const FLIGHT_PROTOCOL = 'ruvyxa.flight'
 const FLIGHT_PROTOCOL_VERSION = 1
 const FLIGHT_BYTE_LIMIT = 1024 * 1024
@@ -556,6 +568,154 @@ function createRouter(): RouterInstance {
   }
 
   /**
+   * Fetch one server-components route's Flight payload.
+   *
+   * `credentials: 'same-origin'` because this is a render, not the public,
+   * cacheable payload `startFlight` above asks for: a server component may read
+   * `cookies()` exactly as it does on a full document request. The custom
+   * header is what keeps that safe — a cross-origin page cannot set it without
+   * a preflight, and the server answers none.
+   */
+  async function fetchRscPayload(pathname: string, signal: AbortSignal): Promise<string> {
+    const requestUrl = new URL(RSC_URL, window.location.origin)
+    requestUrl.searchParams.set('path', pathname)
+    const response = await fetch(requestUrl, {
+      credentials: 'same-origin',
+      headers: { 'x-ruvyxa-rsc': '1' },
+      signal,
+    })
+    if (!response.ok) {
+      throw new Error(`Server-components payload request failed with status ${response.status}`)
+    }
+    return response.text()
+  }
+
+  /**
+   * Execute a server-components route's bundle so it registers its factory.
+   *
+   * The same shape as `loadRoute`, against a different registry: the bundle
+   * this imports contains the route's `'use client'` modules and the decoder,
+   * not a tree it could build on its own.
+   */
+  async function loadRscRoute(entry: RouteManifestEntry, route: string): Promise<boolean> {
+    if (globals.__RUVYXA_RSC_ROUTES__?.[route]) return true
+    if (!entry.src) return false
+    try {
+      await import(/* @vite-ignore */ entry.src)
+    } catch {
+      return false
+    }
+    return Boolean(globals.__RUVYXA_RSC_ROUTES__?.[route])
+  }
+
+  /**
+   * Navigate into a server-components route, or report that it could not be.
+   *
+   * Reporting rather than throwing: every failure here — no bundle, no payload,
+   * a payload the mounted bundle cannot resolve — has the same correct answer,
+   * which is the document load the browser would have done without this router.
+   * The caller performs it, so history is pushed exactly once.
+   *
+   * The render is inside the `try` on purpose. A payload naming a client
+   * reference this bundle never registered throws during `render`, and that is
+   * precisely the stale-deploy case a full load fixes.
+   */
+  async function navigateServerComponents(
+    entry: RouteManifestEntry,
+    context: RouteContextValue,
+    url: URL,
+    historyMode: 'push' | 'replace' | 'none',
+    id: number,
+  ): Promise<boolean> {
+    const root = globals.__RUVYXA_ROOT__
+    if (!root) return false
+
+    const controller = new AbortController()
+    navigationAbort = controller
+    pendingNavigationId = id
+    emit()
+
+    let payload: string
+    try {
+      // Both requests start together: the bundle may already be cached, and the
+      // payload does not depend on it.
+      const [loaded, fetched] = await Promise.all([
+        loadRscRoute(entry, context.route),
+        fetchRscPayload(context.pathname, controller.signal),
+      ])
+      if (id !== navigationId) return true
+      if (!loaded) return false
+      payload = fetched
+    } catch {
+      return id !== navigationId
+    }
+
+    const factory = globals.__RUVYXA_RSC_ROUTES__?.[context.route]
+    if (!factory) return false
+    globals.__RUVYXA_ROUTE_PARAMS__ = context.params
+    globals.__RUVYXA_REQUEST_PATH__ = context.pathname
+    globals.__RUVYXA_ROUTE_PATTERN__ = context.route
+    try {
+      root.render(factory(payload, context))
+    } catch {
+      return false
+    }
+
+    pushHistoryEntry(url, historyMode)
+    snapshot = context
+    search = url.search
+    pendingNavigationId = null
+    emit()
+    return true
+  }
+
+  /**
+   * Open an overlay for this navigation, or report that none applies.
+   *
+   * Split out of `navigate` for the same reason
+   * {@link enterServerComponentsRoute} is: it is a complete way of answering a
+   * navigation, with its own success and fall-through, and reading it inline
+   * meant reading two of those at once.
+   */
+  function tryIntercept(
+    matched: { route: RouteManifestEntry; params: RouteParams },
+    pathname: string,
+    url: URL,
+    historyMode: 'push' | 'replace' | 'none',
+  ): boolean {
+    const intercept = matchIntercept(snapshot.route, matched.route.path, matched.params, pathname)
+    if (!intercept) return false
+    pendingNavigationId = null
+    return renderIntercept(intercept, url, historyMode)
+  }
+
+  /**
+   * Complete a navigation into a server-components route, or fall back.
+   *
+   * Split from `navigate` so the ordinary path keeps its shape: this branch has
+   * its own loading, failure, and scroll handling, and inlining it made one
+   * function responsible for two unrelated ways of producing a tree.
+   */
+  async function enterServerComponentsRoute(
+    entry: RouteManifestEntry,
+    context: RouteContextValue,
+    url: URL,
+    historyMode: 'push' | 'replace' | 'none',
+    id: number,
+    options: NavigateOptions,
+  ): Promise<void> {
+    const navigated = await navigateServerComponents(entry, context, url, historyMode, id)
+    if (id !== navigationId) return
+    pendingNavigationId = null
+    if (!navigated) {
+      emit()
+      hardNavigate(url, historyMode)
+      return
+    }
+    if (options.scroll !== false && historyMode !== 'none') window.scrollTo(0, 0)
+  }
+
+  /**
    * Record the navigation in session history.
    *
    * `none` writes nothing: `popstate` navigations are already at the URL the
@@ -604,19 +764,22 @@ function createRouter(): RouterInstance {
 
     // Checked before anything is fetched: an interception renders from the
     // bundle that is already running, so a navigation it answers costs no
-    // request at all.
-    const intercept = matchIntercept(snapshot.route, matched.route.path, matched.params, pathname)
-    if (intercept) {
-      pendingNavigationId = null
-      if (renderIntercept(intercept, url, historyMode)) return
-      // The mounted route could not re-render — fall through and treat this as
-      // the ordinary navigation it would have been without the overlay.
-    }
+    // request at all. A `false` answer means there was no overlay, or the
+    // mounted route could not re-render — either way this continues as the
+    // ordinary navigation it would have been.
+    if (tryIntercept(matched, pathname, url, historyMode)) return
 
     const context: RouteContextValue = {
       pathname,
       params: matched.params,
       route: matched.route.path,
+    }
+
+    // A server-components route has no tree factory to call: its page is not in
+    // any browser bundle. It renders from a payload instead, on its own path.
+    if (matched.route.serverComponents) {
+      await enterServerComponentsRoute(matched.route, context, url, historyMode, id, options)
+      return
     }
 
     const flight = startFlight(matched.route, context.pathname)

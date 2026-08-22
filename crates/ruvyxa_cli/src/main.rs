@@ -38,6 +38,7 @@ mod plugins;
 mod prerender;
 mod route_types;
 mod runtime_config;
+mod server_references;
 mod site_discovery;
 mod ui;
 

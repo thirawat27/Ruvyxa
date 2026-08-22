@@ -13,7 +13,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::process::Stdio;
 use std::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
+use std::sync::{Arc, Mutex as StdMutex, OnceLock, RwLock as StdRwLock};
 use std::task::{Context, Poll};
 
 use crate::worker_protocol::{
@@ -177,7 +177,16 @@ struct ResponseChannel {
 pub(crate) struct WorkerApiResponse {
     pub response: WorkerResponse,
     pub body: Option<Body>,
+    /// The terminal frame's fields, readable once the body has finished.
+    ///
+    /// A streamed server-components document carries its Flight payload here:
+    /// the payload is complete only when the render is, by which time the first
+    /// frame is long gone. Empty for every other streamed response.
+    pub trailer: WorkerStreamTrailer,
 }
+
+/// Shared slot the body stream fills from the frame that ends it.
+pub(crate) type WorkerStreamTrailer = Arc<OnceLock<WorkerResponse>>;
 
 struct WorkerBodyStream {
     id: String,
@@ -186,6 +195,7 @@ struct WorkerBodyStream {
     idle_timeout: std::time::Duration,
     deadline: Pin<Box<tokio::time::Sleep>>,
     finished: bool,
+    trailer: WorkerStreamTrailer,
 }
 
 impl WorkerBodyStream {
@@ -193,6 +203,7 @@ impl WorkerBodyStream {
         channel: ResponseChannel,
         pending: PendingResponses,
         idle_timeout: std::time::Duration,
+        trailer: WorkerStreamTrailer,
     ) -> Self {
         Self {
             id: channel.id,
@@ -201,6 +212,7 @@ impl WorkerBodyStream {
             idle_timeout,
             deadline: Box::pin(tokio::time::sleep(idle_timeout)),
             finished: false,
+            trailer,
         }
     }
 
@@ -256,6 +268,9 @@ impl Stream for WorkerBodyStream {
                     }
                     Some("api-end") => {
                         self.finished = true;
+                        // Before the stream closes, so a consumer that reads the
+                        // slot after its last item cannot race the write.
+                        let _ = self.trailer.set(response);
                         Poll::Ready(None)
                     }
                     frame => {
@@ -625,18 +640,22 @@ impl Worker {
                 // repeat it here so the flag holds for any caller that builds a
                 // body stream without going through that reader.
                 channel.streaming.store(true, Ordering::Release);
+                let trailer: WorkerStreamTrailer = Arc::new(OnceLock::new());
                 Ok(WorkerApiResponse {
                     response,
                     body: Some(Body::from_stream(WorkerBodyStream::new(
                         channel,
                         Arc::clone(&self.pending),
                         response_timeout,
+                        Arc::clone(&trailer),
                     ))),
+                    trailer,
                 })
             }
             None => Ok(WorkerApiResponse {
                 response,
                 body: None,
+                trailer: Arc::new(OnceLock::new()),
             }),
             frame => {
                 self.pending.remove(&channel.id).await;
@@ -772,6 +791,20 @@ pub struct RenderSsrRequest<'a> {
     pub method: &'a str,
     /// Whether this route opted into the React Server Components pipeline.
     pub server_components: bool,
+    /// A `<form action={fn}>` this request is the submission of.
+    pub form_action: Option<PostedForm<'a>>,
+}
+
+/// A form submitted to a page by a browser that is running no JavaScript.
+///
+/// The hydrated page posts to `/__ruvyxa/rsc` and patches itself from the
+/// reply. A page whose bundle has not loaded — or never will — submits the form
+/// the way HTML always has: to the URL it is on, with the reference id in a
+/// hidden field React wrote while rendering it.
+#[derive(Debug, Clone, Copy)]
+pub struct PostedForm<'a> {
+    pub content_type: &'a str,
+    pub body: &'a [u8],
 }
 
 /// One pre-render, whether at build time or on an ISR revalidation.
@@ -1451,6 +1484,8 @@ impl NodeWorkerPool {
             header_pairs: page.headers.to_vec(),
             method: page.method.to_ascii_uppercase(),
             server_components: page.server_components,
+            form_content_type: page.form_action.map(|form| form.content_type.to_string()),
+            form_body: page.form_action.map(|form| base64_encode(form.body)),
         };
         self.send(request).await
     }
@@ -1515,6 +1550,48 @@ impl NodeWorkerPool {
         response
     }
 
+    /// Render a server-components document as a stream.
+    ///
+    /// Framed like an API response because it is the same shape: a body the
+    /// host forwards as it arrives rather than a value it waits for. The Flight
+    /// payload comes back in the trailer, after the last chunk, because it is
+    /// only complete once the render is.
+    pub(crate) async fn render_rsc_document(
+        &self,
+        page: RenderSsrRequest<'_>,
+    ) -> Result<WorkerApiResponse> {
+        let request = WorkerRequest::RscDocument {
+            id: next_request_id(),
+            project_root: page.project_root.display().to_string(),
+            app_dir: page.app_dir.display().to_string(),
+            page_file: page.page_file.display().to_string(),
+            request_path: page.request_path.to_string(),
+            request_target: page.request_target.to_string(),
+            route_path: page.route_path.to_string(),
+            params: page.params.clone(),
+            header_pairs: page.headers.to_vec(),
+            method: page.method.to_ascii_uppercase(),
+            form_content_type: page.form_action.map(|form| form.content_type.to_string()),
+            form_body: page.form_action.map(|form| base64_encode(form.body)),
+        };
+        let (index, worker) = self.select_worker().await?;
+        let response = worker
+            .start_api_response(&request, self.response_timeout)
+            .await;
+        if response.is_err() {
+            self.replace_failed_worker(index, &worker).await;
+        } else if let Ok(streamed) = &response {
+            self.retire_worker_if_saturated(
+                index,
+                &worker,
+                streamed.response.retained_module_urls,
+                false,
+            )
+            .await;
+        }
+        response
+    }
+
     pub(crate) async fn render_action(
         &self,
         action: RenderActionRequest<'_>,
@@ -1555,6 +1632,70 @@ impl NodeWorkerPool {
             server_components,
         };
         self.send(request).await
+    }
+
+    /// Compile one shared browser module by the name its URL carries.
+    pub(crate) async fn render_client_vendor(
+        &self,
+        project_root: &Path,
+        name: &str,
+    ) -> Result<WorkerResponse> {
+        self.send(WorkerRequest::ClientVendor {
+            id: next_request_id(),
+            project_root: project_root.display().to_string(),
+            name: name.to_string(),
+        })
+        .await
+    }
+
+    /// Render a server-components route's Flight payload for a soft navigation.
+    pub(crate) async fn render_rsc_payload(
+        &self,
+        page: RenderSsrRequest<'_>,
+    ) -> Result<WorkerResponse> {
+        self.send(WorkerRequest::RscPayload {
+            id: next_request_id(),
+            project_root: page.project_root.display().to_string(),
+            app_dir: page.app_dir.display().to_string(),
+            page_file: page.page_file.display().to_string(),
+            request_path: page.request_path.to_string(),
+            request_target: page.request_target.to_string(),
+            route_path: page.route_path.to_string(),
+            params: page.params.clone(),
+            header_pairs: page.headers.to_vec(),
+            method: page.method.to_ascii_uppercase(),
+        })
+        .await
+    }
+
+    /// Run one of a server-components route's server functions.
+    ///
+    /// `body` is handed over base64-encoded because React's encoder produces
+    /// UTF-8 text for plain arguments and multipart bytes when one of them is a
+    /// file, and the worker protocol is line-delimited JSON.
+    pub(crate) async fn render_rsc_action(
+        &self,
+        page: RenderSsrRequest<'_>,
+        reference: &str,
+        content_type: &str,
+        body: &[u8],
+    ) -> Result<WorkerResponse> {
+        self.send(WorkerRequest::RscAction {
+            id: next_request_id(),
+            project_root: page.project_root.display().to_string(),
+            app_dir: page.app_dir.display().to_string(),
+            page_file: page.page_file.display().to_string(),
+            request_path: page.request_path.to_string(),
+            request_target: page.request_target.to_string(),
+            route_path: page.route_path.to_string(),
+            params: page.params.clone(),
+            header_pairs: page.headers.to_vec(),
+            method: page.method.to_ascii_uppercase(),
+            reference: reference.to_string(),
+            content_type: content_type.to_string(),
+            body: base64_encode(body),
+        })
+        .await
     }
 
     /// Ask a worker for a server-components route's browser entry source.
@@ -2251,6 +2392,7 @@ mod tests {
             },
             Arc::new(PendingResponseSet::default()),
             std::time::Duration::from_secs(1),
+            Arc::new(OnceLock::new()),
         ));
         let bytes = axum::body::to_bytes(body, 1024).await.unwrap();
 
@@ -2302,6 +2444,7 @@ mod tests {
             },
             Arc::clone(&pending),
             std::time::Duration::from_secs(1),
+            Arc::new(OnceLock::new()),
         ));
         let error = axum::body::to_bytes(body, 1024).await.unwrap_err();
         assert!(error.to_string().contains("Unexpected worker API stream"));
@@ -2340,6 +2483,7 @@ mod tests {
             },
             Arc::new(PendingResponseSet::default()),
             std::time::Duration::from_secs(1),
+            Arc::new(OnceLock::new()),
         ));
         let error = axum::body::to_bytes(body, 1024).await.unwrap_err();
 
@@ -2366,6 +2510,7 @@ mod tests {
             },
             Arc::new(PendingResponseSet::default()),
             std::time::Duration::from_secs(1),
+            Arc::new(OnceLock::new()),
         ));
         let error = axum::body::to_bytes(body, 1024).await.unwrap_err();
 
@@ -2383,6 +2528,7 @@ mod tests {
             },
             Arc::new(PendingResponseSet::default()),
             std::time::Duration::from_millis(20),
+            Arc::new(OnceLock::new()),
         ));
         let error = axum::body::to_bytes(body, 1024).await.unwrap_err();
 

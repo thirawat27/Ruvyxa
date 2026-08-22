@@ -455,6 +455,23 @@ pub(crate) async fn build_with_cache_override(
     // results in the historical phase order so errors and output stay stable.
     // One live line covers both workers: they overlap, so two spinners would
     // fight over the same terminal row.
+    // Collected before the bundling scope below, which is synchronous: asking
+    // the `react-server` graph what a server-components route's browser entry
+    // contains needs a worker, and the answer has to be in hand before the
+    // shared-chunk analysis runs. An app with no such route starts no worker.
+    let rsc_entries = if args.server_only {
+        crate::client_bundle::ServerComponentEntries::default()
+    } else {
+        collect_server_component_entries(
+            &args.root,
+            &app_dir,
+            &manifest,
+            &config.build,
+            config.javascript_runtime(),
+        )
+        .await?
+    };
+
     let spinner = start_build_phase(show_summary, "bundling");
     let ((prepared_assets, client_manifest), client_bundle_duration) =
         std::thread::scope(|scope| -> anyhow::Result<_> {
@@ -485,6 +502,7 @@ pub(crate) async fn build_with_cache_override(
                         directory: &build_cache_directory,
                     },
                     &plugin_session,
+                    &rsc_entries,
                 )
             };
             let client_bundle_duration = bundle_started.elapsed();
@@ -519,29 +537,6 @@ pub(crate) async fn build_with_cache_override(
     if show_summary {
         let detail = assets_phase_detail(asset_files, image_report.optimized_images);
         print_build_phase(None, "assets prepared", detail, preparation_duration);
-    }
-
-    // Server-components routes are bundled here rather than above: their browser
-    // bundle is built by the JavaScript graph that produced their payload, which
-    // needs a worker. It runs before the manifest is written so the pre-render
-    // pass below reads one manifest with every route in it.
-    let mut client_manifest = client_manifest;
-    if !args.server_only {
-        emit_server_component_client_bundles(
-            &args.root,
-            &app_dir,
-            &manifest,
-            &client_dir,
-            &config.build,
-            RuvyxaBuildCache {
-                dependency_hash: &config.config_dependency_hash,
-                directory: &build_cache_directory,
-            },
-            &plugin_session,
-            config.javascript_runtime(),
-            &mut client_manifest,
-        )
-        .await?;
     }
 
     // The client manifest is machine-read (the server resolves per-route scripts

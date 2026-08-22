@@ -1,3 +1,8 @@
+'use client'
+
+// Loading and unloading a script tag is an effect against a live
+// document, which is a browser concern and has no react-server counterpart.
+
 /**
  * Third-party scripts with a loading strategy.
  *
