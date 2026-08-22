@@ -55,6 +55,11 @@ pub(crate) enum PrerenderJobKind {
     Render {
         route_file: PathBuf,
         mode: &'static str,
+        /// Whether this route renders through the React Server Components
+        /// pipeline. Carried on the job rather than re-read from the page,
+        /// because the route graph already decided it and a second reader
+        /// would be a second answer.
+        server_components: bool,
     },
 }
 
@@ -118,25 +123,7 @@ pub(crate) async fn prerender_static_routes(
     let i18n = manifest.i18n.clone();
 
     let parallelism = prerender_parallelism(build.parallelism, routes_to_prerender.len());
-    let jsx_runtime = parse_jsx_runtime(build.jsx_runtime.as_deref())?;
-    let mut worker_env = ruvyxa_dev_server::project_env(root)?;
-    worker_env.insert(
-        "RUVYXA_JSX_RUNTIME".to_string(),
-        match jsx_runtime {
-            ruvyxa_bundler::JsxRuntime::Classic => "classic".to_string(),
-            ruvyxa_bundler::JsxRuntime::Automatic => "automatic".to_string(),
-        },
-    );
-    // `compiler.mjs` is the other half of `build.target`. It reads the value
-    // from here for the same reason it reads `RUVYXA_JSX_RUNTIME` from here:
-    // a prerender worker is a separate process with no view of the config.
-    worker_env.insert(
-        "RUVYXA_ES_TARGET".to_string(),
-        crate::client_bundle::parse_es_target(build.es_target.as_ref())?
-            .as_str()
-            .to_string(),
-    );
-    worker_env.insert("RUVYXA_RUNTIME".to_string(), runtime.command().to_string());
+    let worker_env = build_worker_env(root, build, runtime)?;
     let render_context_hash =
         prerender_context_hash(root, styles, &client_assets, build, &worker_env);
     let artifact_cache = PrerenderArtifactCache {
@@ -271,6 +258,7 @@ pub(crate) async fn prerender_static_routes(
                             kind: PrerenderJobKind::Render {
                                 route_file: route.file.clone(),
                                 mode,
+                                server_components: route.render.server_components,
                             },
                         });
                     }
@@ -393,6 +381,43 @@ pub(crate) async fn start_prerender_worker_pool(
     ))
 }
 
+/// The environment a build-time Node worker renders under.
+///
+/// A worker is a separate process with no view of `ruvyxa.config.ts`, so every
+/// build option a renderer needs travels as an environment variable. Shared by
+/// pre-rendering and by the server-components client build for the same reason
+/// the two must agree: a route pre-rendered under one JSX runtime and hydrated
+/// under another produces a mismatch nothing else reports.
+pub(crate) fn build_worker_env(
+    root: &Path,
+    build: &BuildConfigOptions,
+    runtime: JavaScriptRuntime,
+) -> anyhow::Result<BTreeMap<String, String>> {
+    let jsx_runtime = parse_jsx_runtime(build.jsx_runtime.as_deref())?;
+    let mut worker_env = ruvyxa_dev_server::project_env(root)?;
+    worker_env.insert(
+        "RUVYXA_JSX_RUNTIME".to_string(),
+        match jsx_runtime {
+            ruvyxa_bundler::JsxRuntime::Classic => "classic".to_string(),
+            ruvyxa_bundler::JsxRuntime::Automatic => "automatic".to_string(),
+        },
+    );
+    // `compiler.mjs` is the other half of `build.target`. It reads the value
+    // from here for the same reason it reads `RUVYXA_JSX_RUNTIME` from here.
+    worker_env.insert(
+        "RUVYXA_ES_TARGET".to_string(),
+        crate::client_bundle::parse_es_target(build.es_target.as_ref())?
+            .as_str()
+            .to_string(),
+    );
+    worker_env.insert("RUVYXA_RUNTIME".to_string(), runtime.command().to_string());
+    // A build renders production output, so its workers load React's production
+    // build. Without this a pre-rendered server-components page carried the
+    // development payload, absolute source paths and all.
+    ruvyxa_dev_server::apply_production_node_env(&mut worker_env, true);
+    Ok(worker_env)
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn render_prerender_job(
     worker_pool: Option<&ruvyxa_dev_server::NodeWorkerPool>,
@@ -420,7 +445,11 @@ pub(crate) async fn render_prerender_job(
     let mut artifact_cache_hit = false;
     let html = match &job.kind {
         PrerenderJobKind::Csr => csr_shell_html(&job.route_path, client_assets, styles),
-        PrerenderJobKind::Render { route_file, mode } => {
+        PrerenderJobKind::Render {
+            route_file,
+            mode,
+            server_components,
+        } => {
             if artifact_cache.enabled
                 && let Some(html) = load_prerender_artifact(artifact_cache, job)
             {
@@ -434,15 +463,16 @@ pub(crate) async fn render_prerender_job(
                     )
                 })?;
                 let result = worker_pool
-                    .render_ssg_isolated(
-                        root,
+                    .render_ssg_isolated(ruvyxa_dev_server::RenderSsgRequest {
+                        project_root: root,
                         app_dir,
-                        Path::new(route_file),
-                        &job.render_path,
-                        &job.route_path,
-                        &job.params,
+                        page_file: Path::new(route_file),
+                        request_path: &job.render_path,
+                        route_path: &job.route_path,
+                        params: &job.params,
                         mode,
-                    )
+                        server_components: *server_components,
+                    })
                     .await
                     .map_err(|error| {
                         anyhow::anyhow!("Pre-rendering failed for {}: {error}", job.render_path)
@@ -460,6 +490,7 @@ pub(crate) async fn render_prerender_job(
                 let dependency_hash = result
                     .dependency_hash
                     .unwrap_or_else(|| "worker-legacy-renderer".to_string());
+                let rsc_payload = result.rsc_payload;
                 let inputs = result.inputs.unwrap_or_default();
                 let html = result.html.ok_or_else(|| {
                     anyhow::anyhow!(
@@ -474,6 +505,7 @@ pub(crate) async fn render_prerender_job(
                     &job.route_path,
                     &job.render_path,
                     &job.params,
+                    rsc_payload.as_deref(),
                 );
                 if artifact_cache.enabled {
                     let mut stable_inputs = stable_prerender_inputs(root, app_dir, &inputs);
@@ -924,6 +956,7 @@ pub(crate) fn inject_prerender_client_assets(
     route_path: &str,
     request_path: &str,
     params: &RouteParams,
+    rsc_payload: Option<&str>,
 ) -> String {
     let Some(assets) = client_assets.get(route_path) else {
         return html.to_string();
@@ -941,8 +974,14 @@ pub(crate) fn inject_prerender_client_assets(
         || assets.src.clone(),
         |loader| ruvyxa_dev_server::hydration_loader_url(loader, &assets.src, assets.hydration),
     );
+    // A pre-rendered server-components route carries its payload in the file:
+    // the HTML on disk is served without ever running a renderer, so nothing
+    // downstream could add it later.
     let scripts = format!(
-        r#"{}<script type="module" src="{}"></script>"#,
+        r#"{}{}<script type="module" src="{}"></script>"#,
+        rsc_payload
+            .map(ruvyxa_dev_server::rsc_payload_block)
+            .unwrap_or_default(),
         ruvyxa_dev_server::bootstrap_data_block(params, request_path, false),
         escape_html_attribute(&script_src)
     );

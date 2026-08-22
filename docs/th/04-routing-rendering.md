@@ -16,6 +16,10 @@ export ของหน้าและ configuration `render`
 | CSR      | หน้า `'use client'`                        | browser หลัง minimal shell                              |
 | PPR      | `export const ppr = true` พร้อม `Suspense` | static shell ตอน build; dynamic slot stream ตอน request |
 
+strategy เป็นตัวกำหนดว่า HTML ถูกสร้าง _เมื่อไร_ ส่วน `export const serverComponents = true`
+กำหนดว่า _graph ไหน_ เป็นคนสร้าง และใช้ร่วมกับทุก strategy ด้านบนได้ยกเว้น PPR — ดู
+[React Server Components](#react-server-components)
+
 ## Markdown, MDX และ component ที่ใช้ร่วมกัน
 
 สร้าง `page.md` สำหรับ Markdown หรือ `page.mdx` เมื่อต้องใช้ JSX, expression และ import ทั้งสองแบบ
@@ -99,6 +103,110 @@ config ตัวเดียวกับที่ Next.js ใช้ และล
 
 `export const metadata` **ไม่ถูกอ่าน** เพราะ metadata object ของ Next เป็นโครงซ้อนชั้น ขณะที่ `meta`
 ของ Ruvyxa เป็นโครงแบน ทั้งสองจึงใช้แทนกันไม่ได้ ให้ใช้ `export const meta` ด้านล่างแทน
+
+## React Server Components
+
+`export const serverComponents = true` ทำให้ route หนึ่งเรนเดอร์ผ่านไปป์ไลน์ server components ของ
+React ตัว page และ layout ของมันจะรันใน module graph ที่ resolve ด้วย condition `react-server` ของ
+React และมีเฉพาะ module ที่ทำเครื่องหมาย `'use client'` เท่านั้นที่ไปถึงเบราว์เซอร์
+
+```tsx
+// app/dashboard/page.tsx
+import { readFile } from 'node:fs/promises'
+import Chart from './chart'
+
+export const serverComponents = true
+
+export default async function Dashboard() {
+  const rows = JSON.parse(await readFile('./data/metrics.json', 'utf8'))
+  return <Chart rows={rows} />
+}
+```
+
+```tsx
+// app/dashboard/chart.tsx
+'use client'
+import { useState } from 'react'
+
+export default function Chart({ rows }: { rows: Row[] }) {
+  const [range, setRange] = useState('30d')
+  // ...
+}
+```
+
+`page.tsx` ด้านบนไม่เคยถูก bundle ไปเบราว์เซอร์ ส่วน `chart.tsx` ถูก และเป็น module เดียวจาก route
+นี้ ที่ถูก page จะถูกแปลงเป็น payload — element tree ที่ serialise ไว้ ซึ่ง `Chart` ปรากฏเป็น
+reference id แทนที่จะเป็นโค้ด — เซิร์ฟเวอร์เรนเดอร์ payload นั้นเป็น HTML และเบราว์เซอร์เล่นซ้ำเพื่อ
+hydrate ทั้งสองฝั่งอ่าน payload เดียวกัน สิ่งที่ hydrate จึงเป็นสิ่งเดียวกับที่เรนเดอร์ไว้
+
+payload เดินทางมาใน data block `<script type="application/json">` เช่นเดียวกับ route bootstrap:
+`Content-Security-Policy` ที่ไม่มี `'unsafe-inline'` จึงไม่บล็อกมัน และไม่ต้องใช้ nonce
+
+### การติดตั้ง runtime
+
+Server components ต้องใช้ `react-server-dom-webpack` เวอร์ชันเดียวกับ React:
+
+```bash
+npm install react-server-dom-webpack@19.2.8
+```
+
+แพ็กเกจนี้เป็น optional: แอปที่ไม่เคยเขียน export นี้ก็ไม่ต้องมี และ route ที่เขียนจะได้ `RUV1863`
+ที่บอกชื่อแพ็กเกจตรง ๆ แพ็กเกจนี้ประกาศ `webpack` เป็น peer สำหรับไฟล์เดียว — bundler plugin ของมัน
+ซึ่ง Ruvyxa ไม่เคยโหลด — จึงควรบอก package manager ให้ข้าม สำหรับ pnpm:
+
+```yaml
+# pnpm-workspace.yaml
+peerDependencyRules:
+  ignoreMissing:
+    - webpack
+```
+
+API ของ Node เป็นโค้ดธรรมดาภายใน server component TypeScript ต้องรู้ว่ามันมีอยู่ ซึ่งหมายถึง
+`@types/node` และ `"types": ["node"]` ใน `tsconfig.json` — โดยมีข้อแม้ว่าสิ่งนี้ทำให้ global ของ
+Node มองเห็นได้จากไฟล์ `'use client'` ด้วย ซึ่งตรงนั้นสิ่งที่กันไม่ให้ใช้คือ boundary check ไม่ใช่
+type checker
+
+### สิ่งที่ server component ทำไม่ได้
+
+React build แบบ `react-server` ไม่มี `useState` ไม่มี `useEffect` และไม่มี `createContext` ดังนั้น
+server component จึงถือ state, รัน effect, หรือให้ context ไม่ได้ นี่คือเส้นแบ่ง
+ไม่ใช่ข้อจำกัดที่ต้อง หาทางเลี่ยง: ย้ายส่วนเหล่านั้นไปไว้ใน module `'use client'`
+แล้วส่งข้อมูลลงไปเป็น props ส่วน `Suspense` ใช้ได้ทั้งสอง graph ดังนั้น `loading.tsx` จึงทำงานเหมือน
+route อื่น ๆ
+
+`error.tsx` และ `not-found.tsx` เป็น boundary ที่สร้างจาก class ซึ่ง server graph รันไม่ได้ บน route
+ที่ใช้ server components ทั้งสองไฟล์ต้องเป็น module `'use client'` — เป็นกฎเดียวกับที่ React
+กำหนดเอง
+
+ฟังก์ชัน `'use server'` แบบ inline ของ React **ยังไม่ได้** implement ส่วน server action ของ Ruvyxa
+ทำงานได้ตามปกติจาก component `'use client'` บน route ที่ใช้ server components เพราะมันเป็น client
+module ธรรมดาที่เรียก action endpoint — ดู [Data, action และ API route](05-data-actions-api.md)
+
+payload ถูกสร้างเป็นสตรีมแล้ว inline ทั้งก้อน ดังนั้น server component ที่ช้าจะหน่วงทั้งเอกสาร
+แทนที่จะสตรีมตามมาทีหลังหลัง `Suspense` boundary ส่วน `loading.tsx` ยังเรนเดอร์ fallback ลงใน
+payload ตามปกติ เพียงแต่ไม่ได้มาถึงแยกต่างหาก
+
+### ชุดที่ Ruvyxa ปฏิเสธ
+
+แต่ละกรณีด้านล่างจะ build ผ่านแล้วไม่ทำอะไรเลย การค้นหา route จึงล้มเหลวแทน (`RUV1011`):
+
+| ชุด                                              | เหตุผล                                                                         |
+| ------------------------------------------------ | ------------------------------------------------------------------------------ |
+| page ที่เป็น `'use client'` + `serverComponents` | page ที่รันในเบราว์เซอร์ทั้งหมดไม่มีฝั่งเซิร์ฟเวอร์ให้เรนเดอร์                 |
+| `export const ppr = true` + `serverComponents`   | partial pre-rendering สตรีม shell ผ่าน entry ที่ไปป์ไลน์นี้ไม่ได้สร้าง         |
+| intercepting route + `serverComponents`          | การ intercept ถูกจับคู่จาก client route registry ที่ไปป์ไลน์นี้ไม่ได้ประกาศไว้ |
+
+การนำทางฝั่งไคลเอนต์ระหว่าง route อื่น ๆ ไม่ได้รับผลกระทบ แต่การเข้า route ที่ใช้ server components
+จะเป็นการร้องขอเอกสารใหม่ ไม่ใช่ soft navigation: bundle ฝั่งเบราว์เซอร์ของมันลงทะเบียน client
+module ไม่ใช่ route tree
+
+### การ deploy
+
+route ที่ใช้ server components และถูก pre-render แล้ว deploy ได้ทุกที่: payload อยู่ในไฟล์ HTML ที่
+adapter คัดลอกไปอยู่แล้ว ส่วน route ที่ยังต้องใช้เซิร์ฟเวอร์ตอนมี request — `ssr`, `isr`, หรือ
+`export const dynamic = 'force-dynamic'` — จะถูกปฏิเสธตอน build ด้วย `RUV2213` เพราะ adapter ทุกตัว
+เสิร์ฟหน้าเว็บผ่าน module ที่สร้างจาก entry แบบ SSR ปกติ ให้เสิร์ฟ route เหล่านั้นด้วย
+`ruvyxa start` หรือปล่อยให้มัน pre-render
 
 ## Route metadata และ boundary
 

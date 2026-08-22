@@ -203,6 +203,69 @@ describe('adapter runner', () => {
     }
   })
 
+  it('refuses a server-components route no adapter can render at request time', async () => {
+    // Every adapter serves pages through the route modules this runner
+    // generates, and those are built by the ordinary SSR entry. A route that
+    // opted into server components and is not pre-rendered would be deployed
+    // as plain SSR: no payload in the document, nothing for its browser bundle
+    // to hydrate, and no error anywhere. A pre-rendered one is fine, because
+    // the payload is already inside the file the adapter copies.
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-adapter-runner-'))
+    const outputDir = path.join(root, '.ruvyxa-staging')
+    try {
+      await mkdir(outputDir, { recursive: true })
+      await writeFile(
+        path.join(root, 'ruvyxa.config.mjs'),
+        `export default { adapter: { name: 'node', build() { return { artifacts: [] } } } }`,
+      )
+      await writeFile(
+        path.join(outputDir, 'manifest.json'),
+        JSON.stringify({
+          routes: [
+            { kind: 'page', path: '/live', render: { strategy: 'ssr', serverComponents: true } },
+            { kind: 'page', path: '/docs', render: { strategy: 'ssg', serverComponents: true } },
+          ],
+        }),
+      )
+
+      const result = await runRunnerResult(root, outputDir)
+
+      assert.equal(result.exitCode, 1)
+      assert.match(result.parsed.message, /RUV2213 adapter node/)
+      assert.match(result.parsed.message, /\/live \(ssr\)/)
+      // The pre-rendered one is not named: it deploys correctly.
+      assert.doesNotMatch(result.parsed.message, /\/docs/)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('deploys a pre-rendered server-components route without complaint', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-adapter-runner-'))
+    const outputDir = path.join(root, '.ruvyxa-staging')
+    try {
+      await mkdir(outputDir, { recursive: true })
+      await writeFile(
+        path.join(root, 'ruvyxa.config.mjs'),
+        `export default { adapter: { name: 'static', supports: ['ssg', 'csr'], build() { return { artifacts: [] } } } }`,
+      )
+      await writeFile(
+        path.join(outputDir, 'manifest.json'),
+        JSON.stringify({
+          routes: [
+            { kind: 'page', path: '/docs', render: { strategy: 'ssg', serverComponents: true } },
+          ],
+        }),
+      )
+
+      const result = await runRunnerResult(root, outputDir)
+
+      assert.equal(result.exitCode, 0, result.parsed?.message ?? '')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('rejects routes the adapter declares it does not support', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-adapter-runner-'))
     const outputDir = path.join(root, '.ruvyxa-staging')

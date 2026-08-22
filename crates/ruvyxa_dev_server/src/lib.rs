@@ -88,7 +88,7 @@ mod i18n;
 mod trace;
 pub use html_document::{
     BOOTSTRAP_ELEMENT_ID, bootstrap_data_block, hydration_loader_source, hydration_loader_url,
-    localize_document, safe_json_for_script,
+    localize_document, rsc_payload_block, safe_json_for_script,
 };
 #[cfg(test)]
 use html_document::{
@@ -119,13 +119,15 @@ use static_assets::{is_safe_relative_path, resolve_public_asset};
 mod worker_protocol;
 
 mod worker_pool;
-pub use worker_pool::NodeWorkerPool;
+pub use worker_pool::{NodeWorkerPool, RenderSsgRequest};
 pub use worker_protocol::{StaticParamSegment, StaticParamsRoute, WarmupRoute};
 
 mod render_pipeline;
 #[cfg(test)]
 use render_pipeline::serve_prerendered_html;
-pub use render_pipeline::{RenderContext, find_runtime_script, render_request_with_context};
+pub use render_pipeline::{
+    RenderContext, apply_production_node_env, find_runtime_script, render_request_with_context,
+};
 use render_pipeline::{render_request_pooled, runtime_env};
 
 mod router;
@@ -3027,6 +3029,47 @@ mod tests {
             client_hydration_script(&config, &no_hydrate, "/", &BTreeMap::new()),
             ""
         );
+    }
+
+    /// The Flight payload is a data block, quoted as a JSON string.
+    ///
+    /// Quoted, because the payload is line-delimited and is not itself a JSON
+    /// document — quoting is what lets one escaping rule cover it and the
+    /// bootstrap block alike. A data block rather than an executable script,
+    /// because a `Content-Security-Policy` without `'unsafe-inline'` blocks
+    /// inline script and a per-request payload cannot be covered by a hash.
+    #[test]
+    fn the_rsc_payload_rides_in_an_escaped_data_block() {
+        let open = r#"<script type="application/json" id="__ruvyxa-rsc">"#;
+
+        // A payload React produced from user data can contain anything. The
+        // property asserted is the one that matters and does not depend on
+        // which escape spelling is used: nothing inside the element can be read
+        // as markup, and nothing can end a JavaScript line early.
+        let hostile = html_document::rsc_payload_block("</script><img src=x>&\u{2028}\u{2029}");
+        assert!(hostile.starts_with(open), "{hostile}");
+        assert!(hostile.ends_with("</script>"), "{hostile}");
+        let inner = &hostile[open.len()..hostile.len() - "</script>".len()];
+        for forbidden in ['<', '>', '&', '\u{2028}', '\u{2029}'] {
+            assert!(
+                !inner.contains(forbidden),
+                "{forbidden:?} survived unescaped in {inner}",
+            );
+        }
+
+        // And the round trip still yields the exact bytes React wrote.
+        let payload =
+            "0:[\"$\",\"main\",null,{}]\n5:I[\"ruv:m_0123456789abcdef\",[],\"default\"]\n";
+        let block = html_document::rsc_payload_block(payload);
+        let inner = &block[open.len()..block.len() - "</script>".len()];
+        let decoded: String = serde_json::from_str(
+            &inner
+                .replace("\\u003c", "<")
+                .replace("\\u003e", ">")
+                .replace("\\u0026", "&"),
+        )
+        .unwrap();
+        assert_eq!(decoded, payload);
     }
 
     #[test]

@@ -4,7 +4,11 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createRequire, isBuiltin } from 'node:module'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
-import { clientModuleId, clientProxyModuleSource } from './client-references.mjs'
+import {
+  RSC_CLIENT_RUNTIME_SPECIFIER,
+  clientModuleId,
+  clientProxyModuleSource,
+} from './client-references.mjs'
 import { compareCodeUnits } from './order.mjs'
 import {
   isSafePackageRelativePath,
@@ -483,6 +487,12 @@ export function runtimeAliases(runtimeDir = path.dirname(fileURLToPath(import.me
       path.join(coreRoot, 'src', 'plugin.ts'),
       path.join(coreRoot, 'dist', 'plugin.js'),
     ),
+    // Not a specifier any app writes: it is how a generated server-components
+    // entry reaches the module that installs the two globals React resolves a
+    // client reference through. An alias rather than a path because the file
+    // lives outside the project, and a server target leaves such a path
+    // external — emitting an absolute import no ESM loader accepts.
+    [RSC_CLIENT_RUNTIME_SPECIFIER]: path.join(runtimeDir, 'rsc-client-runtime.mjs'),
   }
 }
 

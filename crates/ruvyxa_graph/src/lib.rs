@@ -154,6 +154,21 @@ pub struct RenderMeta {
     /// whether a route had JavaScript.
     #[serde(default)]
     pub hydration: HydrationMode,
+    /// `export const serverComponents = true`: render this route through the
+    /// React Server Components pipeline.
+    ///
+    /// Orthogonal to [`Self::strategy`] rather than a variant of it, because it
+    /// answers a different question. The strategy decides *when* a route is
+    /// rendered — at build time, per request, or on a revalidation interval —
+    /// while this decides *which two graphs* render it. A server-components
+    /// route can still be SSG or ISR, and folding the two would have made
+    /// `revalidate` and this mutually exclusive for no reason.
+    ///
+    /// Opt-in per route rather than a project-wide default: turning it on
+    /// changes what reaches the browser for that route, and a framework-wide
+    /// switch would change every existing page at once.
+    #[serde(default)]
+    pub server_components: bool,
 }
 
 impl RenderMeta {
@@ -172,6 +187,7 @@ impl Default for RenderMeta {
             static_paths: Vec::new(),
             has_dynamic_slots: false,
             hydration: HydrationMode::Load,
+            server_components: false,
         }
     }
 }
@@ -300,6 +316,7 @@ pub fn discover_routes(options: DiscoverOptions) -> Result<RouteManifest> {
     });
     detect_conflicts(&routes)?;
     detect_unreachable_intercepts(&routes)?;
+    detect_server_component_conflicts(&routes)?;
 
     Ok(RouteManifest {
         app_dir,
@@ -1436,6 +1453,40 @@ fn sibling_modules(route_dir: &Path, names: &[&str]) -> Vec<String> {
         .collect()
 }
 
+/// Detect a page's rendering strategy, and whether it opts into server components.
+///
+/// The two are read separately because they answer different questions — see
+/// [`RenderMeta::server_components`] — and because the strategy rules below
+/// return early in six places, each of which would otherwise have to remember
+/// to carry the opt-in.
+fn detect_render_strategy(
+    app_dir: &Path,
+    file: &Path,
+    route_path: &str,
+    layout_chain: &[String],
+    cache: &mut ModuleCache,
+) -> RenderMeta {
+    let mut render = detect_render_meta(app_dir, file, route_path, layout_chain, cache);
+    render.server_components = opts_into_server_components(file, cache);
+    render
+}
+
+/// Whether a page declares `export const serverComponents = true`.
+///
+/// Read from masked source for the same reason every other route export is: a
+/// commented-out or quoted occurrence is not a declaration, and reading raw
+/// text turned one into a silent change of rendering pipeline.
+fn opts_into_server_components(file: &Path, cache: &mut ModuleCache) -> bool {
+    let Some(page) = cache.module(file) else {
+        return false;
+    };
+    let source = Arc::clone(&page.source);
+    let Some(code) = cache.masked(file) else {
+        return false;
+    };
+    has_export_const_bool(&source, &code, "serverComponents", true)
+}
+
 /// Detect the rendering strategy for a page by scanning its source for known exports/directives.
 ///
 /// Detection rules (first match wins):
@@ -1445,7 +1496,7 @@ fn sibling_modules(route_dir: &Path, names: &[&str]) -> Vec<String> {
 /// 4. `getStaticParams` or `staticParams` page export → SSG
 /// 5. Route has no dynamic segments and no data fetching → SSG candidate (static routes)
 /// 6. Default → SSR
-fn detect_render_strategy(
+fn detect_render_meta(
     app_dir: &Path,
     file: &Path,
     route_path: &str,
@@ -1910,6 +1961,64 @@ fn detect_unreachable_intercepts(routes: &[RouteEntry]) -> Result<()> {
             intercept.target
         ))
         .into())
+}
+
+/// Refuse the two combinations where `serverComponents` would silently do nothing.
+///
+/// Both are opt-ins that read as working. A page that is itself `'use client'`
+/// has no server half to render, so the export changes nothing and the author
+/// is left believing their data fetching moved off the browser. An interception
+/// is resolved by the client router from a registry the server-components
+/// browser entry does not build, so the modal simply never opens.
+///
+/// Refusing at discovery rather than at render is deliberate: both failures are
+/// invisible in a working page, and a diagnostic that only fires on the request
+/// path would not fire during `ruvyxa check` at all.
+fn detect_server_component_conflicts(routes: &[RouteEntry]) -> Result<()> {
+    for route in routes.iter().filter(|route| route.render.server_components) {
+        if route.render.strategy == RenderStrategy::Csr {
+            return Err(Diagnostic::new(
+                "RUV1011",
+                "Page declares both `use client` and server components",
+            )
+            .explain(
+                "A `'use client'` page runs entirely in the browser, so there is no server graph for `export const serverComponents = true` to render. One of the two is not doing what it says.",
+            )
+            .at_file(&route.file)
+            .suggest(
+                "Remove the `'use client'` directive from the page and move the interactive parts into their own `'use client'` components, or drop the `serverComponents` export.",
+            )
+            .into());
+        }
+        if route.render.strategy == RenderStrategy::Ppr {
+            return Err(Diagnostic::new(
+                "RUV1011",
+                "Server components route also opts into partial pre-rendering",
+            )
+            .explain(
+                "Partial pre-rendering streams a static shell and fills its holes later, through a render entry the server-components pipeline does not build. The route would be pre-rendered as an ordinary shell and the `serverComponents` export would do nothing.",
+            )
+            .at_file(&route.file)
+            .suggest("Remove `export const ppr = true` or `export const serverComponents = true` from this page.")
+            .into());
+        }
+        if let Some(intercept) = route.intercepts.first() {
+            return Err(Diagnostic::new(
+                "RUV1011",
+                "Server components route carries an intercepting route",
+            )
+            .explain(format!(
+                "`{}` intercepts `{}`, and an interception is resolved by the client router from a registry a server-components route does not publish. The overlay would never open.",
+                intercept.marker, intercept.target
+            ))
+            .at_file(&route.file)
+            .suggest(
+                "Drop `export const serverComponents = true` from this route, or move the interception to a route that does not use server components.",
+            )
+            .into());
+        }
+    }
+    Ok(())
 }
 
 fn detect_conflicts(routes: &[RouteEntry]) -> Result<()> {
@@ -2657,6 +2766,127 @@ mod tests {
 
         let error = discover_routes(DiscoverOptions::new(temp.path().join("app"))).unwrap_err();
         assert!(error.to_string().contains("RUV1003"));
+    }
+
+    /// The opt-in is read the way every other route export is: from masked
+    /// source. Reading raw text would let a commented-out line, or the same
+    /// words inside a template literal, silently change a route's rendering
+    /// pipeline — which is how `hydrate` was misread twice before.
+    #[test]
+    fn reads_the_server_components_opt_in_from_code_only() {
+        let cases = [
+            ("export const serverComponents = true\n", true),
+            ("export const serverComponents: boolean = true\n", true),
+            ("export const serverComponents = false\n", false),
+            ("// export const serverComponents = true\n", false),
+            ("/*\nexport const serverComponents = true\n*/\n", false),
+            (
+                "const doc = `\nexport const serverComponents = true\n`;\n",
+                false,
+            ),
+            ("export const serverComponentsAll = true\n", false),
+            ("", false),
+        ];
+
+        for (prologue, expected) in cases {
+            let temp = tempfile::tempdir().unwrap();
+            let app = temp.path().join("app");
+            fs::create_dir_all(&app).unwrap();
+            fs::write(
+                app.join("page.tsx"),
+                format!("{prologue}export default function Page() {{ return null }}\n"),
+            )
+            .unwrap();
+
+            let manifest = discover_routes(DiscoverOptions::new(&app)).unwrap();
+            assert_eq!(
+                manifest.routes[0].render.server_components, expected,
+                "{prologue:?}"
+            );
+        }
+    }
+
+    /// The opt-in is orthogonal to the strategy, not a variant of it: a
+    /// server-components route can still revalidate on an interval.
+    #[test]
+    fn server_components_compose_with_a_rendering_strategy() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(
+            app.join("page.tsx"),
+            "export const serverComponents = true\nexport const revalidate = 60\nexport default function Page() { return null }\n",
+        )
+        .unwrap();
+
+        let manifest = discover_routes(DiscoverOptions::new(&app)).unwrap();
+        assert!(manifest.routes[0].render.server_components);
+        assert_eq!(manifest.routes[0].render.strategy, RenderStrategy::Isr);
+        assert_eq!(manifest.routes[0].render.revalidate, Some(60));
+    }
+
+    /// A `'use client'` page has no server half, so the export would do nothing
+    /// while reading as though it had moved the page's work off the browser.
+    #[test]
+    fn rejects_server_components_on_a_use_client_page() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(
+            app.join("page.tsx"),
+            "\"use client\"\nexport const serverComponents = true\nexport default function Page() { return null }\n",
+        )
+        .unwrap();
+
+        let error = discover_routes(DiscoverOptions::new(&app)).unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("RUV1011"), "{text}");
+        assert!(text.contains("use client"), "{text}");
+    }
+
+    /// Partial pre-rendering streams a shell through an entry the
+    /// server-components pipeline does not build.
+    #[test]
+    fn rejects_server_components_with_partial_prerendering() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(
+            app.join("page.tsx"),
+            "export const ppr = true\nexport const serverComponents = true\nexport default function Page() { return null }\n",
+        )
+        .unwrap();
+
+        let error = discover_routes(DiscoverOptions::new(&app)).unwrap_err();
+        assert!(error.to_string().contains("RUV1011"), "{error}");
+    }
+
+    /// An interception is matched by the client router from a registry a
+    /// server-components browser entry never publishes, so the overlay would
+    /// simply never open.
+    #[test]
+    fn rejects_server_components_on_a_route_carrying_an_interception() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        fs::create_dir_all(app.join("@modal/(.)photo")).unwrap();
+        fs::create_dir_all(app.join("photo")).unwrap();
+        fs::write(app.join("layout.tsx"), "export default function L() {}").unwrap();
+        fs::write(
+            app.join("page.tsx"),
+            "export const serverComponents = true\nexport default function Page() { return null }\n",
+        )
+        .unwrap();
+        fs::write(app.join("photo/page.tsx"), "export default function P() {}").unwrap();
+        fs::write(
+            app.join("@modal/(.)photo/page.tsx"),
+            "export default function M() {}",
+        )
+        .unwrap();
+
+        let error = discover_routes(DiscoverOptions::new(&app)).unwrap_err();
+        let text = error.to_string();
+        assert!(text.contains("RUV1011"), "{text}");
+        assert!(text.contains("/photo"), "{text}");
     }
 
     #[test]

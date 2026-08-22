@@ -2,6 +2,75 @@
 
 ## v1.0.32 (unreleased)
 
+### React Server Components
+
+A page can opt in with `export const serverComponents = true`. It and its layouts then run in a
+module graph resolved with React's `react-server` condition, and only the modules marked
+`'use client'` reach the browser.
+
+```tsx
+// app/dashboard/page.tsx
+import { readFile } from 'node:fs/promises'
+import Chart from './chart' // 'use client'
+
+export const serverComponents = true
+
+export default async function Dashboard() {
+  return <Chart rows={JSON.parse(await readFile('./data/metrics.json', 'utf8'))} />
+}
+```
+
+`page.tsx` is never bundled for the browser. `chart.tsx` is, and on that route it is the only module
+that is. The page becomes a _payload_ — a serialised element tree in which `Chart` is a reference id
+rather than code — which the server renders to HTML and the browser replays to hydrate. The payload
+rides in a `<script type="application/json">` data block, so a `Content-Security-Policy` without
+`'unsafe-inline'` does not block it.
+
+`react-server-dom-webpack` is an optional peer, installed only by apps that use the export; a route
+that opts in without it gets `RUV1863` naming the package.
+
+**Both React instances live in one process.** Ruvyxa compiles the server graph itself, with
+`react-server` in the resolver's condition list, so React's server build is linked into that bundle
+and the ordinary React stays outside it. A worker thread started with `--conditions=react-server`
+was measured to work too, and was rejected: it cannot run on the worker runtimes the adapters
+target, and bundling React is something this codebase's linker already does for every client bundle
+it emits. Everything here was established by running `react-server-dom-webpack@19.2.8`, not by
+reading its documentation — including that `server.browser` reads `__webpack_require__.u` at module
+load and throws in a plain Node process, and that the client side asks for exactly two globals,
+which are a chunk loader and a registry.
+
+**One authority per question.** The `react-server` graph is the only thing that knows which of a
+route's modules are client references, so it also writes the browser entry — but the _Rust_ bundler
+compiles it, because that is where `NODE_ENV` folding, tree-shaking, minification, and the chunk
+budget live. Building it in the JavaScript compiler instead was tried and produced a 1.5 MB bundle
+carrying both of React's builds for a page with one button on it. `bundle_entry_source` is the new
+seam.
+
+**Combinations that would silently do nothing are refused at discovery** (`RUV1011`): a
+`'use client'` page has no server half; partial pre-rendering streams a shell through an entry this
+pipeline does not build; an intercepting route is matched from a client route registry a
+server-components browser entry does not publish. A route that still needs a server at request time
+is refused for adapter builds (`RUV2213`), because every adapter serves pages through a module built
+by the ordinary SSR entry — a pre-rendered one deploys anywhere, since its payload is already in the
+HTML file the adapter copies.
+
+Also in the tree, each with tests: `BundleTarget::ReactServer` and a matching `react-server` target
+in `runtime/package-exports.mjs`, pinned by five cases in `module-resolution-conformance.json`
+including `react-server-dom-webpack`'s own exports map; `runtime/client-references.mjs`, which owns
+the id a `'use client'` module carries across the three graphs that must agree about it; and
+`runtime/rsc-client-runtime.mjs`, the browser half, which has no imports at all because the client
+bundle inlines it.
+
+### Server renders were using React's development build
+
+Nothing set `NODE_ENV` for a rendering worker, so `ruvyxa build` and `ruvyxa start` both loaded the
+development build of React: slower, noisier, and — for a server-components route — one that writes
+absolute source paths into the payload the browser receives. Both now default it to `production`,
+and only when the project has not set it itself. `ruvyxa dev` is unchanged and still gets the
+development build, which is the one it wants.
+
+Pre-rendering the demo went from 4.96s to 963ms on the same machine.
+
 ### Two import scanners read comments as imports
 
 `scripts/pack-smoke.mjs` and `tests/packages/ruvyxa/worker-runtime-contract.test.mjs` each walk
@@ -15,49 +84,6 @@ They mask through `createCodeIndex` from `runtime/scanner.mjs` now — the same 
 repository already uses for exactly this. Two copies of one scan with one hole is what "count the
 copies before trusting a check" means in practice: fixing the comment would have left the second
 scanner waiting for the next one.
-
-### Groundwork for React Server Components — not a usable feature yet
-
-**Ruvyxa still does not support RSC.** A page cannot be a server component today, and nothing in
-this release changes what an application can write. What landed is the part that had to be measured
-before any of it could be designed, and it is described here because the diff adds files a reader
-would otherwise have to guess about.
-
-Two runtime contracts were established against a real `react-server-dom-webpack@19.2.8`, by running
-it rather than by reading its documentation:
-
-- `server.browser` reads `__webpack_require__.u` **at module load** and throws in a plain Node
-  process; `server.node` does not, and renders a Flight stream with no webpack globals present. That
-  single fact decides which binding a non-webpack bundler can use.
-- The client side asks for exactly two globals — `__webpack_chunk_load__` and `__webpack_require__`
-  — which are a chunk loader and a registry, and are satisfied by a fifteen-line shim over Ruvyxa's
-  own registry.
-
-Three pieces are in the tree, each with tests:
-
-- `BundleTarget::ReactServer` and a matching `react-server` target in
-  `packages/ruvyxa/runtime/package-exports.mjs`, so both graphs resolve the `react-server` export
-  condition identically. Five cases in `tests/fixtures/module-resolution-conformance.json` pin it,
-  including `react-server-dom-webpack`'s own exports map — which returns a stub that refuses to load
-  unless the condition is on. Ordering `react-server` ahead of `node` is what reaches a package's
-  server-components build; author order still decides between two accepted conditions, and that is
-  deliberately _not_ a second departure from Node like the `require` pass.
-- `packages/ruvyxa/runtime/client-references.mjs`: the id a `'use client'` module carries across the
-  three places that must agree about it, the proxy module the server graph compiles in its place,
-  the browser registration, the webpack shim, and the manifest React serialises against. The
-  manifest is a `Proxy` because React looks up `"<id>#<export>"` for export names no bundler can
-  enumerate in advance — `createClientModuleProxy` answers any property, so the manifest has to as
-  well.
-- `compileBundleWithMetadata` honours `bundleTarget: 'react-server'` by replacing each
-  `'use client'` module with that proxy and reporting the references it found. Its imports are
-  deliberately not walked: the server graph would otherwise pull in browser-only code and a
-  `useState` the react-server build of React does not export.
-
-Together these already produce a real Flight payload from a Ruvyxa-compiled server component, client
-reference and all. What stops it being a feature is the next piece: every client-reference chunk
-currently inlines its own copy of React, so a page with two of them has two Reacts. Sharing one
-React across chunks changes how Ruvyxa emits _every_ client bundle, which is a decision about
-existing output rather than an addition to it.
 
 ### Intercepting routes are implemented
 

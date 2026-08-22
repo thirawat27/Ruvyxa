@@ -163,13 +163,36 @@ function inspectAdapter(adapter, output) {
  * An adapter that omits `supports` is treated as full-featured.
  */
 async function assertCapabilitiesSupported(adapter, buildDir, config) {
-  if (!Array.isArray(adapter.supports)) return
-
-  const supported = new Set(adapter.supports)
   const manifestPath = path.join(buildDir, 'manifest.json')
   if (!existsSync(manifestPath)) return
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
   const adapterName = adapter.name ?? 'unknown'
+
+  // Checked for every adapter, including ones that declare no `supports` list,
+  // because this is not a capability the adapter could grant. Every adapter
+  // serves pages through the route modules this file generates, and those are
+  // built by `nodeSsrEntrySource` — the ordinary pipeline, not the
+  // server-components one. A route that opted in and is *not* pre-rendered
+  // would be served as plain SSR: the document would carry no Flight payload,
+  // its browser bundle would find nothing to hydrate, and the page would go out
+  // as static HTML with no error anywhere. A pre-rendered one is fine — the
+  // payload is already inside the file the adapter copies.
+  const dynamicServerComponents = (manifest.routes ?? []).filter(
+    (route) => route.render?.serverComponents === true && route.render?.strategy !== 'ssg',
+  )
+  if (dynamicServerComponents.length > 0) {
+    const detail = dynamicServerComponents
+      .map((route) => `${route.path} (${route.render?.strategy})`)
+      .join(', ')
+    throw new Error(
+      `RUV2213 adapter ${adapterName} serves pages through a generated route module that renders ` +
+        `without the server-components pipeline, so ${detail} would be deployed as ordinary SSR ` +
+        'and would never hydrate. Let those routes pre-render, or serve them with `ruvyxa start`.',
+    )
+  }
+
+  if (!Array.isArray(adapter.supports)) return
+  const supported = new Set(adapter.supports)
 
   const unsupported = (manifest.routes ?? []).filter((route) =>
     route.kind === 'api' ? !supported.has('api') : !supported.has(route.render?.strategy),

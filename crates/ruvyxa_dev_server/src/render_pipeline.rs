@@ -429,15 +429,16 @@ async fn render_page_ssg(
     // Render via worker pool (same as SSR but with the SSG bundle type)
     let response = state
         .worker_pool
-        .render_ssg(
-            &state.config.root,
-            &state.config.app_dir,
-            &route.file,
+        .render_ssg(crate::worker_pool::RenderSsgRequest {
+            project_root: &state.config.root,
+            app_dir: &state.config.app_dir,
+            page_file: &route.file,
             request_path,
-            &route.path,
+            route_path: &route.path,
             params,
-            "full",
-        )
+            mode: "full",
+            server_components: route.render.server_components,
+        })
         .await?;
 
     if !response.ok {
@@ -469,13 +470,14 @@ async fn render_page_ssg(
         ""
     };
     let client_script = client_hydration_script(&state.config, route, request_path, params);
+    let rsc_payload = rsc_payload_block(route, response.rsc_payload.as_deref());
     let plugin_head = render_plugin_head(&state.config.plugin_head);
     let head_content =
         format!(r#"{asset_links}{plugin_head}<style data-ruvyxa-css>{styles}</style>"#);
     let html = compose_localized_document(
         &rendered,
         &head_content,
-        &format!("{client_script}{hmr}"),
+        &format!("{rsc_payload}{client_script}{hmr}"),
         state.config.i18n.as_ref(),
         route,
         request_path,
@@ -545,15 +547,16 @@ async fn render_isr_background(
 ) -> Result<String> {
     let response = state
         .worker_pool
-        .render_ssg(
-            &state.config.root,
-            &state.config.app_dir,
-            &route.file,
+        .render_ssg(crate::worker_pool::RenderSsgRequest {
+            project_root: &state.config.root,
+            app_dir: &state.config.app_dir,
+            page_file: &route.file,
             request_path,
-            &route.path,
+            route_path: &route.path,
             params,
-            "full",
-        )
+            mode: "full",
+            server_components: route.render.server_components,
+        })
         .await?;
 
     if !response.ok {
@@ -581,13 +584,14 @@ async fn render_isr_background(
         ""
     };
     let client_script = client_hydration_script(&state.config, route, request_path, params);
+    let rsc_payload = rsc_payload_block(route, response.rsc_payload.as_deref());
     let plugin_head = render_plugin_head(&state.config.plugin_head);
     let head_content =
         format!(r#"{asset_links}{plugin_head}<style data-ruvyxa-css>{styles}</style>"#);
     Ok(compose_localized_document(
         &rendered,
         &head_content,
-        &format!("{client_script}{hmr}"),
+        &format!("{rsc_payload}{client_script}{hmr}"),
         state.config.i18n.as_ref(),
         route,
         request_path,
@@ -955,15 +959,19 @@ async fn render_page_ppr(
     // PPR mode: render with onShellReady (Suspense boundaries show fallback)
     let response = state
         .worker_pool
-        .render_ssg(
-            &state.config.root,
-            &state.config.app_dir,
-            &route.file,
+        .render_ssg(crate::worker_pool::RenderSsgRequest {
+            project_root: &state.config.root,
+            app_dir: &state.config.app_dir,
+            page_file: &route.file,
             request_path,
-            &route.path,
+            route_path: &route.path,
             params,
-            "ppr",
-        )
+            mode: "ppr",
+            // Partial pre-rendering streams a shell through a different entry
+            // than the server-components pipeline builds, so the two are
+            // refused together at discovery (RUV1011) rather than combined here.
+            server_components: false,
+        })
         .await?;
 
     if !response.ok {
@@ -1013,6 +1021,20 @@ async fn render_page_ppr(
     Ok(document)
 }
 
+/// The payload block a document carries, or nothing.
+///
+/// Only a route that ships a client bundle has anything to replay it: a page
+/// with `export const hydrate = false` would otherwise carry a copy of its own
+/// element tree that nothing on the page ever reads.
+fn rsc_payload_block(route: &RouteEntry, payload: Option<&str>) -> String {
+    if !route.render.ships_client_bundle() {
+        return String::new();
+    }
+    payload
+        .map(crate::html_document::rsc_payload_block)
+        .unwrap_or_default()
+}
+
 async fn render_page_pooled(
     state: &AppState,
     route: &RouteEntry,
@@ -1045,6 +1067,7 @@ async fn render_page_pooled(
             params,
             headers: request.headers,
             method: request.method,
+            server_components: route.render.server_components,
         })
         .await?;
 
@@ -1091,6 +1114,11 @@ async fn render_page_pooled(
         ""
     };
     let client_script = client_hydration_script(&state.config, route, request.path, params);
+    // The payload the SSR pass rendered from, so the browser hydrates the tree
+    // that is already on screen instead of asking the server to build it again.
+    // Written before the bundle that reads it: both are inert data until the
+    // deferred module runs, but a reader that precedes its data reads as a bug.
+    let rsc_payload = rsc_payload_block(route, response.rsc_payload.as_deref());
     let plugin_head = render_plugin_head(&state.config.plugin_head);
     let head_content =
         format!(r#"{asset_links}{plugin_head}<style data-ruvyxa-css>{styles}</style>"#);
@@ -1098,7 +1126,7 @@ async fn render_page_pooled(
     let html = compose_localized_document(
         &rendered,
         &head_content,
-        &format!("{client_script}{hmr}"),
+        &format!("{rsc_payload}{client_script}{hmr}"),
         state.config.i18n.as_ref(),
         route,
         request.path,
@@ -1266,6 +1294,7 @@ pub(crate) async fn render_client_bundle_pooled(
             request_path,
             &route_match.route.path,
             &route_match.params,
+            route_match.route.render.server_components,
         )
         .await?;
 
@@ -1742,7 +1771,27 @@ pub(crate) fn runtime_env(config: &ServerConfig) -> Result<BTreeMap<String, Stri
         "RUVYXA_RUNTIME".to_string(),
         config.runtime.command().to_string(),
     );
+    apply_production_node_env(&mut env, !config.watch);
     Ok(env)
+}
+
+/// Tell a rendering worker it is serving production, unless the project said so.
+///
+/// React ships two builds of itself and picks between them by reading
+/// `process.env.NODE_ENV` at load. A worker started without the variable gets
+/// the development build: slower, noisier, and — once a route renders through
+/// the server-components pipeline — one that writes absolute source paths into
+/// the Flight payload the browser receives. `ruvyxa dev` wants exactly that
+/// build; `ruvyxa start` and `ruvyxa build` want the other one.
+///
+/// Only set when the project has not: an app that puts `NODE_ENV` in its `.env`
+/// has said which it wants, and overriding that would be this framework
+/// deciding for it.
+pub fn apply_production_node_env(env: &mut BTreeMap<String, String>, production: bool) {
+    if production {
+        env.entry("NODE_ENV".to_string())
+            .or_insert_with(|| "production".to_string());
+    }
 }
 
 fn jsx_runtime_name(runtime: JsxRuntime) -> &'static str {

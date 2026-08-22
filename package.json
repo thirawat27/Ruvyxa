@@ -33,6 +33,9 @@
     "oxlint": "1.79.0",
     "postcss": "^8.5.26",
     "prettier": "3.9.6",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "react-server-dom-webpack": "19.2.8",
     "typescript": "^7.0.2"
   },
   "engines": {

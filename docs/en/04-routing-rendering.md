@@ -16,6 +16,10 @@ is selected from its exports and the `render` configuration.
 | CSR      | `'use client'` page                       | browser after a minimal shell                               |
 | PPR      | `export const ppr = true` with `Suspense` | static shell at build; dynamic slot streams at request time |
 
+The strategy decides _when_ HTML is produced. `export const serverComponents = true` decides _which
+graphs_ produce it, and composes with every strategy above except PPR — see
+[React Server Components](#react-server-components).
+
 ## Markdown, MDX, and shared components
 
 Create `page.md` for Markdown or `page.mdx` for JSX, expressions, and imports; neither format needs
@@ -100,6 +104,109 @@ pre-render path even if it also exports `revalidate`; `'force-static'` and `'err
 
 `export const metadata` is **not** read: Next's metadata object is nested where Ruvyxa's `meta` is
 flat, so the two are not interchangeable. Use `export const meta` below.
+
+## React Server Components
+
+`export const serverComponents = true` renders a route through React's server-components pipeline.
+The page and its layouts run in a module graph resolved with React's `react-server` condition, and
+only the modules marked `'use client'` reach the browser.
+
+```tsx
+// app/dashboard/page.tsx
+import { readFile } from 'node:fs/promises'
+import Chart from './chart'
+
+export const serverComponents = true
+
+export default async function Dashboard() {
+  const rows = JSON.parse(await readFile('./data/metrics.json', 'utf8'))
+  return <Chart rows={rows} />
+}
+```
+
+```tsx
+// app/dashboard/chart.tsx
+'use client'
+import { useState } from 'react'
+
+export default function Chart({ rows }: { rows: Row[] }) {
+  const [range, setRange] = useState('30d')
+  // ...
+}
+```
+
+`page.tsx` above is never bundled for the browser. `chart.tsx` is, and it is the only module from
+this route that is. The page is turned into a payload — a serialised element tree in which `Chart`
+appears as a reference id rather than as code — which the server renders to HTML and the browser
+replays to hydrate. Both halves read the same payload, so what hydrates is what was rendered.
+
+The payload rides in a `<script type="application/json">` data block, like the route bootstrap: a
+`Content-Security-Policy` without `'unsafe-inline'` does not block it, and no nonce is needed.
+
+### Installing the runtime
+
+Server components need `react-server-dom-webpack`, at the same version as React:
+
+```bash
+npm install react-server-dom-webpack@19.2.8
+```
+
+It is optional: an app that never writes the export does not need it, and a route that does gets
+`RUV1863` naming it. The package lists `webpack` as a peer for one file — its bundler plugin, which
+Ruvyxa never loads — so tell your package manager to skip it. For pnpm:
+
+```yaml
+# pnpm-workspace.yaml
+peerDependencyRules:
+  ignoreMissing:
+    - webpack
+```
+
+Node's own APIs are ordinary code inside a server component. TypeScript needs to know they exist,
+which means `@types/node` and `"types": ["node"]` in `tsconfig.json` — with the caveat that this
+makes Node's globals visible to your `'use client'` files too, where the boundary checks, not the
+type checker, are what stop them being used.
+
+### What a server component cannot do
+
+The `react-server` build of React has no `useState`, no `useEffect`, and no `createContext`, so a
+server component cannot hold state, run an effect, or provide context. That is the boundary, not a
+limitation to work around: move those parts into a `'use client'` module and pass data down as
+props. `Suspense` works in both graphs, so `loading.tsx` behaves as it does on any other route.
+
+`error.tsx` and `not-found.tsx` are class-based boundaries, which the server graph cannot run. On a
+server-components route they must be `'use client'` modules — the same rule React itself imposes.
+
+React's inline `'use server'` functions are **not** implemented. Ruvyxa's own server actions are,
+and they work unchanged from a `'use client'` component on a server-components route: they are
+ordinary client modules calling the action endpoint — see
+[Data, actions, and API routes](05-data-actions-api.md).
+
+The payload is produced as a stream and inlined whole, so a slow server component delays the whole
+document rather than streaming in behind a `Suspense` boundary. `loading.tsx` still renders its
+fallback into the payload; it just does not arrive separately.
+
+### Combinations Ruvyxa refuses
+
+Each of these would build cleanly and then do nothing, so discovery fails instead (`RUV1011`):
+
+| Combination                                    | Why                                                                                 |
+| ---------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `'use client'` page + `serverComponents`       | a page that runs entirely in the browser has no server half to render               |
+| `export const ppr = true` + `serverComponents` | partial pre-rendering streams a shell through an entry this pipeline does not build |
+| an intercepting route + `serverComponents`     | interception is matched from a client route registry this pipeline does not publish |
+
+Client-side navigation between routes is unaffected, but a server-components route is entered with a
+document request rather than a soft navigation: its browser bundle registers client modules, not a
+route tree.
+
+### Deploying
+
+A pre-rendered server-components route deploys anywhere: its payload is already inside the HTML file
+the adapter copies. A route that still needs a server at request time — `ssr`, `isr`, or
+`export const dynamic = 'force-dynamic'` — is refused at build time with `RUV2213`, because every
+adapter serves pages through a generated module built by the ordinary SSR entry. Serve those routes
+with `ruvyxa start`, or let them pre-render.
 
 ## Route metadata and boundaries
 

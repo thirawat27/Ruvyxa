@@ -145,6 +145,7 @@ pub fn bundle_with_shared_modules(
 ) -> Result<BundleOutput> {
     let prepared = prepare_bundle_with_parts(
         input,
+        None,
         context.compile_cache(),
         context.graph_cache(),
         context.incremental(),
@@ -156,10 +157,44 @@ pub fn bundle_with_shared_modules(
     Ok(output)
 }
 
+/// Bundle a caller-supplied entry instead of the generated route entry.
+///
+/// `input` still supplies the project root, target, and options — everything
+/// the resolver and emitter need — but its `layouts`, `templates`, `slots`, and
+/// specials are unused, because the caller has already composed them into
+/// `entry_source`.
+///
+/// The one caller today is the server-components browser bundle. Its entry
+/// imports the `'use client'` modules a Flight payload references, and only the
+/// `react-server` graph knows which those are — so the JavaScript graph that
+/// produced the payload also writes the entry, and this compiles it with the
+/// production pipeline: `NODE_ENV` folding, tree-shaking, minification, source
+/// maps, and the chunk budget. Generating a competing entry here would mean two
+/// answers to which modules are client modules.
+pub fn bundle_entry_source(
+    entry_source: &str,
+    input: BundleInput,
+    context: &BundleContext,
+) -> Result<BundleOutput> {
+    let prepared = prepare_bundle_with_parts(
+        input,
+        Some(entry_source),
+        context.compile_cache(),
+        context.graph_cache(),
+        context.incremental(),
+        context.build_hooks(),
+        context.artifacts(),
+    )?;
+    let output = bundle_prepared(&prepared, &BTreeSet::new())?;
+    context.enforce_cache_budget();
+    Ok(output)
+}
+
 /// Resolve and compile a route once so it can be inspected and emitted later.
 pub fn prepare_bundle(input: BundleInput, context: &BundleContext) -> Result<PreparedBundle> {
     let prepared = prepare_bundle_with_parts(
         input,
+        None,
         context.compile_cache(),
         context.graph_cache(),
         context.incremental(),
@@ -325,6 +360,7 @@ fn emit_shared_route_modules(
 
 fn prepare_bundle_with_parts(
     input: BundleInput,
+    entry_override: Option<&str>,
     compile_cache: &CompileCache,
     graph_cache: &ResolveGraphCache,
     incremental: &incremental::IncrementalGraphCache,
@@ -333,8 +369,12 @@ fn prepare_bundle_with_parts(
 ) -> Result<PreparedBundle> {
     let started = Instant::now();
 
-    // 1. Build the virtual entry source that wires layouts → page.
-    let (entry_source, entry_label) = output::build_entry_source(&input);
+    // 1. Build the virtual entry source that wires layouts → page, unless the
+    //    caller supplied one (see `bundle_entry_source`).
+    let (entry_source, entry_label) = match entry_override {
+        Some(source) => (source.to_string(), "ruvyxa:supplied-entry.tsx".to_string()),
+        None => output::build_entry_source(&input),
+    };
 
     // 2. Resolve the full dependency graph from the entry.
     let graph = resolver::resolve_graph_with_incremental(

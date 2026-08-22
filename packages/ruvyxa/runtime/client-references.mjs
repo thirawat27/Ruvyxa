@@ -21,21 +21,89 @@
  * its contents: it has to survive an edit to the component, or every rebuild
  * would invalidate a payload the browser is still holding.
  *
- * This module must stay dependency-free apart from `node:crypto`: it is read by
- * `compiler.mjs`, which is copied into worker and function directories where
- * nothing else is resolvable.
+ * This module must import nothing outside `node:` builtins and its own runtime
+ * sibling: it is read by `compiler.mjs`, which is copied into worker and
+ * function directories where nothing else is resolvable.
  */
 
 import { createHash } from 'node:crypto'
+import { fileURLToPath } from 'node:url'
 
-/** Global the browser registers evaluated client modules into, keyed by id. */
-export const CLIENT_MODULE_REGISTRY_GLOBAL = '__RUVYXA_CLIENT_MODULES__'
+// Re-exported rather than restated: the browser half of this contract lives in
+// a module with no imports, because it is inlined into the client bundle, and
+// two spellings of the registry global would be two registries.
+export { CLIENT_MODULE_REGISTRY_GLOBAL, RSC_PAYLOAD_ELEMENT_ID } from './rsc-client-runtime.mjs'
 
 /** Prefix every Ruvyxa client-reference id carries, so a stray id is obvious. */
 export const CLIENT_MODULE_ID_PREFIX = 'ruv:'
 
-/** The package the server graph imports its client-reference proxy from. */
-export const RSC_SERVER_PACKAGE = 'react-server-dom-webpack/server.node'
+/**
+ * The package the server graph imports its client-reference proxy from.
+ *
+ * `.edge` rather than `.node`: it is the only server entry whose streams are
+ * web streams, so one server graph runs unchanged on Node, Bun, Deno, and the
+ * worker runtimes the adapters target. It was measured to export everything
+ * `.node` does except `renderToPipeableStream` and `decodeReplyFromBusboy`,
+ * neither of which this framework calls. Emitting the proxy from a *different*
+ * entry than the renderer would link two copies of the server runtime into one
+ * bundle, so this constant is the single answer for both.
+ */
+export const RSC_SERVER_PACKAGE = 'react-server-dom-webpack/server.edge'
+
+/**
+ * The package the SSR pass reads a Flight stream with.
+ *
+ * `.edge` for the same reason as {@link RSC_SERVER_PACKAGE}: web streams. This
+ * one is resolved *without* the `react-server` condition, because turning a
+ * payload into HTML is client-React work that happens to run on a server.
+ */
+export const RSC_SSR_PACKAGE = 'react-server-dom-webpack/client.edge'
+
+/** The package the browser reads a Flight stream with. */
+export const RSC_BROWSER_PACKAGE = 'react-server-dom-webpack/client.browser'
+
+/**
+ * Specifier generated entries import the client-reference runtime by.
+ *
+ * Synthetic rather than a real path, for two reasons. The bundle is compiled
+ * against the *app's* resolver and `ruvyxa/runtime/...` is not one of the
+ * package's exported subpaths; and an absolute path to a file outside the
+ * project resolves but does not *bundle* on a server target, leaving the output
+ * with a bare `D:/...` import no ESM loader accepts. An alias always bundles.
+ *
+ * `runtimeAliases()` in `compiler.mjs` maps it to `runtime/rsc-client-runtime.mjs`,
+ * so every host that already passes those aliases can compile a
+ * server-components entry without knowing this exists.
+ */
+export const RSC_CLIENT_RUNTIME_SPECIFIER = 'ruvyxa:rsc-client-runtime'
+
+/**
+ * Absolute path of the module whose import installs the client-reference
+ * globals.
+ *
+ * Only a browser entry imports it, and only as its first import: see
+ * `rsc-client-install.mjs` for why that side effect is a file of its own.
+ */
+export function clientReferenceInstallPath() {
+  return normalizeClientModulePath(
+    fileURLToPath(new URL('./rsc-client-install.mjs', import.meta.url)),
+  )
+}
+
+/**
+ * Absolute path {@link RSC_CLIENT_RUNTIME_SPECIFIER} resolves to.
+ *
+ * A *browser* entry imports the runtime by this path rather than by the alias
+ * above, because that entry is compiled by two different bundlers: this
+ * package's compiler during `ruvyxa dev`, and the Rust bundler during
+ * `ruvyxa build`. Only the first knows the alias. Both bundle an absolute path
+ * into a browser target, so the path is the spelling both understand.
+ */
+export function clientReferenceRuntimePath() {
+  return normalizeClientModulePath(
+    fileURLToPath(new URL('./rsc-client-runtime.mjs', import.meta.url)),
+  )
+}
 
 /**
  * Normalise a project-relative path to the form the id is computed from.
@@ -92,58 +160,43 @@ export function clientProxyModuleSource(id) {
 }
 
 /**
- * The browser module that publishes one client module under its id.
+ * The imports and statements that publish a build's client modules by id.
  *
- * `__webpack_require__(id)` reads this registry. The entry is the module
- * namespace, so React resolves `#default` and every named export off it.
+ * Returned as two lists rather than as one module source because both callers
+ * splice them into a larger generated entry: the browser bundle, and the SSR
+ * pass that renders the payload to HTML before the browser has run anything.
+ * One shape, spliced twice, is what keeps the two realms resolving an id to the
+ * same module — the failure mode otherwise being a page that renders on the
+ * server and blanks on hydration, or the reverse.
+ *
+ * The first import is the runtime that installs the two globals React reads.
+ * Its position matters: `react-server-dom-webpack/client.browser` touches
+ * `__webpack_require__.u` while its own module body runs, and the linker
+ * evaluates a module's dependencies in the order they are imported.
+ *
+ * `import * as` — the whole namespace — because React resolves `#default` and
+ * every named export off the registry entry, and a build cannot know which
+ * names a payload will ask for.
  */
-export function clientRegistrationSource(id, importPath) {
-  if (!isClientModuleId(id)) {
-    throw new Error(`RUV1860 invalid client reference id: ${JSON.stringify(id)}`)
-  }
-  return [
-    `import * as __ruvyxaClientModule from ${JSON.stringify(importPath)}`,
-    `;(globalThis.${CLIENT_MODULE_REGISTRY_GLOBAL} ||= {})[${JSON.stringify(id)}] = __ruvyxaClientModule`,
-    '',
-  ].join('\n')
+export function clientRegistrySource(references, runtimeSpecifier = RSC_CLIENT_RUNTIME_SPECIFIER) {
+  const imports = [
+    `import { registerClientModule as __ruvyxaRegisterClient } from ${JSON.stringify(runtimeSpecifier)}`,
+  ]
+  const statements = []
+  references.forEach((reference, index) => {
+    if (!isClientModuleId(reference.id)) {
+      throw new Error(`RUV1860 invalid client reference id: ${JSON.stringify(reference.id)}`)
+    }
+    const local = `__ruvyxaClient${index}`
+    imports.push(`import * as ${local} from ${JSON.stringify(toModuleSpecifier(reference.file))}`)
+    statements.push(`__ruvyxaRegisterClient(${JSON.stringify(reference.id)}, ${local})`)
+  })
+  return { imports, statements }
 }
 
-/**
- * The browser prelude that lets React resolve a client reference.
- *
- * `react-server-dom-webpack/client` asks for exactly two globals, and they are
- * the whole of webpack's contract: load the chunks a reference names, then hand
- * back the module for its id. Neither has anything webpack-specific about it —
- * this is a chunk loader and a registry — so a fifteen-line shim over Ruvyxa's
- * own registry satisfies it. The `webpack` variant is used because it is the
- * only one of the three React publishes whose Node server build runs without
- * webpack's own runtime present, which was measured rather than assumed.
- *
- * `__webpack_chunk_load__` is idempotent per URL: React asks for a chunk once
- * per reference, and two references in the same module would otherwise evaluate
- * it twice and register two module instances.
- */
-export function clientReferenceRuntimePrelude() {
-  return `const __ruvyxaChunks = new Map();
-globalThis.__webpack_chunk_load__ = (chunk) => {
-  let pending = __ruvyxaChunks.get(chunk);
-  if (!pending) {
-    pending = import(chunk);
-    __ruvyxaChunks.set(chunk, pending);
-  }
-  return pending;
-};
-globalThis.__webpack_require__ = (id) => {
-  const registry = globalThis.${CLIENT_MODULE_REGISTRY_GLOBAL};
-  const found = registry && registry[id];
-  if (!found) {
-    throw new Error(
-      "RUV1861 client reference " + id + " was not registered; its chunk did not load or did not register itself",
-    );
-  }
-  return found;
-};
-`
+/** Absolute path in the form a generated import statement accepts. */
+function toModuleSpecifier(filePath) {
+  return String(filePath).replaceAll('\\', '/')
 }
 
 /**

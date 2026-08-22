@@ -607,6 +607,7 @@ fn prerender_artifact_cache_reuses_and_invalidates_dependency_content() {
         kind: PrerenderJobKind::Render {
             route_file: source.clone(),
             mode: "full",
+            server_components: false,
         },
     };
     let cache = PrerenderArtifactCache {
@@ -1383,6 +1384,7 @@ fn prerender_html_includes_hashed_hydration_and_preload_assets() {
         "/docs/[slug]",
         "/docs/start",
         &BTreeMap::from([("slug".to_string(), serde_json::json!("start"))]),
+        None,
     );
 
     assert!(html.contains(r#"<link rel="modulepreload" href="/__ruvyxa/client/shared.456.js">"#));
@@ -1415,6 +1417,7 @@ fn prerender_deferred_hydration_loads_bundle_only_through_loader() {
         "/",
         "/",
         &BTreeMap::new(),
+        None,
     );
 
     assert!(!html.contains("modulepreload"), "{html}");

@@ -12,8 +12,20 @@
  * `crates/ruvyxa_bundler/src/output.rs` carries the Rust mirror, and
  * `tests/packages/ruvyxa/entry-templates.test.mjs` asserts the two stay in
  * step.
+ *
+ * The two server-components entries at the bottom of this file have no Rust
+ * mirror yet, because the Rust build path has no `react-server` target to emit
+ * them from. That is a gap in coverage, not a difference in behaviour: nothing
+ * in Rust produces a competing version of them today.
  */
 
+import {
+  RSC_BROWSER_PACKAGE,
+  RSC_SERVER_PACKAGE,
+  clientReferenceInstallPath,
+  clientReferenceRuntimePath,
+  clientRegistrySource,
+} from './client-references.mjs'
 import { compareCodeUnits } from './order.mjs'
 
 /** Global that carries the shared routing React context across bundles. */
@@ -546,6 +558,7 @@ export function routeTreeFunction({
   loadingName = null,
   notFoundName = null,
   levels = [],
+  provider = true,
 }) {
   const lines = [
     `  let tree = React.createElement(${pageName}, { params: ctx.params ?? {}, requestPath: ctx.path })`,
@@ -571,9 +584,20 @@ export function routeTreeFunction({
     metaNames.length > 0
       ? `${META_ELEMENT_LOCAL}(${META_RESOLVE_LOCAL}([${metaNames.join(', ')}], ctx)), `
       : ''
-  lines.push(`  return React.createElement(${ROUTE_CONTEXT_LOCAL}.Provider, {
+  // A server-components graph has no `React.createContext`: the react-server
+  // build does not export it, because a context read is a client concern. The
+  // provider is emitted by whichever graph hydrates the tree instead — the SSR
+  // pass and the browser entry both wrap the decoded element in it, so the
+  // markup they produce still matches.
+  if (provider) {
+    lines.push(`  return React.createElement(${ROUTE_CONTEXT_LOCAL}.Provider, {
     value: { pathname: ctx.path, params: ctx.params ?? {}, route: ${JSON.stringify(routePath)}, flight: ctx.flight },
   }, ${metaChild}tree)`)
+  } else if (metaChild) {
+    lines.push(`  return React.createElement(React.Fragment, null, ${metaChild}tree)`)
+  } else {
+    lines.push('  return tree')
+  }
   return `function ${name}(ctx) {\n${lines.join('\n')}\n}`
 }
 
@@ -899,6 +923,145 @@ ${
       },
     })
   })
+}
+`
+}
+
+/**
+ * Build the server-components entry: a module that renders a route's tree into
+ * a Flight payload.
+ *
+ * This is the only generated entry compiled with the `react-server` export
+ * condition, so it is the only one whose `React` has no `createContext`, no
+ * `useState`, and no class-component lifecycle. Three things that every other
+ * entry emits are therefore absent here, and each absence is a rule rather than
+ * an omission:
+ *
+ * - **No routing context provider.** `React.createContext` does not exist in
+ *   this graph. The provider is emitted by the two graphs that consume the
+ *   payload instead — {@link rscClientEntrySource} and the SSR pass — which
+ *   both wrap the decoded element in it, so the markup still matches.
+ * - **No error boundary.** `routeBoundaryPrelude` is a class component, and a
+ *   server graph has no class lifecycle. An `error.tsx` on a server-components
+ *   route has to be a `'use client'` module, which is the same rule React
+ *   itself imposes.
+ * - **No document assembly.** The payload is not HTML. Turning it into HTML is
+ *   the SSR pass's job, and it runs with the ordinary React.
+ *
+ * `loading.tsx` *is* supported: `React.Suspense` exists in both graphs.
+ *
+ * There is no Rust mirror of this function. `crates/ruvyxa_bundler/src/output.rs`
+ * mirrors the entries the Rust build path emits, and that path has no
+ * server-components target yet; when it gains one, this shape gains a second
+ * implementation and needs a shared fixture on that day.
+ *
+ * @param {object} options
+ * @param {string[]} options.imports Import statements for page and layouts.
+ * @param {string} options.pageName Identifier the page component is bound to.
+ * @param {string[]} options.layoutNames Layout identifiers, root-to-leaf.
+ * @param {string} options.routePath Route pattern, e.g. `/blog/[slug]`.
+ * @param {string|null} [options.loadingName] `loading.tsx` component identifier.
+ * @param {string[]} [options.metaNames] Namespace identifiers from {@link metaSourceImports}.
+ * @param {{ layout: string|null, template: string|null }[]} [options.levels]
+ */
+export function rscServerEntrySource({
+  imports,
+  pageName,
+  layoutNames,
+  routePath,
+  loadingName = null,
+  metaNames = [],
+  levels = [],
+}) {
+  const metaPrelude = metaNames.length > 0 ? `\n${routeMetaPrelude({ lang: false })}\n` : ''
+  const tree = routeTreeFunction({
+    name: '__ruvyxaTree',
+    pageName,
+    layoutNames,
+    routePath,
+    loadingName,
+    metaNames,
+    levels,
+    provider: false,
+  })
+  return `import React from "react"
+import { renderToReadableStream as __ruvyxaRenderFlight } from ${JSON.stringify(RSC_SERVER_PACKAGE)}
+${imports.join('\n')}
+${metaPrelude}
+${tree}
+
+export function flight(ctx, manifest, options) {
+  return __ruvyxaRenderFlight(__ruvyxaTree(ctx), manifest, options)
+}
+`
+}
+
+/**
+ * Build the browser entry for a server-components route.
+ *
+ * Unlike {@link clientEntrySource} this entry does **not** import the page: on
+ * a server-components route the page never reaches the browser, which is the
+ * point. What it imports is the set of `'use client'` modules the server graph
+ * turned into references, so `__webpack_require__` can answer for each id, plus
+ * the decoder that turns the payload the document was served with back into an
+ * element tree.
+ *
+ * The tree is wrapped in the same routing-context provider the SSR pass wraps
+ * it in, with the same value, so hydration sees the markup it rendered.
+ *
+ * A document served without a payload — a route that opted in but was rendered
+ * by an older server, or a response an error replaced — leaves the page as
+ * served rather than blanking it: `hydrateRoot` with nothing to hydrate would
+ * throw away server-rendered HTML the visitor is already reading.
+ *
+ * @param {object} options
+ * @param {{ id: string, file: string }[]} options.references Client modules to register.
+ * @param {string} options.routePath Route pattern for the routing context.
+ * @param {string} options.requestPathLiteral JS literal for the fallback path.
+ * @param {string} options.paramsLiteral JS literal for the fallback params.
+ */
+export function rscClientEntrySource({ references, routePath, requestPathLiteral, paramsLiteral }) {
+  // By absolute path rather than by alias: this entry is compiled by two
+  // bundlers — this package's during `ruvyxa dev`, the Rust one during
+  // `ruvyxa build` — and only the first knows the alias. Both bundle an
+  // absolute path into a browser target.
+  const runtimePath = clientReferenceRuntimePath()
+  const registry = clientRegistrySource(references, runtimePath)
+  // First, and the only import here whose *position* matters: importing it
+  // installs the globals `react-server-dom-webpack/client.browser` reads while
+  // its own module body runs.
+  return `import ${JSON.stringify(clientReferenceInstallPath())}
+${registry.imports.join('\n')}
+import { payloadStream as __ruvyxaPayloadStream, readInlinePayload as __ruvyxaReadPayload } from ${JSON.stringify(runtimePath)}
+import React from "react"
+import { hydrateRoot } from "react-dom/client"
+import { createFromReadableStream as __ruvyxaDecodeFlight } from ${JSON.stringify(RSC_BROWSER_PACKAGE)}
+
+${registry.statements.join('\n')}
+
+${routeContextPrelude()}
+
+${clientBootstrapPrelude()}
+
+const __ruvyxaCtx = {
+  path: globalThis.__RUVYXA_REQUEST_PATH__ ?? ${requestPathLiteral},
+  params: globalThis.__RUVYXA_ROUTE_PARAMS__ ?? ${paramsLiteral},
+}
+const __ruvyxaPayload = __ruvyxaReadPayload()
+
+if (__ruvyxaPayload !== null) {
+  const __ruvyxaResponse = __ruvyxaDecodeFlight(__ruvyxaPayloadStream(__ruvyxaPayload))
+  const __ruvyxaRoot = () =>
+    React.createElement(${ROUTE_CONTEXT_LOCAL}.Provider, {
+      value: { pathname: __ruvyxaCtx.path, params: __ruvyxaCtx.params ?? {}, route: ${JSON.stringify(routePath)}, flight: undefined },
+    }, React.use(__ruvyxaResponse))
+
+  if (globalThis.__RUVYXA_ROOT__) {
+    globalThis.__RUVYXA_ROOT__.render(React.createElement(__ruvyxaRoot))
+  } else {
+    globalThis.__RUVYXA_ROOT__ = hydrateRoot(document, React.createElement(__ruvyxaRoot))
+  }
+  window.__RUVYXA_HYDRATED = true
 }
 `
 }

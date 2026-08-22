@@ -35,8 +35,11 @@ export const products = loader(async ({ cache }) =>
 
 > **ไม่ใช่ React Server Components** Flight ของ Ruvyxa เป็นคนละอย่าง: เป็น JSON payload ต่อ route
 > ที่ page เลือกเปิดใช้เอง และถูก fetch ระหว่าง soft navigation ไม่ใช่ wire format ของ React Flight,
-> `flight` ไม่ใช่ server component และโมดูล `'use client'` ไม่ได้ถูกแปลงเป็น client reference Ruvyxa
-> ยังไม่ได้ implement RSC — ดู [ขอบเขตเอกสาร](18-documentation-scope-and-sources.md)
+> `flight` ไม่ใช่ server component และโมดูล `'use client'` ไม่ได้ถูกแปลงเป็น client reference โดย
+> export นี้ Ruvyxa มี React Server Components จริง แต่อยู่หลัง opt-in คนละตัวที่ไม่มีอะไรร่วมกับ
+> export นี้ — ดู [React Server Components](04-routing-rendering.md#react-server-components) และ
+> route หนึ่งใช้ทั้งสองอย่างพร้อมกันไม่ได้: page ที่ใช้ server components ไม่มี `flight` export
+> ให้เรียก เพราะข้อมูลของมันอยู่ใน payload ของ React อยู่แล้ว
 
 page สามารถ export `flight` เพื่อส่งข้อมูลสาธารณะที่ผูกกับ artifact version ได้ function นี้รับเฉพาะ
 canonical path และ route params และต้องคืนข้อมูลที่ serialize เป็น JSON ได้ Client component อ่าน

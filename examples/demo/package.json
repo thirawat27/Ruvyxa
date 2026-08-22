@@ -24,21 +24,22 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@ruvyxa/realtime": "workspace:*",
     "@ruvyxa/react": "workspace:*",
-    "ruvyxa": "workspace:*",
+    "@ruvyxa/realtime": "workspace:*",
     "react": "^19.2.8",
-    "react-dom": "^19.2.8"
+    "react-dom": "^19.2.8",
+    "react-server-dom-webpack": "19.2.8",
+    "ruvyxa": "workspace:*"
   },
   "devDependencies": {
-    "@types/react": "^19.2.18",
-    "@types/react-dom": "^19.2.4",
-    "@ruvyxa/adapter-node": "workspace:^",
     "@ruvyxa/adapter-bun": "workspace:^",
+    "@ruvyxa/adapter-cloudflare": "workspace:^",
+    "@ruvyxa/adapter-netlify": "workspace:^",
+    "@ruvyxa/adapter-node": "workspace:^",
     "@ruvyxa/adapter-static": "workspace:^",
     "@ruvyxa/adapter-vercel": "workspace:^",
-    "@ruvyxa/adapter-netlify": "workspace:^",
-    "@ruvyxa/adapter-cloudflare": "workspace:^"
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4"
   },
   "engines": {
     "node": ">=24.19.0"

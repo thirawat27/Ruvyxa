@@ -10,6 +10,15 @@ packages:
 overrides:
   react: 19.2.8
   react-dom: 19.2.8
+# `react-server-dom-webpack` lists webpack as a peer for one file — its bundler
+# plugin — which Ruvyxa never loads: the entries it does load (`server.edge`,
+# `client.edge`, `client.browser`) reach the framework through two globals and
+# nothing else. Auto-installing that peer pulls roughly fifty packages in to
+# satisfy a build tool this repo does not use. Apps that adopt server components
+# want the same rule; `docs/*/04-routing-rendering.md` says so.
+peerDependencyRules:
+  ignoreMissing:
+    - webpack
 allowBuilds:
   # Dart Sass uses this optional native watcher only for its CLI watch mode. Ruvyxa calls the
   # compile API directly, so keep the install deterministic without executing its build script.

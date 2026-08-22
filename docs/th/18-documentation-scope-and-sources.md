@@ -34,11 +34,16 @@ implementation ที่ไม่อยู่ในเอกสารเป็�
 
 ## สิ่งที่ยืนยันว่าไม่มี/ยังไม่ใช่ framework feature
 
-Ruvyxa ยังไม่ได้ implement **React Server Components** ไม่มี module graph แบบ `react-server` ไม่มี
-client-reference manifest และไม่มี wire format ของ React Flight ส่วน `'use client'` เป็นการระบุ
-module lane ที่ bundler บังคับใช้ ไม่ใช่ client reference ที่ React resolve เอง ส่วน `flight` export
-และ `useFlight()` ของ Ruvyxa เป็น JSON payload ต่อ route สำหรับ soft navigation ซึ่งไม่มีอะไรร่วมกับ
-RSC นอกจากชื่อ — ดู [Data, action และ API route](05-data-actions-api.md)
+**React Server Components** ถูก implement แล้ว โดยอยู่หลัง `export const serverComponents = true`
+และใช้กับ route ที่เลือกเปิดใช้เท่านั้น — ดู
+[Routing และ rendering](04-routing-rendering.md#react-server-components) ว่าไปป์ไลน์ครอบคลุมอะไร
+และปฏิเสธชุดใดบ้าง ทุกอย่างใต้หัวข้อ "การ deploy" ในหน้านั้นคือขอบเขตปัจจุบัน: route ที่ยังต้องใช้
+เซิร์ฟเวอร์ตอนมี request จะถูกปฏิเสธสำหรับการ build แบบ adapter และการเข้า route ที่ใช้ server
+components เป็นการร้องขอเอกสารใหม่ ไม่ใช่ soft navigation
+
+ส่วน `flight` export และ `useFlight()` ของ Ruvyxa เป็นคนละเรื่อง: เป็น JSON payload ต่อ route สำหรับ
+soft navigation ซึ่งไม่มีอะไรร่วมกับ wire format ของ React นอกจากชื่อ — ดู
+[Data, action และ API route](05-data-actions-api.md)
 
 codebase ไม่มี public generic dependency-injection API, generic queue, scheduler, framework event
 bus, database migration service, managed metrics backend, alert manager, backup/recovery

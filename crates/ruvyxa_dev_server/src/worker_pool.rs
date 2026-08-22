@@ -770,6 +770,27 @@ pub struct RenderSsrRequest<'a> {
     /// Ordered request headers, for `cookies()` and `headers()`.
     pub headers: &'a [(String, String)],
     pub method: &'a str,
+    /// Whether this route opted into the React Server Components pipeline.
+    pub server_components: bool,
+}
+
+/// One pre-render, whether at build time or on an ISR revalidation.
+///
+/// A struct rather than eight positional arguments: the two `&str` route
+/// fields next to each other are `requestPath` and `routePath`, and swapping
+/// them compiles and renders the wrong URL.
+pub struct RenderSsgRequest<'a> {
+    pub project_root: &'a Path,
+    pub app_dir: &'a Path,
+    pub page_file: &'a Path,
+    pub request_path: &'a str,
+    /// Route pattern, not the concrete URL.
+    pub route_path: &'a str,
+    pub params: &'a RouteParams,
+    /// `"full"` or `"ppr"` — whether to wait for all content or just the shell.
+    pub mode: &'a str,
+    /// Whether this route opted into the React Server Components pipeline.
+    pub server_components: bool,
 }
 
 /// One public Flight render, bound to the client artifact requesting it.
@@ -1429,6 +1450,7 @@ impl NodeWorkerPool {
             params: page.params.clone(),
             header_pairs: page.headers.to_vec(),
             method: page.method.to_ascii_uppercase(),
+            server_components: page.server_components,
         };
         self.send(request).await
     }
@@ -1511,6 +1533,7 @@ impl NodeWorkerPool {
         self.send(request).await
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn render_client(
         &self,
         project_root: &Path,
@@ -1519,6 +1542,7 @@ impl NodeWorkerPool {
         request_path: &str,
         route_path: &str,
         params: &RouteParams,
+        server_components: bool,
     ) -> Result<WorkerResponse> {
         let request = WorkerRequest::Client {
             id: next_request_id(),
@@ -1528,85 +1552,58 @@ impl NodeWorkerPool {
             request_path: request_path.to_string(),
             route_path: route_path.to_string(),
             params: params.clone(),
+            server_components,
         };
         self.send(request).await
     }
 
-    /// Pre-render a page (SSG/ISR background revalidation).
-    #[allow(clippy::too_many_arguments)]
-    pub async fn render_ssg(
+    /// Ask a worker for a server-components route's browser entry source.
+    pub async fn rsc_client_entry(
         &self,
         project_root: &Path,
         app_dir: &Path,
         page_file: &Path,
-        request_path: &str,
         route_path: &str,
-        params: &RouteParams,
-        mode: &str,
     ) -> Result<WorkerResponse> {
-        self.render_ssg_with_fresh(
-            project_root,
-            app_dir,
-            page_file,
-            request_path,
-            route_path,
-            params,
-            mode,
-            false,
-        )
+        self.send(WorkerRequest::RscClientEntry {
+            id: next_request_id(),
+            project_root: project_root.display().to_string(),
+            app_dir: app_dir.display().to_string(),
+            page_file: page_file.display().to_string(),
+            route_path: route_path.to_string(),
+        })
         .await
+    }
+
+    /// Pre-render a page (SSG/ISR background revalidation).
+    pub async fn render_ssg(&self, page: RenderSsgRequest<'_>) -> Result<WorkerResponse> {
+        self.render_ssg_with_fresh(page, false).await
     }
 
     /// Pre-render with a fresh module import while keeping compiled bundles cached.
     ///
     /// Production builds historically used one Node process per path. Retaining
     /// import isolation avoids exposing mutable page-module state across paths.
-    #[allow(clippy::too_many_arguments)]
-    pub async fn render_ssg_isolated(
-        &self,
-        project_root: &Path,
-        app_dir: &Path,
-        page_file: &Path,
-        request_path: &str,
-        route_path: &str,
-        params: &RouteParams,
-        mode: &str,
-    ) -> Result<WorkerResponse> {
-        self.render_ssg_with_fresh(
-            project_root,
-            app_dir,
-            page_file,
-            request_path,
-            route_path,
-            params,
-            mode,
-            true,
-        )
-        .await
+    pub async fn render_ssg_isolated(&self, page: RenderSsgRequest<'_>) -> Result<WorkerResponse> {
+        self.render_ssg_with_fresh(page, true).await
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn render_ssg_with_fresh(
         &self,
-        project_root: &Path,
-        app_dir: &Path,
-        page_file: &Path,
-        request_path: &str,
-        route_path: &str,
-        params: &RouteParams,
-        mode: &str,
+        page: RenderSsgRequest<'_>,
         fresh: bool,
     ) -> Result<WorkerResponse> {
         let request = WorkerRequest::Ssg {
             id: next_request_id(),
-            project_root: project_root.display().to_string(),
-            app_dir: app_dir.display().to_string(),
-            page_file: page_file.display().to_string(),
-            request_path: request_path.to_string(),
-            route_path: route_path.to_string(),
-            params: params.clone(),
-            mode: mode.to_string(),
+            project_root: page.project_root.display().to_string(),
+            app_dir: page.app_dir.display().to_string(),
+            page_file: page.page_file.display().to_string(),
+            request_path: page.request_path.to_string(),
+            route_path: page.route_path.to_string(),
+            params: page.params.clone(),
+            mode: page.mode.to_string(),
             fresh,
+            server_components: page.server_components,
         };
         self.send(request).await
     }
@@ -1959,6 +1956,7 @@ mod tests {
             params: BTreeMap::new(),
             mode: "full".to_string(),
             fresh,
+            server_components: false,
         }
     }
 

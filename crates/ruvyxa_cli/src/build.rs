@@ -521,6 +521,29 @@ pub(crate) async fn build_with_cache_override(
         print_build_phase(None, "assets prepared", detail, preparation_duration);
     }
 
+    // Server-components routes are bundled here rather than above: their browser
+    // bundle is built by the JavaScript graph that produced their payload, which
+    // needs a worker. It runs before the manifest is written so the pre-render
+    // pass below reads one manifest with every route in it.
+    let mut client_manifest = client_manifest;
+    if !args.server_only {
+        emit_server_component_client_bundles(
+            &args.root,
+            &app_dir,
+            &manifest,
+            &client_dir,
+            &config.build,
+            RuvyxaBuildCache {
+                dependency_hash: &config.config_dependency_hash,
+                directory: &build_cache_directory,
+            },
+            &plugin_session,
+            config.javascript_runtime(),
+            &mut client_manifest,
+        )
+        .await?;
+    }
+
     // The client manifest is machine-read (the server resolves per-route scripts
     // and preloads from it) and never hand-edited, so emit compact JSON: it is
     // part of the deployed artifact and is parsed on the render path.

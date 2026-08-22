@@ -60,6 +60,13 @@ pub enum WorkerRequest {
         header_pairs: Vec<(String, String)>,
         /// Request method, uppercased.
         method: String,
+        /// Render through the React Server Components pipeline.
+        ///
+        /// Additive: a worker script that predates server components ignores
+        /// the field and renders the route the way it always did, which is the
+        /// right answer for a worker that could not render it at all.
+        #[serde(rename = "serverComponents")]
+        server_components: bool,
     },
     #[serde(rename = "flight")]
     Flight {
@@ -152,6 +159,28 @@ pub enum WorkerRequest {
         #[serde(rename = "routePath")]
         route_path: String,
         params: RouteParams,
+        /// Build the browser bundle for a server-components route: the client
+        /// modules the payload references, not the page itself.
+        #[serde(rename = "serverComponents")]
+        server_components: bool,
+    },
+    /// Ask for a server-components route's browser entry *source*, not a bundle.
+    ///
+    /// The build compiles it with the Rust bundler, which is where `NODE_ENV`
+    /// folding, tree-shaking, minification, and the chunk budget live. The
+    /// source has to come from the worker because only the `react-server` graph
+    /// knows which of a route's modules are client references.
+    #[serde(rename = "rscClientEntry")]
+    RscClientEntry {
+        id: String,
+        #[serde(rename = "projectRoot")]
+        project_root: String,
+        #[serde(rename = "appDir")]
+        app_dir: String,
+        #[serde(rename = "pageFile")]
+        page_file: String,
+        #[serde(rename = "routePath")]
+        route_path: String,
     },
     #[serde(rename = "invalidate")]
     Invalidate {
@@ -192,6 +221,9 @@ pub enum WorkerRequest {
         mode: String,
         /// Build-only isolation: reload the module without discarding the compiled bundle cache.
         fresh: bool,
+        /// Render through the React Server Components pipeline.
+        #[serde(rename = "serverComponents")]
+        server_components: bool,
     },
     /// Resolve static route parameters during production builds.
     #[serde(rename = "staticParams")]
@@ -220,6 +252,7 @@ impl WorkerRequest {
             | Self::Ping { id, .. }
             | Self::Warmup { id, .. }
             | Self::Ssg { id, .. }
+            | Self::RscClientEntry { id, .. }
             | Self::StaticParams { id, .. } => id,
         }
     }
@@ -241,6 +274,7 @@ impl WorkerRequest {
                 | Self::Ssg { .. }
                 | Self::StaticParams { .. }
                 | Self::Client { .. }
+                | Self::RscClientEntry { .. }
                 | Self::Ping { .. }
                 | Self::Warmup { .. }
                 | Self::Invalidate { .. }
@@ -324,6 +358,15 @@ pub struct WorkerResponse {
     pub inputs_version: Option<String>,
     /// Absolute source files used by the compiled bundle.
     pub inputs: Option<Vec<PathBuf>>,
+    /// Browser entry source for a server-components route, from `rscClientEntry`.
+    pub entry_source: Option<String>,
+    /// React Flight payload for a server-components render.
+    ///
+    /// Distinct from `flight` above, which carries Ruvyxa's own JSON route-data
+    /// envelope and has nothing to do with React's wire format. Both names are
+    /// on the wire because both things exist; naming this one `flight` too
+    /// would have made one of the two silently win.
+    pub rsc_payload: Option<String>,
 }
 
 impl WorkerResponse {
@@ -364,6 +407,95 @@ pub(crate) fn request_id_of(frame: &str) -> String {
 mod tests {
     use super::*;
 
+    /// Every request that can render a page carries the server-components
+    /// opt-in, under the name the worker reads.
+    ///
+    /// The three are separate variants but one decision: `ssr` serves a
+    /// request, `ssg` pre-renders at build time, and `client` builds the
+    /// browser bundle. A route that opted in and reached only two of them would
+    /// render its payload and then ship a bundle with nothing to hydrate.
+    #[test]
+    fn every_page_request_carries_the_server_components_opt_in() {
+        let ssr = WorkerRequest::Ssr {
+            id: "1".to_string(),
+            project_root: "/project".to_string(),
+            app_dir: "/project/app".to_string(),
+            page_file: "/project/app/page.tsx".to_string(),
+            request_path: "/".to_string(),
+            request_target: "/".to_string(),
+            route_path: "/".to_string(),
+            params: BTreeMap::new(),
+            header_pairs: Vec::new(),
+            method: "GET".to_string(),
+            server_components: true,
+        };
+        let ssg = WorkerRequest::Ssg {
+            id: "2".to_string(),
+            project_root: "/project".to_string(),
+            app_dir: "/project/app".to_string(),
+            page_file: "/project/app/page.tsx".to_string(),
+            request_path: "/".to_string(),
+            route_path: "/".to_string(),
+            params: BTreeMap::new(),
+            mode: "full".to_string(),
+            fresh: true,
+            server_components: true,
+        };
+        let client = WorkerRequest::Client {
+            id: "3".to_string(),
+            project_root: "/project".to_string(),
+            app_dir: "/project/app".to_string(),
+            page_file: "/project/app/page.tsx".to_string(),
+            request_path: "/".to_string(),
+            route_path: "/".to_string(),
+            params: BTreeMap::new(),
+            server_components: true,
+        };
+
+        for request in [ssr, ssg, client] {
+            let json = serde_json::to_value(&request).unwrap();
+            assert_eq!(
+                json.get("serverComponents"),
+                Some(&serde_json::Value::Bool(true)),
+                "{json}"
+            );
+        }
+    }
+
+    /// The browser entry for a server-components route comes back as source,
+    /// not as a bundle: the build compiles it with the Rust bundler.
+    #[test]
+    fn the_rsc_client_entry_request_asks_for_a_route_by_pattern() {
+        let request = WorkerRequest::RscClientEntry {
+            id: "4".to_string(),
+            project_root: "/project".to_string(),
+            app_dir: "/project/app".to_string(),
+            page_file: "/project/app/blog/[slug]/page.tsx".to_string(),
+            route_path: "/blog/[slug]".to_string(),
+        };
+        let json = serde_json::to_value(&request).unwrap();
+        assert_eq!(json["type"], "rscClientEntry");
+        assert_eq!(json["routePath"], "/blog/[slug]");
+        assert_eq!(json["pageFile"], "/project/app/blog/[slug]/page.tsx");
+    }
+
+    /// React's payload and Ruvyxa's own Flight envelope are different things
+    /// travelling on the same wire, so they are read from different fields.
+    #[test]
+    fn the_response_keeps_the_two_flight_payloads_apart() {
+        let response: WorkerResponse = serde_json::from_str(
+            r#"{"id":"1","ok":true,"rscPayload":"0:[]","flight":"{\"protocol\":\"ruvyxa.flight\"}"}"#,
+        )
+        .unwrap();
+        assert_eq!(response.rsc_payload.as_deref(), Some("0:[]"));
+        assert!(response.flight.is_some());
+
+        // Absent from a worker that predates server components, which is not an
+        // error: that worker rendered the route the way it always did.
+        let legacy: WorkerResponse = serde_json::from_str(r#"{"id":"1","ok":true}"#).unwrap();
+        assert_eq!(legacy.rsc_payload, None);
+    }
+
     #[test]
     fn ssr_worker_request_serializes_path_and_query_separately() {
         let request = WorkerRequest::Ssr {
@@ -375,6 +507,7 @@ mod tests {
             request_target: "/search?q=ruvyxa".to_string(),
             route_path: "/search".to_string(),
             params: BTreeMap::new(),
+            server_components: false,
             header_pairs: Vec::new(),
             method: "GET".to_string(),
         };

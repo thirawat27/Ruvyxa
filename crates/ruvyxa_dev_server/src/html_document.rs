@@ -588,6 +588,32 @@ where
     format!(r#"<script type="application/json" id="{BOOTSTRAP_ELEMENT_ID}">{json}</script>"#)
 }
 
+/// Element id the React Flight payload rides in.
+///
+/// Mirrors `RSC_PAYLOAD_ELEMENT_ID` in
+/// `packages/ruvyxa/runtime/rsc-client-runtime.mjs`, which is the reader.
+pub const RSC_PAYLOAD_ELEMENT_ID: &str = "__ruvyxa-rsc";
+
+/// Render a server-components route's Flight payload as a JSON data block.
+///
+/// The browser needs the exact bytes the SSR pass rendered from: it replays them
+/// through the same decoder to rebuild the tree it is hydrating. Fetching them
+/// again instead would run every server component a second time and could
+/// produce a different tree from the markup already on screen.
+///
+/// A data block rather than an executable script, for the reason
+/// [`bootstrap_data_block`] is one: a `Content-Security-Policy` without
+/// `'unsafe-inline'` blocks inline script, and a payload that differs per
+/// request cannot be covered by a hash.
+///
+/// The payload is quoted as a JSON *string* rather than embedded raw. It is a
+/// line-delimited format, not a JSON document, and quoting is what lets the same
+/// escaping every other block here uses apply to it unchanged.
+pub fn rsc_payload_block(payload: &str) -> String {
+    let json = safe_json_for_script(&serde_json::Value::String(payload.to_string()).to_string());
+    format!(r#"<script type="application/json" id="{RSC_PAYLOAD_ELEMENT_ID}">{json}</script>"#)
+}
+
 pub fn safe_json_for_script(json: &str) -> String {
     json.replace('<', "\\u003c")
         .replace('>', "\\u003e")

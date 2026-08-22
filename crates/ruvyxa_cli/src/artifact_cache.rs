@@ -60,6 +60,13 @@ const WORKER_RUNTIME_FILES: &[&str] = &[
     // Which interceptions a route composes. A change here changes the client
     // entry the worker emits, so prerendered output built from it is stale.
     "route-intercepts.mjs",
+    // The two halves of a server-components render: the pipeline that turns a
+    // route into HTML plus a payload, and the browser-side registry both it and
+    // the client bundle resolve reference ids through. A change to either
+    // changes what a pre-rendered page ships.
+    "server-components.mjs",
+    "rsc-client-runtime.mjs",
+    "rsc-client-install.mjs",
     "flight.mjs",
     "react-compiler.mjs",
 ];

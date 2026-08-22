@@ -183,6 +183,11 @@ pub(crate) fn emit_client_bundles_with_session(
         // `export const hydrate = false` pages ship no client bundle at all;
         // prerender injection and the serve path skip them via the same flag.
         .filter(|route| route.render.ships_client_bundle())
+        // A server-components route's browser bundle holds the modules its
+        // payload references, not the page — and only the `react-server` graph
+        // knows which those are. `emit_server_component_client_bundles` builds
+        // them through the graph that produced the payload.
+        .filter(|route| !route.render.server_components)
         .cloned()
         .collect::<Vec<_>>();
     let parallelism = build_parallelism(build.parallelism, page_routes.len());
@@ -1208,4 +1213,169 @@ pub(crate) fn parse_split_strategy(
             "RUV1601 build.split must be `single`, `route`, or `manual`, got `{other}`"
         ),
     }
+}
+
+/// Emit the browser bundles for server-components routes, and register them.
+///
+/// These routes are excluded from the bundling above because the Rust bundler
+/// has no `react-server` graph, and therefore no way to know which of a route's
+/// modules are client references. The JavaScript graph does know — it produced
+/// the payload that names them — so it writes the entry, and the Rust bundler
+/// compiles it. One authority for "which modules are client modules", one
+/// authority for how a browser bundle is emitted.
+///
+/// Building the bundle in the worker instead was tried and rejected: this
+/// package's JavaScript compiler deliberately does not minify, and it does not
+/// fold `process.env.NODE_ENV`, so the output carried both of React's builds and
+/// came to 1.5 MB for a page with one button on it.
+///
+/// Returns the number of routes bundled. Zero starts no worker, so an app that
+/// uses no server components pays nothing for this.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn emit_server_component_client_bundles(
+    root: &Path,
+    app_dir: &Path,
+    manifest: &RouteManifest,
+    client_dir: &Path,
+    build: &BuildConfigOptions,
+    cache: RuvyxaBuildCache<'_>,
+    plugin_session: &TypeScriptPluginBuildSession,
+    runtime: ruvyxa_dev_server::JavaScriptRuntime,
+    client_manifest: &mut serde_json::Value,
+) -> anyhow::Result<usize> {
+    let routes = server_component_page_routes(manifest);
+    if routes.is_empty() {
+        return Ok(0);
+    }
+
+    let worker_env = crate::prerender::build_worker_env(root, build, runtime)?;
+    let pool = ruvyxa_dev_server::NodeWorkerPool::start_with_size_and_runtime(
+        root,
+        worker_env,
+        Some(1),
+        runtime,
+    )
+    .await
+    .map_err(|error| anyhow::anyhow!(error.to_string()))?;
+
+    let mut sources = Vec::with_capacity(routes.len());
+    for route in &routes {
+        let response = pool
+            .rsc_client_entry(root, app_dir, &route.file, &route.path)
+            .await
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "Server-components client entry failed for {}: {error}",
+                    route.path
+                )
+            })?;
+        if !response.ok {
+            let code = response.code.unwrap_or_else(|| "RUV1300".to_string());
+            let message = response
+                .message
+                .unwrap_or_else(|| "unknown error".to_string());
+            anyhow::bail!(
+                "Server-components client entry failed for {}: {code} {message}",
+                route.path
+            );
+        }
+        let source = response.entry_source.ok_or_else(|| {
+            anyhow::anyhow!(
+                "Server-components client entry for {} produced no source",
+                route.path
+            )
+        })?;
+        sources.push(source);
+    }
+    pool.shutdown().await;
+
+    let bundle_context =
+        bundle_context_for_build(cache.dependency_hash, cache.directory, plugin_session)?;
+    let mut entries = Vec::with_capacity(routes.len());
+    for (route, source) in routes.iter().zip(&sources) {
+        let input = client_bundle_input(root, app_dir, route, build)?;
+        let output = ruvyxa_bundler::bundle_entry_source(source, input, &bundle_context)
+            .map_err(|error| anyhow::anyhow!("Ruvyxa Bundler error for {}: {error}", route.path))?;
+        for diagnostic in &output.diagnostics {
+            tracing::warn!("{diagnostic}");
+        }
+        let hash = content_hash(&output.code);
+        let file_name = format!("{hash}.js");
+        let source_map_file = output.source_map.as_ref().map(|_| format!("{hash}.js.map"));
+        let script = match (&source_map_file, &output.source_map) {
+            (Some(name), Some(map)) => {
+                fs::write(client_dir.join(name), map.as_bytes())?;
+                format!("{}\n//# sourceMappingURL={name}\n", output.code)
+            }
+            _ => output.code.clone(),
+        };
+        fs::write(client_dir.join(&file_name), script.as_bytes())?;
+        entries.push(serde_json::json!({
+            "path": route.path,
+            "entry": route.file,
+            "file": file_name,
+            "src": format!("/__ruvyxa/client/{file_name}"),
+            "sourceMap": source_map_file,
+            "bytes": script.len(),
+            "outputBytes": output.stats.output_bytes,
+            "estimatedGzBytes": output.stats.estimated_gz_bytes,
+            "durationMs": output.stats.duration_ms,
+            "moduleCount": output.stats.module_count,
+            "cacheHits": output.stats.cache_hits,
+            "artifactCacheHit": false,
+            "treeShakenModules": output.stats.tree_shaken_modules,
+            "hydration": serde_json::to_value(route.render.hydration)?,
+            // A server-components route ships one bundle holding every client
+            // module it references, so there is nothing to preload separately
+            // and nothing to split out.
+            "sharedChunks": [],
+            "chunks": [],
+            // Ruvyxa's own Flight transport and `'use cache'` apply to a page's
+            // `flight(context)` export, which a server-components page does not
+            // have: its data is already in the React payload.
+            "flight": false,
+            "cache": false,
+            "serverComponents": true,
+            "optimized": true,
+            "treeShaken": build.tree_shaking.unwrap_or(true),
+            "chunkStrategy": build.split_strategy.as_deref().unwrap_or("route"),
+        }));
+    }
+    bundle_context
+        .save_incremental()
+        .context("failed to persist incremental module graph")?;
+
+    let bundled = entries.len();
+    let all_routes = client_manifest
+        .get_mut("routes")
+        .and_then(|routes| routes.as_array_mut())
+        .ok_or_else(|| anyhow::anyhow!("client manifest has no routes array"))?;
+    all_routes.extend(entries);
+    all_routes.sort_by(|left, right| {
+        let key = |route: &serde_json::Value| {
+            route
+                .get("path")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string()
+        };
+        key(left).cmp(&key(right))
+    });
+    // Rewritten rather than appended to: the lean sibling manifest was already
+    // emitted for the routes the Rust bundler produced above, and a server that
+    // read the stale copy would serve a server-components route with no bundle.
+    write_client_route_manifest(client_dir, all_routes)?;
+    Ok(bundled)
+}
+
+/// Page routes that render through the server-components pipeline and ship JS.
+pub(crate) fn server_component_page_routes(manifest: &RouteManifest) -> Vec<RouteEntry> {
+    manifest
+        .routes
+        .iter()
+        .filter(|route| route.kind == ruvyxa_graph::RouteKind::Page)
+        .filter(|route| route.render.server_components)
+        .filter(|route| route.render.ships_client_bundle())
+        .cloned()
+        .collect()
 }
