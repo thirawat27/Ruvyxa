@@ -456,50 +456,59 @@ struct ServerComponentsRoute {
 /// cannot set a custom header without a preflight, and nothing here answers one,
 /// so a third-party site cannot reach either verb even with credentials
 /// attached.
+///
+/// The refusal is boxed. An `axum` `Response` is far larger than the resolved
+/// route, so an unboxed `Err` would make every caller of this function carry a
+/// response-sized value on the path that succeeds — which is every request that
+/// works.
 async fn resolve_server_components_route(
     state: &AppState,
     headers: &HeaderMap,
     path: &str,
-) -> Result<ServerComponentsRoute, Response> {
+) -> Result<ServerComponentsRoute, Box<Response>> {
     if headers
         .get(RSC_REQUEST_HEADER)
         .and_then(|value| value.to_str().ok())
         != Some("1")
     {
-        return Err(with_security_headers(
+        return Err(Box::new(with_security_headers(
             (
                 StatusCode::BAD_REQUEST,
                 "Server-components requests require the Ruvyxa navigation header",
             )
                 .into_response(),
-        ));
+        )));
     }
     let Ok(request_path) = canonical_request_path(path) else {
-        return Err(with_security_headers(
+        return Err(Box::new(with_security_headers(
             (
                 StatusCode::BAD_REQUEST,
                 "Server-components request has an invalid route",
             )
                 .into_response(),
-        ));
+        )));
     };
     let (manifest, router) = match state.runtime_cache.router(&state.config).await {
         Ok(snapshot) => snapshot,
         Err(error) => {
             error!(%error, "Server-components route snapshot failed");
-            return Err(with_security_headers(
+            return Err(Box::new(with_security_headers(
                 StatusCode::INTERNAL_SERVER_ERROR.into_response(),
-            ));
+            )));
         }
     };
     let Some(route_match) = router.find(&manifest, &request_path) else {
-        return Err(with_security_headers(StatusCode::NOT_FOUND.into_response()));
+        return Err(Box::new(with_security_headers(
+            StatusCode::NOT_FOUND.into_response(),
+        )));
     };
     // A route that never opted in has no payload to give and no server function
     // to run, and answering either would mean going through a pipeline it was
     // not written for.
     if route_match.route.kind != RouteKind::Page || !route_match.route.render.server_components {
-        return Err(with_security_headers(StatusCode::NOT_FOUND.into_response()));
+        return Err(Box::new(with_security_headers(
+            StatusCode::NOT_FOUND.into_response(),
+        )));
     }
     Ok(ServerComponentsRoute {
         file: route_match.route.file.clone(),
@@ -562,7 +571,7 @@ pub(crate) async fn rsc_payload_endpoint(
 ) -> Response {
     let route_match = match resolve_server_components_route(&state, &headers, &query.path).await {
         Ok(resolved) => resolved,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
     let request_path = route_match.path.clone();
     let header_pairs = forwarded_header_pairs(&headers);
@@ -657,7 +666,7 @@ pub(crate) async fn rsc_action_endpoint(
     }
     let route_match = match resolve_server_components_route(&state, &headers, &query.path).await {
         Ok(resolved) => resolved,
-        Err(response) => return response,
+        Err(response) => return *response,
     };
 
     let content_type = headers
