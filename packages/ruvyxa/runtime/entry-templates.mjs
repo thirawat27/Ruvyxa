@@ -805,7 +805,10 @@ window.__RUVYXA_HYDRATED = true
 }
 
 /**
- * Build a Node SSR entry that streams through `renderToPipeableStream`.
+ * Build a server SSR entry that streams through `renderToPipeableStream`, or
+ * through `renderToReadableStream` on Bun and Deno, whose `react-dom/server`
+ * has no pipeable renderer. Both buffer the stream into the document string
+ * this entry returns; the streaming renderer is what lets a component await.
  *
  * @param {object} options
  * @param {string[]} options.imports Import statements for page, layouts, and specials.
@@ -876,17 +879,7 @@ async function __ruvyxaRenderDocument(ctx) {
   const tree = __ruvyxaTree(ctx)
 
   if (typeof ReactDomServer.renderToPipeableStream !== "function") {
-${
-  serverRecovers
-    ? `    try {
-      return "<!doctype html>" + ReactDomServer.renderToString(tree)
-    } catch (error) {
-      const recovery = __ruvyxaRecovery(ctx, error)
-      if (recovery) return "<!doctype html>" + ReactDomServer.renderToString(recovery)
-      throw error
-    }`
-    : '    return "<!doctype html>" + ReactDomServer.renderToString(tree)'
-}
+    return __ruvyxaRenderWebStream(ctx, tree)
   }
 
   return new Promise((resolve, reject) => {
@@ -941,6 +934,74 @@ ${
       },
     })
   })
+}
+
+/**
+ * Render the document on a runtime whose \`react-dom/server\` is a web build.
+ *
+ * Bun and Deno resolve that specifier to an entry point exporting
+ * \`renderToReadableStream\` and no \`renderToPipeableStream\`. \`renderToString\`
+ * is not the substitute it looks like: it is the synchronous legacy renderer,
+ * and a component that awaits anything — every async server component — makes
+ * it throw "A component suspended while responding to synchronous input"
+ * instead of rendering. It stays here as the last resort for a runtime that
+ * offers neither streaming renderer.
+ */
+async function __ruvyxaRenderWebStream(ctx, tree) {
+  if (typeof ReactDomServer.renderToReadableStream !== "function") {
+${
+  serverRecovers
+    ? `    try {
+      return "<!doctype html>" + ReactDomServer.renderToString(tree)
+    } catch (error) {
+      const recovery = __ruvyxaRecovery(ctx, error)
+      if (recovery) return "<!doctype html>" + ReactDomServer.renderToString(recovery)
+      throw error
+    }`
+    : '    return "<!doctype html>" + ReactDomServer.renderToString(tree)'
+}
+  }
+
+  let captured = null
+  let html = null
+  try {
+    const stream = await ReactDomServer.renderToReadableStream(tree, {
+      onError(error) {
+        if (!captured) captured = error
+      },
+    })
+${
+  readyEvent === 'onAllReady'
+    ? `    // Nothing is read until the whole render is done, which is what makes
+    // the buffered document hold finished markup rather than a fallback and
+    // the inline script that replaces it. The pipeable path above says the
+    // same thing by piping from \`onAllReady\`.
+    await stream.allReady
+`
+    : ''
+}    html = await new Response(stream).text()
+  } catch (error) {
+    if (!captured) captured = error
+  }
+
+  if (captured) {${
+    serverRecovers
+      ? `
+    const recovery = __ruvyxaRecovery(ctx, captured)
+    if (recovery) return "<!doctype html>" + ReactDomServer.renderToString(recovery)`
+      : ''
+  }
+${
+  tolerateStreamErrors || serverRecovers
+    ? `    if (globalThis.process?.env?.RUVYXA_DEBUG) console.error("[ruvyxa] streaming render error", captured)
+    // A slot that threw is survivable; a shell that never produced a document
+    // is not, and there is nothing to return in its place.
+    if (html === null) throw captured`
+    : '    throw captured'
+}
+  }
+
+  return html.trimStart().toLowerCase().startsWith("<!doctype") ? html : "<!doctype html>" + html
 }
 `
 }
