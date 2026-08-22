@@ -1008,6 +1008,21 @@ impl NodeWorkerPool {
     /// [`NodeWorkerPool::retiring`] for why leaving those to their drain tasks
     /// orphaned them. Shutting a draining worker down here also unblocks its
     /// task, because closing the worker clears its pending set.
+    /// How many worker processes are currently in selection.
+    ///
+    /// Exposed so a caller with a batch of independent requests can size its own
+    /// concurrency to the pool instead of guessing. Sending more than this does
+    /// not go faster — the extra requests queue on a worker — and it does raise
+    /// how much compilation output is alive at once.
+    #[must_use]
+    pub fn size(&self) -> usize {
+        self.workers
+            .read()
+            .map(|workers| workers.len())
+            .unwrap_or(1)
+            .max(1)
+    }
+
     pub async fn shutdown(&self) {
         let live = match self.workers.read() {
             Ok(workers) => workers.clone(),

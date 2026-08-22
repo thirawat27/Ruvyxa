@@ -638,6 +638,117 @@ fn prerender_artifact_cache_reuses_and_invalidates_dependency_content() {
     assert!(load_prerender_artifact(&next_build_cache, &job).is_none());
 }
 
+/// A server-components answer is only reusable while every file behind it is
+/// unchanged — and "behind it" means both compiles, not just the one that names
+/// the route.
+///
+/// The expensive part of a warm production build was asking the `react-server`
+/// graph what a route's browser entry contains and which `'use server'` modules
+/// it reaches. Neither depends on the request, so both are cached. What makes
+/// that safe is the input list the worker reports: the union of the server
+/// graph's files and the client registry's, because the server graph reads a
+/// `'use client'` module and stops there. The action module behind one is
+/// invisible to it, and the reference ids in this answer are versioned by that
+/// module's source — so an answer kept across an edit to it hands the browser a
+/// proxy for a function the server no longer registers.
+/// `server-component-entry-inputs.test.mjs` holds the worker to reporting both.
+#[test]
+fn server_component_entry_cache_invalidates_on_an_edit_behind_a_client_component() {
+    let temp = tempfile::tempdir().unwrap();
+    let page = temp.path().join("page.tsx");
+    let actions = temp.path().join("actions.ts");
+    fs::write(&page, "export const serverComponents = true").unwrap();
+    fs::write(&actions, "'use server'\nexport const save = () => {}").unwrap();
+    let inputs = vec![page.clone(), actions.clone()];
+    let reference = ruvyxa_dev_server::ServerReferenceSource {
+        id: "ruv:s_0123456789abcdef".to_string(),
+        file: actions.clone(),
+        source: "export const save = () => {}".to_string(),
+    };
+    let cache = ServerComponentEntryCache {
+        directory: temp.path().join("cache"),
+        dependency_hash: "config-v1".to_string(),
+        context_hash: "worker-v1".to_string(),
+        fingerprints: Arc::new(ArtifactFingerprintCache::default()),
+    };
+
+    store_server_component_entry(&cache, "/rsc", &inputs, "export default 1", &[reference]);
+    let hit = load_server_component_entry(&cache, "/rsc").expect("a stored entry must be reusable");
+    assert_eq!(hit.entry_source, "export default 1");
+    assert_eq!(hit.server_references.len(), 1);
+
+    fs::write(&actions, "'use server'\nexport const save = (word) => word").unwrap();
+    let next_build = ServerComponentEntryCache {
+        fingerprints: Arc::new(ArtifactFingerprintCache::default()),
+        ..cache
+    };
+    assert!(
+        load_server_component_entry(&next_build, "/rsc").is_none(),
+        "an edited action must not be answered from the previous reference list"
+    );
+}
+
+/// Upgrading Ruvyxa, or changing what the worker is started with, changes what
+/// the same files compile to — so neither may be left out of cache identity.
+#[test]
+fn server_component_entry_cache_answers_only_for_its_own_worker_context() {
+    let temp = tempfile::tempdir().unwrap();
+    let page = temp.path().join("page.tsx");
+    fs::write(&page, "export const serverComponents = true").unwrap();
+    let cache = ServerComponentEntryCache {
+        directory: temp.path().join("cache"),
+        dependency_hash: "config-v1".to_string(),
+        context_hash: "worker-v1".to_string(),
+        fingerprints: Arc::new(ArtifactFingerprintCache::default()),
+    };
+    store_server_component_entry(&cache, "/rsc", std::slice::from_ref(&page), "entry", &[]);
+
+    for (dependency_hash, context_hash) in [("config-v2", "worker-v1"), ("config-v1", "worker-v2")]
+    {
+        let changed = ServerComponentEntryCache {
+            directory: cache.directory.clone(),
+            dependency_hash: dependency_hash.to_string(),
+            context_hash: context_hash.to_string(),
+            fingerprints: Arc::new(ArtifactFingerprintCache::default()),
+        };
+        assert!(
+            load_server_component_entry(&changed, "/rsc").is_none(),
+            "{dependency_hash}/{context_hash} must not read an entry produced under another"
+        );
+    }
+}
+
+/// The environment the worker runs under decides which modules its graph
+/// resolves, so two environments cannot share one cached answer.
+#[test]
+fn server_component_context_hash_follows_the_worker_environment() {
+    let temp = tempfile::tempdir().unwrap();
+    let base = BTreeMap::from([("RUVYXA_JSX_RUNTIME".to_string(), "automatic".to_string())]);
+    let classic = BTreeMap::from([("RUVYXA_JSX_RUNTIME".to_string(), "classic".to_string())]);
+    let runtime = ruvyxa_dev_server::JavaScriptRuntime::Node;
+
+    let baseline = server_component_context_hash(temp.path(), runtime, &base);
+    assert_eq!(
+        baseline,
+        server_component_context_hash(temp.path(), runtime, &base),
+        "the same inputs must produce the same hash"
+    );
+    assert_ne!(
+        baseline,
+        server_component_context_hash(temp.path(), runtime, &classic),
+        "a different JSX runtime compiles to different modules"
+    );
+    assert_ne!(
+        baseline,
+        server_component_context_hash(
+            temp.path(),
+            ruvyxa_dev_server::JavaScriptRuntime::Bun,
+            &base
+        ),
+        "a config may branch on `process.versions`, so the runtime is part of the answer"
+    );
+}
+
 #[test]
 fn dev_config_respects_overlay_and_trace_flags() {
     let args = ServerArgs {
@@ -1535,15 +1646,28 @@ fn prerender_deferred_hydration_loads_bundle_only_through_loader() {
     assert!(!html.contains(r#"src="/__ruvyxa/client/home.js""#));
 }
 
+/// A pre-rendered document is served from disk with no renderer left to touch
+/// it, so everything the live pipeline puts in the head has to be in it already
+/// — the stylesheet and the links for what the project publishes.
+///
+/// The icon link is why: without it a browser falls back to requesting
+/// `/favicon.ico`, and a project that publishes an icon under another name has
+/// no such file. Every production page load logged a 404 that `ruvyxa dev`,
+/// which renders through the pipeline that injects these, never showed.
 #[test]
-fn prerender_html_includes_global_styles_in_the_document_head() {
-    let html = inject_prerender_styles(
+fn prerender_html_includes_the_document_head_the_live_renderer_composes() {
+    let html = inject_prerender_head(
         "<!doctype html><html><head><title>Docs</title></head><body><main>Guide</main></body></html>",
-        "body { color: rebeccapurple; }",
+        &PrerenderHead {
+            asset_links: Arc::from(r#"<link rel="icon" type="image/png" href="/ruvyxa.png">"#),
+            styles: Arc::from("body { color: rebeccapurple; }"),
+        },
     );
 
     assert!(html.contains(r#"<style data-ruvyxa-css>body { color: rebeccapurple; }</style>"#));
+    assert!(html.contains(r#"<link rel="icon" type="image/png" href="/ruvyxa.png">"#));
     assert!(html.find("data-ruvyxa-css").unwrap() < html.find("</head>").unwrap());
+    assert!(html.find(r#"rel="icon""#).unwrap() < html.find("</head>").unwrap());
     assert!(html.contains("<main>Guide</main>"));
 }
 

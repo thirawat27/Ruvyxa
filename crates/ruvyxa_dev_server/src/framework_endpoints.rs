@@ -153,63 +153,130 @@ pub(crate) async fn client_manifest(State(state): State<Arc<AppState>>) -> Respo
         return with_security_headers(response);
     }
 
-    let routes = match state.runtime_cache.router(&state.config).await {
-        Ok((manifest, _)) => {
-            let eligible = manifest
-                .routes
-                .iter()
-                .filter(|route| route.kind == RouteKind::Page && route.render.ships_client_bundle())
-                .cloned()
-                .collect::<Vec<_>>();
-            let mut entries = Vec::with_capacity(eligible.len());
-            for route in eligible {
-                let Ok(bundle) = render_client_bundle_pooled(&state, &route.path).await else {
-                    continue;
-                };
-                // Hashed unstamped, exactly as `client_bundle` hashes it before
-                // appending the stamp, so the version this manifest advertises
-                // is the one the browser reads back out of the bundle.
-                let artifact = client_artifact_version(&bundle.document.html);
-                let source = tokio::fs::read_to_string(&route.file)
-                    .await
-                    .unwrap_or_default();
-                let module = ruvyxa_bundler::ast::parse_module(&source);
-                let mut entry = serde_json::json!({
-                    "path": route.path,
-                    "src": format!(
-                        "/__ruvyxa/client?path={}",
-                        url_encode_component(&route.path)
-                    ),
-                    "artifactVersion": artifact,
-                    "flight": ruvyxa_bundler::ast::has_named_runtime_export(&source, &module, "flight"),
-                    "cache": ruvyxa_bundler::reference_manifest::has_module_directive(&source, "use cache"),
-                });
-                // Held to the same shape the build writes, in
-                // `write_client_route_manifest`: present only when true.
-                if route.render.server_components {
-                    entry["serverComponents"] = serde_json::Value::Bool(true);
-                }
-                entries.push(entry);
-            }
-            entries
-        }
-        Err(error) => {
-            error!(%error, "client manifest request failed");
-            Vec::new()
-        }
-    };
-
-    let body = serde_json::json!({ "routes": routes }).to_string();
-    let mut response = body.into_response();
+    let body = synthesized_route_manifest(&state).await;
+    let mut response = body.to_string().into_response();
     response.headers_mut().insert(
         header::CONTENT_TYPE,
         HeaderValue::from_static("application/json; charset=utf-8"),
     );
-    // Never cache: routes appear and disappear as files are added during dev.
+    // Never cache in the browser: routes appear and disappear as files are
+    // added during dev, and the server's own copy is dropped on every watcher
+    // event.
     response
         .headers_mut()
         .insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
     with_security_headers(response)
+}
+
+/// The dev route table, rebuilt only when something on disk has changed.
+///
+/// The work below is proportional to the number of page routes and asks the
+/// worker pool for each one's browser bundle, because the hash of that bundle is
+/// the `artifactVersion` the client router compares against. The browser fetches
+/// this table on every document load, so doing it per request made the endpoint
+/// the slowest thing `ruvyxa dev` served — two orders of magnitude above a page
+/// render, and seconds on the first request of a session.
+async fn synthesized_route_manifest(state: &Arc<AppState>) -> Arc<str> {
+    loop {
+        let generation = match state.runtime_cache.cached_client_routes().await {
+            Ok(body) => return body,
+            Err(generation) => generation,
+        };
+        let body: Arc<str> = Arc::from(build_route_manifest_body(state).await.as_str());
+        if let Some(stored) = state
+            .runtime_cache
+            .store_client_routes(generation, body)
+            .await
+        {
+            return stored;
+        }
+    }
+}
+
+async fn build_route_manifest_body(state: &Arc<AppState>) -> String {
+    let Ok((manifest, _)) = state
+        .runtime_cache
+        .router(&state.config)
+        .await
+        .inspect_err(|error| {
+            error!(%error, "client manifest request failed");
+        })
+    else {
+        return serde_json::json!({ "routes": [] }).to_string();
+    };
+    let eligible = manifest
+        .routes
+        .iter()
+        .filter(|route| route.kind == RouteKind::Page && route.render.ships_client_bundle())
+        .cloned()
+        .collect::<Vec<_>>();
+
+    // One route's entry needs its bundle compiled, and the routes are
+    // independent, so they run across the pool rather than one after another. In
+    // sequence this was the largest stall of a dev session: the first request of
+    // the day compiled every page's browser bundle end to end before answering.
+    // Bounded by the pool, because more in flight than there are workers only
+    // queues on one of them while keeping more compilation output alive.
+    let mut pending = tokio::task::JoinSet::new();
+    let mut entries = vec![serde_json::Value::Null; eligible.len()];
+    let mut next = 0;
+    let concurrency = state.worker_pool.size().min(eligible.len().max(1));
+    loop {
+        while pending.len() < concurrency && next < eligible.len() {
+            let state = Arc::clone(state);
+            let route = eligible[next].clone();
+            let index = next;
+            next += 1;
+            pending.spawn(async move { (index, route_manifest_entry(&state, &route).await) });
+        }
+        let Some(joined) = pending.join_next().await else {
+            break;
+        };
+        match joined {
+            Ok((index, Some(entry))) => entries[index] = entry,
+            Ok((_, None)) => {}
+            Err(error) => error!(%error, "client manifest entry task failed"),
+        }
+    }
+
+    // Order is the manifest's, not the order the compiles finished, so the same
+    // project always answers with the same bytes.
+    let routes = entries
+        .into_iter()
+        .filter(|entry| !entry.is_null())
+        .collect::<Vec<_>>();
+    serde_json::json!({ "routes": routes }).to_string()
+}
+
+/// One route's line in the dev route table, or `None` when its bundle could not
+/// be produced — a route the browser cannot navigate to is left out rather than
+/// advertised.
+async fn route_manifest_entry(
+    state: &Arc<AppState>,
+    route: &ruvyxa_graph::RouteEntry,
+) -> Option<serde_json::Value> {
+    let bundle = render_client_bundle_pooled(state, &route.path).await.ok()?;
+    // Hashed unstamped, exactly as `client_bundle` hashes it before appending
+    // the stamp, so the version this manifest advertises is the one the browser
+    // reads back out of the bundle.
+    let artifact = client_artifact_version(&bundle.document.html);
+    let source = tokio::fs::read_to_string(&route.file)
+        .await
+        .unwrap_or_default();
+    let module = ruvyxa_bundler::ast::parse_module(&source);
+    let mut entry = serde_json::json!({
+        "path": route.path,
+        "src": format!("/__ruvyxa/client?path={}", url_encode_component(&route.path)),
+        "artifactVersion": artifact,
+        "flight": ruvyxa_bundler::ast::has_named_runtime_export(&source, &module, "flight"),
+        "cache": ruvyxa_bundler::reference_manifest::has_module_directive(&source, "use cache"),
+    });
+    // Held to the same shape the build writes, in `write_client_route_manifest`:
+    // present only when true.
+    if route.render.server_components {
+        entry["serverComponents"] = serde_json::Value::Bool(true);
+    }
+    Some(entry)
 }
 
 /// The route table a build published, or `None` when there is not one.

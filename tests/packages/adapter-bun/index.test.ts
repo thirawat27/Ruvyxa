@@ -20,19 +20,36 @@ describe('bun', () => {
     )
 
     // The server is the shared standalone source, so Bun and Node make the
-    // same ordering, fallback, and cache-header decisions.
+    // same ordering, fallback, and cache-header decisions. Only the transport
+    // differs, and it has to be Bun's own: `createHandler` already is the
+    // `Request` → `Response` function `Bun.serve` wants, and routing it through
+    // `node:http` instead made every request pay to have a `Request` taken
+    // apart and a `Response` rebuilt.
     const server = output.artifacts?.find((artifact) => artifact.kind === 'function')
     const source = server && 'handlerSource' in server ? String(server.handlerSource) : ''
-    assert.match(source, /node:http/)
+    assert.match(source, /Bun\.serve\(/)
+    assert.doesNotMatch(source, /from 'node:http'/)
     assert.match(source, /isAssetPath\(url\.pathname\)/)
     assert.match(source, /public, max-age=3600, must-revalidate/)
-    // Streamed, not buffered — the paired assertion below is the other half
-    // of that contract. Piped through a named handle so the stream's error
-    // and client-disconnect events can be handled; see standalone-server.
-    assert.match(source, /Readable\.fromWeb\(response\.body\)/)
-    assert.match(source, /body\.pipe\(res\)/)
+    // The handler's response is returned as it is, so a streamed render still
+    // streams and nothing is buffered on the way out.
     assert.doesNotMatch(source, /response\.arrayBuffer\(\)/)
     assert.doesNotMatch(source, /npx/)
+    // `idleTimeout` has defaulted to 0 — never retire an idle connection —
+    // since Bun 1.1.27, which is already on the safe side of the 502 the Node
+    // transport raises `keepAliveTimeout` to avoid, and is what lets a long
+    // streamed response stay open. It is set only when an operator asks for a
+    // bound, and clamped to the 255-second maximum Bun accepts.
+    assert.match(source, /RUVYXA_KEEP_ALIVE_TIMEOUT/)
+    assert.match(source, /Math\.min\(255,/)
+    // Spread, so the option is simply absent when nothing was configured and
+    // Bun's own default stands.
+    assert.match(source, /\.\.\.idleTimeout,/)
+    // The slice is handed over as a file, not as its `.stream()`: measured
+    // against Bun 1.4.0, a sliced `BunFile`'s stream served by `Bun.serve`
+    // sends the whole file, so a seek would have played the entire video.
+    assert.match(source, /file\.slice\(plan\.partial\.start, plan\.partial\.end \+ 1\)/)
+    assert.doesNotMatch(source, /plan\.partial\.end \+ 1\)\.stream\(\)/)
 
     // An API-only app has no prerendered pages; the publish directory must be
     // optional so the build does not fail with RUV2202.

@@ -24,11 +24,17 @@ describe('generated standalone server', () => {
    * failure surfaces at deploy time on the user's machine, not here, so the
    * emitted program is parsed as the program it will actually be.
    */
-  it('emits syntactically valid JavaScript', () => {
+  it('emits syntactically valid JavaScript for every runtime', () => {
     const directory = mkdtempSync(path.join(tmpdir(), 'ruvyxa-standalone-'))
-    const file = path.join(directory, 'index.mjs')
-    writeFileSync(file, generated, 'utf8')
-    execFileSync(process.execPath, ['--check', file], { stdio: 'pipe' })
+    for (const runtime of ['node', 'bun', 'deno'] as const) {
+      const file = path.join(directory, `${runtime}.mjs`)
+      writeFileSync(file, standaloneServerSource({ runtime, runtimePolicy: {} }), 'utf8')
+      // Node parses all three: the Bun and Deno programs use no syntax it does
+      // not have, and the runtime-specific part of each is an API call, not a
+      // dialect. A program that did need one would fail here rather than after
+      // a deploy.
+      execFileSync(process.execPath, ['--check', file], { stdio: 'pipe' })
+    }
   })
 
   /**
@@ -47,17 +53,37 @@ describe('generated standalone server', () => {
       generated.includes('parseByteRange'),
       'ranges must be decided by the shared parser, not reimplemented here',
     )
-    assert.ok(
-      generated.includes("setHeader('accept-ranges', 'bytes')"),
-      'a resource that answers ranges has to advertise them',
-    )
-    assert.match(generated, /statusCode = 416/, 'an unsatisfiable range is a 416')
-    assert.match(generated, /partial \? 206 : 200/, 'a satisfied range is a 206')
     assert.match(
       generated,
-      /createReadStream\(hit\.file, \{ start: partial\.start, end: partial\.end \}\)/,
+      /createReadStream\(plan\.file, \{ start: plan\.partial\.start, end: plan\.partial\.end \}\)/,
       'only the requested bytes may be read; re-reading the file to reach a late seek is the cost ranges exist to avoid',
     )
+  })
+
+  /**
+   * Statuses, headers, and byte windows are decided once, in
+   * `staticResponsePlan`, and a transport only sends what it is handed. A
+   * second copy of any of that is how two runtimes come to disagree about a
+   * cache lifetime or a content type with nothing to catch it — the emitted
+   * behaviour itself is checked for all three in
+   * `standalone-server-conformance.test.ts`.
+   */
+  it('decides a static response once for every runtime', () => {
+    for (const runtime of ['node', 'bun', 'deno'] as const) {
+      const source = standaloneServerSource({ runtime, runtimePolicy: {} })
+      const definitions = source.match(/function staticResponsePlan\(/g) ?? []
+      assert.equal(definitions.length, 1, `${runtime} must decide static responses in one place`)
+      assert.equal(
+        (source.match(/'accept-ranges'/g) ?? []).length,
+        2,
+        `${runtime} advertises ranges from the plan alone, once for a hit and once for a 416`,
+      )
+      assert.doesNotMatch(
+        source,
+        /MIME_TYPES\[[\s\S]{0,120}\]\s*\?\?[\s\S]{0,80}MIME_TYPES\[/,
+        `${runtime} must look up a content type once`,
+      )
+    }
   })
 
   /**

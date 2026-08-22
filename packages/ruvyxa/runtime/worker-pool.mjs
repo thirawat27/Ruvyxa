@@ -1473,14 +1473,24 @@ function cacheBundle(cacheKey, outfile, projectRoot, inputs, dependencyHash, con
       }),
     ),
   )
-  bundleInputVersions.set(
-    cacheKey,
-    createHash('sha256')
-      .update([...normalizedInputs].sort().join('\0'))
-      .digest('hex')
-      .slice(0, 16),
-  )
+  bundleInputVersions.set(cacheKey, inputsVersionOf(normalizedInputs))
   if (dependencyHash) bundleFingerprints.set(cacheKey, dependencyHash)
+}
+
+/**
+ * The short token that stands for "this exact set of input files".
+ *
+ * A function rather than an expression inside `cacheBundle` because a second
+ * caller now needs it: a response describing more than one compile reports the
+ * union of their inputs, and a version computed a different way there would
+ * claim two different things about the same list. Order is normalized, so the
+ * token answers to the set and not to the order it was collected in.
+ */
+function inputsVersionOf(inputs) {
+  return createHash('sha256')
+    .update([...inputs].sort().join('\0'))
+    .digest('hex')
+    .slice(0, 16)
 }
 
 function deleteBundleCacheEntry(cacheKey, knownOutfile) {
@@ -2525,6 +2535,16 @@ async function handleServerComponents(request, { fresh = false, html = true } = 
     })
   })
 
+  // Both compiles when both ran. A pre-rendered page is cached against these,
+  // and the registry is what supplies the client components React renders into
+  // the HTML — including the hidden fields of a `<form action={fn}>`, whose
+  // reference id is versioned by the action module's source. Reported from the
+  // server graph alone, editing that module left every pre-rendered page
+  // serving markup that names a function id the server no longer registers.
+  const inputs = registry
+    ? [...new Set([...(server.inputs ?? []), ...(registry.inputs ?? [])])]
+    : (server.inputs ?? [])
+
   return {
     ok: true,
     html: rendered.html ?? undefined,
@@ -2532,8 +2552,8 @@ async function handleServerComponents(request, { fresh = false, html = true } = 
     requestScoped: usedRequestContext(context),
     revalidate: collectRevalidations(context),
     dependencyHash: server.dependencyHash,
-    inputsVersion: server.inputsVersion,
-    inputs: server.inputs,
+    inputsVersion: inputsVersionOf(inputs),
+    inputs,
   }
 }
 
@@ -2660,6 +2680,16 @@ async function handleServerComponentsEntry(request) {
   // components into references and never followed their imports.
   const registry = await bundleRscSsrRegistry(resolvedRoot, appDir, server.clientReferences)
 
+  // Both compiles, because this answer is derived from both. The server graph
+  // reads a `'use client'` module — it has to, to see the directive — and then
+  // stops, so nothing *behind* one is in its input list. A caller caching this
+  // response against those inputs alone would never notice an edit to the
+  // `'use server'` module a client component imports, and the ids in
+  // `serverReferences` are versioned by that module's source: the browser
+  // bundle would then be built from proxies naming a function the server no
+  // longer registers, and every call through them fails at run time.
+  const inputs = [...new Set([...(server.inputs ?? []), ...(registry.inputs ?? [])])]
+
   return {
     ok: true,
     entrySource: rscClientEntrySource({
@@ -2677,8 +2707,8 @@ async function handleServerComponentsEntry(request) {
     // Handing over the text rather than the rule keeps one implementation of
     // what a server reference looks like.
     serverReferences: browserServerReferences(registry.serverReferences),
-    inputsVersion: server.inputsVersion,
-    inputs: server.inputs,
+    inputsVersion: inputsVersionOf(inputs),
+    inputs,
   }
 }
 

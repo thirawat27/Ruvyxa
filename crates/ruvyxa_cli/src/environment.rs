@@ -64,6 +64,59 @@ pub(crate) fn tool_version(command: &str, args: &[&str]) -> String {
     }
 }
 
+/// The oldest Bun release the generated Bun server is written against.
+///
+/// `Bun.serve` gained `idleTimeout` in 1.1.26, and that is the newest API the
+/// emitted program can reach for; everything else it uses is older
+/// (`import.meta.dirname` since 1.0.23, `Bun.file` and its `slice`,
+/// `server.stop`). Recorded so `doctor` can say so rather than leaving a user to
+/// discover it from a deployed server that will not start.
+pub(crate) const MINIMUM_BUN_VERSION: (u32, u32, u32) = (1, 1, 26);
+
+/// The oldest Deno release the generated Deno server is written against.
+///
+/// 2.0 is where Node built-in compatibility — `node:process`, `node:fs`,
+/// `node:path` — became the supported path rather than a flag, and the emitted
+/// program imports all three by specifier. The two Deno APIs it uses are older
+/// than that (`import.meta.dirname` since 1.40, `HttpServer.shutdown`), so this
+/// is the binding constraint.
+pub(crate) const MINIMUM_DENO_VERSION: (u32, u32, u32) = (2, 0, 0);
+
+/// The leading `major.minor.patch` of a `--version` line, or `None`.
+///
+/// `bun --version` prints the number alone and `deno --version` prints it after
+/// the runtime's name, so the first three dot-separated integers anywhere in the
+/// line are the version. A line this cannot read is reported as-is rather than
+/// as too old: refusing to run over an unparsed string would turn a cosmetic
+/// change in someone else's output into a broken toolchain.
+pub(crate) fn parse_runtime_version(text: &str) -> Option<(u32, u32, u32)> {
+    let start = text.find(|character: char| character.is_ascii_digit())?;
+    let digits = &text[start..];
+    let end = digits
+        .find(|character: char| !character.is_ascii_digit() && character != '.')
+        .unwrap_or(digits.len());
+    let mut parts = digits[..end].split('.');
+    Some((
+        parts.next()?.parse().ok()?,
+        parts.next().unwrap_or("0").parse().ok()?,
+        parts.next().unwrap_or("0").parse().ok()?,
+    ))
+}
+
+/// A `doctor` row for a JavaScript runtime, flagged when it is below the floor.
+pub(crate) fn runtime_status(version: String, minimum: (u32, u32, u32)) -> String {
+    let (major, minor, patch) = minimum;
+    if version == "missing" {
+        return crate::ui::tool_status(version);
+    }
+    match parse_runtime_version(&version) {
+        Some(found) if found < minimum => {
+            crate::ui::warn_text(format!("{version} — Ruvyxa needs {major}.{minor}.{patch}"))
+        }
+        _ => crate::ui::ok_text(version),
+    }
+}
+
 /// Reports Bun's version using the same executable resolution as the build
 /// and dev-server runtimes. Windows exposes Bun as a `bun.cmd` shim, which a
 /// plain `Command::new("bun")` cannot launch, so a naive check reports "missing"
@@ -249,4 +302,44 @@ pub(crate) fn duplicate_dependencies(package: &serde_json::Value) -> Vec<String>
 
     duplicates.sort();
     duplicates
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The two runtimes print their version differently, and both have to be
+    /// read: `bun --version` prints the number alone, `deno --version` prints it
+    /// after the runtime's name and follows it with V8 and TypeScript lines.
+    #[test]
+    fn reads_the_version_out_of_either_runtimes_greeting() {
+        assert_eq!(parse_runtime_version("1.4.0"), Some((1, 4, 0)));
+        assert_eq!(parse_runtime_version("deno 2.9.5"), Some((2, 9, 5)));
+        assert_eq!(parse_runtime_version("1.2"), Some((1, 2, 0)));
+        assert_eq!(parse_runtime_version("2"), Some((2, 0, 0)));
+        // Pre-releases are common on both, and the tag after the number is not
+        // part of the ordering this compares.
+        assert_eq!(parse_runtime_version("1.4.0-canary.3"), Some((1, 4, 0)));
+        assert_eq!(parse_runtime_version("missing"), None);
+        assert_eq!(parse_runtime_version(""), None);
+    }
+
+    /// A runtime below the floor is flagged, one at or above it is not, and one
+    /// whose output cannot be read is left alone.
+    ///
+    /// The last case is the one worth stating: reporting an unparsed string as
+    /// too old would turn a cosmetic change in someone else's `--version` output
+    /// into a toolchain this tool declares broken.
+    #[test]
+    fn flags_a_runtime_below_the_floor_and_nothing_else() {
+        let needle = format!("needs {}.{}.{}", 1, 1, 26);
+        assert!(runtime_status("1.1.25".to_string(), MINIMUM_BUN_VERSION).contains(&needle));
+        assert!(runtime_status("1.0.36".to_string(), MINIMUM_BUN_VERSION).contains(&needle));
+        assert!(!runtime_status("1.1.26".to_string(), MINIMUM_BUN_VERSION).contains(&needle));
+        assert!(!runtime_status("1.4.0".to_string(), MINIMUM_BUN_VERSION).contains(&needle));
+        assert!(!runtime_status("deno 2.9.5".to_string(), MINIMUM_DENO_VERSION).contains("needs"));
+        assert!(runtime_status("deno 1.46.3".to_string(), MINIMUM_DENO_VERSION).contains("needs"));
+        assert!(!runtime_status("bun-next".to_string(), MINIMUM_BUN_VERSION).contains("needs"));
+        assert!(runtime_status("missing".to_string(), MINIMUM_BUN_VERSION).contains("missing"));
+    }
 }

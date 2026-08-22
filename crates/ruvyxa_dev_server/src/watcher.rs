@@ -95,9 +95,9 @@ pub(crate) fn start_watcher(
                     hmr_update.event_type = HmrEventType::FullReload;
                 }
                 // Selective cache invalidation based on affected routes.
-                if hmr_update.full_reload || hmr_update.affected_routes.is_empty() {
-                    // Full invalidation: manifest may have changed (new/deleted routes).
-                    runtime_cache.invalidate();
+                let rediscover = hmr_update.full_reload || hmr_update.affected_routes.is_empty();
+                invalidate_runtime_caches(&runtime_cache, rediscover, &paths);
+                if rediscover {
                     render_cache.invalidate_all_blocking();
                     let refresh_config = config.clone();
                     let refresh_cache = runtime_cache.clone();
@@ -111,11 +111,6 @@ pub(crate) fn start_watcher(
                         }
                     });
                 } else {
-                    // Selective invalidation: only evict affected route caches.
-                    // Refresh styles only when the current CSS dependency graph
-                    // intersects a changed path. Component-only updates retain it.
-                    runtime_cache.invalidate_styles_for_paths(&paths);
-
                     // Selectively invalidate render cache for affected routes only.
                     for route_path in &hmr_update.affected_routes {
                         render_cache.invalidate_route_blocking(route_path);
@@ -427,6 +422,30 @@ fn ignored_watch_path(root: &Path, path: &Path) -> bool {
             .any(|component| matches!(component.as_ref(), ".ruvyxa" | "node_modules"))
 }
 
+/// Which cached answers one watcher event invalidates.
+///
+/// `rediscover` is the event class that may have added or removed a route, and
+/// it drops everything. The other class is a component edit: it changes neither
+/// the route manifest nor necessarily the collected CSS, so both are kept and
+/// only the stylesheets that actually read a changed file are refreshed.
+///
+/// The client route table is dropped either way, and that is the whole reason
+/// this is a function rather than two lines inside the branch. The table carries
+/// each route's bundle hash, which is what the client router compares against to
+/// decide whether the bundle the browser already holds is current — and a
+/// component edit changes exactly that while changing nothing else the selective
+/// branch invalidates. Kept across one, the table tells the router that stale
+/// bundle is fine and the next soft navigation renders the code from before the
+/// save.
+fn invalidate_runtime_caches(runtime_cache: &RuntimeCache, rediscover: bool, paths: &[PathBuf]) {
+    runtime_cache.invalidate_client_routes();
+    if rediscover {
+        runtime_cache.invalidate();
+    } else {
+        runtime_cache.invalidate_styles_for_paths(paths);
+    }
+}
+
 fn instrumentation_source_changed(root: &Path, paths: &[PathBuf]) -> bool {
     let root = ruvyxa_diagnostics::normalized_canonical_path(root);
     paths.iter().any(|path| {
@@ -550,6 +569,49 @@ mod tests {
                 payload["sequence"]
                     .as_u64()
                     .is_some_and(|sequence| sequence > 0)
+            );
+        }
+    }
+
+    /// A component edit takes the selective branch, and the selective branch has
+    /// to drop the client route table anyway.
+    ///
+    /// That branch exists to keep the route manifest and the collected CSS
+    /// across an edit that changes neither — but the table it used to keep as
+    /// well carries each route's bundle hash, which is exactly what such an edit
+    /// changes. The client router reads that hash to decide whether the bundle
+    /// the browser already holds is current, so keeping the table told it the
+    /// pre-edit bundle was fine and the next soft navigation rendered the code
+    /// from before the save.
+    #[tokio::test]
+    async fn a_selective_watcher_event_still_drops_the_client_route_table() {
+        for rediscover in [false, true] {
+            let cache = Arc::new(RuntimeCache::default());
+            let generation = cache
+                .cached_client_routes()
+                .await
+                .expect_err("a fresh cache holds no table");
+            cache
+                .store_client_routes(generation, Arc::from(r#"{"routes":[]}"#))
+                .await
+                .expect("the table installs against its own generation");
+            assert!(
+                cache.cached_client_routes().await.is_ok(),
+                "the table must be readable before the event"
+            );
+
+            // The watcher invalidates from its own thread, which is why these
+            // take the blocking lock and cannot be called on the async runtime.
+            let invalidated = Arc::clone(&cache);
+            tokio::task::spawn_blocking(move || {
+                invalidate_runtime_caches(&invalidated, rediscover, &[PathBuf::from("a.tsx")]);
+            })
+            .await
+            .unwrap();
+
+            assert!(
+                cache.cached_client_routes().await.is_err(),
+                "rediscover={rediscover}: the table must not survive a watcher event"
             );
         }
     }

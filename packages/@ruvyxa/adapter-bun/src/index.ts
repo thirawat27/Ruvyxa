@@ -67,7 +67,10 @@ export function bun(options: BunAdapterOptions = {}): Adapter {
           {
             kind: 'function',
             path: 'deploy/bun/server',
-            handlerSource: standaloneServerSource({ runtimePolicy: runtimeBuildPolicy(ctx) }),
+            handlerSource: standaloneServerSource({
+              runtime: 'bun',
+              runtimePolicy: runtimeBuildPolicy(ctx),
+            }),
           },
           // Static publish directory served by the standalone server. An
           // API-only app has no prerendered pages; the server still runs.

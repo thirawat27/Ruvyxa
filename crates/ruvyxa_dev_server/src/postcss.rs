@@ -50,6 +50,10 @@ pub struct PostcssRunner {
     config: PathBuf,
     runner: PathBuf,
     mode: &'static str,
+    /// The runtime that executes the plugin chain. The chain is the project's
+    /// own JavaScript and its plugins are the project's own dependencies, so it
+    /// runs under the runtime the rest of the project's JavaScript does.
+    runtime: crate::JavaScriptRuntime,
 }
 
 /// One stylesheet after the project's plugin chain has run.
@@ -82,7 +86,11 @@ impl PostcssRunner {
     /// stage existed. A project that *does* declare PostCSS but has no reachable
     /// runtime script is an error rather than a silent skip: emitting raw CSS a
     /// browser cannot resolve is how an unstyled page reaches production.
-    pub fn detect(root: &Path, production: bool) -> Result<Option<Self>> {
+    pub fn detect(
+        root: &Path,
+        production: bool,
+        runtime: crate::JavaScriptRuntime,
+    ) -> Result<Option<Self>> {
         let Some(config) = CONFIG_FILE_NAMES
             .iter()
             .map(|name| root.join(name))
@@ -111,12 +119,30 @@ impl PostcssRunner {
             } else {
                 "development"
             },
+            runtime,
         }))
     }
 
     /// The configuration file, so callers can record it as a watch input.
     pub fn config_file(&self) -> &Path {
         &self.config
+    }
+
+    /// The process that runs the plugin chain.
+    ///
+    /// Separated from [`Self::run`] so a test can read the program and its
+    /// arguments without a runtime installed. What it answers is which
+    /// JavaScript runtime the project's own PostCSS plugins execute under, and
+    /// that used to be `node` no matter what the project had selected — so a
+    /// Bun- or Deno-only machine built everything except its stylesheet.
+    fn plugin_command(&self, request_file: &Path) -> Command {
+        let mut command = Command::new(self.runtime.executable());
+        command
+            .args(self.runtime.script_args())
+            .current_dir(&self.root)
+            .arg(&self.runner)
+            .arg(request_file);
+        command
     }
 
     /// Run the plugin chain over one collected stylesheet.
@@ -142,11 +168,7 @@ impl PostcssRunner {
             .to_string(),
         )?;
 
-        let mut command = Command::new(crate::JavaScriptRuntime::Node.executable());
-        command
-            .current_dir(&self.root)
-            .arg(&self.runner)
-            .arg(&request_file);
+        let mut command = self.plugin_command(&request_file);
 
         let output =
             crate::process::output_with_timeout(&mut command, crate::process::STYLE_TOOL_TIMEOUT)
@@ -255,9 +277,54 @@ mod tests {
     fn a_project_without_a_config_has_no_postcss_stage() {
         let dir = tempfile::tempdir().unwrap();
         assert!(
-            PostcssRunner::detect(dir.path(), false).unwrap().is_none(),
+            PostcssRunner::detect(dir.path(), false, crate::JavaScriptRuntime::Node)
+                .unwrap()
+                .is_none(),
             "a project with no PostCSS config must keep the previous CSS behavior"
         );
+    }
+
+    /// The plugin chain is the project's own JavaScript, loaded from the
+    /// project's own `node_modules`, so it runs under the runtime the project
+    /// selected. Every other JavaScript stage of a build already did; this one
+    /// launched `node` regardless, which a machine that has only Bun or Deno
+    /// does not have.
+    #[test]
+    fn the_plugin_chain_runs_under_the_projects_runtime() {
+        for runtime in [
+            crate::JavaScriptRuntime::Node,
+            crate::JavaScriptRuntime::Bun,
+            crate::JavaScriptRuntime::Deno,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            fs::write(
+                dir.path().join("postcss.config.js"),
+                "module.exports = { plugins: {} }",
+            )
+            .unwrap();
+            let runner = PostcssRunner::detect(dir.path(), false, runtime)
+                .unwrap()
+                .expect("a project with a PostCSS config has a stage");
+            let command = runner.plugin_command(Path::new("request.json"));
+            assert_eq!(
+                command.get_program(),
+                runtime.executable().as_os_str(),
+                "{runtime:?} must run its own executable"
+            );
+            let leading = command
+                .get_args()
+                .take(runtime.script_args().len())
+                .collect::<Vec<_>>();
+            assert_eq!(
+                leading,
+                runtime
+                    .script_args()
+                    .iter()
+                    .map(std::ffi::OsStr::new)
+                    .collect::<Vec<_>>(),
+                "{runtime:?} must keep the arguments its runtime needs before a script"
+            );
+        }
     }
 
     #[test]
@@ -265,7 +332,7 @@ mod tests {
         for name in CONFIG_FILE_NAMES {
             let dir = tempfile::tempdir().unwrap();
             fs::write(dir.path().join(name), "export default { plugins: {} }").unwrap();
-            let detected = PostcssRunner::detect(dir.path(), false);
+            let detected = PostcssRunner::detect(dir.path(), false, crate::JavaScriptRuntime::Node);
             // The runtime script lives in this working tree, so detection
             // resolves; the point under test is that the name was recognised.
             match detected {

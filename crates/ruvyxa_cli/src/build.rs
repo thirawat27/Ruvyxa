@@ -152,23 +152,40 @@ impl Drop for BuildStagingCleanup {
     }
 }
 
+/// What the style half of asset preparation needs.
+///
+/// The two travel together because neither answers anything on its own: the
+/// entries say which stylesheets to collect, and the runtime is what executes
+/// the project's PostCSS chain over them — that chain is the project's own
+/// JavaScript, loaded from the project's own dependencies.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct StyleStage<'a> {
+    /// `None` skips style collection entirely: a server-only artifact renders no
+    /// HTML document, so collected CSS has nothing to be inlined into and no
+    /// stylesheet to be emitted as. The project's own source files are still
+    /// staged — an API route may import a module that sits next to a stylesheet.
+    pub(crate) entries: Option<&'a [PathBuf]>,
+    pub(crate) runtime: ruvyxa_dev_server::JavaScriptRuntime,
+}
+
 pub(crate) fn prepare_build_assets(
     root: &Path,
     app_dir: &Path,
     server_dir: &Path,
     assets_dir: &Path,
-    // `None` skips style collection entirely: a server-only artifact renders no
-    // HTML document, so collected CSS has nothing to be inlined into and no
-    // stylesheet to be emitted as. The project's own source files are still
-    // staged — an API route may import a module that sits next to a stylesheet.
-    style_entries: Option<&[PathBuf]>,
+    styles_stage: StyleStage<'_>,
     image_cache_dir: &Path,
     image_options: &ImageOptimizationOptions,
 ) -> anyhow::Result<PreparedBuildAssets> {
     let started = Instant::now();
     let (styles, images) = std::thread::scope(|scope| -> anyhow::Result<_> {
-        let styles = scope.spawn(|| match style_entries {
-            Some(entries) => ruvyxa_dev_server::collect_styles_for_build(root, app_dir, entries),
+        let styles = scope.spawn(|| match styles_stage.entries {
+            Some(entries) => ruvyxa_dev_server::collect_styles_for_build(
+                root,
+                app_dir,
+                entries,
+                styles_stage.runtime,
+            ),
             None => Ok(ruvyxa_dev_server::StyleCollection::default()),
         });
         let app_copy = scope.spawn(|| copy_dir_all(app_dir, &server_dir.join("app")));
@@ -414,6 +431,46 @@ pub(crate) async fn build_with_cache_override(
     if args.server_only {
         ensure_server_only_supported(target, &manifest)?;
     }
+    // Started here and awaited below, because the next two statements boot the
+    // plugin host and neither side needs anything from the other. Both are
+    // dominated by a JavaScript runtime coming up; run in sequence they were the
+    // two largest steps of a warm build, and overlapped they cost whichever is
+    // slower. The task is spawned rather than joined so the plugin host's
+    // blocking start does not hold it.
+    let rsc_entries_task = (!args.server_only).then(|| {
+        let root = args.root.clone();
+        let app_dir = app_dir.clone();
+        let manifest = manifest.clone();
+        let build = config.build.clone();
+        let runtime = config.javascript_runtime();
+        let worker_env = build_worker_env(&args.root, &config.build, runtime);
+        let cache_directory = build_cache_directory.clone();
+        let dependency_hash = config.config_dependency_hash.clone();
+        tokio::spawn(async move {
+            // The context hash needs the same environment the worker will be
+            // started with; a failure to assemble it is reported by the
+            // collection itself, so caching is simply skipped here.
+            let cache = worker_env.ok().map(|worker_env| ServerComponentEntryCache {
+                directory: cache_directory,
+                dependency_hash,
+                context_hash: crate::artifact_cache::server_component_context_hash(
+                    &root,
+                    runtime,
+                    &worker_env,
+                ),
+                fingerprints: std::sync::Arc::new(ArtifactFingerprintCache::default()),
+            });
+            collect_server_component_entries(
+                &root,
+                &app_dir,
+                &manifest,
+                &build,
+                runtime,
+                cache.as_ref(),
+            )
+            .await
+        })
+    });
     let plugin_session = TypeScriptPluginBuildSession::new(
         &args.root,
         &config.plugins,
@@ -459,17 +516,11 @@ pub(crate) async fn build_with_cache_override(
     // the `react-server` graph what a server-components route's browser entry
     // contains needs a worker, and the answer has to be in hand before the
     // shared-chunk analysis runs. An app with no such route starts no worker.
-    let rsc_entries = if args.server_only {
-        crate::client_bundle::ServerComponentEntries::default()
-    } else {
-        collect_server_component_entries(
-            &args.root,
-            &app_dir,
-            &manifest,
-            &config.build,
-            config.javascript_runtime(),
-        )
-        .await?
+    let rsc_entries = match rsc_entries_task {
+        Some(task) => task.await.map_err(|error| {
+            anyhow::anyhow!("server-components entry collection failed: {error}")
+        })??,
+        None => crate::client_bundle::ServerComponentEntries::default(),
     };
 
     let spinner = start_build_phase(show_summary, "bundling");
@@ -481,7 +532,10 @@ pub(crate) async fn build_with_cache_override(
                     &app_dir,
                     &server_dir,
                     &assets_dir,
-                    style_entries.as_deref(),
+                    StyleStage {
+                        entries: style_entries.as_deref(),
+                        runtime: config.javascript_runtime(),
+                    },
                     &image_cache_dir,
                     &image_options,
                 )
@@ -579,7 +633,13 @@ pub(crate) async fn build_with_cache_override(
             &manifest,
             &prerender_dir,
             &client_dir,
-            &style_collection.css,
+            PrerenderHead {
+                // Read from the staged assets directory, which is what a
+                // deployed server publishes — not from the project's `public/`,
+                // which still holds an original the build converted away.
+                asset_links: ruvyxa_dev_server::public_asset_links(&assets_dir).into(),
+                styles: style_collection.css.as_str().into(),
+            },
             &config.build,
             RuvyxaBuildCache {
                 dependency_hash: &config.config_dependency_hash,

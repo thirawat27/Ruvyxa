@@ -13,6 +13,8 @@ use ruvyxa_bundler::style_module::{
 use ruvyxa_diagnostics::{Diagnostic, Result, RuvyxaError};
 use walkdir::WalkDir;
 
+use crate::JavaScriptRuntime;
+
 const SCRIPT_EXTENSIONS: &[&str] = &["ts", "tsx", "js", "jsx", "mts", "cts", "mjs", "cjs"];
 const PREPROCESSOR_EXTENSIONS: &[&str] = &["scss", "sass", "less"];
 
@@ -27,8 +29,18 @@ pub struct StyleCollection {
 ///
 /// Runs the project's PostCSS chain in development mode. Use
 /// [`collect_styles_for_build`] for production output.
-pub fn collect_styles(root: &Path, app_dir: &Path, entries: &[PathBuf]) -> Result<StyleCollection> {
-    collect_styles_in_mode(root, app_dir, entries, false)
+///
+/// `runtime` is the project's JavaScript runtime, and it is a parameter rather
+/// than a default because the PostCSS chain is a JavaScript program: a project
+/// on Bun or Deno without Node installed had its stylesheet fail while every
+/// other JavaScript stage of the same build ran fine.
+pub fn collect_styles(
+    root: &Path,
+    app_dir: &Path,
+    entries: &[PathBuf],
+    runtime: JavaScriptRuntime,
+) -> Result<StyleCollection> {
+    collect_styles_in_mode(root, app_dir, entries, runtime, false)
 }
 
 /// [`collect_styles`] with PostCSS plugins told they are running a production
@@ -38,20 +50,22 @@ pub fn collect_styles_for_build(
     root: &Path,
     app_dir: &Path,
     entries: &[PathBuf],
+    runtime: JavaScriptRuntime,
 ) -> Result<StyleCollection> {
-    collect_styles_in_mode(root, app_dir, entries, true)
+    collect_styles_in_mode(root, app_dir, entries, runtime, true)
 }
 
 fn collect_styles_in_mode(
     root: &Path,
     app_dir: &Path,
     entries: &[PathBuf],
+    runtime: JavaScriptRuntime,
     production: bool,
 ) -> Result<StyleCollection> {
     let root = absolute_path(root)?;
     let app_dir = absolute_path(app_dir)?;
     let tsconfig = TsConfigPaths::load(&root);
-    let postcss = crate::PostcssRunner::detect(&root, production)?;
+    let postcss = crate::PostcssRunner::detect(&root, production, runtime)?;
     let mut scripts = VecDeque::new();
     let mut style_seeds = Vec::new();
 
@@ -940,7 +954,8 @@ mod tests {
         .unwrap();
         fs::write(app.join("live.css"), ".live { color: red }").unwrap();
 
-        let collection = collect_styles(root, &app, &[]).expect("a dead import must not fail");
+        let collection = collect_styles(root, &app, &[], JavaScriptRuntime::Node)
+            .expect("a dead import must not fail");
 
         assert!(
             collection.css.contains(".live { color: red }"),
@@ -982,7 +997,7 @@ mod tests {
         .unwrap();
         fs::write(styles.join("tokens.css"), ":root { --space: 1rem; }").unwrap();
 
-        let collection = collect_styles(root, &app, &[]).unwrap();
+        let collection = collect_styles(root, &app, &[], JavaScriptRuntime::Node).unwrap();
 
         assert!(collection.css.contains("--space: 1rem"));
         assert!(collection.css.contains(".card { color: red; }"));
@@ -1000,7 +1015,7 @@ mod tests {
         fs::write(app.join("global.css"), "body { margin: 0; }").unwrap();
         fs::write(app.join("unused.css"), ".unused { display: none; }").unwrap();
 
-        let collection = collect_styles(root, &app, &[]).unwrap();
+        let collection = collect_styles(root, &app, &[], JavaScriptRuntime::Node).unwrap();
 
         assert_eq!(collection.css.matches("body { margin: 0; }").count(), 1);
         assert!(!collection.css.contains(".unused"));
@@ -1018,7 +1033,13 @@ mod tests {
         fs::write(app.join("page.tsx"), "export default 1").unwrap();
         fs::write(themes.join("dark.css"), "html { color-scheme: dark; }").unwrap();
 
-        let collection = collect_styles(root, &app, &[PathBuf::from("themes")]).unwrap();
+        let collection = collect_styles(
+            root,
+            &app,
+            &[PathBuf::from("themes")],
+            JavaScriptRuntime::Node,
+        )
+        .unwrap();
 
         assert!(collection.css.contains("color-scheme: dark"));
         assert_eq!(collection.files.len(), 1);
@@ -1041,7 +1062,7 @@ mod tests {
         )
         .unwrap();
 
-        let collection = collect_styles(root, &app, &[]).unwrap();
+        let collection = collect_styles(root, &app, &[], JavaScriptRuntime::Node).unwrap();
 
         assert!(collection.css.contains("https://example.com/theme.css"));
         assert!(collection.css.contains("<\\/STYLE>"));
@@ -1064,7 +1085,7 @@ mod tests {
         fs::write(app.join("page.tsx"), "import '@styles/theme.css'").unwrap();
         fs::write(styles.join("theme.css"), ".theme { color: navy; }").unwrap();
 
-        let collection = collect_styles(root, &app, &[]).unwrap();
+        let collection = collect_styles(root, &app, &[], JavaScriptRuntime::Node).unwrap();
 
         assert!(collection.css.contains(".theme { color: navy; }"));
     }
@@ -1093,7 +1114,7 @@ mod tests {
         .unwrap();
         fs::write(styles.join("tokens.css"), ".tokens { color: teal; }").unwrap();
 
-        let collection = collect_styles(root, &app, &[]).unwrap();
+        let collection = collect_styles(root, &app, &[], JavaScriptRuntime::Node).unwrap();
 
         assert!(collection.css.contains(".tokens { color: teal; }"));
         assert!(collection.css.contains(".entry { color: navy; }"));
@@ -1131,7 +1152,7 @@ mod tests {
         )
         .unwrap();
 
-        let collection = collect_styles(root, &app, &[]).unwrap();
+        let collection = collect_styles(root, &app, &[], JavaScriptRuntime::Node).unwrap();
 
         assert!(collection.css.contains(".left"));
         assert!(collection.css.contains(".right"));
@@ -1170,7 +1191,7 @@ mod tests {
         )
         .unwrap();
 
-        let collection = collect_styles(root, &app, &[]).unwrap();
+        let collection = collect_styles(root, &app, &[], JavaScriptRuntime::Node).unwrap();
         let expected = scope_css_module(
             &compile_sass_file(&module_path, root).unwrap(),
             &module_path,
@@ -1236,7 +1257,7 @@ mod tests {
         )
         .unwrap();
 
-        let collection = collect_styles(root, &app, &[]).unwrap();
+        let collection = collect_styles(root, &app, &[], JavaScriptRuntime::Node).unwrap();
 
         assert!(collection.css.contains(".renamed"), "{}", collection.css);
         assert!(
@@ -1265,7 +1286,7 @@ mod tests {
         fs::write(app.join("layout.tsx"), "import './globals.css'").unwrap();
         fs::write(app.join("globals.css"), ".from { color: red }\n").unwrap();
 
-        let collection = collect_styles(root, &app, &[]).unwrap();
+        let collection = collect_styles(root, &app, &[], JavaScriptRuntime::Node).unwrap();
 
         assert_eq!(collection.css.trim(), ".from { color: red }");
     }
@@ -1287,7 +1308,7 @@ mod tests {
         )
         .unwrap();
 
-        let error = collect_styles(root, &app, &[])
+        let error = collect_styles(root, &app, &[], JavaScriptRuntime::Node)
             .expect_err("a plugin failure must not be swallowed into raw CSS");
         let message = error.to_string();
         assert!(message.contains("RUV1406"), "{message}");

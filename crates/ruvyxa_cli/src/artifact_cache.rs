@@ -147,7 +147,7 @@ pub(crate) fn prerender_artifact_cache_file(cache_dir: &Path, job: &PrerenderJob
 
 pub(crate) fn prerender_context_hash(
     root: &Path,
-    styles: &str,
+    head: &PrerenderHead,
     client_assets: &BTreeMap<String, PrerenderClientAssets>,
     build: &BuildConfigOptions,
     project_env: &BTreeMap<String, String>,
@@ -155,7 +155,11 @@ pub(crate) fn prerender_context_hash(
     let process_env = stable_process_env();
     let context = serde_json::json!({
         "version": env!("CARGO_PKG_VERSION"),
-        "styles": content_hash(styles),
+        "styles": content_hash(&head.styles),
+        // In the key because it is in the output: these links are written into
+        // every pre-rendered document, so publishing or removing the file one
+        // names changes what a cached page would serve.
+        "assetLinks": content_hash(&head.asset_links),
         "clientAssets": client_assets,
         "jsx": build.jsx_runtime.as_deref().unwrap_or("automatic"),
         // `build.target` decides what the transform emits, so a change to it
@@ -384,6 +388,101 @@ pub(crate) fn store_client_plan(
     };
     write_client_cache_file(
         client_plan_cache_file(cache_dir, route_path, variant),
+        source,
+    );
+}
+
+pub(crate) fn server_component_entry_cache_file(cache_dir: &Path, route_path: &str) -> PathBuf {
+    cache_dir
+        .join("server-component-entries")
+        .join(format!("{}.json", versioned_key(route_path)))
+}
+
+/// Everything a `react-server` compile depends on that is not a project file.
+///
+/// The worker runtime list is the prerender list unchanged, and deliberately
+/// wider than what this compile reads: a superset can only invalidate an entry
+/// that would still have been valid, while a subset serves a reference list the
+/// current worker would not produce — and a wrong reference list does not fail
+/// here, it fails much later as `RUV1820` on an import the project is right to
+/// have. The environment is in too, because it carries the JSX runtime, the ES
+/// target, `NODE_ENV`, and the project's own variables, each of which can change
+/// which modules the graph resolves.
+pub(crate) fn server_component_context_hash(
+    root: &Path,
+    runtime: ruvyxa_dev_server::JavaScriptRuntime,
+    worker_env: &BTreeMap<String, String>,
+) -> String {
+    let context = serde_json::json!({
+        "version": env!("CARGO_PKG_VERSION"),
+        "runtime": runtime.command(),
+        "workerRuntime": runtime_script_hashes(root, WORKER_RUNTIME_FILES),
+        "workerEnv": worker_env,
+    });
+    content_hash(&context.to_string())
+}
+
+pub(crate) fn load_server_component_entry(
+    cache: &ServerComponentEntryCache,
+    route_path: &str,
+) -> Option<CachedServerComponentEntry> {
+    let source = fs::read_to_string(server_component_entry_cache_file(
+        &cache.directory,
+        route_path,
+    ))
+    .ok()?;
+    let entry: CachedServerComponentEntry = serde_json::from_str(&source).ok()?;
+    if entry.version != 1
+        || entry.dependency_hash != cache.dependency_hash
+        || entry.context_hash != cache.context_hash
+        || entry.files.is_empty()
+        || entry.entry_source.is_empty()
+    {
+        return None;
+    }
+    entry
+        .files
+        .iter()
+        .all(|(path, expected)| cache.fingerprints.fingerprint(path).as_deref() == Some(expected))
+        .then_some(entry)
+}
+
+pub(crate) fn store_server_component_entry(
+    cache: &ServerComponentEntryCache,
+    route_path: &str,
+    inputs: &[PathBuf],
+    entry_source: &str,
+    server_references: &[ruvyxa_dev_server::ServerReferenceSource],
+) {
+    let files = inputs
+        .iter()
+        .map(|path| ruvyxa_diagnostics::normalized_canonical_path(path))
+        .filter_map(|path| {
+            cache
+                .fingerprints
+                .fingerprint(&path)
+                .map(|fingerprint| (path, fingerprint))
+        })
+        .collect::<BTreeMap<_, _>>();
+    // A worker that reported no readable inputs has given nothing to invalidate
+    // against, and an entry with an empty file list would answer for every
+    // future state of the project.
+    if files.is_empty() {
+        return;
+    }
+    let entry = CachedServerComponentEntry {
+        version: 1,
+        dependency_hash: cache.dependency_hash.clone(),
+        context_hash: cache.context_hash.clone(),
+        files,
+        entry_source: entry_source.to_string(),
+        server_references: server_references.to_vec(),
+    };
+    let Ok(source) = serde_json::to_vec(&entry) else {
+        return;
+    };
+    write_client_cache_file(
+        server_component_entry_cache_file(&cache.directory, route_path),
         source,
     );
 }

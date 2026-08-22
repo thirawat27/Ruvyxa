@@ -83,14 +83,20 @@ impl BuildHooks for ServerReferenceSources {
     }
 }
 
-/// One spelling for a path, so a lookup cannot miss on separators alone.
+/// One spelling for a path, so a lookup cannot miss on punctuation alone.
 ///
 /// The worker reports what its own resolver produced and the bundler asks with
 /// what its resolver produced. Both are absolute and both point at the same
-/// file, but only on Windows can they differ in separator, and a miss here is
-/// invisible until the build fails somewhere else with `RUV1820`.
+/// file, and only on Windows can they differ in how they are written: in the
+/// separator, and in the extended-length `\\?\` prefix that `canonicalize`
+/// adds to a root and every path derived from it. Node never produces that
+/// prefix, so a build given a canonicalized root asked with it and was
+/// answered by nothing — and a miss here is invisible until the build fails
+/// somewhere else with `RUV1820`, naming an import the project is right to
+/// have.
 fn normalize(path: &Path) -> PathBuf {
-    PathBuf::from(path.to_string_lossy().replace('\\', "/"))
+    let plain = ruvyxa_diagnostics::without_verbatim_prefix(path);
+    PathBuf::from(plain.to_string_lossy().replace('\\', "/"))
 }
 
 #[cfg(test)]
@@ -139,6 +145,32 @@ mod tests {
             )
             .unwrap();
         assert!(loaded.is_some());
+    }
+
+    /// A canonicalized root must not hide the substitution from the bundle it
+    /// was collected for.
+    ///
+    /// `std::fs::canonicalize` writes an extended-length `\\?\` prefix on
+    /// Windows, and a root that carries one hands it to every module path
+    /// derived from it. Node's resolver never produces one, so the reported
+    /// file and the asked-for file describe the same bytes in two spellings.
+    /// The build that hit this asked with the prefix, was answered by nothing,
+    /// and walked the real `'use server'` module into a browser bundle — where
+    /// it is refused as `RUV1820`, naming an import that is not the mistake.
+    #[cfg(windows)]
+    #[test]
+    fn matches_across_the_windows_extended_length_prefix() {
+        let sources = ServerReferenceSources::new([reference(r"D:\app\app\actions.ts")]);
+        let loaded = sources
+            .load(
+                Path::new(r"\\?\D:\app\app\actions.ts"),
+                &context(BundleTarget::Client),
+            )
+            .unwrap();
+        assert!(
+            loaded.is_some(),
+            "a verbatim-prefixed path must find what an ordinary one reported"
+        );
     }
 
     /// The server graph runs this code rather than referencing it, and an

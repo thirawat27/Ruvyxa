@@ -2,6 +2,204 @@
 
 ## v1.0.32 (unreleased)
 
+### Bun and Deno serve with their own servers
+
+`Bun.serve` and `Deno.serve` take a function from `Request` to `Response`. `createHandler` **is** a
+function from `Request` to `Response`. Between them, until now, sat `node:http`: every request had
+its `Request` taken apart into a Node request, and every answer had a `Response` reassembled from a
+Node one — a header list rebuilt in each direction, a body buffered on the way in, and a web stream
+converted to a Node stream on the way out. Both runtimes implement `node:http` well enough that this
+worked, which is why it lasted; it was never what either runtime is for.
+
+Each adapter now emits its own runtime's server, and nothing above the transport moved. Which URL
+names which file, what it is served as, how long it may be cached, which bytes a range asks for,
+whether routing or the publish directory answers first, whether the security defaults apply — all of
+that is one shared program text with one `staticResponsePlan` in it, and a transport turns the plan
+it is handed into bytes. That is the whole reason to do it this way: **the question "does a Bun
+deployment behave like a Node one" is answered by construction**, not by two implementations that
+agree today. Only reading a file's bytes differs, because only that is a runtime API rather than a
+decision — `Bun.file` (a slice of which is still a file, so a range is still `sendfile`), Deno's own
+readable for a whole file and the Node compatibility stream for a range, `createReadStream` on Node.
+
+The Node transport is unchanged on purpose. Rewritten as a `fetch` handler it would have paid the
+same translation in the other direction, on the runtime most deployments use.
+
+Shutdown, keep-alive, and signal handling came along. `Bun.serve`'s `idleTimeout` defaults to ten
+seconds, which sits under every managed proxy's idle window and produces exactly the intermittent
+502 that `keepAliveTimeout` is raised to avoid on Node; it now follows `RUVYXA_KEEP_ALIVE_TIMEOUT`
+like the Node server. `Deno.serve`'s `shutdown()` already waits for in-flight responses, which is
+the drain the Node transport builds by hand. And signals are registered one at a time inside a
+`try`, because Deno on Windows delivers only a subset of them and throws on the rest — losing
+`SIGINT` because `SIGTERM` could not be registered would leave the process unstoppable from a
+terminal.
+
+**The emitted program is now run, not read.**
+`tests/packages/core/standalone-server-conformance.test.ts` stages the directory an adapter actually
+produces — the real `serverless-handler.mjs` and every module it imports, copied exactly as
+`materializeFunction` copies them — and puts all three servers through one table of cases: an
+immutable hashed bundle, a revalidating public asset, a PNG URL answered by the WebP the build
+published, a byte range checked against the exact bytes, an unsatisfiable range, a HEAD, a rendered
+page, a `public/` HTML fallback, two kinds of miss, three path traversals, and the security headers
+on both a static file and a page. The Node server is spawned as its own process and answers real
+sockets. Bun's and Deno's are loaded with that runtime's server and file APIs standing in, which
+does not claim to test either runtime — it tests the program Ruvyxa emits for them, which is the
+part this repository owns. Before this, every assertion about these servers was a regular expression
+over a template string, and neither Bun nor Deno was installed on the machine that ran them.
+
+### Every production page load logged a 404 for `/favicon.ico`
+
+A browser asks for `/favicon.ico` only when the document declares no icon of its own. `ruvyxa dev`
+declared one; production did not, for two independent reasons, and both are the same kind of mistake
+— a decision made in one renderer and not the other.
+
+A pre-rendered page is composed by the build and served from disk with no renderer left to touch it,
+so everything the live pipeline adds to the head has to be in the file already. The stylesheet was;
+the asset links were not. And on the live path, the link is emitted when the published directory
+holds the icon — but `ruvyxa dev` publishes the project's `public/`, which has the PNG, while
+`ruvyxa start` publishes the staged assets, where `image.keepOriginal: false` had already converted
+it to WebP. So the check asked about a file that production had by then renamed, and answered "no
+icon" for every live-rendered page as well.
+
+Both are fixed at the seam rather than at the symptom. `PrerenderHead` carries the asset links
+beside the styles through the whole pre-render path, built from the staged assets directory — the
+one a deployed server actually publishes, not the source directory the build read. And the icon
+lookup now knows both forms the build can leave behind, declaring the type of whichever is there.
+Static, ISR, CSR, streamed, dynamic, and server-components routes all carry the link now; they were
+checked one at a time against a running `ruvyxa start`.
+
+The links are in the pre-render cache key too, because they are in the output: publishing or
+removing the file one names changes what a cached page would serve.
+
+### A canonicalized project root failed every server-components build
+
+`std::fs::canonicalize` writes an extended-length `\\?\` prefix on Windows, and a root that carries
+one hands it to every module path derived from it. Node's resolver never produces one. So a build
+given a canonicalized root asked its `'use server'` substitution table with `\\?\D:\app\...` while
+the worker had reported `D:\app\...`, the lookup was answered by nothing, and the bundler walked the
+real server module into a browser bundle — where it is refused as **`RUV1820`, naming an import the
+project is right to have**. The same directory built without the prefix.
+
+`ruvyxa bench --baseline` was the reliable way to hit it: it canonicalizes the project root before
+cloning it. Every baseline run on a Windows machine with a server-components route had been failing.
+
+The fix is one spelling for a path in the one place that compares two. `without_verbatim_prefix`
+sits beside `normalized_canonical_path` and answers the other half of the question — that one asks
+the file system what a path is, this one only respells a path already in hand, which is what a
+lookup key needs and what a key that ran `canonicalize` per module would pay a syscall for. The
+benchmark uses it too, so its workspace is the shape of path a user's build actually has.
+
+While there: a failing baseline sample now names the scenario it failed in. Seven builds run per
+sample and they differ only in what the previous step edited, so an unqualified error made a failure
+after the client edit and a failure on the very first cold build read identically.
+
+### A warm production build spent most of its time recompiling one answer
+
+Measured on the demo, a warm `ruvyxa build` spent **1.5 of 2.2 seconds** asking the `react-server`
+graph two questions about two routes: which of a route's modules are client references, and which
+`'use server'` modules those references reach. Both answers come from compiling, both are a pure
+function of the files that were read, and neither depends on the request — so both were being
+recomputed from scratch on every build of an unchanged project.
+
+They are cached now, content-addressed on those files exactly like every other build artifact, and a
+build where every route hits starts no worker process at all. The demo's warm build went from ~2.15s
+to ~1.47s.
+
+**What makes it safe is the input list.** The `react-server` graph reads a `'use client'` module —
+it has to, to see the directive — and then stops, so the `'use server'` module _behind_ one is known
+only to the registry compile. The reference ids in the cached answer are versioned by that module's
+source, so an answer kept across an edit to it would hand the browser a proxy naming a function the
+server no longer registers, and every call through it would fail at run time. The worker reports the
+union of both compiles' inputs for that reason, and
+`tests/packages/ruvyxa/server-component-entry-inputs.test.mjs` holds it there.
+
+The same gap was open in the render path, where it reached further: a pre-rendered server-components
+page is cached against these inputs too, and the registry is what supplies the client components
+React renders into the HTML — including the hidden fields of a `<form action={fn}>`, whose reference
+id is versioned by the action module's source. Editing that module left every pre-rendered page
+serving markup naming a function id the server no longer registered. That render reports the union
+now as well.
+
+The collection also overlaps the plugin host's start, since neither needs anything from the other
+and both are dominated by a JavaScript runtime coming up.
+
+### The slowest thing `ruvyxa dev` served was its own route table
+
+`/__ruvyxa/client/route-manifest.json` is what the client router matches against, and the browser
+fetches it on every document load. Serving it meant asking the worker pool for **every** page
+route's browser bundle — the hash of that bundle is the `artifactVersion` the router compares
+against — reading each route's source, and parsing it, all of it again per request. Measured over a
+raw keep-alive socket on the demo: a page took **0.2 ms** and this took **60 ms**, and the first
+request of a session took **3.3 seconds** because it compiled twenty-seven browser bundles end to
+end before answering.
+
+It is cached now, and the routes are compiled across the pool rather than one after another: **0.10
+ms** warm, **0.87 s** on the first request. What it costs after an edit — the only other time it is
+built — is 120–170 ms.
+
+**The cache is dropped on every watcher event, including the selective ones.** That branch exists to
+keep the route manifest and the collected CSS across an edit that changes neither, and it was the
+one that mattered here: a component edit changes the bundle that component is in, which is exactly
+what this table advertises. Kept across one, it would tell the router that the copy the browser
+already holds is current, and the next soft navigation would render the code from before the save.
+`a_selective_watcher_event_still_drops_the_client_route_table` holds it, and was seen fail without
+the line.
+
+### Two JavaScript runtimes started one after the other
+
+`ruvyxa dev` came up in **1.09–1.17 s**, of which 0.76 s was the plugin host starting and 0.21 s was
+the render worker pool starting. Neither needs anything from the other. They come up together now,
+and the middleware stack is validated before either is spawned rather than after — a rejected
+configuration is a configuration error, and paying for two runtimes to boot before reporting it only
+makes the report slower.
+
+**0.62–0.68 s.** The first request to a server-components route came down with it, from 1.34 s to
+0.55 s, because the pool now has a head start on its dependency warm-up.
+
+### Bun and Deno, measured rather than read about
+
+Both runtimes were installed on the machine this was written on — Bun 1.4.0 and Deno 2.9.5, under
+`~/.bun/bin` and `~/.deno/bin` — and `ruvyxa doctor` reported Deno as missing. Both installers add
+their directory to `PATH`, and a shell that has not been restarted since sees neither the executable
+nor a shim; the lookup now falls back to where each installer writes, so `--runtime deno` can be
+selected at all.
+
+With that fixed, `tests/packages/core/standalone-server-conformance.test.ts` runs all three emitted
+servers **as real processes** when the runtime is installed, and falls back to stubbed
+`globalThis.Bun` / `globalThis.Deno` when it is not. The suite title says which happened, because
+the two are not the same evidence — and the difference showed immediately.
+
+**`BunFile.slice(…).stream()` serves the whole file.** Measured on Bun 1.4.0: a sliced `BunFile`
+reports the right `size`, and `text()`, `bytes()`, and using it directly as a response body all give
+the four bytes asked for — but the same slice's `.stream()`, serialized by `Bun.serve`, sends all
+ten. A `Range: bytes=2-5` request came back `206` with a correct `content-range` and the entire file
+as its body, which is the whole video a seek would have played. The slice is handed over as a file.
+Bun does **not** re-apply a request's `Range` to a response the handler returns — its automatic
+`206` is about its own static `routes` — so nothing has to work around that either.
+
+`Bun.serve`'s `idleTimeout` was also being set to 65 seconds on the theory that Bun closes an idle
+connection after ten. It has defaulted to 0 — never — since Bun 1.1.27, which is already on the safe
+side of the 502 the Node transport raises `keepAliveTimeout` to avoid, and is what lets a long
+streamed response stay open. It is left alone now unless `RUVYXA_KEEP_ALIVE_TIMEOUT` asks for a
+bound.
+
+`ruvyxa doctor` reports each runtime against the version the emitted server needs — Bun 1.1.26, for
+`Bun.serve`'s `idleTimeout`, and Deno 2.0, for the Node built-ins it imports — and flags one below
+it. A `--version` line it cannot parse is reported as-is rather than as too old: a cosmetic change
+in someone else's output must not become a toolchain this tool declares broken.
+
+`ruvyxa build --root examples/demo --runtime bun` and `--runtime deno` both build the demo in full,
+server components included, and `ruvyxa dev --runtime bun` / `--runtime deno` both come up and serve
+every route class — a page, a client-hydrated page, a server-components page, and an API route.
+
+### PostCSS ran under Node whatever the project selected
+
+A project's PostCSS chain is the project's own JavaScript, loaded from the project's own
+dependencies, and every other JavaScript stage of a build already runs under the runtime the project
+selected. This one launched `node` unconditionally — so a Bun- or Deno-only machine built everything
+except its stylesheet. The runtime travels to `PostcssRunner` now, and
+`the_plugin_chain_runs_under_the_projects_runtime` reads the program and the arguments the runner
+would launch.
+
 ### React Server Components
 
 A page can opt in with `export const serverComponents = true`. It and its layouts then run in a

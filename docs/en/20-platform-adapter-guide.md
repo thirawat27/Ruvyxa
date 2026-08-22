@@ -94,6 +94,22 @@ All three generated servers default to `PORT=3000` and `HOST=0.0.0.0`. Each adap
 runtime image should not carry the CLI. The Deno standalone command deliberately grants the server
 its required permissions, so run only the artifact built from a project you trust.
 
+**Supported runtime versions.** Node follows the `engines.node` floor in the package manifests. Bun
+needs **1.1.26 or newer** — the release that added `Bun.serve`'s `idleTimeout`, the newest API the
+emitted server can reach for — and Deno needs **2.0 or newer**, where the Node built-ins it imports
+(`node:process`, `node:fs`, `node:path`) became the supported path. `ruvyxa doctor` reports the
+installed version of each and flags one below the floor. Verified against Bun 1.4.0 and Deno 2.9.5.
+
+Each server uses its own runtime's HTTP server: `node:http` on Node, `Bun.serve` on Bun, and
+`Deno.serve` on Deno. Everything above the transport is one shared program — which URL names which
+file, what it is served as, how long it may be cached, which bytes a range asks for, whether routing
+or the publish directory answers first, and how a shutdown drains — so the three answer identically.
+`RUVYXA_SHUTDOWN_GRACE` bounds the drain on all three. `RUVYXA_KEEP_ALIVE_TIMEOUT` raises Node's
+keep-alive window above a managed proxy's own idle window — unset, Node closes an idle connection
+after five seconds and the proxy's next request on it fails as a 502 — and, when set, also bounds
+Bun's `idleTimeout` (in seconds, capped at 255). Bun is left at its own default otherwise, which
+never retires an idle connection and never cuts a long streamed response short.
+
 ## Static hosting: publish only static output
 
 ```bash

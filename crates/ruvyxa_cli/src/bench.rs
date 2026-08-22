@@ -124,7 +124,14 @@ impl Drop for BenchmarkWorkspace {
 pub(crate) async fn run_baseline_benchmark(args: &BenchArgs) -> anyhow::Result<()> {
     let started = Instant::now();
     let samples = args.samples.max(1);
+    // Canonical so every sample and every containment check below compares
+    // against one absolute path, and respelled because `canonicalize` writes an
+    // extended-length `\\?\` prefix on Windows. A benchmark measuring a shape
+    // of path no user's build has is measuring the wrong thing — and this one
+    // did: the prefix reached the bundler and nothing else, so the workspace
+    // failed to build for a reason the project itself never had.
     let source_root = fs::canonicalize(&args.root)
+        .map(|path| ruvyxa_diagnostics::without_verbatim_prefix(&path))
         .with_context(|| format!("failed to resolve benchmark root {}", args.root.display()))?;
     let source_config = load_project_config(&source_root)?;
     let source_out_dir = safe_relative_directory(source_config.out_dir(), "build output")?;
@@ -161,13 +168,13 @@ pub(crate) async fn run_baseline_benchmark(args: &BenchArgs) -> anyhow::Result<(
         });
 
         let cold_started = Instant::now();
-        benchmark_build(&workspace.path, &cache_dir).await?;
+        benchmark_build(&workspace.path, &cache_dir, &scenario_ids[0]).await?;
         timings[0].push(cold_started.elapsed());
         observations[0].push(read_cache_observation(&workspace_out_dir)?);
         let cold_artifacts = semantic_build_artifacts(&workspace_out_dir)?;
 
         let warm_started = Instant::now();
-        benchmark_build(&workspace.path, &cache_dir).await?;
+        benchmark_build(&workspace.path, &cache_dir, &scenario_ids[1]).await?;
         timings[1].push(warm_started.elapsed());
         observations[1].push(read_cache_observation(&workspace_out_dir)?);
         let warm_artifacts = semantic_build_artifacts(&workspace_out_dir)?;
@@ -185,25 +192,25 @@ pub(crate) async fn run_baseline_benchmark(args: &BenchArgs) -> anyhow::Result<(
 
         apply_leaf_edit(&css_file)?;
         let css_started = Instant::now();
-        benchmark_build(&workspace.path, &cache_dir).await?;
+        benchmark_build(&workspace.path, &cache_dir, &scenario_ids[3]).await?;
         timings[3].push(css_started.elapsed());
         observations[3].push(read_cache_observation(&workspace_out_dir)?);
 
         apply_leaf_edit(&client_file)?;
         let client_started = Instant::now();
-        benchmark_build(&workspace.path, &cache_dir).await?;
+        benchmark_build(&workspace.path, &cache_dir, &scenario_ids[4]).await?;
         timings[4].push(client_started.elapsed());
         observations[4].push(read_cache_observation(&workspace_out_dir)?);
 
         apply_leaf_edit(&server_file)?;
         let server_started = Instant::now();
-        benchmark_build(&workspace.path, &cache_dir).await?;
+        benchmark_build(&workspace.path, &cache_dir, &scenario_ids[5]).await?;
         timings[5].push(server_started.elapsed());
         observations[5].push(read_cache_observation(&workspace_out_dir)?);
 
         apply_leaf_edit(&editable_file)?;
         let edit_started = Instant::now();
-        benchmark_build(&workspace.path, &cache_dir).await?;
+        benchmark_build(&workspace.path, &cache_dir, &scenario_ids[6]).await?;
         timings[6].push(edit_started.elapsed());
         observations[6].push(read_cache_observation(&workspace_out_dir)?);
 
@@ -306,7 +313,14 @@ pub(crate) async fn run_baseline_benchmark(args: &BenchArgs) -> anyhow::Result<(
     Ok(())
 }
 
-async fn benchmark_build(root: &Path, cache_dir: &Path) -> anyhow::Result<()> {
+/// Run one baseline build and name the scenario it belongs to if it fails.
+///
+/// Every sample runs seven builds that differ only in what the previous step
+/// edited, so an unqualified error says nothing about which one broke: a
+/// failure after the client edit and a failure on the very first cold build
+/// arrive as the same sentence. The scenario id comes from the contract, so the
+/// name in the error is the name in the report.
+async fn benchmark_build(root: &Path, cache_dir: &Path, scenario: &str) -> anyhow::Result<()> {
     build_with_cache_override(
         BuildArgs {
             root: root.to_path_buf(),
@@ -319,6 +333,7 @@ async fn benchmark_build(root: &Path, cache_dir: &Path) -> anyhow::Result<()> {
         Some(cache_dir),
     )
     .await
+    .with_context(|| format!("benchmark scenario {scenario} failed"))
 }
 
 fn baseline_contract() -> anyhow::Result<BaselineContract> {
@@ -451,12 +466,17 @@ fn benchmark_edit_file(
         .into_iter()
         .find(|route| route.file.is_file())
         .context("the project has no route source file to use for the leaf-edit benchmark")?;
-    let file = fs::canonicalize(&route.file).with_context(|| {
-        format!(
-            "failed to resolve benchmark edit file {}",
-            route.file.display()
-        )
-    })?;
+    // Respelled like `source_root`, or the containment check below compares a
+    // verbatim path against an ordinary one and rejects a file that is inside
+    // the workspace.
+    let file = fs::canonicalize(&route.file)
+        .map(|path| ruvyxa_diagnostics::without_verbatim_prefix(&path))
+        .with_context(|| {
+            format!(
+                "failed to resolve benchmark edit file {}",
+                route.file.display()
+            )
+        })?;
     ensure!(
         file.starts_with(root),
         "benchmark edit file {} escapes the isolated project workspace",

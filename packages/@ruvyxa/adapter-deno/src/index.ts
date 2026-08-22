@@ -38,7 +38,10 @@ export function deno(options: DenoAdapterOptions = {}): Adapter {
           {
             kind: 'function',
             path: 'deploy/deno/server',
-            handlerSource: standaloneServerSource({ runtimePolicy: runtimeBuildPolicy(ctx) }),
+            handlerSource: standaloneServerSource({
+              runtime: 'deno',
+              runtimePolicy: runtimeBuildPolicy(ctx),
+            }),
           },
           { kind: 'static-site', path: 'deploy/deno/public', optional: true },
           {

@@ -85,6 +85,35 @@ pub(crate) struct CachedPrerenderArtifact {
     pub(crate) html: String,
 }
 
+/// What one `react-server` compile told the build about one route.
+///
+/// Cached because producing it is the most expensive single step of a warm
+/// production build and none of it depends on the request: two compiles run in
+/// a Node worker to answer two questions — which modules of this route are
+/// client references, and which `'use server'` modules those references reach.
+/// Both answers are a pure function of the files the two compiles read, which
+/// is exactly what `files` records.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub(crate) struct CachedServerComponentEntry {
+    pub(crate) version: u8,
+    pub(crate) dependency_hash: String,
+    /// Covers the worker runtime and the environment it was started with — the
+    /// inputs that are not project files. See
+    /// [`crate::artifact_cache::server_component_context_hash`].
+    pub(crate) context_hash: String,
+    pub(crate) files: BTreeMap<PathBuf, String>,
+    pub(crate) entry_source: String,
+    pub(crate) server_references: Vec<ruvyxa_dev_server::ServerReferenceSource>,
+}
+
+/// Where a route's `react-server` answer is cached, and what makes it stale.
+pub(crate) struct ServerComponentEntryCache {
+    pub(crate) directory: PathBuf,
+    pub(crate) dependency_hash: String,
+    pub(crate) context_hash: String,
+    pub(crate) fingerprints: Arc<ArtifactFingerprintCache>,
+}
+
 #[derive(Clone)]
 pub(crate) struct ClientRoutePlan {
     pub(crate) path: String,
@@ -1326,16 +1355,43 @@ pub(crate) fn parse_split_strategy(
 ///
 /// Returns an empty map — starting no worker — for an app that uses no server
 /// components.
+///
+/// A route whose cached answer is still valid is served from disk and never
+/// reaches a worker, and a build where every route hits starts no worker
+/// process at all. Both compiles behind one answer are expensive — together
+/// they were the largest single cost of a warm production build of the demo,
+/// ahead of bundling, pre-rendering, and asset preparation combined — and
+/// neither depends on anything but the files it read.
 pub(crate) async fn collect_server_component_entries(
     root: &Path,
     app_dir: &Path,
     manifest: &RouteManifest,
     build: &BuildConfigOptions,
     runtime: ruvyxa_dev_server::JavaScriptRuntime,
+    cache: Option<&ServerComponentEntryCache>,
 ) -> anyhow::Result<ServerComponentEntries> {
     let routes = server_component_page_routes(manifest);
     if routes.is_empty() {
         return Ok(ServerComponentEntries::default());
+    }
+
+    let mut collected = ServerComponentEntries::default();
+    let mut pending = Vec::new();
+    for route in routes {
+        match cache.and_then(|cache| {
+            crate::artifact_cache::load_server_component_entry(cache, &route.path)
+        }) {
+            Some(entry) => {
+                collected
+                    .entries
+                    .insert(route.path.clone(), entry.entry_source);
+                collected.server_references.extend(entry.server_references);
+            }
+            None => pending.push(route),
+        }
+    }
+    if pending.is_empty() {
+        return Ok(collected);
     }
 
     let worker_env = crate::prerender::build_worker_env(root, build, runtime)?;
@@ -1348,8 +1404,7 @@ pub(crate) async fn collect_server_component_entries(
     .await
     .map_err(|error| anyhow::anyhow!(error.to_string()))?;
 
-    let mut collected = ServerComponentEntries::default();
-    for route in &routes {
+    for route in &pending {
         let response = pool
             .rsc_client_entry(root, app_dir, &route.file, &route.path)
             .await
@@ -1376,10 +1431,24 @@ pub(crate) async fn collect_server_component_entries(
                 route.path
             )
         })?;
+        let server_references = response.server_references.unwrap_or_default();
+        if let Some(cache) = cache {
+            // Stored against the inputs of *both* compiles behind this answer,
+            // which is why the worker reports their union: the `react-server`
+            // graph reads a `'use client'` module and stops, so the `'use
+            // server'` module behind one is known only to the registry compile
+            // — and the reference ids in this answer are versioned by that
+            // module's source.
+            crate::artifact_cache::store_server_component_entry(
+                cache,
+                &route.path,
+                &response.inputs.unwrap_or_default(),
+                &source,
+                &server_references,
+            );
+        }
         collected.entries.insert(route.path.clone(), source);
-        collected
-            .server_references
-            .extend(response.server_references.unwrap_or_default());
+        collected.server_references.extend(server_references);
     }
     pool.shutdown().await;
     Ok(collected)

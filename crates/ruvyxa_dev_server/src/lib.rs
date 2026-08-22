@@ -113,7 +113,7 @@ use plugin_bridge::{
 mod plugin_head;
 pub use plugin_head::{PluginHeadEntry, render_plugin_head};
 mod static_assets;
-use static_assets::public_asset_links;
+pub use static_assets::public_asset_links;
 #[cfg(test)]
 use static_assets::{is_safe_relative_path, resolve_public_asset};
 
@@ -228,6 +228,13 @@ impl JavaScriptRuntime {
     /// Windows package-manager shims commonly expose Bun as `bun.cmd` instead
     /// of `bun.exe`. Launching the shim through `cmd.exe` can corrupt JSON
     /// arguments, so resolve the Bun package executable behind the shim first.
+    ///
+    /// After that comes the directory each runtime's own installer writes to.
+    /// Both add it to `PATH`, and a shell that has not been restarted since —
+    /// or a tool launched from one that never had it — sees neither the
+    /// executable nor the shim. On the machine this was written on, Deno 2.9.5
+    /// was installed at `~/.deno/bin/deno.exe` and `ruvyxa doctor` reported it
+    /// missing, so `--runtime deno` could not be selected at all.
     #[must_use]
     pub fn executable(self) -> std::path::PathBuf {
         match self {
@@ -237,14 +244,16 @@ impl JavaScriptRuntime {
                 if let Some(executable) = bun_executable_from_path() {
                     return executable;
                 }
-                std::path::PathBuf::from(self.command())
+                installer_home_executable(self)
+                    .unwrap_or_else(|| std::path::PathBuf::from(self.command()))
             }
             Self::Deno => {
                 #[cfg(windows)]
                 if let Some(executable) = deno_executable_from_path() {
                     return executable;
                 }
-                std::path::PathBuf::from(self.command())
+                installer_home_executable(self)
+                    .unwrap_or_else(|| std::path::PathBuf::from(self.command()))
             }
         }
     }
@@ -291,6 +300,34 @@ impl JavaScriptRuntime {
             Self::Node
         }
     }
+}
+
+/// Where a runtime's own installer puts it, under a home directory.
+///
+/// Split from the lookup so the rule can be tested without a home directory to
+/// stand in for the real one. Bun installs to `~/.bun/bin` and Deno to
+/// `~/.deno/bin`; both are named after the runtime, so the directory follows
+/// from [`JavaScriptRuntime::command`] rather than from a second list that
+/// could disagree with it.
+fn runtime_home_executable(
+    runtime: JavaScriptRuntime,
+    home: &std::path::Path,
+) -> Option<std::path::PathBuf> {
+    let file = if cfg!(windows) {
+        format!("{}.exe", runtime.command())
+    } else {
+        runtime.command().to_string()
+    };
+    let candidate = home
+        .join(format!(".{}", runtime.command()))
+        .join("bin")
+        .join(file);
+    candidate.is_file().then_some(candidate)
+}
+
+fn installer_home_executable(runtime: JavaScriptRuntime) -> Option<std::path::PathBuf> {
+    let home = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"))?;
+    runtime_home_executable(runtime, std::path::Path::new(&home))
 }
 
 #[cfg(windows)]
@@ -643,6 +680,16 @@ pub(crate) struct RuntimeCache {
     /// blocking filesystem syscall on a Tokio worker thread, per request, for an
     /// answer that only changes when the watcher invalidates this cache.
     asset_links: tokio::sync::RwLock<CacheSlot<Arc<str>>>,
+    /// The synthesized `route-manifest.json` body `ruvyxa dev` serves.
+    ///
+    /// Rebuilt only when something on disk changed. Building it asks the worker
+    /// pool for every page route's browser bundle — the bundle's hash is the
+    /// `artifactVersion` the client router compares against — and the browser
+    /// fetches this table on every document load, so the answer was being
+    /// recomputed across every route of the project for each one. On the demo
+    /// that made a manifest request cost more than sixty milliseconds against a
+    /// page's two tenths of one.
+    client_routes: tokio::sync::RwLock<CacheSlot<Arc<str>>>,
 }
 
 /// One independently invalidated cache generation.
@@ -717,7 +764,54 @@ impl RuntimeCache {
             routes: tokio::sync::RwLock::new(CacheSlot::with_value(RouteCacheEntry::new(manifest))),
             styles: tokio::sync::RwLock::new(CacheSlot::default()),
             asset_links: tokio::sync::RwLock::new(CacheSlot::default()),
+            client_routes: tokio::sync::RwLock::new(CacheSlot::default()),
         }
+    }
+
+    /// The cached client route table, or the generation a rebuild must install
+    /// against.
+    ///
+    /// Split in two rather than taking a builder closure because building the
+    /// table needs the whole [`AppState`] this cache is a field of. The
+    /// generation is what stops a build that started before a watcher event
+    /// from installing its stale answer afterwards.
+    pub(crate) async fn cached_client_routes(&self) -> std::result::Result<Arc<str>, u64> {
+        let cached = self.client_routes.read().await;
+        match cached.value.as_ref() {
+            Some(body) => Ok(Arc::clone(body)),
+            None => Err(cached.generation),
+        }
+    }
+
+    /// Install a table built against `generation`.
+    ///
+    /// `None` means the generation moved while it was being built, so the table
+    /// describes a tree that has already changed and the caller has to build
+    /// again rather than serve it.
+    pub(crate) async fn store_client_routes(
+        &self,
+        generation: u64,
+        body: Arc<str>,
+    ) -> Option<Arc<str>> {
+        let mut cached = self.client_routes.write().await;
+        if let Some(existing) = cached.value.as_ref() {
+            return Some(Arc::clone(existing));
+        }
+        cached
+            .insert_if_current(generation, Arc::clone(&body))
+            .then_some(body)
+    }
+
+    /// Drop the client route table alone.
+    ///
+    /// Called for *every* watcher event, including the selective ones that keep
+    /// the route manifest and the collected CSS. Those are selective because a
+    /// component edit changes neither — but it does change the bundle that
+    /// component is in, and the table advertises that bundle's hash. Keeping it
+    /// across such an edit tells the router the bundle it already has is
+    /// current, and the soft navigation renders the code from before the save.
+    pub(crate) fn invalidate_client_routes(&self) {
+        self.client_routes.blocking_write().invalidate();
     }
 
     /// Public-directory `<link>` tags, resolved on first use.
@@ -869,6 +963,7 @@ impl RuntimeCache {
         self.routes.blocking_write().invalidate();
         self.styles.blocking_write().invalidate();
         self.asset_links.blocking_write().invalidate();
+        self.client_routes.blocking_write().invalidate();
     }
 
     #[cfg(test)]
@@ -876,6 +971,7 @@ impl RuntimeCache {
         self.routes.write().await.invalidate();
         self.styles.write().await.invalidate();
         self.asset_links.write().await.invalidate();
+        self.client_routes.write().await.invalidate();
     }
 }
 
@@ -890,7 +986,8 @@ async fn collect_styles_off_thread(config: &ServerConfig) -> Result<StyleCollect
     let root = config.root.clone();
     let app_dir = config.app_dir.clone();
     let entries = config.style_entries.clone();
-    tokio::task::spawn_blocking(move || collect_styles(&root, &app_dir, &entries))
+    let runtime = config.runtime;
+    tokio::task::spawn_blocking(move || collect_styles(&root, &app_dir, &entries, runtime))
         .await
         .map_err(|error| RuvyxaError::Message(format!("Style collection task failed: {error}")))?
 }
@@ -1127,9 +1224,27 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
     let (reload_tx, _) = broadcast::channel(64);
     let runtime_cache = Arc::new(RuntimeCache::with_manifest(manifest.clone()));
 
+    // Validated before anything is spawned: a rejected middleware stack is a
+    // configuration error, and paying for two JavaScript runtimes to start
+    // before reporting it only makes the report slower.
+    //
+    // The built-in rate limiter reads `security.trustedProxyIps` for the same
+    // reason the action limiter does: behind a reverse proxy the transport peer
+    // is the proxy, so keying on it alone gives every caller one shared bucket.
+    let middleware_stack = MiddlewareStack::new(config.middleware.clone())
+        .with_trusted_proxies(config.trusted_proxies.clone());
+    middleware_stack.validate().map_err(RuvyxaError::Message)?;
+
+    // Both start a JavaScript runtime and neither needs anything from the
+    // other, so they come up together. In sequence they were the whole of a dev
+    // server's startup — the render workers and then the plugin host, each
+    // waiting for a process that had nothing to say to it.
     let env = runtime_env(&config)?;
-    let worker_pool =
-        Arc::new(NodeWorkerPool::start_with_runtime(&config.root, env, config.runtime).await?);
+    let (worker_pool, plugin_runtime) = tokio::try_join!(
+        NodeWorkerPool::start_with_runtime(&config.root, env, config.runtime),
+        start_plugin_runtime(&config),
+    )?;
+    let worker_pool = Arc::new(worker_pool);
     info!(
         runtime = config.runtime.command(),
         "JavaScript worker pool ready"
@@ -1147,13 +1262,6 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
     let watcher_render_cache = render_cache.clone();
     let hmr_tracker = Arc::new(HmrTracker::new());
     hmr_tracker.populate_from_manifest(&manifest.routes);
-    // The built-in rate limiter reads `security.trustedProxyIps` for the same
-    // reason the action limiter does: behind a reverse proxy the transport peer
-    // is the proxy, so keying on it alone gives every caller one shared bucket.
-    let middleware_stack = MiddlewareStack::new(config.middleware.clone())
-        .with_trusted_proxies(config.trusted_proxies.clone());
-    middleware_stack.validate().map_err(RuvyxaError::Message)?;
-    let plugin_runtime = start_plugin_runtime(&config).await?;
     let realtime = realtime_runtime(plugin_runtime.as_ref())?;
     let presence = presence_runtime(plugin_runtime.as_ref())?;
     assert_transport_paths_distinct(realtime.as_ref(), presence.as_ref())?;
@@ -3200,6 +3308,49 @@ mod tests {
     /// The favicon link is derived from a filesystem stat, and every page render
     /// used to redo it. Caching it means the answer is computed once and only
     /// recomputed when the watcher invalidates the runtime cache.
+    /// A runtime installed by its own installer has to be findable.
+    ///
+    /// Both installers write to `~/.<runtime>/bin` and add it to `PATH`, so a
+    /// shell that has not been restarted since — or a tool launched from one
+    /// that never had it — sees nothing on `PATH`. Deno 2.9.5 was installed
+    /// exactly that way on the machine this was written on and `doctor`
+    /// reported it missing, which also made `--runtime deno` unselectable.
+    #[test]
+    fn a_runtime_is_found_where_its_own_installer_puts_it() {
+        let home = tempfile::tempdir().expect("temp dir");
+        for runtime in [JavaScriptRuntime::Bun, JavaScriptRuntime::Deno] {
+            assert_eq!(
+                runtime_home_executable(runtime, home.path()),
+                None,
+                "{runtime:?} must not be claimed before it is installed"
+            );
+
+            let bin = home
+                .path()
+                .join(format!(".{}", runtime.command()))
+                .join("bin");
+            std::fs::create_dir_all(&bin).expect("bin dir");
+            let file = if cfg!(windows) {
+                format!("{}.exe", runtime.command())
+            } else {
+                runtime.command().to_string()
+            };
+            std::fs::write(bin.join(&file), []).expect("write");
+
+            assert_eq!(
+                runtime_home_executable(runtime, home.path()),
+                Some(bin.join(&file)),
+                "{runtime:?} must be found where its installer put it"
+            );
+        }
+        // Node is not installed this way, and asking would only find a
+        // directory nobody writes.
+        assert_eq!(
+            runtime_home_executable(JavaScriptRuntime::Node, home.path()),
+            None
+        );
+    }
+
     #[tokio::test]
     async fn runtime_cache_resolves_public_asset_links_once_until_invalidated() {
         let temp = tempfile::tempdir().unwrap();

@@ -42,7 +42,7 @@ export type {
 } from './types.js'
 export type * from './plugin.js'
 export { standaloneServerSource } from './standalone-server.js'
-export type { StandaloneServerOptions } from './standalone-server.js'
+export type { StandaloneServerOptions, StandaloneServerRuntime } from './standalone-server.js'
 export {
   CLIENT_BUNDLE_PREFIX,
   clientBuildOutput,

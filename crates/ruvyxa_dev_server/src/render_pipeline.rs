@@ -144,7 +144,13 @@ impl RenderContext {
         if let Some(styles) = self.styles.get() {
             return Ok(styles);
         }
-        let css = collect_styles(&config.root, &config.app_dir, &config.style_entries)?.css;
+        let css = collect_styles(
+            &config.root,
+            &config.app_dir,
+            &config.style_entries,
+            config.runtime,
+        )?
+        .css;
         // A concurrent caller may have won the race; either value is the same
         // collection of the same sources, so whichever lands first stands.
         Ok(self.styles.get_or_init(|| css))

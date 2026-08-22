@@ -447,8 +447,14 @@ pub(crate) fn doctor(args: DoctorArgs) -> anyhow::Result<()> {
     print_field("node", tool_status(tool_version("node", &["--version"])));
     print_field("rustc", tool_status(tool_version("rustc", &["--version"])));
     print_field("cargo", tool_status(tool_version("cargo", &["--version"])));
-    print_field("bun", tool_status(bun_version()));
-    print_field("deno", tool_status(deno_version()));
+    print_field(
+        "bun",
+        runtime_status(bun_version(), environment::MINIMUM_BUN_VERSION),
+    );
+    print_field(
+        "deno",
+        runtime_status(deno_version(), environment::MINIMUM_DENO_VERSION),
+    );
     if let Some(package) = &package {
         // React is part of what is installed, not a section of its own — the
         // three rows only ever answered "can this project render".

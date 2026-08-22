@@ -236,6 +236,38 @@ const WINDOWS_VERBATIM_PREFIX: &str = "\\\\?\\";
 #[cfg(windows)]
 const WINDOWS_VERBATIM_UNC_PREFIX: &str = "\\\\?\\UNC\\";
 
+/// Spell a path already in hand without its Windows extended-length prefix.
+///
+/// Separate from [`normalized_canonical_path`] because the two answer different
+/// questions. That one asks the file system what a path really is; this one only
+/// respells the path it is given, touching no disk — which is what a lookup key
+/// needs, and a key that canonicalized would pay a syscall for every module a
+/// bundle loads.
+///
+/// The prefix matters because it is contagious: a root carrying it hands it to
+/// every path derived from it, while a path the same build receives from a Node
+/// worker never has one. Two spellings of one file then fail to compare equal,
+/// and the failure surfaces nowhere near the comparison — a server-components
+/// build whose root had been canonicalized lost every `'use server'`
+/// substitution and was refused as `RUV1820`, naming an import the project is
+/// right to have.
+///
+/// A no-op on other platforms and on any Windows path without the prefix.
+#[must_use]
+pub fn without_verbatim_prefix(path: &std::path::Path) -> std::path::PathBuf {
+    #[cfg(windows)]
+    {
+        let text = path.to_string_lossy();
+        if let Some(stripped) = text.strip_prefix(WINDOWS_VERBATIM_UNC_PREFIX) {
+            return std::path::PathBuf::from(format!("\\\\{stripped}"));
+        }
+        if let Some(stripped) = text.strip_prefix(WINDOWS_VERBATIM_PREFIX) {
+            return std::path::PathBuf::from(stripped);
+        }
+    }
+    path.to_path_buf()
+}
+
 /// Canonicalizes a path without a Windows verbatim (`\\?\`) prefix.
 ///
 /// `std::fs::canonicalize` returns extended-length paths on Windows. Those
@@ -245,21 +277,10 @@ const WINDOWS_VERBATIM_UNC_PREFIX: &str = "\\\\?\\UNC\\";
 /// path when canonicalization fails (for example, the path does not exist).
 #[must_use]
 pub fn normalized_canonical_path(path: &std::path::Path) -> std::path::PathBuf {
-    let canonical = match path.canonicalize() {
-        Ok(canonical) => canonical,
-        Err(_) => return path.to_path_buf(),
-    };
-    #[cfg(windows)]
-    {
-        let text = canonical.to_string_lossy();
-        if let Some(stripped) = text.strip_prefix(WINDOWS_VERBATIM_UNC_PREFIX) {
-            return std::path::PathBuf::from(format!("\\\\{stripped}"));
-        }
-        if let Some(stripped) = text.strip_prefix(WINDOWS_VERBATIM_PREFIX) {
-            return std::path::PathBuf::from(stripped);
-        }
+    match path.canonicalize() {
+        Ok(canonical) => without_verbatim_prefix(&canonical),
+        Err(_) => path.to_path_buf(),
     }
-    canonical
 }
 
 #[cfg(test)]

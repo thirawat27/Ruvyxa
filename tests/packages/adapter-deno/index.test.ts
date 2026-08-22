@@ -20,15 +20,22 @@ describe('deno', () => {
         { kind: 'file', path: 'deploy/deno/README.md' },
       ],
     )
+    // Deno's own server, not `node:http`: `createHandler` already is the
+    // `Request` → `Response` function `Deno.serve` takes, and going through the
+    // compatibility layer made every request pay for a translation in each
+    // direction. The decisions either side of it are the shared ones.
     const server = output.artifacts?.find((artifact) => artifact.kind === 'function')
     const source = server && 'handlerSource' in server ? String(server.handlerSource) : ''
-    assert.match(source, /node:http/)
-    // Streamed, not buffered — the paired assertion below is the other half
-    // of that contract. Piped through a named handle so the stream's error
-    // and client-disconnect events can be handled; see standalone-server.
-    assert.match(source, /Readable\.fromWeb\(response\.body\)/)
-    assert.match(source, /body\.pipe\(res\)/)
+    assert.match(source, /Deno\.serve\(/)
+    assert.doesNotMatch(source, /from 'node:http'/)
+    assert.match(source, /isAssetPath\(url\.pathname\)/)
+    assert.match(source, /public, max-age=3600, must-revalidate/)
+    // The handler's response is returned as it is, so a streamed render still
+    // streams and nothing is buffered on the way out.
     assert.doesNotMatch(source, /response\.arrayBuffer\(\)/)
+    // `server.shutdown()` waits for in-flight responses, which is the drain the
+    // Node transport has to build by hand.
+    assert.match(source, /server\.shutdown\(\)/)
     assert.equal(
       output.artifacts?.find((artifact) => artifact.kind === 'static-site')?.optional,
       true,

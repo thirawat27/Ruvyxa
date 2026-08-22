@@ -854,11 +854,38 @@ pub(crate) fn content_type_for(path: &Path) -> &'static str {
     }
 }
 
-pub(crate) fn public_asset_links(public_dir: &Path) -> String {
+/// The icon a document declares, in the order it is looked for, with the type it
+/// is actually served as.
+///
+/// Both spellings are here because a build publishes only one of them:
+/// `image.keepOriginal: false` converts the PNG and keeps the WebP, while the
+/// project's own `public/` still holds the PNG that `ruvyxa dev` serves. The URL
+/// of either resolves at run time — `resolve_public_asset` answers a PNG request
+/// from the WebP — but an existence check does not know that, and asking it
+/// about the PNG alone is how the icon link disappeared from production while
+/// development kept emitting it.
+const DOCUMENT_ICONS: &[(&str, &str)] =
+    &[("ruvyxa.png", "image/png"), ("ruvyxa.webp", "image/webp")];
+
+/// `<link>` tags for the files a project publishes that a document should
+/// declare.
+///
+/// Public because a pre-rendered page has to end up with the same head this
+/// server composes for a live render: `ruvyxa build` bakes the document and
+/// `ruvyxa start` serves it from disk without ever running a renderer, so
+/// nothing downstream is left to add these. When the icon link was missing from
+/// baked pages, every browser fell back to requesting `/favicon.ico` and every
+/// production page load logged a 404 that `ruvyxa dev` never showed.
+pub fn public_asset_links(public_dir: &Path) -> String {
     let mut links = Vec::new();
 
-    if public_dir.join("ruvyxa.png").exists() {
-        links.push(r#"<link rel="icon" type="image/png" href="/ruvyxa.png">"#.to_string());
+    if let Some((file, content_type)) = DOCUMENT_ICONS
+        .iter()
+        .find(|(file, _)| public_dir.join(file).is_file())
+    {
+        links.push(format!(
+            r#"<link rel="icon" type="{content_type}" href="/{file}">"#
+        ));
     }
 
     links.join("")
@@ -867,6 +894,45 @@ pub(crate) fn public_asset_links(public_dir: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The icon link has to survive the build's own image optimization.
+    ///
+    /// `ruvyxa dev` publishes the project's `public/`, which holds the PNG;
+    /// `ruvyxa start` publishes the staged assets, where `image.keepOriginal:
+    /// false` left only the WebP. Asking about the PNG alone answered "no icon"
+    /// for every production page, and every browser then fell back to
+    /// `/favicon.ico` and logged a 404 that development never showed.
+    #[test]
+    fn the_icon_link_follows_whichever_form_the_build_published() {
+        for (file, expected) in [
+            (
+                "ruvyxa.png",
+                r#"<link rel="icon" type="image/png" href="/ruvyxa.png">"#,
+            ),
+            (
+                "ruvyxa.webp",
+                r#"<link rel="icon" type="image/webp" href="/ruvyxa.webp">"#,
+            ),
+        ] {
+            let temp = tempfile::tempdir().expect("temp dir");
+            assert_eq!(
+                public_asset_links(temp.path()),
+                "",
+                "a directory with no icon declares none"
+            );
+            std::fs::write(temp.path().join(file), [0u8; 4]).expect("write");
+            assert_eq!(public_asset_links(temp.path()), expected);
+        }
+    }
+
+    /// A directory is not a file, and a `public/ruvyxa.png/` would otherwise be
+    /// declared as an icon that cannot load.
+    #[test]
+    fn a_directory_named_like_the_icon_is_not_one() {
+        let temp = tempfile::tempdir().expect("temp dir");
+        std::fs::create_dir(temp.path().join("ruvyxa.png")).expect("mkdir");
+        assert_eq!(public_asset_links(temp.path()), "");
+    }
 
     /// A large asset must not be read into memory in full before the first byte
     /// is written: peak memory was the sum of every large file being served at

@@ -49,6 +49,22 @@ pub(crate) struct PrerenderArtifactCache {
     pub(crate) enabled: bool,
 }
 
+/// What every pre-rendered document carries in its `<head>` besides its own
+/// metadata.
+///
+/// The two travel together because a baked page has to end up with the head the
+/// live renderer composes. `ruvyxa dev` renders through a pipeline that injects
+/// both; a page pre-rendered at build time is served from disk with nobody left
+/// to add either, and the two documents then differ. That is how the icon link
+/// went missing from production only — every browser fell back to
+/// `/favicon.ico`, and every production page load logged a 404 that development
+/// never showed.
+#[derive(Debug, Clone)]
+pub(crate) struct PrerenderHead {
+    pub(crate) asset_links: Arc<str>,
+    pub(crate) styles: Arc<str>,
+}
+
 #[derive(Debug, Clone)]
 pub(crate) enum PrerenderJobKind {
     Csr,
@@ -90,7 +106,7 @@ pub(crate) async fn prerender_static_routes(
     manifest: &RouteManifest,
     prerender_dir: &Path,
     client_dir: &Path,
-    styles: &str,
+    head: PrerenderHead,
     build: &BuildConfigOptions,
     cache: RuvyxaBuildCache<'_>,
     runtime: JavaScriptRuntime,
@@ -119,13 +135,12 @@ pub(crate) async fn prerender_static_routes(
 
     fs::create_dir_all(prerender_dir)?;
     let client_assets = Arc::new(load_prerender_client_assets(client_dir));
-    let shared_styles = Arc::<str>::from(styles);
     let i18n = manifest.i18n.clone();
 
     let parallelism = prerender_parallelism(build.parallelism, routes_to_prerender.len());
     let worker_env = build_worker_env(root, build, runtime)?;
     let render_context_hash =
-        prerender_context_hash(root, styles, &client_assets, build, &worker_env);
+        prerender_context_hash(root, &head, &client_assets, build, &worker_env);
     let artifact_cache = PrerenderArtifactCache {
         directory: cache.directory.to_path_buf(),
         dependency_hash: cache.dependency_hash.to_string(),
@@ -296,7 +311,7 @@ pub(crate) async fn prerender_static_routes(
                 let app_dir = app_dir.to_path_buf();
                 let prerender_dir = prerender_dir.to_path_buf();
                 let client_assets = client_assets.clone();
-                let styles = shared_styles.clone();
+                let head = head.clone();
                 let artifact_cache = artifact_cache.clone();
                 let i18n = i18n.clone();
                 pending.spawn(async move {
@@ -306,7 +321,7 @@ pub(crate) async fn prerender_static_routes(
                         &app_dir,
                         &prerender_dir,
                         &client_assets,
-                        &styles,
+                        &head,
                         &job,
                         &artifact_cache,
                         i18n.as_ref(),
@@ -425,7 +440,7 @@ pub(crate) async fn render_prerender_job(
     app_dir: &Path,
     prerender_dir: &Path,
     client_assets: &BTreeMap<String, PrerenderClientAssets>,
-    styles: &str,
+    head: &PrerenderHead,
     job: &PrerenderJob,
     artifact_cache: &PrerenderArtifactCache,
     i18n: Option<&ruvyxa_graph::I18nRouting>,
@@ -444,7 +459,7 @@ pub(crate) async fn render_prerender_job(
 
     let mut artifact_cache_hit = false;
     let html = match &job.kind {
-        PrerenderJobKind::Csr => csr_shell_html(&job.route_path, client_assets, styles),
+        PrerenderJobKind::Csr => csr_shell_html(&job.route_path, client_assets, head),
         PrerenderJobKind::Render {
             route_file,
             mode,
@@ -498,7 +513,7 @@ pub(crate) async fn render_prerender_job(
                         job.render_path
                     )
                 })?;
-                let html = inject_prerender_styles(&html, styles);
+                let html = inject_prerender_head(&html, head);
                 let html = inject_prerender_client_assets(
                     &html,
                     client_assets,
@@ -821,7 +836,7 @@ pub(crate) fn is_unsafe_prerender_segment(segment: &str) -> bool {
 pub(crate) fn csr_shell_html(
     route_path: &str,
     client_assets: &BTreeMap<String, PrerenderClientAssets>,
-    styles: &str,
+    head: &PrerenderHead,
 ) -> String {
     let assets = client_assets.get(route_path);
     let preload_links = assets
@@ -841,6 +856,7 @@ pub(crate) fn csr_shell_html(
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Loading...</title>
+  {asset_links}
   <style data-ruvyxa-css>{styles}</style>
   {preload_links}
   {bootstrap}
@@ -850,6 +866,8 @@ pub(crate) fn csr_shell_html(
   <script type="module" src="{client_src}"></script>
 </body>
 </html>"#,
+        asset_links = head.asset_links,
+        styles = head.styles,
         client_src = escape_html_attribute(&client_src),
         // `params` is empty rather than the route's: this shell is written once
         // per route pattern, not per request, so it has no concrete parameters
@@ -858,18 +876,25 @@ pub(crate) fn csr_shell_html(
     )
 }
 
-pub(crate) fn inject_prerender_styles(html: &str, styles: &str) -> String {
-    let style_tag = format!(r#"<style data-ruvyxa-css>{styles}</style>"#);
+/// Put into a rendered document what the live renderer would have added.
+///
+/// The order matches `render_page_ssg`'s head — links, then the stylesheet — so
+/// the two documents differ only where they have to.
+pub(crate) fn inject_prerender_head(html: &str, head: &PrerenderHead) -> String {
+    let head_tags = format!(
+        r#"{}<style data-ruvyxa-css>{}</style>"#,
+        head.asset_links, head.styles
+    );
     let lower = html.to_ascii_lowercase();
     if let Some(head_end) = lower.find("</head>") {
-        let mut output = String::with_capacity(html.len() + style_tag.len());
+        let mut output = String::with_capacity(html.len() + head_tags.len());
         output.push_str(&html[..head_end]);
-        output.push_str(&style_tag);
+        output.push_str(&head_tags);
         output.push_str(&html[head_end..]);
         return output;
     }
 
-    format!("<!doctype html><html><head>{style_tag}</head><body>{html}</body></html>")
+    format!("<!doctype html><html><head>{head_tags}</head><body>{html}</body></html>")
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -1017,7 +1042,14 @@ mod csr_shell_tests {
     /// hydrates against markup that cannot match and reports #418.
     #[test]
     fn csr_shell_marks_itself_as_not_server_rendered() {
-        let html = csr_shell_html("/hooks", &BTreeMap::new(), "");
+        let html = csr_shell_html(
+            "/hooks",
+            &BTreeMap::new(),
+            &PrerenderHead {
+                asset_links: Arc::from(""),
+                styles: Arc::from(""),
+            },
+        );
 
         assert!(
             html.contains(r#""csr":true"#),

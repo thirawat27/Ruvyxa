@@ -128,7 +128,7 @@ pub(crate) struct CssConfigOptions {
     pub(crate) entries: Vec<String>,
 }
 
-#[derive(Debug, Default, serde::Deserialize)]
+#[derive(Debug, Clone, Default, serde::Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct BuildConfigOptions {
     pub(crate) minify: Option<bool>,

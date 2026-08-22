@@ -93,6 +93,22 @@ generated server ทั้งสามใช้ `PORT=3000` และ `HOST=0.0.
 ไม่ควรมี CLI Deno standalone command ตั้ง permission ที่ server ต้องใช้โดยตั้งใจ จึงรันเฉพาะ
 artifact ที่ build จาก project ที่คุณเชื่อถือ
 
+**เวอร์ชัน runtime ที่รองรับ** Node ใช้ค่า `engines.node` ใน package manifest ส่วน Bun ต้อง **1.1.26
+ขึ้นไป** — รุ่นที่เพิ่ม `idleTimeout` ให้ `Bun.serve` ซึ่งเป็น API ใหม่สุดที่ server ที่ emit
+ออกมาใช้ — และ Deno ต้อง **2.0 ขึ้นไป** ซึ่งเป็นรุ่นที่ Node built-in ที่มัน import (`node:process`,
+`node:fs`, `node:path`) กลายเป็นทางที่รองรับจริง `ruvyxa doctor` รายงานเวอร์ชัน
+ที่ติดตั้งของแต่ละตัวและเตือนเมื่อต่ำกว่าเกณฑ์ ทดสอบกับ Bun 1.4.0 และ Deno 2.9.5
+
+server แต่ละตัวใช้ HTTP server ของ runtime ตัวเอง: `node:http` บน Node, `Bun.serve` บน Bun และ
+`Deno.serve` บน Deno ทุกอย่างเหนือ transport เป็นโปรแกรมชุดเดียวกัน — URL ไหนหมายถึงไฟล์ไหน, serve
+เป็นอะไร, cache ได้นานเท่าไร, range ขอ byte ช่วงไหน, routing หรือ publish directory ตอบก่อน และ
+shutdown drain อย่างไร — ทั้งสามจึงตอบเหมือนกัน `RUVYXA_SHUTDOWN_GRACE` จำกัดเวลา drain ทั้งสามตัว
+ส่วน `RUVYXA_KEEP_ALIVE_TIMEOUT` ยก keep-alive window ของ Node ให้สูงกว่า idle window ของ managed
+proxy — ถ้าไม่ตั้ง Node จะปิด idle connection ที่ห้าวินาที แล้ว request ถัดไปของ proxy บน connection
+นั้นจะพังเป็น 502 — และเมื่อตั้งค่าไว้จะจำกัด `idleTimeout` ของ Bun ด้วย (หน่วยวินาที สูงสุด 255)
+นอกนั้นปล่อย Bun ไว้ที่ default ของมันเอง ซึ่งไม่ปิด idle connection เลยและไม่ตัด streamed response
+ที่ยาว
+
 ## Static hosting: publish เฉพาะ static output
 
 ```bash
