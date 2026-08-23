@@ -17,8 +17,14 @@ packages/create-ruvyxa/template/
 packages/@ruvyxa/cli-*/bin/
 
 # Project-scope deploy artifacts written by `ruvyxa build --adapter <platform>`
-# when the demo app is built for a hosting platform. Scoped to examples/demo so
-# a hand-authored netlify.toml or wrangler.jsonc elsewhere is still tracked.
+# when a fixture app is built for a hosting platform. Scoped to the two fixtures
+# rather than global, so a hand-authored netlify.toml or wrangler.jsonc anywhere
+# else is still tracked.
+#
+# Both lists, because both apps get built with adapters: the demo is the broad
+# fixture, and deploy-smoke is the one CI deploys and the one an adapter change
+# is checked against. Listing only the demo left `--adapter vercel` and
+# `--adapter netlify` dropping untracked directories into deploy-smoke.
 examples/demo/.vercel/
 examples/demo/.netlify/
 examples/demo/netlify.toml
@@ -30,3 +36,14 @@ examples/demo/firebase.json
 examples/demo/.amplify-hosting/
 examples/demo/_headers
 examples/demo/_redirects
+examples/deploy-smoke/.vercel/
+examples/deploy-smoke/.netlify/
+examples/deploy-smoke/netlify.toml
+examples/deploy-smoke/netlify/functions/
+examples/deploy-smoke/wrangler.jsonc
+examples/deploy-smoke/railway.json
+examples/deploy-smoke/render.yaml
+examples/deploy-smoke/firebase.json
+examples/deploy-smoke/.amplify-hosting/
+examples/deploy-smoke/_headers
+examples/deploy-smoke/_redirects
