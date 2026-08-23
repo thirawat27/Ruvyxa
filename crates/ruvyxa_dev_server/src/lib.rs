@@ -3,7 +3,6 @@ use std::collections::BTreeMap;
 use std::collections::{BTreeSet, HashSet};
 #[cfg(test)]
 use std::fs;
-use std::future::IntoFuture;
 use std::net::SocketAddr;
 use std::net::ToSocketAddrs;
 use std::path::{Path, PathBuf};
@@ -79,7 +78,7 @@ use cli_output::{
 };
 
 mod port_binding;
-use port_binding::bind_listener;
+use port_binding::bind_listeners;
 #[cfg(test)]
 use port_binding::{PORT_FALLBACK_SCAN_LIMIT, port_conflict_diagnostic};
 
@@ -1337,11 +1336,15 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
         ));
 
     let address = resolve_bind_address(&config)?;
-    let (listener, bound_address) = bind_listener(&config, address).await?;
+    let (listeners, bound_address) = bind_listeners(&config, address).await?;
 
-    info!("Ruvyxa server listening on http://{bound_address}");
+    for listener in &listeners {
+        if let Ok(bound) = listener.local_addr() {
+            info!("Ruvyxa server listening on http://{bound}");
+        }
+    }
     print_server_ready(&config, &manifest, bound_address, startup_started.elapsed());
-    let server_result = serve_until_shutdown(listener, app).await;
+    let server_result = serve_until_shutdown(listeners, app).await;
 
     worker_pool.shutdown().await;
     server_result?;
@@ -1354,23 +1357,34 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
 /// would otherwise keep `ruvyxa dev` alive indefinitely after Ctrl-C, so the
 /// remaining connections are dropped once it expires.
 async fn serve_until_shutdown(
-    listener: tokio::net::TcpListener,
+    listeners: Vec<tokio::net::TcpListener>,
     app: Router,
 ) -> std::io::Result<()> {
-    let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
-    let server = axum::serve(listener, server_make_service(app))
-        .with_graceful_shutdown(async move {
-            let _ = shutdown_rx.changed().await;
-        })
-        .into_future();
-    tokio::pin!(server);
+    let (shutdown_tx, _) = tokio::sync::watch::channel(false);
+    // One server per address the host answers to, over one router. They share
+    // the shutdown channel, so a signal drains all of them together rather than
+    // leaving the loopback family nobody signalled still accepting.
+    let mut servers = tokio::task::JoinSet::new();
+    for listener in listeners {
+        let mut shutdown_rx = shutdown_tx.subscribe();
+        let service = server_make_service(app.clone());
+        servers.spawn(async move {
+            axum::serve(listener, service)
+                .with_graceful_shutdown(async move {
+                    let _ = shutdown_rx.changed().await;
+                })
+                .await
+        });
+    }
+    let servers = drain_servers(servers);
+    tokio::pin!(servers);
 
     tokio::select! {
-        result = &mut server => result,
+        result = &mut servers => result,
         signal = shutdown_signal() => {
             info!(signal, "shutting down Ruvyxa server");
             let _ = shutdown_tx.send(true);
-            match tokio::time::timeout(SERVER_SHUTDOWN_GRACE, &mut server).await {
+            match tokio::time::timeout(SERVER_SHUTDOWN_GRACE, &mut servers).await {
                 Ok(result) => result,
                 Err(_) => {
                     warn!("server shutdown timed out; closing remaining connections");
@@ -1378,6 +1392,32 @@ async fn serve_until_shutdown(
                 }
             }
         }
+    }
+}
+
+/// Wait for every listener's server to finish, reporting the first failure.
+///
+/// Dropping this future aborts whatever is still running, which is what the
+/// grace timeout above relies on to close remaining connections.
+async fn drain_servers(
+    mut servers: tokio::task::JoinSet<std::io::Result<()>>,
+) -> std::io::Result<()> {
+    let mut first_failure = None;
+    while let Some(joined) = servers.join_next().await {
+        let failure = match joined {
+            Ok(Ok(())) => continue,
+            Ok(Err(error)) => error,
+            Err(error) if error.is_panic() => {
+                std::io::Error::other(format!("server task panicked: {error}"))
+            }
+            // Cancelled: this future was dropped, so there is nothing to report.
+            Err(_) => continue,
+        };
+        first_failure.get_or_insert(failure);
+    }
+    match first_failure {
+        Some(failure) => Err(failure),
+        None => Ok(()),
     }
 }
 
@@ -3586,7 +3626,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn bind_listener_uses_next_available_port_when_requested_port_is_busy() {
+    async fn bind_listeners_use_next_available_port_when_requested_port_is_busy() {
         let occupied = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let occupied_address = occupied.local_addr().unwrap();
         if occupied_address.port() == u16::MAX {
@@ -3594,7 +3634,7 @@ mod tests {
         }
 
         let config = ServerConfig::dev(".", "127.0.0.1", occupied_address.port());
-        let (_listener, bound_address) = bind_listener(&config, occupied_address).await.unwrap();
+        let (_listeners, bound_address) = bind_listeners(&config, occupied_address).await.unwrap();
 
         assert!(bound_address.port() > occupied_address.port());
         assert!(
@@ -3605,13 +3645,60 @@ mod tests {
         );
     }
 
+    /// The default host must answer on both loopback families.
+    ///
+    /// `localhost` resolves to `::1` and `127.0.0.1`, and the server used to
+    /// take whichever one the resolver returned first — `::1` on Windows. A
+    /// browser falls back to the other family and never notices; `proxy_pass
+    /// http://127.0.0.1:3000`, a container health probe, and `curl 127.0.0.1`
+    /// do not, and got "connection refused" from a server that was serving
+    /// perfectly well.
+    ///
+    /// Connections are opened rather than listeners inspected, because the
+    /// claim is about reachability, and both have to be on one port: two
+    /// families on two ports is the same failure wearing a different shape.
+    #[tokio::test]
+    async fn the_default_host_accepts_connections_on_every_loopback_family() {
+        use tokio::net::TcpStream;
+
+        // Nothing to prove on a host that cannot serve IPv6 loopback at all.
+        let Ok(probe) = TcpListener::bind("[::1]:0").await else {
+            return;
+        };
+        drop(probe);
+
+        let config = ServerConfig::dev(".", "localhost", 0);
+        let requested = resolve_bind_address(&config).unwrap();
+        let (listeners, bound_address) = bind_listeners(&config, requested).await.unwrap();
+        let port = bound_address.port();
+
+        let bound: Vec<SocketAddr> = listeners
+            .iter()
+            .map(|listener| listener.local_addr().unwrap())
+            .collect();
+        assert!(
+            bound.iter().all(|address| address.port() == port),
+            "every loopback family must answer on one port, got {bound:?}"
+        );
+
+        for address in [
+            SocketAddr::from(([127, 0, 0, 1], port)),
+            SocketAddr::from(([0, 0, 0, 0, 0, 0, 0, 1], port)),
+        ] {
+            assert!(
+                TcpStream::connect(address).await.is_ok(),
+                "the default host must be reachable at {address}"
+            );
+        }
+    }
+
     /// The reported bug: another project holds `127.0.0.1:3000`, Ruvyxa binds
     /// `[::1]:3000` because that is what `localhost` resolved to first, both
     /// succeed, and `http://localhost:3000` reaches whichever server the
     /// browser's resolver happens to pick. A port is only free when it is free
     /// on every address the host answers to.
     #[tokio::test]
-    async fn bind_listener_moves_on_when_the_other_loopback_family_is_taken() {
+    async fn bind_listeners_move_on_when_the_other_loopback_family_is_taken() {
         let Ok(occupied) = TcpListener::bind("127.0.0.1:0").await else {
             return;
         };
@@ -3628,7 +3715,7 @@ mod tests {
 
         let config = ServerConfig::dev(".", "localhost", port);
         let requested: SocketAddr = format!("[::1]:{port}").parse().unwrap();
-        let (_listener, bound_address) = bind_listener(&config, requested).await.unwrap();
+        let (_listeners, bound_address) = bind_listeners(&config, requested).await.unwrap();
 
         assert_ne!(
             bound_address.port(),

@@ -13,62 +13,55 @@ use crate::cli_output::{accent, dim, warn_text};
 /// Highest port offset tried past the requested port before giving up.
 pub(crate) const PORT_FALLBACK_SCAN_LIMIT: u16 = 100;
 
-pub(crate) async fn bind_listener(
+/// Bind every address the configured host answers to, on one shared port.
+///
+/// A host is not an address. `localhost` is two of them on any dual-stack
+/// machine, and serving only the one the resolver returned first is why
+/// `http://127.0.0.1:3000` answered "connection refused" from a server that was
+/// happily serving `[::1]:3000` — the exact shape `proxy_pass
+/// http://127.0.0.1:3000`, a container health probe, and most CI scripts are
+/// written in.
+///
+/// Binding all of them also *is* the port-availability check. Taking one family
+/// while another process holds the other succeeds on every platform, and then
+/// whichever family the client's resolver picks decides whose server it
+/// reaches; that is how two projects "shared" port 3000 without either
+/// reporting a conflict. Holding the whole set leaves no window between
+/// checking and binding.
+pub(crate) async fn bind_listeners(
     config: &ServerConfig,
     address: SocketAddr,
-) -> Result<(TcpListener, SocketAddr)> {
+) -> Result<(Vec<TcpListener>, SocketAddr)> {
     let mut first_addr_in_use = None;
-    let guards = guard_addresses(&config.host, address.ip());
+    let targets = bind_addresses(&config.host, address.ip());
 
     for offset in 0..=PORT_FALLBACK_SCAN_LIMIT {
         let Some(port) = address.port().checked_add(offset) else {
             break;
         };
-        let mut candidate = address;
-        candidate.set_port(port);
 
-        let bind_result = TcpListener::bind(candidate).await;
-        match bind_result {
-            Ok(listener) => {
-                // Binding succeeded on one address, which is not the same as
-                // the port being free. `localhost` answers to both `127.0.0.1`
-                // and `::1`; binding one while another process holds the other
-                // succeeds on every platform, and then whichever family the
-                // browser's resolver picks decides whose server it reaches.
-                // That is how two projects "shared" port 3000 without either
-                // one reporting a conflict.
-                if let Some(busy) = busy_guard(&guards, candidate.ip(), port).await {
-                    drop(listener);
-                    if offset == 0 {
-                        first_addr_in_use = Some(std::io::Error::new(
-                            ErrorKind::AddrInUse,
-                            format!("port {port} is already bound on {busy}"),
-                        ));
-                    }
-                    continue;
-                }
-
-                let bound_address = listener.local_addr().unwrap_or(candidate);
+        match bind_every(&targets, port).await {
+            Ok(listeners) => {
+                let bound_address = listeners
+                    .first()
+                    .and_then(|listener| listener.local_addr().ok())
+                    .unwrap_or_else(|| SocketAddr::new(address.ip(), port));
                 if offset > 0 {
                     print_port_fallback(config, address, bound_address);
                 }
-                return Ok((listener, bound_address));
+                return Ok((listeners, bound_address));
             }
-            // AddrInUse: another process owns the port. PermissionDenied:
-            // Windows returns WSAEACCES (10013) for ports inside an excluded
-            // port range (Hyper-V/WinNAT reservations); both mean "this port
-            // is unavailable, try the next one" rather than a fatal failure.
-            Err(error)
-                if error.kind() == ErrorKind::AddrInUse
-                    || error.kind() == ErrorKind::PermissionDenied =>
-            {
+            Err(BindFailure::PortUnavailable(error)) => {
                 if offset == 0 {
                     first_addr_in_use = Some(error);
                 }
             }
-            Err(source) => {
+            Err(BindFailure::Fatal { target, source }) => {
                 return Err(RuvyxaError::Io {
-                    message: format!("Failed to bind server address {candidate}"),
+                    message: format!(
+                        "Failed to bind server address {}",
+                        SocketAddr::new(target, port)
+                    ),
                     source,
                 });
             }
@@ -80,52 +73,100 @@ pub(crate) async fn bind_listener(
     Err(port_conflict_diagnostic(config, address, &error).into())
 }
 
-/// Addresses that must also be free before a port counts as available.
-///
-/// The listener binds one address, but the URL the user opens does not name an
-/// address — it names a host. Every address that host resolves to has to be
-/// free, or the server is reachable only some of the time.
-fn guard_addresses(host: &str, primary: IpAddr) -> Vec<IpAddr> {
-    let mut addresses: Vec<IpAddr> = format!("{host}:0")
-        .to_socket_addrs()
-        .map(|resolved| resolved.map(|address| address.ip()).collect())
-        .unwrap_or_default();
-
-    // A resolver that answers with only one loopback family still leaves the
-    // other reachable as `localhost`, so guard both whenever either appears.
-    if addresses.iter().any(IpAddr::is_loopback) || primary.is_loopback() {
-        addresses.push(IpAddr::V4(Ipv4Addr::LOCALHOST));
-        addresses.push(IpAddr::V6(Ipv6Addr::LOCALHOST));
-    }
-
-    addresses.sort();
-    addresses.dedup();
-    addresses
+/// Why one port could not be taken across the whole address set.
+enum BindFailure {
+    /// Something already holds the port on at least one address. The next port
+    /// is worth trying.
+    PortUnavailable(std::io::Error),
+    /// The primary address cannot be bound for a reason that changing port will
+    /// not fix — an interface that does not exist, for instance.
+    Fatal {
+        target: IpAddr,
+        source: std::io::Error,
+    },
 }
 
-/// The first guard address that already has something listening on `port`.
+/// Take `port` on every address, or leave it free on all of them.
 ///
-/// `bound` is skipped: this process just bound it.
-async fn busy_guard(guards: &[IpAddr], bound: IpAddr, port: u16) -> Option<IpAddr> {
-    for guard in guards {
-        if *guard == bound {
-            continue;
-        }
-        match TcpListener::bind(SocketAddr::new(*guard, port)).await {
-            Ok(probe) => drop(probe),
+/// Partial success is the thing to avoid: a half-bound port would serve some
+/// clients and refuse others. Dropping the listeners collected so far releases
+/// what was taken, so the caller can move to the next port cleanly.
+async fn bind_every(
+    targets: &[IpAddr],
+    port: u16,
+) -> std::result::Result<Vec<TcpListener>, BindFailure> {
+    let mut listeners = Vec::with_capacity(targets.len());
+    // Port 0 asks the OS to choose, and it chooses per socket. Every address
+    // has to end up on the *same* port or the host is answering on two of them,
+    // so the first assignment becomes the port the rest are held to.
+    let mut port = port;
+
+    for (index, target) in targets.iter().enumerate() {
+        match TcpListener::bind(SocketAddr::new(*target, port)).await {
+            Ok(listener) => {
+                if port == 0 {
+                    port = listener.local_addr().map(|bound| bound.port()).unwrap_or(0);
+                }
+                listeners.push(listener);
+            }
+            // AddrInUse: another process owns the port. PermissionDenied:
+            // Windows returns WSAEACCES (10013) for ports inside an excluded
+            // port range (Hyper-V/WinNAT reservations); both mean "this port is
+            // unavailable, try the next one" rather than a fatal failure.
             Err(error)
                 if error.kind() == ErrorKind::AddrInUse
                     || error.kind() == ErrorKind::PermissionDenied =>
             {
-                return Some(*guard);
+                return Err(BindFailure::PortUnavailable(error));
             }
-            // Anything else — an address this machine cannot bind at all, such
-            // as an IPv6 address on a host without IPv6 — says nothing about
-            // whether the port is contended.
+            // Only the primary address has to be bindable. A secondary that
+            // cannot be bound at all — the IPv6 loopback on a host without
+            // IPv6 — is not a conflict and not a failure: it is simply not an
+            // address this machine answers on.
+            Err(source) if index == 0 => {
+                return Err(BindFailure::Fatal {
+                    target: *target,
+                    source,
+                });
+            }
             Err(_) => {}
         }
     }
-    None
+
+    if listeners.is_empty() {
+        return Err(BindFailure::PortUnavailable(std::io::Error::from(
+            ErrorKind::AddrNotAvailable,
+        )));
+    }
+    Ok(listeners)
+}
+
+/// Every address the configured host answers to, the resolved one first.
+///
+/// Order matters only for which address is reported as bound and which one's
+/// failure is fatal; the set is what decides reachability.
+fn bind_addresses(host: &str, primary: IpAddr) -> Vec<IpAddr> {
+    let mut addresses = vec![primary];
+    addresses.extend(
+        format!("{host}:0")
+            .to_socket_addrs()
+            .map(|resolved| resolved.map(|address| address.ip()).collect::<Vec<_>>())
+            .unwrap_or_default(),
+    );
+
+    // Loopback is one destination with two addresses. A resolver that answers
+    // with only one family still leaves the other reachable as `localhost`, so
+    // serve both whenever either appears. An explicit `0.0.0.0` or a real
+    // interface address is left exactly as asked for.
+    if addresses.iter().any(IpAddr::is_loopback) {
+        addresses.push(IpAddr::V4(Ipv4Addr::LOCALHOST));
+        addresses.push(IpAddr::V6(Ipv6Addr::LOCALHOST));
+    }
+
+    // Order-preserving, so the primary stays first.
+    let mut seen = std::collections::HashSet::new();
+    addresses.retain(|address| seen.insert(*address));
+    addresses
 }
 
 fn print_port_fallback(config: &ServerConfig, requested: SocketAddr, bound: SocketAddr) {

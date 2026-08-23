@@ -2,6 +2,37 @@
 
 ## v1.0.32 (unreleased)
 
+### `ruvyxa start` was reachable on `[::1]` and refused on `127.0.0.1`
+
+`localhost` is two addresses on any dual-stack machine, and the server took whichever one the
+resolver returned first — `::1` on Windows. A browser tries the other family and never tells you;
+`proxy_pass http://127.0.0.1:3000`, a container health probe, and `curl 127.0.0.1` do not, and got
+connection refused from a server that was serving perfectly well:
+
+```
+curl http://127.0.0.1:3000  → connection refused
+curl http://[::1]:3000      → 200
+curl http://localhost:3000  → 200
+```
+
+That is the ordinary self-hosting shape, so the ordinary self-hosting setup could not reach the
+server at all. The emitted adapter servers were never affected — they default to `0.0.0.0`.
+
+A host is not an address. The server now binds **every** address the configured host answers to,
+across one port, and serves them from one router with one shutdown channel. `--host 0.0.0.0` and
+`--host 10.0.0.5` still bind exactly what they name; loopback is treated as one destination with two
+addresses, because a client that resolves `localhost` may arrive on either.
+
+Binding the whole set is also what checks the port is free, which removes a race: the previous code
+bound one address and then probed the others, and the port-conflict logic it needed for
+`ruvyxa dev`'s "two projects quietly shared port 3000" bug now falls out of holding all of them.
+`--port 0` gained a fix on the way — the OS assigns per socket, so each family had been getting a
+different port; the first assignment now sets the port the rest are held to.
+
+The new test opens connections rather than inspecting listeners, since the claim is about
+reachability, and asserts both families answer on one port. Reverting to a single-address bind fails
+it with the reported symptom.
+
 ### A warm production build spent two thirds of its time on answers it already had
 
 Measured on the demo, through `ruvyxa bench --baseline`, which renders each sample in a disposable
