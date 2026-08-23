@@ -120,7 +120,8 @@ pre code {
   color: #93c5fd;
 }
 
-.method.put {
+.method.put,
+.method.patch {
   background: #713f12;
   color: #fde047;
 }

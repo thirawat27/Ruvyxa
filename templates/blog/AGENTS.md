@@ -1,13 +1,31 @@
 # Ruvyxa App Agent Guide
 
-You are working in a Ruvyxa application. Keep this starter small, explicit, and close to the
-file-system route shape:
+You are working in a Ruvyxa blog. Keep this starter small, explicit, and close to the file-system
+route shape:
 
 - `app/layout.tsx` wraps all pages.
 - `app/page.tsx` is the home route.
 - `app/globals.css` is the default global stylesheet.
 - `public/` contains static assets.
 - `ruvyxa.config.ts` configures server, build, cache, security, and middleware.
+
+## How a post works here
+
+- A post is a folder under `app/blog/` containing `page.mdx`. The folder name is the URL segment.
+  Markdown and MDX routes need no configuration; `.md` keeps raw HTML inert, `.mdx` evaluates JSX.
+- The frontmatter between the `---` fences is exported twice by the compiler: as `frontmatter`,
+  which `app/blog/posts.ts` reads to build the index, and as `meta`, which the router renders as
+  `<title>` and `<meta name="description">`. **Write it once; never restate a title in `posts.ts`.**
+  `app/ruvyxa-env.d.ts` is the type contract those fields have to satisfy.
+- Publishing a post is a new folder plus one line in `app/blog/posts.ts`. Its `href` is checked
+  against the real routes because `typedRoutes` is on, so a renamed folder is a compile error rather
+  than a dead link.
+- Sort and compare dates as ISO strings and format them with an explicit `timeZone`. `posts.ts`
+  explains both: `localeCompare` orders by the building machine's locale, and a date formatted in
+  the machine's own zone renders one day on the server and another in the browser.
+- `content: true` derives `rss.xml`, `content.json`, `search-index.json`, and `llms.txt` from those
+  same posts, and the route manifest yields `sitemap.xml` and `robots.txt`. All of them embed
+  `site.url`, so **change it in `ruvyxa.config.ts` before deploying** — it ships as a placeholder.
 
 ## Rules
 

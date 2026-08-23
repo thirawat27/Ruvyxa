@@ -1,23 +1,8 @@
-const recentPosts = [
-  {
-    slug: 'getting-started',
-    title: 'Getting Started with Ruvyxa',
-    date: '2025-01-15',
-    excerpt: 'Learn how to build modern web applications with the Ruvyxa framework.',
-  },
-  {
-    slug: 'server-components',
-    title: 'Understanding Server Components',
-    date: '2025-01-10',
-    excerpt: 'A deep dive into server-side rendering and how Ruvyxa handles it.',
-  },
-  {
-    slug: 'styling-guide',
-    title: 'Styling in Ruvyxa',
-    date: '2025-01-05',
-    excerpt: 'Explore the various ways to style your Ruvyxa application.',
-  },
-]
+import { Link } from '@ruvyxa/react'
+
+import { formatDate, posts } from './blog/posts'
+
+const recentPosts = posts.slice(0, 3)
 
 export default function Home() {
   return (
@@ -25,26 +10,24 @@ export default function Home() {
       <h1 id="home-title">Welcome to My Blog</h1>
       <p>Thoughts on web development, design, and building with modern frameworks.</p>
 
-      <h2>Recent Posts</h2>
-      <ul className="post-list" aria-label="Recent blog posts">
+      <h2>Recent posts</h2>
+      <ul className="post-list" aria-label="Recent posts">
         {recentPosts.map((post) => (
-          <li key={post.slug} className="post-item">
+          <li key={post.href} className="post-item">
             <p className="post-date">
-              <time dateTime={post.date}>
-                {new Date(post.date).toLocaleDateString('en-US', {
-                  year: 'numeric',
-                  month: 'long',
-                  day: 'numeric',
-                })}
-              </time>
+              <time dateTime={post.date}>{formatDate(post.date)}</time>
             </p>
             <h3 className="post-title">
-              <a href={`/blog/${post.slug}`}>{post.title}</a>
+              <Link href={post.href}>{post.title}</Link>
             </h3>
-            <p className="post-excerpt">{post.excerpt}</p>
+            <p className="post-excerpt">{post.description}</p>
           </li>
         ))}
       </ul>
+
+      <p>
+        <Link href="/blog">Read every post →</Link>
+      </p>
     </section>
   )
 }

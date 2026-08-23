@@ -1,6 +1,9 @@
-export const meta = {
-  title: 'About - My Ruvyxa Blog',
-  description: 'Learn more about this blog and its author.',
+import { Link } from '@ruvyxa/react'
+import type { Meta } from '@ruvyxa/react'
+
+export const meta: Meta = {
+  title: 'About',
+  description: 'Who writes here, and how the site is put together.',
 }
 
 export default function About() {
@@ -8,17 +11,27 @@ export default function About() {
     <section aria-labelledby="about-title">
       <h1 id="about-title">About</h1>
       <p>
-        This blog is built with Ruvyxa, a modern full-stack web framework powered by Rust and React.
-        It serves as a starting point for content-focused websites.
+        Replace this page with your own. Tell readers who you are, what you write about, and how to
+        reach you.
+      </p>
+
+      <h2>How this site works</h2>
+      <p>
+        Every post is a Markdown file under <code>app/blog/</code>. The folder is the URL, the
+        frontmatter is the document metadata, and <code>app/blog/posts.ts</code> reads that same
+        frontmatter to build the index — so nothing is written down twice.
       </p>
       <p>
-        Ruvyxa combines server-side rendering, static generation, and client-side interactivity into
-        a cohesive developer experience with file-based routing.
+        The build publishes more than the pages: <code>sitemap.xml</code> and{' '}
+        <code>robots.txt</code> come from the route manifest, and <code>rss.xml</code>,{' '}
+        <code>content.json</code>, <code>search-index.json</code>, and <code>llms.txt</code> come
+        from the posts themselves. Set <code>site.url</code> in <code>ruvyxa.config.ts</code> before
+        deploying, because every absolute URL in those files is built from it.
       </p>
-      <h2>About the Author</h2>
+
+      <h2>Start here</h2>
       <p>
-        Replace this section with your own bio. Tell your readers who you are, what you write about,
-        and how they can get in touch.
+        <Link href="/blog/hello-ruvyxa">Hello, Ruvyxa</Link> walks through adding your first post.
       </p>
     </section>
   )

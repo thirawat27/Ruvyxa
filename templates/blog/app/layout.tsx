@@ -1,8 +1,21 @@
+import { Link } from '@ruvyxa/react'
+import type { Meta } from '@ruvyxa/react'
+
 import './globals.css'
 
-export const meta = {
+/**
+ * Root metadata.
+ *
+ * Every `meta` on a route's path merges from here down to the page, most
+ * specific wins — so `titleTemplate` formats the title of every route below,
+ * including the frontmatter title of each `page.mdx`.
+ */
+export const meta: Meta = {
   title: 'My Ruvyxa Blog',
+  titleTemplate: '%s — My Ruvyxa Blog',
   description: 'A content-focused blog built with Ruvyxa.',
+  siteName: 'My Ruvyxa Blog',
+  lang: 'en',
 }
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
@@ -11,25 +24,30 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
       <body>
         <header className="header">
           <nav className="nav" aria-label="Main navigation">
-            <a href="/" className="nav-brand">
+            <Link href="/" className="nav-brand">
               My Blog
-            </a>
+            </Link>
             <ul className="nav-links">
               <li>
-                <a href="/">Home</a>
+                <Link href="/">Home</Link>
               </li>
               <li>
-                <a href="/blog">Blog</a>
+                <Link href="/blog">Blog</Link>
               </li>
               <li>
-                <a href="/about">About</a>
+                <Link href="/about">About</Link>
               </li>
             </ul>
+            {/* `rss.xml` is generated from the posts by `content: true`. It is a
+                published file rather than a route, so it stays a plain anchor. */}
+            <a className="nav-feed" href="/rss.xml">
+              RSS
+            </a>
           </nav>
         </header>
         <main className="content">{children}</main>
         <footer className="footer">
-          <p>&copy; {new Date().getFullYear()} My Ruvyxa Blog. All rights reserved.</p>
+          <p>&copy; My Ruvyxa Blog. Built with Ruvyxa.</p>
         </footer>
       </body>
     </html>

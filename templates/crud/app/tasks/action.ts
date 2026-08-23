@@ -1,59 +1,59 @@
 import { action } from 'ruvyxa/server'
-import { addTask, toggleTaskById, deleteTaskById } from './server'
+
+import { addTask, deleteTaskById, toggleTaskById } from './server'
 
 /**
- * Server action to create a new task.
- * Validates that the title is non-empty and within length limits.
+ * Server actions for the task list.
+ *
+ * `action.input(schema)` takes anything with a synchronous `parse(value)`, so
+ * the two schemas below can be replaced wholesale by a schema library without
+ * touching a handler. Validation runs on the server either way: the browser
+ * sees a form, and a form is a suggestion.
+ *
+ * A handler that throws answers with the error; one that returns `{ error }`
+ * answers with a result the caller can render. Both are used below — a missing
+ * field is a malformed request, while a task that no longer exists is a normal
+ * outcome of two tabs racing.
  */
+
+/** Read one required, trimmed field out of an unknown payload. */
+function requiredField(value: unknown, field: string, maxLength: number): string {
+  if (!value || typeof value !== 'object' || !(field in value)) {
+    throw new Error(`Field "${field}" is required.`)
+  }
+  const text = String((value as Record<string, unknown>)[field]).trim()
+  if (!text) throw new Error(`Field "${field}" is required.`)
+  if (text.length > maxLength) {
+    throw new Error(`Field "${field}" must be ${maxLength} characters or fewer.`)
+  }
+  return text
+}
+
 const taskTitle = {
-  parse(value: unknown) {
-    if (!value || typeof value !== 'object' || !('title' in value)) {
-      throw new Error('Task title is required.')
-    }
-    const title = String(value.title).trim()
-    if (!title) throw new Error('Task title is required.')
-    if (title.length > 200) throw new Error('Task title must be 200 characters or fewer.')
-    return { title }
-  },
+  parse: (value: unknown) => ({ title: requiredField(value, 'title', 200) }),
 }
 
 const taskId = {
-  parse(value: unknown) {
-    if (!value || typeof value !== 'object' || !('id' in value)) {
-      throw new Error('Task ID is required.')
-    }
-    const id = String(value.id).trim()
-    if (!id) throw new Error('Task ID is required.')
-    return { id }
-  },
+  parse: (value: unknown) => ({ id: requiredField(value, 'id', 64) }),
 }
 
+/** Create a task and drop the cached list that no longer describes reality. */
 export const createTask = action.input(taskTitle).handler(async ({ input, invalidate }) => {
   const task = addTask(input.title)
   invalidate('tasks')
   return { ok: true, task }
 })
 
-/**
- * Server action to toggle a task's done state.
- */
+/** Flip a task between done and not done. */
 export const toggleTask = action.input(taskId).handler(async ({ input, invalidate }) => {
-  const success = toggleTaskById(input.id)
-  if (!success) {
-    return { error: 'Task not found.' }
-  }
+  if (!toggleTaskById(input.id)) return { error: 'Task not found.' }
   invalidate('tasks')
   return { ok: true }
 })
 
-/**
- * Server action to delete a task.
- */
+/** Remove a task. */
 export const deleteTask = action.input(taskId).handler(async ({ input, invalidate }) => {
-  const success = deleteTaskById(input.id)
-  if (!success) {
-    return { error: 'Task not found.' }
-  }
+  if (!deleteTaskById(input.id)) return { error: 'Task not found.' }
   invalidate('tasks')
   return { ok: true }
 })

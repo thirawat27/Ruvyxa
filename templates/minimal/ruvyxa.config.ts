@@ -5,11 +5,18 @@ const settings: RuvyxaConfig = {
   outDir: '.ruvyxa',
   // Generates .ruvyxa/types/routes.d.ts, which narrows `<Link href>` and
   // `useRouter().push` to the routes this project actually has. The tsconfig
-  // `include` below is what makes TypeScript read it.
+  // `include` is what makes TypeScript read it.
   typedRoutes: true,
   server: {
     host: 'localhost',
     port: 3000,
+  },
+  // `robots.txt` and `sitemap.xml` are generated from the route manifest during
+  // `ruvyxa build`. Give `url` the deployed origin — or set RUVYXA_SITE_URL in
+  // the deployment environment — and the sitemap is published too. Without one
+  // the build emits `robots.txt` alone rather than a sitemap of invented URLs.
+  site: {
+    // url: 'https://example.com',
   },
   build: {
     minify: true,
@@ -31,7 +38,6 @@ const settings: RuvyxaConfig = {
     optimize: true,
     quality: 82,
     lossless: false,
-    workers: 0,
   },
 }
 

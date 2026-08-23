@@ -1,13 +1,32 @@
 # Ruvyxa App Agent Guide
 
-You are working in a Ruvyxa application. Keep this starter small, explicit, and close to the
-file-system route shape:
+You are working in a Ruvyxa API. Keep this starter small, explicit, and close to the file-system
+route shape:
 
 - `app/layout.tsx` wraps all pages.
-- `app/page.tsx` is the home route.
+- `app/page.tsx` is the endpoint documentation, and the only page.
 - `app/globals.css` is the default global stylesheet.
 - `public/` contains static assets.
 - `ruvyxa.config.ts` configures server, build, cache, security, and middleware.
+
+## How the endpoints work
+
+- A folder under `app/api/` with a `route.ts` is an endpoint; the exported `GET`, `POST`, `PATCH`,
+  and `DELETE` functions are its methods. A handler receives `{ request, params }`, and a dynamic
+  segment is `string | string[]` until it has been narrowed.
+- `app/api/http.ts` holds everything the handlers share: JSON body reading, field validation, and
+  the error shape. **Add a new error there, not inline** — the repeated four-line error literal is
+  what that module replaced.
+- Errors answer with the RFC 9457 shape (`title`, `status`, `detail`) as `application/problem+json`,
+  so a client can tell an error body from a result without inspecting its fields. Success bodies
+  stay plain `application/json`.
+- Status codes carry meaning: `201` with a `Location` header for a create, `204` with no body for a
+  delete, `PATCH` for a partial update because `PUT` means replacement. Keep them that way.
+- `app/api/items/store.ts` is in-process, so it resets on restart and each worker holds its own copy
+  — two requests can legitimately see different data. It is a placeholder for a database client, and
+  it is only ever imported by `route.ts` files, which never reach the browser.
+- `security.apiLimit` in `ruvyxa.config.ts` bounds the request body these endpoints will read. Raise
+  it deliberately if an endpoint starts accepting uploads.
 
 ## Rules
 

@@ -1,0 +1,43 @@
+---
+title: 'Hello, Ruvyxa'
+description: 'Why this blog is a folder of Markdown files and what the framework does with them.'
+date: '2026-08-18'
+tags: ['ruvyxa', 'getting-started']
+---
+
+# {frontmatter.title}
+
+This post is a file: `app/blog/hello-ruvyxa/page.mdx`. There is no posts table, no CMS, and no
+loader. The folder is the URL, the file is the page, and the frontmatter at the top is the
+document's metadata.
+
+## What the framework does with it
+
+Ruvyxa compiles `.md` and `.mdx` routes with no configuration. Each one exports:
+
+- `frontmatter` — the block between the `---` fences, parsed and JSON-checked.
+- `meta` — the same object, which the router renders as `<title>` and `<meta name="description">`.
+- `headings` — every heading in document order, with the `id` it rendered with.
+
+`app/blog/posts.ts` imports `frontmatter` from each post to build the index you came from. The
+frontmatter is written once and read in both places, so a title can never be right on the post and
+stale on the list.
+
+## Add a post
+
+Create a folder, write the file, and it is live:
+
+```bash
+mkdir -p app/blog/my-first-post
+$EDITOR app/blog/my-first-post/page.mdx
+```
+
+Then add one line to `app/blog/posts.ts` so the index knows the order to show it in. That second
+step is deliberate — the list of what is published, and in what order, is a decision worth keeping
+in code you can read.
+
+## Where to go next
+
+- [Authoring in MDX](/blog/authoring-in-mdx) — components and expressions inside a post.
+- [Choosing a rendering strategy](/blog/choosing-a-rendering-strategy) — when HTML gets produced.
+- [Deploying your blog](/blog/deploying-your-blog) — adapters, and what the build publishes.

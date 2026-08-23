@@ -1,69 +1,41 @@
+import { badRequest, optionalString, readJsonObject } from '../http'
 import { nextItemId, store, type Item } from './store'
 
 /**
- * GET /api/items
- * List all items in the store.
+ * GET /api/items — list every item.
  */
-export async function GET() {
-  const all = Array.from(store.items.values())
-  return Response.json(
-    { items: all, count: all.length },
-    {
-      status: 200,
-      headers: { 'Content-Type': 'application/json' },
-    },
-  )
+export function GET(): Response {
+  const items = [...store.items.values()]
+  return Response.json({ items, count: items.length })
 }
 
 /**
- * POST /api/items
- * Create a new item. Requires a JSON body with at least a `name` field.
+ * POST /api/items — create an item.
+ *
+ * Requires `name`; `description` is optional. Answers `201` with the created
+ * item and a `Location` header pointing at it, which is what lets a client
+ * follow the resource without guessing how ids are built.
  */
-export async function POST({ request }: { request: Request }) {
-  let body: unknown
-  try {
-    body = await request.json()
-  } catch {
-    return Response.json(
-      { error: 'Invalid JSON body.', status: 400 },
-      { status: 400, headers: { 'Content-Type': 'application/json' } },
-    )
-  }
+export async function POST({ request }: { request: Request }): Promise<Response> {
+  const body = await readJsonObject(request)
+  if (body instanceof Response) return body
 
-  if (!body || typeof body !== 'object') {
-    return Response.json(
-      { error: 'Request body must be a JSON object.', status: 400 },
-      { status: 400, headers: { 'Content-Type': 'application/json' } },
-    )
-  }
+  const name = optionalString(body, 'name', 200)
+  if (name instanceof Response) return name
+  if (!name) return badRequest('Field "name" is required and must be a non-empty string.')
 
-  const { name, description } = body as Record<string, unknown>
+  const description = optionalString(body, 'description', 2000)
+  if (description instanceof Response) return description
 
-  if (!name || typeof name !== 'string' || name.trim().length === 0) {
-    return Response.json(
-      { error: 'Field "name" is required and must be a non-empty string.', status: 400 },
-      { status: 400, headers: { 'Content-Type': 'application/json' } },
-    )
-  }
-
-  if (name.trim().length > 200) {
-    return Response.json(
-      { error: 'Field "name" must be 200 characters or fewer.', status: 400 },
-      { status: 400, headers: { 'Content-Type': 'application/json' } },
-    )
-  }
-
-  const desc = typeof description === 'string' ? description.trim() : ''
   const now = new Date().toISOString()
   const item: Item = {
     id: nextItemId(),
-    name: name.trim(),
-    description: desc,
+    name,
+    description: description ?? '',
     createdAt: now,
     updatedAt: now,
   }
-
   store.items.set(item.id, item)
 
-  return Response.json({ item }, { status: 201, headers: { 'Content-Type': 'application/json' } })
+  return Response.json({ item }, { status: 201, headers: { Location: `/api/items/${item.id}` } })
 }

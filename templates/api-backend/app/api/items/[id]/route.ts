@@ -1,136 +1,84 @@
-import { store } from '../store'
+import { badRequest, notFound, optionalString, readJsonObject } from '../../http'
+import { store, type Item } from '../store'
 
-type ItemRouteContext = {
+/**
+ * Handlers receive the matched route parameters alongside the request. A
+ * dynamic segment can be captured more than once by a catch-all, so the value
+ * is `string | string[]` until it has been narrowed.
+ */
+interface ItemRouteContext {
   request: Request
   params: { id?: string | string[] }
 }
 
-/**
- * GET /api/items/:id
- * Get a single item by its ID.
- */
-export async function GET({ params }: Pick<ItemRouteContext, 'params'>) {
+/** Narrow `params.id` to the single segment this route declares, or explain why not. */
+function requireId(params: ItemRouteContext['params']): string | Response {
   const { id } = params
+  if (typeof id !== 'string' || id === '') return badRequest('Parameter "id" is required.')
+  return id
+}
 
-  if (!id || typeof id !== 'string') {
-    return Response.json(
-      { error: 'Parameter "id" is required.', status: 400 },
-      { status: 400, headers: { 'Content-Type': 'application/json' } },
-    )
-  }
-
-  const item = store.items.get(id)
-  if (!item) {
-    return Response.json(
-      { error: 'Not found.', status: 404 },
-      { status: 404, headers: { 'Content-Type': 'application/json' } },
-    )
-  }
-
-  return Response.json({ item }, { status: 200, headers: { 'Content-Type': 'application/json' } })
+/** Look an item up, or answer 404. */
+function requireItem(params: ItemRouteContext['params']): Item | Response {
+  const id = requireId(params)
+  if (id instanceof Response) return id
+  return store.items.get(id) ?? notFound(`No item has the id "${id}".`)
 }
 
 /**
- * PUT /api/items/:id
- * Update an existing item. Accepts partial updates (name and/or description).
+ * GET /api/items/:id — read one item.
  */
-export async function PUT({ request, params }: ItemRouteContext) {
-  const { id } = params
-
-  if (!id || typeof id !== 'string') {
-    return Response.json(
-      { error: 'Parameter "id" is required.', status: 400 },
-      { status: 400, headers: { 'Content-Type': 'application/json' } },
-    )
-  }
-
-  const existing = store.items.get(id)
-  if (!existing) {
-    return Response.json(
-      { error: 'Not found.', status: 404 },
-      { status: 404, headers: { 'Content-Type': 'application/json' } },
-    )
-  }
-
-  let body: unknown
-  try {
-    body = await request.json()
-  } catch {
-    return Response.json(
-      { error: 'Invalid JSON body.', status: 400 },
-      { status: 400, headers: { 'Content-Type': 'application/json' } },
-    )
-  }
-
-  if (!body || typeof body !== 'object') {
-    return Response.json(
-      { error: 'Request body must be a JSON object.', status: 400 },
-      { status: 400, headers: { 'Content-Type': 'application/json' } },
-    )
-  }
-
-  const { name, description } = body as Record<string, unknown>
-
-  if (name !== undefined) {
-    if (typeof name !== 'string' || name.trim().length === 0) {
-      return Response.json(
-        { error: 'Field "name" must be a non-empty string.', status: 400 },
-        { status: 400, headers: { 'Content-Type': 'application/json' } },
-      )
-    }
-    if (name.trim().length > 200) {
-      return Response.json(
-        { error: 'Field "name" must be 200 characters or fewer.', status: 400 },
-        { status: 400, headers: { 'Content-Type': 'application/json' } },
-      )
-    }
-    existing.name = name.trim()
-  }
-
-  if (description !== undefined) {
-    if (typeof description !== 'string') {
-      return Response.json(
-        { error: 'Field "description" must be a string.', status: 400 },
-        { status: 400, headers: { 'Content-Type': 'application/json' } },
-      )
-    }
-    existing.description = description.trim()
-  }
-
-  existing.updatedAt = new Date().toISOString()
-  store.items.set(id, existing)
-
-  return Response.json(
-    { item: existing },
-    { status: 200, headers: { 'Content-Type': 'application/json' } },
-  )
+export function GET({ params }: Pick<ItemRouteContext, 'params'>): Response {
+  const item = requireItem(params)
+  if (item instanceof Response) return item
+  return Response.json({ item })
 }
 
 /**
- * DELETE /api/items/:id
- * Delete an item by its ID.
+ * PATCH /api/items/:id — update the fields the body mentions.
+ *
+ * `PATCH` rather than `PUT`: this applies a partial change, and `PUT` means
+ * "replace the resource with exactly this". Using `PUT` for a partial update is
+ * the kind of thing a client only finds out about by losing a field.
  */
-export async function DELETE({ params }: Pick<ItemRouteContext, 'params'>) {
-  const { id } = params
+export async function PATCH({ request, params }: ItemRouteContext): Promise<Response> {
+  const existing = requireItem(params)
+  if (existing instanceof Response) return existing
 
-  if (!id || typeof id !== 'string') {
-    return Response.json(
-      { error: 'Parameter "id" is required.', status: 400 },
-      { status: 400, headers: { 'Content-Type': 'application/json' } },
-    )
+  const body = await readJsonObject(request)
+  if (body instanceof Response) return body
+
+  const name = optionalString(body, 'name', 200)
+  if (name instanceof Response) return name
+  if (name === '') return badRequest('Field "name" must be a non-empty string.')
+
+  const description = optionalString(body, 'description', 2000)
+  if (description instanceof Response) return description
+
+  if (name === undefined && description === undefined) {
+    return badRequest('Provide at least one of "name" or "description".')
   }
 
-  if (!store.items.has(id)) {
-    return Response.json(
-      { error: 'Not found.', status: 404 },
-      { status: 404, headers: { 'Content-Type': 'application/json' } },
-    )
+  const updated: Item = {
+    ...existing,
+    name: name ?? existing.name,
+    description: description ?? existing.description,
+    updatedAt: new Date().toISOString(),
   }
+  store.items.set(updated.id, updated)
 
-  store.items.delete(id)
+  return Response.json({ item: updated })
+}
 
-  return Response.json(
-    { message: 'Item deleted.' },
-    { status: 200, headers: { 'Content-Type': 'application/json' } },
-  )
+/**
+ * DELETE /api/items/:id — remove one item.
+ *
+ * Answers `204 No Content`: the deletion is the whole answer, and a body
+ * restating it is one more thing for a client to parse and ignore.
+ */
+export function DELETE({ params }: Pick<ItemRouteContext, 'params'>): Response {
+  const item = requireItem(params)
+  if (item instanceof Response) return item
+  store.items.delete(item.id)
+  return new Response(null, { status: 204 })
 }
