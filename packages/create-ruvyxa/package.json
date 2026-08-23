@@ -36,7 +36,10 @@
     "ssr",
     "ssg",
     "rsc",
-    "zero-config"
+    "zero-config",
+    "blog",
+    "crud",
+    "api"
   ],
   "repository": {
     "type": "git",

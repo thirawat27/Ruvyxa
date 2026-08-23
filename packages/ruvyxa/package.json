@@ -93,7 +93,10 @@
     "jamstack",
     "csr",
     "ppr",
-    "partial-prerendering"
+    "partial-prerendering",
+    "css-modules",
+    "scss",
+    "sass"
   ],
   "repository": {
     "type": "git",

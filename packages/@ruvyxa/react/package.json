@@ -37,7 +37,12 @@
     "fullstack",
     "typescript",
     "json-ld",
-    "prefetch"
+    "prefetch",
+    "image-optimization",
+    "webp",
+    "view-transitions",
+    "open-graph",
+    "schema-org"
   ],
   "repository": {
     "type": "git",
