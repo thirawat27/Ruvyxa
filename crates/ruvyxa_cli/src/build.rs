@@ -377,6 +377,219 @@ pub(crate) async fn build_with_output(args: BuildArgs, show_summary: bool) -> an
     build_with_cache_override(args, show_summary, None).await
 }
 
+/// Ask the `react-server` graph for each server-components route's browser
+/// entry, ahead of the bundling scope that needs the answer.
+///
+/// `None` for a server-only build, which emits no browser entry at all.
+fn spawn_server_component_entry_collection(
+    args: &BuildArgs,
+    config: &ProjectConfig,
+    app_dir: &Path,
+    manifest: &RouteManifest,
+    build_cache_directory: &Path,
+) -> Option<tokio::task::JoinHandle<anyhow::Result<crate::client_bundle::ServerComponentEntries>>> {
+    if args.server_only {
+        return None;
+    }
+    let root = args.root.clone();
+    let app_dir = app_dir.to_path_buf();
+    let manifest = manifest.clone();
+    let build = config.build.clone();
+    let runtime = config.javascript_runtime();
+    let worker_env = build_worker_env(&args.root, &config.build, runtime);
+    let cache_directory = build_cache_directory.to_path_buf();
+    let dependency_hash = config.config_dependency_hash.clone();
+    Some(tokio::spawn(async move {
+        // The context hash needs the same environment the worker will be
+        // started with; a failure to assemble it is reported by the collection
+        // itself, so caching is simply skipped here.
+        let cache = worker_env.ok().map(|worker_env| ServerComponentEntryCache {
+            directory: cache_directory,
+            dependency_hash,
+            context_hash: crate::artifact_cache::server_component_context_hash(
+                &root,
+                runtime,
+                &worker_env,
+            ),
+            fingerprints: std::sync::Arc::new(ArtifactFingerprintCache::default()),
+        });
+        collect_server_component_entries(
+            &root,
+            &app_dir,
+            &manifest,
+            &build,
+            runtime,
+            cache.as_ref(),
+        )
+        .await
+    }))
+}
+
+/// Start the pre-render worker pool ahead of the pre-render phase.
+///
+/// See [`start_static_params_worker_pool`] for why the phase cannot start it
+/// any later than its own first statement, and why that made a fully cached
+/// build pay for a Node process to do nothing but enumerate paths.
+fn spawn_static_params_worker_pool(
+    args: &BuildArgs,
+    config: &ProjectConfig,
+    manifest: &RouteManifest,
+) -> Option<
+    tokio::task::JoinHandle<
+        anyhow::Result<Option<std::sync::Arc<ruvyxa_dev_server::NodeWorkerPool>>>,
+    >,
+> {
+    if args.server_only {
+        return None;
+    }
+    let root = args.root.clone();
+    let manifest = manifest.clone();
+    let build = config.build.clone();
+    let runtime = config.javascript_runtime();
+    Some(tokio::spawn(async move {
+        start_static_params_worker_pool(&root, &manifest, &build, runtime).await
+    }))
+}
+
+/// How long each reported build phase took.
+pub(crate) struct BuildPhaseTiming {
+    pub(crate) route_discovery: Duration,
+    pub(crate) validation: Duration,
+    pub(crate) preparation: Duration,
+    pub(crate) client_bundle: Duration,
+    pub(crate) prerender: Duration,
+}
+
+/// Everything `build.json` states about a finished build.
+///
+/// Assembling the document is pure data collection: no stage reads it and no
+/// decision depends on it, so it is gathered apart from the pipeline that
+/// produced the values. That keeps the pipeline function about the order work
+/// happens in, which is the only thing its length is worth spending on.
+pub(crate) struct BuildReport<'a> {
+    pub(crate) target: BuildTarget,
+    pub(crate) args: &'a BuildArgs,
+    pub(crate) config: &'a ProjectConfig,
+    pub(crate) manifest: &'a RouteManifest,
+    pub(crate) client_manifest: &'a serde_json::Value,
+    pub(crate) image_report: &'a ImageOptimizationReport,
+    pub(crate) prerendered: &'a [PrerenderedRoute],
+    pub(crate) detected_adapter: Option<&'a (String, String)>,
+    pub(crate) timing: BuildPhaseTiming,
+}
+
+impl BuildReport<'_> {
+    fn document(&self) -> serde_json::Value {
+        let Self {
+            target,
+            args,
+            config,
+            manifest,
+            client_manifest,
+            image_report,
+            prerendered,
+            detected_adapter,
+            timing,
+        } = self;
+        serde_json::json!({
+            "framework": "Ruvyxa",
+            "version": env!("CARGO_PKG_VERSION"),
+            "target": format!("{:?}", target).to_lowercase(),
+            "profile": "production",
+            "createdAtUnix": SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .map(|duration| duration.as_secs())
+                .unwrap_or_default(),
+            "routes": manifest.routes.len(),
+            "serverOnly": args.server_only,
+            "serverDir": "server",
+            // Null rather than "client": a server-only artifact has no client
+            // directory, and an adapter or operator reading this file must not be
+            // pointed at a path the build never wrote.
+            "clientDir": if args.server_only { serde_json::Value::Null } else { serde_json::json!("client") },
+            "assetsDir": "assets",
+            "adapter": args
+                .adapter
+                .as_deref()
+                .map(|name| serde_json::json!(name))
+                .or_else(|| config.adapter.clone())
+                .or_else(|| detected_adapter
+                    .map(|(name, _)| serde_json::json!(name))),
+            "adapterOptions": config.adapter_options.clone(),
+            "images": image_report,
+            "runtime": {
+                "middleware": config.middleware,
+                "i18n": manifest.i18n,
+                "image": {
+                    "onDemand": config.images.on_demand.enabled(),
+                    "maxWidth": config.images.on_demand.max_width(),
+                    "sizes": config.images.variant_widths
+                }
+            },
+            "hashAlgorithm": ASSET_HASH_ALGORITHM,
+            "security": {
+                "actionLimit": config.security.action_body_limit_bytes.unwrap_or(1024 * 1024),
+                "apiLimit": config.security.api_body_limit_bytes.unwrap_or(10 * 1024 * 1024),
+                "pluginLimit": config.security.plugin_response_body_limit_bytes.unwrap_or(32 * 1024 * 1024),
+                "actionRateLimit": {
+                    "max": config.security.action_rate_limit.as_ref().and_then(|value| value.max).unwrap_or(600),
+                    "window": config.security.action_rate_limit.as_ref().and_then(|value| value.window).unwrap_or(60)
+                },
+                "sameOrigin": config.security.same_origin_actions.unwrap_or(true),
+                "fetchMeta": config.security.fetch_metadata_actions.unwrap_or(true),
+                "trustedProxyIps": config.security.trusted_proxy_ips,
+                "headers": config.security.security_headers.unwrap_or(true)
+            },
+            "build": {
+                "minify": config.build.minify.unwrap_or(true),
+                "map": config.build.sourcemap.unwrap_or(false),
+                "treeShake": config.build.tree_shaking.unwrap_or(true),
+                "split": config.build.split_strategy.as_deref().unwrap_or("route"),
+                "jsx": config.build.jsx_runtime.as_deref().unwrap_or("automatic"),
+                "manifest": config.build.emit_chunk_manifest.unwrap_or(false),
+                "warm": config.build.prebundle_dependencies.unwrap_or(true),
+                "prerenderCache": config.build.prerender_cache.unwrap_or(true),
+                "workers": client_manifest.get("parallelism").cloned().unwrap_or(serde_json::Value::Null)
+            },
+            "render": {
+                "prerendered": prerendered.len(),
+                "routes": prerendered.iter().map(|p| serde_json::json!({
+                    "path": p.path,
+                    "strategy": format!("{:?}", p.strategy).to_lowercase(),
+                    "revalidate": p.revalidate,
+                    "cacheHit": p.artifact_cache_hit,
+                })).collect::<Vec<_>>()
+            },
+            "timing": {
+                "routeDiscoveryMs": duration_ms(timing.route_discovery),
+                "validationMs": duration_ms(timing.validation),
+                "preparationMs": duration_ms(timing.preparation),
+                "clientBundleMs": duration_ms(timing.client_bundle),
+                "prerenderMs": duration_ms(timing.prerender)
+            }
+        })
+    }
+}
+
+/// Collect the deferred pool start, naming the task if it panicked.
+///
+/// `Ok(None)` covers both "no task was started" and "no route needed a pool",
+/// which pre-rendering treats the same way: it starts one itself if a render
+/// turns out to miss the artifact cache.
+async fn awaited_static_params_pool(
+    task: Option<
+        tokio::task::JoinHandle<
+            anyhow::Result<Option<std::sync::Arc<ruvyxa_dev_server::NodeWorkerPool>>>,
+        >,
+    >,
+) -> anyhow::Result<Option<std::sync::Arc<ruvyxa_dev_server::NodeWorkerPool>>> {
+    let Some(task) = task else {
+        return Ok(None);
+    };
+    task.await
+        .map_err(|error| anyhow::anyhow!("static-parameter worker start failed: {error}"))?
+}
+
 /// Run a production build with an optional isolated artifact-cache directory.
 ///
 /// Normal CLI builds pass `None` and retain the configured cache contract. The
@@ -431,46 +644,20 @@ pub(crate) async fn build_with_cache_override(
     if args.server_only {
         ensure_server_only_supported(target, &manifest)?;
     }
-    // Started here and awaited below, because the next two statements boot the
-    // plugin host and neither side needs anything from the other. Both are
-    // dominated by a JavaScript runtime coming up; run in sequence they were the
-    // two largest steps of a warm build, and overlapped they cost whichever is
-    // slower. The task is spawned rather than joined so the plugin host's
-    // blocking start does not hold it.
-    let rsc_entries_task = (!args.server_only).then(|| {
-        let root = args.root.clone();
-        let app_dir = app_dir.clone();
-        let manifest = manifest.clone();
-        let build = config.build.clone();
-        let runtime = config.javascript_runtime();
-        let worker_env = build_worker_env(&args.root, &config.build, runtime);
-        let cache_directory = build_cache_directory.clone();
-        let dependency_hash = config.config_dependency_hash.clone();
-        tokio::spawn(async move {
-            // The context hash needs the same environment the worker will be
-            // started with; a failure to assemble it is reported by the
-            // collection itself, so caching is simply skipped here.
-            let cache = worker_env.ok().map(|worker_env| ServerComponentEntryCache {
-                directory: cache_directory,
-                dependency_hash,
-                context_hash: crate::artifact_cache::server_component_context_hash(
-                    &root,
-                    runtime,
-                    &worker_env,
-                ),
-                fingerprints: std::sync::Arc::new(ArtifactFingerprintCache::default()),
-            });
-            collect_server_component_entries(
-                &root,
-                &app_dir,
-                &manifest,
-                &build,
-                runtime,
-                cache.as_ref(),
-            )
-            .await
-        })
-    });
+    // Both started here and awaited at the phase that consumes them. Each is
+    // dominated by a JavaScript runtime coming up and neither needs anything
+    // the phases in between produce, so run in sequence they were three of the
+    // largest steps of a warm build and overlapped they cost the slowest one.
+    // Spawned rather than joined, so the plugin host's blocking start below
+    // does not hold them.
+    let rsc_entries_task = spawn_server_component_entry_collection(
+        &args,
+        &config,
+        &app_dir,
+        &manifest,
+        &build_cache_directory,
+    );
+    let static_params_pool_task = spawn_static_params_worker_pool(&args, &config, &manifest);
     let plugin_session = TypeScriptPluginBuildSession::new(
         &args.root,
         &config.plugins,
@@ -623,6 +810,7 @@ pub(crate) async fn build_with_cache_override(
     // no page routes by the compatibility rule above, so this stage has no work
     // to do and its `prerender/` directory is never created.
     let prerender_dir = staging_dir.join("prerender");
+    let static_params_pool = awaited_static_params_pool(static_params_pool_task).await?;
     let phase_started = Instant::now();
     let prerendered = if args.server_only {
         Vec::new()
@@ -647,6 +835,7 @@ pub(crate) async fn build_with_cache_override(
             },
             config.javascript_runtime(),
             show_summary,
+            static_params_pool,
         )
         .await?
     };
@@ -695,84 +884,24 @@ pub(crate) async fn build_with_cache_override(
         info!(adapter = %name, source = %source, "auto-detected deploy adapter");
     }
 
-    let mut build_info = serde_json::json!({
-        "framework": "Ruvyxa",
-        "version": env!("CARGO_PKG_VERSION"),
-        "target": format!("{:?}", target).to_lowercase(),
-        "profile": "production",
-        "createdAtUnix": SystemTime::now()
-            .duration_since(SystemTime::UNIX_EPOCH)
-            .map(|duration| duration.as_secs())
-            .unwrap_or_default(),
-        "routes": manifest.routes.len(),
-        "serverOnly": args.server_only,
-        "serverDir": "server",
-        // Null rather than "client": a server-only artifact has no client
-        // directory, and an adapter or operator reading this file must not be
-        // pointed at a path the build never wrote.
-        "clientDir": if args.server_only { serde_json::Value::Null } else { serde_json::json!("client") },
-        "assetsDir": "assets",
-        "adapter": args
-            .adapter
-            .as_deref()
-            .map(|name| serde_json::json!(name))
-            .or_else(|| config.adapter.clone())
-            .or_else(|| detected_adapter
-                .as_ref()
-                .map(|(name, _)| serde_json::json!(name))),
-        "adapterOptions": config.adapter_options.clone(),
-        "images": image_report,
-        "runtime": {
-            "middleware": config.middleware,
-            "i18n": manifest.i18n,
-            "image": {
-                "onDemand": config.images.on_demand.enabled(),
-                "maxWidth": config.images.on_demand.max_width(),
-                "sizes": config.images.variant_widths
-            }
+    let mut build_info = BuildReport {
+        target,
+        args: &args,
+        config: &config,
+        manifest: &manifest,
+        client_manifest: &client_manifest,
+        image_report: &image_report,
+        prerendered: &prerendered,
+        detected_adapter: detected_adapter.as_ref(),
+        timing: BuildPhaseTiming {
+            route_discovery: route_discovery_duration,
+            validation: validation_duration,
+            preparation: preparation_duration,
+            client_bundle: client_bundle_duration,
+            prerender: prerender_duration,
         },
-        "hashAlgorithm": ASSET_HASH_ALGORITHM,
-        "security": {
-            "actionLimit": config.security.action_body_limit_bytes.unwrap_or(1024 * 1024),
-            "apiLimit": config.security.api_body_limit_bytes.unwrap_or(10 * 1024 * 1024),
-            "pluginLimit": config.security.plugin_response_body_limit_bytes.unwrap_or(32 * 1024 * 1024),
-            "actionRateLimit": {
-                "max": config.security.action_rate_limit.as_ref().and_then(|value| value.max).unwrap_or(600),
-                "window": config.security.action_rate_limit.as_ref().and_then(|value| value.window).unwrap_or(60)
-            },
-            "sameOrigin": config.security.same_origin_actions.unwrap_or(true),
-            "fetchMeta": config.security.fetch_metadata_actions.unwrap_or(true),
-            "trustedProxyIps": config.security.trusted_proxy_ips,
-            "headers": config.security.security_headers.unwrap_or(true)
-        },
-        "build": {
-            "minify": config.build.minify.unwrap_or(true),
-            "map": config.build.sourcemap.unwrap_or(false),
-            "treeShake": config.build.tree_shaking.unwrap_or(true),
-            "split": config.build.split_strategy.as_deref().unwrap_or("route"),
-            "jsx": config.build.jsx_runtime.as_deref().unwrap_or("automatic"),
-            "manifest": config.build.emit_chunk_manifest.unwrap_or(false),
-            "warm": config.build.prebundle_dependencies.unwrap_or(true),
-            "prerenderCache": config.build.prerender_cache.unwrap_or(true),
-            "workers": client_manifest.get("parallelism").cloned().unwrap_or(serde_json::Value::Null)
-        },
-        "render": {
-            "prerendered": prerendered.len(),
-            "routes": prerendered.iter().map(|p| serde_json::json!({
-                "path": p.path,
-                "strategy": format!("{:?}", p.strategy).to_lowercase(),
-                "revalidate": p.revalidate,
-                "cacheHit": p.artifact_cache_hit,
-            })).collect::<Vec<_>>()
-        },
-        "timing": {
-            "routeDiscoveryMs": duration_ms(route_discovery_duration),
-            "validationMs": duration_ms(validation_duration),
-            "preparationMs": duration_ms(preparation_duration),
-            "clientBundleMs": duration_ms(client_bundle_duration),
-            "prerenderMs": duration_ms(prerender_duration)
-        }
-    });
+    }
+    .document();
     fs::write(
         staging_dir.join("build.json"),
         serde_json::to_string_pretty(&build_info)?,

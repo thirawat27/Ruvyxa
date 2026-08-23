@@ -5,7 +5,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 
 import {
   cacheFileName,
-  compileBundle,
+  compileBundleIfChanged,
   compileContentSource,
   runtimeAliases,
   serverPlatform,
@@ -80,7 +80,7 @@ async function loadRegistry(root) {
     'config',
     cacheFileName([moduleCode, configFile, 'plugin-runtime'], 'mjs'),
   )
-  await compileBundle({
+  await compileBundleIfChanged({
     projectRoot: root,
     entrySource: moduleCode,
     sourcefile: 'ruvyxa:plugin-config-entry.ts',
@@ -123,7 +123,7 @@ async function configuredContentPlugin(root, configFile, config) {
     'config',
     cacheFileName([moduleCode, configFile, 'content-engine-runtime'], 'mjs'),
   )
-  await compileBundle({
+  await compileBundleIfChanged({
     projectRoot: root,
     entrySource: moduleCode,
     sourcefile: 'ruvyxa:content-engine-config-entry.ts',

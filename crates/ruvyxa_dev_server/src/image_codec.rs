@@ -342,7 +342,7 @@ mod tests {
 
         // Every pixel that is visible at all must still be blue: any red in a
         // pixel with alpha is red that came from the transparent half.
-        for pixel in pixels.chunks_exact(4) {
+        for pixel in pixels.as_chunks::<4>().0 {
             let [red, _green, blue, alpha] = [pixel[0], pixel[1], pixel[2], pixel[3]];
             if alpha > 0 {
                 assert!(
@@ -370,7 +370,7 @@ mod tests {
 
         let source = decoded(40, 40, PixelLayout::Rgb8, &EXPECTED);
         let resized = Pixels::from_decoded(&source).resize(10, 10).unwrap();
-        for pixel in resized.as_slice().chunks_exact(3) {
+        for pixel in resized.as_slice().as_chunks::<3>().0 {
             for (channel, expected) in pixel.iter().zip(EXPECTED) {
                 let drift = i16::from(*channel) - i16::from(expected);
                 assert!(

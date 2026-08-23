@@ -2,6 +2,58 @@
 
 ## v1.0.32 (unreleased)
 
+### A warm production build spent two thirds of its time on answers it already had
+
+Measured on the demo, through `ruvyxa bench --baseline`, which renders each sample in a disposable
+copy with a private cache and refuses to publish timings until it has confirmed the cold and warm
+builds emit the same artifacts. Every scenario in the fixture moved:
+
+| scenario          | before |  after |
+| ----------------- | -----: | -----: |
+| cold-build        | 7885ms | 6624ms |
+| warm-build        | 1718ms |  554ms |
+| first-route       |  520ms |  270ms |
+| css-edit-build    | 2563ms | 1355ms |
+| client-edit-build | 1925ms |  735ms |
+| server-edit-build | 1819ms |  588ms |
+| leaf-edit-build   | 1954ms |  870ms |
+
+Three things were paid for repeatedly, and none of them had changed since the last build.
+
+**The config bundle was recompiled on every boot.** Loading the plugin host compiles
+`ruvyxa.config.ts` and everything it reaches into one module, then `writeIfChanged` finds the result
+byte-identical to the file already on disk and writes nothing — 341ms of a 964ms build to confirm
+that. The compiler could not say so any sooner, because walking the graph is how it finds out.
+`compileBundleIfChanged` records what the last compile read, and what those files hash to together,
+in a manifest beside the output; the next boot re-reads them instead of recompiling them.
+
+The recorded set is every file the graph reached, not the project's own. `dependencyHash` is
+deliberately project-scoped — it answers whether the _application_ changed — but 89 of the 94 inputs
+to a config bundle are the framework's modules, and a key that ignored them would have served a
+stale bundle to anyone editing Ruvyxa itself, silently and for as long as the file sat there.
+`tests/packages/ruvyxa/bundle-reuse.test.mjs` observes reuse rather than inferring it: the emitted
+bundle is marked after a compile, so a compile that really ran erases the mark. Narrowing the key
+back to project files leaves five of its six cases passing and fails the sixth.
+
+**Runtime detection spawned three processes to answer one question.** `JavaScriptRuntime::detect()`
+asked Node, Bun, and Deno for `--version` — all three, because the arguments to the decision were
+evaluated before the decision, so Node answering first saved nothing. A build asked six times. It is
+now one probe, memoized for the process, and the test counts probes rather than checking the answer:
+the previous tests pass unchanged against the eager version, which is why nothing caught this.
+Running through the `ruvyxa` npm wrapper was never affected — it sets `RUVYXA_INVOKER_RUNTIME` — so
+this is the standalone binary's path, and CI's.
+
+**Pre-rendering started a Node worker pool and then had nothing for it to do.** A dynamic route's
+paths come from the project's own `generateStaticParams`, so the pool has to exist before the first
+job is known. On a warm build that start _was_ the phase: 158ms of 263ms, after which every render
+came from the artifact cache. It cannot be skipped, but it depends on nothing the build does in
+between, so it now starts next to the plugin host and the server-components collection and is
+awaited where it is used. A project with no dynamic static params still starts nothing at all.
+
+Static parameters themselves are still resolved on every build. Caching them would mean treating
+`generateStaticParams` as pure with respect to its module inputs, which is a semantic decision and
+not a speed one; the opt-in `{ params, cache }` return remains the way to ask for it.
+
 ### The deployment smoke was asking the demo to do something no adapter can
 
 CI built `examples/demo` with the bun and deno adapters and then launched the result. That build

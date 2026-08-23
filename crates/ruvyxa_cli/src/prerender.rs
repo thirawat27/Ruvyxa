@@ -111,23 +111,9 @@ pub(crate) async fn prerender_static_routes(
     cache: RuvyxaBuildCache<'_>,
     runtime: JavaScriptRuntime,
     show_progress: bool,
+    started_worker_pool: Option<Arc<ruvyxa_dev_server::NodeWorkerPool>>,
 ) -> anyhow::Result<Vec<PrerenderedRoute>> {
-    use ruvyxa_graph::RouteKind;
-
-    let routes_to_prerender: Vec<&RouteEntry> = manifest
-        .routes
-        .iter()
-        .filter(|route| {
-            route.kind == RouteKind::Page
-                && matches!(
-                    route.render.strategy,
-                    RenderStrategy::Ssg
-                        | RenderStrategy::Isr
-                        | RenderStrategy::Ppr
-                        | RenderStrategy::Csr
-                )
-        })
-        .collect();
+    let routes_to_prerender = routes_to_prerender(manifest);
 
     if routes_to_prerender.is_empty() {
         return Ok(Vec::new());
@@ -152,13 +138,17 @@ pub(crate) async fn prerender_static_routes(
     // all served from the validated artifact cache. Dynamic static-parameter
     // discovery still needs a worker before jobs can be enumerated; ordinary
     // static/CSR routes start one only when a render cache miss remains.
-    let needs_static_params_worker = routes_to_prerender
-        .iter()
-        .any(|route| route.render.has_static_params && route_has_dynamic_segments(&route.path));
-    let mut worker_pool = if needs_static_params_worker {
-        Some(start_prerender_worker_pool(root, &worker_env, parallelism, runtime).await?)
-    } else {
-        None
+    //
+    // The caller is given the chance to have started that pool already, because
+    // nothing about it depends on the phases in between — see
+    // [`start_static_params_worker_pool`].
+    let needs_static_params_worker = needs_static_params_worker(&routes_to_prerender);
+    let mut worker_pool = match started_worker_pool {
+        Some(pool) => Some(pool),
+        None if needs_static_params_worker => {
+            Some(start_prerender_worker_pool(root, &worker_env, parallelism, runtime).await?)
+        }
+        None => None,
     };
 
     let prerendered = async {
@@ -376,6 +366,67 @@ pub(crate) async fn prerender_static_routes(
         worker_pool.shutdown().await;
     }
     prerendered
+}
+
+/// Page routes this build will attempt to pre-render.
+fn routes_to_prerender(manifest: &RouteManifest) -> Vec<&RouteEntry> {
+    use ruvyxa_graph::RouteKind;
+
+    manifest
+        .routes
+        .iter()
+        .filter(|route| {
+            route.kind == RouteKind::Page
+                && matches!(
+                    route.render.strategy,
+                    RenderStrategy::Ssg
+                        | RenderStrategy::Isr
+                        | RenderStrategy::Ppr
+                        | RenderStrategy::Csr
+                )
+        })
+        .collect()
+}
+
+/// Does enumerating this build's pre-render jobs require running project code?
+///
+/// A dynamic route's paths come from its own `generateStaticParams`, so there
+/// is no list of jobs until a worker has run it. Every other route's jobs
+/// follow from the manifest alone.
+fn needs_static_params_worker(routes_to_prerender: &[&RouteEntry]) -> bool {
+    routes_to_prerender
+        .iter()
+        .any(|route| route.render.has_static_params && route_has_dynamic_segments(&route.path))
+}
+
+/// Start the worker pool pre-rendering will need, before the phase that needs it.
+///
+/// On a fully cached build this process start *was* the pre-render phase: 158ms
+/// of 263ms, after which every render came from the artifact cache and the pool
+/// enumerated jobs and nothing else. It cannot be skipped — the jobs are not
+/// knowable without running project code — but it also depends on nothing the
+/// build does in between, so the caller starts it next to work already in
+/// flight and hands the pool to [`prerender_static_routes`].
+///
+/// `None` when no route needs one. Pre-rendering then starts a pool only if a
+/// render actually misses the cache, exactly as before.
+pub(crate) async fn start_static_params_worker_pool(
+    root: &Path,
+    manifest: &RouteManifest,
+    build: &BuildConfigOptions,
+    runtime: JavaScriptRuntime,
+) -> anyhow::Result<Option<Arc<ruvyxa_dev_server::NodeWorkerPool>>> {
+    let routes = routes_to_prerender(manifest);
+    if routes.is_empty() || !needs_static_params_worker(&routes) {
+        return Ok(None);
+    }
+    // The same size pre-rendering would have chosen, so starting early cannot
+    // hand the phase a differently sized pool than it would have built.
+    let parallelism = prerender_parallelism(build.parallelism, routes.len());
+    let worker_env = build_worker_env(root, build, runtime)?;
+    start_prerender_worker_pool(root, &worker_env, parallelism, runtime)
+        .await
+        .map(Some)
 }
 
 pub(crate) async fn start_prerender_worker_pool(

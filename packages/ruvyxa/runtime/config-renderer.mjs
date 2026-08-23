@@ -6,7 +6,7 @@ import { compareEntryKeys } from './order.mjs'
 
 import {
   cacheFileName,
-  compileBundleWithMetadata,
+  compileBundleIfChanged,
   runtimeAliases,
   serverPlatform,
   toImportPath,
@@ -51,7 +51,7 @@ try {
     cacheFileName([moduleCode, configFile], 'mjs'),
   )
 
-  const bundle = await compileBundleWithMetadata({
+  const bundle = await compileBundleIfChanged({
     projectRoot,
     entrySource: moduleCode,
     sourcefile: 'ruvyxa:config-entry.ts',

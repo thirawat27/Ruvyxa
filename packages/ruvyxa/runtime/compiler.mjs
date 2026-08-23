@@ -284,7 +284,116 @@ export async function compileBundleWithMetadata({
       ...existingManifestFiles(root),
       ...tsconfigPaths.files.map((file) => path.relative(root, file).replaceAll('\\', '/')),
     ].sort(),
+    // Every file this compile actually read, project-local or not, plus the
+    // manifests and tsconfigs that took part in resolving them.
+    //
+    // Deliberately wider than `fingerprintInputs`, which is project-relative
+    // because it answers "did the application change". Reusing a compiled
+    // bundle asks the different question "could these bytes still be
+    // produced", and for a config bundle the answer lives mostly outside the
+    // project: 89 of a demo config's 94 inputs are the framework's own modules.
+    readFiles: [
+      ...new Set([
+        ...modules
+          .filter((module) => module.filePath)
+          .map((module) => path.resolve(module.filePath)),
+        ...existingManifestFiles(root).map((name) => path.join(root, name)),
+        ...tsconfigPaths.files.map((file) => path.resolve(file)),
+      ]),
+    ].sort(compareCodeUnits),
+    // Files that were looked for and not found. A lockfile or a tsconfig
+    // appearing changes what a bare specifier resolves to without changing any
+    // file that was read, so their absence is part of what was observed.
+    absentFiles: [
+      ...PROJECT_MANIFEST_FILES,
+      ...(tsconfigPaths.files.length === 0 ? ['tsconfig.json', 'jsconfig.json'] : []),
+    ]
+      .map((name) => path.join(root, name))
+      .filter((file) => !existsSync(file))
+      .sort(compareCodeUnits),
   }
+}
+
+/**
+ * Compile a bundle, or reuse the previous compile when nothing it read changed.
+ *
+ * [`compileBundleWithMetadata`] cannot say the output is still current without
+ * walking and compiling the whole graph — which is the work a caller wanted to
+ * skip. `writeIfChanged` then finds the bytes identical and writes nothing, so
+ * the whole cost bought an answer that was already sitting on disk. Booting the
+ * plugin host for the demo spent 341ms of a 964ms warm build exactly this way,
+ * on every build, and the dev server pays it again at startup.
+ *
+ * The manifest beside the output records what the last compile read and what
+ * those files hash to together, which answers the question by reading them
+ * instead of recompiling them. Recorded metadata is replayed verbatim, so a
+ * reused bundle reports the same `dependencyHash` a fresh one would — callers
+ * key their own caches on it.
+ *
+ * A manifest that is missing, unparseable, or no longer matching is a miss and
+ * nothing more: the compile runs and rewrites it. The one change this cannot
+ * see is a file appearing where none was before and capturing a specifier that
+ * already resolved elsewhere, which is the same bound the other
+ * content-addressed caches here carry.
+ */
+export async function compileBundleIfChanged(options) {
+  const manifestFile = `${options.outfile}.inputs.json`
+  const reused = await reusableBundle(manifestFile, options.outfile)
+  if (reused) return reused
+
+  const bundle = await compileBundleWithMetadata(options)
+  await writeIfChanged(
+    manifestFile,
+    JSON.stringify({
+      version: BUNDLE_INPUT_MANIFEST_VERSION,
+      hash: await fingerprintFiles(bundle.readFiles),
+      metadata: bundle,
+    }),
+  )
+  return bundle
+}
+
+/**
+ * Format of the manifest [`compileBundleIfChanged`] writes. Bump it when the
+ * meaning of a recorded field changes; an entry in an older format is a miss,
+ * never a migration.
+ */
+const BUNDLE_INPUT_MANIFEST_VERSION = 1
+
+/** The recorded metadata, if the output and every file behind it still hold. */
+async function reusableBundle(manifestFile, outfile) {
+  if (!existsSync(outfile)) return null
+  let manifest
+  try {
+    manifest = JSON.parse(await readFile(manifestFile, 'utf8'))
+  } catch {
+    return null
+  }
+  if (manifest?.version !== BUNDLE_INPUT_MANIFEST_VERSION) return null
+  const { hash, metadata } = manifest
+  if (typeof hash !== 'string' || !metadata) return null
+  if (metadata.absentFiles?.some((file) => existsSync(file))) return null
+  const current = await fingerprintFiles(metadata.readFiles ?? []).catch(() => null)
+  return current === hash ? metadata : null
+}
+
+/**
+ * Hash a set of files by path and content.
+ *
+ * Both sides of the cache go through here so they cannot compute the
+ * fingerprint differently. Contents come from disk rather than from the
+ * compiler's in-memory module sources, which have already been transformed and
+ * so would never match a later read of the file itself.
+ */
+async function fingerprintFiles(files) {
+  const hash = createHash('sha256')
+  for (const file of files) {
+    hash.update(file)
+    hash.update('\0')
+    hash.update(await readFile(file))
+    hash.update('\0')
+  }
+  return hash.digest('hex')
 }
 
 export function toImportPath(file) {

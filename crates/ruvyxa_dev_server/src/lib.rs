@@ -275,31 +275,49 @@ impl JavaScriptRuntime {
     /// only when Node is unavailable and Bun can be executed. If neither
     /// runtime is installed, keep Node as the diagnostic target so the
     /// resulting process error names the conventional runtime.
+    ///
+    /// Answered once per process. Every probe is a `--version` process spawn,
+    /// and a single build asks this question from route discovery, style
+    /// collection, bundling, and pre-rendering; the set of installed runtimes
+    /// cannot change underneath one command, so asking again only costs
+    /// spawns. A build of the demo used to spend a fifth of its warm total
+    /// here.
     #[must_use]
     pub fn detect() -> Self {
-        Self::from_availability(
-            Self::Node.is_available(),
-            Self::Bun.is_available(),
-            Self::Deno.is_available(),
-        )
+        static DETECTED: std::sync::OnceLock<JavaScriptRuntime> = std::sync::OnceLock::new();
+        *DETECTED.get_or_init(|| Self::detect_by(|runtime| runtime.is_available()))
+    }
+
+    /// The detection rule, asking `available` about one runtime at a time.
+    ///
+    /// The probe is consulted in preference order and stops at the first
+    /// runtime that answers, so the ordinary case — Node installed — costs one
+    /// spawn instead of three. Taking the probe as an argument is also what
+    /// lets the rule be tested without three runtimes on the machine.
+    #[must_use]
+    pub fn detect_by(mut available: impl FnMut(Self) -> bool) -> Self {
+        Self::DETECTION_ORDER
+            .into_iter()
+            .find(|runtime| available(*runtime))
+            .unwrap_or(Self::Node)
     }
 
     #[must_use]
-    pub const fn from_availability(
+    pub fn from_availability(
         node_available: bool,
         bun_available: bool,
         deno_available: bool,
     ) -> Self {
-        if node_available {
-            Self::Node
-        } else if bun_available {
-            Self::Bun
-        } else if deno_available {
-            Self::Deno
-        } else {
-            Self::Node
-        }
+        Self::detect_by(|runtime| match runtime {
+            Self::Node => node_available,
+            Self::Bun => bun_available,
+            Self::Deno => deno_available,
+        })
     }
+
+    /// Preference order for auto-detection, stated once so the eager and lazy
+    /// callers cannot come to disagree about it.
+    const DETECTION_ORDER: [Self; 3] = [Self::Node, Self::Bun, Self::Deno];
 }
 
 /// Where a runtime's own installer puts it, under a home directory.
@@ -2566,6 +2584,46 @@ mod tests {
             JavaScriptRuntime::from_availability(false, false, false),
             JavaScriptRuntime::Node
         );
+    }
+
+    /// Each probe is a `<runtime> --version` process spawn, so the number of
+    /// them is the cost of detection, not an implementation detail. Node
+    /// answering has to end the question: the eager form asked all three on
+    /// every call, and a warm build asks six times.
+    #[test]
+    fn detection_stops_probing_once_a_runtime_answers() {
+        let mut probed = Vec::new();
+        let selected = JavaScriptRuntime::detect_by(|runtime| {
+            probed.push(runtime);
+            runtime == JavaScriptRuntime::Node
+        });
+        assert_eq!(selected, JavaScriptRuntime::Node);
+        assert_eq!(probed, vec![JavaScriptRuntime::Node]);
+
+        let mut probed = Vec::new();
+        let selected = JavaScriptRuntime::detect_by(|runtime| {
+            probed.push(runtime);
+            runtime == JavaScriptRuntime::Deno
+        });
+        assert_eq!(selected, JavaScriptRuntime::Deno);
+        assert_eq!(
+            probed,
+            vec![
+                JavaScriptRuntime::Node,
+                JavaScriptRuntime::Bun,
+                JavaScriptRuntime::Deno
+            ]
+        );
+    }
+
+    /// The answer is cached for the life of the process, so a second call must
+    /// not spawn anything. Asserted through the public entry point because the
+    /// cache is what callers actually get.
+    #[test]
+    fn repeated_detection_answers_from_the_first_probe() {
+        let first = JavaScriptRuntime::detect();
+        let second = JavaScriptRuntime::detect();
+        assert_eq!(first, second);
     }
 
     #[test]

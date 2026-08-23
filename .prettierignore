@@ -3,6 +3,11 @@ node_modules/
 .pnpm-store/
 target/
 
+# Agent tool state. A worktree here holds a checkout of this repository, so
+# without this line `prettier --check .` reports another branch's files as
+# failures of this one — and only on the machine that has the worktree.
+.claude/
+
 # Build output
 dist/
 .test-build/
