@@ -49,7 +49,6 @@ pub(crate) struct ClientBundle {
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CachedClientArtifact {
-    pub(crate) version: u8,
     pub(crate) dependency_hash: String,
     pub(crate) files: BTreeMap<PathBuf, String>,
     pub(crate) bundle: ClientBundle,
@@ -57,7 +56,6 @@ pub(crate) struct CachedClientArtifact {
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CachedClientPlan {
-    pub(crate) version: u8,
     pub(crate) dependency_hash: String,
     pub(crate) files: BTreeMap<PathBuf, String>,
     /// Ordered, because the shared chunk is emitted in this order and a plan
@@ -68,7 +66,6 @@ pub(crate) struct CachedClientPlan {
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CachedSharedRouteArtifact {
-    pub(crate) version: u8,
     pub(crate) dependency_hash: String,
     pub(crate) files: BTreeMap<PathBuf, String>,
     pub(crate) code: String,
@@ -77,7 +74,6 @@ pub(crate) struct CachedSharedRouteArtifact {
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CachedPrerenderArtifact {
-    pub(crate) version: u8,
     pub(crate) dependency_hash: String,
     pub(crate) render_context_hash: String,
     pub(crate) renderer_dependency_hash: String,
@@ -95,7 +91,6 @@ pub(crate) struct CachedPrerenderArtifact {
 /// is exactly what `files` records.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CachedServerComponentEntry {
-    pub(crate) version: u8,
     pub(crate) dependency_hash: String,
     /// Covers the worker runtime and the environment it was started with — the
     /// inputs that are not project files. See
@@ -220,9 +215,312 @@ pub(crate) fn emit_client_bundles_with_session(
     // route is bundled here with every other one anyway: its modules have to
     // join the shared-chunk analysis, or its bundle inlines a second copy of
     // React and a soft navigation into it renders with two Reacts on the page.
-    let entry_source_for =
-        |route: &RouteEntry| rsc_entries.entries.get(&route.path).map(String::as_str);
-    let page_routes = manifest
+    let page_routes = client_page_routes(manifest, rsc_entries);
+    let pass = ClientBundlePass {
+        root,
+        app_dir,
+        build,
+        parallelism: build_parallelism(build.parallelism, page_routes.len()),
+        bundle_context: bundle_context_for_build(
+            cache.dependency_hash,
+            cache.directory,
+            plugin_session,
+            &rsc_entries.server_references,
+        )?,
+        artifact_cache_dir: cache.directory.to_path_buf(),
+        artifact_dependency_hash: cache.dependency_hash.to_string(),
+        artifact_fingerprints: ArtifactFingerprintCache::default(),
+        empty_shared_modules: BTreeSet::new(),
+        split_strategy: parse_split_strategy(build.split_strategy.as_deref())?,
+        page_routes,
+        rsc_entries,
+    };
+    let bundled = pass.bundle_page_routes(client_dir)?;
+    let shared_route_chunks = bundled.shared_chunks;
+
+    let written = write_route_bundles(client_dir, bundled.bundles, build)?;
+    let mut routes = written.routes;
+
+    finalize_route_entries(
+        client_dir,
+        &mut routes,
+        &pass.page_routes,
+        &shared_route_chunks,
+    )?;
+
+    write_client_route_manifest(client_dir, &routes)?;
+
+    write_chunk_manifest(
+        client_dir,
+        build,
+        &written.chunk_manifests,
+        &shared_route_chunks,
+    )?;
+
+    // Persist only after every route artifact has been emitted successfully;
+    // a failed batch leaves the previous dependency graph intact.
+    pass.bundle_context
+        .save_incremental()
+        .context("failed to persist incremental module graph")?;
+
+    Ok(client_bundle_report(
+        build,
+        plugins,
+        pass.parallelism,
+        &written.totals,
+        routes,
+        &shared_route_chunks,
+        &pass.bundle_context,
+    ))
+}
+
+/// Everything a client-bundling pass reads but does not decide.
+///
+/// The route-splitting branch below needs eleven values that the caller has
+/// already resolved. Naming them together is what lets the split strategy be a
+/// method with one argument instead of a twelve-parameter function, and it puts
+/// the caller's setup in one place rather than interleaved with the branch.
+struct ClientBundlePass<'a> {
+    root: &'a Path,
+    app_dir: &'a Path,
+    build: &'a BuildConfigOptions,
+    bundle_context: ruvyxa_bundler::BundleContext,
+    artifact_cache_dir: PathBuf,
+    artifact_dependency_hash: String,
+    artifact_fingerprints: ArtifactFingerprintCache,
+    empty_shared_modules: BTreeSet<PathBuf>,
+    parallelism: usize,
+    split_strategy: ruvyxa_bundler::SplitStrategy,
+    page_routes: Vec<RouteEntry>,
+    rsc_entries: &'a ServerComponentEntries,
+}
+
+impl ClientBundlePass<'_> {
+    /// A server-components route's browser bundle holds the `'use client'`
+    /// modules its payload references, not the page — and only the
+    /// `react-server` graph knows which those are, so it wrote the entry. The
+    /// route is bundled here with every other one anyway: its modules have to
+    /// join the shared-chunk analysis, or its bundle inlines a second copy of
+    /// React and a soft navigation into it renders with two Reacts on the page.
+    fn entry_source_for(&self, route: &RouteEntry) -> Option<&str> {
+        self.rsc_entries
+            .entries
+            .get(&route.path)
+            .map(String::as_str)
+    }
+
+    /// Bundle every page route, and the shared chunk they read from when the
+    /// route-split strategy found modules worth sharing.
+    fn bundle_page_routes(&self, client_dir: &Path) -> anyhow::Result<BundledRoutes> {
+        if self.split_strategy != ruvyxa_bundler::SplitStrategy::Route {
+            return Ok(BundledRoutes {
+                bundles: self.bundle_routes_alone(None)?,
+                shared_chunks: Vec::new(),
+            });
+        }
+        let plan_variant = client_route_plan_variant(self.build)?;
+        let plans = bundle_routes_parallel(&self.page_routes, self.parallelism, |route| {
+            prepare_client_route_plan(
+                self.root,
+                self.app_dir,
+                route,
+                self.build,
+                &self.bundle_context,
+                &self.artifact_cache_dir,
+                &self.artifact_dependency_hash,
+                &plan_variant,
+                &self.artifact_fingerprints,
+                self.entry_source_for(route),
+            )
+        })?;
+        let plans_by_route = plans
+            .iter()
+            .map(|(_, plan)| (plan.path.clone(), plan.clone()))
+            .collect::<BTreeMap<_, _>>();
+        let shared_modules = shared_route_module_paths(&plans);
+        if shared_modules.is_empty() {
+            return Ok(BundledRoutes {
+                bundles: self.bundle_routes_alone(Some(&plans_by_route))?,
+                shared_chunks: Vec::new(),
+            });
+        }
+        self.bundle_routes_around_shared_chunk(client_dir, &plans, &plans_by_route, &shared_modules)
+    }
+
+    /// Bundle each route on its own, reusing a prepared plan where one exists.
+    ///
+    /// The two callers differ only in whether a plan is available: the
+    /// non-route strategy never prepared one, and the route strategy prepared
+    /// plans that turned out to share nothing worth hoisting. Everything past
+    /// that — no shared modules, no shared chunk file, the `base` cache variant
+    /// — is the same answer, and it was written out twice.
+    fn bundle_routes_alone(
+        &self,
+        plans_by_route: Option<&BTreeMap<String, ClientRoutePlan>>,
+    ) -> anyhow::Result<Vec<(usize, ClientBundle)>> {
+        bundle_routes_parallel(&self.page_routes, self.parallelism, |route| {
+            bundle_client_route(
+                self.root,
+                self.app_dir,
+                route,
+                self.build,
+                &self.bundle_context,
+                plans_by_route
+                    .and_then(|plans| plans.get(&route.path))
+                    .and_then(|plan| plan.prepared.as_deref()),
+                &self.empty_shared_modules,
+                None,
+                &self.artifact_cache_dir,
+                &self.artifact_dependency_hash,
+                "base",
+                &self.artifact_fingerprints,
+                self.entry_source_for(route),
+            )
+        })
+    }
+
+    /// Emit the chunk these routes share, then bundle each route against it.
+    fn bundle_routes_around_shared_chunk(
+        &self,
+        client_dir: &Path,
+        plans: &[(usize, ClientRoutePlan)],
+        plans_by_route: &BTreeMap<String, ClientRoutePlan>,
+        shared_modules: &[PathBuf],
+    ) -> anyhow::Result<BundledRoutes> {
+        let shared_output = self.shared_chunk_output(plans, shared_modules)?;
+        let executable_modules = shared_output
+            .modules
+            .into_iter()
+            .map(|path| ruvyxa_diagnostics::normalized_canonical_path(&path))
+            .collect::<BTreeSet<_>>();
+        let shared_chunk =
+            emit_shared_route_chunk(client_dir, shared_output.code, &executable_modules, plans)?;
+        let bundles = bundle_routes_parallel(&self.page_routes, self.parallelism, |route| {
+            let plan = plans_by_route.get(&route.path);
+            // A set, not a list: this one answers "does this route read that
+            // module from the registry", and nothing about order.
+            let route_shared_modules = plan.map_or_else(BTreeSet::new, |plan| {
+                plan.module_paths
+                    .iter()
+                    .filter(|module| executable_modules.contains(*module))
+                    .cloned()
+                    .collect::<BTreeSet<_>>()
+            });
+            let shared_file =
+                (!route_shared_modules.is_empty()).then_some(shared_chunk.file_name.as_str());
+            bundle_client_route(
+                self.root,
+                self.app_dir,
+                route,
+                self.build,
+                &self.bundle_context,
+                plan.and_then(|plan| plan.prepared.as_deref()),
+                &route_shared_modules,
+                shared_file,
+                &self.artifact_cache_dir,
+                &self.artifact_dependency_hash,
+                &shared_chunk.file_name,
+                &self.artifact_fingerprints,
+                self.entry_source_for(route),
+            )
+        })?;
+        Ok(BundledRoutes {
+            bundles,
+            shared_chunks: vec![shared_chunk],
+        })
+    }
+
+    /// The shared chunk's code and module list, from the artifact cache when it
+    /// is warm and from the bundler when it is not.
+    fn shared_chunk_output(
+        &self,
+        plans: &[(usize, ClientRoutePlan)],
+        shared_modules: &[PathBuf],
+    ) -> anyhow::Result<ruvyxa_bundler::SharedRouteBundleOutput> {
+        let shared_options = client_bundle_options(self.build)?;
+        let shared_variant = serde_json::to_string(&shared_options)?;
+        if let Some(output) = load_shared_route_artifact(
+            &self.artifact_cache_dir,
+            &self.artifact_dependency_hash,
+            shared_modules,
+            &shared_variant,
+            &self.artifact_fingerprints,
+        ) {
+            return Ok(output);
+        }
+        // Every route having a prepared bundle means the shared chunk can be
+        // composed from what is already compiled; a build hook can rewrite a
+        // module after that point, so its presence sends this back through the
+        // bundler.
+        let prepared_routes = plans
+            .iter()
+            .filter_map(|(_, plan)| plan.prepared.as_deref())
+            .collect::<Vec<_>>();
+        let output = if prepared_routes.len() == plans.len()
+            && self.bundle_context.build_hooks().host_count() == 0
+        {
+            ruvyxa_bundler::bundle_shared_prepared_route_modules(
+                &prepared_routes,
+                shared_modules,
+                shared_options,
+            )
+        } else {
+            ruvyxa_bundler::bundle_shared_route_modules(
+                ruvyxa_diagnostics::normalized_canonical_path(self.root),
+                ruvyxa_diagnostics::normalized_canonical_path(self.app_dir),
+                shared_modules,
+                shared_options,
+                &self.bundle_context,
+            )
+        }
+        .map_err(|error| anyhow::anyhow!("Ruvyxa Bundler shared route error: {error}"))?;
+        store_shared_route_artifact(
+            &self.artifact_cache_dir,
+            &self.artifact_dependency_hash,
+            shared_modules,
+            &shared_variant,
+            &output,
+            &self.artifact_fingerprints,
+        );
+        Ok(output)
+    }
+}
+
+/// One bundling pass's output: a bundle per page route, plus the shared
+/// chunks those bundles read modules from. Named rather than returned as a
+/// tuple because the two halves are read far apart — the bundles are written
+/// immediately, the chunks decorate the manifest at the end.
+struct BundledRoutes {
+    bundles: Vec<(usize, ClientBundle)>,
+    shared_chunks: Vec<SharedRouteChunk>,
+}
+
+/// Running totals over every route bundle written in one pass.
+#[derive(Default)]
+struct ClientBundleTotals {
+    output_bytes: usize,
+    estimated_gz_bytes: usize,
+    duration_ms: u64,
+    modules: usize,
+    cache_hits: usize,
+    tree_shaken_modules: usize,
+}
+
+/// What writing the route bundles produced: the manifest entry per route, the
+/// per-route chunk manifests the optional `chunk-manifest.json` republishes,
+/// and the totals the build report quotes.
+struct WrittenRouteBundles {
+    routes: Vec<serde_json::Value>,
+    chunk_manifests: Vec<serde_json::Value>,
+    totals: ClientBundleTotals,
+}
+
+/// The routes that get a browser bundle, and the three reasons one does not.
+fn client_page_routes(
+    manifest: &RouteManifest,
+    rsc_entries: &ServerComponentEntries,
+) -> Vec<RouteEntry> {
+    manifest
         .routes
         .iter()
         .filter(|route| route.kind == ruvyxa_graph::RouteKind::Page)
@@ -238,180 +536,19 @@ pub(crate) fn emit_client_bundles_with_session(
             !route.render.server_components || rsc_entries.entries.contains_key(&route.path)
         })
         .cloned()
-        .collect::<Vec<_>>();
-    let parallelism = build_parallelism(build.parallelism, page_routes.len());
-    let bundle_context = bundle_context_for_build(
-        cache.dependency_hash,
-        cache.directory,
-        plugin_session,
-        &rsc_entries.server_references,
-    )?;
-    let artifact_cache_dir = cache.directory.to_path_buf();
-    let artifact_dependency_hash = cache.dependency_hash.to_string();
-    let artifact_fingerprints = ArtifactFingerprintCache::default();
-    let empty_shared_modules = BTreeSet::new();
-    let split_strategy = parse_split_strategy(build.split_strategy.as_deref())?;
-    let (bundles, shared_route_chunks) = if split_strategy == ruvyxa_bundler::SplitStrategy::Route {
-        let plan_variant = format!(
-            "route-v2-manifest-{}",
-            build.emit_chunk_manifest.unwrap_or(false)
-        );
-        let plans = bundle_routes_parallel(&page_routes, parallelism, |route| {
-            prepare_client_route_plan(
-                root,
-                app_dir,
-                route,
-                build,
-                &bundle_context,
-                &artifact_cache_dir,
-                &artifact_dependency_hash,
-                &plan_variant,
-                &artifact_fingerprints,
-                entry_source_for(route),
-            )
-        })?;
-        let plans_by_route = plans
-            .iter()
-            .map(|(_, plan)| (plan.path.clone(), plan.clone()))
-            .collect::<BTreeMap<_, _>>();
-        let shared_modules = shared_route_module_paths(&plans);
-        if shared_modules.is_empty() {
-            let bundles = bundle_routes_parallel(&page_routes, parallelism, |route| {
-                let prepared = plans_by_route
-                    .get(&route.path)
-                    .and_then(|plan| plan.prepared.as_deref());
-                bundle_client_route(
-                    root,
-                    app_dir,
-                    route,
-                    build,
-                    &bundle_context,
-                    prepared,
-                    &empty_shared_modules,
-                    None,
-                    &artifact_cache_dir,
-                    &artifact_dependency_hash,
-                    "base",
-                    &artifact_fingerprints,
-                    entry_source_for(route),
-                )
-            })?;
-            (bundles, Vec::new())
-        } else {
-            let shared_options = client_bundle_options(build)?;
-            let shared_variant = serde_json::to_string(&shared_options)?;
-            let shared_output = if let Some(output) = load_shared_route_artifact(
-                &artifact_cache_dir,
-                &artifact_dependency_hash,
-                &shared_modules,
-                &shared_variant,
-                &artifact_fingerprints,
-            ) {
-                output
-            } else {
-                let prepared_routes = plans
-                    .iter()
-                    .filter_map(|(_, plan)| plan.prepared.as_deref())
-                    .collect::<Vec<_>>();
-                let output = if prepared_routes.len() == plans.len()
-                    && bundle_context.build_hooks().host_count() == 0
-                {
-                    ruvyxa_bundler::bundle_shared_prepared_route_modules(
-                        &prepared_routes,
-                        &shared_modules,
-                        shared_options,
-                    )
-                } else {
-                    ruvyxa_bundler::bundle_shared_route_modules(
-                        ruvyxa_diagnostics::normalized_canonical_path(root),
-                        ruvyxa_diagnostics::normalized_canonical_path(app_dir),
-                        &shared_modules,
-                        shared_options,
-                        &bundle_context,
-                    )
-                }
-                .map_err(|error| anyhow::anyhow!("Ruvyxa Bundler shared route error: {error}"))?;
-                store_shared_route_artifact(
-                    &artifact_cache_dir,
-                    &artifact_dependency_hash,
-                    &shared_modules,
-                    &shared_variant,
-                    &output,
-                    &artifact_fingerprints,
-                );
-                output
-            };
-            let executable_modules = shared_output
-                .modules
-                .into_iter()
-                .map(|path| ruvyxa_diagnostics::normalized_canonical_path(&path))
-                .collect::<BTreeSet<_>>();
-            let shared_chunk = emit_shared_route_chunk(
-                client_dir,
-                shared_output.code,
-                &executable_modules,
-                &plans,
-            )?;
-            let bundles = bundle_routes_parallel(&page_routes, parallelism, |route| {
-                let plan = plans_by_route.get(&route.path);
-                // A set, not a list: this one answers "does this route read
-                // that module from the registry", and nothing about order.
-                let route_shared_modules = plan.map_or_else(BTreeSet::new, |plan| {
-                    plan.module_paths
-                        .iter()
-                        .filter(|module| executable_modules.contains(*module))
-                        .cloned()
-                        .collect::<BTreeSet<_>>()
-                });
-                let shared_file =
-                    (!route_shared_modules.is_empty()).then_some(shared_chunk.file_name.as_str());
-                bundle_client_route(
-                    root,
-                    app_dir,
-                    route,
-                    build,
-                    &bundle_context,
-                    plan.and_then(|plan| plan.prepared.as_deref()),
-                    &route_shared_modules,
-                    shared_file,
-                    &artifact_cache_dir,
-                    &artifact_dependency_hash,
-                    &shared_chunk.file_name,
-                    &artifact_fingerprints,
-                    entry_source_for(route),
-                )
-            })?;
-            (bundles, vec![shared_chunk])
-        }
-    } else {
-        let bundles = bundle_routes_parallel(&page_routes, parallelism, |route| {
-            bundle_client_route(
-                root,
-                app_dir,
-                route,
-                build,
-                &bundle_context,
-                None,
-                &empty_shared_modules,
-                None,
-                &artifact_cache_dir,
-                &artifact_dependency_hash,
-                "base",
-                &artifact_fingerprints,
-                entry_source_for(route),
-            )
-        })?;
-        (bundles, Vec::new())
-    };
+        .collect()
+}
 
+/// Write every route bundle, its source map, and its chunks, collecting the
+/// manifest entry each one contributes.
+fn write_route_bundles(
+    client_dir: &Path,
+    bundles: Vec<(usize, ClientBundle)>,
+    build: &BuildConfigOptions,
+) -> anyhow::Result<WrittenRouteBundles> {
     let mut routes = Vec::new();
-    let mut route_chunk_manifests = Vec::new();
-    let mut total_output_bytes = 0usize;
-    let mut total_estimated_gz_bytes = 0usize;
-    let mut total_duration_ms = 0u64;
-    let mut total_modules = 0usize;
-    let mut total_cache_hits = 0usize;
-    let mut total_tree_shaken_modules = 0usize;
+    let mut chunk_manifests = Vec::new();
+    let mut totals = ClientBundleTotals::default();
 
     for (_, bundle) in bundles {
         fs::write(client_dir.join(&bundle.file_name), bundle.script.as_bytes())?;
@@ -420,15 +557,15 @@ pub(crate) fn emit_client_bundles_with_session(
         {
             fs::write(client_dir.join(source_map_file), source_map.as_bytes())?;
         }
-        total_output_bytes += bundle.output_bytes;
-        total_estimated_gz_bytes += bundle.estimated_gz_bytes;
-        total_duration_ms += bundle.duration_ms;
-        total_modules += bundle.module_count;
-        total_cache_hits += bundle.cache_hits;
-        total_tree_shaken_modules += bundle.tree_shaken_modules;
+        totals.output_bytes += bundle.output_bytes;
+        totals.estimated_gz_bytes += bundle.estimated_gz_bytes;
+        totals.duration_ms += bundle.duration_ms;
+        totals.modules += bundle.module_count;
+        totals.cache_hits += bundle.cache_hits;
+        totals.tree_shaken_modules += bundle.tree_shaken_modules;
 
         if let Some(chunk_manifest) = &bundle.chunk_manifest {
-            route_chunk_manifests.push(chunk_manifest.clone());
+            chunk_manifests.push(chunk_manifest.clone());
         }
 
         for chunk in &bundle.chunks {
@@ -486,7 +623,22 @@ pub(crate) fn emit_client_bundles_with_session(
 
         routes.push(route_info);
     }
+    Ok(WrittenRouteBundles {
+        routes,
+        chunk_manifests,
+        totals,
+    })
+}
 
+/// Add to each manifest entry what only the whole set of routes could decide:
+/// its hydration mode, the deferred-hydration loader shared by every route that
+/// needs one, and the shared chunks it reads modules from.
+fn finalize_route_entries(
+    client_dir: &Path,
+    routes: &mut [serde_json::Value],
+    page_routes: &[RouteEntry],
+    shared_route_chunks: &[SharedRouteChunk],
+) -> anyhow::Result<()> {
     let hydration_loader = page_routes
         .iter()
         .any(|route| {
@@ -503,7 +655,7 @@ pub(crate) fn emit_client_bundles_with_session(
         })
         .transpose()?;
 
-    for route in &mut routes {
+    for route in routes.iter_mut() {
         let route_path = route
             .get("path")
             .and_then(|value| value.as_str())
@@ -532,21 +684,28 @@ pub(crate) fn emit_client_bundles_with_session(
             .collect::<Vec<_>>();
         route["sharedChunks"] = serde_json::Value::Array(route_shared_chunks);
         if let Some(chunk_manifest) = route.get_mut("chunkManifest") {
-            attach_shared_chunks_to_manifest(chunk_manifest, &shared_route_chunks);
+            attach_shared_chunks_to_manifest(chunk_manifest, shared_route_chunks);
         }
     }
+    Ok(())
+}
 
-    write_client_route_manifest(client_dir, &routes)?;
-
+/// Emit `chunk-manifest.json` when the build asked for it.
+fn write_chunk_manifest(
+    client_dir: &Path,
+    build: &BuildConfigOptions,
+    chunk_manifests: &[serde_json::Value],
+    shared_route_chunks: &[SharedRouteChunk],
+) -> anyhow::Result<()> {
     if build.emit_chunk_manifest.unwrap_or(false) {
         fs::write(
             client_dir.join("chunk-manifest.json"),
             serde_json::to_string_pretty(&serde_json::json!({
-                "routes": route_chunk_manifests
+                "routes": chunk_manifests
                     .iter()
                     .map(|manifest| {
                         let mut manifest = manifest.clone();
-                        attach_shared_chunks_to_manifest(&mut manifest, &shared_route_chunks);
+                        attach_shared_chunks_to_manifest(&mut manifest, shared_route_chunks);
                         manifest
                     })
                     .collect::<Vec<_>>(),
@@ -557,17 +716,25 @@ pub(crate) fn emit_client_bundles_with_session(
             }))?,
         )?;
     }
+    Ok(())
+}
 
+/// The build report for this client pass. Pure formatting over what the pass
+/// already decided, apart from the cache-budget sweep it triggers.
+fn client_bundle_report(
+    build: &BuildConfigOptions,
+    plugins: &[BuildPluginConfig],
+    parallelism: usize,
+    totals: &ClientBundleTotals,
+    routes: Vec<serde_json::Value>,
+    shared_route_chunks: &[SharedRouteChunk],
+    bundle_context: &ruvyxa_bundler::BundleContext,
+) -> serde_json::Value {
     let bundle_budget = bundle_budget_report(&routes);
     let cache_budget = bundle_context.enforce_cache_budget();
-    // Persist only after every route artifact has been emitted successfully;
-    // a failed batch leaves the previous dependency graph intact.
-    bundle_context
-        .save_incremental()
-        .context("failed to persist incremental module graph")?;
     let artifact_graph = bundle_context.artifacts().stats();
 
-    Ok(serde_json::json!({
+    serde_json::json!({
         "chunkStrategy": build.split_strategy.as_deref().unwrap_or("route"),
         "minify": build.minify.unwrap_or(true),
         "sourcemap": build.sourcemap.unwrap_or(false),
@@ -575,12 +742,12 @@ pub(crate) fn emit_client_bundles_with_session(
         "jsxRuntime": build.jsx_runtime.as_deref().unwrap_or("automatic"),
         "emitChunkManifest": build.emit_chunk_manifest.unwrap_or(false),
         "parallelism": parallelism,
-        "moduleCount": total_modules,
-        "outputBytes": total_output_bytes,
-        "estimatedGzBytes": total_estimated_gz_bytes,
-        "durationMs": total_duration_ms,
-        "cacheHits": total_cache_hits,
-        "treeShakenModules": total_tree_shaken_modules,
+        "moduleCount": totals.modules,
+        "outputBytes": totals.output_bytes,
+        "estimatedGzBytes": totals.estimated_gz_bytes,
+        "durationMs": totals.duration_ms,
+        "cacheHits": totals.cache_hits,
+        "treeShakenModules": totals.tree_shaken_modules,
         "budget": bundle_budget,
         "plugins": build_plugin_manifest(plugins),
         "sharedRouteChunks": shared_route_chunks
@@ -599,7 +766,7 @@ pub(crate) fn emit_client_bundles_with_session(
             "resolver": bundle_context.graph_cache().stats()
         },
         "routes": routes
-    }))
+    })
 }
 
 pub(crate) fn bundle_routes_parallel<F, T>(
@@ -894,7 +1061,7 @@ pub(crate) fn client_bundle_input(
     route: &RouteEntry,
     build: &BuildConfigOptions,
 ) -> anyhow::Result<ruvyxa_bundler::BundleInput> {
-    use ruvyxa_bundler::{BundleInput, BundleOptions, BundleTarget};
+    use ruvyxa_bundler::{BundleInput, BundleTarget};
 
     let root = ruvyxa_diagnostics::normalized_canonical_path(root);
     let app_dir = ruvyxa_diagnostics::normalized_canonical_path(app_dir);
@@ -961,18 +1128,44 @@ pub(crate) fn client_bundle_input(
         request_path: route.path.clone(),
         target: BundleTarget::Client,
         specials,
-        options: BundleOptions {
-            minify: build.minify.unwrap_or(true),
-            source_map: build.sourcemap.unwrap_or(false),
-            tree_shaking: build.tree_shaking.unwrap_or(true),
-            jsx_runtime: parse_jsx_runtime(build.jsx_runtime.as_deref())?,
-            es_target: parse_es_target(build.es_target.as_ref())?,
-            split_strategy: parse_split_strategy(build.split_strategy.as_deref())?,
-            emit_chunk_manifest: build.emit_chunk_manifest.unwrap_or(false),
-            collect_module_manifest: parse_split_strategy(build.split_strategy.as_deref())?
-                == ruvyxa_bundler::SplitStrategy::Route,
-        },
+        options: client_route_bundle_options(build)?,
     })
+}
+
+/// The bundler options a client route bundle is compiled with.
+///
+/// One place, because two things read them and they must agree: the compile
+/// itself, and the cache key of the plan that compile produces. They did not
+/// agree — the plan key named a literal (`route-v2-manifest-<bool>`) that
+/// encoded only `emitChunkManifest`, so changing `jsx`, `target`, `minify`, or
+/// `treeShake` left the key equal and a warm build reused a plan built under
+/// the previous options. A `jsx` change alone moves the module set, because
+/// the automatic runtime imports `react/jsx-runtime` and the classic one does
+/// not.
+pub(crate) fn client_route_bundle_options(
+    build: &BuildConfigOptions,
+) -> anyhow::Result<ruvyxa_bundler::BundleOptions> {
+    let split_strategy = parse_split_strategy(build.split_strategy.as_deref())?;
+    Ok(ruvyxa_bundler::BundleOptions {
+        minify: build.minify.unwrap_or(true),
+        source_map: build.sourcemap.unwrap_or(false),
+        tree_shaking: build.tree_shaking.unwrap_or(true),
+        jsx_runtime: parse_jsx_runtime(build.jsx_runtime.as_deref())?,
+        es_target: parse_es_target(build.es_target.as_ref())?,
+        split_strategy,
+        emit_chunk_manifest: build.emit_chunk_manifest.unwrap_or(false),
+        collect_module_manifest: split_strategy == ruvyxa_bundler::SplitStrategy::Route,
+    })
+}
+
+/// The cache identity of a client route plan: the options that produced it.
+///
+/// Derived rather than stamped. A literal here has to be edited by hand every
+/// time the plan's shape or meaning changes, and forgetting the edit is
+/// silent — the same reason `MANIFEST_VERSION` in the bundler's
+/// `incremental.rs` carries no counter.
+pub(crate) fn client_route_plan_variant(build: &BuildConfigOptions) -> anyhow::Result<String> {
+    Ok(serde_json::to_string(&client_route_bundle_options(build)?)?)
 }
 
 /// Resolve the special files (`error.tsx` / `loading.tsx` / `not-found.tsx`)

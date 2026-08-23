@@ -686,19 +686,27 @@ async function handleSsrCoalesced(request) {
   // context would therefore return the first request's HTML to the second.
   // Hash the complete context to keep the map key bounded while preserving the
   // ordered duplicate values carried by the worker protocol.
-  const coalesceKey = `ssr:${requestContextKey(request)}`
+  return coalesce(`ssr:${requestContextKey(request)}`, () => handleSsr(request))
+}
 
-  // Check if an identical render is already in-flight.
-  if (renderCoalesceMap.has(coalesceKey)) {
-    return renderCoalesceMap.get(coalesceKey)
-  }
-
-  // No duplicate — start the render and register the promise.
-  const renderPromise = handleSsr(request).finally(() => {
-    renderCoalesceMap.delete(coalesceKey)
-  })
-  renderCoalesceMap.set(coalesceKey, renderPromise)
-  return renderPromise
+/**
+ * Run `render` once per key, handing every concurrent caller the same promise.
+ *
+ * The SSR and SSG entry points each had this written out. The mechanism is not
+ * where they differ — the *key* is, and that is the only part worth reading
+ * twice: what makes two requests the same page is a per-strategy decision, and
+ * getting it too coarse returns one caller's HTML to another. Keeping the
+ * bookkeeping here leaves each caller owning just that.
+ *
+ * The entry is removed in `finally`, so a rejected render is not cached as the
+ * answer for the next request.
+ */
+function coalesce(coalesceKey, render) {
+  const inFlight = renderCoalesceMap.get(coalesceKey)
+  if (inFlight) return inFlight
+  const pending = render().finally(() => renderCoalesceMap.delete(coalesceKey))
+  renderCoalesceMap.set(coalesceKey, pending)
+  return pending
 }
 
 // --- Warmup Handler ---
@@ -883,17 +891,12 @@ function flightCacheKey(routePath, requestPath, params) {
 // --- SSG Handler with Request Coalescing ---
 async function handleSsgCoalesced(request) {
   const { pageFile, requestPath, params, mode, fresh } = request
-  const coalesceKey = `ssg:${pageFile}:${requestPath}:${JSON.stringify(params || {})}:${mode || 'full'}:${fresh ? 'fresh' : 'cached'}`
-
-  if (renderCoalesceMap.has(coalesceKey)) {
-    return renderCoalesceMap.get(coalesceKey)
-  }
-
-  const renderPromise = handleSsg(request).finally(() => {
-    renderCoalesceMap.delete(coalesceKey)
-  })
-  renderCoalesceMap.set(coalesceKey, renderPromise)
-  return renderPromise
+  // Params are sorted for the same reason `flightCacheKey` sorts them: the two
+  // objects describe the same page whichever order their keys were built in,
+  // and an unsorted key silently answers that they are different renders.
+  const sortedParams = Object.fromEntries(Object.entries(params || {}).sort(compareEntryKeys))
+  const coalesceKey = `ssg:${pageFile}:${requestPath}:${JSON.stringify(sortedParams)}:${mode || 'full'}:${fresh ? 'fresh' : 'cached'}`
+  return coalesce(coalesceKey, () => handleSsg(request))
 }
 
 // --- SSG Handler ---

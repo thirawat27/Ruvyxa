@@ -1,6 +1,6 @@
 {
   "name": "@ruvyxa/database",
-  "version": "1.0.31",
+  "version": "1.0.32",
   "description": "Typed database primitives and production adapter contracts for Ruvyxa applications.",
   "license": "Apache-2.0",
   "type": "module",

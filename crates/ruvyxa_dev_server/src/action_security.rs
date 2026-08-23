@@ -215,6 +215,10 @@ struct RateSlot {
 
 /// Per-client action rate limiter with memory independent of client count.
 ///
+/// One of the four limiters catalogued in `ruvyxa_middleware`'s crate docs.
+/// This is the only one with a sliding window: an action is the path where
+/// the boundary burst a fixed window allows is worth paying to avoid.
+///
 /// The previous design tracked a `HashMap<String, Vec<Instant>>` capped at
 /// 10,000 keys and **denied any key it could not admit** once that cap was
 /// reached. That made the limiter an amplifier: an attacker rotating source

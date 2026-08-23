@@ -21,6 +21,7 @@
  * pipe: a collected stylesheet is far larger than an argument list may be.
  */
 
+import { writeSync } from 'node:fs'
 import { readFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import path from 'node:path'
@@ -191,14 +192,26 @@ function describePostcssError(error, configFile) {
   return `${location}${error.reason ?? error.message} (plugin chain from ${configFile})`
 }
 
+/**
+ * Emit the one JSON line this run owes its caller, then leave.
+ *
+ * `process.exit()` does not drain a pending asynchronous stdout write, and
+ * stdout here is a pipe read by `postcss.rs`. This payload is a whole compiled
+ * stylesheet, so it is the one of these helpers most able to outgrow a pipe
+ * buffer. Writing straight to fd 1 removes the race instead of narrowing it.
+ * See the stdio-protocol rule in `AGENTS.md`.
+ */
+function respondAndExit(payload, code) {
+  writeSync(1, `${JSON.stringify(payload)}\n`)
+  process.exit(code)
+}
+
 function succeed(css, dependencies) {
-  process.stdout.write(`${JSON.stringify({ ok: true, css, dependencies })}\n`)
-  process.exit(0)
+  respondAndExit({ ok: true, css, dependencies }, 0)
 }
 
 function fail(code, message) {
-  process.stdout.write(`${JSON.stringify({ ok: false, code, message })}\n`)
-  process.exit(1)
+  respondAndExit({ ok: false, code, message }, 1)
 }
 
 try {

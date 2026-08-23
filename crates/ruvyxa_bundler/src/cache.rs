@@ -31,13 +31,17 @@ use crate::{EsTarget, JsxRuntime};
 /// Maximum number of entries kept in the in-process memory cache.
 const MEMORY_CACHE_LIMIT: usize = 512;
 
-/// Current compiler version stamp — bump this when the transform logic changes
-/// to automatically invalidate stale cache entries.
-const COMPILER_VERSION: &str = concat!(
-    "ruvyxa_bundler:",
-    env!("CARGO_PKG_VERSION"),
-    ":ast-build-hooks"
-);
+/// Identity of the compiler that produced a cache entry.
+///
+/// Derived from the crate version and nothing else. There used to be a
+/// trailing `:ast-build-hooks` tag here, documented as "bump this when the
+/// transform logic changes" — the hand-maintained stamp this repository
+/// already ruled out for `MANIFEST_VERSION` in `incremental.rs`. Such a stamp
+/// fails silently in the direction that matters: forgetting to bump it serves
+/// output the current compiler would not emit, and nothing points at the
+/// stamp as the cause. The crate version already changes on every release,
+/// which is the only boundary a released build can cross.
+const COMPILER_VERSION: &str = concat!("ruvyxa_bundler:", env!("CARGO_PKG_VERSION"));
 
 /// LRU-ordered in-memory cache entry.
 #[derive(Debug)]

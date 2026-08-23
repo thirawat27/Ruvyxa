@@ -266,15 +266,22 @@ pub(crate) fn load_project_config(root: &Path) -> anyhow::Result<ProjectConfig> 
     Ok(config)
 }
 
-/// Format of [`ConfigLoadCache`]. Bump to discard every existing entry when the
-/// meaning of a field changes; a stale entry is silently ignored, not migrated.
-pub(crate) const CONFIG_CACHE_VERSION: u32 = 2;
+/// Identity of the toolchain that wrote a [`ConfigLoadCache`] entry.
+///
+/// This cache lives at a fixed path, so nothing else distinguishes an entry
+/// written by an older Ruvyxa. It used to be a `CONFIG_CACHE_VERSION: u32`
+/// documented as "bump when the meaning of a field changes" — a stamp that is
+/// silent when forgotten, and the failure is a config result replayed from a
+/// renderer that no longer exists. The crate version answers the same question
+/// without anyone maintaining it.
+pub(crate) const CONFIG_CACHE_TOOLCHAIN: &str = env!("CARGO_PKG_VERSION");
 
 /// A previous config render, with everything needed to decide if it still holds.
 #[derive(serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ConfigLoadCache {
-    pub(crate) version: u32,
+    /// The Ruvyxa that wrote this entry; see [`CONFIG_CACHE_TOOLCHAIN`].
+    pub(crate) toolchain: String,
     /// The runtime that produced this result. A config may branch on
     /// `process.versions`, so a result rendered by Node cannot answer for Bun.
     pub(crate) runtime: String,
@@ -308,7 +315,7 @@ pub(crate) fn config_cache_is_current(
     runtime: JavaScriptRuntime,
     renderer_fingerprint: &str,
 ) -> bool {
-    if cache.version != CONFIG_CACHE_VERSION
+    if cache.toolchain != CONFIG_CACHE_TOOLCHAIN
         || cache.runtime != runtime.command()
         || cache.renderer_fingerprint != renderer_fingerprint
     {
@@ -389,7 +396,7 @@ fn write_config_cache(
     }
 
     let cache = ConfigLoadCache {
-        version: CONFIG_CACHE_VERSION,
+        toolchain: CONFIG_CACHE_TOOLCHAIN.to_string(),
         runtime: runtime.command().to_string(),
         renderer_fingerprint: renderer_fingerprint.to_string(),
         inputs,

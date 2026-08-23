@@ -613,37 +613,11 @@ pub(crate) async fn build_with_cache_override(
         print_build_header(&args, target, &app_dir, &out_dir);
     }
 
-    let phase_started = Instant::now();
-    let spinner = start_build_phase(show_summary, "routes discovered");
-    let manifest = discover_project_routes(&args.root, &config)?;
-    let route_discovery_duration = phase_started.elapsed();
-    if show_summary {
-        print_build_phase(
-            spinner,
-            "routes discovered",
-            format!("{} routes", manifest.routes.len()),
-            route_discovery_duration,
-        );
-    }
-    // Written before validation so a build that fails on a route error still
-    // leaves the editor's route types describing what is on disk.
-    if config.typed_routes() {
-        write_route_types(&args.root, &manifest)?;
-    }
-    let phase_started = Instant::now();
-    let spinner = start_build_phase(show_summary, "validated");
-    let validation = validate_app(&args.root, &manifest)?;
-    fail_on_diagnostics(&validation.diagnostics)?;
-    let validation_duration = phase_started.elapsed();
-    if show_summary {
-        print_build_phase(spinner, "validated", "ok".to_string(), validation_duration);
-    }
-    // Every server-only compatibility rule is enforced here: before the plugin
-    // session starts and before any staging directory exists, so a rejected
-    // build leaves the previous output and the project untouched.
-    if args.server_only {
-        ensure_server_only_supported(target, &manifest)?;
-    }
+    let ValidatedRoutes {
+        manifest,
+        discovery_duration: route_discovery_duration,
+        validation_duration,
+    } = discover_and_validate_routes(&args, &config, target, show_summary)?;
     // Both started here and awaited at the phase that consumes them. Each is
     // dominated by a JavaScript runtime coming up and neither needs anything
     // the phases in between produce, so run in sequence they were three of the
@@ -666,17 +640,15 @@ pub(crate) async fn build_with_cache_override(
         config.react_compiler.unwrap_or(false),
     )?;
     plugin_session.run_start(&out_dir)?;
-    let staging_dir = create_build_staging_dir(&out_dir).with_context(|| {
-        format!(
-            "failed to create build staging dir in {}",
-            out_dir.display()
-        )
-    })?;
-    let _staging_cleanup = BuildStagingCleanup::new(staging_dir.clone());
-    let server_dir = staging_dir.join("server");
-    let client_dir = staging_dir.join("client");
-    let assets_dir = staging_dir.join("assets");
-    let image_cache_dir = build_cache_directory.join("images");
+    let staging = BuildStagingLayout::create(&out_dir, &build_cache_directory)?;
+    let _staging_cleanup = BuildStagingCleanup::new(staging.root.clone());
+    let BuildStagingLayout {
+        root: staging_dir,
+        server_dir,
+        client_dir,
+        assets_dir,
+        image_cache_dir,
+    } = staging;
     let style_entries = (!args.server_only).then(|| config.style_entries(&args.root));
     // `public/` is a URL contract for an API-only service too, so its files are
     // still staged. What is skipped is the browser-facing part: WebP conversion
@@ -943,6 +915,93 @@ pub(crate) async fn build_with_cache_override(
         print_success_banner_at("Built into", Some(&out_dir), started.elapsed());
     }
     Ok(())
+}
+
+/// What route discovery and validation produced, with the two phase timings the
+/// build report quotes.
+struct ValidatedRoutes {
+    manifest: RouteManifest,
+    discovery_duration: Duration,
+    validation_duration: Duration,
+}
+
+/// Discover the project's routes and refuse the build if they do not validate.
+///
+/// Everything here happens before the plugin session starts and before any
+/// staging directory exists, which is the property that matters: a build
+/// rejected on a route error leaves the previous output and the project
+/// untouched.
+fn discover_and_validate_routes(
+    args: &BuildArgs,
+    config: &ProjectConfig,
+    target: BuildTarget,
+    show_summary: bool,
+) -> anyhow::Result<ValidatedRoutes> {
+    let phase_started = Instant::now();
+    let spinner = start_build_phase(show_summary, "routes discovered");
+    let manifest = discover_project_routes(&args.root, config)?;
+    let discovery_duration = phase_started.elapsed();
+    if show_summary {
+        print_build_phase(
+            spinner,
+            "routes discovered",
+            format!("{} routes", manifest.routes.len()),
+            discovery_duration,
+        );
+    }
+    // Written before validation so a build that fails on a route error still
+    // leaves the editor's route types describing what is on disk.
+    if config.typed_routes() {
+        write_route_types(&args.root, &manifest)?;
+    }
+    let phase_started = Instant::now();
+    let spinner = start_build_phase(show_summary, "validated");
+    let validation = validate_app(&args.root, &manifest)?;
+    fail_on_diagnostics(&validation.diagnostics)?;
+    let validation_duration = phase_started.elapsed();
+    if show_summary {
+        print_build_phase(spinner, "validated", "ok".to_string(), validation_duration);
+    }
+    if args.server_only {
+        ensure_server_only_supported(target, &manifest)?;
+    }
+    Ok(ValidatedRoutes {
+        manifest,
+        discovery_duration,
+        validation_duration,
+    })
+}
+
+/// The directories one build writes into.
+///
+/// Derived together because every phase below takes some subset of them, and
+/// they are only correct relative to each other: `root` is the staging tree the
+/// build commits atomically, while `image_cache_dir` deliberately sits outside
+/// it so a discarded staging tree does not throw away converted images.
+struct BuildStagingLayout {
+    root: PathBuf,
+    server_dir: PathBuf,
+    client_dir: PathBuf,
+    assets_dir: PathBuf,
+    image_cache_dir: PathBuf,
+}
+
+impl BuildStagingLayout {
+    fn create(out_dir: &Path, build_cache_directory: &Path) -> anyhow::Result<Self> {
+        let root = create_build_staging_dir(out_dir).with_context(|| {
+            format!(
+                "failed to create build staging dir in {}",
+                out_dir.display()
+            )
+        })?;
+        Ok(Self {
+            server_dir: root.join("server"),
+            client_dir: root.join("client"),
+            assets_dir: root.join("assets"),
+            image_cache_dir: build_cache_directory.join("images"),
+            root,
+        })
+    }
 }
 
 /// Copy the browser artifact identity into the deployment route manifest.

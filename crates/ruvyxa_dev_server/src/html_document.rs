@@ -1072,7 +1072,16 @@ pub(crate) fn render_error_overlay(view: ErrorOverlayView<'_>) -> String {
     )
 }
 
-pub(crate) fn escape_html(input: &str) -> String {
+/// Escape a value interpolated into HTML text or a double-quoted attribute.
+///
+/// This is the one place that rule lives in the workspace. It had been
+/// written out three times - here, in `i18n.rs`, and in the CLI prerenderer -
+/// as three copies of one XSS guard that nothing kept level. The copies
+/// answer for the same values: `i18n.rs` escapes `hreflang` hrefs the live
+/// server emits and the prerenderer escapes the script and preload URLs a
+/// baked page carries, so a character taught to one copy and not the others
+/// stays inert under `dev` and injects markup into the built page.
+pub fn escape_html(input: &str) -> String {
     input
         .replace('&', "&amp;")
         .replace('<', "&lt;")

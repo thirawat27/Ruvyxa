@@ -1,5 +1,6 @@
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, writeSync } from 'node:fs'
 import path from 'node:path'
+import { once } from 'node:events'
 import { createInterface } from 'node:readline'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 
@@ -42,8 +43,10 @@ const hostEnvironment = process.argv.includes('--environment=development')
   : 'production'
 
 if (!projectRootArg || !mode) {
-  writeResponse(failure('RUV1701', 'Plugin runtime requires project root and mode arguments.'))
-  process.exit(1)
+  exitWithResponse(
+    failure('RUV1701', 'Plugin runtime requires project root and mode arguments.'),
+    1,
+  )
 }
 
 // Stdout is reserved for the NDJSON protocol.
@@ -60,11 +63,11 @@ try {
   } else {
     const payload = JSON.parse(readFileSync(0, 'utf8'))
     const response = await handleHook(registry, mode, payload)
-    writeResponse(response)
+    await writeResponse(response)
     if (!response.ok) process.exitCode = 1
   }
 } catch (error) {
-  writeResponse(failureFromError(error), mode === '--persistent')
+  await writeResponse(failureFromError(error), mode === '--persistent')
   process.exitCode = 1
 }
 
@@ -160,7 +163,7 @@ async function runPersistent(registry) {
     } catch (error) {
       response = failureFromError(error)
     }
-    writeResponse(response, true)
+    await writeResponse(response, true)
   }
 }
 
@@ -400,6 +403,35 @@ function failureFromError(error) {
   )
 }
 
-function writeResponse(response, newline = false) {
-  process.stdout.write(JSON.stringify(response) + (newline ? '\n' : ''))
+/**
+ * Write one protocol message, waiting for the pipe when it is full.
+ *
+ * The persistent mode answers hook after hook down one stdout pipe. Ignoring
+ * `write()`'s return value there does not drop anything, but it does let the
+ * process buffer every unread response in memory while a slow host reads —
+ * unbounded growth on the one path that runs for the life of a dev server.
+ * Waiting for `drain` hands the backpressure back, which is what
+ * `worker-pool.mjs`'s `writeWorkerMessage` already does. See the
+ * stdio-protocol rule in `AGENTS.md`.
+ */
+async function writeResponse(response, newline = false) {
+  if (!process.stdout.write(JSON.stringify(response) + (newline ? '\n' : ''))) {
+    await once(process.stdout, 'drain')
+  }
+}
+
+/**
+ * Write a final response and leave, without racing the write against the exit.
+ *
+ * Stdout here is a pipe read by the Rust host, and a write to a pipe is
+ * asynchronous: `process.exit()` tears the process down without draining one
+ * that has not flushed, so `writeResponse()` followed by `process.exit(1)`
+ * could drop the very diagnostic that explains why the run failed, leaving the
+ * host to report unparsable output instead. Writing straight to fd 1 removes
+ * the race rather than narrowing it. Every other exit path sets
+ * `process.exitCode` and returns, which lets Node drain stdout on its own.
+ */
+function exitWithResponse(response, code) {
+  writeSync(1, JSON.stringify(response))
+  process.exit(code)
 }

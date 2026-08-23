@@ -2905,7 +2905,7 @@ fn a_plugin_worker_that_exits_without_answering_is_reported_immediately() {
 /// looking build against the wrong settings.
 #[test]
 fn the_config_cache_is_reused_only_while_every_recorded_input_still_holds() {
-    use crate::runtime_config::{CONFIG_CACHE_VERSION, ConfigLoadCache, config_cache_is_current};
+    use crate::runtime_config::{CONFIG_CACHE_TOOLCHAIN, ConfigLoadCache, config_cache_is_current};
     use ruvyxa_dev_server::JavaScriptRuntime;
     use std::collections::BTreeMap;
 
@@ -2916,7 +2916,7 @@ fn the_config_cache_is_reused_only_while_every_recorded_input_still_holds() {
 
     let base = |mutate: &dyn Fn(&mut ConfigLoadCache)| {
         let mut cache = ConfigLoadCache {
-            version: CONFIG_CACHE_VERSION,
+            toolchain: CONFIG_CACHE_TOOLCHAIN.to_string(),
             runtime: JavaScriptRuntime::Node.command().to_string(),
             renderer_fingerprint: "renderer-v1".to_string(),
             inputs: BTreeMap::from([("ruvyxa.config.ts".to_string(), config_hash.clone())]),
@@ -2934,8 +2934,8 @@ fn the_config_cache_is_reused_only_while_every_recorded_input_still_holds() {
 
     // Each of these invalidates on its own.
     assert!(
-        !is_current(&base(&|cache| cache.version += 1)),
-        "a cache written by another format must be discarded, not reinterpreted"
+        !is_current(&base(&|cache| cache.toolchain.push_str("-next"))),
+        "a cache written by another Ruvyxa must be discarded, not reinterpreted"
     );
     assert!(
         !is_current(&base(&|cache| cache.runtime = "bun".to_string())),
@@ -2977,7 +2977,7 @@ fn the_config_cache_is_reused_only_while_every_recorded_input_still_holds() {
 /// config also re-renders when the variable first appears.
 #[test]
 fn the_config_cache_tracks_only_the_environment_the_config_actually_read() {
-    use crate::runtime_config::{CONFIG_CACHE_VERSION, ConfigLoadCache, config_cache_is_current};
+    use crate::runtime_config::{CONFIG_CACHE_TOOLCHAIN, ConfigLoadCache, config_cache_is_current};
     use ruvyxa_dev_server::JavaScriptRuntime;
     use std::collections::BTreeMap;
 
@@ -2990,7 +2990,7 @@ fn the_config_cache_tracks_only_the_environment_the_config_actually_read() {
     )]);
 
     let cache = |env: BTreeMap<String, Option<String>>| ConfigLoadCache {
-        version: CONFIG_CACHE_VERSION,
+        toolchain: CONFIG_CACHE_TOOLCHAIN.to_string(),
         runtime: JavaScriptRuntime::Node.command().to_string(),
         renderer_fingerprint: "renderer-v1".to_string(),
         inputs: inputs.clone(),
@@ -3038,4 +3038,56 @@ fn the_config_cache_tracks_only_the_environment_the_config_actually_read() {
     );
 
     unsafe { std::env::remove_var(key) };
+}
+
+/// Cache identity is derived from the inputs, never stamped by hand.
+///
+/// The plan key used to be the literal `route-v2-manifest-<emitChunkManifest>`:
+/// a counter somebody had to remember to raise, and a key that named one of the
+/// eight options the plan is actually built from. Both halves failed quietly —
+/// a forgotten bump served a plan the current bundler would not produce, and a
+/// `jsx` change reused a plan whose module set no longer matched.
+#[test]
+fn a_client_plan_key_follows_every_option_that_shapes_it() {
+    use crate::client_bundle::client_route_plan_variant;
+
+    let base = BuildConfigOptions::default();
+    let baseline = client_route_plan_variant(&base).expect("baseline variant");
+
+    // No `vN` stamp survives in the key: the options are the identity.
+    for stamp in ["-v1", "-v2", "-v3", ":v1", ":v2", ":v3"] {
+        assert!(
+            !baseline.contains(stamp),
+            "plan key still carries a hand-maintained stamp: {baseline}"
+        );
+    }
+
+    // Every option that reaches the bundler has to move the key. `jsx` is the
+    // one that proves it matters rather than merely differs: the automatic
+    // runtime imports `react/jsx-runtime` and the classic one does not, so the
+    // two plans describe different module sets.
+    for (name, mutate) in [
+        (
+            "jsx",
+            (|options: &mut BuildConfigOptions| options.jsx_runtime = Some("classic".to_string()))
+                as fn(&mut BuildConfigOptions),
+        ),
+        ("minify", |options| options.minify = Some(false)),
+        ("treeShake", |options| options.tree_shaking = Some(false)),
+        ("map", |options| options.sourcemap = Some(true)),
+        ("split", |options| {
+            options.split_strategy = Some("single".to_string())
+        }),
+        ("emitChunkManifest", |options| {
+            options.emit_chunk_manifest = Some(true)
+        }),
+    ] {
+        let mut changed = BuildConfigOptions::default();
+        mutate(&mut changed);
+        assert_ne!(
+            baseline,
+            client_route_plan_variant(&changed).expect("variant"),
+            "changing `{name}` must change the plan cache key"
+        );
+    }
 }

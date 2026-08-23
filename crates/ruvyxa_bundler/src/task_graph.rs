@@ -303,8 +303,27 @@ impl ArtifactTaskGraph {
             });
         }
         let mut inner = self.lock();
+        // Join whenever work is still in flight, not only while the state still
+        // reads `Building`.
+        //
+        // `publish` is `begin` then `complete` with the lock released between
+        // them, so several route builds that share one module overlap here. The
+        // first of them to finish flips the record to `Ready` while its
+        // siblings are still running; deciding from `state` alone then opened a
+        // new generation for the next arrival, and every sibling's `complete`
+        // was rejected as `StaleCompletion` — a build failure with no bad input
+        // behind it, reproduced by
+        // `a_sibling_that_joined_still_completes_after_the_first_one_finishes`.
+        //
+        // `Failed` and `Cancelled` are deliberately not joinable: completing
+        // into either is refused anyway, so a new generation is the only useful
+        // answer there.
         if let Some(existing) = inner.records.get_mut(&key)
-            && existing.state == ArtifactState::Building
+            && existing.active_builders > 0
+            && matches!(
+                existing.state,
+                ArtifactState::Building | ArtifactState::Ready
+            )
         {
             if existing.dependencies != dependencies {
                 return Err(ArtifactGraphError::DependencyMismatch {
@@ -1146,5 +1165,109 @@ mod tests {
         assert!(graph.record(&pinned_source).is_some());
 
         drop(task);
+    }
+}
+
+#[cfg(test)]
+mod concurrent_publish_tests {
+    use super::*;
+
+    fn transform_key(graph: &ArtifactTaskGraph) -> ArtifactKey {
+        graph.key(
+            ArtifactKind::Transform,
+            [("module", b"shared.tsx".as_slice())],
+        )
+    }
+
+    /// A builder that joined an in-flight artifact must still be allowed to
+    /// finish after a sibling finishes first.
+    ///
+    /// `publish` is `begin` then `complete` with the lock released between
+    /// them, so several route builds that share one module interleave exactly
+    /// like this. `begin` used to decide join-or-restart from `state` alone:
+    /// the first completion flips the record to `Ready` while its siblings are
+    /// still mid-flight, the next `begin` therefore started generation N+1, and
+    /// every sibling was then told its generation had been invalidated — a
+    /// build failure with no bad input behind it, and one that only shows up
+    /// when three builds of one module overlap.
+    #[test]
+    fn a_sibling_that_joined_still_completes_after_the_first_one_finishes() {
+        let temp = tempfile::tempdir().unwrap();
+        let graph = ArtifactTaskGraph::at_dir(temp.path(), "test", true);
+        let key = transform_key(&graph);
+
+        let first = graph.begin(key.clone(), BTreeSet::new()).unwrap();
+        let joined = graph.begin(key.clone(), BTreeSet::new()).unwrap();
+        first.complete("shared-output").unwrap();
+
+        // A third build arrives while `joined` is still running. It must join
+        // the same generation rather than open a new one.
+        let third = graph.begin(key.clone(), BTreeSet::new()).unwrap();
+        third.complete("shared-output").unwrap();
+
+        joined
+            .complete("shared-output")
+            .expect("a joined builder must not be rejected as stale");
+    }
+
+    /// The same shape under real threads, as the build hits it.
+    #[test]
+    fn concurrent_publishers_of_one_artifact_all_succeed() {
+        for round in 0..64 {
+            let temp = tempfile::tempdir().unwrap();
+            let graph = ArtifactTaskGraph::at_dir(temp.path(), "test", true);
+            let key = graph.key(
+                ArtifactKind::Transform,
+                [("round", round.to_string().as_bytes())],
+            );
+            let errors = std::sync::Arc::new(Mutex::new(Vec::new()));
+            std::thread::scope(|scope| {
+                for _ in 0..8 {
+                    let graph = graph.clone();
+                    let key = key.clone();
+                    let errors = std::sync::Arc::clone(&errors);
+                    scope.spawn(move || {
+                        if let Err(error) = graph.publish(key, BTreeSet::new(), "same-content") {
+                            errors.lock().unwrap().push(error);
+                        }
+                    });
+                }
+            });
+            let errors = errors.lock().unwrap();
+            assert!(
+                errors.is_empty(),
+                "round {round}: publishing one artifact from several threads must not fail: {errors:?}"
+            );
+        }
+    }
+
+    /// Restarting is still what happens when nothing is in flight — otherwise
+    /// an artifact could never be rebuilt after an invalidation.
+    #[test]
+    fn a_settled_artifact_still_opens_a_new_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        let graph = ArtifactTaskGraph::at_dir(temp.path(), "test", true);
+        let key = transform_key(&graph);
+
+        graph
+            .begin(key.clone(), BTreeSet::new())
+            .unwrap()
+            .complete("first")
+            .unwrap();
+        let settled = graph.record(&key).unwrap().generation;
+
+        graph.invalidate(&key, "source changed");
+        graph
+            .begin(key.clone(), BTreeSet::new())
+            .unwrap()
+            .complete("second")
+            .unwrap();
+
+        let record = graph.record(&key).unwrap();
+        assert!(
+            record.generation > settled,
+            "a rebuild after invalidation must open a new generation"
+        );
+        assert_eq!(record.content_hash.as_deref(), Some("second"));
     }
 }

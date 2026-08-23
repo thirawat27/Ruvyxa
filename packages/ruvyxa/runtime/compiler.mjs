@@ -20,7 +20,7 @@ import {
   PACKAGE_EXPORT_TARGETS,
   resolveExportsEntry,
 } from './package-exports.mjs'
-import { createCodeIndex, directivePrologueEnd } from './scanner.mjs'
+import { createCodeIndex, directivePrologueEnd, findInCode, maskNonCode } from './scanner.mjs'
 const JS_EXTENSIONS = ['', '.ts', '.tsx', '.js', '.jsx', '.mts', '.mjs', '.md', '.mdx']
 export const MDX_COMPONENT_EXTENSIONS = ['.tsx', '.ts', '.jsx', '.js', '.mts', '.mjs']
 const ASSET_EXTENSIONS = new Set(['.css', '.scss', '.sass', '.less'])
@@ -345,7 +345,7 @@ export async function compileBundleIfChanged(options) {
   await writeIfChanged(
     manifestFile,
     JSON.stringify({
-      version: BUNDLE_INPUT_MANIFEST_VERSION,
+      compiler: BUNDLE_INPUT_MANIFEST_IDENTITY,
       hash: await fingerprintFiles(bundle.readFiles),
       metadata: bundle,
     }),
@@ -354,11 +354,21 @@ export async function compileBundleIfChanged(options) {
 }
 
 /**
- * Format of the manifest [`compileBundleIfChanged`] writes. Bump it when the
- * meaning of a recorded field changes; an entry in an older format is a miss,
- * never a migration.
+ * Identity of the compiler that wrote a bundle-input manifest.
+ *
+ * Derived from this module's own bytes rather than a literal. The constant it
+ * replaced was documented as "bump it when the meaning of a recorded field
+ * changes", which holds only while somebody remembers — and forgetting is
+ * silent: the build replays metadata recorded under rules that no longer
+ * apply. The file that defines the format is exactly the thing that changes
+ * when the format does, so hashing it answers the question with nothing left
+ * to maintain. Computed once per process, off a module that is by definition
+ * readable because it is running.
  */
-const BUNDLE_INPUT_MANIFEST_VERSION = 1
+const BUNDLE_INPUT_MANIFEST_IDENTITY = createHash('sha256')
+  .update(readFileSync(fileURLToPath(import.meta.url)))
+  .digest('hex')
+  .slice(0, 16)
 
 /** The recorded metadata, if the output and every file behind it still hold. */
 async function reusableBundle(manifestFile, outfile) {
@@ -369,7 +379,7 @@ async function reusableBundle(manifestFile, outfile) {
   } catch {
     return null
   }
-  if (manifest?.version !== BUNDLE_INPUT_MANIFEST_VERSION) return null
+  if (manifest?.compiler !== BUNDLE_INPUT_MANIFEST_IDENTITY) return null
   const { hash, metadata } = manifest
   if (typeof hash !== 'string' || !metadata) return null
   if (metadata.absentFiles?.some((file) => existsSync(file))) return null
@@ -1550,7 +1560,7 @@ function rewriteModule(module) {
     module.key,
     createHash('sha256').update(module.source).digest('hex'),
     module.jsxRuntime,
-    module.reactCompiler ? 'react-compiler-v1' : 'baseline',
+    module.reactCompiler ? 'react-compiler' : 'baseline',
     [...module.deps.entries()]
       .map(([specifier, dep]) => `${specifier}:${dep.external ? dep.alias : dep.id}`)
       .join('|'),
@@ -3008,7 +3018,7 @@ function transformModuleSource(module) {
     .update('\0')
     .update(module.jsxRuntime)
     .update('\0')
-    .update(module.reactCompiler ? 'react-compiler-v1' : 'baseline')
+    .update(module.reactCompiler ? 'react-compiler' : 'baseline')
     .update('\0')
     .update(module.source)
     .digest('hex')
@@ -3158,158 +3168,23 @@ function isServerOnlySpecifier(specifier) {
   return ['server-only', '@ruvyxa/auth', '@ruvyxa/database'].includes(specifier)
 }
 
+/**
+ * Every private `process.env` read that is really code.
+ *
+ * Found in the shared scanner's mask and parsed out of the raw source, the
+ * find-in-masked/slice-from-raw shape `ruvyxa_graph` uses for the same reason:
+ * a name is a value, and masking blanks values. A read inside a template
+ * interpolation still counts — the mask treats interpolations as code — while
+ * one inside a string, comment, or regex literal does not.
+ */
 function privateEnvReads(source) {
   const names = []
-  scanPrivateEnvReads(source, 0, 0, names)
+  for (const offset of findInCode(source, 'process.env')) {
+    if (!isEnvReadBoundary(source, offset)) continue
+    const parsed = parsePrivateEnvName(source, offset + 'process.env'.length)
+    if (parsed && envReadIsPrivate(parsed.name)) names.push(parsed.name)
+  }
   return names
-}
-
-// Keep the runtime scanner structurally aligned with the Rust boundary scanner.
-// A template literal is not wholly non-code: `${...}` contains executable code
-// and must still be checked for private environment reads.
-function scanPrivateEnvReads(source, start, templateExpressionDepth, names) {
-  let index = start
-  // Index of the last byte that can end a token. A `/` only opens a regular
-  // expression when no value precedes it. Without this, `/['"]/` reads as a
-  // division followed by an unterminated string, and every later env read in
-  // the module goes unreported.
-  let previousSignificant = -1
-
-  while (index < source.length) {
-    const char = source[index]
-    const next = source[index + 1]
-    const tokenStart = index
-
-    if (char === '"' || char === "'") {
-      index = readStringEnd(source, index, char)
-      previousSignificant = tokenStart
-      continue
-    }
-    if (char === '`') {
-      index = scanTemplateForPrivateEnv(source, index, names)
-      previousSignificant = tokenStart
-      continue
-    }
-    if (char === '/' && next === '/') {
-      const end = source.indexOf('\n', index + 2)
-      index = end === -1 ? source.length : end
-      continue
-    }
-    if (char === '/' && next === '*') {
-      const end = source.indexOf('*/', index + 2)
-      index = end === -1 ? source.length : end + 2
-      continue
-    }
-    if (char === '/' && regexCanStart(source, previousSignificant)) {
-      index = readRegexEnd(source, index)
-      previousSignificant = tokenStart
-      continue
-    }
-    if (templateExpressionDepth > 0 && char === '{') {
-      templateExpressionDepth += 1
-      index += 1
-      previousSignificant = tokenStart
-      continue
-    }
-    if (templateExpressionDepth > 0 && char === '}') {
-      templateExpressionDepth -= 1
-      index += 1
-      if (templateExpressionDepth === 0) return index
-      previousSignificant = tokenStart
-      continue
-    }
-
-    if (source.startsWith('process.env', index) && isEnvReadBoundary(source, index)) {
-      const parsed = parsePrivateEnvName(source, index + 'process.env'.length)
-      if (parsed && envReadIsPrivate(parsed.name)) {
-        names.push(parsed.name)
-      }
-      index = parsed?.end ?? index + 'process.env'.length
-      previousSignificant = index - 1
-      continue
-    }
-    if (!/\s/.test(char)) previousSignificant = tokenStart
-    index += 1
-  }
-  return index
-}
-
-const REGEX_PRECEDING_KEYWORDS = new Set([
-  'await',
-  'case',
-  'delete',
-  'do',
-  'else',
-  'in',
-  'instanceof',
-  'new',
-  'of',
-  'return',
-  'throw',
-  'typeof',
-  'void',
-  'yield',
-])
-
-/** A regex may only start where a value is expected, never after one. */
-function regexCanStart(source, previousSignificant) {
-  if (previousSignificant < 0) return true
-  const previous = source[previousSignificant]
-  if (previous === ')' || previous === ']' || previous === '}') return false
-  if (previous === '"' || previous === "'" || previous === '`') return false
-  if (!isIdentifierChar(previous)) return true
-
-  let wordStart = previousSignificant
-  while (wordStart > 0 && isIdentifierChar(source[wordStart - 1])) wordStart -= 1
-  return REGEX_PRECEDING_KEYWORDS.has(source.slice(wordStart, previousSignificant + 1))
-}
-
-function isIdentifierChar(char) {
-  return char !== undefined && /[\w$]/.test(char)
-}
-
-/** Return the index just past a regular expression literal and its flags. */
-function readRegexEnd(source, start) {
-  let index = start + 1
-  let insideCharacterClass = false
-
-  while (index < source.length) {
-    const char = source[index]
-    if (char === '\\') {
-      index = Math.min(index + 2, source.length)
-      continue
-    }
-    // An unterminated literal was a division after all; resume normal scanning.
-    if (char === '\n') return index
-    if (char === '[') insideCharacterClass = true
-    else if (char === ']' && insideCharacterClass) insideCharacterClass = false
-    else if (char === '/' && !insideCharacterClass) {
-      index += 1
-      break
-    }
-    index += 1
-  }
-
-  while (index < source.length && isIdentifierChar(source[index])) index += 1
-  return index
-}
-
-function scanTemplateForPrivateEnv(source, start, names) {
-  let index = start + 1
-  while (index < source.length) {
-    const char = source[index]
-    if (char === '\\') {
-      index = Math.min(index + 2, source.length)
-      continue
-    }
-    if (char === '`') return index + 1
-    if (char === '$' && source[index + 1] === '{') {
-      index = scanPrivateEnvReads(source, index + 2, 1, names)
-      continue
-    }
-    index += 1
-  }
-  return index
 }
 
 function isEnvReadBoundary(source, index) {
@@ -3339,110 +3214,6 @@ function parsePrivateEnvName(source, start) {
   index += 1
   while (/\s/.test(source[index] ?? '')) index += 1
   return source[index] === ']' ? { name: match[0], end: index + 1 } : null
-}
-
-function maskNonCode(source, options = {}) {
-  const preserveImportExportSpecifiers = options.preserveImportExportSpecifiers === true
-  const preserveImportCallSpecifiers = options.preserveImportCallSpecifiers === true
-  const preserveRequireCallSpecifiers = options.preserveRequireCallSpecifiers === true
-  let output = ''
-  let index = 0
-  // Index of the last byte that can end a token, tracked for the same reason as
-  // in `scanPrivateEnvReads`: a `/` only opens a regular expression where no
-  // value precedes it.
-  let previousSignificant = -1
-
-  while (index < source.length) {
-    const char = source[index]
-    const next = source[index + 1]
-    const tokenStart = index
-
-    if (char === '/' && next === '/') {
-      const end = source.indexOf('\n', index + 2)
-      const stop = end === -1 ? source.length : end
-      output += ' '.repeat(stop - index)
-      index = stop
-      continue
-    }
-
-    if (char === '/' && next === '*') {
-      const end = source.indexOf('*/', index + 2)
-      const stop = end === -1 ? source.length : end + 2
-      output += maskRange(source.slice(index, stop))
-      index = stop
-      continue
-    }
-
-    if (char === '"' || char === "'") {
-      const end = readStringEnd(source, index, char)
-      const literal = source.slice(index, end)
-      const previous = source.slice(Math.max(0, index - 32), index)
-      const preserve =
-        (preserveImportExportSpecifiers && /\b(?:from|import)\s*$/.test(previous)) ||
-        (preserveImportCallSpecifiers && /\bimport\s*\(\s*$/.test(previous)) ||
-        (preserveRequireCallSpecifiers && /\brequire\s*\(\s*$/.test(previous))
-      output += preserve ? literal : maskRange(literal)
-      index = end
-      previousSignificant = tokenStart
-      continue
-    }
-
-    if (char === '`') {
-      const end = readTemplateEnd(source, index)
-      output += maskRange(source.slice(index, end))
-      index = end
-      previousSignificant = tokenStart
-      continue
-    }
-
-    // A regular expression is masked like any other literal. Without this, a
-    // regex that contains a quote — `/("[^"]*"|'[^']*')/` — opens a phantom
-    // string that runs to the next quote anywhere later in the file, and every
-    // `import`/`export` in between is misread as string content.
-    if (char === '/' && regexCanStart(source, previousSignificant)) {
-      const end = readRegexEnd(source, index)
-      output += maskRange(source.slice(index, end))
-      index = end
-      previousSignificant = tokenStart
-      continue
-    }
-
-    output += char
-    index++
-    if (!/\s/.test(char)) previousSignificant = tokenStart
-  }
-
-  return output
-}
-
-function readStringEnd(source, start, quote) {
-  let index = start + 1
-  while (index < source.length) {
-    const char = source[index++]
-    if (char === '\\') {
-      index++
-      continue
-    }
-    if (char === quote) break
-  }
-  return index
-}
-
-function readTemplateEnd(source, start) {
-  let index = start + 1
-  while (index < source.length) {
-    const char = source[index++]
-    if (char === '\\') {
-      index++
-      continue
-    }
-    if (char === '`') break
-  }
-  return index
-}
-
-function maskRange(value) {
-  return value.replace(/[^\n]/g, ' ')
 }
 
 function pushIfExists(collection, file) {

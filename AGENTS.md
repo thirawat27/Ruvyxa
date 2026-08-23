@@ -18,9 +18,26 @@ work in the repository.
   endpoint to `framework_endpoints.rs` and its route to the table in `lib.rs`, not to `lib.rs`
   alone; the conformance test there checks the two agree.
 - `crates/ruvyxa_graph` owns file-system route discovery, validation, rendering strategy detection,
-  and route manifests.
-- `packages/` contains npm packages: `ruvyxa`, `create-ruvyxa`, `@ruvyxa/core`, `@ruvyxa/react`,
-  adapters, and platform CLI packages.
+  and route manifests. It depends on `ruvyxa_bundler` for one reason: route validation reuses the
+  bundler's source scanner rather than running a second text scan that could disagree.
+- `crates/ruvyxa_middleware` owns the Tower layer stack — CORS, rate limiting, request logging,
+  response timing, custom headers, client-IP resolution — and the TypeScript plugin host. Its crate
+  docs carry the contract shared by every rate limiter in the workspace; read it before adding a
+  fifth.
+- `crates/ruvyxa_diagnostics` owns error codes, `Result`, and the path helpers every other crate
+  agrees on (`normalized_canonical_path` in particular — see the Windows note under Change
+  Guidance). `crates/ruvyxa_tui` owns terminal layout, spinners, progress, the mascot, and theme.
+- `packages/` contains the npm packages:
+  - `ruvyxa` — the framework package. `runtime/*.mjs` are the modules the Rust CLI resolves by path
+    and spawns or imports; `src/plugins/` is the first-party plugin API behind the `plugins.ts`
+    barrel; `scripts/sync-shared-runtime.mjs` regenerates the committed copies of shared modules.
+  - `create-ruvyxa` — the scaffolder, with its own copy of `template/minimal`.
+  - `@ruvyxa/core` — primitives both the Rust host and a deployed build need: `route-match`,
+    `origin-policy`, the standalone server, shared server utilities.
+  - `@ruvyxa/react` — the client router, `not-found`, and the React-facing surface.
+  - `@ruvyxa/auth`, `@ruvyxa/database`, `@ruvyxa/realtime`, `@ruvyxa/testing` — optional
+    integrations.
+  - `@ruvyxa/adapter-*` — eleven deploy adapters; `@ruvyxa/cli-*` — five prebuilt CLI binaries.
 - `examples/demo/` is the broad integration fixture. It is deliberately **not** deployable: it
   includes a dynamic server-components route, and every adapter refuses one with `RUV2213`, so
   `ruvyxa build --adapter <name>` against it always fails.
@@ -28,8 +45,17 @@ work in the repository.
   is what CI builds and then launches on real Node, Bun, and Deno through
   `scripts/smoke-runtime-adapter.mjs`. Keep it deployable: a route or feature no adapter supports
   belongs in the demo instead.
-- `templates/minimal/` is copied into new projects by `create-ruvyxa`.
-- `docs/` is user-facing documentation.
+- `templates/` holds five scaffolds — `minimal`, `blog`, `crud`, `api-backend`, `plugin`.
+  `templates/minimal/` is what `create-ruvyxa` copies into a new project, and it is mirrored into
+  `packages/create-ruvyxa/template/minimal/`; `scripts/check-template-mirrors.mjs` keeps the two in
+  step and `pnpm release:validate` fails on drift.
+- `tests/` holds the Node suites, one directory per package under `tests/packages/`, plus the
+  cross-language tables in `tests/fixtures/`. Rust tests live beside the crate they cover.
+- `docs/` is the user-facing guide, numbered `01`–`11` and mirrored in `docs/en/` and `docs/th/`.
+  `scripts/check-doc-links.mjs` resolves every markdown link and gates a release.
+- `scripts/` holds the repository's own tooling: release validation, packaging smoke tests, adapter
+  sync, template mirrors, git hooks, and the benchmark harness. They are entry points to Knip, so a
+  new one needs no registration but a deleted one does.
 
 ## Operating Rules
 
@@ -46,6 +72,66 @@ work in the repository.
   project CSS may live outside `app/`; unimported global styles should use `css.entries`.
 - For npm packaging changes, verify that packed tarballs do not include tests or `workspace:`
   protocol dependencies and that runtime files needed by the CLI are included.
+
+### The child-process stdio protocol
+
+Six `runtime/*.mjs` files answer a Rust caller over stdout: `adapter-runner`, `api-renderer`,
+`config-renderer`, `css-runner`, `plugin-runtime`, and `ssr-renderer`, plus `worker-pool` for the
+persistent worker. Each carries its own small writer rather than importing a shared one, because
+`api-renderer.mjs` and `css-runner.mjs` deliberately import no sibling module and a shared file
+would have to be registered in `package.json` `files`, in `WORKER_RUNTIME_FILES`, and in the
+standalone-copy tests to buy four lines. Local copies are fine; **diverging semantics are not**, and
+they did diverge — three awaited the flush and three did not. Two rules hold them level:
+
+- **Never `process.exit()` after an unflushed `process.stdout.write()`.** Exit does not drain a
+  pending asynchronous write, and stdout is a pipe. Either `await` the write, or write the final
+  message with `writeSync(1, …)` and exit — `css-runner.mjs`'s `respondAndExit` and
+  `adapter-runner.mjs`'s `exitWithResponse` are the pattern. Setting `process.exitCode` and
+  returning needs neither, because Node drains stdout on a natural exit.
+- **A loop that keeps writing must respect backpressure.** Check `write()`'s return value and
+  `await once(process.stdout, 'drain')`, as `worker-pool.mjs`'s `writeWorkerMessage` and
+  `plugin-runtime.mjs`'s persistent mode do. Ignoring it buffers every unread response in memory for
+  as long as the host is slow.
+
+### Cache identity is derived, never stamped
+
+**No hand-maintained version literal decides whether a cached thing may be reused.** Not
+`const CACHE_VERSION: u8 = 1`, not `"route-v2-manifest-{}"`, not `':ast-build-hooks'`, not
+`BUNDLE_INPUT_MANIFEST_VERSION = 1`. Every one of those existed here, each with a comment telling
+the next person to bump it, and the comment is the whole problem: the stamp is only correct while
+somebody remembers, and forgetting it is **silent** — the build serves an artifact the current code
+would not produce, and nothing points at the stamp as the reason.
+
+Derive the identity from something that already changes when the answer changes:
+
+| The cache                                  | Its identity                                                                                                |
+| ------------------------------------------ | ----------------------------------------------------------------------------------------------------------- |
+| every artifact under `.ruvyxa/cache/`      | `versioned_key()` in `artifact_cache.rs` — `env!("CARGO_PKG_VERSION")` mixed into the key                   |
+| a client route plan                        | `client_route_plan_variant()` — the serialized `BundleOptions` that produced it                             |
+| compiled modules (`ruvyxa_bundler::cache`) | `COMPILER_VERSION` — the crate version, nothing appended                                                    |
+| optimized images                           | `ENCODER_IDENTITY` — the crate version, mixed into the content-addressed key                                |
+| the config-load cache                      | `CONFIG_CACHE_TOOLCHAIN` — the crate version, at a fixed path with nothing else to distinguish it           |
+| the bundle-input manifest (`compiler.mjs`) | the sha256 of `compiler.mjs` itself: the file that defines the format is what changes when the format does  |
+| the incremental module graph               | `MANIFEST_VERSION`, a constant string with **no** counter — compatibility lives in the entry format instead |
+
+Two rules follow, and `a_client_plan_key_follows_every_option_that_shapes_it` in
+`crates/ruvyxa_cli/src/tests.rs` holds the first:
+
+- **A key names every input that changes the output.** The plan key named `emitChunkManifest` alone,
+  so a `jsx` change reused a plan whose module set no longer matched — the automatic runtime imports
+  `react/jsx-runtime` and the classic one does not.
+- **Within one release, compatibility is the entry format's job.** A field added later is `Option`
+  so "absent" stays distinguishable from "empty"; a field whose _meaning_ changes is renamed, so an
+  entry that cannot answer the new question fails to deserialize instead of being trusted. See
+  `CachedModuleEntry::aliases` in `incremental.rs` for the worked example.
+
+Version numbers that are **not** this, and must stay literal: the framework's own version
+(`env!("CARGO_PKG_VERSION")`, `package.json`), a spec constant (a source map is always
+`version: 3`), a platform's config schema (`@ruvyxa/adapter-vercel` writes what Vercel expects), a
+wire protocol two independently-shipped sides negotiate (`FLIGHT_PROTOCOL_VERSION`, the HMR
+`protocolVersion`, `REFERENCE_MANIFEST_SCHEMA_VERSION`, `schemaVersion` in `tests/fixtures/*.json`),
+a runtime floor (`MINIMUM_BUN_VERSION`), and a user-facing config value (`pwa`'s `version`). Those
+describe a contract with something outside this repository. A cache key describes only us.
 
 ## Verification
 
@@ -109,6 +195,25 @@ For demo behavior changes, also run:
 cargo run -p ruvyxa_cli -- check --root examples/demo
 cargo run -p ruvyxa_cli -- test:parity --root examples/demo
 ```
+
+The rest of the scripts, and when each is worth running:
+
+| Command                    | When                                                                                                   |
+| -------------------------- | ------------------------------------------------------------------------------------------------------ |
+| `pnpm check:cargo-lock`    | after any `Cargo.toml` edit — the lockfile has to describe the manifests                               |
+| `pnpm check:oxc-lockstep`  | after touching `oxc` or `oxc-transform` — the Rust bundler and the Node runtime must be on one version |
+| `pnpm verify:reproducible` | after a change to emitted bytes, ordering, or hashing — two builds of one input must agree             |
+| `pnpm test:full-flow`      | before a release; scaffolds, builds, and runs a project end to end (PowerShell)                        |
+| `pnpm publish:dry-run`     | before a release, to see what would actually be published                                              |
+
+`pnpm release:bump` writes every manifest with `JSON.stringify`, which Prettier disagrees with — run
+`pnpm format` after it or `pnpm format:check` fails on twenty-four `package.json` files.
+
+Run the narrowest thing that can fail. `cargo test -p <crate> <name>` and
+`node --test --test-name-pattern="<name>" tests/packages/ruvyxa/<suite>.test.mjs` are seconds;
+`pnpm -r test` is minutes. A JavaScript suite needs the package built first — a
+`core/build is not exported` style error almost always means a stale `dist/`, so run `pnpm -r build`
+before believing it.
 
 ## Change Guidance
 
@@ -268,12 +373,43 @@ cargo run -p ruvyxa_cli -- test:parity --root examples/demo
   build error at all. When adding a shape, add it to the adversarial suite in `linker.rs` that links
   and then **parses** the result; matching the output text passes on exactly the bugs this class
   produces.
+- - The JavaScript graph has the same single owner: `packages/ruvyxa/runtime/scanner.mjs`, the port
+    of `ast.rs`. It exports `createCodeIndex` (is this offset code?), `findInCode` (every code-only
+    occurrence of a marker), `maskNonCode` (the mirror of `ast::masked_code` — same length, `\n` in
+    place, everything else blanked), and `directivePrologueEnd`. **Route every new text walk through
+    it.** `compiler.mjs` carried a second scanner beside it for a long time and the two differed in
+    exactly one place: interpolations. `scanner.mjs` walks `${…}` as code; the private copy scanned
+    to the next backtick, so an odd number of backticks inside a template — one hidden in a string
+    or a regex inside an interpolation — ended the template early and desynchronised the rest of the
+    file. `` const fence = `x${"`"}y` `` above an `import` dropped that dependency from the bundle
+    with no diagnostic at all, because `extractSpecifiers` **is** the JavaScript module graph.
+    Guarded by `keeps scanning code after a template literal that hides a backtick`.
+  - A scan that needs the _value_ of a literal cannot read masked code, because masking blanks the
+    literal. The answer is not "read raw": find the position in the mask, slice the value out of the
+    raw source. `ruvyxa_graph::export_const_value` and `compiler.mjs`'s `privateEnvReads` are the
+    worked examples.
+- Path comparison on Windows goes through `ruvyxa_diagnostics::normalized_canonical_path`, never
+  `Path::canonicalize` directly. `canonicalize` returns the extended-length `\\?\` prefix, and a key
+  built from it never equals one built from a path the user typed — which broke every
+  server-components build until the prefix was stripped in one place. Anything that becomes a map
+  key, a cache key, or a manifest entry normalizes first.
 - - A gate a comment promises has to exist. `output.rs` said
     `tests/packages/ruvyxa/entry-templates.test.mjs` asserted that its generated-entry preludes
     agreed with `entry-templates.mjs`; that test never read `output.rs`, so the routing-context and
     error-boundary preludes were two hand-maintained copies with nothing holding them together.
     `tests/packages/ruvyxa/entry-prelude-parity.test.mjs` executes both copies against one stand-in
     React. When a doc comment names the test that holds a contract, open that test.
+- A shared record that several workers may be finishing at once is decided by **how many are still
+  in flight**, not by what its state currently reads. `ArtifactTaskGraph::publish` is `begin` then
+  `complete` with the lock released between them, so route builds that share one module overlap
+  there; `begin` chose join-or-restart from `state` alone, and the first sibling to finish flipped
+  the record to `Ready` while the others were still running. The next arrival then opened generation
+  N+1, and every in-flight sibling was told
+  `artifact <id> completed after its generation was invalidated` — a build failure with no bad input
+  behind it, on a route that varied with scheduling. The condition is `active_builders > 0` now, and
+  the interleaving is pinned deterministically by
+  `a_sibling_that_joined_still_completes_after_the_first_one_finishes` rather than by a thread
+  stress test, which passed against the broken code sixty-four times in a row.
 - Documentation changes should describe actual supported behavior, not intended future behavior.
 - If a check was already failing before your work, report it as baseline and do not weaken tests to
   pass.

@@ -22,13 +22,15 @@ use ruvyxa_dev_server::image_codec::{
     Pixels, WebpSettings, decode_within_pixel_budget, encode_webp, header_dimensions, scaled_height,
 };
 
-/// Bumped when a change makes previously cached bytes wrong for the same input.
+/// Identity of the encoder that produced a cached image.
 ///
-/// The cache is keyed by source bytes and encoder settings, neither of which
-/// changes when the resampling implementation does. Without this byte, the
-/// first build after such a change would mix outputs from two resamplers in one
-/// asset directory.
-const CACHE_VERSION: u8 = 1;
+/// The rest of the key is source bytes and encoder settings, and neither
+/// changes when the resampling implementation does — so without this the first
+/// build after such a change mixes outputs from two resamplers in one asset
+/// directory. It used to be a `CACHE_VERSION: u8` to raise by hand, which only
+/// works while somebody remembers: forgetting it is silent and ships the mixed
+/// directory. The crate version is the same boundary, derived.
+const ENCODER_IDENTITY: &str = env!("CARGO_PKG_VERSION");
 
 /// Widest primary output by default: the top of the standard responsive ladder,
 /// and the width of a 4K display.
@@ -600,8 +602,9 @@ fn output_cache_key(
     width: Option<u32>,
 ) -> String {
     let mut hash = blake3::Hasher::new();
+    hash.update(ENCODER_IDENTITY.as_bytes());
     hash.update(&[
-        CACHE_VERSION,
+        0,
         options.quality.clamp(1, 100),
         u8::from(options.lossless),
         options.effort.min(6),

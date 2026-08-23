@@ -1,6 +1,6 @@
 {
   "name": "@ruvyxa/testing",
-  "version": "1.0.31",
+  "version": "1.0.32",
   "description": "Framework-native loader, action, and cache test doubles for Ruvyxa applications.",
   "license": "Apache-2.0",
   "type": "module",

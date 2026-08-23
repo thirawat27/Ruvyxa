@@ -86,6 +86,14 @@ pub(crate) fn content_hash_bytes(input: &[u8]) -> String {
 /// bundler still served the broken chunk it emitted before the upgrade — the
 /// project's own inputs had not changed, so every key still matched — and the
 /// only cure was a manual `ruvyxa clean` nobody knew to run.
+/// A cached shape carries no version counter of its own. Compatibility across
+/// releases is this key's job, and compatibility across an edit *within* a
+/// release belongs in the entry format: a field added later is `Option`, and a
+/// field whose meaning changes is renamed, so an entry that cannot answer the
+/// new question fails to deserialize instead of being trusted. A hand-stamped
+/// `version: 3` said the same thing only while somebody remembered to raise
+/// it — see `MANIFEST_VERSION` in `ruvyxa_bundler::incremental` for the
+/// decision this follows.
 fn versioned_key(parts: &str) -> String {
     content_hash(&format!("{}\0{parts}", env!("CARGO_PKG_VERSION")))
 }
@@ -213,8 +221,7 @@ pub(crate) fn load_prerender_artifact(
     let cache_file = prerender_artifact_cache_file(&cache.directory, job);
     let source = fs::read_to_string(&cache_file).ok()?;
     let artifact: CachedPrerenderArtifact = serde_json::from_str(&source).ok()?;
-    if artifact.version != 1
-        || artifact.dependency_hash != cache.dependency_hash
+    if artifact.dependency_hash != cache.dependency_hash
         || artifact.render_context_hash != cache.render_context_hash
         || artifact.renderer_dependency_hash.is_empty()
         || artifact.files.is_empty()
@@ -252,7 +259,6 @@ pub(crate) fn store_prerender_artifact(
         return;
     }
     let artifact = CachedPrerenderArtifact {
-        version: 1,
         dependency_hash: cache.dependency_hash.clone(),
         render_context_hash: cache.render_context_hash.clone(),
         renderer_dependency_hash: renderer_dependency_hash.to_string(),
@@ -279,8 +285,7 @@ pub(crate) fn load_shared_route_artifact(
     ))
     .ok()?;
     let artifact: CachedSharedRouteArtifact = serde_json::from_str(&source).ok()?;
-    if artifact.version != 1
-        || artifact.dependency_hash != dependency_hash
+    if artifact.dependency_hash != dependency_hash
         || artifact.files.is_empty()
         || artifact.modules.is_empty()
     {
@@ -317,7 +322,6 @@ pub(crate) fn store_shared_route_artifact(
         return;
     }
     let artifact = CachedSharedRouteArtifact {
-        version: 1,
         dependency_hash: dependency_hash.to_string(),
         files,
         code: output.code.clone(),
@@ -341,11 +345,7 @@ pub(crate) fn load_client_plan(
 ) -> Option<Vec<PathBuf>> {
     let source = fs::read_to_string(client_plan_cache_file(cache_dir, route_path, variant)).ok()?;
     let plan: CachedClientPlan = serde_json::from_str(&source).ok()?;
-    // Version 3 carries the module list in evaluation order. A version 2 entry
-    // holds the same modules sorted by path, which is not the same answer, so
-    // it is discarded rather than read.
-    if plan.version != 3
-        || plan.dependency_hash != dependency_hash
+    if plan.dependency_hash != dependency_hash
         || plan.files.is_empty()
         || plan.module_paths.is_empty()
     {
@@ -378,7 +378,6 @@ pub(crate) fn store_client_plan(
         return;
     }
     let plan = CachedClientPlan {
-        version: 3,
         dependency_hash: dependency_hash.to_string(),
         files,
         module_paths: module_paths.to_vec(),
@@ -432,8 +431,7 @@ pub(crate) fn load_server_component_entry(
     ))
     .ok()?;
     let entry: CachedServerComponentEntry = serde_json::from_str(&source).ok()?;
-    if entry.version != 1
-        || entry.dependency_hash != cache.dependency_hash
+    if entry.dependency_hash != cache.dependency_hash
         || entry.context_hash != cache.context_hash
         || entry.files.is_empty()
         || entry.entry_source.is_empty()
@@ -471,7 +469,6 @@ pub(crate) fn store_server_component_entry(
         return;
     }
     let entry = CachedServerComponentEntry {
-        version: 1,
         dependency_hash: cache.dependency_hash.clone(),
         context_hash: cache.context_hash.clone(),
         files,
@@ -497,10 +494,7 @@ pub(crate) fn load_client_artifact(
     let source =
         fs::read_to_string(client_artifact_cache_file(cache_dir, route_path, variant)).ok()?;
     let artifact: CachedClientArtifact = serde_json::from_str(&source).ok()?;
-    if artifact.version != 2
-        || artifact.dependency_hash != dependency_hash
-        || artifact.files.is_empty()
-    {
+    if artifact.dependency_hash != dependency_hash || artifact.files.is_empty() {
         return None;
     }
     let valid = artifact
@@ -534,7 +528,6 @@ pub(crate) fn store_client_artifact(
         return;
     }
     let artifact = CachedClientArtifact {
-        version: 2,
         dependency_hash: dependency_hash.to_string(),
         files,
         bundle: bundle.clone(),

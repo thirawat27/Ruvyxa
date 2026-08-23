@@ -445,6 +445,9 @@ struct RateBucket {
 
 /// In-memory fixed-window rate limiter, keyed by transport peer or by a
 /// configured header.
+///
+/// The general-purpose one of the four limiters catalogued in this crate's
+/// module docs, and the one `rateLimit` in `ruvyxa.config.ts` configures.
 #[derive(Debug, Clone)]
 pub struct RateLimitLayer {
     max_requests: usize,

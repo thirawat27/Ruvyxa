@@ -339,6 +339,10 @@ fn valid_state_key(key: &str) -> bool {
 
 /// Fixed-window frame limiter applied per connection.
 ///
+/// One of the four limiters catalogued in `ruvyxa_middleware`'s crate docs.
+/// Per-connection rather than per-client because the socket already is the
+/// identity, which is why this one needs no key and no eviction.
+///
 /// Cursor streams are bursty, so the window is deliberately coarse: a peer may
 /// spend its whole budget in one frame of animation without being throttled,
 /// but cannot sustain more than the cap.

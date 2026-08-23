@@ -87,8 +87,8 @@ mod html_document;
 mod i18n;
 mod trace;
 pub use html_document::{
-    BOOTSTRAP_ELEMENT_ID, bootstrap_data_block, hydration_loader_source, hydration_loader_url,
-    localize_document, rsc_payload_block, safe_json_for_script,
+    BOOTSTRAP_ELEMENT_ID, bootstrap_data_block, escape_html, hydration_loader_source,
+    hydration_loader_url, localize_document, rsc_payload_block, safe_json_for_script,
 };
 #[cfg(test)]
 use html_document::{

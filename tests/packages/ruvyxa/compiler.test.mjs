@@ -3228,6 +3228,38 @@ export const marker = 'reached'
       )
     })
   })
+  it('keeps scanning code after a template literal that hides a backtick', async () => {
+    // The compiler used to carry its own source scanner beside `scanner.mjs`,
+    // and that copy had no interpolation state: a backtick inside a string
+    // inside a `${…}` closed the template early, so every `import` after it in
+    // the file read as string content. The dependency was dropped from the
+    // bundle silently — no diagnostic, just a module that is not there.
+    await withFixture(async ({ root, outDir }) => {
+      const entryFile = path.join(root, 'entry.js')
+      await writeFile(path.join(root, 'dep.js'), "export const value = 'dependency-was-bundled'\n")
+      await writeFile(
+        entryFile,
+        [
+          'const fence = `x${"`"}y`',
+          "import { value } from './dep.js'",
+          'export default value + fence',
+          '',
+        ].join('\n'),
+      )
+
+      const outfile = path.join(outDir, 'template-scan.mjs')
+      clearCompilerCache()
+      await compileBundle({
+        projectRoot: root,
+        entrySource: `export { default } from ${JSON.stringify(toImportPath(entryFile))}`,
+        sourcefile: 'ruvyxa:template-scan-entry.ts',
+        outfile,
+        platform: 'node',
+      })
+
+      assert.match(await readFile(outfile, 'utf8'), /dependency-was-bundled/)
+    })
+  })
 })
 
 function resolveFixtureFile(candidate) {

@@ -1,5 +1,5 @@
 import { cp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
+import { existsSync, writeSync } from 'node:fs'
 import { createRequire } from 'node:module'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -29,10 +29,10 @@ const [projectRootArg, outputDirArg, adapterNameArg] = process.argv.slice(2)
 const runnerMode = process.env.RUVYXA_ADAPTER_RUNNER_MODE ?? 'build'
 
 if (!projectRootArg || !outputDirArg) {
-  writeResponse(
+  exitWithResponse(
     failure('RUV2200', 'Adapter runner requires project root and build output arguments.'),
+    1,
   )
-  process.exit(1)
 }
 
 const projectRoot = path.resolve(projectRootArg)
@@ -1051,4 +1051,20 @@ function failure(code, message, stack) {
 
 function writeResponse(response) {
   process.stdout.write(JSON.stringify(response))
+}
+
+/**
+ * Write a final response and leave, without racing the write against the exit.
+ *
+ * Stdout here is a pipe read by the Rust host, and a write to a pipe is
+ * asynchronous: `process.exit()` tears the process down without draining one
+ * that has not flushed, so `writeResponse()` followed by `process.exit(1)`
+ * could drop the very diagnostic that explains why the run failed, leaving the
+ * host to report unparsable output instead. Writing straight to fd 1 removes
+ * the race rather than narrowing it. Every other exit path sets
+ * `process.exitCode` and returns, which lets Node drain stdout on its own.
+ */
+function exitWithResponse(response, code) {
+  writeSync(1, JSON.stringify(response))
+  process.exit(code)
 }

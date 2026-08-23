@@ -72,6 +72,62 @@ export function findInCode(source, marker) {
 }
 
 /**
+ * Blank everything that is not code, preserving offsets and line structure.
+ *
+ * The JavaScript mirror of `ast::masked_code` in
+ * `crates/ruvyxa_bundler/src/ast.rs`: the result has the same length as
+ * `source`, every `\n` stays where it was, and every other non-code character
+ * becomes a space. That is what lets a caller find a position in the mask and
+ * slice the value out of the raw source — the pattern the Rust side settled on
+ * after reading raw source silently disabled two guards.
+ *
+ * `compiler.mjs` used to carry its own copy of this walk. That copy had no
+ * template-interpolation state, so a backtick inside a string inside a `${…}`
+ * ended the template early and every `import` after it in the file stopped
+ * being seen as code — the module was dropped from the bundle with no
+ * diagnostic. Interpolations are code here, as they already were for
+ * `createCodeIndex`.
+ *
+ * `options` keeps the *text* of module specifiers that would otherwise be
+ * blanked, because the rewriters have to read the specifier they are replacing:
+ *
+ * - `preserveImportExportSpecifiers` — a literal after `from` or `import`
+ * - `preserveImportCallSpecifiers` — a literal inside `import(`
+ * - `preserveRequireCallSpecifiers` — a literal inside `require(`
+ */
+export function maskNonCode(source, options = {}) {
+  const code = new Uint8Array(source.length)
+  const literals = []
+  maskRange(source, 0, source.length, code, literals)
+  for (const [start, end] of preservedLiterals(source, literals, options)) {
+    for (let index = start; index < end; index += 1) code[index] = 1
+  }
+  const output = []
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index]
+    output.push(code[index] === 1 || character === '\n' ? character : ' ')
+  }
+  return output.join('')
+}
+
+/** Bytes preceding a quote that decide whether it opens a module specifier. */
+const SPECIFIER_LOOKBACK = 32
+
+/** The string literals `maskNonCode` was asked to leave readable. */
+function preservedLiterals(source, literals, options) {
+  const patterns = [
+    [options.preserveImportExportSpecifiers === true, /\b(?:from|import)\s*$/],
+    [options.preserveImportCallSpecifiers === true, /\bimport\s*\(\s*$/],
+    [options.preserveRequireCallSpecifiers === true, /\brequire\s*\(\s*$/],
+  ].filter(([enabled]) => enabled)
+  if (patterns.length === 0) return []
+  return literals.filter(([start]) => {
+    const preceding = source.slice(Math.max(0, start - SPECIFIER_LOOKBACK), start)
+    return patterns.some(([, pattern]) => pattern.test(preceding))
+  })
+}
+
+/**
  * Offset just past the module's directive prologue.
  *
  * Generated top-level statements must be inserted here. Not at the very start,
@@ -121,8 +177,14 @@ function skipLeadingTrivia(source, start) {
   }
 }
 
-/** Mark the code positions of `source[start..end]`. Mirrors `ast.rs::mask_range`. */
-function maskRange(source, start, end, code) {
+/**
+ * Mark the code positions of `source[start..end]`. Mirrors `ast.rs::mask_range`.
+ *
+ * `literals`, when given, collects the `[start, end)` of every *closed* string
+ * literal encountered. Only `maskNonCode` needs them, to decide which module
+ * specifiers to leave readable; `createCodeIndex` omits the argument.
+ */
+function maskRange(source, start, end, code, literals) {
   let index = start
   let previousSignificant = -1
   while (index < end) {
@@ -132,7 +194,9 @@ function maskRange(source, start, end, code) {
     }
     if (source[index] === '`') {
       const { after, interpolations } = templateLiteral(source, index, end)
-      for (const [codeStart, codeEnd] of interpolations) maskRange(source, codeStart, codeEnd, code)
+      for (const [codeStart, codeEnd] of interpolations) {
+        maskRange(source, codeStart, codeEnd, code, literals)
+      }
       previousSignificant = index
       index = after
       continue
@@ -140,6 +204,8 @@ function maskRange(source, start, end, code) {
     if (source[index] === '"' || source[index] === "'") {
       const quote = index
       index = skipString(source, index, end)
+      // An unterminated quote resumes at `quote + 1` and names no literal.
+      if (literals && index > quote + 1) literals.push([quote, index])
       previousSignificant = quote
       continue
     }

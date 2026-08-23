@@ -20,7 +20,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use ruvyxa_dev_server::JavaScriptRuntime;
+use ruvyxa_dev_server::{JavaScriptRuntime, escape_html};
 use ruvyxa_graph::{HydrationMode, RenderStrategy, RouteEntry, RouteManifest, RouteParams};
 use tracing::info;
 
@@ -919,7 +919,7 @@ pub(crate) fn csr_shell_html(
 </html>"#,
         asset_links = head.asset_links,
         styles = head.styles,
-        client_src = escape_html_attribute(&client_src),
+        client_src = escape_html(&client_src),
         // `params` is empty rather than the route's: this shell is written once
         // per route pattern, not per request, so it has no concrete parameters
         // to carry. The client bundle falls back to reading `location`.
@@ -1008,22 +1008,10 @@ pub(crate) fn module_preload_links(preloads: &[String]) -> String {
     preloads
         .iter()
         .map(|src| {
-            let src = escape_html_attribute(src);
+            let src = escape_html(src);
             format!(r#"<link rel="modulepreload" href="{src}">"#)
         })
         .collect()
-}
-
-/// Escape a value interpolated into a double-quoted HTML attribute.
-///
-/// Mirrors the dev server's `escape_html`, so a manifest entry cannot inject
-/// markup in prerendered output while the same value stays inert in dev.
-pub(crate) fn escape_html_attribute(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
-        .replace('"', "&quot;")
 }
 
 pub(crate) fn inject_prerender_client_assets(
@@ -1059,7 +1047,7 @@ pub(crate) fn inject_prerender_client_assets(
             .map(ruvyxa_dev_server::rsc_payload_block)
             .unwrap_or_default(),
         ruvyxa_dev_server::bootstrap_data_block(params, request_path, false),
-        escape_html_attribute(&script_src)
+        escape_html(&script_src)
     );
     let lower = html.to_ascii_lowercase();
     if let (Some(head_end), Some(body_end)) = (lower.find("</head>"), lower.rfind("</body>"))

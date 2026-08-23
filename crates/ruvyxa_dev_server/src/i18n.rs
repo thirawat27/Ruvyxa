@@ -2,6 +2,7 @@ use axum::http::{HeaderMap, header};
 use ruvyxa_graph::{I18nRouting, RouteKind, RouteManifest, RouteParams};
 
 use crate::RadixRouter;
+use crate::html_document::escape_html;
 
 pub(crate) fn locale_redirect_path(
     config: Option<&I18nRouting>,
@@ -67,12 +68,12 @@ pub(crate) fn localized_head(
         head.push_str("<link rel=\"alternate\" hreflang=\"");
         head.push_str(alternate);
         head.push_str("\" href=\"");
-        head.push_str(&escape_html_attribute(&href));
+        head.push_str(&escape_html(&href));
         head.push_str("\">");
     }
     let default_href = localized_path(&config.default_locale, rest);
     head.push_str("<link rel=\"alternate\" hreflang=\"x-default\" href=\"");
-    head.push_str(&escape_html_attribute(&default_href));
+    head.push_str(&escape_html(&default_href));
     head.push_str("\">");
     Some((locale.to_string(), head))
 }
@@ -161,14 +162,6 @@ fn prefixed_path(locale: &str, request_path: &str) -> String {
 fn localized_path(locale: &str, rest: Option<&str>) -> String {
     rest.filter(|rest| !rest.is_empty())
         .map_or_else(|| format!("/{locale}"), |rest| format!("/{locale}/{rest}"))
-}
-
-fn escape_html_attribute(value: &str) -> String {
-    value
-        .replace('&', "&amp;")
-        .replace('"', "&quot;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
 }
 
 #[cfg(test)]
