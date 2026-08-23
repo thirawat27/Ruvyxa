@@ -125,7 +125,7 @@ function bannerLines(sprite, status) {
   return lines
 }
 
-// The starters do not share one layout — `blog` has routes `minimal` lacks, `api-backend`
+// The starters do not share one layout — `blog` has routes `minimal` lacks, `api`
 // has no page components at all — so the summary is rendered from the files that were
 // actually written rather than from an assumed structure.
 const TREE_MAX_ENTRIES = 24
@@ -224,7 +224,7 @@ const TEMPLATE_DESCRIPTIONS = {
   minimal: 'Blank starter — layout and a single page',
   blog: 'Content site with blog and about routes',
   crud: 'Task list backed by server actions and forms',
-  'api-backend': 'API-only routes, no page UI',
+  api: 'API-only routes, no page UI',
 }
 
 /** Line-editing prompt (readline's own cooked-mode handling covers backspace, paste, etc). */

@@ -13,20 +13,20 @@ export default function Home() {
       <h2>Recent posts</h2>
       <ul className="post-list" aria-label="Recent posts">
         {recentPosts.map((post) => (
-          <li key={post.href} className="post-item">
+          <li key={post.slug} className="post-item">
             <p className="post-date">
               <time dateTime={post.date}>{formatDate(post.date)}</time>
             </p>
             <h3 className="post-title">
-              <Link href={post.href}>{post.title}</Link>
+              <Link href={`/blog/${post.slug}`}>{post.title}</Link>
             </h3>
-            <p className="post-excerpt">{post.description}</p>
+            <p className="post-excerpt">{post.excerpt}</p>
           </li>
         ))}
       </ul>
 
       <p>
-        <Link href="/blog">Read every post →</Link>
+        <Link href="/blog">Read every post</Link>
       </p>
     </section>
   )

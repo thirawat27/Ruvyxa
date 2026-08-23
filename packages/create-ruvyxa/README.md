@@ -16,7 +16,7 @@ Choose a starter with `--template` (or `-t` when invoking the binary directly):
 ```bash
 npm create ruvyxa@latest my-blog -- --template blog
 npm create ruvyxa@latest my-admin -- --template crud
-npm create ruvyxa@latest my-api -- --template api-backend
+npm create ruvyxa@latest my-api -- --template api
 ```
 
 Run it with no arguments on a terminal and it becomes interactive: it prompts for a project name and
@@ -24,7 +24,7 @@ lets you pick the starter with an arrow-key menu (`j`/`k` also navigate). The sc
 the real generated file tree — nested, directories first, colored by role — and runs under an
 animated mascot spinner.
 
-Available starters are `minimal` (the default), `blog`, `crud`, and `api-backend`.
+Available starters are `minimal` (the default), `blog`, `crud`, and `api`.
 
 The generated project starts with:
 

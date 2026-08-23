@@ -45,7 +45,7 @@ work in the repository.
   is what CI builds and then launches on real Node, Bun, and Deno through
   `scripts/smoke-runtime-adapter.mjs`. Keep it deployable: a route or feature no adapter supports
   belongs in the demo instead.
-- `templates/` holds five scaffolds — `minimal`, `blog`, `crud`, `api-backend`, `plugin`.
+- `templates/` holds five scaffolds — `minimal`, `blog`, `crud`, `api`, `plugin`.
   `templates/minimal/` is what `create-ruvyxa` copies into a new project, and it is mirrored into
   `packages/create-ruvyxa/template/minimal/`; `scripts/check-template-mirrors.mjs` keeps the two in
   step and `pnpm release:validate` fails on drift.

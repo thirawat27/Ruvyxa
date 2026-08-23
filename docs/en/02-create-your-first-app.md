@@ -7,7 +7,7 @@
 ## Create an application
 
 The workspace publishes `create-ruvyxa`, and its source contains `minimal`, `blog`, `crud`, and
-`api-backend` templates. Use the generator for a complete, package-manager-neutral starter.
+`api` templates. Use the generator for a complete, package-manager-neutral starter.
 
 ```bash
 npm create ruvyxa@latest my-app

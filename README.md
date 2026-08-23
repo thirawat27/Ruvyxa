@@ -265,9 +265,9 @@ documents: [ARCHITECTURE.md](ARCHITECTURE.md), [CHANGELOG.md](CHANGELOG.md),
 ### Deploy Anywhere (11 Adapters)
 
 - **Four starters** — `npm create ruvyxa@latest` defaults to the focused `minimal` app, with `blog`,
-  `crud`, and `api-backend` available through `--template`. Run it with no arguments on a real
-  terminal and it prompts for a project name and offers an arrow-key template menu (`j`/`k` also
-  work); the scaffold summary prints the actual generated file tree, colored by role.
+  `crud`, and `api` available through `--template`. Run it with no arguments on a real terminal and
+  it prompts for a project name and offers an arrow-key template menu (`j`/`k` also work); the
+  scaffold summary prints the actual generated file tree, colored by role.
 - **11 Deployment Adapters** — Zero-config native output for Vercel, Netlify, Cloudflare, Node.js,
   Bun, Deno, Static, AWS Amplify, Firebase, Railway, and Render. See the
   [Deployment Guide](docs/en/15-deploy-run-and-operate.md) for platform-specific configurations.
@@ -301,7 +301,7 @@ Choose a focused starter when you want more than the minimal route:
 ```bash
 npm create ruvyxa@latest my-blog -- --template blog
 npm create ruvyxa@latest my-admin -- --template crud
-npm create ruvyxa@latest my-api -- --template api-backend
+npm create ruvyxa@latest my-api -- --template api
 ```
 
 Open [http://localhost:3000](http://localhost:3000).

@@ -6,9 +6,8 @@
 
 ## สร้าง application
 
-workspace เผยแพร่ `create-ruvyxa` และ source ของมันมี template `minimal`, `blog`, `crud` และ
-`api-backend` ใช้ generator เพื่อเริ่มต้น project ที่สมบูรณ์และไม่ผูกกับ package manager
-รายใดรายหนึ่ง
+workspace เผยแพร่ `create-ruvyxa` และ source ของมันมี template `minimal`, `blog`, `crud` และ `api`
+ใช้ generator เพื่อเริ่มต้น project ที่สมบูรณ์และไม่ผูกกับ package manager รายใดรายหนึ่ง
 
 ```bash
 npm create ruvyxa@latest my-app

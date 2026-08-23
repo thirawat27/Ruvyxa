@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 const here = dirname(fileURLToPath(import.meta.url))
 const packageRoot = resolve(here, '..')
 const repoRoot = resolve(packageRoot, '../..')
-const templates = ['minimal', 'blog', 'crud', 'api-backend']
+const templates = ['minimal', 'blog', 'crud', 'api']
 const excludedDirectories = new Set(['.ruvyxa', 'dist', 'node_modules'])
 
 await rm(resolve(packageRoot, 'template'), { recursive: true, force: true })

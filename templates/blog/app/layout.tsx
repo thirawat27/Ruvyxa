@@ -3,18 +3,12 @@ import type { Meta } from '@ruvyxa/react'
 
 import './globals.css'
 
-/**
- * Root metadata.
- *
- * Every `meta` on a route's path merges from here down to the page, most
- * specific wins — so `titleTemplate` formats the title of every route below,
- * including the frontmatter title of each `page.mdx`.
- */
+// Root metadata. Every `meta` on a route's path merges from here down to the
+// page, so `titleTemplate` formats the title of every route below it.
 export const meta: Meta = {
   title: 'My Ruvyxa Blog',
   titleTemplate: '%s — My Ruvyxa Blog',
   description: 'A content-focused blog built with Ruvyxa.',
-  siteName: 'My Ruvyxa Blog',
   lang: 'en',
 }
 
@@ -38,11 +32,6 @@ export default function RootLayout({ children }: Readonly<{ children: React.Reac
                 <Link href="/about">About</Link>
               </li>
             </ul>
-            {/* `rss.xml` is generated from the posts by `content: true`. It is a
-                published file rather than a route, so it stays a plain anchor. */}
-            <a className="nav-feed" href="/rss.xml">
-              RSS
-            </a>
           </nav>
         </header>
         <main className="content">{children}</main>

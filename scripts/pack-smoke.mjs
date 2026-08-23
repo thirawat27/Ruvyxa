@@ -193,7 +193,7 @@ for (const file of readdirSync(destination).filter((name) => name.endsWith('.tgz
   }
 
   if (packageJson.name === 'create-ruvyxa') {
-    for (const template of ['minimal', 'blog', 'crud', 'api-backend']) {
+    for (const template of ['minimal', 'blog', 'crud', 'api']) {
       assert(
         listing.includes(`package/template/${template}/package.json`),
         `create-ruvyxa package missing ${template} template`,
@@ -255,7 +255,7 @@ execFileSync('tar', [
   '-C',
   `${extracted}/create-ruvyxa`,
 ])
-const starters = ['minimal', 'blog', 'crud', 'api-backend']
+const starters = ['minimal', 'blog', 'crud', 'api']
 const scaffoldTarball = (file) => `file:../../${destination}/${file}`
 const workspaceTarball = (file) => `file:../${destination}/${file}`
 

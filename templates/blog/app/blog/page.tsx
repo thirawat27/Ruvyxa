@@ -16,21 +16,14 @@ export default function BlogIndex() {
 
       <ul className="post-list" aria-label="All posts">
         {posts.map((post) => (
-          <li key={post.href} className="post-item">
+          <li key={post.slug} className="post-item">
             <p className="post-date">
               <time dateTime={post.date}>{formatDate(post.date)}</time>
             </p>
             <h2 className="post-title">
-              <Link href={post.href}>{post.title}</Link>
+              <Link href={`/blog/${post.slug}`}>{post.title}</Link>
             </h2>
-            <p className="post-excerpt">{post.description}</p>
-            {post.tags && (
-              <ul className="post-tags" aria-label="Tags">
-                {post.tags.map((tag) => (
-                  <li key={tag}>{tag}</li>
-                ))}
-              </ul>
-            )}
+            <p className="post-excerpt">{post.excerpt}</p>
           </li>
         ))}
       </ul>

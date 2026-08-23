@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url'
 export { detectPackageManager } from './detect-pm.js'
 export type { PackageManager, PackageManagerInfo } from './detect-pm.js'
 
-export const STARTER_TEMPLATES = ['minimal', 'blog', 'crud', 'api-backend'] as const
+export const STARTER_TEMPLATES = ['minimal', 'blog', 'crud', 'api'] as const
 export type StarterTemplate = (typeof STARTER_TEMPLATES)[number]
 
 export interface CreateRuvyxaOptions {

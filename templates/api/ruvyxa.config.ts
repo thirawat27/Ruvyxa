@@ -17,12 +17,6 @@ const settings: RuvyxaConfig = {
   site: {
     // url: 'https://example.com',
   },
-  security: {
-    // Largest JSON body an API route will accept, in bytes. The default is
-    // 10 MB; this API only ever reads a name and a description, and a limit
-    // that matches what the endpoints use is a limit an attacker cannot spend.
-    apiLimit: 64 * 1024,
-  },
   build: {
     minify: true,
     map: false,

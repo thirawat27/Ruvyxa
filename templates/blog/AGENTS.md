@@ -11,21 +11,21 @@ route shape:
 
 ## How a post works here
 
-- A post is a folder under `app/blog/` containing `page.mdx`. The folder name is the URL segment.
-  Markdown and MDX routes need no configuration; `.md` keeps raw HTML inert, `.mdx` evaluates JSX.
-- The frontmatter between the `---` fences is exported twice by the compiler: as `frontmatter`,
-  which `app/blog/posts.ts` reads to build the index, and as `meta`, which the router renders as
-  `<title>` and `<meta name="description">`. **Write it once; never restate a title in `posts.ts`.**
-  `app/ruvyxa-env.d.ts` is the type contract those fields have to satisfy.
-- Publishing a post is a new folder plus one line in `app/blog/posts.ts`. Its `href` is checked
-  against the real routes because `typedRoutes` is on, so a renamed folder is a compile error rather
-  than a dead link.
-- Sort and compare dates as ISO strings and format them with an explicit `timeZone`. `posts.ts`
-  explains both: `localeCompare` orders by the building machine's locale, and a date formatted in
-  the machine's own zone renders one day on the server and another in the browser.
-- `content: true` derives `rss.xml`, `content.json`, `search-index.json`, and `llms.txt` from those
-  same posts, and the route manifest yields `sitemap.xml` and `robots.txt`. All of them embed
-  `site.url`, so **change it in `ruvyxa.config.ts` before deploying** — it ships as a placeholder.
+- Every post lives in the `posts` array in `app/blog/posts.ts`, newest first. Adding a post is one
+  entry in that array — nothing else has to be registered.
+- `app/blog/page.tsx` lists them and `app/blog/[slug]/page.tsx` renders one. The `[slug]` folder is
+  a dynamic segment; the page's `getStaticParams` export tells the build which slugs to pre-render,
+  so each post is a file on disk before anyone asks for it. **Add a post to the array and the route
+  appears — do not maintain a second list.**
+- Both pages read the array through `findPost()` and `formatDate()`. Keep them there rather than
+  duplicating a lookup or a date format in a page.
+- `formatDate` passes an explicit `timeZone`, and that is load-bearing: a date formatted in the
+  machine's own zone renders one day on the server and another in the browser. Do not drop it.
+- Navigate with `<Link>` from `@ruvyxa/react`, not a bare `<a>`. `typedRoutes` is on, so a mistyped
+  path is a compile error; a template literal built from a literal pattern — `` `/blog/${slug}` `` —
+  type-checks on its own.
+- `robots.txt` and `sitemap.xml` come from the route manifest at build time. Set `site.url` in
+  `ruvyxa.config.ts` before deploying, or the build publishes `robots.txt` alone.
 
 ## Rules
 

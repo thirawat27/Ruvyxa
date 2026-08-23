@@ -31,9 +31,9 @@ flowchart LR
 ```
 
 Before deployment, run `npm run check`, `npm run build`, and `npm run test:parity`; then inspect the
-manifest/output and exercise a health route that your application implements (the `api-backend`
-template includes `app/api/health/route.ts`). The framework does not reserve or implement a
-universal health/readiness endpoint.
+manifest/output and exercise a health route that your application implements (the `api` template
+includes `app/api/health/route.ts`). The framework does not reserve or implement a universal
+health/readiness endpoint.
 
 ## Production checklist
 

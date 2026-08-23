@@ -191,7 +191,7 @@ describe('createRuvyxaApp', () => {
   for (const [template, expectedFile] of [
     ['blog', 'app/blog/[slug]/page.tsx'],
     ['crud', 'app/tasks/action.ts'],
-    ['api-backend', 'app/api/items/[id]/route.ts'],
+    ['api', 'app/api/items/[id]/route.ts'],
   ] as const) {
     it(`creates the ${template} starter`, async () => {
       const tempRoot = await mkdtemp(join(tmpdir(), 'ruvyxa-create-'))
@@ -233,7 +233,7 @@ describe('createRuvyxaApp', () => {
     try {
       await assert.rejects(
         createRuvyxaApp(target, { template: 'unknown' as never }),
-        /Choose one of: minimal, blog, crud, api-backend/,
+        /Choose one of: minimal, blog, crud, api/,
       )
       await assert.rejects(readdir(target), /ENOENT/)
     } finally {

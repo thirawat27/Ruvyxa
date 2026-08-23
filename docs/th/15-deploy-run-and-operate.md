@@ -31,7 +31,7 @@ flowchart LR
 ```
 
 ก่อน deploy ให้รัน `npm run check`, `npm run build` และ `npm run test:parity`; แล้วตรวจ
-manifest/output และเรียก health route ที่ application ของคุณทำเอง (`api-backend` template มี
+manifest/output และเรียก health route ที่ application ของคุณทำเอง (`api` template มี
 `app/api/health/route.ts`) framework ไม่ได้สำรองหรือ implement health/readiness endpoint แบบสากล
 
 ## Production checklist
