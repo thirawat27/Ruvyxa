@@ -266,7 +266,7 @@ mod tests {
     ///
     /// The JavaScript hosts share one matcher module; this router cannot, so
     /// the two are held together by `tests/fixtures/route-match-conformance.json`
-    /// instead. `tests/packages/react/route-match.test.mjs` drives the same file
+    /// instead. `packages/@ruvyxa/react/test/route-match.test.mjs` drives the same file
     /// through the client matcher and the serverless handler. A behaviour change
     /// made in one language and not the other fails here.
     #[test]

@@ -92,8 +92,7 @@ pub use html_document::{
 };
 #[cfg(test)]
 use html_document::{
-    client_hydration_script, compose_document, dev_diagnostic_overlay, hmr_client_script,
-    prebuilt_client_assets,
+    client_hydration_script, compose_document, dev_diagnostic_overlay, prebuilt_client_assets,
 };
 use html_document::{dev_error_overlay, error_response, plain_error_page, public_internal_error};
 
@@ -3762,13 +3761,5 @@ mod tests {
         );
 
         unsafe { std::env::remove_var("NO_COLOR") };
-    }
-
-    #[test]
-    fn hmr_client_reloads_for_every_update() {
-        let script = hmr_client_script();
-        assert!(script.contains("JSON.parse(event.data);"));
-        assert!(script.contains("location.reload();"));
-        assert!(!script.contains("document.createElement(\"script\")"));
     }
 }

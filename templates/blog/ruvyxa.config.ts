@@ -8,7 +8,7 @@ import { config } from 'ruvyxa/config'
  *
  * Add a key when you want something *other* than the default — restating one
  * pins it, and the pinned value is what a future release can no longer improve
- * for this project. `docs/07-configuration.md` has the full option map.
+ * for this project. `docs/en/07-configuration.md` has the full option map.
  */
 export default config({
   // Generates `.ruvyxa/types/routes.d.ts`, which narrows `<Link href>`,

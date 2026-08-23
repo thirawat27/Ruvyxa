@@ -671,7 +671,7 @@ export function createHandler(options) {
    * `Connection closed.` in the browser and blanked the document, while the same
    * page worked under `ruvyxa dev` and `ruvyxa start`. It is the third time a
    * capability has existed on one of the two request hosts and not the other,
-   * which is what `tests/fixtures/endpoint-contract.json` exists to catch.
+   * which is what `tests/fixtures/framework-endpoint-conformance.json` exists to catch.
    */
   async function handleRscAction(request, url) {
     if (request.headers.get('x-ruvyxa-rsc') !== '1') {
@@ -1772,22 +1772,6 @@ function normalizeCacheEntry(value) {
 // ─── Prerender Cache Paths ──────────────────────────────────────────────────
 
 /**
- * Map a request path to the relative location of its pre-rendered HTML.
- *
- * Mirrors the build writer, which stores `<prerenderDir>/<path>/index.html`
- * from its canonical route path. Request handlers canonicalize before calling
- * this mapper; direct callers must provide the path representation they store.
- *
- * Returns `null` when the path cannot be mapped to a contained location.
- * Adapters join the result onto their cache directory and touch the file
- * system, so this is the single place that decides what is in bounds — the
- * platform URL parser is not a substitute, because adapters may be handed a
- * path from a source that never went through it.
- *
- * @param {string} pathname Request path, beginning with `/`.
- * @returns {string|null} A `.../index.html` relative path, or null if unsafe.
- */
-/**
  * Reject a path segment that could escape, or misname, the cache directory.
  *
  * Written as explicit character tests rather than a regular expression: this
@@ -1805,6 +1789,22 @@ function isUnsafeSegment(segment) {
   return false
 }
 
+/**
+ * Map a request path to the relative location of its pre-rendered HTML.
+ *
+ * Mirrors the build writer, which stores `<prerenderDir>/<path>/index.html`
+ * from its canonical route path. Request handlers canonicalize before calling
+ * this mapper; direct callers must provide the path representation they store.
+ *
+ * Returns `null` when the path cannot be mapped to a contained location.
+ * Adapters join the result onto their cache directory and touch the file
+ * system, so this is the single place that decides what is in bounds — the
+ * platform URL parser is not a substitute, because adapters may be handed a
+ * path from a source that never went through it.
+ *
+ * @param {string} pathname Request path, beginning with `/`.
+ * @returns {string|null} A `.../index.html` relative path, or null if unsafe.
+ */
 export function prerenderRelativePath(pathname) {
   if (typeof pathname !== 'string' || !pathname.startsWith('/')) return null
 

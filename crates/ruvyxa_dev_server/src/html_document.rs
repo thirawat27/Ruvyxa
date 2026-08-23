@@ -1093,18 +1093,34 @@ pub fn escape_html(input: &str) -> String {
 mod tests {
     use super::*;
 
+    /// The emitted client is held by **running** it, not by matching its text.
+    ///
+    /// This test used to be nine `contains` assertions over the emitted source.
+    /// Every one of them survives a refactor that inverts a comparison, drops an
+    /// `await`, renames the cache-busting query parameter, or emits a script that
+    /// does not parse at all -- which is the class of bug the assertions existed
+    /// to catch. `tests/packages/ruvyxa/hmr-client-behaviour.test.mjs` parses this
+    /// literal out of the source and executes it against stand-in browser globals
+    /// instead, and asks it what it actually does.
+    ///
+    /// What stays here is only the shape that suite depends on to find the script,
+    /// so a literal it can no longer extract fails in Rust with a reason rather
+    /// than as thirteen unexplained JavaScript failures.
     #[test]
-    fn hmr_client_rejects_stale_sequences_and_applies_css_without_reload() {
-        let script = hmr_client_script();
-        assert!(script.contains("ruvyxa.hmr"));
-        assert!(script.contains("message.sequence <= lastSequence"));
-        assert!(script.contains("ruvyxa:hmr:${message.traceId}:received"));
-        assert!(script.contains("if (message.traceAck !== true) return"));
-        assert!(script.contains("body: JSON.stringify({ traceId: message.traceId })"));
-        assert!(script.contains("if (message.fullReload) reload()"));
-        assert!(script.contains("style[data-ruvyxa-css]"));
-        assert!(script.contains("await applyCss(message.sequence)"));
-        assert!(script.contains("location.reload()"));
+    fn hmr_client_script_is_one_extractable_script_element() {
+        let script = hmr_client_script().trim();
+        let body = script
+            .strip_prefix("<script>")
+            .and_then(|rest| rest.strip_suffix("</script>"))
+            .expect("the HMR client must be emitted as exactly one <script> element");
+        assert!(
+            !body.contains("</script>"),
+            "a second closing tag would end the element early in the document",
+        );
+        assert!(
+            !body.trim().is_empty(),
+            "an empty client would leave every dev page without hot reload",
+        );
     }
 
     #[test]

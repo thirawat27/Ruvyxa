@@ -215,13 +215,14 @@ cargo run -p ruvyxa_cli -- test:parity --root examples/demo
 
 The rest of the scripts, and when each is worth running:
 
-| Command                    | When                                                                                                   |
-| -------------------------- | ------------------------------------------------------------------------------------------------------ |
-| `pnpm check:cargo-lock`    | after any `Cargo.toml` edit — the lockfile has to describe the manifests                               |
-| `pnpm check:oxc-lockstep`  | after touching `oxc` or `oxc-transform` — the Rust bundler and the Node runtime must be on one version |
-| `pnpm verify:reproducible` | after a change to emitted bytes, ordering, or hashing — two builds of one input must agree             |
-| `pnpm test:full-flow`      | before a release; scaffolds, builds, and runs a project end to end (PowerShell)                        |
-| `pnpm publish:dry-run`     | before a release, to see what would actually be published                                              |
+| Command                    | When                                                                                                               |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `pnpm check:cargo-lock`    | after any `Cargo.toml` edit — the lockfile has to describe the manifests                                           |
+| `pnpm check:oxc-lockstep`  | after touching `oxc` or `oxc-transform` — the Rust bundler and the Node runtime must be on one version             |
+| `pnpm check:source-refs`   | after moving or renaming a test, fixture, or script — comments naming it are gates, and a stale one points nowhere |
+| `pnpm verify:reproducible` | after a change to emitted bytes, ordering, or hashing — two builds of one input must agree                         |
+| `pnpm test:full-flow`      | before a release; scaffolds, builds, and runs a project end to end (PowerShell)                                    |
+| `pnpm publish:dry-run`     | before a release, to see what would actually be published                                                          |
 
 `pnpm release:bump` writes every manifest with `JSON.stringify`, which Prettier disagrees with — run
 `pnpm format` after it or `pnpm format:check` fails on twenty-four `package.json` files.
@@ -415,7 +416,14 @@ before believing it.
     agreed with `entry-templates.mjs`; that test never read `output.rs`, so the routing-context and
     error-boundary preludes were two hand-maintained copies with nothing holding them together.
     `tests/packages/ruvyxa/entry-prelude-parity.test.mjs` executes both copies against one stand-in
-    React. When a doc comment names the test that holds a contract, open that test.
+    React. When a doc comment names the test that holds a contract, open that test — and
+    `scripts/check-source-path-refs.mjs` now checks that you can. It reads the comments out of every
+    `.rs`/`.mjs`/`.ts` file git knows about — tracked, or merely not ignored — and fails when a
+    repository path named in one does not resolve, because `check-doc-links.mjs` only ever saw
+    Markdown. Three pointers had already rotted behind it: a test that moved from `.mjs` to `.ts`,
+    one naming a `tests/packages` react directory that has never existed, and a fixture called
+    `endpoint-contract.json` that was never created at all. Paths written in string literals are
+    ignored, so only comments are held.
 - A shared record that several workers may be finishing at once is decided by **how many are still
   in flight**, not by what its state currently reads. `ArtifactTaskGraph::publish` is `begin` then
   `complete` with the lock released between them, so route builds that share one module overlap
@@ -489,7 +497,17 @@ before believing it.
   wrapper bugs visible — a folded `Set-Cookie`, a body that arrived parsed instead of raw, and
   binary bytes round-tripped through a string. The runtime CI smoke covers only the standalone
   server (node, bun, deno, and the railway/render/aws adapters that reuse it), so for these four
-  that suite is the only thing that runs the code.
+  that suite is the only thing that runs the code. The same rule reached the HMR client.
+  `hmr_client_script()` in `html_document.rs` emits the JavaScript every `ruvyxa dev` browser runs,
+  and it was held by twelve `contains` assertions across two tests — which pass on an inverted
+  comparison, a dropped `await`, a renamed cache-busting parameter, and on a script that does not
+  parse at all. `tests/packages/ruvyxa/hmr-client-behaviour.test.mjs` parses the literal out of the
+  Rust source and executes it in a `vm` against stand-in browser globals, so the questions are
+  behavioural: a stale sequence stays ignored, a CSS update does not reload, an apply that a newer
+  sequence overtook abandons itself rather than writing stale CSS, a refresh boundary that throws
+  still falls back to a reload, and no update ever calls `document.createElement`. What stays in
+  Rust is only the shape that suite needs to find the script. When a generated script is the
+  product, the stand-ins are the test — not the substrings.
 - A config key reaches its consumer or it does not exist. `adapterOptions` was declared in
   `RuvyxaConfig`, validated by `config-renderer.mjs`, written into `build.json`, and documented in
   the configuration guide — while `adapter-runner.mjs` called the adapter factory as `factory()`

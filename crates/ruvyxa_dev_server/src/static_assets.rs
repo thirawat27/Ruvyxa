@@ -1052,7 +1052,7 @@ mod tests {
     /// The JavaScript servers read `STATIC_CONTENT_TYPES` from
     /// `@ruvyxa/core/utils`; this handler cannot, so the two are held together
     /// by `tests/fixtures/static-asset-conformance.json` instead.
-    /// `tests/packages/core/static-asset-contract.test.mjs` drives the same file
+    /// `tests/packages/core/static-asset-contract.test.ts` drives the same file
     /// through the JavaScript table. A change made in one language and not the
     /// other fails here rather than after deployment.
     #[test]
