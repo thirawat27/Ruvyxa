@@ -148,3 +148,18 @@ jobs:
         run: |
           cargo run -p ruvyxa_cli -- build --root examples/deploy-smoke --runtime deno --adapter deno
           node scripts/smoke-runtime-adapter.mjs deno examples/deploy-smoke/.ruvyxa/deploy/deno 4392
+      # The edge lane, which had no deployment coverage at all until it was the
+      # only place a NODE_ENV left at "development" could survive: an edge
+      # bundle has no `process`, so the literal compiled into it is the only
+      # value React ever reads, and nothing here had ever run one.
+      #
+      # It builds a pruned copy rather than examples/deploy-smoke itself,
+      # because that app has an ISR route and `adapter.supports` says cloudflare
+      # has no ISR — the build refuses it with RUV2202, correctly. Add another
+      # ISR route and this step fails by name rather than skipping quietly.
+      - name: Build and exercise the Cloudflare worker
+        shell: bash
+        run: |
+          FIXTURE=$(node scripts/edge-fixture.mjs examples/deploy-smoke --drop cached)
+          cargo run -p ruvyxa_cli -- build --root "$FIXTURE" --adapter cloudflare
+          node scripts/smoke-runtime-adapter.mjs edge "$FIXTURE/.ruvyxa/deploy/cloudflare/worker" 4393

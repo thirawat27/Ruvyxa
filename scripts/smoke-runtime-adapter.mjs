@@ -1,30 +1,213 @@
 import { spawn } from 'node:child_process'
-import { existsSync } from 'node:fs'
-import { request as httpRequest } from 'node:http'
+import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs'
+import { createServer, request as httpRequest } from 'node:http'
 import path from 'node:path'
+import { Readable } from 'node:stream'
+import { pipeline } from 'node:stream/promises'
+import { pathToFileURL } from 'node:url'
 import { gunzipSync } from 'node:zlib'
 
-const [runtime, deploymentDirectory, portArg] = process.argv.slice(2)
-if (!['node', 'bun', 'deno'].includes(runtime) || !deploymentDirectory || !portArg) {
+const RUNTIMES = ['node', 'bun', 'deno', 'edge']
+const [runtime, deploymentDirectory, portArg, assetsArg] = process.argv.slice(2)
+if (!RUNTIMES.includes(runtime) || !deploymentDirectory || !portArg) {
   console.error(
-    'usage: node scripts/smoke-runtime-adapter.mjs <node|bun|deno> <deployment-dir> <port>',
+    'usage: node scripts/smoke-runtime-adapter.mjs <node|bun|deno|edge> <deployment-dir> <port> [assets-dir]',
   )
+  console.error(
+    '  edge takes the worker directory; assets default to <deployment-dir>/../assets, which is',
+  )
+  console.error('  where the cloudflare adapter puts the files its platform serves.')
   process.exit(2)
 }
 
 const port = Number(portArg)
 const base = `http://127.0.0.1:${port}`
-const entry = path.join('server', 'index.mjs')
-const args = runtime === 'deno' ? ['run', '-A', '--no-prompt', entry] : [entry]
-const child = spawn(runtimeExecutable(runtime), args, {
-  cwd: path.resolve(deploymentDirectory),
-  env: { ...process.env, HOST: '127.0.0.1', PORT: String(port) },
-  stdio: ['ignore', 'pipe', 'pipe'],
-})
+
+/**
+ * The route strategies this deployment can serve.
+ *
+ * An edge target has no ISR — `adapter.supports` says so and the build refuses
+ * such a route — so the fixture it is built from has none either, and the check
+ * for it has nothing to ask. Skipped checks are printed rather than dropped: a
+ * suite that quietly shrinks reads as one that passed.
+ */
+const capabilities = runtime === 'edge' ? new Set(['ssr', 'ssg', 'csr', 'api']) : null
 
 let output = ''
-child.stdout.on('data', (chunk) => (output += chunk))
-child.stderr.on('data', (chunk) => (output += chunk))
+let child = null
+let server = null
+
+if (runtime === 'edge') await startEdgeWorker()
+else startRuntimeProcess()
+
+/** Spawn the emitted standalone server, which is a program on these runtimes. */
+function startRuntimeProcess() {
+  const entry = path.join('server', 'index.mjs')
+  const args = runtime === 'deno' ? ['run', '-A', '--no-prompt', entry] : [entry]
+  child = spawn(runtimeExecutable(runtime), args, {
+    cwd: path.resolve(deploymentDirectory),
+    env: { ...process.env, HOST: '127.0.0.1', PORT: String(port) },
+    stdio: ['ignore', 'pipe', 'pipe'],
+  })
+  child.stdout.on('data', (chunk) => (output += chunk))
+  child.stderr.on('data', (chunk) => (output += chunk))
+}
+
+/**
+ * Put a real HTTP server in front of the emitted worker.
+ *
+ * An edge adapter emits a *module*, not a program: Cloudflare imports it and
+ * calls `fetch`, and serves the asset directory beside it from its own network
+ * before the worker is ever invoked. Nothing here could exercise that half, so
+ * the whole edge lane — the only one whose bundles have no `process` at all —
+ * was checked by reading the files it wrote rather than by asking it anything.
+ * A `NODE_ENV` that stayed `"development"` in every worker's SSR pass survived
+ * that way.
+ *
+ * Static first, then the worker, because that is the order the platform routes
+ * in and the reason a worker never sees a request for a hashed bundle.
+ */
+async function startEdgeWorker() {
+  const workerDir = path.resolve(deploymentDirectory)
+  const assetsDir = path.resolve(assetsArg ?? path.join(workerDir, '..', 'assets'))
+  const module = await import(pathToFileURL(path.join(workerDir, 'index.mjs')).href)
+  const worker = module.default
+  if (typeof worker?.fetch !== 'function') {
+    throw new Error(`${workerDir}/index.mjs does not export a { fetch } worker`)
+  }
+
+  server = createServer(async (request, response) => {
+    try {
+      const url = new URL(request.url, base)
+      const file =
+        request.method === 'GET' || request.method === 'HEAD'
+          ? staticFile(assetsDir, url.pathname)
+          : null
+      if (file) {
+        response.statusCode = 200
+        response.setHeader('content-type', assetContentType(file))
+        for (const [name, value] of assetHeaders(url.pathname)) response.setHeader(name, value)
+        createReadStream(file).pipe(response)
+        return
+      }
+      await answerWithWorker(worker, request, response, url)
+    } catch (error) {
+      output += `${error?.stack ?? error}\n`
+      response.statusCode = 500
+      response.end('worker threw')
+    }
+  })
+  await new Promise((resolve) => server.listen(port, '127.0.0.1', resolve))
+}
+
+/** Turn a Node request into a `Request`, call the worker, and write the answer back. */
+async function answerWithWorker(worker, request, response, url) {
+  const chunks = []
+  for await (const chunk of request) chunks.push(chunk)
+  const body = chunks.length > 0 ? Buffer.concat(chunks) : undefined
+  const answer = await worker.fetch(
+    new Request(url.toString(), {
+      method: request.method,
+      headers: Object.entries(request.headers).flatMap(([key, value]) =>
+        Array.isArray(value) ? value.map((item) => [key, item]) : [[key, String(value)]],
+      ),
+      body,
+      duplex: body ? 'half' : undefined,
+    }),
+    {},
+    { waitUntil() {} },
+  )
+  response.statusCode = answer.status
+  for (const [key, value] of answer.headers.entries()) {
+    if (key !== 'set-cookie') response.setHeader(key, value)
+  }
+  const cookies = answer.headers.getSetCookie?.() ?? []
+  if (cookies.length > 0) response.setHeader('set-cookie', cookies)
+  if (!answer.body) {
+    response.end()
+    return
+  }
+  await pipeline(Readable.fromWeb(answer.body), response)
+}
+
+/**
+ * The `_headers` rules the platform applies to a published file.
+ *
+ * Workers static assets read this file out of the asset directory and attach
+ * what it says; the worker never sees the request. So the cache policy and the
+ * security defaults on an edge deployment are a *file the adapter wrote*, not
+ * headers any code sets, and asserting them means reading that file the way the
+ * platform does. Ignoring it here would have made the asset check pass or fail
+ * on this script instead of on the artifact.
+ *
+ * The format is one path pattern per unindented line, its headers indented
+ * under it, `*` matching any run of characters. Later matches win, which is the
+ * order the adapter writes them in — `/*` first, then the specific ones.
+ */
+function assetHeaders(pathname) {
+  headerRules ??= parseHeaderRules()
+  const matched = new Map()
+  for (const rule of headerRules) {
+    if (!rule.pattern.test(pathname)) continue
+    for (const [name, value] of rule.headers) matched.set(name, value)
+  }
+  return matched
+}
+
+let headerRules = null
+
+function parseHeaderRules() {
+  const file = path.join(
+    path.resolve(assetsArg ?? path.join(deploymentDirectory, '..', 'assets')),
+    '_headers',
+  )
+  if (!existsSync(file)) return []
+  const rules = []
+  for (const line of readFileSync(file, 'utf8').split('\n')) {
+    if (line.trim() === '') continue
+    if (!/^\s/.test(line)) {
+      const escaped = line
+        .trim()
+        .replace(/[.+?^${}()|[\]\\]/g, '\\$&')
+        .replaceAll('*', '.*')
+      rules.push({ pattern: new RegExp(`^${escaped}$`), headers: [] })
+      continue
+    }
+    const separator = line.indexOf(':')
+    if (separator === -1 || rules.length === 0) continue
+    rules
+      .at(-1)
+      .headers.push([
+        line.slice(0, separator).trim().toLowerCase(),
+        line.slice(separator + 1).trim(),
+      ])
+  }
+  return rules
+}
+
+/** The published file a path names, if the asset directory has one. */
+function staticFile(root, pathname) {
+  const decoded = decodeURIComponent(pathname)
+  if (decoded.includes('..')) return null
+  const direct = path.join(root, decoded)
+  for (const candidate of [direct, path.join(direct, 'index.html')]) {
+    if (existsSync(candidate) && statSync(candidate).isFile()) return candidate
+  }
+  return null
+}
+
+function assetContentType(file) {
+  const types = {
+    '.html': 'text/html; charset=utf-8',
+    '.js': 'text/javascript; charset=utf-8',
+    '.mjs': 'text/javascript; charset=utf-8',
+    '.json': 'application/json; charset=utf-8',
+    '.svg': 'image/svg+xml',
+    '.txt': 'text/plain; charset=utf-8',
+    '.css': 'text/css; charset=utf-8',
+  }
+  return types[path.extname(file)] ?? 'application/octet-stream'
+}
 
 /**
  * What the emitted server has to get right, checked against the real runtime.
@@ -57,6 +240,7 @@ const checks = [
   },
   {
     name: 'GET /cached serves an ISR route',
+    requires: 'isr',
     path: '/cached',
     assert: (response, body) => {
       if (response.status !== 200) return `status ${response.status}`
@@ -343,18 +527,58 @@ function rawPost(pathname, headers, body) {
 
 try {
   await waitUntilServing()
+  let ran = 0
   for (const check of checks) {
+    if (check.requires && capabilities && !capabilities.has(check.requires)) {
+      console.log(`[skip] ${runtime} · ${check.name} — this target has no ${check.requires}`)
+      continue
+    }
     const response = await fetch(base + check.path)
     const body = await response.text()
     const failure = check.assert(response, body)
     if (failure) throw new Error(`${runtime}: ${check.name} — ${failure}\n${output}`)
     console.log(`[ok] ${runtime} · ${check.name}`)
+    ran += 1
   }
-  await checkCompression()
+  // Compression belongs to whatever serves the bytes. The standalone servers do
+  // it themselves — `standalone-server.ts` negotiates and encodes — and this is
+  // the only place that proves it, since `fetch` decodes transparently. On an
+  // edge target the platform's asset network answers a static route and
+  // compresses on its own, and the shared handler encodes nothing at all, so
+  // there is no claim here to check rather than a check being skipped for
+  // convenience.
+  if (runtime === 'edge') {
+    console.log(`[skip] ${runtime} · content negotiation — the platform owns it on this target`)
+  } else {
+    await checkCompression()
+    ran += 2
+  }
   await checkRscPayload()
   await checkServerFunction()
-  console.log(`[ok] ${runtime} deployment artifact passed ${checks.length + 4} checks`)
+  console.log(`[ok] ${runtime} deployment artifact passed ${ran + 2} checks`)
 } finally {
+  await stopServing()
+}
+
+// Explicit, and only on the `edge` transport. The other three run the artifact
+// as a child process, so killing it drains everything it held. This one imports
+// the worker into *this* process, and a worker is a module its platform never
+// asks to let a process exit — Cloudflare has no process to exit. Waiting for
+// the loop to drain would be asking the artifact for a property nothing about
+// it promises, and it hung there with every check already reported. A thrown
+// check still exits non-zero, above this line.
+if (runtime === 'edge') process.exit(0)
+
+/** Stop whichever transport was started, without leaving the port held. */
+async function stopServing() {
+  if (server) {
+    // `closeAllConnections` before `close`, because `fetch` keeps its sockets
+    // alive and `close` waits for every one of them. Without it the script
+    // finished its checks and then hung with nothing left to do.
+    server.closeAllConnections()
+    await new Promise((resolve) => server.close(resolve))
+    return
+  }
   child.kill()
   await Promise.race([
     new Promise((resolve) => child.once('exit', resolve)),
@@ -367,7 +591,9 @@ async function waitUntilServing() {
   const deadline = Date.now() + 15_000
   let lastError
   while (Date.now() < deadline) {
-    if (child.exitCode !== null) throw new Error(`server exited with ${child.exitCode}: ${output}`)
+    if (child && child.exitCode !== null) {
+      throw new Error(`server exited with ${child.exitCode}: ${output}`)
+    }
     try {
       const response = await fetch(`${base}/api/health`)
       await response.arrayBuffer()

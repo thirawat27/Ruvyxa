@@ -47,3 +47,8 @@ examples/deploy-smoke/firebase.json
 examples/deploy-smoke/.amplify-hosting/
 examples/deploy-smoke/_headers
 examples/deploy-smoke/_redirects
+
+# The pruned copy `scripts/edge-fixture.mjs` writes so an edge target can be
+# built from an app whose routes it can all serve. Generated per run, never
+# hand-edited, and rebuilt from the fixture beside it.
+examples/*/.edge/
