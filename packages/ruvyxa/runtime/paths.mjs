@@ -1,6 +1,20 @@
 import { existsSync, readFileSync } from 'node:fs'
 import path from 'node:path'
 
+/**
+ * An absolute path in the form a generated `import` statement can carry.
+ *
+ * Here rather than in `compiler.mjs` because `entry-templates.mjs` needs it and
+ * this module is a leaf. When it lived in the compiler, that one import edge
+ * pulled the whole build system into every bundle reaching a template — the
+ * deployed server-components renderer imports `entry-templates.mjs`, so its
+ * function bundle tried to inline `oxc` and failed on a dependency cycle inside
+ * `semver`. A two-line helper is not worth a dependency that large.
+ */
+export function toImportPath(file) {
+  return path.resolve(file).replaceAll('\\', '/')
+}
+
 const RESERVED = /^(?:react(?:-dom)?|ruvyxa)(?:\/|$)|^@ruvyxa\//
 
 /** Load the effective local tsconfig/jsconfig alias model with extends support. */

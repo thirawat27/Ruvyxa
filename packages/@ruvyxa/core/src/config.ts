@@ -6,6 +6,7 @@ export type {
   ContentConfig,
   ContentEngineConfig,
   CorsConfig,
+  EsTarget,
   GetStaticParams,
   ImageConfig,
   I18nConfig,

@@ -21,10 +21,9 @@ file-system route shape:
   `/__ruvyxa/action?path=/tasks&name=<export>`. That is why the page works with JavaScript disabled.
   Do not replace them with click handlers unless you intend to lose that.
 - **`app/tasks/server.ts` is in the client graph**, because `page.tsx` imports it and a page also
-  renders in the browser. Its header explains why it is not marked `server-only` and why making
-  `/tasks` a server-components route would make the scaffolded app undeployable (`RUV2213`). Never
-  put a secret, a token, or a private environment variable in that module — put it in an API route
-  or an action.
+  renders in the browser. Its header explains why it is not marked `server-only`. Never put a
+  secret, a token, or a private environment variable in that module — put it in an API route or an
+  action.
 
 ## Rules
 

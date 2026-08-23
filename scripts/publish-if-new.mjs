@@ -1,7 +1,8 @@
 #!/usr/bin/env node
-import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { spawnSync } from 'node:child_process'
+import { workspacePackageDirs } from './workspace-packages.mjs'
 
 const args = process.argv.slice(2)
 const dryRun = args.includes('--dry-run')
@@ -12,13 +13,7 @@ if (packageNames.length === 0) {
   process.exit(1)
 }
 
-const packageDirs = [
-  'packages/ruvyxa',
-  'packages/create-ruvyxa',
-  ...readdirSync('packages/@ruvyxa')
-    .map((name) => `packages/@ruvyxa/${name}`)
-    .filter((dir) => statSync(dir).isDirectory()),
-]
+const { dirs: packageDirs } = workspacePackageDirs()
 
 const packages = new Map(
   packageDirs.map((dir) => {

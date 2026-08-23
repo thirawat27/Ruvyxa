@@ -38,17 +38,34 @@ work in the repository.
   - `@ruvyxa/auth`, `@ruvyxa/database`, `@ruvyxa/realtime`, `@ruvyxa/testing` — optional
     integrations.
   - `@ruvyxa/adapter-*` — eleven deploy adapters; `@ruvyxa/cli-*` — five prebuilt CLI binaries.
-- `examples/demo/` is the broad integration fixture. It is deliberately **not** deployable: it
-  includes a dynamic server-components route, and every adapter refuses one with `RUV2213`, so
-  `ruvyxa build --adapter <name>` against it always fails.
-- `examples/deploy-smoke/` is the smallest application every self-hosted adapter _can_ deploy, and
-  is what CI builds and then launches on real Node, Bun, and Deno through
+- `examples/demo/` is the broad integration fixture, and it **is** deployable — `RUV2213` is gone,
+  along with the refusal of a dynamic server-components route. A failure there is usually a question
+  about the feature rather than about the emitted server, which is what the smoke fixture is for.
+- `examples/deploy-smoke/` is the smallest application every self-hosted adapter can deploy, and is
+  what CI builds and then launches on real Node, Bun, and Deno through
   `scripts/smoke-runtime-adapter.mjs`. Keep it deployable: a route or feature no adapter supports
-  belongs in the demo instead.
+  belongs in the demo instead. `/rsc` there is a **dynamic** server-components route on purpose — a
+  pre-rendered one proves nothing about a deployment, because its payload is already in the file the
+  adapter copies and no renderer runs.
 - `templates/` holds five scaffolds — `minimal`, `blog`, `crud`, `api`, `plugin`.
-  `templates/minimal/` is what `create-ruvyxa` copies into a new project, and it is mirrored into
-  `packages/create-ruvyxa/template/minimal/`; `scripts/check-template-mirrors.mjs` keeps the two in
-  step and `pnpm release:validate` fails on drift.
+  `templates/minimal/` is what `create-ruvyxa` copies into a new project.
+  `packages/create-ruvyxa/template/` is **generated, not committed**: it is gitignored, and
+  `packages/create-ruvyxa/scripts/prepare-template.mjs` deletes and rebuilds it from `templates/*`
+  on `prepack`, renaming `.gitignore` to `gitignore` because npm strips a packaged dotfile. Edit
+  `templates/`; never that copy, and never add a second mechanism to keep the two in step — this
+  file used to say `scripts/check-template-mirrors.mjs` did, and it does not. That script holds one
+  genuinely hand-maintained pair: `ruvyxa-runner.tsx` in the template and in `examples/demo`, so the
+  fixture exercises what a scaffolded project ships with. `pnpm release:validate` fails on drift
+  there.
+
+  A scaffold's `ruvyxa.config.ts` carries only the decisions a new project has to make. Restating a
+  default there costs twice: it teaches a newcomer that the key is required, and it pins the value,
+  so a release that improves the default never reaches the projects already scaffolded. Four
+  templates each restated fifteen of them. `scripts/pack-smoke.mjs` rewrites the scaffolded config
+  by text replace to add plugins, and a replace that matches nothing returns the source unchanged —
+  so trimming the template left three unused imports and a `tsc` error naming none of it. It asserts
+  its anchor now; anything else that edits a template by string has to do the same.
+
 - `tests/` holds the Node suites, one directory per package under `tests/packages/`, plus the
   cross-language tables in `tests/fixtures/`. Rust tests live beside the crate they cover.
 - `docs/` is the user-facing guide, numbered `01`–`11` and mirrored in `docs/en/` and `docs/th/`.
@@ -410,6 +427,87 @@ before believing it.
   the interleaving is pinned deterministically by
   `a_sibling_that_joined_still_completes_after_the_first_one_finishes` rather than by a thread
   stress test, which passed against the broken code sixty-four times in a row.
+- A deployed build renders its own documents, so it must write everything a document needs. The
+  generated route registry produced markup and nothing else — no bootstrap block, no module
+  preloads, no `<script type="module">` — because both writers of those are Rust
+  (`client_hydration_script` for a live render, `inject_prerender_client_assets` for a baked page).
+  So **no live-rendered page in any deployed build hydrated**: an SSR route never, and an ISR route
+  from its first revalidation, since the revalidation persists what the registry rendered over the
+  file the build had injected into. `documentAssetsPrelude()` in `entry-templates.mjs` is the fourth
+  writer of that block and the JavaScript twin of `safe_json_for_script`, `escape_html`,
+  `hydration_loader_url`, and the head/tail placement. The check that matters is not "is a script
+  present" but "does the live render byte-match the baked file" — they are the same page.
+- One physical package reached by two paths is two modules unless the graph says otherwise. pnpm
+  links a package into every dependent's `node_modules`, and keying the module graph by the walked
+  path put **five React instances** in one server bundle. Ordinary SSR survived it by luck; the
+  server-components SSR pass did not, and every client component in a deployed RSC route threw
+  `Cannot read properties of null (reading 'useRef')`. `moduleGraphKey()` normalizes the key with
+  `realpathSync` and only the key — `filePath` stays the resolved path because client-reference ids
+  are measured from it. The bundle also got 36% smaller.
+- A finished bundle is an artifact, not a source file. The linker numbers its modules `__m0` upward,
+  so inlining one linked bundle into another put a second `const __m1` in the same scope as the
+  first, and the outer module's `const __ext1 = __m1` hit its temporal dead zone — the whole
+  deployment failed to import. `identifierPrefix` exists for the one case that has to inline its own
+  output: the deployed server-components registry is compiled with React external so it shares the
+  renderer's instance, which it can only get by being linked _into_ the module that has it. The
+  `react-server` bundle beside it carries its own React on purpose and stays a sibling file.
+- An extension point is only open as far as its narrowest gate. `ruvyxa build --adapter <package>`
+  has always resolved an arbitrary adapter package, and two things downstream closed it again:
+  `AdapterOutput['platform']` was a union of the eleven platforms in this repository, and
+  project-scope artifacts were checked against an allowlist of eleven hosting paths — so a community
+  adapter could name no platform and write no config file for its own target. The allowlist also
+  read as a security boundary and was not one: an adapter is a function the project installed and
+  named, so it already has `node:fs`. It is a deny-list of the project's own source, manifests, and
+  configured `appDir`/`outDir` now, matched on whole path segments — `apphosting.yaml` is a real
+  file name that a prefix test reads as living inside `app`. When adding an extension point, check
+  every gate its output passes through, not just the one that admits the caller.
+- Rebuilding a `Response` costs more than its headers on Bun. The standalone server compresses
+  text-shaped responses now, and the first version added `Vary: Accept-Encoding` by constructing a
+  new `Response` around `response.body` — which, for a sliced `BunFile`, hands back the whole file
+  rather than the slice. Every byte range over a compressible asset became the entire asset behind a
+  `206`. When nothing about the body changes, set the header in place and return the same response;
+  build a new one only on the path that actually replaces the body. The same rule is why the range
+  and `HEAD` cases are excluded from compression rather than handled inside it.
+- `ruvyxa.config`'s option names live in `packages/ruvyxa/runtime/config-schema.mjs`, and
+  `RuvyxaConfig` in `@ruvyxa/core` is the second description of the same object. Nothing held them
+  together and they drifted: `build.target` was accepted by the renderer, validated by the Rust
+  config, applied by both compilers, and written up in `docs/*/07-configuration.md`, while the
+  public type never declared it — so a project that set it failed `tsc` against a build that
+  honoured the value. `tests/packages/core/config-schema.test.ts` replays the table against a
+  `RuvyxaConfig`-typed literal: a key the type does not declare fails compilation, and a key the
+  literal omits fails the comparison, so neither side can grow a key alone. `react` and `typescript`
+  are the two deliberate exceptions and are named in `DEPRECATED_CONFIG_KEYS` rather than skipped
+  quietly. A new `runtime/*.mjs` also needs its line in `package.json` `files`; `pack-smoke.mjs` now
+  walks the `config-renderer.mjs` graph as well, so forgetting one fails the packaging smoke.
+- A generated handler is held by running it, never by matching its text. Four adapters write their
+  own platform wrapper — vercel, netlify, firebase, cloudflare — and each translates a platform
+  request into a `Request` and a `Response` back. Only vercel's was ever executed; the other three
+  had `assert.match(source, /createHandler/)`, which passes on every bug that class actually has.
+  Changing cloudflare's manifest import to `./manifest.json` left six text assertions green while
+  the Worker could not load at all. `tests/deployed-function.ts` assembles the bundle the way
+  `adapter-runner.mjs` does and imports it; its `echoRouteModules` exists to make three specific
+  wrapper bugs visible — a folded `Set-Cookie`, a body that arrived parsed instead of raw, and
+  binary bytes round-tripped through a string. The runtime CI smoke covers only the standalone
+  server (node, bun, deno, and the railway/render/aws adapters that reuse it), so for these four
+  that suite is the only thing that runs the code.
+- A config key reaches its consumer or it does not exist. `adapterOptions` was declared in
+  `RuvyxaConfig`, validated by `config-renderer.mjs`, written into `build.json`, and documented in
+  the configuration guide — while `adapter-runner.mjs` called the adapter factory as `factory()`
+  with no arguments. Every zero-config deploy selects its adapter by name (`--adapter`,
+  `RUVYXA_ADAPTER`, platform detection), so those deployments could not configure their adapter at
+  all, and the key that existed to fix that was inert. Passing it on is half the answer; the other
+  half is `configuredAdapter`, which refuses `adapterOptions` beside an already-constructed
+  `config.adapter` instead of ignoring it a second way. When adding a config key, follow it to the
+  code that reads it and write the test that fails when the wiring is removed.
+- A setting the deployment environment owns must be read from the environment, and the environment
+  outranks the committed config file. `ruvyxa start` resolved its bind address from
+  `--host`/`--port` and `ruvyxa.config.ts` alone, so it ignored `PORT` and bound `localhost` — while
+  the standalone server the same build generates has always read `PORT`/`HOST` and bound `0.0.0.0`.
+  A container routes to the container's address, not its loopback, so that deployment answered
+  nothing and the platform reported a crash loop with no error in the log. `resolve_bind_address`
+  owns the ordering for `dev`, `start`, and `preview` together, takes the environment through a
+  closure so it is testable, and fails on an unparseable `PORT` rather than falling back to 3000 — a
+  silent fallback surfaces only as a health check that never passes.
 - Documentation changes should describe actual supported behavior, not intended future behavior.
 - If a check was already failing before your work, report it as baseline and do not weaken tests to
   pass.

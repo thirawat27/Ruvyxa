@@ -5,6 +5,7 @@ export type {
   AdapterArtifact,
   AdapterInspection,
   AdapterOutput,
+  AdapterPlatform,
   BuildContext,
   BuiltinMiddlewareConfig,
   CachedStaticParams,

@@ -65,6 +65,8 @@ const RSC_PATH = '/__ruvyxa/rsc'
 /** Defaults matching `ruvyxa build`'s validated `security` block. */
 const DEFAULT_API_BODY_LIMIT = 10 * 1024 * 1024
 const DEFAULT_ACTION_BODY_LIMIT = 1024 * 1024
+/** Largest server-function call body, matching `framework_endpoints.rs`. */
+const RSC_ACTION_BODY_LIMIT = 4 * 1024 * 1024
 const DEFAULT_ACTION_RATE_MAX = 600
 const DEFAULT_ACTION_RATE_WINDOW_SECONDS = 60
 
@@ -368,6 +370,14 @@ export function createHandler(options) {
       if (pathname === ACTION_PATH) {
         return { limit: actionPolicy.actionLimit, message: 'Action payload is too large' }
       }
+      // A server-function call is arguments, not an upload: React encodes them
+      // as text unless one is a file, and a file large enough to matter belongs
+      // in a route handler that can stream it. Same bound as the native host's
+      // `MAX_SERVER_ACTION_BODY`, applied in the same place the other endpoint
+      // bounds are, so a call accepted locally is accepted here.
+      if (pathname === RSC_PATH) {
+        return { limit: RSC_ACTION_BODY_LIMIT, message: 'Server-function call too large' }
+      }
     } catch {
       // `dispatch` owns malformed-path reporting. The generic cap remains a
       // safe ingress bound until it returns the canonical 400 response.
@@ -411,20 +421,11 @@ export function createHandler(options) {
       return handleFlight(request, url)
     }
 
-    // Answered explicitly rather than left to fall through to the router,
-    // where it would 404 and read as a missing route. A deployed function
-    // serves pages through modules built by the ordinary SSR entry — which is
-    // why `adapter-runner.mjs` refuses a server-components route that still
-    // needs a server (RUV2213) — so it has no payload to render. A pre-rendered
-    // one deploys fine and its soft navigation falls back to a document load,
-    // which for a static file is a cache hit.
+    // A soft navigation into a server-components route. The generated registry
+    // carries a payload-only renderer for each one now, so this answers rather
+    // than reporting 501 and making the browser fall back to a document load.
     if (pathname === RSC_PATH) {
-      return textResponse(
-        501,
-        'This deployment serves pages through the ordinary render pipeline and cannot produce a ' +
-          'server-components payload. Pre-rendered routes navigate as documents; serve dynamic ' +
-          'ones with `ruvyxa start`.',
-      )
+      return handleRscPayload(request, url)
     }
 
     const match = matchRoute(pathname)
@@ -584,6 +585,153 @@ export function createHandler(options) {
           vary: 'x-ruvyxa-flight',
         },
       })
+    }
+  }
+
+  /**
+   * The Flight payload for a soft navigation into a server-components route.
+   *
+   * Mirrors `rsc_payload_endpoint` in the native server: the same header gate,
+   * the same content type, and the same `Vary` — the browser router calls one
+   * endpoint and must not be able to tell which host answered.
+   *
+   * This reported 501 in every deployed build until the generated route
+   * registry learned to render through the server-components pipeline, so a
+   * navigation into such a route fell back to a full document load.
+   */
+  async function handleRscPayload(request, url) {
+    if (request.method === 'POST') return handleRscAction(request, url)
+    if (request.method !== 'GET') {
+      return new Response('Method Not Allowed', {
+        status: 405,
+        headers: { allow: 'GET, POST', 'content-type': 'text/plain; charset=utf-8' },
+      })
+    }
+    // The header a cross-origin page cannot set without a preflight. Same gate
+    // the native server applies, and the reason this endpoint needs no CORS
+    // rule of its own.
+    if (request.headers.get('x-ruvyxa-rsc') !== '1') {
+      return textResponse(400, 'Server-components payload requests require the Ruvyxa header')
+    }
+
+    const pathname = canonicalRoutePath(url.searchParams.get('path') ?? '')
+    if (pathname === null) return textResponse(400, 'Payload request has an invalid route')
+    const match = matchRoute(pathname)
+    if (!match || match.route.kind !== 'page') {
+      return textResponse(404, 'Payload route was not found')
+    }
+
+    try {
+      const module = await importPage(match.route.id)
+      if (typeof module.rscPayload !== 'function') {
+        return textResponse(
+          501,
+          'This route does not render through the server-components pipeline',
+        )
+      }
+      const context = requestContext({
+        headerPairs: [...request.headers],
+        method: request.method,
+        url: pathname,
+        params: match.params ?? {},
+      })
+      const payload = await runWithRequestContext(context, () =>
+        module.rscPayload({ path: pathname, params: match.params ?? {} }),
+      )
+      return new Response(payload, {
+        headers: {
+          'content-type': 'text/x-component; charset=utf-8',
+          'cache-control': 'private, no-store',
+          vary: 'x-ruvyxa-rsc',
+        },
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      console.error(`[ruvyxa] Server-components payload ${pathname} failed:`, message)
+      // The text is deliberately not the error's: this endpoint answers a
+      // browser, and the native server does not expose internal render text
+      // either.
+      return textResponse(500, 'Server-components payload render failed')
+    }
+  }
+
+  /**
+   * Run one of a server-components route's server functions.
+   *
+   * `POST` to the same path that serves the route's payload, because it is the
+   * same question asked twice — `GET` renders the route, `POST` runs one of the
+   * functions it exposes — and because a second path would mean a second
+   * reserved route and a second place the same-origin header is checked. This
+   * mirrors `rsc_action_endpoint` in the native server, down to the header names
+   * and the body bound.
+   *
+   * Nothing answered this in a deployed build until now: the endpoint accepted
+   * `GET` and refused everything else with a `405`. Clicking anything wired to a
+   * server function on a deployed server-components page therefore threw
+   * `Connection closed.` in the browser and blanked the document, while the same
+   * page worked under `ruvyxa dev` and `ruvyxa start`. It is the third time a
+   * capability has existed on one of the two request hosts and not the other,
+   * which is what `tests/fixtures/endpoint-contract.json` exists to catch.
+   */
+  async function handleRscAction(request, url) {
+    if (request.headers.get('x-ruvyxa-rsc') !== '1') {
+      return textResponse(400, 'Server-components payload requests require the Ruvyxa header')
+    }
+    const reference = request.headers.get('x-ruvyxa-action') ?? ''
+    if (reference === '') {
+      return textResponse(400, 'Server-function calls must name a reference')
+    }
+
+    const pathname = canonicalRoutePath(url.searchParams.get('path') ?? '')
+    if (pathname === null) return textResponse(400, 'Payload request has an invalid route')
+    const match = matchRoute(pathname)
+    if (!match || match.route.kind !== 'page') {
+      return textResponse(404, 'Payload route was not found')
+    }
+
+    // `encodeReply` produces a string for plain arguments and `FormData` when
+    // one of them is a file or a stream, and `decodeReply` has to be handed the
+    // same kind back. The size bound is applied by `requestBodyPolicy` rather
+    // than here, so it covers both shapes and refuses before the body is read.
+    const contentType = request.headers.get('content-type') ?? 'text/plain;charset=UTF-8'
+    let body
+    try {
+      body = contentType.toLowerCase().startsWith('multipart/form-data')
+        ? await request.formData()
+        : await request.text()
+    } catch {
+      return textResponse(400, 'Server-function call body could not be read')
+    }
+
+    try {
+      const module = await importPage(match.route.id)
+      if (typeof module.rscAction !== 'function') {
+        // Distinguishable from 404 on purpose, and from the payload endpoint's
+        // 501: this route renders through the pipeline but declares no
+        // `'use server'` function, so there was nothing to build a bundle from.
+        return textResponse(501, 'RUV1866 this route declares no server functions')
+      }
+      const context = requestContext({
+        headerPairs: [...request.headers],
+        method: 'POST',
+        url: pathname,
+        params: match.params ?? {},
+      })
+      const payload = await runWithRequestContext(context, () =>
+        module.rscAction({ reference, body }),
+      )
+      recordRevalidations(collectRevalidations(context))
+      return new Response(payload, {
+        headers: {
+          'content-type': 'text/x-component; charset=utf-8',
+          'cache-control': 'private, no-store',
+          vary: 'x-ruvyxa-rsc',
+        },
+      })
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error)
+      console.error(`[ruvyxa] Server function ${reference} on ${pathname} failed:`, message)
+      return textResponse(500, 'Server function failed')
     }
   }
 
@@ -881,6 +1029,24 @@ export function createHandler(options) {
     const forcedClaim = claimForcedRevalidation(pathname)
     const forced = forcedClaim !== null
 
+    // A form whose `action` is a server function and whose page has no
+    // JavaScript posts to the page's own URL: React writes the reference into
+    // hidden fields rather than into an `action` attribute, so there is no
+    // other endpoint for it to reach. `posted_form()` recognises this on the
+    // native host; nothing here did, so the deployed build re-rendered the page
+    // and dropped the submission on the floor — a `200` with the initial state
+    // in it, which is indistinguishable from a form that was never submitted.
+    //
+    // Ahead of the strategy switch, and answering `no-store` whatever the route
+    // says: a `ssg` route serves a file to readers and renders to submitters,
+    // and the answer belongs to one visitor.
+    const formData = await postedFormData(route, request)
+    if (formData) {
+      const rendered = await renderPage(route, pathname, params, request, formData)
+      rendered.headers.set('cache-control', 'no-store')
+      return rendered
+    }
+
     if (strategy === 'csr' || strategy === 'ssg') {
       return servePrerendered(route, request, pathname, params, forced, forcedClaim)
     }
@@ -914,7 +1080,34 @@ export function createHandler(options) {
    * was about to store the HTML — the ISR cache below — must not, because the
    * document belongs to whoever sent this request.
    */
-  async function renderPage(route, pathname, params, request) {
+  /**
+   * The submitted form a server-components route should run an action from.
+   *
+   * `null` for everything else, which is every other request: a different verb,
+   * a route that does not render through the pipeline, an empty body, or a
+   * content type a `<form>` cannot produce. The two encodings are the ones
+   * React asks for when it writes the hidden fields and the one a form that
+   * overrode `encType` sends; both decode to `FormData`. Same test as
+   * `posted_form()` on the native host, in the same order.
+   */
+  async function postedFormData(route, request) {
+    if (route.render?.serverComponents !== true) return null
+    if (!request || request.method !== 'POST') return null
+    const essence = (request.headers.get('content-type') ?? '').split(';')[0].trim().toLowerCase()
+    if (essence !== 'multipart/form-data' && essence !== 'application/x-www-form-urlencoded') {
+      return null
+    }
+    try {
+      const formData = await request.formData()
+      // An empty submission carries no reference, so there is nothing to run
+      // and the ordinary render is the right answer.
+      return [...formData.keys()].length > 0 ? formData : null
+    } catch {
+      return null
+    }
+  }
+
+  async function renderPage(route, pathname, params, request, formData = null) {
     const mod = await importPage(route.id)
     const context = requestContext({
       headerPairs: [...(request?.headers ?? [])],
@@ -923,8 +1116,13 @@ export function createHandler(options) {
       params: params ?? {},
     })
     const rendered = await runWithRequestContext(context, () =>
-      mod.render({ path: pathname, params: params ?? {} }),
+      mod.render({ path: pathname, params: params ?? {}, formData }),
     )
+    // Only for a submission. An ordinary page render calling `revalidatePath()`
+    // is not a thing this host has ever applied, and starting to would change
+    // every route's behaviour; a server function called by the form it was
+    // posted to is exactly the case where the native host applies them.
+    if (formData) recordRevalidations(collectRevalidations(context))
     const html = localizeHtmlDocument(rendered, route.path, pathname, params ?? {}, i18n)
     const response = new Response(html, {
       status: 200,

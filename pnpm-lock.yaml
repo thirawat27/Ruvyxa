@@ -96,6 +96,9 @@ importers:
       react-dom:
         specifier: 19.2.8
         version: 19.2.8(react@19.2.8)
+      react-server-dom-webpack:
+        specifier: 19.2.8
+        version: 19.2.8(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(webpack@5.109.2(postcss@8.5.26))
       ruvyxa:
         specifier: workspace:*
         version: link:../../packages/ruvyxa

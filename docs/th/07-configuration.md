@@ -16,7 +16,7 @@ source type ของมัน
 | `appDir`, `outDir`                                                       | string                                                 | ตำแหน่ง app source และ generated output                                  |
 | `runtime`                                                                | `node \| bun \| deno \| edge \| static`, ปริยาย `node` | นโยบาย runtime/target                                                    |
 | `typedRoutes`                                                            | boolean, ปริยาย `false`                                | สร้าง `.ruvyxa/types/routes.d.ts` เพื่อตรวจ `<Link href>` กับ route จริง |
-| `server.host`, `server.port`                                             | string, number                                         | address ที่ dev/start ฟัง                                                |
+| `server.host`, `server.port`                                             | string, number                                         | address ที่ฟัง ดู [Listening address](#listening-address)                |
 | `build.minify`, `map`, `treeShake`, `manifest`, `warm`, `prerenderCache` | boolean; cache ปริยาย true                             | พฤติกรรม compiler/build artifact                                         |
 | `build.split`                                                            | `single \| route \| manual`                            | นโยบาย bundle splitting                                                  |
 | `build.workers`                                                          | number                                                 | build parallelism ดูหมายเหตุด้านล่าง                                     |
@@ -35,7 +35,7 @@ source type ของมัน
 | i18n          | `locales`, `defaultLocale`, `localeParam`, `detectLocale`, `cookie`                                                              | `locales` และ `defaultLocale` จำเป็นเมื่อกำหนด i18n param ปริยาย `lang`, detection true, cookie `RUVYXA_LOCALE`                                                                                                                                                                                                                                                                                                                                                                                                                                  |
 | Site          | `site.url`, `site.sitemap`, `site.robots`                                                                                        | Sitemap ตั้ง `exclude`, `additionalPaths`, `defaults` และ `entries` ที่เพิ่ม metadata ได้; robots ตั้ง rule, sitemap URL และ host ได้                                                                                                                                                                                                                                                                                                                                                                                                            |
 | Middleware    | `builtin.cors`, `builtin.timing`, `builtin.log`, `builtin.rate`, `builtin.headers`, `workers`, `timeoutMs`                       | CORS มี origins/methods/headers/credentials/maxAge built-in rate ต้องมี `max`, `window`, `key` แบบเลือกได้ plugin worker 1–8; timeout ปริยาย 30,000 ms และสูงสุด 300,000                                                                                                                                                                                                                                                                                                                                                                         |
-| Integration   | `adapter`, `adapterOptions`, `plugins`                                                                                           | ใช้ adapter สำหรับ build output และ array ของ `RuvyxaPlugin` สำหรับ extension                                                                                                                                                                                                                                                                                                                                                                                                                                                                    |
+| Integration   | `adapter`, `adapterOptions`, `plugins`                                                                                           | `adapter` เก็บ adapter ที่สร้างไว้แล้ว ส่วน `adapterOptions` ใช้ตั้งค่า adapter ที่เลือกด้วยชื่อแทน (ดู [Configuring an adapter selected by name](#configuring-an-adapter-selected-by-name)) การตั้งทั้งสองพร้อมกันเป็น error ส่วน `plugins` เป็น array ของ `RuvyxaPlugin`                                                                                                                                                                                                                                                                       |
 
 ## Runtime selection
 
@@ -46,6 +46,57 @@ source type ของมัน
 
 Deno รัน trusted local project configuration และ plugin พร้อม permission ที่ต้องใช้
 (`deno run -A --no-prompt --node-modules-dir=manual`) อย่าเลือกใช้กับ project code ที่ไม่น่าเชื่อถือ
+
+## Listening address
+
+`--host` และ `--port` มีลำดับสูงสุด ตามด้วย environment variable `HOST` และ `PORT` แล้วจึงเป็น
+`server.host` และ `server.port` ใน `ruvyxa.config.ts` และค่าปริยายของแต่ละคำสั่งเป็นลำดับสุดท้าย
+
+ที่ environment ชนะ config file เป็นความตั้งใจ: platform แบบ managed จะฉีด `PORT`
+เข้ามาและคาดหวังให้ process ใช้ค่านั้น ส่วน `ruvyxa.config.ts` ที่ commit ไว้ใน repository
+ไม่มีทางรู้เลขนั้นได้ หาก `PORT` ไม่ใช่ตัวเลขระหว่าง 0 ถึง 65535
+คำสั่งจะล้มเหลวแทนที่จะถอยไปใช้ค่าอื่น เพื่อให้ deployment ที่ตั้งค่าผิดรายงานสาเหตุออกมา
+แทนที่จะเห็นเพียง health check ที่ไม่ผ่าน
+
+| คำสั่ง                           | host ปริยาย | port ปริยาย |
+| -------------------------------- | ----------- | ----------- |
+| `ruvyxa dev`                     | `localhost` | `3000`      |
+| `ruvyxa start`, `ruvyxa preview` | `0.0.0.0`   | `3000`      |
+
+`start` และ `preview` bind ทุก interface เพราะ container จะ route ไปยัง address ของ container ไม่ใช่
+loopback ของมัน — production server ที่ bind `localhost` จึงไม่ตอบอะไรเลยจากภายนอก ค่านี้ตรงกับ
+standalone server ที่ `ruvyxa build` สร้างออกมา ซึ่งอ่าน `PORT` และ `HOST` แบบเดียวกันมาตลอด ใช้
+`--host localhost` หากต้องการรัน production ในเครื่องโดยไม่เปิดออกสู่เครือข่าย
+
+## Configuring an adapter selected by name
+
+adapter เข้าถึง build ได้สองทาง และแต่ละทางรับ option ต่างกัน
+
+สร้างไว้ใน config — option ส่งเข้า factory โดยตรง:
+
+```ts
+import { config } from 'ruvyxa/config'
+import { render } from '@ruvyxa/adapter-render'
+
+export default config({ adapter: render({ serviceName: 'checkout-api' }) })
+```
+
+เลือกด้วยชื่อ — `ruvyxa build --adapter render`, `RUVYXA_ADAPTER=render` หรือการตรวจ platform จาก
+environment ของ hosting กรณีนี้ไม่มี factory call ให้ส่ง option เข้าไป `adapterOptions`
+จึงทำหน้าที่เป็น argument ของ call นั้น:
+
+```ts
+import { config } from 'ruvyxa/config'
+
+export default config({ adapterOptions: { serviceName: 'checkout-api' } })
+```
+
+รูปแบบที่สองคือสิ่งที่ทำให้ zero-config deploy ยังตั้งค่าได้: project ไม่ระบุ adapter, platform
+เลือกให้ และ option ยังมีผลอยู่ adapter จะ validate option เอง ดังนั้นค่าที่ adapter ไม่รับจะทำให้
+build ล้มเหลวพร้อม diagnostic ของ adapter ตัวนั้น
+
+การตั้ง `adapter` และ `adapterOptions` พร้อมกันเป็น error ไม่ใช่กฎลำดับความสำคัญ เพราะ adapter
+ที่สร้างแล้วถือ option ของตัวเองอยู่ และจะไม่มีอะไรอ่าน option ชุดที่สอง
 
 ## Production configuration example
 

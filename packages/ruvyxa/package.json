@@ -22,6 +22,7 @@
     "runtime/client-references.mjs",
     "runtime/compiler.mjs",
     "runtime/config-renderer.mjs",
+    "runtime/config-schema.mjs",
     "runtime/css-runner.mjs",
     "runtime/glob.mjs",
     "runtime/entry-templates.mjs",

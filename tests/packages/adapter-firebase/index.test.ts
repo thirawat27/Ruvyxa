@@ -1,7 +1,43 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
+import { mkdtemp, rm } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+
 import { firebase } from '../../../packages/@ruvyxa/adapter-firebase/dist/index.js'
+import {
+  deployFunction,
+  echoManifest,
+  echoRouteModules,
+  nodeRequest,
+  nodeResponse,
+  ECHO_BINARY_BODY,
+  ECHO_COOKIES,
+} from '../../deployed-function.ts'
+
+/**
+ * A stand-in for `firebase-functions/v2/https`, resolved from the function
+ * directory the way the real dependency is on Cloud Functions.
+ *
+ * `onRequest` hands back the request handler with the deployment options
+ * attached, so the test can both invoke the function and read the options the
+ * adapter declared for it.
+ */
+const firebaseFunctionsStub = {
+  'node_modules/firebase-functions/package.json': JSON.stringify({
+    name: 'firebase-functions',
+    version: '0.0.0-test',
+    type: 'module',
+    exports: { './v2/https': './v2/https.js' },
+  }),
+  'node_modules/firebase-functions/v2/https.js':
+    'export function onRequest(options, handler) {\n' +
+    '  const invoke = (request, response) => handler(request, response)\n' +
+    '  invoke.deploymentOptions = options\n' +
+    '  return invoke\n' +
+    '}\n',
+}
 
 describe('firebase', () => {
   it('emits Hosting, Functions v2, cache, and rewrite artifacts', async () => {
@@ -105,5 +141,110 @@ describe('firebase', () => {
     assert.doesNotThrow(() => firebase({ region: 'europe-west10' }))
     assert.throws(() => firebase({ functionName: 'bad-name' }), /functionName/)
     assert.throws(() => firebase({ region: 'moon-1' }), /region/)
+  })
+
+  // Cloud Functions v2 hands the function an Express-style request whose body
+  // may already be parsed, and takes a Node response back. Every step of that
+  // translation is hand-written here, and none of it was ever executed.
+  it('serves a request through the deployed function bundle', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-firebase-handler-'))
+    try {
+      const output = await firebase({ projectConfig: false }).build({ root, outDir: '.ruvyxa' })
+      const artifact = output.artifacts?.find((item) => item.kind === 'function')
+      assert.ok(artifact && 'handlerSource' in artifact && artifact.handlerSource)
+
+      const bundle = await deployFunction(root, {
+        handlerSource: String(artifact.handlerSource),
+        manifest: echoManifest(),
+        routeModules: echoRouteModules(),
+        extraFiles: firebaseFunctionsStub,
+      })
+
+      // The export name is the configured function name, which is what
+      // firebase.json's rewrite points at. A mismatch deploys a function
+      // nothing routes to.
+      const invoke = bundle.ruvyxaServer as ((
+        request: unknown,
+        response: unknown,
+      ) => Promise<void>) & {
+        deploymentOptions: { region?: string; timeoutSeconds?: number }
+      }
+      assert.equal(typeof invoke, 'function')
+      assert.equal(invoke.deploymentOptions.region, 'us-central1')
+
+      // The raw bytes a platform exposes beside its parsed body win, so a body
+      // the platform parsed is never re-serialized when the original survives.
+      const raw = nodeResponse()
+      await invoke(
+        nodeRequest({
+          url: '/api/echo',
+          method: 'POST',
+          headers: { host: 'example.test', 'content-type': 'text/plain' },
+          rawBody: Buffer.from('streamed-payload'),
+        }),
+        raw.response,
+      )
+      assert.equal(raw.response.statusCode, 200)
+      assert.equal(raw.body().toString(), 'streamed-payload')
+      // Repeated Set-Cookie must reach `setHeader` as an array. Folding them
+      // into one comma-joined string is the classic way to lose the second
+      // cookie, and it satisfies every text assertion.
+      assert.deepEqual(raw.headers.get('set-cookie'), ECHO_COOKIES)
+
+      // With no rawBody, a JSON body the platform parsed is serialized back.
+      const parsed = nodeResponse()
+      await invoke(
+        nodeRequest({
+          url: '/api/echo',
+          method: 'POST',
+          headers: { host: 'example.test', 'content-type': 'application/json' },
+          body: { parsed: true },
+        }),
+        parsed.response,
+      )
+      assert.equal(parsed.body().toString(), '{"parsed":true}')
+
+      // A form body is re-encoded as a form, not as JSON.
+      const form = nodeResponse()
+      await invoke(
+        nodeRequest({
+          url: '/api/echo',
+          method: 'POST',
+          headers: {
+            host: 'example.test',
+            'content-type': 'application/x-www-form-urlencoded',
+          },
+          body: { name: 'ada', role: 'admin' },
+        }),
+        form.response,
+      )
+      assert.equal(form.body().toString(), 'name=ada&role=admin')
+
+      // Bytes that are not valid UTF-8 survive: a wrapper that round-trips the
+      // body through a string replaces them and the check still reads "200".
+      const binary = nodeResponse()
+      await invoke(
+        nodeRequest({
+          url: '/api/echo',
+          method: 'POST',
+          headers: { host: 'example.test', 'x-binary': '1' },
+        }),
+        binary.response,
+      )
+      assert.deepEqual(binary.body(), ECHO_BINARY_BODY)
+
+      const missing = nodeResponse()
+      await invoke(
+        nodeRequest({
+          url: '/api/absent',
+          method: 'POST',
+          headers: { host: 'example.test' },
+        }),
+        missing.response,
+      )
+      assert.equal(missing.response.statusCode, 404)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
   })
 })

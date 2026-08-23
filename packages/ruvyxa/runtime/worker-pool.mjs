@@ -22,7 +22,7 @@
 import { availableParallelism } from 'node:os'
 import { createHash, randomUUID } from 'node:crypto'
 import { once } from 'node:events'
-import { existsSync, readdirSync } from 'node:fs'
+import { existsSync } from 'node:fs'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import path from 'node:path'
@@ -40,7 +40,10 @@ import {
   clientVendorEntrySource,
   clientVendorSpecifier,
   clientVendorUrls,
+  collectLayouts,
+  collectSlots,
   collectSpecials,
+  collectTemplates,
   compileBundleWithMetadata,
   compilerCacheStats,
   hasModuleDirective,
@@ -66,12 +69,13 @@ import {
   rscActionEntrySource,
   rscClientEntrySource,
   rscServerEntrySource,
-  wrapperLevels,
+  wrapperEntryParts,
 } from './entry-templates.mjs'
 import {
   RSC_BROWSER_PACKAGE,
   RSC_SSR_PACKAGE,
   clientRegistrySource,
+  mergeServerReferences,
   serverManifest,
   serverProxyModuleSource,
 } from './client-references.mjs'
@@ -85,7 +89,7 @@ import { collectIntercepts } from './route-intercepts.mjs'
 import { WorkerAdmissionController } from './worker-admission.mjs'
 import { CachePressureController, LruCache } from './cache-budget.mjs'
 import { encodeFlightPayload } from './flight.mjs'
-import { compareCodeUnits, compareEntryKeys } from './order.mjs'
+import { compareEntryKeys } from './order.mjs'
 
 /**
  * Names a page may use to declare its static parameter set, most specific
@@ -1522,133 +1526,6 @@ function dropModuleCacheEntries(cacheKey, outfile) {
   if (version) moduleCache.delete(`${outfile}?${version}`)
 }
 
-// --- Shared Utilities ---
-function collectLayouts(appDir, routeDir) {
-  return collectNested(appDir, routeDir, 'layout.tsx')
-}
-
-/**
- * `template.tsx` files from the app root down to the route, root first.
- *
- * Discovered here rather than carried in the worker request for the same reason
- * layouts are: this host already walks the directory chain, and a second source
- * of truth is a second thing to keep level with
- * `template_chain()` in `crates/ruvyxa_graph/src/lib.rs`.
- */
-function collectTemplates(appDir, routeDir) {
-  return collectNested(appDir, routeDir, 'template.tsx')
-}
-
-/** Files named `fileName` on the path from the app root to `routeDir`, root first. */
-function collectNested(appDir, routeDir, fileName) {
-  const found = []
-  let current = appDir
-
-  pushIfExists(found, path.join(current, fileName))
-
-  const relative = path.relative(appDir, routeDir)
-  if (relative && !relative.startsWith('..')) {
-    for (const segment of relative.split(path.sep)) {
-      if (!segment) continue
-      current = path.join(current, segment)
-      pushIfExists(found, path.join(current, fileName))
-    }
-  }
-
-  return found
-}
-
-/**
- * Import statements and composition levels for a route's layouts and templates.
- *
- * The two interleave by directory, so building the identifiers and the levels
- * together is what keeps `Layout0`/`Template0` pointing at the files
- * `wrapperLevels()` names.
- */
-function wrapperEntryParts(layouts, templates, slots = [], intercepts = []) {
-  const imports = []
-  const layoutNames = []
-  layouts.forEach((file, index) => {
-    imports.push(`import Layout${index} from ${JSON.stringify(toImportPath(file))}`)
-    layoutNames.push(`Layout${index}`)
-  })
-  templates.forEach((file, index) => {
-    imports.push(`import Template${index} from ${JSON.stringify(toImportPath(file))}`)
-  })
-  slots.forEach((slot, index) => {
-    imports.push(`import Slot${index} from ${JSON.stringify(toImportPath(slot.file))}`)
-  })
-  intercepts.forEach((intercept, index) => {
-    imports.push(`import Intercept${index} from ${JSON.stringify(toImportPath(intercept.file))}`)
-  })
-  return {
-    imports,
-    layoutNames,
-    levels: wrapperLevels(layouts, templates, slots, intercepts),
-  }
-}
-
-/**
- * Parallel-route slots in scope for a route, level order then name order.
- *
- * Walks the same directory chain the layout and template chains do, and at each
- * level resolves every `@name` folder against the route's remaining segments: a
- * page inside the slot for that sub-path, else the slot's `default.tsx`, else
- * nothing at all. Mirrors `route_slots()` in `crates/ruvyxa_graph/src/lib.rs`,
- * which decides the same thing for the Rust bundler — a slot one host composes
- * and the other does not is a panel that appears under `ruvyxa build` and
- * vanishes under `ruvyxa dev`.
- */
-function collectSlots(appDir, routeDir) {
-  const relative = path.relative(appDir, routeDir)
-  if (relative.startsWith('..')) return []
-  const segments = relative ? relative.split(path.sep).filter(Boolean) : []
-
-  const slots = []
-  let level = appDir
-  for (let depth = 0; depth <= segments.length; depth += 1) {
-    if (depth > 0) level = path.join(level, segments[depth - 1])
-    const remaining = segments.slice(depth)
-    let names
-    try {
-      names = readdirSync(level, { withFileTypes: true })
-        .filter(
-          (entry) => entry.isDirectory() && entry.name.startsWith('@') && entry.name.length > 1,
-        )
-        .map((entry) => entry.name.slice(1))
-        .sort()
-    } catch {
-      continue
-    }
-    for (const name of names) {
-      const slotDir = path.join(level, `@${name}`)
-      const file = slotPageFor(slotDir, remaining)
-      if (file) slots.push({ level, name, file })
-    }
-  }
-  return slots
-}
-
-/** The file a slot renders for the remaining URL segments, or null. */
-function slotPageFor(slotDir, remaining) {
-  const target = path.join(slotDir, ...remaining)
-  for (const name of ['page.tsx', 'page.jsx', 'page.md', 'page.mdx']) {
-    const candidate = path.join(target, name)
-    if (existsSync(candidate)) return candidate
-  }
-  for (const name of ['default.tsx', 'default.jsx']) {
-    const candidate = path.join(slotDir, name)
-    if (existsSync(candidate)) return candidate
-  }
-  return null
-}
-
-function pushIfExists(collection, file) {
-  if (existsSync(file)) {
-    collection.push(file)
-  }
-}
-
 // Turn a `collectSpecials` result into the import statements and component
 // identifiers a generated entry needs. Absent kinds contribute nothing, so a
 // route with no special files produces exactly the bundle it did before.
@@ -2287,24 +2164,6 @@ async function bundleRscActionModule(projectRoot, appDir, references) {
       ...bundleInputMetadata(cacheKey),
     }
   })
-}
-
-/**
- * Every `'use server'` module a route can reach, from both sides of it.
- *
- * The union is not an optimisation. An actions file imported by the page is in
- * the `react-server` graph and nowhere else; one imported only by a
- * `'use client'` component is in the browser graph and nowhere else, because a
- * client reference's own imports are never walked by the server graph. A call
- * may name either, so a bundle built from one list alone cannot answer half of
- * them.
- */
-function mergeServerReferences(...lists) {
-  const merged = new Map()
-  for (const list of lists) {
-    for (const reference of list ?? []) merged.set(reference.id, reference)
-  }
-  return [...merged.values()].sort((left, right) => compareCodeUnits(left.id, right.id))
 }
 
 /**

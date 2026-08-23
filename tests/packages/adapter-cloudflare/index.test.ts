@@ -1,7 +1,18 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
+import { mkdtemp, rm } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+
 import { cloudflare } from '../../../packages/@ruvyxa/adapter-cloudflare/dist/index.js'
+import {
+  deployFunction,
+  echoManifest,
+  echoRouteModules,
+  ECHO_BINARY_BODY,
+  ECHO_COOKIES,
+} from '../../deployed-function.ts'
 
 describe('cloudflare', () => {
   it('returns edge deployment output with worker function', async () => {
@@ -191,6 +202,74 @@ describe('cloudflare', () => {
         artifact && 'contents' in artifact ? String(artifact.contents) : '{}',
       )
       assert.deepEqual(config.compatibility_flags, ['nodejs_compat'], artifact.path)
+    }
+  })
+
+  // The Worker wrapper is a hand-written translation like every other
+  // platform's, and text assertions pass on the bugs it can actually have.
+  it('serves a request through the deployed worker bundle', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-cloudflare-worker-'))
+    try {
+      const output = await cloudflare({ projectConfig: false }).build({ root, outDir: '.ruvyxa' })
+      const artifact = output.artifacts?.find((item) => item.kind === 'function')
+      assert.ok(artifact && 'handlerSource' in artifact && artifact.handlerSource)
+
+      const bundle = await deployFunction(root, {
+        handlerSource: String(artifact.handlerSource),
+        manifest: echoManifest(),
+        routeModules: echoRouteModules(),
+      })
+      const worker = bundle.default as {
+        fetch(request: Request, env: unknown, ctx: unknown): Promise<Response>
+      }
+      assert.equal(typeof worker?.fetch, 'function', 'a Worker exports a default fetch handler')
+
+      // `ctx` carries waitUntil, which the shared handler hands background work
+      // to. Recorded rather than stubbed away, so a wrapper that forwards the
+      // wrong argument stops being invisible.
+      const deferred: Promise<unknown>[] = []
+      const ctx = {
+        waitUntil(promise: Promise<unknown>) {
+          deferred.push(promise)
+        },
+      }
+
+      const echoed = await worker.fetch(
+        new Request('https://example.test/api/echo', {
+          method: 'POST',
+          headers: { 'content-type': 'text/plain' },
+          body: 'streamed-payload',
+        }),
+        {},
+        ctx,
+      )
+      assert.equal(echoed.status, 200)
+      assert.equal(await echoed.text(), 'streamed-payload')
+      assert.deepEqual(echoed.headers.getSetCookie(), ECHO_COOKIES)
+
+      const binary = await worker.fetch(
+        new Request('https://example.test/api/echo', {
+          method: 'POST',
+          headers: { 'x-binary': '1' },
+        }),
+        {},
+        ctx,
+      )
+      assert.deepEqual(Buffer.from(await binary.arrayBuffer()), ECHO_BINARY_BODY)
+
+      const missing = await worker.fetch(
+        new Request('https://example.test/api/absent', { method: 'POST' }),
+        {},
+        ctx,
+      )
+      assert.equal(missing.status, 404)
+
+      // `waitUntil` exists for ISR revalidation, which this adapter does not
+      // support at all, so an API response that scheduled background work would
+      // be work the platform is never told to wait for.
+      assert.deepEqual(deferred, [], 'an API response schedules no background work')
+    } finally {
+      await rm(root, { recursive: true, force: true })
     }
   })
 })

@@ -18,12 +18,13 @@ import { cache, loader } from 'ruvyxa/server'
  * makes the build fail with `RUV1007` rather than making the problem go away.
  *
  * The clean fix is `export const serverComponents = true` on `/tasks`, which
- * keeps the server half out of the browser entirely. It is deliberately not done
- * here: every deploy adapter refuses a *dynamic* server-components route with
- * `RUV2213`, so a starter that used it would scaffold applications that cannot
- * be deployed. Real data behind a database client — which does not resolve in a
- * browser at all — does not have this shape. Keep secrets out of this module,
- * and put anything that must never reach a browser in an API route or an action.
+ * keeps the server half out of the browser entirely, and it now deploys to any
+ * adapter that runs a server. It is still not done here, for a smaller reason:
+ * a starter should show the plainest shape that works everywhere, including a
+ * static export. Real data behind a database client — which does not resolve in
+ * a browser at all — does not have this shape either. Keep secrets out of this
+ * module, and put anything that must never reach a browser in an API route or
+ * an action.
  */
 export interface Task {
   id: string

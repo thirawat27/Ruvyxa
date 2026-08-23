@@ -109,6 +109,15 @@ proxy — ถ้าไม่ตั้ง Node จะปิด idle connection �
 นอกนั้นปล่อย Bun ไว้ที่ default ของมันเอง ซึ่งไม่ปิด idle connection เลยและไม่ตัด streamed response
 ที่ยาว
 
+**Compression** ทั้งสามตัวบีบอัด response ที่เป็น text — document, JSON, JavaScript, CSS, SVG — ด้วย
+gzip เมื่อ client รับได้ และประกาศ `Vary: Accept-Encoding` บนทุก response ที่บีบอัดได้ เพื่อให้
+shared cache แยก key ได้ถูก ประเภทที่บีบอัดมาแล้ว (รูป วิดีโอ ฟอนต์) ถูกปล่อยไว้เหมือนเดิม
+เช่นเดียวกับ byte range ซึ่ง offset ของมันอ้างถึง byte ที่ยังไม่ถูก encode ตั้ง
+`RUVYXA_COMPRESSION=0` เมื่อมี proxy หรือ CDN ด้านหน้าบีบอัดอยู่แล้ว การบีบอัดซ้ำเปลืองแต่ CPU
+ของเครื่องที่เล็กกว่า การเจรจา encoding ถือว่า `q=0` คือการปฏิเสธ ตรงกับ `ruvyxa start` ส่วน brotli
+ตั้งใจไม่รองรับที่นี่ เพราะไม่มี format ของ `CompressionStream` การรองรับจะทำให้ runtime
+ตัวหนึ่งบีบอัดได้ดีกว่าอีกสองตัว สำหรับ build เดียวกัน
+
 ## Static hosting: publish เฉพาะ static output
 
 ```bash
@@ -165,6 +174,87 @@ firebase deploy --only hosting,functions
 traffic ไป compute resource `default` compute runtime ปริยายคือ `nodejs24.x`; ค่า `nodejs20.x` และ
 `nodejs22.x` เก่ายังคงใช้ได้เมื่อกำหนด compatibility override โดยตรง ตั้ง `projectOutput: false`
 เฉพาะเมื่อ build system อื่นเก็บ deploy artifact
+
+## เขียน adapter สำหรับ platform ที่ Ruvyxa ไม่ได้ ship มาให้
+
+adapter คือ factory ที่คืน object ซึ่งมี `name`, `target`, `supports` (ไม่บังคับ) และ `build(ctx)`
+ที่คืน `AdapterOutput` กลไกนี้ไม่ได้สงวนไว้ให้เฉพาะ adapter ใน repository นี้:
+`ruvyxa build --adapter <package>` จะ resolve `@ruvyxa/adapter-<name>`, `ruvyxa-adapter-<name>`
+และชื่อ package ตรง ๆ ตามลำดับ ดังนั้นแค่ publish `ruvyxa-adapter-flyio` ก็ทำให้ `--adapter flyio`
+ใช้งานได้
+
+```ts
+import type { Adapter, BuildContext } from '@ruvyxa/core'
+import {
+  clientBuildOutput,
+  runtimeBuildPolicy,
+  standaloneServerSource,
+  validateBuildContext,
+} from '@ruvyxa/core'
+
+export interface FlyAdapterOptions {
+  appName?: string
+}
+
+export default function flyio(options: FlyAdapterOptions = {}): Adapter {
+  const appName = options.appName ?? 'ruvyxa-app'
+  return {
+    name: 'flyio',
+    target: 'node',
+    supports: ['ssr', 'ssg', 'csr', 'isr', 'ppr', 'api'],
+    build(ctx: BuildContext) {
+      validateBuildContext(ctx, 'flyioAdapter')
+      return {
+        name: 'flyio',
+        target: 'node',
+        platform: 'flyio',
+        runtime: 'node',
+        entry: `${ctx.outDir}/server/app`,
+        assetsDir: `${ctx.outDir}/assets`,
+        ...clientBuildOutput(ctx),
+        artifacts: [
+          {
+            kind: 'function',
+            path: 'deploy/flyio/server',
+            handlerSource: standaloneServerSource({ runtimePolicy: runtimeBuildPolicy(ctx) }),
+          },
+          { kind: 'static-site', path: 'deploy/flyio/public', optional: true },
+          {
+            kind: 'file',
+            path: 'fly.toml',
+            scope: 'project',
+            skipIfExists: true,
+            contents: `app = "${appName}"\n`,
+          },
+        ],
+      }
+    },
+  }
+}
+```
+
+กติกาสี่ข้อที่ runner บังคับ และอีกหนึ่งข้อที่ควรทำ:
+
+- **รับ options object ก้อนเดียวและใส่ค่า default ให้ทุก field** factory จะถูกเรียกด้วย
+  `config.adapterOptions` เมื่อ adapter ถูกเลือกด้วยชื่อ และด้วย `{}` เมื่อไม่ได้เลือกแบบนั้น option
+  ที่ factory ปฏิเสธจะทำให้ build ล้มเหลวพร้อมข้อความของคุณเอง ซึ่งเป็นที่ที่ validation ควรอยู่
+- **`platform` เป็น string อะไรก็ได้** ชื่อข้างบน autocomplete ได้ ส่วน platform ที่ package
+  นี้ไม่เคยรู้จักก็เขียนลงไปตรง ๆ
+- **`scope: 'project'` เขียน "ข้าง ๆ" project ไม่ใช่ "ทับ"** path ที่ resolve ออกนอก project root
+  หรือทับ source directory, manifest, lockfile, `tsconfig.json`, `ruvyxa.config.*` หรือ
+  `appDir`/`outDir` ที่ตั้งไว้ จะถูกปฏิเสธด้วย `RUV2200` ที่เหลือใน project root เป็นของคุณ —
+  ซึ่งเป็นที่ที่ platform มองหาไฟล์ config ของมัน ใช้คู่กับ `skipIfExists: true` เพื่อให้ไฟล์ที่
+  user เขียนเองชนะเสมอ
+- **ประกาศ `supports` ตามจริง** runner จะ validate ทุก route เทียบกับรายการนี้ และปฏิเสธ route
+  ที่ไม่รองรับพร้อมระบุชื่อ (`RUV2202`) แทนที่จะปล่อยให้ deployment 404 ตอน runtime
+- **ใช้ `standaloneServerSource` ซ้ำ เว้นแต่ platform ต้องการ signature ของตัวเอง** มันคือ server
+  ที่ CI รันจริงบน Node, Bun และ Deno ส่วน wrapper ที่เขียนเองคือโค้ดที่มีแต่ test ของคุณครอบคลุม
+
+ตรวจผลลัพธ์โดยไม่ต้อง deploy:
+
+```bash
+ruvyxa build --adapter ruvyxa-adapter-flyio
+```
 
 ## Provider handoff checklist
 

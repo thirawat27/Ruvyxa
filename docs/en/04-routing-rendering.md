@@ -354,14 +354,19 @@ requires a same-origin header a cross-origin page cannot set without a preflight
 ### Deploying
 
 A pre-rendered server-components route deploys anywhere: its payload is already inside the HTML file
-the adapter copies. A route that still needs a server at request time — `ssr`, `isr`, or
-`export const dynamic = 'force-dynamic'` — is refused at build time with `RUV2213`, because every
-adapter serves pages through a generated module built by the ordinary SSR entry. Serve those routes
-with `ruvyxa start`, or let them pre-render.
+the adapter copies.
 
-A deployed function answers `/__ruvyxa/rsc` with 501 for the same reason, so on those targets a
-navigation into a server-components route falls back to a document load — which, for a pre-rendered
-route, is a static file the CDN already holds.
+A route that still needs a server at request time — `ssr`, `isr`, or
+`export const dynamic = 'force-dynamic'` — deploys to any adapter that runs one. The build compiles
+that route's `react-server` graph and its SSR registry into the function bundle, and the generated
+route module renders through the same server-components pipeline `ruvyxa start` uses: the document
+carries its Flight payload and hydrates. `/__ruvyxa/rsc` answers on those targets too, so a soft
+navigation into the route fetches a payload rather than reloading the document.
+
+The one target that cannot is a static one. A published site has no server left to run the Flight
+pass, so a dynamic server-components route on `--adapter static` is refused with `RUV2202`, naming
+the route and the strategy — the same diagnostic any unsupported strategy gets. Let it pre-render,
+or choose an adapter that runs a server.
 
 ## Route metadata and boundaries
 

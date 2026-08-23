@@ -1,11 +1,12 @@
 import { createHash } from 'node:crypto'
-import { existsSync, readFileSync, realpathSync, statSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from 'node:fs'
 import { mkdir, readFile, writeFile } from 'node:fs/promises'
 import { createRequire, isBuiltin } from 'node:module'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   RSC_CLIENT_RUNTIME_SPECIFIER,
+  RSC_RENDERER_SPECIFIER,
   clientModuleId,
   clientProxyModuleSource,
   serverModuleId,
@@ -13,6 +14,7 @@ import {
   serverRegistrationSource,
 } from './client-references.mjs'
 import { compareCodeUnits } from './order.mjs'
+import { toImportPath } from './paths.mjs'
 import {
   isSafePackageRelativePath,
   legacyEntryCandidates,
@@ -96,22 +98,104 @@ export function compilerCacheStats() {
   }
 }
 
+/**
+ * Which files compose a route, in one place.
+ *
+ * Layouts, templates, and parallel slots were discovered here *and* in
+ * `worker-pool.mjs`, which carried its own `collectLayouts` alongside this one
+ * — two implementations that happened to agree. They are one now because a
+ * third caller arrived: `adapter-runner.mjs` composes a server-components route
+ * for a deployed function, and a route composed one way by `ruvyxa start` and
+ * another by its own build is the failure this file exists to prevent. Each
+ * mirrors a rule in `crates/ruvyxa_graph/src/lib.rs`, named on the function.
+ */
+
+/** `layout.tsx` files from the app root down to the route, root first. */
 export function collectLayouts(appDir, routeDir) {
-  const layouts = []
+  return collectNested(appDir, routeDir, 'layout.tsx')
+}
+
+/**
+ * `template.tsx` files from the app root down to the route, root first.
+ *
+ * Mirrors `template_chain()` in `crates/ruvyxa_graph/src/lib.rs`.
+ */
+export function collectTemplates(appDir, routeDir) {
+  return collectNested(appDir, routeDir, 'template.tsx')
+}
+
+/** Files named `fileName` on the path from the app root to `routeDir`, root first. */
+function collectNested(appDir, routeDir, fileName) {
+  const found = []
   let current = appDir
 
-  pushIfExists(layouts, path.join(current, 'layout.tsx'))
+  pushIfExists(found, path.join(current, fileName))
 
   const relative = path.relative(appDir, routeDir)
   if (relative && !relative.startsWith('..')) {
     for (const segment of relative.split(path.sep)) {
       if (!segment) continue
       current = path.join(current, segment)
-      pushIfExists(layouts, path.join(current, 'layout.tsx'))
+      pushIfExists(found, path.join(current, fileName))
     }
   }
 
-  return layouts
+  return found
+}
+
+/**
+ * Parallel-route slots in scope for a route, level order then name order.
+ *
+ * Walks the same directory chain the layout and template chains do, and at each
+ * level resolves every `@name` folder against the route's remaining segments: a
+ * page inside the slot for that sub-path, else the slot's `default.tsx`, else
+ * nothing at all. Mirrors `route_slots()` in `crates/ruvyxa_graph/src/lib.rs`,
+ * which decides the same thing for the Rust bundler — a slot one host composes
+ * and the other does not is a panel that appears under `ruvyxa build` and
+ * vanishes under `ruvyxa dev`.
+ */
+export function collectSlots(appDir, routeDir) {
+  const relative = path.relative(appDir, routeDir)
+  if (relative.startsWith('..')) return []
+  const segments = relative ? relative.split(path.sep).filter(Boolean) : []
+
+  const slots = []
+  let level = appDir
+  for (let depth = 0; depth <= segments.length; depth += 1) {
+    if (depth > 0) level = path.join(level, segments[depth - 1])
+    const remaining = segments.slice(depth)
+    let names
+    try {
+      names = readdirSync(level, { withFileTypes: true })
+        .filter(
+          (entry) => entry.isDirectory() && entry.name.startsWith('@') && entry.name.length > 1,
+        )
+        .map((entry) => entry.name.slice(1))
+        .sort()
+    } catch {
+      continue
+    }
+    for (const name of names) {
+      const slotDir = path.join(level, `@${name}`)
+      const file = slotPageFor(slotDir, remaining)
+      if (file) slots.push({ level, name, file })
+    }
+  }
+  return slots
+}
+
+/** The file a slot renders for the remaining URL segments, or null. */
+function slotPageFor(slotDir, remaining) {
+  const target = path.join(slotDir, ...remaining)
+  for (const name of ['page.tsx', 'page.jsx', 'page.md', 'page.mdx']) {
+    const candidate = path.join(target, name)
+    if (existsSync(candidate)) return candidate
+  }
+  for (const name of ['default.tsx', 'default.jsx']) {
+    const candidate = path.join(slotDir, name)
+    if (existsSync(candidate)) return candidate
+  }
+  return null
 }
 
 /** File names of the special files a segment may declare, by kind. */
@@ -177,8 +261,34 @@ export async function compileBundleWithMetadata({
   bundlePackages = false,
   bundleAliasDependencies = false,
   external = [],
+  /**
+   * Prefix for the identifiers the linker mints — `__m0`, `__ext0`, and so on.
+   *
+   * Exists because a finished bundle is sometimes inlined into another one: the
+   * deployed server-components registry is compiled with React left external
+   * so it shares the renderer's instance, which means it can only get that
+   * instance by being linked *into* the module that has it. Both bundles number
+   * their modules from zero, so the inner `const __m1` landed in the same scope
+   * as the outer module's `const __ext1 = __m1` and shadowed it — the whole
+   * deployment failed to import with `Cannot access '__m1' before
+   * initialization`, a temporal dead zone nothing in either bundle could see.
+   *
+   * The default is the original spelling, so every existing bundle is
+   * byte-identical; only a caller that inlines its own output passes one.
+   */
+  identifierPrefix = '__',
   aliases = {},
   minify = false,
+  /**
+   * Pin `process.env.NODE_ENV` inside the emitted bundle.
+   *
+   * Only a deployment passes it, and it passes `'production'`: an artifact that
+   * `ruvyxa build` wrote is a production build whichever way the host happens to
+   * start it, and its browser half already says so unconditionally. Left null
+   * the bundle reads the ambient value exactly as before, which is what
+   * `ruvyxa dev` needs — see `nodeEnvPrelude`.
+   */
+  nodeEnv = null,
   sourceMap = true,
   jsxRuntime = process.env.RUVYXA_JSX_RUNTIME ?? 'automatic',
   reactCompiler = false,
@@ -228,6 +338,7 @@ export async function compileBundleWithMetadata({
     externals,
     externalSet,
     externalUrls,
+    identifierPrefix,
     aliases,
     platform,
     bundleTarget: resolvedBundleTarget,
@@ -244,7 +355,13 @@ export async function compileBundleWithMetadata({
     tsconfigPaths,
   })
 
-  const linked = linkModules(modules, externals, { minify, outfile, sourceMap, externalUrls })
+  const linked = linkModules(modules, externals, {
+    minify,
+    outfile,
+    sourceMap,
+    externalUrls,
+    nodeEnv,
+  })
   await mkdir(path.dirname(outfile), { recursive: true })
   await writeIfChanged(outfile, linked.code)
   if (linked.map) {
@@ -406,9 +523,11 @@ async function fingerprintFiles(files) {
   return hash.digest('hex')
 }
 
-export function toImportPath(file) {
-  return path.resolve(file).replaceAll('\\', '/')
-}
+// Re-exported rather than defined here: it lives in `paths.mjs` so a template
+// module can reach it without importing this one, which would pull the whole
+// build system into any bundle that reaches a template. Every existing caller
+// keeps importing it from here.
+export { toImportPath }
 
 export function cacheFileName(parts, extension) {
   const hash = createHash('sha256')
@@ -721,6 +840,9 @@ export function runtimeAliases(runtimeDir = path.dirname(fileURLToPath(import.me
     // lives outside the project, and a server target leaves such a path
     // external — emitting an absolute import no ESM loader accepts.
     [RSC_CLIENT_RUNTIME_SPECIFIER]: path.join(runtimeDir, 'rsc-client-runtime.mjs'),
+    // How a deployed route registry reaches the server-components renderer,
+    // for the same reason and by the same mechanism as the line above.
+    [RSC_RENDERER_SPECIFIER]: path.join(runtimeDir, 'server-components.mjs'),
   }
 }
 
@@ -738,6 +860,7 @@ async function visitModule(context) {
     externals,
     externalSet,
     externalUrls,
+    identifierPrefix,
     aliases,
     platform,
     bundleTarget,
@@ -772,7 +895,7 @@ async function visitModule(context) {
       { source: moduleSource, filePath, root, baseDir, markdownConfig, tsconfigPaths },
       expandImportMetaGlob,
     )
-  const id = `__m${modules.length}`
+  const id = `${identifierPrefix}m${modules.length}`
   const module = {
     id,
     key,
@@ -835,7 +958,7 @@ async function visitModule(context) {
     // 'browser'` means — so asking `shouldBundleResolved` about React would
     // always bundle it, and the URL the caller supplied would never be emitted.
     if (externalUrls?.[specifier]) {
-      registerExternalDependency(module, specifier, null, externals, externalUrls)
+      registerExternalDependency(module, specifier, null, externals, externalUrls, identifierPrefix)
       continue
     }
 
@@ -846,7 +969,7 @@ async function visitModule(context) {
     // despite listing it, and rendered client components against a second copy
     // whose dispatcher was null.
     if (externalSet.has(specifier)) {
-      registerExternalDependency(module, specifier, null, externals, externalUrls)
+      registerExternalDependency(module, specifier, null, externals, externalUrls, identifierPrefix)
       continue
     }
 
@@ -873,7 +996,7 @@ async function visitModule(context) {
       assertSupportedModuleKind(resolved, specifier, filePath || sourcefile)
       const depSource = await readSourceFile(resolved)
       const dep = await visitModule({
-        key: resolved,
+        key: moduleGraphKey(resolved),
         filePath: resolved,
         source: depSource,
         sourcefile,
@@ -884,6 +1007,7 @@ async function visitModule(context) {
         externals,
         externalSet,
         externalUrls,
+        identifierPrefix,
         aliases,
         platform,
         bundleTarget,
@@ -904,7 +1028,14 @@ async function visitModule(context) {
       continue
     }
 
-    registerExternalDependency(module, specifier, resolvedAlias, externals, externalUrls)
+    registerExternalDependency(
+      module,
+      specifier,
+      resolvedAlias,
+      externals,
+      externalUrls,
+      identifierPrefix,
+    )
 
     if (!externalSet.has(specifier) && specifier.startsWith('.')) {
       throw new Error(`RUV1801 cannot resolve '${specifier}' from ${filePath || sourcefile}`)
@@ -1318,7 +1449,14 @@ function shouldBundleResolved(
  * is what keeps a page on a single React while still emitting one bundle per
  * route.
  */
-function registerExternalDependency(module, specifier, resolvedAlias, externals, externalUrls) {
+function registerExternalDependency(
+  module,
+  specifier,
+  resolvedAlias,
+  externals,
+  externalUrls,
+  identifierPrefix = '__',
+) {
   // A shared module keeps its own name as the key. The URL is where the browser
   // loads it from; the key is what the registry stores it under, and both ends
   // of that lookup are generated from this one string.
@@ -1326,7 +1464,7 @@ function registerExternalDependency(module, specifier, resolvedAlias, externals,
   let externalSpecifier = specifier
   if (!shared && resolvedAlias) externalSpecifier = toImportPath(resolvedAlias)
   if (!externals.has(externalSpecifier)) {
-    externals.set(externalSpecifier, `__ext${externals.size}`)
+    externals.set(externalSpecifier, `${identifierPrefix}ext${externals.size}`)
   }
   module.deps.set(specifier, {
     external: true,
@@ -1355,7 +1493,38 @@ function browserNodeEnv() {
   return process.env.NODE_ENV || 'development'
 }
 
-function linkModules(modules, externals, { minify, outfile, sourceMap, externalUrls }) {
+/**
+ * The statement that pins a deployed bundle to the build it was compiled for.
+ *
+ * A deployment is a production artifact by construction: the browser half is
+ * compiled by the Rust bundler, which folds `process.env.NODE_ENV` to
+ * `"production"` and cannot be told otherwise (`linker.rs`). The server half
+ * read the *ambient* value, and nothing in an emitted deployment sets one — so
+ * `node server/index.mjs`, the documented way to run the Node adapter's output,
+ * ran React's development build against a production browser bundle. For an
+ * ordinary page that is a size and speed cost. For a server-components route it
+ * is fatal and silent over HTTP: the document renders, every status code is
+ * 200, and the browser throws `Failed to read a RSC payload created by a
+ * development version of React` and shows a blank page. The development payload
+ * also carries the build machine's absolute source paths — the smoke's document
+ * was 11,420 bytes of which 9,878 were stack frames naming `D:/Ruvyxa/...`.
+ *
+ * Emitted once per bundle, ahead of every module factory, because that is the
+ * earliest point inside a module body — a statement in the *entry* cannot do it,
+ * since ESM evaluates imports before any statement of the importer. Each linked
+ * bundle carries its own copy for the same reason: `route-modules.mjs` imports
+ * the `react-server` bundle, so that sibling's body runs first and has to pin
+ * the value for itself.
+ */
+function nodeEnvPrelude(nodeEnv) {
+  return `if (globalThis.process?.env) globalThis.process.env.NODE_ENV = ${JSON.stringify(nodeEnv)};`
+}
+
+function linkModules(
+  modules,
+  externals,
+  { minify, outfile, sourceMap, externalUrls, nodeEnv = null },
+) {
   const out = []
   const lineMappings = []
   const mapSources = new Map()
@@ -1390,6 +1559,13 @@ function linkModules(modules, externals, { minify, outfile, sourceMap, externalU
   if (reactAlias) push(`const React = ${reactAlias}.default ?? ${reactAlias};`)
   if (externals.size > 0) push('')
 
+  // Ahead of every module factory: React reads `NODE_ENV` while its own factory
+  // runs, and a host that has a real `process` ignores the stand-in below.
+  if (nodeEnv) {
+    push(nodeEnvPrelude(nodeEnv))
+    push('')
+  }
+
   const rewrittenModules = new Map(modules.map((module) => [module.id, rewriteModule(module)]))
 
   for (const module of orderModulesByDependencies(modules)) {
@@ -1403,7 +1579,7 @@ function linkModules(modules, externals, { minify, outfile, sourceMap, externalU
     push(`  const module = { exports: __exports };`)
     push(`  const exports = module.exports;`)
     push(
-      `  const process = globalThis.process ?? { env: { NODE_ENV: ${JSON.stringify(browserNodeEnv())} } };`,
+      `  const process = globalThis.process ?? { env: { NODE_ENV: ${JSON.stringify(nodeEnv ?? browserNodeEnv())} } };`,
     )
     const codeLines = rewritten.code.split('\n')
     for (let index = 0; index < codeLines.length; index++) {
@@ -1553,6 +1729,33 @@ function encodeVlq(value) {
     encoded += base64[digit]
   } while (vlq > 0)
   return encoded
+}
+
+/**
+ * The identity two paths to one file must share.
+ *
+ * pnpm links a package into every dependent's `node_modules`, so one physical
+ * `react` is reachable by several paths — `examples/demo/node_modules/react`,
+ * `packages/@ruvyxa/react/node_modules/react`, the workspace root's — and
+ * keying the graph by the path that was walked put **five** React instances in
+ * one server bundle. Ordinary SSR survived that by luck: its components and
+ * `react-dom/server` happened to land on the same copy. The server-components
+ * SSR pass did not, and every client component in a deployed RSC route threw
+ * `Cannot read properties of null (reading 'useRef')` — React's "more than one
+ * copy" failure, with nothing in the bundle naming the cause.
+ *
+ * Only the graph key is normalized. `filePath` stays the path that was resolved
+ * because client-reference ids are measured from it, and those must keep naming
+ * a module the way the browser graph names it.
+ */
+function moduleGraphKey(resolved) {
+  try {
+    return realpathSync(resolved)
+  } catch {
+    // A path that cannot be resolved is its own identity; the read that
+    // follows reports the real problem.
+    return resolved
+  }
 }
 
 function rewriteModule(module) {

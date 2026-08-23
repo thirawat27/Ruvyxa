@@ -89,6 +89,107 @@ fn platform_detection_reads_hosting_environment() {
 }
 
 #[test]
+fn the_bind_address_prefers_the_flag_then_the_environment_then_the_config() {
+    let env = |vars: &'static [(&'static str, &'static str)]| {
+        move |key: &str| {
+            vars.iter()
+                .find(|(name, _)| *name == key)
+                .map(|(_, value)| value.to_string())
+        }
+    };
+    let args = |host: Option<&str>, port: Option<u16>| ServerArgs {
+        root: PathBuf::from("."),
+        host: host.map(str::to_string),
+        port,
+        runtime: None,
+    };
+    let empty = ProjectConfig::default();
+    let configured: ProjectConfig =
+        serde_json::from_value(json!({ "server": { "host": "127.0.0.1", "port": 4100 } })).unwrap();
+
+    // Nothing set: each command's own default.
+    assert_eq!(
+        resolve_bind_address(&args(None, None), &empty, env(&[]), DEV_DEFAULT_HOST).unwrap(),
+        ("localhost".to_string(), DEFAULT_PORT)
+    );
+    assert_eq!(
+        resolve_bind_address(&args(None, None), &empty, env(&[]), PRODUCTION_DEFAULT_HOST).unwrap(),
+        ("0.0.0.0".to_string(), DEFAULT_PORT)
+    );
+
+    // The platform's variables beat a committed config file, which is the whole
+    // point: a container injects PORT and the repository cannot know it.
+    assert_eq!(
+        resolve_bind_address(
+            &args(None, None),
+            &configured,
+            env(&[("PORT", "8080"), ("HOST", "0.0.0.0")]),
+            DEV_DEFAULT_HOST,
+        )
+        .unwrap(),
+        ("0.0.0.0".to_string(), 8080)
+    );
+
+    // An explicit flag beats the environment.
+    assert_eq!(
+        resolve_bind_address(
+            &args(Some("::1"), Some(5000)),
+            &configured,
+            env(&[("PORT", "8080"), ("HOST", "0.0.0.0")]),
+            PRODUCTION_DEFAULT_HOST,
+        )
+        .unwrap(),
+        ("::1".to_string(), 5000)
+    );
+
+    // With no variable set the config file is still honoured.
+    assert_eq!(
+        resolve_bind_address(&args(None, None), &configured, env(&[]), DEV_DEFAULT_HOST).unwrap(),
+        ("127.0.0.1".to_string(), 4100)
+    );
+
+    // A declared-but-empty variable says nothing, so the config still applies.
+    assert_eq!(
+        resolve_bind_address(
+            &args(None, None),
+            &configured,
+            env(&[("PORT", "  "), ("HOST", "")]),
+            DEV_DEFAULT_HOST,
+        )
+        .unwrap(),
+        ("127.0.0.1".to_string(), 4100)
+    );
+
+    // Whitespace around a real value is the platform's, not the user's.
+    assert_eq!(
+        resolve_bind_address(
+            &args(None, None),
+            &empty,
+            env(&[("PORT", " 8080 "), ("HOST", " 0.0.0.0 ")]),
+            DEV_DEFAULT_HOST,
+        )
+        .unwrap(),
+        ("0.0.0.0".to_string(), 8080)
+    );
+
+    // A PORT that cannot be a port fails loudly rather than binding 3000, which
+    // would show up only as a failing health check with nothing naming why.
+    for invalid in ["abc", "70000", "-1", "8080.0"] {
+        let error = resolve_bind_address(
+            &args(None, None),
+            &empty,
+            |key| (key == "PORT").then(|| invalid.to_string()),
+            PRODUCTION_DEFAULT_HOST,
+        )
+        .expect_err("an unusable PORT must be reported");
+        assert!(
+            format!("{error:#}").contains("PORT must be a number"),
+            "unexpected error for PORT={invalid}: {error:#}"
+        );
+    }
+}
+
+#[test]
 fn prerender_paths_stay_inside_the_build_output() {
     let root = std::path::Path::new("/out/prerender");
 
@@ -520,18 +621,38 @@ fn caps_build_parallelism_to_available_work() {
     assert_eq!(build_parallelism(Some(usize::MAX), 2), 2);
 }
 
+/// The CPU ceiling, which is the half of the decision that has exact answers.
+///
+/// This used to be asserted through `prerender_parallelism`, which also passes
+/// the budget through `prerender_worker_budget` — a memory bound that lowers
+/// the answer on a machine short of RAM, deliberately. So the assertions read
+/// as claims about this code and were partly claims about the host: on this
+/// tree, with 1.2 GB free, `prerender_parallelism(Some(64), 32)` answered 5
+/// where the test demanded 8, and the same test passed seconds later once the
+/// build beside it had exited.
+#[test]
+fn caps_the_configured_prerender_cpu_budget_at_the_worker_pool_limit() {
+    assert_eq!(prerender_cpu_budget(Some(3)), 3);
+    // An explicit configuration may exceed the default cap, up to the worker
+    // pool limit — and no further.
+    assert_eq!(
+        prerender_cpu_budget(Some(64)),
+        MAX_CONFIGURED_PRERENDER_PARALLELISM
+    );
+    assert!(prerender_cpu_budget(None) <= MAX_PRERENDER_PARALLELISM);
+    assert!(prerender_cpu_budget(None) >= 1);
+}
+
+/// What `prerender_parallelism` promises whatever the machine has spare: never
+/// more workers than there is work, and never fewer than one.
 #[test]
 fn caps_default_prerender_parallelism_to_limit_and_available_work() {
     assert_eq!(prerender_parallelism(None, 1), 1);
+    assert_eq!(prerender_parallelism(Some(3), 0), 1);
     assert!(prerender_parallelism(None, 10) <= MAX_PRERENDER_PARALLELISM);
-    assert_eq!(prerender_parallelism(Some(3), 2), 2);
-    // An explicit configuration may exceed the default cap, up to the
-    // worker pool limit.
-    assert_eq!(prerender_parallelism(Some(3), 10), 3);
-    assert_eq!(
-        prerender_parallelism(Some(64), 32),
-        MAX_CONFIGURED_PRERENDER_PARALLELISM
-    );
+    assert!(prerender_parallelism(Some(3), 2) <= 2);
+    assert!(prerender_parallelism(Some(64), 32) <= MAX_CONFIGURED_PRERENDER_PARALLELISM);
+    assert!(prerender_parallelism(Some(64), 32) >= 1);
 }
 
 #[test]

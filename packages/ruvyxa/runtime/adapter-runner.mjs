@@ -7,20 +7,33 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 import {
   cacheFileName,
   compileBundle,
+  compileBundleWithMetadata,
   collectLayouts,
+  collectSlots,
   collectSpecials,
+  collectTemplates,
   runtimeAliases,
   serverPlatform,
   INSTRUMENTATION_FILES,
   toImportPath,
 } from './compiler.mjs'
 import {
+  documentAssetsPrelude,
   metaSourceImports,
   routeBoundaryPrelude,
   routeContextPrelude,
   routeMetaPrelude,
   routeTreeFunction,
+  rscActionEntrySource,
+  rscServerEntrySource,
+  wrapperEntryParts,
 } from './entry-templates.mjs'
+import {
+  RSC_RENDERER_SPECIFIER,
+  RSC_SSR_PACKAGE,
+  clientRegistrySource,
+  mergeServerReferences,
+} from './client-references.mjs'
 import { createPluginRegistry } from './plugin-http.mjs'
 import { HANDLER_RUNTIME_FILES, prerenderRelativePath } from './serverless-handler.mjs'
 import { actionReferenceId } from './action-runtime.mjs'
@@ -53,10 +66,6 @@ const KNOWN_ADAPTER_NAMES = [
   'firebase',
   'aws',
 ]
-// Hosting platforms discover deployment output at fixed project-root
-// locations. Project-scope artifacts are limited to this allowlist so an
-// adapter can enable zero-config deploys without gaining arbitrary write
-// access to the project.
 /**
  * Runtime a target implies when an adapter does not state one.
  *
@@ -65,19 +74,48 @@ const KNOWN_ADAPTER_NAMES = [
  */
 const DEFAULT_RUNTIME_BY_TARGET = { edge: 'edge', static: 'static' }
 
-const PROJECT_ARTIFACT_ALLOWLIST = [
-  '.vercel/output',
-  '.netlify/v1',
-  'netlify.toml',
-  'netlify/functions',
-  'wrangler.jsonc',
-  'railway.json',
-  'render.yaml',
-  'firebase.json',
-  '.amplify-hosting',
-  '_headers',
-  '_redirects',
+/**
+ * Project paths a deploy adapter must never write.
+ *
+ * This used to run the other way — an allowlist of eleven hosting locations,
+ * one per official adapter. Two things were wrong with it. A community adapter
+ * could not emit the file its platform discovers (`fly.toml`, a `Dockerfile`,
+ * `app.yaml`) at all, so every new target meant editing this file; and it read
+ * as a security boundary while not being one, since an adapter is a JavaScript
+ * function the project installed and named in its own config and therefore
+ * already has `node:fs`.
+ *
+ * What the rule genuinely protects is the project's own source and manifests
+ * from a build step whose job is to add deployment configuration beside them.
+ * Written as that, it stays correct for adapters nobody here has seen.
+ *
+ * The configured `appDir` and `outDir` are added at check time rather than
+ * listed, because a project may have moved either.
+ */
+const PROTECTED_PROJECT_ENTRIES = [
+  '.git',
+  'app',
+  'src',
+  'pages',
+  'components',
+  'lib',
+  'plugins',
+  'public',
+  'node_modules',
+  'package.json',
+  'package-lock.json',
+  'pnpm-lock.yaml',
+  'pnpm-workspace.yaml',
+  'yarn.lock',
+  'bun.lock',
+  'bun.lockb',
+  'deno.json',
+  'deno.jsonc',
+  'tsconfig.json',
 ]
+
+/** `ruvyxa.config.*` in every extension the config loader accepts. */
+const PROJECT_CONFIG_FILE = /^ruvyxa\.config\.(?:ts|mts|js|mjs)$/
 
 try {
   // The config is loaded even when `--adapter <name>` names the deploy target,
@@ -90,8 +128,8 @@ try {
   // without threading the config through every artifact kind.
   projectConfig = config
   const adapter = adapterNameArg
-    ? await loadNamedAdapter(projectRoot, adapterNameArg)
-    : config?.adapter
+    ? await loadNamedAdapter(projectRoot, adapterNameArg, adapterOptionsFor(config))
+    : configuredAdapter(config)
   if (adapter === undefined) {
     writeResponse(success(runnerMode === 'inspect' ? null : []))
   } else if (!adapter || typeof adapter !== 'object' || typeof adapter.build !== 'function') {
@@ -177,20 +215,12 @@ async function assertCapabilitiesSupported(adapter, buildDir, config) {
   // its browser bundle would find nothing to hydrate, and the page would go out
   // as static HTML with no error anywhere. A pre-rendered one is fine — the
   // payload is already inside the file the adapter copies.
-  const dynamicServerComponents = (manifest.routes ?? []).filter(
-    (route) => route.render?.serverComponents === true && route.render?.strategy !== 'ssg',
-  )
-  if (dynamicServerComponents.length > 0) {
-    const detail = dynamicServerComponents
-      .map((route) => `${route.path} (${route.render?.strategy})`)
-      .join(', ')
-    throw new Error(
-      `RUV2213 adapter ${adapterName} serves pages through a generated route module that renders ` +
-        `without the server-components pipeline, so ${detail} would be deployed as ordinary SSR ` +
-        'and would never hydrate. Let those routes pre-render, or serve them with `ruvyxa start`.',
-    )
-  }
-
+  // A server-components route is deployable: `materializeRouteModules` compiles
+  // its `react-server` graph and its SSR registry into the function bundle and
+  // renders through `renderServerComponents`, the same pipeline `ruvyxa start`
+  // uses. What it cannot do is render on a target with no server at all — a
+  // static publish has nothing left to run the Flight pass — so the refusal is
+  // now about the adapter rather than about the strategy.
   if (!Array.isArray(adapter.supports)) return
   const supported = new Set(adapter.supports)
 
@@ -320,7 +350,54 @@ function actionFileFor(route) {
   return null
 }
 
-async function loadNamedAdapter(root, name) {
+/**
+ * Return `config.adapterOptions`, validated as an options object.
+ *
+ * The key was declared in `RuvyxaConfig`, validated by `config-renderer.mjs`,
+ * carried into `build.json` by `ruvyxa build`, and documented in the
+ * configuration guide — and then read by nothing, because this file called the
+ * adapter factory with no arguments at all. Every zero-config path is selected
+ * by name (`--adapter`, `RUVYXA_ADAPTER`, or platform detection), so a project
+ * deploying that way had no way to configure its adapter whatsoever.
+ *
+ * Validated here as well as in the renderer because the two see different
+ * objects: the renderer validates the config it projects for the Rust host,
+ * while this file compiles and imports `ruvyxa.config` itself.
+ */
+function adapterOptionsFor(config) {
+  const options = config?.adapterOptions
+  if (options === undefined) return {}
+  if (!options || typeof options !== 'object' || Array.isArray(options)) {
+    throw new Error(
+      `RUV2200 config.adapterOptions must be an object, got ${Array.isArray(options) ? 'array' : typeof options}.`,
+    )
+  }
+  return options
+}
+
+/**
+ * Return `config.adapter`, refusing options that would silently do nothing.
+ *
+ * `adapterOptions` configures an adapter this file constructs by name. When the
+ * config already holds a constructed adapter, its options went to the factory
+ * call that built it, and `adapterOptions` has nothing left to reach — so
+ * setting both is reported rather than ignored. Ignoring it is the failure this
+ * whole key had for its entire existence.
+ */
+function configuredAdapter(config) {
+  const adapter = config?.adapter
+  if (adapter !== undefined && config?.adapterOptions !== undefined) {
+    throw new Error(
+      'RUV2200 config.adapterOptions configures an adapter selected by name (`--adapter`, ' +
+        'RUVYXA_ADAPTER, or platform detection), and config.adapter is already constructed. ' +
+        'Pass the options to the factory instead — `adapter: vercel({ … })` — or drop ' +
+        '`adapter` and let the deploy target select it.',
+    )
+  }
+  return adapter
+}
+
+async function loadNamedAdapter(root, name, options) {
   // A bare short name maps onto the official and community naming
   // conventions; a scoped or slashed name is used verbatim so any published
   // adapter package works with `ruvyxa build --adapter <package>`.
@@ -360,7 +437,9 @@ async function loadNamedAdapter(root, name) {
   if (typeof factory !== 'function') {
     throw new Error(`RUV2203 ${resolvedPackage} does not export an adapter factory.`)
   }
-  return factory()
+  // Every official factory takes one options object and defaults it to `{}`, so
+  // passing one is safe for an adapter that ignores options entirely.
+  return factory(options ?? {})
 }
 
 async function loadConfig(root) {
@@ -498,16 +577,36 @@ function projectArtifactDestination(artifactPath) {
     throw new Error(`RUV2200 adapter artifact path escapes the project root: ${artifactPath}.`)
   }
   const relative = path.relative(projectRoot, destination).split(path.sep).join('/')
-  const allowed = PROJECT_ARTIFACT_ALLOWLIST.some(
-    (prefix) => relative === prefix || relative.startsWith(prefix + '/'),
-  )
-  if (!allowed) {
+  const protectedBy = protectedProjectEntry(relative)
+  if (protectedBy !== null) {
     throw new Error(
-      `RUV2200 project-scope adapter artifact path is not allowlisted: ${artifactPath}. ` +
-        `Allowed locations: ${PROJECT_ARTIFACT_ALLOWLIST.join(', ')}.`,
+      `RUV2200 project-scope adapter artifact would overwrite project source: ${artifactPath} ` +
+        `(protected: ${protectedBy}). A deploy adapter writes platform configuration beside the ` +
+        'project, never over it.',
     )
   }
   return destination
+}
+
+/**
+ * The protected entry `relative` falls under, or null when it is free to write.
+ *
+ * Matches whole path segments only: `apple.json` is not inside `app`, and a
+ * prefix test would have said it was.
+ */
+function protectedProjectEntry(relative) {
+  const owned = [
+    ...PROTECTED_PROJECT_ENTRIES,
+    projectConfig?.appDir ?? 'app',
+    projectConfig?.outDir ?? '.ruvyxa',
+  ]
+  for (const entry of owned) {
+    const normalized = String(entry).replace(/\\/g, '/').replace(/^\.\//, '').replace(/\/+$/, '')
+    if (normalized === '' || normalized === '.') continue
+    if (relative === normalized || relative.startsWith(normalized + '/')) return normalized
+  }
+  const [first] = relative.split('/')
+  return PROJECT_CONFIG_FILE.test(first) ? first : null
 }
 
 function artifactDestination(buildDir, artifactPath) {
@@ -566,7 +665,7 @@ async function materializeFunction(buildDir, destination, handlerSource, target)
   // static import registry. Static imports let edge bundlers discover all
   // modules; compiling here avoids shipping raw TS/TSX and removes the
   // manifest path ambiguity that previously produced server/app/app/....
-  await materializeRouteModules(manifest, destination, target)
+  await materializeRouteModules(manifest, destination, target, buildDir)
 
   // Copy pre-rendered pages for ISR/SSG fallback
   const prerenderDir = path.join(buildDir, 'prerender')
@@ -596,8 +695,207 @@ async function materializeFunction(buildDir, destination, handlerSource, target)
   )
 }
 
-async function materializeRouteModules(manifest, destination, target) {
+/**
+ * Per-route browser assets, read from the client manifest the build wrote.
+ *
+ * The same file `load_prerender_client_assets` reads on the Rust side, and the
+ * same four fields. Baked into the generated registry as literals rather than
+ * shipped and read at request time: they are fixed once the build has run, and
+ * a deployed function that had to load a manifest would need it copied into
+ * every function directory.
+ *
+ * An unreadable or absent manifest yields an empty map, which leaves every
+ * route without a client script — the behaviour every deployed build had until
+ * this existed, so a build that somehow produced no manifest degrades to it
+ * rather than failing.
+ */
+async function loadClientAssets(buildDir) {
+  let manifest
+  try {
+    manifest = JSON.parse(await readFile(path.join(buildDir, 'client', 'manifest.json'), 'utf8'))
+  } catch {
+    return new Map()
+  }
+  const assets = new Map()
+  for (const route of Array.isArray(manifest?.routes) ? manifest.routes : []) {
+    if (typeof route?.path !== 'string' || typeof route?.src !== 'string') continue
+    assets.set(route.path, {
+      src: route.src,
+      preloads: (Array.isArray(route.sharedChunks) ? route.sharedChunks : [])
+        .map((chunk) => chunk?.src)
+        .filter((src) => typeof src === 'string'),
+      hydration: typeof route.hydration === 'string' ? route.hydration : 'load',
+      hydrationLoader: typeof route.hydrationLoader === 'string' ? route.hydrationLoader : null,
+    })
+  }
+  return assets
+}
+
+/**
+ * Build the two `react-server` artifacts one server-components route needs.
+ *
+ * A server-components render is two passes over two module graphs that never
+ * share a React instance, and both graphs are compiled — the server one with
+ * the `react-server` export condition so React's server build is linked into
+ * it, the registry with the ordinary React left external so the SSR pass
+ * renders client components with the instance `react-dom/server` is using.
+ * `worker-pool.mjs` builds the same two for `ruvyxa dev` and `ruvyxa start`;
+ * this builds them once, at build time, for a deployed function.
+ *
+ * Not shared with that host's builders because what differs is the *caching*:
+ * the worker keys them in an LRU with build locks because it rebuilds on every
+ * edit, and a build runs once. What must not differ is the compile options and
+ * the reference base, so both read `rscReferenceBase` and the entry sources
+ * from the modules that own them.
+ *
+ * Returned as absolute paths. The registry compile inlines both, because a
+ * deployed function directory resolves no sibling specifiers.
+ */
+async function buildServerComponentBundles(route, pageFile, index) {
+  const appDir = projectAppDir()
+  const cacheDir = path.join(projectRoot, '.ruvyxa', 'cache', 'rsc-deploy')
+  await mkdir(cacheDir, { recursive: true })
+
+  // The one position the project's own tree and a staged copy share, so a
+  // reference id names the same module in the browser bundle the Rust client
+  // build emitted and in the payload this bundle will produce.
+  const referenceBase = path.dirname(path.resolve(appDir))
+  const routeDir = path.dirname(pageFile)
+  const layouts = collectLayouts(appDir, routeDir)
+  const templates = collectTemplates(appDir, routeDir)
+  const slots = collectSlots(appDir, routeDir)
+  const specials = collectSpecials(appDir, routeDir)
+  const routePath = route.path ?? '/'
+
+  const imports = [`import Page from ${JSON.stringify(toImportPath(pageFile))}`]
+  const {
+    imports: wrapperImports,
+    layoutNames,
+    levels,
+  } = wrapperEntryParts(layouts, templates, slots)
+  imports.push(...wrapperImports)
+  if (specials.loading) {
+    imports.push(`import RouteLoading from ${JSON.stringify(toImportPath(specials.loading))}`)
+  }
+  const { imports: metaImports, metaNames } = metaSourceImports(
+    [...layouts, pageFile].map(toImportPath),
+  )
+  imports.push(...metaImports)
+
+  const serverFile = path.join(cacheDir, `server.${index}.mjs`)
+  const server = await compileBundleWithMetadata({
+    projectRoot,
+    entrySource: rscServerEntrySource({
+      imports,
+      pageName: 'Page',
+      layoutNames,
+      levels,
+      routePath,
+      loadingName: specials.loading ? 'RouteLoading' : null,
+      metaNames,
+    }),
+    sourcefile: 'ruvyxa:rsc-server.tsx',
+    outfile: serverFile,
+    platform: serverPlatform(),
+    bundleTarget: 'react-server',
+    clientReferenceBase: referenceBase,
+    // The one graph in this framework that carries its dependencies. Left
+    // external, `react` would resolve through the host's resolver, which has no
+    // way to know this module wants the `react-server` build.
+    bundlePackages: true,
+    nodeEnv: 'production',
+    aliases: runtimeAliases(runtimeDir),
+  })
+
+  const { imports: registryImports, statements } = clientRegistrySource(server.clientReferences)
+  const registryFile = path.join(cacheDir, `registry.${index}.mjs`)
+  const registry = await compileBundleWithMetadata({
+    projectRoot,
+    entrySource: `${registryImports.join('\n')}\n${statements.join('\n')}\n`,
+    sourcefile: 'ruvyxa:rsc-registry.tsx',
+    outfile: registryFile,
+    platform: serverPlatform(),
+    // Client modules are lifted out of their packages and inlined here, so a
+    // bare specifier left behind would resolve from this directory instead of
+    // from the package that wrote it.
+    bundlePackages: true,
+    // React and the DOM renderer stay external so these components share the
+    // instance `react-dom/server` renders them with. Bundling either would put
+    // two copies in one render and every hook would throw.
+    external: ['react', 'react/jsx-runtime', 'react-dom', 'react-dom/client', 'react-dom/server'],
+    // This bundle is the *client* side of the boundary that happens to run on a
+    // server, so a `'use server'` module it reaches becomes a reference here
+    // exactly as it does in the browser — which is what makes a
+    // `<form action={fn}>` render the same hidden fields in both.
+    serverReferenceClient: RSC_SSR_PACKAGE,
+    clientReferenceBase: referenceBase,
+    aliases: runtimeAliases(runtimeDir),
+    // This bundle is linked *into* the route registry, because that is the only
+    // way it can share the React instance `react-dom/server` renders with —
+    // left as a sibling file it would resolve its own copy and every hook threw
+    // `Cannot read properties of null (reading 'useRef')`. Two bundles that
+    // both number their modules `__m0` upward cannot share a scope, so this one
+    // is numbered differently.
+    identifierPrefix: `__rsc${index}_`,
+    // No `nodeEnv` here, unlike every other bundle a deployment emits: this one
+    // is never loaded on its own, and the registry it is linked into pins the
+    // value before any factory of the combined bundle runs.
+  })
+
+  // Every `'use server'` module either graph can reach. Both lists are needed:
+  // an actions file the page imports is in the `react-server` graph and nowhere
+  // else, and one imported only by a `'use client'` component is in the
+  // registry's graph and nowhere else, because a reference's own imports are
+  // never walked by the server graph.
+  const serverReferences = mergeServerReferences(server.serverReferences, registry.serverReferences)
+  let actionFile = null
+  if (serverReferences.length > 0) {
+    actionFile = path.join(cacheDir, `action.${index}.mjs`)
+    await compileBundleWithMetadata({
+      projectRoot,
+      entrySource: rscActionEntrySource({ references: serverReferences }),
+      sourcefile: 'ruvyxa:rsc-action.tsx',
+      outfile: actionFile,
+      platform: serverPlatform(),
+      // The functions run in the realm the page rendered in, so this bundle
+      // carries the `react-server` build for the same reason the render entry
+      // does: a function that returns an element tree must produce one the
+      // page's own React can serialise.
+      bundleTarget: 'react-server',
+      clientReferenceBase: referenceBase,
+      bundlePackages: true,
+      nodeEnv: 'production',
+      aliases: runtimeAliases(runtimeDir),
+    })
+  }
+
+  return {
+    serverFile,
+    registryFile,
+    actionFile,
+    // The server bundle stays a sibling: it carries its own React — the
+    // `react-server` build, which must *not* be the renderer's instance — so it
+    // has nothing to share and no reason to be re-linked.
+    serverSpecifier: `./rsc/server.${index}.mjs`,
+    // Same reasoning, and it is loaded only when a call arrives, so it is
+    // imported lazily rather than at module scope.
+    actionSpecifier: actionFile ? `./rsc/action.${index}.mjs` : null,
+    references: server.clientReferences,
+  }
+}
+
+/** The project's app directory, honouring a configured `appDir`. */
+function projectAppDir() {
+  const configured = projectConfig?.appDir
+  return path.resolve(
+    projectRoot,
+    typeof configured === 'string' && configured ? configured : 'app',
+  )
+}
+
+async function materializeRouteModules(manifest, destination, target, buildDir) {
   const routes = Array.isArray(manifest.routes) ? manifest.routes : []
+  const clientAssets = await loadClientAssets(buildDir)
   const imports = []
   const definitions = []
   const records = []
@@ -619,6 +917,18 @@ async function materializeRouteModules(manifest, destination, target) {
     definitions.push(routeContextPrelude())
     definitions.push(routeBoundaryPrelude())
     definitions.push(routeMetaPrelude())
+    // The document writers a deployed render needs. Nothing else in the
+    // deployment has them: `client_hydration_script` and
+    // `inject_prerender_client_assets` are both Rust, and this registry is the
+    // renderer once the build is over.
+    definitions.push(documentAssetsPrelude())
+    // Imported only when a route needs it, so an app with no server-components
+    // route ships neither the renderer nor the second React it links.
+    if (routes.some((route) => route?.render?.serverComponents === true)) {
+      imports.push(
+        `import { callRouteServerFunction as __ruvyxaCallServerFunction, renderServerComponents as __ruvyxaRenderServerComponents, runRouteFormAction as __ruvyxaRunFormAction } from ${JSON.stringify(RSC_RENDERER_SPECIFIER)}`,
+      )
+    }
   }
 
   // Server actions live in `action.ts` beside the page they belong to and are
@@ -627,6 +937,9 @@ async function materializeRouteModules(manifest, destination, target) {
   // registry had no way to reach them and `POST /__ruvyxa/action` could only
   // ever 404 in a deployed build.
   const actionRecords = []
+
+  /** Pre-linked server-components artifacts to copy beside the registry. */
+  const serverComponentBundles = []
 
   for (const [index, route] of routes.entries()) {
     if (!route || typeof route !== 'object' || typeof route.id !== 'string') {
@@ -645,11 +958,30 @@ async function materializeRouteModules(manifest, destination, target) {
       continue
     }
 
-    const page = pageRouteDefinition(routeFile, index, route.path ?? '/', route.cache === true)
+    const serverComponents =
+      route.render?.serverComponents === true
+        ? await buildServerComponentBundles(route, routeFile, index)
+        : null
+    if (serverComponents) serverComponentBundles.push(serverComponents)
+
+    const page = pageRouteDefinition(routeFile, index, route.path ?? '/', route.cache === true, {
+      // Null for a route that ships no bundle (`export const hydrate = false`)
+      // and for one the client build skipped: the render then adds no script,
+      // which is what those routes want.
+      clientAssets: clientAssets.get(route.path ?? '/') ?? null,
+      serverComponents,
+    })
     imports.push(...page.imports)
     definitions.push(page.definition)
     records.push(
-      `  ${JSON.stringify(route.id)}: { render: ${page.renderName}, flight: ${page.flightName} }`,
+      `  ${JSON.stringify(route.id)}: { render: ${page.renderName}, flight: ${page.flightName}` +
+        // Present only on a server-components route; the handler reads its
+        // absence as "this route has no payload to give".
+        `${page.payloadName ? `, rscPayload: ${page.payloadName}` : ''}` +
+        // Present only when that route also declares server functions, which
+        // is what tells the handler a `POST` to `/__ruvyxa/rsc` can be answered
+        // rather than refused.
+        `${page.actionName ? `, rscAction: ${page.actionName}` : ''} }`,
     )
 
     const actionFile = actionFileFor(route)
@@ -696,7 +1028,22 @@ export async function loadActionModule(routeId) {
 ${pluginPart.definition}
 `
   const outfile = path.join(destination, 'route-modules.mjs')
-  await compileRegistry(buildSource(plugins), outfile, target)
+  // Every pre-linked server-components artifact, copied beside the registry and
+  // named external so the compile emits the import rather than inlining it.
+  const rscExternals = []
+  for (const bundle of serverComponentBundles) {
+    for (const [specifier, source] of [
+      [bundle.serverSpecifier, bundle.serverFile],
+      [bundle.actionSpecifier, bundle.actionFile],
+    ]) {
+      if (!specifier) continue
+      const destinationFile = path.join(destination, ...specifier.slice('./'.length).split('/'))
+      await mkdir(path.dirname(destinationFile), { recursive: true })
+      await cp(source, destinationFile)
+      rscExternals.push(specifier)
+    }
+  }
+  await compileRegistry(buildSource(plugins), outfile, target, rscExternals)
 
   // An edge runtime has no Node built-ins. Compiling the plugin registry into
   // the bundle brings `ruvyxa.config` and everything it imports with it, and
@@ -709,7 +1056,7 @@ ${pluginPart.definition}
     const builtins = nodeBuiltinImports(await readFile(outfile, 'utf8'))
     if (builtins.length > 0) {
       const withoutPlugins = { imports: [], definition: 'export const applyPluginHttp = undefined' }
-      await compileRegistry(buildSource(withoutPlugins), outfile, target)
+      await compileRegistry(buildSource(withoutPlugins), outfile, target, rscExternals)
       if (nodeBuiltinImports(await readFile(outfile, 'utf8')).length === 0) {
         throw new Error(
           `RUV2206 the project's plugins reach ${builtins.join(', ')}, which an edge runtime ` +
@@ -720,7 +1067,7 @@ ${pluginPart.definition}
       // The routes themselves reach a Node built-in. That is the pre-existing
       // shape of this project against an edge target and is not this step's to
       // decide, so the registry is restored with its plugins intact.
-      await compileRegistry(buildSource(plugins), outfile, target)
+      await compileRegistry(buildSource(plugins), outfile, target, rscExternals)
     }
   }
 }
@@ -734,7 +1081,7 @@ function nodeBuiltinImports(source) {
   return [...specifiers].sort()
 }
 
-async function compileRegistry(entrySource, outfile, target) {
+async function compileRegistry(entrySource, outfile, target, external = []) {
   await compileBundle({
     projectRoot,
     entrySource,
@@ -748,6 +1095,16 @@ async function compileRegistry(entrySource, outfile, target) {
     // stated here because the default derives `client` from `platform`.
     bundleTarget: target === 'edge' ? 'edge' : 'ssr',
     bundlePackages: true,
+    // Every bundle in a deployment states the build it is, rather than reading
+    // one off whatever started the process. See `nodeEnvPrelude` in the
+    // compiler: an edge artifact has no `process` at all and took the
+    // stand-in's literal, and a Node artifact took whatever the host exported —
+    // which for the documented `node server/index.mjs` is nothing.
+    nodeEnv: 'production',
+    // Sibling artifacts this registry imports rather than contains. See the
+    // server-components branch of `pageRouteDefinition` for why a finished
+    // bundle must not be re-linked into this one.
+    external,
     reactCompiler: projectConfig?.reactCompiler === true,
     aliases: runtimeAliases(runtimeDir),
   })
@@ -861,13 +1218,21 @@ function resolveProjectRouteFile(routeFile, routeId) {
   return resolved
 }
 
-function pageRouteDefinition(pageFile, routeIndex, routePath = '/', cacheFlight = false) {
-  const appDir = path.join(projectRoot, 'app')
+function pageRouteDefinition(
+  pageFile,
+  routeIndex,
+  routePath = '/',
+  cacheFlight = false,
+  { clientAssets = null, serverComponents = null } = {},
+) {
+  const appDir = projectAppDir()
   const layouts = collectLayouts(appDir, path.dirname(pageFile))
   const specials = collectSpecials(appDir, path.dirname(pageFile))
   const pageName = `Page${routeIndex}`
   const moduleName = `PageModule${routeIndex}`
   const renderName = `renderPage${routeIndex}`
+  const payloadName = `rscPayload${routeIndex}`
+  const actionName = `rscAction${routeIndex}`
   const treeName = `buildTree${routeIndex}`
   const flightName = cacheFlight
     ? `flightPage${routeIndex}`
@@ -905,6 +1270,111 @@ function pageRouteDefinition(pageFile, routeIndex, routePath = '/', cacheFlight 
   const cachedFlight = cacheFlight
     ? `\n\nasync function ${flightName}(ctx) {\n  return __ruvyxaCache(__ruvyxaFlightKey(${JSON.stringify(routePath)}, ctx)).get(() => ${moduleName}.flight(ctx))\n}`
     : ''
+
+  // The route's browser assets, frozen into the module. `null` means the route
+  // ships no bundle, and the render then adds no script rather than a broken
+  // one — the same branch `client_hydration_script` takes for `hydrate = false`.
+  const assetsLiteral = clientAssets === null ? 'null' : JSON.stringify(clientAssets)
+
+  // A server-components route renders through the other pipeline entirely: the
+  // page and its layouts never reach `react-dom/server` here, so none of the
+  // tree, boundary, or meta machinery below applies to it. Its meta is resolved
+  // inside the `react-server` graph by `rscServerEntrySource`.
+  if (serverComponents) {
+    const serverAlias = `RscServer${routeIndex}`
+    return {
+      // Sibling specifiers, left external by `compileRegistry` and copied into
+      // the function directory beside this module. Not inlined: both files are
+      // *already linked* bundles, and the linker names its modules `__m<N>`
+      // from zero, so inlining one into another puts a second `const __m1` in
+      // the same scope as the first. The inner declaration shadows the outer,
+      // and the outer module's own reference to it hits the temporal dead zone
+      // — the whole deployment failed to import with
+      // `Cannot access '__m1' before initialization`. A finished bundle is an
+      // artifact, not a source file; it gets copied, not re-linked.
+      imports: [
+        `import * as ${serverAlias} from ${JSON.stringify(serverComponents.serverSpecifier)}`,
+        // Inlined, not a sibling: evaluating the registry is what registers
+        // each client module under the id the payload names, and it has to do
+        // that with the React instance this module renders with.
+        `import ${JSON.stringify(toImportPath(serverComponents.registryFile))}`,
+      ],
+      definition: `async function ${renderName}(ctx) {${
+        serverComponents.actionSpecifier
+          ? `
+  // A \`<form action={fn}>\` submitted without JavaScript posts here, with the
+  // reference in hidden fields. The action runs before the render so the page
+  // can show what it returned, which is what \`useActionState\` replays.
+  const posted = ctx?.formData
+    ? await __ruvyxaRunFormAction({ actionModule: await ${actionName}Bundle(), formData: ctx.formData })
+    : null`
+          : ''
+      }
+  const rendered = await __ruvyxaRenderServerComponents({
+    serverModule: ${serverAlias},
+    references: ${JSON.stringify(serverComponents.references)},
+    ctx,
+    routePath: ${JSON.stringify(routePath)},${
+      serverComponents.actionSpecifier ? `\n    formState: posted?.formState ?? null,` : ''
+    }
+  })
+  const assets = __ruvyxaDocumentAssets(${assetsLiteral}, ctx, rendered.payload)
+  const withAssets = __ruvyxaInjectDocumentAssets(rendered.html, assets.head, assets.tail)
+  return withAssets.trimStart().toLowerCase().startsWith("<!doctype") ? withAssets : "<!doctype html>" + withAssets
+}
+
+/**
+ * The payload alone, for a soft navigation into this route.
+ *
+ * The browser already has a document, so rendering markup it would throw away
+ * would run every server component for nothing — \`html: false\` skips the SSR
+ * pass and the registry lookups it needs.
+ */
+async function ${payloadName}(ctx) {
+  const rendered = await __ruvyxaRenderServerComponents({
+    serverModule: ${serverAlias},
+    references: ${JSON.stringify(serverComponents.references)},
+    ctx,
+    routePath: ${JSON.stringify(routePath)},
+    html: false,
+  })
+  return rendered.payload
+}${
+        serverComponents.actionSpecifier
+          ? `
+
+/**
+ * This route's server functions, loaded on the first call that needs them.
+ *
+ * Imported lazily rather than at module scope: the bundle carries its own React
+ * — the \`react-server\` build again — and most requests to a deployment
+ * neither call a server function nor submit a form.
+ */
+let ${actionName}Module = null
+async function ${actionName}Bundle() {
+  ${actionName}Module ??= await import(${JSON.stringify(serverComponents.actionSpecifier)})
+  return ${actionName}Module
+}
+
+/** Run one of this route's server functions, for a \`POST /__ruvyxa/rsc\`. */
+async function ${actionName}({ reference, body }) {
+  return await __ruvyxaCallServerFunction({
+    actionModule: await ${actionName}Bundle(),
+    references: ${JSON.stringify(serverComponents.references)},
+    reference,
+    body,
+  })
+}`
+          : ''
+      }`,
+      renderName,
+      payloadName,
+      actionName: serverComponents.actionSpecifier ? actionName : null,
+      moduleName,
+      flightName: 'null',
+    }
+  }
+
   const definition = `${routeTreeFunction({
     name: treeName,
     pageName,
@@ -926,10 +1396,12 @@ async function ${renderName}(ctx) {
   } else {
     throw new Error("React server renderer is unavailable")
   }
-  const document = html.trimStart().toLowerCase().startsWith("<!doctype") ? html : "<!doctype html>" + html
+  const assets = __ruvyxaDocumentAssets(${assetsLiteral}, ctx, null)
+  const withAssets = __ruvyxaInjectDocumentAssets(html, assets.head, assets.tail)
+  const document = withAssets.trimStart().toLowerCase().startsWith("<!doctype") ? withAssets : "<!doctype html>" + withAssets
   return __ruvyxaApplyLang(document, __ruvyxaResolveMeta([${metaNames.join(', ')}], ctx).lang)
 }${cachedFlight}`
-  return { imports, definition, renderName, moduleName, flightName }
+  return { imports, definition, renderName, payloadName: null, moduleName, flightName }
 }
 
 /**

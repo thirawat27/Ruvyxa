@@ -194,6 +194,109 @@ function isAssetPath(pathname) {
   return ASSET_EXTENSIONS.has(segment.slice(dot + 1).toLowerCase());
 }
 
+// Response compression, which \`ruvyxa dev\` and \`ruvyxa start\` have always
+// done and this server did not: a self-hosted deployment sent every document
+// and every client bundle uncompressed, so the production build shipped more
+// bytes than the development server it was compared against. Set
+// RUVYXA_COMPRESSION=0 where a proxy already compresses — doing it twice only
+// spends CPU on the smaller machine.
+const COMPRESSION_ENABLED = !['0', 'false', 'off'].includes(
+  String(process.env.RUVYXA_COMPRESSION ?? '').trim().toLowerCase(),
+);
+
+// Below this, the framing and the CPU cost are worth more than the bytes saved.
+// Set well under one MTU rather than at the 1 KB that reads like a round
+// number: a 400-byte document that gzips to 250 still arrives in one packet
+// either way, but a 900-byte one that does not compress costs a second.
+// A streamed response has no declared length and is always compressed, because
+// there is nothing to compare — that is the SSR and PPR case, where the payload
+// is a document and worth encoding anyway.
+const COMPRESSION_MIN_BYTES = 256;
+
+// Text-shaped payloads only. Images, video, fonts, and archives are already
+// compressed, and running them through gzip reliably makes them larger.
+const COMPRESSIBLE_TYPE =
+  /^(?:text\\/|application\\/(?:json|javascript|xml|xhtml\\+xml|rss\\+xml|atom\\+xml|ld\\+json|manifest\\+json|wasm)|image\\/svg\\+xml)/i;
+
+function isCompressibleType(contentType) {
+  return COMPRESSION_ENABLED && COMPRESSIBLE_TYPE.test(String(contentType ?? ''));
+}
+
+/**
+ * The content codings a client will accept, as a token to q-value map.
+ *
+ * \`q=0\` is a refusal rather than a low preference, which is the part a naive
+ * \`includes('gzip')\` gets wrong — and the Rust server already reads it that
+ * way, so answering differently would make one project compress under
+ * \`ruvyxa start\` and not under its own build.
+ */
+function acceptedEncodings(header) {
+  const accepted = new Map();
+  for (const part of String(header ?? '').split(',')) {
+    const [rawToken, ...parameters] = part.split(';');
+    const token = rawToken.trim().toLowerCase();
+    if (token === '') continue;
+    const quality = parameters
+      .map((parameter) => parameter.trim().toLowerCase())
+      .find((parameter) => parameter.startsWith('q='));
+    accepted.set(token, quality === undefined ? 1 : Number(quality.slice(2)));
+  }
+  return accepted;
+}
+
+/**
+ * Which coding to answer with, or null for none.
+ *
+ * Only what \`CompressionStream\` and \`node:zlib\` both implement, so the three
+ * transports cannot diverge on the answer. Brotli is deliberately absent: it
+ * has no \`CompressionStream\` format, so supporting it here would mean one
+ * runtime compressing better than the other two for the same build.
+ */
+function negotiateEncoding(acceptEncoding) {
+  const accepted = acceptedEncodings(acceptEncoding);
+  for (const candidate of ['gzip', 'deflate']) {
+    const quality = accepted.get(candidate) ?? accepted.get('*');
+    if (quality !== undefined && !(quality === 0)) return candidate;
+  }
+  return null;
+}
+
+/**
+ * The coding this response should be sent with, or null to send it as-is.
+ *
+ * One decision for all three transports and both paths — the static file and
+ * the handler's response. A 206 and a 416 are excluded because their byte
+ * offsets describe the identity encoding, and a body compressed underneath a
+ * \`content-range\` is a range the client cannot use.
+ */
+function compressionFor(status, method, contentType, contentLength, contentEncoding, accept) {
+  if (method === 'HEAD') return null;
+  if (status === 204 || status === 206 || status === 304 || status === 416) return null;
+  // Already encoded by whatever produced it; re-encoding would mislabel it.
+  if (contentEncoding) return null;
+  if (!isCompressibleType(contentType)) return null;
+  if (contentLength !== null && contentLength < COMPRESSION_MIN_BYTES) return null;
+  return negotiateEncoding(accept);
+}
+
+/** \`content-length\` as a number, or null when it is absent or unusable. */
+function contentLengthOf(value) {
+  const length = Number(value);
+  return value === null || value === undefined || !Number.isFinite(length) ? null : length;
+}
+
+/** Add \`accept-encoding\` to a \`Vary\` value without dropping what is there. */
+function withVaryAcceptEncoding(existing) {
+  const present = String(existing ?? '')
+    .split(',')
+    .map((token) => token.trim())
+    .filter((token) => token !== '');
+  if (present.some((token) => token.toLowerCase() === 'accept-encoding')) {
+    return present.join(', ');
+  }
+  return [...present, 'accept-encoding'].join(', ');
+}
+
 /**
  * Everything about serving one file except the sending of it.
  *
@@ -243,6 +346,10 @@ function staticResponsePlan(pathname, rangeHeader) {
   if (partial) {
     headers['content-range'] = 'bytes ' + partial.start + '-' + partial.end + '/' + hit.size;
   }
+  // Declared for every compressible file, not only the ones actually
+  // compressed: a shared cache that stored one client's gzip copy without this
+  // would hand it to the next client whether or not that client can read it.
+  if (isCompressibleType(contentType)) headers['vary'] = 'accept-encoding';
   return { status: partial ? 206 : 200, headers, file: hit.file, partial };
 }
 
@@ -290,6 +397,27 @@ function nodeTransport(): string {
   return `import { createServer } from 'node:http';
 import { createReadStream } from 'node:fs';
 import { Readable } from 'node:stream';
+import { createDeflate, createGzip } from 'node:zlib';
+
+/**
+ * Insert the encoder for \`encoding\` between a body and the response.
+ *
+ * \`node:zlib\` rather than \`CompressionStream\` because this transport already
+ * works in Node streams end to end, and routing a file through a web stream and
+ * back is the copying the transport exists to avoid. The *decision* is shared
+ * with the other two runtimes; only the mechanism is Node's.
+ */
+function pipeCompressed(source, res, encoding) {
+  const encoder = encoding === 'gzip' ? createGzip() : createDeflate();
+  // The status and headers are already committed, so a failure here can only
+  // become a dropped connection — but unhandled it would take the process down.
+  encoder.on('error', (error) => {
+    console.error('[ruvyxa] response compression failed:', error);
+    res.destroy(error);
+  });
+  res.on('close', () => encoder.destroy());
+  source.pipe(encoder).pipe(res);
+}
 
 function applySecurityHeaders(res) {
   if (!SECURITY_HEADERS_ENABLED) return;
@@ -313,6 +441,20 @@ function sendStatic(req, res, plan) {
     res.end();
     return;
   }
+  const encoding = compressionFor(
+    plan.status,
+    req.method,
+    plan.headers['content-type'],
+    contentLengthOf(plan.headers['content-length']),
+    null,
+    req.headers['accept-encoding'],
+  );
+  if (encoding) {
+    res.setHeader('content-encoding', encoding);
+    // The declared length describes the file, not the encoded bytes, and
+    // nothing knows the encoded length until the stream ends.
+    res.removeHeader('content-length');
+  }
   const file = plan.partial
     ? createReadStream(plan.file, { start: plan.partial.start, end: plan.partial.end })
     : createReadStream(plan.file);
@@ -328,6 +470,10 @@ function sendStatic(req, res, plan) {
   // A client that disconnects mid-download leaves the read stream open;
   // closing it stops the file descriptor and the buffering behind it.
   res.on('close', () => file.destroy());
+  if (encoding) {
+    pipeCompressed(file, res, encoding);
+    return;
+  }
   file.pipe(res);
 }
 
@@ -391,6 +537,24 @@ const server = createServer(async (req, res) => {
     }
     const setCookies = response.headers.getSetCookie?.() ?? [];
     if (setCookies.length > 0) res.setHeader('set-cookie', setCookies);
+
+    const contentType = response.headers.get('content-type');
+    if (isCompressibleType(contentType)) {
+      res.setHeader('vary', withVaryAcceptEncoding(res.getHeader('vary')));
+    }
+    const encoding = compressionFor(
+      response.status,
+      req.method,
+      contentType,
+      contentLengthOf(response.headers.get('content-length')),
+      response.headers.get('content-encoding'),
+      req.headers['accept-encoding'],
+    );
+    if (encoding) {
+      res.setHeader('content-encoding', encoding);
+      res.removeHeader('content-length');
+    }
+
     if (req.method === 'HEAD') {
       res.end();
       return;
@@ -414,6 +578,10 @@ const server = createServer(async (req, res) => {
     // Stop producing for a client that has gone away: without this an aborted
     // navigation keeps the render running to completion for nobody.
     res.on('close', () => body.destroy());
+    if (encoding) {
+      pipeCompressed(body, res, encoding);
+      return;
+    }
     body.pipe(res);
   } catch (error) {
     if (error instanceof RequestBodyTooLarge) {
@@ -653,6 +821,74 @@ async function staticResponse(plan, method) {
   return new Response(await openStaticBody(plan), { status: plan.status, headers });
 }
 
+/**
+ * Encode the body if the client asked for it and the payload is worth it.
+ *
+ * \`CompressionStream\` rather than a runtime-specific encoder: it is the one
+ * API both Bun and Deno implement, so these two transports cannot disagree
+ * about what a build compresses. The response is rebuilt because its headers
+ * may be immutable — every middleware redirect is a \`Response.redirect\` —
+ * and \`Set-Cookie\` is carried across by hand for the reason
+ * \`withSecurityHeaders\` gives just above.
+ */
+function withCompression(response, request) {
+  const contentType = response.headers.get('content-type');
+  if (!isCompressibleType(contentType)) return response;
+
+  const encoding = compressionFor(
+    response.status,
+    request.method,
+    contentType,
+    contentLengthOf(response.headers.get('content-length')),
+    response.headers.get('content-encoding'),
+    request.headers.get('accept-encoding'),
+  );
+
+  if (!encoding) {
+    // Nothing to encode, so the headers are adjusted in place rather than by
+    // rebuilding. Constructing a new Response means taking \`response.body\`,
+    // and on Bun taking the stream of a sliced \`BunFile\` yields the whole
+    // file — which turned every range over a compressible asset into the
+    // entire asset behind a 206.
+    try {
+      response.headers.set('vary', withVaryAcceptEncoding(response.headers.get('vary')));
+    } catch {
+      // \`Response.redirect\` has immutable headers, and it carries no body for
+      // a cache to key wrong, so there is nothing lost by leaving it alone.
+    }
+    return response;
+  }
+
+  const setCookies = response.headers.getSetCookie?.() ?? [];
+  const headers = new Headers(response.headers);
+  headers.set('vary', withVaryAcceptEncoding(response.headers.get('vary')));
+  if (setCookies.length > 0) {
+    headers.delete('set-cookie');
+    for (const cookie of setCookies) headers.append('set-cookie', cookie);
+  }
+
+  // Negotiation said yes but there is nothing to encode. The rebuild still
+  // happens so \`Vary\` survives; \`content-encoding\` does not, because an
+  // empty body is not gzip.
+  if (response.body === null) {
+    return new Response(null, {
+      status: response.status,
+      statusText: response.statusText,
+      headers,
+    });
+  }
+
+  headers.set('content-encoding', encoding);
+  // Nothing knows the encoded length until the stream ends, and a stale one
+  // would truncate the response at the client.
+  headers.delete('content-length');
+  return new Response(response.body.pipeThrough(new CompressionStream(encoding)), {
+    status: response.status,
+    statusText: response.statusText,
+    headers,
+  });
+}
+
 async function handleRequest(request) {
   const url = new URL(request.url);
   const isRead = request.method === 'GET' || request.method === 'HEAD';
@@ -663,7 +899,7 @@ async function handleRequest(request) {
   // paths fall back to static files.
   if (isRead && (url.pathname.startsWith('/__ruvyxa/') || isAssetPath(url.pathname))) {
     const plan = staticResponsePlan(url.pathname, request.headers.get('range'));
-    if (plan) return await staticResponse(plan, request.method);
+    if (plan) return withCompression(await staticResponse(plan, request.method), request);
   }
 
   // The request goes to the handler as it arrived. Its own \`security.apiLimit\`
@@ -674,9 +910,9 @@ async function handleRequest(request) {
 
   if (response.status === 404 && isRead) {
     const plan = staticResponsePlan(url.pathname, request.headers.get('range'));
-    if (plan) return await staticResponse(plan, request.method);
+    if (plan) return withCompression(await staticResponse(plan, request.method), request);
   }
-  return withSecurityHeaders(response);
+  return withCompression(withSecurityHeaders(response), request);
 }
 
 ${listen}

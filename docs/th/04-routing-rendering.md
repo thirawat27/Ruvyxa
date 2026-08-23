@@ -353,14 +353,19 @@ preflight
 ### การ deploy
 
 route ที่ใช้ server components และถูก pre-render แล้ว deploy ได้ทุกที่: payload อยู่ในไฟล์ HTML ที่
-adapter คัดลอกไปอยู่แล้ว ส่วน route ที่ยังต้องใช้เซิร์ฟเวอร์ตอนมี request — `ssr`, `isr`, หรือ
-`export const dynamic = 'force-dynamic'` — จะถูกปฏิเสธตอน build ด้วย `RUV2213` เพราะ adapter ทุกตัว
-เสิร์ฟหน้าเว็บผ่าน module ที่สร้างจาก entry แบบ SSR ปกติ ให้เสิร์ฟ route เหล่านั้นด้วย
-`ruvyxa start` หรือปล่อยให้มัน pre-render
+adapter คัดลอกไปอยู่แล้ว
 
-ฟังก์ชันที่ deploy แล้วจะตอบ `/__ruvyxa/rsc` ด้วย 501 ด้วยเหตุผลเดียวกัน ดังนั้นบนเป้าหมายเหล่านั้น
-การนำทางเข้า route ที่ใช้ server components จะย้อนไปโหลดเอกสารแทน ซึ่งสำหรับ route ที่ pre-render
-ไว้แล้วก็คือไฟล์สแตติกที่ CDN ถืออยู่แล้ว
+ส่วน route ที่ยังต้องใช้เซิร์ฟเวอร์ตอนมี request — `ssr`, `isr` หรือ
+`export const dynamic = 'force-dynamic'` — deploy ได้กับ adapter ทุกตัวที่รันเซิร์ฟเวอร์ build
+จะคอมไพล์ `react-server` graph ของ route นั้นพร้อม SSR registry เข้าไปใน function bundle และ route
+module ที่สร้างขึ้นจะ render ผ่าน pipeline ของ server components ตัวเดียวกับที่ `ruvyxa start` ใช้
+เอกสารที่ได้จึงมี Flight payload ติดไปด้วยและ hydrate ได้ `/__ruvyxa/rsc` ก็ตอบบนเป้าหมายเหล่านั้น
+เช่นกัน การนำทางแบบ soft เข้า route นั้นจึงดึง payload แทนการโหลดเอกสารใหม่
+
+เป้าหมายเดียวที่ทำไม่ได้คือ static เพราะไซต์ที่ publish แล้วไม่มีเซิร์ฟเวอร์เหลือให้รัน Flight pass
+route แบบ dynamic ที่ใช้ server components บน `--adapter static` จึงถูกปฏิเสธด้วย `RUV2202`
+พร้อมระบุชื่อ route และ strategy — เป็น diagnostic เดียวกับ strategy อื่นที่ adapter ไม่รองรับ
+ให้ปล่อยให้ pre-render หรือเลือก adapter ที่รันเซิร์ฟเวอร์
 
 ## Route metadata และ boundary
 

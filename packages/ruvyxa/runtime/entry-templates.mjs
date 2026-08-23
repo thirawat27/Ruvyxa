@@ -27,7 +27,12 @@ import {
   clientReferenceRuntimePath,
   clientRegistrySource,
 } from './client-references.mjs'
+import { toImportPath } from './paths.mjs'
 import { compareCodeUnits } from './order.mjs'
+// One owner for the element id the Flight payload rides in. `rsc-client-runtime`
+// is the reader and declares no import-time side effect, so importing it here
+// costs nothing — unlike `rsc-client-install.mjs`, which exists to hold one.
+import { RSC_PAYLOAD_ELEMENT_ID } from './rsc-client-runtime.mjs'
 
 /** Global that carries the shared routing React context across bundles. */
 export const ROUTE_CONTEXT_GLOBAL = '__RUVYXA_ROUTE_CONTEXT__'
@@ -73,6 +78,145 @@ export function clientBootstrapPrelude() {
 globalThis.__RUVYXA_ROUTE_PARAMS__ ??= __ruvyxaBootstrap.params
 globalThis.__RUVYXA_REQUEST_PATH__ ??= __ruvyxaBootstrap.path
 if (__ruvyxaBootstrap.csr === true) globalThis.__RUVYXA_CSR__ = true`
+}
+
+/**
+ * Emit the document writers a deployed function needs, as source text.
+ *
+ * Every other writer of these blocks is Rust: `client_hydration_script` for a
+ * live render, `inject_prerender_client_assets` for a page baked at build time,
+ * and the CSR shell. A deployed build has none of them — the generated route
+ * registry *is* the renderer — and it wrote no bootstrap block, no module
+ * preloads, and no `<script type="module">` at all. So an SSR route in any
+ * deployed function served markup that could never hydrate, and an ISR route
+ * lost its script the first time it revalidated, because the revalidation
+ * persists what this renderer produced over the file the build had injected.
+ *
+ * Returned as source rather than imported, for the reason `flightCachePrelude`
+ * is: this text is emitted into a function artifact that resolves no bare or
+ * sibling specifiers.
+ *
+ * The escaping is the JavaScript twin of `safe_json_for_script` and
+ * `escape_html` in `crates/ruvyxa_dev_server/src/html_document.rs`. Held to
+ * `tests/fixtures/client-bootstrap-conformance.json` — the element id, the key
+ * names, and the two escaping cases — by a test that renders a real deployed
+ * route module, because the values come from the request URL and a writer that
+ * forgot would let a path segment close the script element.
+ */
+export function documentAssetsPrelude() {
+  return `const __RUVYXA_BOOTSTRAP_ID = ${JSON.stringify(BOOTSTRAP_ELEMENT_ID)}
+const __RUVYXA_RSC_ID = ${JSON.stringify(RSC_PAYLOAD_ELEMENT_ID)}
+
+/** Twin of \`safe_json_for_script\`: make JSON safe as raw text inside a script. */
+function __ruvyxaSafeJson(json) {
+  return json
+    .split("<").join("\\\\u003c")
+    .split(">").join("\\\\u003e")
+    .split("&").join("\\\\u0026")
+    .split("\\u2028").join("\\\\u2028")
+    .split("\\u2029").join("\\\\u2029")
+}
+
+/** Twin of \`escape_html\`, for an attribute value. */
+function __ruvyxaEscapeAttribute(value) {
+  return String(value)
+    .split("&").join("&amp;")
+    .split("<").join("&lt;")
+    .split(">").join("&gt;")
+    .split('"').join("&quot;")
+}
+
+/** Twin of \`url_encode_component\`. */
+function __ruvyxaEncodeComponent(value) {
+  let out = ""
+  for (const byte of new TextEncoder().encode(String(value))) {
+    const char = String.fromCharCode(byte)
+    if (/[A-Za-z0-9\\-_.~/]/.test(char)) out += char
+    else out += "%" + byte.toString(16).toUpperCase().padStart(2, "0")
+  }
+  return out
+}
+
+/** Twin of \`bootstrap_data_block\`. */
+function __ruvyxaBootstrapBlock(params, requestPath, csr) {
+  const payload = { params: params ?? {}, path: requestPath }
+  // Absent rather than false, so a hydrating page carries no CSR marker.
+  if (csr === true) payload.csr = true
+  let json
+  try {
+    json = JSON.stringify(payload)
+  } catch {
+    // An unserializable params object loses the parameters, not the document.
+    json = JSON.stringify({ params: {}, path: requestPath })
+  }
+  return '<script type="application/json" id="' + __RUVYXA_BOOTSTRAP_ID + '">' +
+    __ruvyxaSafeJson(json) + "</script>"
+}
+
+/**
+ * Twin of \`rsc_payload_block\`.
+ *
+ * Quoted as a JSON *string* rather than embedded raw: a Flight payload is a
+ * line-delimited format, not a JSON document, and quoting is what lets the same
+ * escaping every other block uses apply to it unchanged.
+ */
+function __ruvyxaRscPayloadBlock(payload) {
+  return '<script type="application/json" id="' + __RUVYXA_RSC_ID + '">' +
+    __ruvyxaSafeJson(JSON.stringify(String(payload))) + "</script>"
+}
+
+/** Twin of \`hydration_loader_url\`. */
+function __ruvyxaHydrationSrc(assets) {
+  if (!assets.hydrationLoader) return assets.src
+  if (assets.hydration !== "idle" && assets.hydration !== "visible") return assets.src
+  return assets.hydrationLoader + "?strategy=" + assets.hydration +
+    "&src=" + __ruvyxaEncodeComponent(assets.src)
+}
+
+/**
+ * Insert head and tail fragments into a rendered document.
+ *
+ * Twin of the placement in \`inject_prerender_client_assets\`: preloads before
+ * \`</head>\`, scripts before \`</body>\`, and a whole document synthesised when
+ * the render produced a fragment rather than a page. The \`head_end <= body_end\`
+ * guard is the same one — a document whose \`</head>\` follows its last
+ * \`</body>\` is not one this can splice.
+ */
+function __ruvyxaInjectDocumentAssets(html, head, tail) {
+  if (head === "" && tail === "") return html
+  const lower = html.toLowerCase()
+  const headEnd = lower.indexOf("</head>")
+  const bodyEnd = lower.lastIndexOf("</body>")
+  if (headEnd !== -1 && bodyEnd !== -1 && headEnd <= bodyEnd) {
+    return html.slice(0, headEnd) + head + html.slice(headEnd, bodyEnd) + tail + html.slice(bodyEnd)
+  }
+  return "<!doctype html><html><head>" + head + "</head><body>" + html + tail + "</body></html>"
+}
+
+/**
+ * The head and tail one page render contributes.
+ *
+ * \`assets\` is null for a route that ships no client bundle —
+ * \`export const hydrate = false\` — and then only an RSC payload can be added.
+ * A deferred bundle emits no preloads, matching both Rust writers: preloading a
+ * module the page has decided not to run yet is work for nothing.
+ */
+function __ruvyxaDocumentAssets(assets, ctx, rscPayload) {
+  if (!assets) {
+    return { head: "", tail: rscPayload == null ? "" : __ruvyxaRscPayloadBlock(rscPayload) }
+  }
+  const deferred = assets.hydration === "idle" || assets.hydration === "visible"
+  const head = deferred
+    ? ""
+    : (assets.preloads ?? [])
+        .map((src) => '<link rel="modulepreload" href="' + __ruvyxaEscapeAttribute(src) + '">')
+        .join("")
+  const payload = rscPayload == null ? "" : __ruvyxaRscPayloadBlock(rscPayload)
+  const bootstrap = __ruvyxaBootstrapBlock(ctx.params ?? {}, ctx.path, false)
+  const script =
+    '<script type="module" src="' + __ruvyxaEscapeAttribute(__ruvyxaHydrationSrc(assets)) + '"></script>'
+  return { head, tail: payload + bootstrap + script }
+}`
 }
 
 /** Global registry of route pattern to tree factory, read by the client router. */
@@ -492,6 +636,42 @@ export function wrapperLevels(layoutPaths = [], templatePaths = [], slots = [], 
  * @param {string[]} layoutNames Layout identifiers, root-to-leaf.
  * @param {{ layout: string|null, template: string|null }[]} levels
  */
+/**
+ * Import statements and composition levels for a route's layouts and templates.
+ *
+ * The two interleave by directory, so building the identifiers and the levels
+ * together is what keeps `Layout0`/`Template0` pointing at the files
+ * `wrapperLevels()` names.
+ *
+ * Lives here rather than in `worker-pool.mjs` because two hosts now generate a
+ * server-components entry — that worker for `ruvyxa dev`/`start`, and
+ * `adapter-runner.mjs` for a deployed function — and a route whose wrappers are
+ * numbered differently in the two produces a document that hydrates against a
+ * tree it does not match.
+ */
+export function wrapperEntryParts(layouts, templates, slots = [], intercepts = []) {
+  const imports = []
+  const layoutNames = []
+  layouts.forEach((file, index) => {
+    imports.push(`import Layout${index} from ${JSON.stringify(toImportPath(file))}`)
+    layoutNames.push(`Layout${index}`)
+  })
+  templates.forEach((file, index) => {
+    imports.push(`import Template${index} from ${JSON.stringify(toImportPath(file))}`)
+  })
+  slots.forEach((slot, index) => {
+    imports.push(`import Slot${index} from ${JSON.stringify(toImportPath(slot.file))}`)
+  })
+  intercepts.forEach((intercept, index) => {
+    imports.push(`import Intercept${index} from ${JSON.stringify(toImportPath(intercept.file))}`)
+  })
+  return {
+    imports,
+    layoutNames,
+    levels: wrapperLevels(layouts, templates, slots, intercepts),
+  }
+}
+
 export function wrapperLoop(layoutNames, levels = []) {
   if (levels.every((level) => !level.template && !hasSlots(level) && !hasIntercepts(level))) {
     return `  for (const Layout of [${layoutNames.join(', ')}].reverse()) {

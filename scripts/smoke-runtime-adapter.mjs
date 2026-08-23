@@ -1,6 +1,8 @@
 import { spawn } from 'node:child_process'
 import { existsSync } from 'node:fs'
+import { request as httpRequest } from 'node:http'
 import path from 'node:path'
+import { gunzipSync } from 'node:zlib'
 
 const [runtime, deploymentDirectory, portArg] = process.argv.slice(2)
 if (!['node', 'bun', 'deno'].includes(runtime) || !deploymentDirectory || !portArg) {
@@ -90,7 +92,254 @@ const checks = [
     path: '/definitely-not-a-route',
     assert: (response) => (response.status === 404 ? null : `status ${response.status}`),
   },
+  {
+    // A dynamic server-components route is rendered by the emitted function on
+    // every request, so this is the only check that exercises what a deployed
+    // build has to carry for itself: the `react-server` graph, the SSR registry
+    // that turns a reference id back into a component, and the payload data
+    // block the browser hydrates from. Every adapter refused this shape with
+    // RUV2213 until the route registry learned to render through that pipeline.
+    name: 'GET /rsc renders a dynamic server-components route',
+    path: '/rsc',
+    assert: (response, body) => {
+      if (response.status !== 200) return `status ${response.status}`
+      if (!body.includes('data-smoke="rsc"')) return `body ${body.slice(0, 160)}`
+      // The client component rendered by the SSR pass. A deployed bundle with
+      // more than one React copy throws on its first hook instead, and the
+      // route answers 500 rather than markup.
+      if (!body.includes('data-smoke="counter"')) return 'the client component did not render'
+      // `count <!-- -->0`: React writes a comment between adjacent text nodes
+      // so hydration can tell where one ends and the next begins. Its presence
+      // is itself evidence the markup came from a real render rather than a
+      // string, so the check tolerates it rather than stripping it.
+      if (!/count (?:<!-- -->)?0/.test(body)) {
+        return 'the client component rendered without its state'
+      }
+      // Without the payload the document is server-rendered and inert: the
+      // browser entry declines to hydrate nothing.
+      if (!body.includes('id="__ruvyxa-rsc"')) return 'no Flight payload in the document'
+      if (!body.includes('id="__ruvyxa-bootstrap"')) return 'no bootstrap block in the document'
+      if (!/<script type="module" src="\/__ruvyxa\/client\//.test(body)) {
+        return 'no browser bundle in the document'
+      }
+      // The half no other assertion here can reach: which *build* of React
+      // rendered the payload. A deployment's browser bundle is compiled by the
+      // Rust bundler, which folds `NODE_ENV` to production and cannot be told
+      // otherwise, while the server half used to read the ambient value — and
+      // nothing in an emitted deployment sets one, so `node server/index.mjs`
+      // served a development payload to a production client. Every check above
+      // passed: the status was 200, the markup was right, the payload was
+      // there. The browser threw `Failed to read a RSC payload created by a
+      // development version of React` and showed a blank page.
+      //
+      // Development React writes an owner stack for every row, each frame
+      // naming an absolute path on the build machine, which makes the leak
+      // itself the cheapest thing to assert — and worth asserting on its own,
+      // since a document that publishes `file:///…/home/<user>/…` to every
+      // visitor is a defect whatever React does with it.
+      if (body.includes('file:///')) {
+        return 'the payload carries development React debug frames (build paths leaked)'
+      }
+      return null
+    },
+  },
 ]
+
+/**
+ * Compression, checked over a raw request rather than through `fetch`.
+ *
+ * `fetch` decodes the body and removes `content-encoding` before anything here
+ * can look at it, so a server that compressed nothing would be indistinguishable
+ * from one that compressed everything — which is how this went unnoticed while
+ * the standalone server sent every document and bundle uncompressed.
+ */
+async function checkCompression() {
+  const compressed = await rawGet('/', { 'accept-encoding': 'gzip' })
+  if (compressed.headers['content-encoding'] !== 'gzip') {
+    throw new Error(
+      `${runtime}: a gzip-capable client got content-encoding ` +
+        `${compressed.headers['content-encoding']}\n${output}`,
+    )
+  }
+  const vary = String(compressed.headers['vary'] ?? '').toLowerCase()
+  if (!vary.includes('accept-encoding')) {
+    throw new Error(`${runtime}: compressed response is missing Vary: Accept-Encoding\n${output}`)
+  }
+  if (compressed.headers['content-length'] !== undefined) {
+    throw new Error(`${runtime}: a compressed response kept its identity content-length\n${output}`)
+  }
+  const decoded = gunzipSync(compressed.body).toString('utf8')
+  if (!decoded.includes('data-smoke="page"')) {
+    throw new Error(`${runtime}: gunzipped body ${decoded.slice(0, 120)}\n${output}`)
+  }
+  if (compressed.body.length >= decoded.length) {
+    throw new Error(
+      `${runtime}: gzip made the page larger (${compressed.body.length} >= ${decoded.length})\n${output}`,
+    )
+  }
+  console.log(`[ok] ${runtime} · GET / is gzipped for a client that accepts it`)
+
+  // A client that refuses every coding must still be served, uncompressed.
+  const identity = await rawGet('/', { 'accept-encoding': 'identity' })
+  if (identity.headers['content-encoding'] !== undefined) {
+    throw new Error(
+      `${runtime}: identity-only client got content-encoding ` +
+        `${identity.headers['content-encoding']}\n${output}`,
+    )
+  }
+  if (!identity.body.toString('utf8').includes('data-smoke="page"')) {
+    throw new Error(`${runtime}: identity body ${identity.body.toString('utf8').slice(0, 120)}`)
+  }
+  console.log(`[ok] ${runtime} · GET / stays identity for a client that refuses gzip`)
+}
+
+/**
+ * The payload endpoint a soft navigation into a server-components route calls.
+ *
+ * Reported 501 in every deployed build until the route registry could render
+ * through the server-components pipeline, so such a navigation fell back to a
+ * full document load. Checked here rather than in a unit test because the
+ * contract is the *response*: the browser router calls one endpoint and must
+ * not be able to tell which host answered it.
+ */
+async function checkRscPayload() {
+  const payload = await rawGet('/__ruvyxa/rsc?path=/rsc', { 'x-ruvyxa-rsc': '1' })
+  if (payload.status !== 200) {
+    throw new Error(`${runtime}: payload endpoint answered ${payload.status}\n${output}`)
+  }
+  if (!String(payload.headers['content-type']).startsWith('text/x-component')) {
+    throw new Error(`${runtime}: payload content-type ${payload.headers['content-type']}`)
+  }
+  // Flight is line-delimited `<id>:<value>` rows. Which id arrives first is
+  // completion order, not document order, so the check is the shape and the
+  // client reference the page actually has — not a fixed first row.
+  const body = payload.body.toString('utf8')
+  if (!/(^|\n)\d+:/.test(body)) {
+    throw new Error(`${runtime}: payload is not Flight rows: ${body.slice(0, 200)}\n${output}`)
+  }
+  if (!body.includes('ruv:')) {
+    throw new Error(`${runtime}: payload names no client reference: ${body.slice(0, 200)}`)
+  }
+
+  // The header is what keeps this endpoint out of reach of a cross-origin page,
+  // which cannot set it without a preflight.
+  const unguarded = await rawGet('/__ruvyxa/rsc?path=/rsc', {})
+  if (unguarded.status !== 400) {
+    throw new Error(`${runtime}: payload endpoint answered ${unguarded.status} without its header`)
+  }
+  console.log(`[ok] ${runtime} · /__ruvyxa/rsc serves a payload and refuses an unmarked request`)
+}
+
+/**
+ * The other verb on the same path: running one of the route's server functions.
+ *
+ * `POST /__ruvyxa/rsc` answered `405` in every deployed build, and every check
+ * above stayed green while it did — the document rendered, hydrated, and
+ * returned 200. What broke was a rejected promise inside the browser: clicking
+ * anything wired to a server function threw `Connection closed.` and left a
+ * blank page. So this is asked over HTTP, in the shape React asks it.
+ *
+ * The reference id comes out of the page's own browser bundle rather than being
+ * spelled here, because it is derived from the module's path and a fixture that
+ * restated it would only prove the two spellings match.
+ */
+async function checkServerFunction() {
+  const document = await rawGet('/rsc', {})
+  const bundle = document.body.toString('utf8').match(/src="(\/__ruvyxa\/client\/[^"]+)"/)
+  if (!bundle) throw new Error(`${runtime}: the document names no browser bundle`)
+  const source = (await rawGet(bundle[1], {})).body.toString('utf8')
+  // `'use server'` modules get the `s_` prefix; a client reference gets `m_`.
+  // Only the module id is a literal in the bundle — the browser proxy appends
+  // the export name at call time — so the export this fixture declares is
+  // appended here rather than searched for. The `{16}` is what keeps this off
+  // the runtime's own `ruv:s_[a-f0-9]{16}` validation pattern, which is also in
+  // the bundle and is not an id.
+  const moduleId = source.match(/ruv:s_[0-9a-f]{16}/)
+  if (!moduleId) {
+    throw new Error(`${runtime}: the browser bundle names no server function`)
+  }
+  const reference = [`${moduleId[0]}#echo`]
+
+  const called = await rawPost(
+    '/__ruvyxa/rsc?path=/rsc',
+    {
+      'x-ruvyxa-rsc': '1',
+      'x-ruvyxa-action': reference[0],
+      'content-type': 'text/plain;charset=UTF-8',
+      // What `encodeReply` produces for a single string argument.
+    },
+    '["smoke"]',
+  )
+  if (called.status !== 200) {
+    throw new Error(
+      `${runtime}: server function answered ${called.status}: ${called.body.toString('utf8').slice(0, 200)}
+${output}`,
+    )
+  }
+  const answer = called.body.toString('utf8')
+  if (!answer.includes('server:smoke')) {
+    throw new Error(`${runtime}: server function returned ${answer.slice(0, 200)}`)
+  }
+
+  const unguarded = await rawPost('/__ruvyxa/rsc?path=/rsc', { 'x-ruvyxa-rsc': '1' }, '["smoke"]')
+  if (unguarded.status !== 400) {
+    throw new Error(`${runtime}: a call naming no reference answered ${unguarded.status}`)
+  }
+  console.log(`[ok] ${runtime} · POST /__ruvyxa/rsc runs one of the route's server functions`)
+}
+
+/** One GET with exact headers and no transparent decoding. */
+function rawGet(pathname, headers) {
+  return new Promise((resolve, reject) => {
+    const call = httpRequest(
+      { host: '127.0.0.1', port, path: pathname, method: 'GET', headers },
+      (response) => {
+        const chunks = []
+        response.on('data', (chunk) => chunks.push(chunk))
+        response.on('end', () =>
+          resolve({
+            status: response.statusCode,
+            headers: response.headers,
+            body: Buffer.concat(chunks),
+          }),
+        )
+        response.on('error', reject)
+      },
+    )
+    call.on('error', reject)
+    call.end()
+  })
+}
+
+/** One POST with exact headers, for the endpoints that take a body. */
+function rawPost(pathname, headers, body) {
+  return new Promise((resolve, reject) => {
+    const payload = Buffer.from(body, 'utf8')
+    const call = httpRequest(
+      {
+        host: '127.0.0.1',
+        port,
+        path: pathname,
+        method: 'POST',
+        headers: { ...headers, 'content-length': String(payload.byteLength) },
+      },
+      (response) => {
+        const chunks = []
+        response.on('data', (chunk) => chunks.push(chunk))
+        response.on('end', () =>
+          resolve({
+            status: response.statusCode,
+            headers: response.headers,
+            body: Buffer.concat(chunks),
+          }),
+        )
+        response.on('error', reject)
+      },
+    )
+    call.on('error', reject)
+    call.end(payload)
+  })
+}
 
 try {
   await waitUntilServing()
@@ -101,7 +350,10 @@ try {
     if (failure) throw new Error(`${runtime}: ${check.name} — ${failure}\n${output}`)
     console.log(`[ok] ${runtime} · ${check.name}`)
   }
-  console.log(`[ok] ${runtime} deployment artifact passed ${checks.length} checks`)
+  await checkCompression()
+  await checkRscPayload()
+  await checkServerFunction()
+  console.log(`[ok] ${runtime} deployment artifact passed ${checks.length + 4} checks`)
 } finally {
   child.kill()
   await Promise.race([

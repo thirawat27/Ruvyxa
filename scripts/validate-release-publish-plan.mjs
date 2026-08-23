@@ -1,6 +1,7 @@
 #!/usr/bin/env node
-import { readdirSync, readFileSync, statSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { workspacePackageDirs } from './workspace-packages.mjs'
 
 const orderedPackages = [
   '@ruvyxa/core',
@@ -24,16 +25,10 @@ const orderedPackages = [
   'create-ruvyxa',
 ]
 
-const packageDirs = [
-  'packages/ruvyxa',
-  'packages/create-ruvyxa',
-  ...readdirSync('packages/@ruvyxa').map((name) => `packages/@ruvyxa/${name}`),
-]
-  .filter((dir) => statSync(dir).isDirectory())
-  .map((dir) => ({
-    dir,
-    manifest: JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')),
-  }))
+const packageDirs = workspacePackageDirs().dirs.map((dir) => ({
+  dir,
+  manifest: JSON.parse(readFileSync(join(dir, 'package.json'), 'utf8')),
+}))
 
 const expectedPackages = packageDirs
   .map(({ manifest }) => manifest)

@@ -5,7 +5,8 @@
     "reserved": "Must appear in RESERVED_FRAMEWORK_ROUTES (crates/ruvyxa_dev_server/src/lib.rs) and RESERVED_FRAMEWORK_PATHS (packages/ruvyxa/runtime/plugin-http.mjs). A plugin that registers one of these paths panics axum, so both lists have to name the same set.",
     "native": "Served by the Axum host. `always` in every mode, `dev` only when config.watch is set.",
     "serverless": "How createHandler answers. `dispatch` means the path is handled before route matching and must never fall through to the generic route-miss 404. `static` means the build emits the bytes and a CDN or publish directory answers, so a function never sees it. `none` means the endpoint does not exist outside the native host.",
-    "probe": "Request the Node conformance test sends when serverless is `dispatch`."
+    "probe": "Request the Node conformance test sends when serverless is `dispatch`. Use `probes` instead when an endpoint answers more than one verb: a single probe checks one verb and says nothing about the others, which is how `POST /__ruvyxa/rsc` -- every server-function call on a deployed server-components page -- returned 405 with this table green.",
+    "probes": "Several such requests, replayed one at a time. An endpoint that answers more than one verb lists each of them here rather than one in `probe`."
   },
   "endpoints": [
     {
@@ -48,11 +49,17 @@
       "reserved": true,
       "native": "always",
       "serverless": "dispatch",
-      "probe": {
-        "method": "GET",
-        "query": "path=/"
-      },
-      "note": "React Server Components payloads for a soft navigation. Unlike /__ruvyxa/flight this is a render and carries the visitor's headers, so it is never cacheable. A deployed function answers 501: it serves pages through modules built by the ordinary SSR entry, which is why adapter-runner refuses a server-components route that still needs a server (RUV2213)."
+      "probes": [
+        {
+          "method": "GET",
+          "query": "path=/"
+        },
+        {
+          "method": "POST",
+          "query": "path=/"
+        }
+      ],
+      "note": "React Server Components. `GET` renders a route's payload for a soft navigation; `POST` runs one of the server functions that route exposes and answers with the payload its return value encodes to. Unlike /__ruvyxa/flight both are renders and carry the visitor's headers, so neither is cacheable. The deployed function answered 501 to `GET` and 405 to `POST` until the generated route registry learned to render through the server-components pipeline and to call into an action bundle."
     },
     {
       "path": "/__ruvyxa/trace",

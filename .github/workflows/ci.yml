@@ -109,12 +109,10 @@ jobs:
       - name: Smoke test package tarballs
         run: pnpm pack:smoke
       # The deployment smoke builds examples/deploy-smoke, not examples/demo.
-      # The demo is the broad integration fixture and includes a dynamic
-      # server-components route, which no adapter can deploy — every adapter
-      # serves pages through a generated module built by the ordinary SSR entry,
-      # so such a route is refused at build time with RUV2213. Building the demo
-      # with an adapter therefore cannot succeed, and these steps are about the
-      # emitted server rather than the demo's feature list.
+      # The demo is deployable now that a dynamic server-components route no
+      # longer refuses (RUV2213 is gone), but it is the broad feature fixture:
+      # these steps are about the emitted server, so they build the smallest app
+      # that exercises every part of it and check the answers over HTTP.
       - name: Build and launch Node deployment artifact
         shell: bash
         run: |

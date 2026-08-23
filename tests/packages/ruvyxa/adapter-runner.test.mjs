@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict'
 import { spawn } from 'node:child_process'
+import { existsSync } from 'node:fs'
 import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { describe, it } from 'node:test'
-import { fileURLToPath } from 'node:url'
+import { fileURLToPath, pathToFileURL } from 'node:url'
 
 const workspaceRoot = path.resolve(fileURLToPath(new URL('../../..', import.meta.url)))
 const adapterRunner = path.join(workspaceRoot, 'packages/ruvyxa/runtime/adapter-runner.mjs')
@@ -203,20 +204,24 @@ describe('adapter runner', () => {
     }
   })
 
-  it('refuses a server-components route no adapter can render at request time', async () => {
-    // Every adapter serves pages through the route modules this runner
-    // generates, and those are built by the ordinary SSR entry. A route that
-    // opted into server components and is not pre-rendered would be deployed
-    // as plain SSR: no payload in the document, nothing for its browser bundle
-    // to hydrate, and no error anywhere. A pre-rendered one is fine, because
-    // the payload is already inside the file the adapter copies.
+  // RUV2213 used to refuse *every* non-pre-rendered server-components route,
+  // for every adapter, because the generated route module rendered through the
+  // ordinary SSR entry — the page would have deployed with no payload in the
+  // document and nothing for its browser bundle to hydrate. The runner compiles
+  // the `react-server` graph and the SSR registry into the function now, so the
+  // remaining constraint is the one an adapter genuinely has: a target with no
+  // server cannot run a Flight pass at request time.
+  it('refuses a dynamic server-components route on a target with no server', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-adapter-runner-'))
     const outputDir = path.join(root, '.ruvyxa-staging')
     try {
       await mkdir(outputDir, { recursive: true })
       await writeFile(
         path.join(root, 'ruvyxa.config.mjs'),
-        `export default { adapter: { name: 'node', build() { return { artifacts: [] } } } }`,
+        `export default { adapter: {
+          name: 'static', target: 'static', supports: ['ssg', 'csr'],
+          build() { return { artifacts: [] } }
+        } }`,
       )
       await writeFile(
         path.join(outputDir, 'manifest.json'),
@@ -231,10 +236,121 @@ describe('adapter runner', () => {
       const result = await runRunnerResult(root, outputDir)
 
       assert.equal(result.exitCode, 1)
-      assert.match(result.parsed.message, /RUV2213 adapter node/)
+      assert.match(result.parsed.message, /RUV2202 adapter static/)
       assert.match(result.parsed.message, /\/live \(ssr\)/)
-      // The pre-rendered one is not named: it deploys correctly.
+      // The pre-rendered one is not named: its payload is inside the file the
+      // adapter publishes, so a static host serves it correctly.
       assert.doesNotMatch(result.parsed.message, /\/docs/)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  // A deployment is a production build whichever way the host starts it, and
+  // its browser half already says so unconditionally — the Rust bundler folds
+  // `NODE_ENV` to production and cannot be told otherwise. The server half read
+  // the ambient value, and nothing in an emitted deployment sets one, so the
+  // documented `node server/index.mjs` ran React's *development* build against
+  // a production browser bundle. Every HTTP-level check passed: 200, correct
+  // markup, a payload in the document. The browser threw `Failed to read a RSC
+  // payload created by a development version of React` and rendered nothing,
+  // and the development payload published the build machine's absolute source
+  // paths to every visitor.
+  it('pins NODE_ENV to production in the function a deployment emits', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-adapter-runner-'))
+    const outputDir = path.join(root, '.ruvyxa-staging')
+    const functionDir = path.join(outputDir, 'deploy', 'function')
+    try {
+      await installFakeReact(root)
+      await mkdir(path.join(root, 'app', 'mode'), { recursive: true })
+      await mkdir(path.join(outputDir, 'prerender'), { recursive: true })
+      await writeFile(
+        path.join(root, 'app', 'layout.tsx'),
+        `export default function Layout({ children }) { return <body>{children}</body> }`,
+      )
+      await writeFile(
+        path.join(root, 'app', 'mode', 'page.tsx'),
+        `export default function Page() { return <main>{process.env.NODE_ENV ?? 'unset'}</main> }`,
+      )
+
+      const manifest = {
+        routes: [
+          {
+            id: 'app/mode/page',
+            kind: 'page',
+            path: '/mode',
+            file: 'app/mode/page.tsx',
+            layoutChain: ['app/layout'],
+            render: { strategy: 'ssr' },
+          },
+        ],
+      }
+      await writeFile(path.join(outputDir, 'manifest.json'), JSON.stringify(manifest))
+
+      const handlerSource = `import { createHandler } from './serverless-handler.mjs'
+import { loadRouteModule } from './route-modules.mjs'
+const routes = ${JSON.stringify(manifest.routes)}
+export default createHandler({ routes, importPage: loadRouteModule, importApi: loadRouteModule })
+`
+      await writeFile(
+        path.join(root, 'ruvyxa.config.mjs'),
+        `export default { adapter: { build() { return {
+          artifacts: [{ kind: 'function', path: 'deploy/function', handlerSource: ${JSON.stringify(handlerSource)} }]
+        } } } }`,
+      )
+
+      await runRunner(root, outputDir)
+
+      const registry = await readFile(path.join(functionDir, 'route-modules.mjs'), 'utf8')
+      const pin = registry.indexOf('globalThis.process.env.NODE_ENV = "production"')
+      assert.notEqual(pin, -1, 'the emitted registry does not pin NODE_ENV')
+      // Ahead of the first module factory, because React reads the value while
+      // its own factory runs: a pin after it is a pin that never happened. A
+      // statement in the *entry* cannot do this either — ESM evaluates a
+      // module's imports before any statement of the importer.
+      assert.ok(
+        pin < registry.indexOf('const __m'),
+        'the pin runs after a module factory has already read NODE_ENV',
+      )
+
+      // The claim is behavioural, so it is checked by running the artifact the
+      // documented way — a process with no `NODE_ENV` exported — rather than by
+      // reading the source it was compiled from.
+      assert.equal(
+        await renderThroughFunction(functionDir, '/mode'),
+        '<!doctype html><body><main>production</main></body>',
+      )
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('deploys a dynamic server-components route on an adapter that runs one', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-adapter-runner-'))
+    const outputDir = path.join(root, '.ruvyxa-staging')
+    try {
+      await mkdir(outputDir, { recursive: true })
+      await writeFile(
+        path.join(root, 'ruvyxa.config.mjs'),
+        `export default { adapter: {
+          name: 'node', target: 'node', supports: ['ssr', 'ssg', 'csr', 'isr', 'ppr', 'api'],
+          build() { return { artifacts: [] } }
+        } }`,
+      )
+      await writeFile(
+        path.join(outputDir, 'manifest.json'),
+        JSON.stringify({
+          routes: [
+            { kind: 'page', path: '/live', render: { strategy: 'ssr', serverComponents: true } },
+          ],
+        }),
+      )
+
+      // No artifacts are declared, so nothing is compiled here; what is under
+      // test is that the capability check lets the route through at all.
+      const result = await runRunner(root, outputDir)
+
+      assert.deepEqual(result.result, [])
     } finally {
       await rm(root, { recursive: true, force: true })
     }
@@ -486,6 +602,14 @@ export default handler
       assert.match(registry, /renderPage0/)
       assert.doesNotMatch(registry, /import\(`\.\/server\/app\//)
 
+      // This one is an `edge` artifact, which has no `process` at runtime at
+      // all — the stand-in each module gets is the only `NODE_ENV` its React
+      // will ever read, and it was compiled from whatever the *build* process
+      // happened to export, which is nothing. So a Worker ran React's
+      // development build with no way for the deployment to say otherwise.
+      assert.match(registry, /NODE_ENV: "production"/)
+      assert.doesNotMatch(registry, /NODE_ENV: "development"/)
+
       // The manifest also ships as a module. A platform that re-bundles the
       // function (Netlify's esbuild step) keeps only what it can resolve
       // statically, and a sibling manifest.json read at runtime crashed the
@@ -656,22 +780,83 @@ export default handler
     }
   })
 
-  it('rejects project-scope artifacts outside the allowlist', async () => {
+  // The manifests, the source directories, and the project's own config are
+  // what a deploy adapter must not overwrite. Everything else at the project
+  // root is a platform's discovery location and belongs to the adapter.
+  for (const [name, artifactPath] of [
+    ['a package manifest', 'package.json'],
+    ['the application source directory', 'app/page.tsx'],
+    ["the project's own config", 'ruvyxa.config.ts'],
+    ['a lockfile', 'pnpm-lock.yaml'],
+    ['the build output directory', '.ruvyxa/manifest.json'],
+    ['a path escaping the project root', '../outside.json'],
+  ]) {
+    it(`refuses a project-scope artifact over ${name}`, async () => {
+      const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-adapter-runner-'))
+      const outputDir = path.join(root, '.ruvyxa-staging')
+      try {
+        await mkdir(outputDir, { recursive: true })
+        await writeFile(
+          path.join(root, 'ruvyxa.config.mjs'),
+          `export default { adapter: { build() { return { artifacts: [
+            { kind: 'file', path: ${JSON.stringify(artifactPath)}, scope: 'project', contents: '{}' }
+          ] } } } }`,
+        )
+
+        const result = await runRunnerResult(root, outputDir)
+
+        assert.equal(result.exitCode, 1)
+        assert.match(
+          result.parsed.message,
+          /would overwrite project source|escapes the project root/,
+          result.parsed.message,
+        )
+        // The refusal has to happen before the write, not be reported after it.
+        assert.equal(
+          existsSync(path.resolve(root, artifactPath)),
+          false,
+          `${artifactPath} was written despite being refused`,
+        )
+      } finally {
+        await rm(root, { recursive: true, force: true })
+      }
+    })
+  }
+
+  // The allowlist this replaced named eleven paths, one per official adapter,
+  // so a community adapter could not write the file its own platform discovers.
+  it('lets an adapter write the project file its platform discovers', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-adapter-runner-'))
     const outputDir = path.join(root, '.ruvyxa-staging')
     try {
       await mkdir(outputDir, { recursive: true })
       await writeFile(
         path.join(root, 'ruvyxa.config.mjs'),
-        `export default { adapter: { build() { return { artifacts: [
-          { kind: 'file', path: 'package.json', scope: 'project', contents: '{}' }
-        ] } } } }`,
+        `export default { adapter: {
+          name: 'flyio', target: 'node', platform: 'flyio',
+          build() { return { name: 'flyio', target: 'node', platform: 'flyio', artifacts: [
+            { kind: 'file', path: 'fly.toml', scope: 'project', contents: 'app = "demo"\\n' },
+            { kind: 'file', path: 'Dockerfile', scope: 'project', contents: 'FROM node:24\\n' },
+            // Firebase App Hosting's real file name, and the reason the
+            // protected entries match whole path segments: a prefix test reads
+            // this as living inside \`app\` and refuses it.
+            { kind: 'file', path: 'apphosting.yaml', scope: 'project', contents: 'runConfig: {}\\n' }
+          ] } }
+        } }`,
       )
 
-      const result = await runRunnerResult(root, outputDir)
+      const result = await runRunner(root, outputDir)
 
-      assert.equal(result.exitCode, 1)
-      assert.match(result.parsed.message, /project-scope adapter artifact path is not allowlisted/)
+      assert.deepEqual(
+        result.result,
+        [
+          { kind: 'file', path: 'fly.toml', scope: 'project' },
+          { kind: 'file', path: 'Dockerfile', scope: 'project' },
+          { kind: 'file', path: 'apphosting.yaml', scope: 'project' },
+        ],
+        'a platform this repository has never heard of still gets its config file',
+      )
+      assert.equal(await readFile(path.join(root, 'fly.toml'), 'utf8'), 'app = "demo"\n')
     } finally {
       await rm(root, { recursive: true, force: true })
     }
@@ -835,6 +1020,103 @@ export default loadRouteModule
       assert.match(result.parsed.message, /RUV2203 adapter does-not-exist could not be resolved/)
       assert.match(result.parsed.message, /@ruvyxa\/adapter-does-not-exist/)
       assert.match(result.parsed.message, /ruvyxa-adapter-does-not-exist/)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  // `adapterOptions` was declared in RuvyxaConfig, validated by the config
+  // renderer, written into build.json, and documented -- while this runner
+  // called the factory with no arguments, so every adapter selected by name
+  // (which is every zero-config deploy) was stuck on its defaults.
+  it('hands config.adapterOptions to an adapter selected by name', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-adapter-options-'))
+    const outputDir = path.join(root, '.ruvyxa-staging')
+    try {
+      await mkdir(path.join(outputDir, 'assets'), { recursive: true })
+      await mkdir(path.join(outputDir, 'client'), { recursive: true })
+      await mkdir(path.join(outputDir, 'prerender'), { recursive: true })
+      await writeFile(path.join(outputDir, 'prerender', 'index.html'), '<main>home</main>')
+      await installFakeReact(root)
+      await mkdir(path.join(root, 'app'), { recursive: true })
+      await writeFile(path.join(outputDir, 'manifest.json'), JSON.stringify({ routes: [] }))
+      await writeFile(
+        path.join(root, 'ruvyxa.config.mjs'),
+        `export default { adapterOptions: { serviceName: 'checkout-api' } }`,
+      )
+
+      await runRunner(root, outputDir, 'render')
+
+      const blueprint = await readFile(path.join(outputDir, 'deploy/render/render.yaml'), 'utf8')
+      assert.match(blueprint, /name: "checkout-api"/)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  // The options reach the factory itself, not a copy the runner interprets:
+  // the adapter's own validator is what rejects this one.
+  it('reports an adapter option the factory refuses', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-adapter-options-'))
+    const outputDir = path.join(root, '.ruvyxa-staging')
+    try {
+      await mkdir(outputDir, { recursive: true })
+      await writeFile(
+        path.join(root, 'ruvyxa.config.mjs'),
+        `export default { adapterOptions: { serviceName: 'Not A Valid Name!' } }`,
+      )
+
+      const result = await runRunnerResult(root, outputDir, 'render')
+
+      assert.equal(result.exitCode, 1)
+      assert.match(result.parsed.message, /RUV2001/)
+      assert.match(result.parsed.message, /serviceName/)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('refuses adapterOptions beside an already-constructed config.adapter', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-adapter-options-'))
+    const outputDir = path.join(root, '.ruvyxa-staging')
+    try {
+      await mkdir(outputDir, { recursive: true })
+      await writeFile(
+        path.join(root, 'ruvyxa.config.mjs'),
+        `export default {
+          adapter: {
+            name: 'fixture', target: 'static', supports: ['ssg'],
+            build() { return { name: 'fixture', target: 'static', entry: 'x', assetsDir: 'y' } }
+          },
+          adapterOptions: { region: 'iad1' },
+        }`,
+      )
+
+      const result = await runRunnerResult(root, outputDir, undefined)
+
+      assert.equal(result.exitCode, 1)
+      assert.match(result.parsed.message, /RUV2200 config\.adapterOptions/)
+      assert.match(result.parsed.message, /Pass the options to the factory instead/)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('rejects adapterOptions that is not an options object', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-adapter-options-'))
+    const outputDir = path.join(root, '.ruvyxa-staging')
+    try {
+      await mkdir(outputDir, { recursive: true })
+      await writeFile(
+        path.join(root, 'ruvyxa.config.mjs'),
+        `export default { adapterOptions: ['iad1'] }`,
+      )
+
+      const result = await runRunnerResult(root, outputDir, 'render')
+
+      assert.equal(result.exitCode, 1)
+      assert.match(result.parsed.message, /RUV2200 config\.adapterOptions must be an object/)
+      assert.match(result.parsed.message, /got array/)
     } finally {
       await rm(root, { recursive: true, force: true })
     }
@@ -1007,6 +1289,44 @@ function runRunner(root, outputDir, adapterName, env = {}) {
           new Error(`invalid runner JSON: ${error.message}; stdout=${stdout}; stderr=${stderr}`),
         )
       }
+    })
+  })
+}
+
+/**
+ * Render one path through an emitted function, in a process with no `NODE_ENV`.
+ *
+ * A child rather than an `import()` here, for two reasons that both matter: the
+ * pin the caller is checking mutates `process.env` of whatever process loads the
+ * bundle, and this test's whole subject is what the bundle does when the host
+ * exported nothing — which cannot be arranged for the test runner itself.
+ */
+function renderThroughFunction(functionDir, requestPath) {
+  const entry = pathToFileURL(path.join(functionDir, 'index.mjs')).href
+  const source = `const { default: handler } = await import(${JSON.stringify(entry)})
+const response = await handler(new Request('http://localhost${requestPath}'))
+process.stdout.write(await response.text())`
+  const env = { ...process.env }
+  delete env.NODE_ENV
+  return new Promise((resolve, reject) => {
+    const child = spawn(process.execPath, ['--input-type=module', '-e', source], {
+      stdio: 'pipe',
+      env,
+    })
+    let stdout = ''
+    let stderr = ''
+    child.stdout.setEncoding('utf8')
+    child.stderr.setEncoding('utf8')
+    child.stdout.on('data', (chunk) => {
+      stdout += chunk
+    })
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk
+    })
+    child.on('error', reject)
+    child.on('close', (code) => {
+      if (code === 0) resolve(stdout)
+      else reject(new Error(`render failed (${code}): ${stderr}`))
     })
   })
 }

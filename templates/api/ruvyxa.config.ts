@@ -1,43 +1,33 @@
-import { config, type RuvyxaConfig } from 'ruvyxa/config'
+import { config } from 'ruvyxa/config'
 
-const settings: RuvyxaConfig = {
-  appDir: 'app',
-  outDir: '.ruvyxa',
-  // Generates .ruvyxa/types/routes.d.ts, which narrows `<Link href>` and
-  // `useRouter().push` to the routes this project actually has. The tsconfig
-  // `include` is what makes TypeScript read it.
+/**
+ * Every option is optional, and every default is the one a production build
+ * should already want: minified output, route-level splitting, route and CSS
+ * caches on, images optimized, security headers applied. So this file holds
+ * only the decisions a new project actually has to make.
+ *
+ * Add a key when you want something *other* than the default — restating one
+ * pins it, and the pinned value is what a future release can no longer improve
+ * for this project. `docs/07-configuration.md` has the full option map.
+ */
+export default config({
+  // Generates `.ruvyxa/types/routes.d.ts`, which narrows `<Link href>`,
+  // `useRouter().push`, and `useRouter().prefetch` to the routes this project
+  // actually has. Off by default; the `include` in tsconfig.json is what makes
+  // TypeScript read the generated file.
   typedRoutes: true,
-  server: {
-    host: 'localhost',
-    port: 3000,
-  },
-  // `robots.txt` and `sitemap.xml` are generated from the route manifest during
-  // `ruvyxa build`. Give `url` the deployed origin — or set RUVYXA_SITE_URL in
-  // the deployment environment — and the sitemap is published too.
+
   site: {
+    // `robots.txt` and `sitemap.xml` are generated from the route manifest
+    // during `ruvyxa build`. Give `url` the deployed origin — or set
+    // RUVYXA_SITE_URL in the deployment environment — and the sitemap is
+    // published too. Without one the build emits `robots.txt` alone rather than
+    // a sitemap of invented URLs.
     // url: 'https://example.com',
   },
-  build: {
-    minify: true,
-    map: false,
-    treeShake: true,
-    split: 'route',
-    // `workers` is intentionally unset: the build sizes route bundling to the
-    // machine's cores and free memory. Pinning a number here caps a 16-core
-    // machine at 4 and asks a memory-limited CI container for more than it has.
-  },
-  cache: {
-    routes: true,
-    css: true,
-  },
-  debug: {
-    overlay: true,
-  },
-  image: {
-    optimize: true,
-    quality: 82,
-    lossless: false,
-  },
-}
 
-export default config(settings)
+  // `server.host` and `server.port` are not set here on purpose. `ruvyxa dev`
+  // serves localhost:3000, `ruvyxa start` binds 0.0.0.0:3000, and both read
+  // HOST and PORT from the environment — which is how a container tells the
+  // process which port it was given. A value written here would outrank that.
+})

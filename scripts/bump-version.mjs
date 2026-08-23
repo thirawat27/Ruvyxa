@@ -10,6 +10,7 @@
 import { readdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { execSync } from 'node:child_process'
 import { join } from 'node:path'
+import { workspacePackageDirs } from './workspace-packages.mjs'
 
 const rootPkg = JSON.parse(readFileSync('package.json', 'utf8'))
 const newVersion = process.argv[2] || rootPkg.version
@@ -22,13 +23,7 @@ if (rootPkg.version !== newVersion) {
 }
 
 // Update all workspace package.json files
-const packageDirs = [
-  'packages/ruvyxa',
-  'packages/create-ruvyxa',
-  ...readdirSync('packages/@ruvyxa')
-    .map((name) => `packages/@ruvyxa/${name}`)
-    .filter((dir) => statSync(dir).isDirectory()),
-]
+const { dirs: packageDirs } = workspacePackageDirs()
 
 for (const dir of packageDirs) {
   const file = join(dir, 'package.json')

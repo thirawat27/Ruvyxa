@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { readdirSync, readFileSync, statSync } from 'node:fs'
 import { join } from 'node:path'
+import { workspacePackageDirs } from './workspace-packages.mjs'
 
 const rootPkg = JSON.parse(readFileSync('package.json', 'utf8'))
 const expectedVersion = rootPkg.version
@@ -10,13 +11,7 @@ const requiredRuntimeNodeVersion = requiredRuntimeNodeEngine.replace(/^>=/, '')
 const requiredRuntimeNodeMajor = requiredRuntimeNodeVersion.split('.')[0]
 const workspaceNodeTypesVersion = rootPkg.devDependencies?.['@types/node']
 const repoUrl = 'git+https://github.com/thirawat27/ruvyxa.git'
-const packageDirs = [
-  'packages/ruvyxa',
-  'packages/create-ruvyxa',
-  ...readdirSync('packages/@ruvyxa')
-    .map((name) => `packages/@ruvyxa/${name}`)
-    .filter((dir) => statSync(dir).isDirectory()),
-]
+const { dirs: packageDirs, ignored: ignoredPackageDirs } = workspacePackageDirs()
 
 const failures = []
 
@@ -182,6 +177,14 @@ for (const [claim, claimed] of readme.matchAll(/Node\.js\s\*{0,2}(\d+\.\d+)\+/g)
 if (failures.length > 0) {
   console.error(failures.map((failure) => `- ${failure}`).join('\n'))
   process.exit(1)
+}
+
+// Reported rather than ignored. A directory under `packages/` with no manifest
+// is not a workspace package and is skipped, but it is invisible to
+// `git status` when everything inside it is ignored — which is how one sat
+// there long enough to crash this script on a clean tree.
+for (const dir of ignoredPackageDirs) {
+  console.log(`Ignored ${dir}: no package.json, so it is not a workspace package.`)
 }
 
 console.log(`Validated README Node floor against engines.node (${requiredRuntimeNodeEngine}).`)

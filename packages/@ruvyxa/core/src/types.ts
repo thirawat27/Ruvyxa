@@ -1,3 +1,25 @@
+/**
+ * Accepted values for `build.target`.
+ *
+ * The canonical spellings only. `es6` and mixed case are tolerated at runtime,
+ * and `es5` is absent because oxc does not implement it. The authority is
+ * `tests/fixtures/es-target-conformance.json`, which both compilers replay.
+ */
+export type EsTarget =
+  | 'es2015'
+  | 'es2016'
+  | 'es2017'
+  | 'es2018'
+  | 'es2019'
+  | 'es2020'
+  | 'es2021'
+  | 'es2022'
+  | 'es2023'
+  | 'es2024'
+  | 'es2025'
+  | 'es2026'
+  | 'esnext'
+
 export interface RuvyxaConfig {
   appDir?: string
   outDir?: string
@@ -45,6 +67,25 @@ export interface RuvyxaConfig {
     split?: 'single' | 'route' | 'manual'
     workers?: number
     jsx?: 'classic' | 'automatic'
+    /**
+     * JavaScript language level the emitted modules are written down to.
+     *
+     * Applied by both compilers — the Rust client graph and
+     * `runtime/compiler.mjs` for the server and prerender graph — and held to
+     * one accepted list by `tests/fixtures/es-target-conformance.json`.
+     *
+     * A target below the syntax the source uses can require
+     * `@oxc-project/runtime` helpers, and Ruvyxa ships no helper runtime, so a
+     * module that would need one fails the build by name rather than emitting
+     * an import nothing can resolve. Ordinary application code is helper-free
+     * at `es2022` and above.
+     *
+     * `es6` is accepted as an alias for `es2015`, and values are matched
+     * case-insensitively after trimming.
+     *
+     * @default 'esnext'
+     */
+    target?: EsTarget
     manifest?: boolean
     /** Precompile dev route modules and load their dependencies in background workers. */
     warm?: boolean
@@ -808,6 +849,20 @@ export interface BuildContext {
   buildInfo?: Readonly<Record<string, unknown>>
 }
 
+/** The platforms the adapters in this repository target. */
+export type AdapterPlatform =
+  | 'node'
+  | 'vercel'
+  | 'cloudflare'
+  | 'netlify'
+  | 'bun'
+  | 'deno'
+  | 'static'
+  | 'railway'
+  | 'render'
+  | 'firebase'
+  | 'aws'
+
 export interface AdapterOutput {
   name: string
   target: Adapter['target']
@@ -817,18 +872,16 @@ export interface AdapterOutput {
   clientDir?: string
   /** Chunk graph consumed by deployment tooling when `build.manifest` is enabled. */
   chunkManifest?: string
-  platform?:
-    | 'node'
-    | 'vercel'
-    | 'cloudflare'
-    | 'netlify'
-    | 'bun'
-    | 'deno'
-    | 'static'
-    | 'railway'
-    | 'render'
-    | 'firebase'
-    | 'aws'
+  /**
+   * The hosting platform this output targets.
+   *
+   * The official names autocomplete; any other string is accepted, because a
+   * third-party adapter targets a platform this package has never heard of and
+   * a closed union left it with nothing honest to write here. `ruvyxa build
+   * --adapter <package>` has always resolved an arbitrary adapter package, so
+   * the type is what was closed, not the mechanism.
+   */
+  platform?: AdapterPlatform | (string & {})
   /** Runtime expected by the deployment entrypoint. */
   runtime?: 'node' | 'bun' | 'deno'
   configFiles?: string[]

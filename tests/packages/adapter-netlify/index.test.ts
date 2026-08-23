@@ -1,8 +1,19 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
+import { mkdtemp, rm } from 'node:fs/promises'
+import os from 'node:os'
+import path from 'node:path'
+
 import type { AdapterArtifact } from '../../../packages/@ruvyxa/core/dist/types.js'
 import { netlify } from '../../../packages/@ruvyxa/adapter-netlify/dist/index.js'
+import {
+  deployFunction,
+  echoManifest,
+  echoRouteModules,
+  ECHO_BINARY_BODY,
+  ECHO_COOKIES,
+} from '../../deployed-function.ts'
 
 describe('netlify', () => {
   it('returns serverless deployment output with function artifacts', async () => {
@@ -191,5 +202,86 @@ describe('netlify', () => {
   it('declares supported strategies', () => {
     const adapter = netlify()
     assert.deepEqual(adapter.supports, ['ssr', 'ssg', 'csr', 'isr', 'ppr', 'api'])
+  })
+
+  // Everything above reads the artifact list and the generated source text.
+  // This runs the function, because a wrapper that folds two Set-Cookie headers
+  // into one string, or loses binary bytes, matches every regex a text
+  // assertion could write.
+  it('serves a request through the deployed function bundle', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-netlify-handler-'))
+    try {
+      const output = await netlify({ frameworksApi: false }).build({ root, outDir: '.ruvyxa' })
+      const artifact = output.artifacts?.find((item) => item.kind === 'function')
+      assert.ok(artifact && 'handlerSource' in artifact && artifact.handlerSource)
+
+      const bundle = await deployFunction(root, {
+        handlerSource: String(artifact.handlerSource),
+        manifest: echoManifest(),
+        routeModules: echoRouteModules(),
+      })
+      const handler = bundle.default as (
+        request: Request,
+        context: unknown,
+      ) => Promise<Response> | Response
+
+      // Netlify Functions v2 hands the function a Web Request and takes a Web
+      // Response back, so the whole contract is exercisable here.
+      const echoed = await handler(
+        new Request('https://example.test/api/echo', {
+          method: 'POST',
+          headers: { 'content-type': 'text/plain' },
+          body: 'streamed-payload',
+        }),
+        {},
+      )
+      assert.equal(echoed.status, 200)
+      assert.equal(await echoed.text(), 'streamed-payload')
+      assert.deepEqual(echoed.headers.getSetCookie(), ECHO_COOKIES)
+
+      const binary = await handler(
+        new Request('https://example.test/api/echo', {
+          method: 'POST',
+          headers: { 'x-binary': '1' },
+        }),
+        {},
+      )
+      assert.deepEqual(Buffer.from(await binary.arrayBuffer()), ECHO_BINARY_BODY)
+
+      // A path the manifest does not carry must 404 rather than throw: the
+      // platform turns an exception into a 500 with no diagnostic.
+      const missing = await handler(
+        new Request('https://example.test/api/absent', { method: 'POST' }),
+        {},
+      )
+      assert.equal(missing.status, 404)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  // The exported `config` is what Netlify reads to route requests to the
+  // function at all, so an object shape it cannot parse means the function is
+  // deployed and never invoked.
+  it('exports a Functions v2 config the platform can route with', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-netlify-config-'))
+    try {
+      const output = await netlify({ frameworksApi: false }).build({ root, outDir: '.ruvyxa' })
+      const artifact = output.artifacts?.find((item) => item.kind === 'function')
+      assert.ok(artifact && 'handlerSource' in artifact && artifact.handlerSource)
+
+      const bundle = await deployFunction(root, {
+        handlerSource: String(artifact.handlerSource),
+        manifest: echoManifest(),
+        routeModules: echoRouteModules(),
+      })
+
+      const config = bundle.config as { path?: unknown; preferStatic?: unknown }
+      assert.ok(config, 'the function must export a config object')
+      assert.equal(config.path, '/*')
+      assert.equal(config.preferStatic, true)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
   })
 })

@@ -3,6 +3,7 @@ import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
 import { compareEntryKeys } from './order.mjs'
+import { CONFIG_KEY_SCHEMA } from './config-schema.mjs'
 
 import {
   cacheFileName,
@@ -91,10 +92,15 @@ function findConfig(root) {
 /**
  * Reject a key `ruvyxa.config` does not define, at every level.
  *
- * Split by section rather than kept as one run of calls. The list is the
- * config surface written out longhand, so it grows with every option, and as
- * one function it was the largest thing in this module while containing no
- * logic at all — the projection below is the part worth reading.
+ * The names are data in `config-schema.mjs` rather than argument lists here.
+ * `RuvyxaConfig` in `@ruvyxa/core` describes the same surface for the type
+ * checker, nothing held the two together, and they drifted: `build.target` was
+ * accepted here, validated by the Rust config, and applied by both compilers
+ * while the public type never declared it, so a project that set it failed
+ * `tsc` against a build that honoured it. One table, two readers.
+ *
+ * Split by section because the projection below is the part worth reading;
+ * these four functions are now only the shape of the walk.
  */
 function assertConfigKeys(config) {
   assertTopLevelConfigKeys(config)
@@ -105,200 +111,63 @@ function assertConfigKeys(config) {
 
 /** The option names `ruvyxa.config` accepts at its root. */
 function assertTopLevelConfigKeys(config) {
-  assertKnownKeys(config, 'config', [
-    'appDir',
-    'outDir',
-    'runtime',
-    'react',
-    'reactCompiler',
-    'typescript',
-    'typedRoutes',
-    'css',
-    'markdown',
-    'server',
-    'build',
-    'render',
-    'debug',
-    'image',
-    'i18n',
-    'security',
-    'cache',
-    'site',
-    'content',
-    'middleware',
-    'adapter',
-    'adapterOptions',
-    'plugins',
-  ])
+  assertKnownKeys(config, 'config')
 }
 
 /** Compiler, server, build, image, i18n, security, and cache sections. */
 function assertRuntimeConfigKeys(config) {
-  assertKnownKeys(config.css, 'config.css', ['entries'])
-  assertKnownKeys(config.markdown, 'config.markdown', [
-    'gfm',
-    'remarkPlugins',
-    'rehypePlugins',
-    'recmaPlugins',
-    'remarkRehypeOptions',
-  ])
-  assertKnownKeys(config.server, 'config.server', ['host', 'port'])
-  assertKnownKeys(config.build, 'config.build', [
-    'minify',
-    'map',
-    'treeShake',
-    'split',
-    'workers',
-    'jsx',
-    'target',
-    'manifest',
-    'warm',
-    'prerenderCache',
-  ])
-  assertKnownKeys(config.debug, 'config.debug', ['overlay', 'traces'])
-  assertKnownKeys(config.image, 'config.image', [
-    'optimize',
-    'quality',
-    'lossless',
-    'keepOriginal',
-    'variantWidths',
-    'workers',
-    'effort',
-    'onDemand',
-  ])
-  assertKnownKeys(config.image?.onDemand, 'config.image.onDemand', ['enabled', 'maxWidth'])
-  assertKnownKeys(config.i18n, 'config.i18n', [
-    'locales',
-    'defaultLocale',
-    'localeParam',
-    'detectLocale',
-    'cookie',
-  ])
-  assertKnownKeys(config.security, 'config.security', [
-    'actionLimit',
-    'apiLimit',
-    'pluginLimit',
-    'actionRateLimit',
-    'sameOrigin',
-    'fetchMeta',
-    'trustedProxyIps',
-    'headers',
-  ])
-  assertKnownKeys(config.security?.actionRateLimit, 'config.security.actionRateLimit', [
-    'max',
-    'window',
-  ])
-  assertKnownKeys(config.cache, 'config.cache', ['routes', 'css', 'dir'])
+  assertKnownKeys(config.css, 'config.css')
+  assertKnownKeys(config.markdown, 'config.markdown')
+  assertKnownKeys(config.server, 'config.server')
+  assertKnownKeys(config.build, 'config.build')
+  assertKnownKeys(config.debug, 'config.debug')
+  assertKnownKeys(config.image, 'config.image')
+  assertKnownKeys(config.image?.onDemand, 'config.image.onDemand')
+  assertKnownKeys(config.i18n, 'config.i18n')
+  assertKnownKeys(config.security, 'config.security')
+  assertKnownKeys(config.security?.actionRateLimit, 'config.security.actionRateLimit')
+  assertKnownKeys(config.cache, 'config.cache')
 }
 
 /** Site metadata: the content engine, sitemap entries, and robots rules. */
 function assertSiteConfigKeys(config) {
-  assertKnownKeys(config.site, 'config.site', [
-    'url',
-    'title',
-    'description',
-    'language',
-    'sitemap',
-    'robots',
-  ])
-  assertKnownKeys(config.content, 'config.content', ['engine'])
+  assertKnownKeys(config.site, 'config.site')
+  assertKnownKeys(config.content, 'config.content')
   if (isObject(config.content?.engine)) {
-    assertKnownKeys(config.content.engine, 'config.content.engine', [
-      'exclude',
-      'locale',
-      'stopWords',
-      'minTermLength',
-      'manifestPath',
-      'searchPath',
-      'feedPath',
-      'sitemapPath',
-      'llmsPath',
-      'language',
-    ])
+    assertKnownKeys(config.content.engine, 'config.content.engine')
   }
-  assertKnownKeys(config.site?.sitemap, 'config.site.sitemap', [
-    'exclude',
-    'additionalPaths',
-    'defaults',
-    'entries',
-  ])
-  assertKnownKeys(config.site?.sitemap?.defaults, 'config.site.sitemap.defaults', [
-    'lastModified',
-    'changeFrequency',
-    'priority',
-  ])
+  assertKnownKeys(config.site?.sitemap, 'config.site.sitemap')
+  assertKnownKeys(config.site?.sitemap?.defaults, 'config.site.sitemap.defaults')
+  // One schema entry describes every element of an array; the field name the
+  // user is shown carries the index instead, so the diagnostic still points at
+  // the entry they wrote.
+  const entrySchema = 'config.site.sitemap.entries[]'
   for (const [index, entry] of sitemapEntries(config.site?.sitemap?.entries).entries()) {
     const field = `config.site.sitemap.entries[${index}]`
-    assertKnownKeys(entry, field, [
-      'url',
-      'lastModified',
-      'changeFrequency',
-      'priority',
-      'alternates',
-      'images',
-      'videos',
-    ])
-    assertKnownKeys(entry?.alternates, `${field}.alternates`, ['languages'])
+    assertKnownKeys(entry, entrySchema, field)
+    assertKnownKeys(entry?.alternates, `${entrySchema}.alternates`, `${field}.alternates`)
+    const videoSchema = `${entrySchema}.videos[]`
     for (const [videoIndex, video] of sitemapVideos(entry?.videos).entries()) {
       const videoField = `${field}.videos[${videoIndex}]`
-      assertKnownKeys(video, videoField, [
-        'title',
-        'thumbnail_loc',
-        'description',
-        'content_loc',
-        'player_loc',
-        'duration',
-        'view_count',
-        'rating',
-        'expiration_date',
-        'publication_date',
-        'family_friendly',
-        'requires_subscription',
-        'live',
-        'restriction',
-        'platform',
-        'uploader',
-        'tag',
-      ])
-      assertKnownKeys(video?.restriction, `${videoField}.restriction`, ['relationship', 'content'])
-      assertKnownKeys(video?.platform, `${videoField}.platform`, ['relationship', 'content'])
-      assertKnownKeys(video?.uploader, `${videoField}.uploader`, ['content', 'info'])
+      assertKnownKeys(video, videoSchema, videoField)
+      assertKnownKeys(video?.restriction, `${videoSchema}.restriction`, `${videoField}.restriction`)
+      assertKnownKeys(video?.platform, `${videoSchema}.platform`, `${videoField}.platform`)
+      assertKnownKeys(video?.uploader, `${videoSchema}.uploader`, `${videoField}.uploader`)
     }
   }
-  assertKnownKeys(config.site?.robots, 'config.site.robots', ['rules', 'sitemap', 'host'])
+  assertKnownKeys(config.site?.robots, 'config.site.robots')
   for (const [index, rule] of siteRobotsRules(config.site?.robots?.rules).entries()) {
-    assertKnownKeys(rule, `config.site.robots.rules[${index}]`, [
-      'userAgent',
-      'allow',
-      'disallow',
-      'crawlDelay',
-    ])
+    assertKnownKeys(rule, 'config.site.robots.rules[]', `config.site.robots.rules[${index}]`)
   }
 }
 
 /** Render defaults and the built-in middleware stack. */
 function assertMiddlewareConfigKeys(config) {
-  assertKnownKeys(config.render, 'config.render', ['strategy', 'revalidate'])
-  assertKnownKeys(config.middleware, 'config.middleware', ['builtin', 'workers', 'timeoutMs'])
-  assertKnownKeys(config.middleware?.builtin, 'config.middleware.builtin', [
-    'cors',
-    'timing',
-    'log',
-    'rate',
-    'headers',
-  ])
-  assertKnownKeys(config.middleware?.builtin?.cors, 'config.middleware.builtin.cors', [
-    'origins',
-    'methods',
-    'headers',
-    'credentials',
-    'maxAge',
-  ])
-  assertKnownKeys(config.middleware?.builtin?.rate, 'config.middleware.builtin.rate', [
-    'max',
-    'window',
-    'key',
-  ])
+  assertKnownKeys(config.render, 'config.render')
+  assertKnownKeys(config.middleware, 'config.middleware')
+  assertKnownKeys(config.middleware?.builtin, 'config.middleware.builtin')
+  assertKnownKeys(config.middleware?.builtin?.cors, 'config.middleware.builtin.cors')
+  assertKnownKeys(config.middleware?.builtin?.rate, 'config.middleware.builtin.rate')
 }
 
 async function sanitizeConfig(config) {
@@ -887,8 +756,21 @@ async function adapterOutput(adapter, root, outDir) {
   return serialized
 }
 
-function assertKnownKeys(value, field, allowedKeys) {
+/**
+ * Reject any key of `value` that `schemaPath` does not name.
+ *
+ * `field` is what the user is shown, and defaults to the schema path. They
+ * differ for one element of an array, where the schema describes the shape once
+ * and the diagnostic has to name the index the user wrote.
+ */
+function assertKnownKeys(value, schemaPath, field = schemaPath) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return
+  const allowedKeys = CONFIG_KEY_SCHEMA[schemaPath]
+  if (allowedKeys === undefined) {
+    // A section checked against a path the schema does not define would accept
+    // every key silently, which is the whole failure this function prevents.
+    throw new Error(`RUV1602 config schema has no entry for ${schemaPath}`)
+  }
   const allowed = new Set(allowedKeys)
   const unknown = Object.keys(value).filter((key) => !allowed.has(key))
   if (unknown.length > 0) {

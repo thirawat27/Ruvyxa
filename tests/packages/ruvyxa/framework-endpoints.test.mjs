@@ -56,17 +56,27 @@ describe('framework endpoint conformance', () => {
     assert.ok(dispatched.length > 0, 'the contract must dispatch at least one endpoint')
 
     for (const endpoint of dispatched) {
-      const query = endpoint.probe?.query ? `?${endpoint.probe.query}` : ''
-      const response = await handler(
-        new Request(`https://example.test${endpoint.path}${query}`, {
-          method: endpoint.probe?.method ?? 'GET',
-        }),
-      )
-      assert.equal(
-        await isRouteMiss(response),
-        false,
-        `${endpoint.path} fell through to route matching; the handler does not serve it`,
-      )
+      // One probe per verb the endpoint answers. A single probe checks one verb
+      // and says nothing about the others, which is exactly how `POST
+      // /__ruvyxa/rsc` — every server-function call on a deployed
+      // server-components page — returned 405 with this test green.
+      for (const probe of endpoint.probes ?? [endpoint.probe ?? {}]) {
+        const query = probe.query ? `?${probe.query}` : ''
+        const method = probe.method ?? 'GET'
+        const response = await handler(
+          new Request(`https://example.test${endpoint.path}${query}`, { method }),
+        )
+        assert.equal(
+          await isRouteMiss(response),
+          false,
+          `${endpoint.path} fell through to route matching; the handler does not serve it`,
+        )
+        assert.notEqual(
+          response.status,
+          405,
+          `${method} ${endpoint.path} is refused by the handler but listed in the contract`,
+        )
+      }
     }
   })
 

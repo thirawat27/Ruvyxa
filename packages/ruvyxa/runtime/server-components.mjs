@@ -38,7 +38,7 @@
 import React from 'react'
 import { renderToReadableStream as renderHtmlStream } from 'react-dom/server'
 
-import { RSC_SSR_PACKAGE, clientManifest } from './client-references.mjs'
+import { RSC_SSR_PACKAGE, clientManifest, serverManifest } from './client-references.mjs'
 import { ROUTE_CONTEXT_GLOBAL } from './entry-templates.mjs'
 import { installClientReferenceRuntime } from './rsc-client-runtime.mjs'
 
@@ -288,6 +288,78 @@ export function routeContextValue(ctx, routePath) {
  */
 export function flightManifest(references) {
   return clientManifest(references.map((reference) => ({ id: reference.id, chunks: [] })))
+}
+
+/**
+ * Run one of a route's server functions and return the payload it produced.
+ *
+ * The deployed twin of `worker_pool.rs`'s `render_rsc_action`. It exists here
+ * rather than in the generated route module because both hosts have to hand
+ * `callServerFunction` the *same* two manifests: a reply encoded against a
+ * different client manifest names references the caller cannot resolve, and the
+ * server manifest is what lets an argument carry an action of its own —
+ * `remove.bind(null, id)` passed to `<form action={…}>` is the ordinary way
+ * that happens.
+ *
+ * A deployed build could not do this at all until now. `/__ruvyxa/rsc` answered
+ * `GET` and refused `POST` with a `405`, so clicking anything wired to a server
+ * function on a deployed server-components page threw `Connection closed.` in
+ * the browser and left a blank document — while the same page worked under
+ * `ruvyxa dev` and `ruvyxa start`.
+ *
+ * @param {object} options
+ * @param {{ callServerFunction: Function }} options.actionModule The compiled
+ *   `react-server` action bundle for this route.
+ * @param {{ id: string }[]} options.references The route's client references.
+ * @param {string} options.reference The `'use server'` id the caller named.
+ * @param {string|FormData} options.body What React's `encodeReply` produced.
+ * @returns {Promise<string>} The Flight payload the function's return value
+ *   encodes to, which may itself contain client references.
+ */
+/**
+ * Run the action a plain form post named, for a browser with no JavaScript.
+ *
+ * The deployed twin of `posted_form()` plus `runFormAction` on the native host.
+ * `null` when the post named no action — the ordinary answer for any other form
+ * on the page, and the caller then renders the route as it would have without a
+ * body.
+ *
+ * The `formState` half is what makes `useActionState` show its answer without
+ * JavaScript: React writes an extra `$ACTION_KEY` field for a form whose action
+ * came from that hook, and the value returned here is the token the HTML
+ * renderer replays it from. Without it the action runs and the page renders its
+ * initial state, which is what a deployed build did — the submission reached a
+ * `200` carrying no evidence it had happened.
+ */
+export async function runRouteFormAction({ actionModule, formData }) {
+  if (typeof actionModule?.runFormAction !== 'function') return null
+  return await actionModule.runFormAction({ formData, serverManifest: serverManifest() })
+}
+
+export async function callRouteServerFunction({ actionModule, references, reference, body }) {
+  if (typeof actionModule?.callServerFunction !== 'function') {
+    throw new Error(
+      'RUV1866 this route was compiled without a server-function bundle, so nothing can be called on it',
+    )
+  }
+  // Same shape as the render path: a function that throws reaches `onError`
+  // rather than rejecting the stream, so the first error is captured and
+  // rethrown once the payload has been read.
+  let failure = null
+  const stream = await actionModule.callServerFunction({
+    reference,
+    body,
+    manifest: flightManifest(references),
+    serverManifest: serverManifest(),
+    options: {
+      onError(error) {
+        failure ??= error
+      },
+    },
+  })
+  const payload = await readStreamText(stream)
+  if (failure) throw failure
+  return payload
 }
 
 /**

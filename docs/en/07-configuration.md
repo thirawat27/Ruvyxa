@@ -16,7 +16,7 @@ nested source types.
 | `appDir`, `outDir`                                                       | strings                                                 | App source and generated output locations.                                            |
 | `runtime`                                                                | `node \| bun \| deno \| edge \| static`, default `node` | Runtime/target policy.                                                                |
 | `typedRoutes`                                                            | boolean, default `false`                                | Generate `.ruvyxa/types/routes.d.ts` so `<Link href>` is checked against real routes. |
-| `server.host`, `server.port`                                             | string, number                                          | Dev/start listening address.                                                          |
+| `server.host`, `server.port`                                             | string, number                                          | Listening address. See [Listening address](#listening-address).                       |
 | `build.minify`, `map`, `treeShake`, `manifest`, `warm`, `prerenderCache` | booleans; cache defaults true                           | Compiler/build artifact behavior.                                                     |
 | `build.split`                                                            | `single \| route \| manual`                             | Bundle splitting policy.                                                              |
 | `build.workers`                                                          | number                                                  | Build parallelism. See note below.                                                    |
@@ -35,7 +35,7 @@ nested source types.
 | i18n          | `locales`, `defaultLocale`, `localeParam`, `detectLocale`, `cookie`                                                              | `locales` and `defaultLocale` are required when i18n is set. Default param is `lang`, detection true, cookie `RUVYXA_LOCALE`.                                                                                                                                                                                                                                                                                                                                                                                                              |
 | Site          | `site.url`, `site.sitemap`, `site.robots`                                                                                        | Sitemap may set `exclude`, `additionalPaths`, `defaults`, and enriched `entries`; robots may set rules, sitemap URLs, and host.                                                                                                                                                                                                                                                                                                                                                                                                            |
 | Middleware    | `builtin.cors`, `builtin.timing`, `builtin.log`, `builtin.rate`, `builtin.headers`, `workers`, `timeoutMs`                       | CORS has origins/methods/headers/credentials/maxAge. Built-in rate needs `max`, `window`, optional `key`. Plugin workers are 1–8; timeout is 30,000 ms by default and at most 300,000.                                                                                                                                                                                                                                                                                                                                                     |
-| Integration   | `adapter`, `adapterOptions`, `plugins`                                                                                           | Use an adapter for build output and an array of `RuvyxaPlugin` values for extensions.                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
+| Integration   | `adapter`, `adapterOptions`, `plugins`                                                                                           | `adapter` holds a constructed adapter; `adapterOptions` configures one selected by name instead (see [Configuring an adapter selected by name](#configuring-an-adapter-selected-by-name)). Setting both is an error. `plugins` is an array of `RuvyxaPlugin` values.                                                                                                                                                                                                                                                                       |
 
 ## Runtime selection
 
@@ -46,6 +46,56 @@ then Deno. `edge` and `static` are build targets, not JavaScript worker hosts.
 
 Deno executes trusted local project configuration and plugins with the permissions they require
 (`deno run -A --no-prompt --node-modules-dir=manual`). Do not select it for untrusted project code.
+
+## Listening address
+
+`--host` and `--port` have the highest precedence, then the `HOST` and `PORT` environment variables,
+then `server.host` and `server.port` in `ruvyxa.config.ts`, then the command's own default.
+
+The environment beats the config file deliberately: a managed platform injects `PORT` and expects
+the process to use it, and a `ruvyxa.config.ts` committed to the repository cannot know the number.
+A `PORT` that is not a number between 0 and 65535 fails the command rather than falling back, so a
+misconfigured deployment reports the cause instead of a failing health check.
+
+| Command                          | Default host | Default port |
+| -------------------------------- | ------------ | ------------ |
+| `ruvyxa dev`                     | `localhost`  | `3000`       |
+| `ruvyxa start`, `ruvyxa preview` | `0.0.0.0`    | `3000`       |
+
+`start` and `preview` bind every interface because a container routes to the container's address
+rather than to its loopback: a production server bound to `localhost` answers nothing from outside.
+This matches the standalone server that `ruvyxa build` generates, which has always read `PORT` and
+`HOST` the same way. Pass `--host localhost` to keep a local production run off the network.
+
+## Configuring an adapter selected by name
+
+An adapter can reach a build in two ways, and each takes its options differently.
+
+Constructed in the config — the options go to the factory:
+
+```ts
+import { config } from 'ruvyxa/config'
+import { render } from '@ruvyxa/adapter-render'
+
+export default config({ adapter: render({ serviceName: 'checkout-api' }) })
+```
+
+Selected by name — `ruvyxa build --adapter render`, `RUVYXA_ADAPTER=render`, or platform detection
+from the hosting environment. There is no factory call to pass options to, so `adapterOptions` is
+that call's argument:
+
+```ts
+import { config } from 'ruvyxa/config'
+
+export default config({ adapterOptions: { serviceName: 'checkout-api' } })
+```
+
+The second form is what keeps a zero-config deploy configurable: the project names no adapter, the
+platform selects one, and the options still apply. The adapter validates them itself, so a value it
+refuses fails the build with that adapter's own diagnostic.
+
+Setting `adapter` and `adapterOptions` together is an error rather than a precedence rule. The
+constructed adapter already holds its options and nothing would read the second set.
 
 ## Production configuration example
 

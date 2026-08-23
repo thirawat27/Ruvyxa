@@ -1,10 +1,13 @@
 //! Turning CLI arguments plus `ruvyxa.config.*` into a runnable configuration.
 //!
 //! Two server configurations are produced here — `dev` and `start` — and they
-//! resolve the same settings from the same two sources, with an explicit flag
-//! always beating the config file. Keeping both in one module is deliberate: a
-//! setting added to one and forgotten in the other is the failure mode, and
-//! here the omission is visible.
+//! resolve the same settings from the same sources, with an explicit flag
+//! always beating everything below it. Keeping both in one module is
+//! deliberate: a setting added to one and forgotten in the other is the failure
+//! mode, and here the omission is visible.
+//!
+//! The bind address is the one setting whose sources differ from the rest, and
+//! `resolve_bind_address` owns that ordering for both.
 //!
 //! This module also owns adapter inspection and the JavaScript runtime choice
 //! (Node, Bun, or Deno), including the process-wide override a `--runtime` flag sets
@@ -23,18 +26,80 @@ use ruvyxa_dev_server::{JavaScriptRuntime, ServerConfig, find_runtime_script};
 
 use crate::*;
 
+/// Default bind host for `ruvyxa dev`: reachable from this machine only.
+pub(crate) const DEV_DEFAULT_HOST: &str = "localhost";
+/// Default bind host for `ruvyxa start` and `ruvyxa preview`.
+///
+/// Every container runtime routes to the container's address rather than to its
+/// loopback, so a production server bound to `localhost` answers nothing from
+/// outside — the health check fails and the platform reports a crash loop with
+/// no error in the log. `0.0.0.0` is also what the standalone server this
+/// repository generates has always used, so the two production hosts now agree.
+pub(crate) const PRODUCTION_DEFAULT_HOST: &str = "0.0.0.0";
+/// Port used when no flag, environment variable, or config value names one.
+pub(crate) const DEFAULT_PORT: u16 = 3000;
+
+/// Resolve the address a server binds: flag, then environment, then config.
+///
+/// An explicit flag is the operator speaking now, so it wins outright. `PORT`
+/// and `HOST` come next, because they are set by whatever actually owns the
+/// socket: every managed platform injects `PORT` and expects the process to use
+/// it, and a `ruvyxa.config.ts` committed to the repository cannot know the
+/// number. The config file is the project's own default below that, and
+/// `default_host` is the last word.
+///
+/// Reading the environment through a closure rather than `std::env::var` keeps
+/// this testable — the same shape `detect_platform_adapter` uses — since
+/// mutating process environment from a test is both global and unsound.
+///
+/// An unparseable `PORT` is an error rather than a fallback: on a platform that
+/// injected it, quietly binding 3000 instead produces a failing health check
+/// and nothing that names the cause. Empty and whitespace-only values are
+/// ignored, because a CI template that declares the variable without setting it
+/// is saying nothing, not saying zero.
+pub(crate) fn resolve_bind_address(
+    args: &ServerArgs,
+    config: &ProjectConfig,
+    env: impl Fn(&str) -> Option<String>,
+    default_host: &str,
+) -> anyhow::Result<(String, u16)> {
+    let from_env = |name: &str| {
+        env(name)
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    };
+
+    let host = args
+        .host
+        .clone()
+        .or_else(|| from_env("HOST"))
+        .or_else(|| config.server.host.clone())
+        .unwrap_or_else(|| default_host.to_string());
+
+    let port = match args.port {
+        Some(port) => port,
+        None => match from_env("PORT") {
+            Some(raw) => raw.parse::<u16>().with_context(|| {
+                format!("PORT must be a number between 0 and 65535, got `{raw}`")
+            })?,
+            None => config.server.port.unwrap_or(DEFAULT_PORT),
+        },
+    };
+
+    Ok((host, port))
+}
+
 pub(crate) fn dev_server_config(
     args: &ServerArgs,
     config: &ProjectConfig,
 ) -> anyhow::Result<ServerConfig> {
-    let mut server = ServerConfig::dev(
-        &args.root,
-        args.host
-            .clone()
-            .or_else(|| config.server.host.clone())
-            .unwrap_or_else(|| "localhost".to_string()),
-        args.port.or(config.server.port).unwrap_or(3000),
-    );
+    let (host, port) = resolve_bind_address(
+        args,
+        config,
+        |key| std::env::var(key).ok(),
+        DEV_DEFAULT_HOST,
+    )?;
+    let mut server = ServerConfig::dev(&args.root, host, port);
     let out_dir = args.root.join(config.out_dir());
     server.app_dir = args.root.join(config.app_dir());
     server.public_dir = args.root.join("public");
@@ -139,14 +204,13 @@ pub(crate) fn production_server_config(
     args: &ServerArgs,
     config: &ProjectConfig,
 ) -> anyhow::Result<ServerConfig> {
-    let mut server = ServerConfig::production(
-        &args.root,
-        args.host
-            .clone()
-            .or_else(|| config.server.host.clone())
-            .unwrap_or_else(|| "localhost".to_string()),
-        args.port.or(config.server.port).unwrap_or(3000),
-    );
+    let (host, port) = resolve_bind_address(
+        args,
+        config,
+        |key| std::env::var(key).ok(),
+        PRODUCTION_DEFAULT_HOST,
+    )?;
+    let mut server = ServerConfig::production(&args.root, host, port);
     let out_dir = args.root.join(config.out_dir());
     server.app_dir = out_dir.join("server").join(config.app_dir());
     server.public_dir = out_dir.join("assets");

@@ -159,7 +159,11 @@ for (const file of readdirSync(destination).filter((name) => name.endsWith('.tgz
       listing.includes(`package/native-bin/${platform}-${arch}/${executable}`),
       'ruvyxa package missing native binary',
     )
-    for (const runtimeFile of packagedRuntimeGraph(['compiler.mjs', 'worker-pool.mjs'])) {
+    for (const runtimeFile of packagedRuntimeGraph([
+      'compiler.mjs',
+      'worker-pool.mjs',
+      'config-renderer.mjs',
+    ])) {
       assert(
         listing.includes(`package/runtime/${runtimeFile}`),
         `ruvyxa package missing runtime/${runtimeFile}`,
@@ -319,11 +323,23 @@ for (const starter of starters) {
   if (starter === 'minimal') {
     const configPath = `${appDir}/ruvyxa.config.ts`
     const configSource = readFileSync(configPath, 'utf8')
+    // A text replace that finds nothing returns the source unchanged, so a
+    // template that stops carrying this line leaves the three imports below
+    // unused and fails `tsc` with a message that names none of this. Checked
+    // rather than assumed: the anchor moved once already, when the scaffold's
+    // config was trimmed to the two decisions a new project actually makes.
+    const anchor = 'export default config({'
+    if (!configSource.includes(anchor)) {
+      throw new Error(
+        `pack:smoke expected "${anchor}" in the scaffolded ruvyxa.config.ts so it could add ` +
+          'plugins to it. Update this injection to match the template.',
+      )
+    }
     writeFileSync(
       configPath,
       `import { databasePlugin } from '@ruvyxa/database'\nimport { realtime } from '@ruvyxa/realtime'\nimport { contentEngine } from 'ruvyxa/plugins'\n${configSource.replace(
-        'const settings: RuvyxaConfig = {',
-        `const settings: RuvyxaConfig = {
+        anchor,
+        `${anchor}
   plugins: [
     databasePlugin(),
     realtime(),

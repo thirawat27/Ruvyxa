@@ -417,6 +417,48 @@ for (const runtime of runtimes) {
         assert.equal(response.headers.get('x-frame-options'), 'DENY', `missing on ${pathname}`)
       }
     })
+
+    /**
+     * `content-encoding` is not asserted here: an installed runtime is driven
+     * through `fetch`, which decodes the body and removes the header before a
+     * test can see it. What survives that is `Vary`, which is the part a shared
+     * cache depends on — without it a proxy hands one client's gzip copy to a
+     * client that cannot read it. The encoded bytes themselves are checked
+     * against all three real runtimes by `scripts/smoke-runtime-adapter.mjs`.
+     */
+    it('declares Vary on a compressible response and not on a binary one', async () => {
+      await ready
+      const page = await request('/')
+      assert.match(
+        String(page.headers.get('vary') ?? ''),
+        /accept-encoding/i,
+        'a document must vary by Accept-Encoding',
+      )
+
+      const image = await request('/logo.png')
+      assert.doesNotMatch(
+        String(image.headers.get('vary') ?? ''),
+        /accept-encoding/i,
+        'a PNG is already compressed, so nothing about it varies by encoding',
+      )
+      assert.equal(image.headers.get('content-encoding'), null)
+    })
+
+    /**
+     * A range describes byte offsets into the identity encoding. Compressing
+     * underneath a `content-range` hands the client a window it cannot map back
+     * to the bytes it asked for, and the file this uses is `text/javascript` —
+     * compressible, so the exclusion is what keeps it out rather than its type.
+     */
+    it('never encodes a range response', async () => {
+      await ready
+      const response = await request('/__ruvyxa/client/app.abc123.js', {
+        headers: { range: 'bytes=0-3' },
+      })
+      assert.equal(response.status, 206)
+      assert.equal(response.headers.get('content-encoding'), null)
+      assert.equal(response.headers.get('content-length'), '4')
+    })
   })
 }
 

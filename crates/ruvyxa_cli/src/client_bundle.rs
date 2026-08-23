@@ -896,15 +896,28 @@ pub(crate) fn build_parallelism(configured: Option<usize>, work_items: usize) ->
 /// on the demo these processes account for more resident memory than the CLI
 /// itself.
 pub(crate) fn prerender_parallelism(configured: Option<usize>, work_items: usize) -> usize {
-    let cpu_budget = configured
+    crate::host_resources::prerender_worker_budget(prerender_cpu_budget(configured))
+        .clamp(1, work_items.max(1))
+}
+
+/// The CPU-side ceiling, before the host's free memory has a say.
+///
+/// Split out because it is the only part of the decision a test can state an
+/// exact number for. `prerender_parallelism` also passes through
+/// `prerender_worker_budget`, which lowers the answer when the machine is short
+/// on memory — by design, and the reason a test asserting
+/// `prerender_parallelism(Some(64), 32) == MAX_CONFIGURED_PRERENDER_PARALLELISM`
+/// passed on an idle machine and failed on a busy one. It was asserting the
+/// host's free memory, which is not a property of this code.
+pub(crate) fn prerender_cpu_budget(configured: Option<usize>) -> usize {
+    configured
         .map(|value| value.min(MAX_CONFIGURED_PRERENDER_PARALLELISM))
         .unwrap_or_else(|| {
             std::thread::available_parallelism()
                 .map(usize::from)
                 .unwrap_or(1)
                 .min(MAX_PRERENDER_PARALLELISM)
-        });
-    crate::host_resources::prerender_worker_budget(cpu_budget).clamp(1, work_items.max(1))
+        })
 }
 
 /// Flatten every plugin's declared head elements in configuration order.

@@ -32,6 +32,7 @@ import { fileURLToPath } from 'node:url'
 // Re-exported rather than restated: the browser half of this contract lives in
 // a module with no imports, because it is inlined into the client bundle, and
 // two spellings of the registry global would be two registries.
+import { compareCodeUnits } from './order.mjs'
 import { isServerModuleId, parseServerReference } from './rsc-client-runtime.mjs'
 
 export {
@@ -85,6 +86,17 @@ export const RSC_BROWSER_PACKAGE = 'react-server-dom-webpack/client.browser'
  * server-components entry without knowing this exists.
  */
 export const RSC_CLIENT_RUNTIME_SPECIFIER = 'ruvyxa:rsc-client-runtime'
+
+/**
+ * How a generated route registry reaches the server-components renderer.
+ *
+ * An alias for the same reason `RSC_CLIENT_RUNTIME_SPECIFIER` is one: the file
+ * lives outside the project, and a server target leaves an absolute path
+ * external instead of bundling it — emitting an import no ESM loader accepts.
+ * A deployed function has to carry the renderer inside its own bundle, because
+ * it resolves no sibling specifiers at run time.
+ */
+export const RSC_RENDERER_SPECIFIER = 'ruvyxa:server-components'
 
 /**
  * Absolute path of the module whose import installs the client-reference
@@ -393,4 +405,26 @@ export function clientManifest(references) {
       return separator >= 0 && chunks.has(property.slice(0, separator))
     },
   })
+}
+
+/**
+ * Every `'use server'` module a route can reach, from both sides of it.
+ *
+ * The union is not an optimisation. An actions file imported by the page is in
+ * the `react-server` graph and nowhere else; one imported only by a
+ * `'use client'` component is in the browser graph and nowhere else, because a
+ * client reference's own imports are never walked by the server graph. A call
+ * may name either, so a bundle built from one list alone cannot answer half of
+ * them.
+ *
+ * Lives here rather than beside either caller because both hosts build that
+ * bundle and must agree on its contents: `worker-pool.mjs` for `ruvyxa dev`,
+ * `start`, and the prerender pass, and `adapter-runner.mjs` for a deployment.
+ */
+export function mergeServerReferences(...lists) {
+  const merged = new Map()
+  for (const list of lists) {
+    for (const reference of list ?? []) merged.set(reference.id, reference)
+  }
+  return [...merged.values()].sort((left, right) => compareCodeUnits(left.id, right.id))
 }

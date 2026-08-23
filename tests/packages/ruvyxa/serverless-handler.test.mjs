@@ -1096,3 +1096,143 @@ describe('optional catch-all parity with the dev server', () => {
     assert.deepEqual(rendered.at(-1).params.slug, ['clothes', 'tops'])
   })
 })
+
+/**
+ * The half of `/__ruvyxa/rsc` a status code on the payload endpoint cannot see.
+ *
+ * The native host answers both verbs on this path: `GET` renders a route's
+ * payload, `POST` runs one of the server functions that route exposes. The
+ * deployed handler answered `GET` and refused `POST` with a `405`, so clicking
+ * anything wired to a server function on a deployed server-components page
+ * threw `Connection closed.` in the browser and blanked the document, while the
+ * same page worked under `ruvyxa dev` and `ruvyxa start`.
+ */
+describe('server functions on a deployed server-components route', () => {
+  function rscRoute() {
+    return {
+      id: 'app/rsc/page',
+      path: '/rsc',
+      kind: 'page',
+      file: 'app/rsc/page.tsx',
+      render: { strategy: 'ssr', serverComponents: true },
+    }
+  }
+
+  function handlerWith(pageModule) {
+    return createHandler({
+      routes: [rscRoute()],
+      importPage: async () => pageModule,
+      importApi: async () => ({}),
+    })
+  }
+
+  function actionRequest(body = 'ARGS', headers = {}) {
+    return new Request('http://localhost/__ruvyxa/rsc?path=/rsc', {
+      method: 'POST',
+      headers: { 'x-ruvyxa-rsc': '1', 'x-ruvyxa-action': 'ruv:s_abc#run', ...headers },
+      body,
+    })
+  }
+
+  it('runs the named function and answers with its payload', async () => {
+    const calls = []
+    const handler = handlerWith({
+      render: async () => '<html></html>',
+      rscAction: async (call) => {
+        calls.push(call)
+        return '0:"ok"\n'
+      },
+    })
+
+    const response = await handler(actionRequest())
+
+    assert.equal(response.status, 200)
+    assert.equal(response.headers.get('content-type'), 'text/x-component; charset=utf-8')
+    // Never cached and never shared: the answer belongs to one visitor, and the
+    // header gate is what keeps a cross-origin page from asking at all.
+    assert.equal(response.headers.get('cache-control'), 'private, no-store')
+    assert.equal(response.headers.get('vary'), 'x-ruvyxa-rsc')
+    assert.equal(await response.text(), '0:"ok"\n')
+    assert.deepEqual(calls, [{ reference: 'ruv:s_abc#run', body: 'ARGS' }])
+  })
+
+  it('refuses a call that names no reference', async () => {
+    const handler = handlerWith({ render: async () => '', rscAction: async () => '' })
+    const response = await handler(actionRequest('ARGS', { 'x-ruvyxa-action': '' }))
+    assert.equal(response.status, 400)
+  })
+
+  it('refuses a call a cross-origin page could make', async () => {
+    const handler = handlerWith({ render: async () => '', rscAction: async () => '' })
+    const request = new Request('http://localhost/__ruvyxa/rsc?path=/rsc', {
+      method: 'POST',
+      headers: { 'x-ruvyxa-action': 'ruv:s_abc#run' },
+      body: 'ARGS',
+    })
+    assert.equal((await handler(request)).status, 400)
+  })
+
+  it('reports a route with no server functions as 501 rather than 404', async () => {
+    // Distinguishable on purpose: the route exists and renders through the
+    // pipeline, it simply declares nothing callable, so the build had nothing
+    // to compile an action bundle from.
+    const handler = handlerWith({ render: async () => '', rscPayload: async () => '' })
+    const response = await handler(actionRequest())
+    assert.equal(response.status, 501)
+    assert.match(await response.text(), /RUV1866/)
+  })
+
+  it('hands a form posted without JavaScript to the render', async () => {
+    // React writes the reference into hidden fields rather than into an
+    // `action` attribute, so a no-JS submission posts to the page's own URL.
+    // Nothing here recognised that, and the page re-rendered with its initial
+    // state — a 200 indistinguishable from a form that was never submitted.
+    const seen = []
+    const handler = handlerWith({
+      render: async (ctx) => {
+        seen.push(ctx.formData)
+        return `<html>${ctx.formData ? 'submitted' : 'initial'}</html>`
+      },
+    })
+
+    const body = new URLSearchParams({ $ACTION_REF_1: '', version: '1.0.30' })
+    const response = await handler(
+      new Request('http://localhost/rsc', {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body,
+      }),
+    )
+
+    assert.equal(await response.text(), '<html>submitted</html>')
+    // A submission is one visitor's answer whatever the route's strategy says.
+    assert.equal(response.headers.get('cache-control'), 'no-store')
+    assert.equal(seen.at(-1).get('version'), '1.0.30')
+
+    await handler(new Request('http://localhost/rsc'))
+    assert.equal(seen.at(-1), null)
+  })
+
+  it('leaves a form posted to an ordinary page alone', async () => {
+    const seen = []
+    const handler = createHandler({
+      routes: [{ ...rscRoute(), render: { strategy: 'ssr' } }],
+      importPage: async () => ({
+        render: async (ctx) => {
+          seen.push(ctx.formData)
+          return '<html></html>'
+        },
+      }),
+      importApi: async () => ({}),
+    })
+
+    await handler(
+      new Request('http://localhost/rsc', {
+        method: 'POST',
+        headers: { 'content-type': 'application/x-www-form-urlencoded' },
+        body: new URLSearchParams({ version: '1' }),
+      }),
+    )
+    assert.equal(seen.at(-1), null)
+  })
+})

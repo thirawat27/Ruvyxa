@@ -110,6 +110,15 @@ after five seconds and the proxy's next request on it fails as a 502 — and, wh
 Bun's `idleTimeout` (in seconds, capped at 255). Bun is left at its own default otherwise, which
 never retires an idle connection and never cuts a long streamed response short.
 
+**Compression.** All three compress text-shaped responses — documents, JSON, JavaScript, CSS, SVG —
+with gzip when the client accepts it, and declare `Vary: Accept-Encoding` on every response that
+could have been compressed so a shared cache keys them apart. Already-compressed types (images,
+video, fonts) are left alone, as are byte ranges, whose offsets describe the unencoded bytes. Set
+`RUVYXA_COMPRESSION=0` where a proxy or CDN in front already compresses; doing it twice only spends
+CPU on the smaller machine. The encoding is negotiated with `q=0` treated as a refusal, matching
+`ruvyxa start`. Brotli is deliberately not offered here: it has no `CompressionStream` format, so
+supporting it would mean one runtime compressing better than the other two for the same build.
+
 ## Static hosting: publish only static output
 
 ```bash
@@ -168,6 +177,88 @@ root and under `<outDir>/deploy/aws/`. Its deploy manifest routes static assets 
 and dynamic traffic to compute resource `default`. The default compute runtime is `nodejs24.x`;
 older `nodejs20.x` and `nodejs22.x` values remain available only as explicit compatibility
 overrides. Set `projectOutput: false` only when another build system collects the deploy artifact.
+
+## Write an adapter for a platform Ruvyxa does not ship
+
+An adapter is a factory returning an object with `name`, `target`, an optional `supports` list, and
+a `build(ctx)` that returns an `AdapterOutput`. Nothing about the mechanism is reserved to the
+adapters in this repository: `ruvyxa build --adapter <package>` resolves `@ruvyxa/adapter-<name>`,
+`ruvyxa-adapter-<name>`, and the bare package name in that order, so publishing
+`ruvyxa-adapter-flyio` is enough to make `--adapter flyio` work.
+
+```ts
+import type { Adapter, BuildContext } from '@ruvyxa/core'
+import {
+  clientBuildOutput,
+  runtimeBuildPolicy,
+  standaloneServerSource,
+  validateBuildContext,
+} from '@ruvyxa/core'
+
+export interface FlyAdapterOptions {
+  appName?: string
+}
+
+export default function flyio(options: FlyAdapterOptions = {}): Adapter {
+  const appName = options.appName ?? 'ruvyxa-app'
+  return {
+    name: 'flyio',
+    target: 'node',
+    supports: ['ssr', 'ssg', 'csr', 'isr', 'ppr', 'api'],
+    build(ctx: BuildContext) {
+      validateBuildContext(ctx, 'flyioAdapter')
+      return {
+        name: 'flyio',
+        target: 'node',
+        platform: 'flyio',
+        runtime: 'node',
+        entry: `${ctx.outDir}/server/app`,
+        assetsDir: `${ctx.outDir}/assets`,
+        ...clientBuildOutput(ctx),
+        artifacts: [
+          {
+            kind: 'function',
+            path: 'deploy/flyio/server',
+            handlerSource: standaloneServerSource({ runtimePolicy: runtimeBuildPolicy(ctx) }),
+          },
+          { kind: 'static-site', path: 'deploy/flyio/public', optional: true },
+          {
+            kind: 'file',
+            path: 'fly.toml',
+            scope: 'project',
+            skipIfExists: true,
+            contents: `app = "${appName}"\n`,
+          },
+        ],
+      }
+    },
+  }
+}
+```
+
+Four rules the runner enforces, and one habit worth keeping:
+
+- **Take one options object and default every field.** The factory is called with
+  `config.adapterOptions` when the adapter is selected by name, and with `{}` when it is not. An
+  option your factory refuses fails the build with your own message, which is where validation
+  belongs.
+- **`platform` is any string.** The names above autocomplete; a platform this package has never
+  heard of is written as-is.
+- **`scope: 'project'` writes beside the project, never over it.** A path that resolves outside the
+  project root, or onto its source directories, manifests, lockfiles, `tsconfig.json`,
+  `ruvyxa.config.*`, or the configured `appDir`/`outDir`, is refused with `RUV2200`. Everything else
+  at the project root is yours — that is where a platform looks for its config file. Pair it with
+  `skipIfExists: true` so a file the user wrote always wins.
+- **Declare `supports` honestly.** The runner validates every route against it and refuses an
+  unsupported one by name (`RUV2202`) rather than letting the deployment 404 at runtime.
+- **Reuse `standaloneServerSource` unless the platform needs its own signature.** It is the server
+  CI runs on real Node, Bun, and Deno; a hand-written wrapper is code only your own tests cover.
+
+Check the result without deploying:
+
+```bash
+ruvyxa build --adapter ruvyxa-adapter-flyio
+```
 
 ## Provider handoff checklist
 

@@ -2,6 +2,153 @@
 
 ## v1.0.32 (unreleased)
 
+### A deployed server-components page was blank in a real browser
+
+Every check anybody had was green. The route answered `200`, the markup was right, the client
+component was in it with its initial state, the Flight payload was in the document, and the module
+script was there to hydrate from. Opening the page showed nothing at all, and the console said why:
+
+```
+Failed to read a RSC payload created by a development version of React on the server
+while on the client using a production version of React.
+```
+
+A deployment is a production build whichever way the host starts it, and its browser half already
+said so unconditionally — the Rust bundler folds `process.env.NODE_ENV` to `"production"` and cannot
+be told otherwise. The server half read the _ambient_ value, and nothing in an emitted deployment
+sets one. `node server/index.mjs` is the documented way to run the Node adapter's output; it exports
+nothing, so the emitted server ran React's **development** build against a production browser
+bundle. For an ordinary page that is a size and speed cost nobody would notice. For a
+server-components route it is fatal, and fatal only in a browser: nothing observable over HTTP is
+wrong.
+
+The development build also writes an owner stack for every payload row, each frame naming an
+absolute path on the machine that ran the build. The smoke's document was 11,420 bytes, of which
+9,878 were stack frames publishing `D:/Ruvyxa/...` to every visitor. It is 1,542 bytes now.
+
+Each bundle a deployment emits states the build it is, ahead of every module factory in it — the
+earliest point inside a module body, and the only one that works: a statement in the _entry_ cannot
+do it, because ESM evaluates a module's imports before any statement of the importer, and React
+reads `NODE_ENV` while its own factory runs. Each linked bundle carries its own copy for the same
+reason, since `route-modules.mjs` imports the `react-server` bundle and that sibling's body runs
+first.
+
+An `edge` artifact had the same bug arriving from the other direction and nothing could work around
+it: a Worker has no `process` at all, so the stand-in compiled into each module was the only
+`NODE_ENV` its React would ever read — and it was compiled from whatever the _build_ process
+exported, which is nothing.
+
+The smoke now asserts a deployed server-components document contains no `file:///`, which is the
+cheap observable for both halves of this: development React's frames and the path leak are the same
+string.
+
+### Dynamic server-components routes deploy
+
+`RUV2213` refused every server-components route that was not pre-rendered, on every adapter, because
+the generated route module rendered through the ordinary SSR entry — the page would have deployed
+with no payload in the document and nothing for its browser bundle to hydrate. The adapter runner
+compiles the route's `react-server` graph and its SSR registry at build time now, and the generated
+module renders through `renderServerComponents`, the same pipeline `ruvyxa start` uses.
+`/__ruvyxa/rsc` answers in a deployed function too, where it used to be a `501`, so a soft
+navigation into such a route fetches a payload instead of reloading the document.
+
+The remaining refusal is `RUV2202` for a target with no server, which cannot run a Flight pass at
+request time whatever the runner emits.
+
+Verified on Node, Bun, and Deno through `examples/deploy-smoke`'s `/rsc` route — deliberately
+`force-dynamic`, because a pre-rendered one proves nothing about a deployment: its payload is
+already inside the file the adapter copies and no renderer runs. In a browser, against the Node
+artifact: the page hydrates, `useState` works, and a soft navigation from `/` into it keeps the
+document alive.
+
+Three things blocked it, each worth not rediscovering:
+
+- **The SSR registry has to be linked _into_ `route-modules.mjs`**, not shipped beside it. It is
+  compiled with React external so it shares the renderer's instance; as a sibling it resolved its
+  own copy and every hook threw `Cannot read properties of null (reading 'useRef')`. The
+  `react-server` bundle is the opposite case — it carries React's server build on purpose — so it
+  stays a sibling.
+- **Inlining a linked bundle into another one collides on `__m<N>`/`__ext<N>`.** Both number from
+  zero, so the inner `const __m1` shadowed the outer one and the outer's `const __ext1 = __m1` hit a
+  temporal dead zone: the deployment failed to import, with an error neither bundle could explain.
+  `compileBundleWithMetadata({ identifierPrefix })` exists for this; the default keeps every other
+  bundle byte-identical.
+- **pnpm gave one physical React five module keys.** Each dependent gets its own symlink, and the
+  graph was keyed by the path it was reached through, so a server bundle held five React instances.
+  Ordinary SSR survived by luck; the RSC pass did not. The key is normalized through `realpathSync`
+  now — `filePath` is left alone, because client-reference ids are measured from it. Every function
+  bundle every adapter emits got 36% smaller as a side effect.
+
+### Server functions could not be called from a deployed page
+
+Found by opening a deployed server-components page in a browser and clicking the button on it — the
+first time anybody had. Every check the repository owns was green: the route answered `200`, the
+markup was right, the payload was there, the page hydrated. The click threw `Connection closed.` in
+the console and left a blank document.
+
+The native host answers both verbs on `/__ruvyxa/rsc`: `GET` renders a route's payload for a soft
+navigation, `POST` runs one of the server functions that route exposes and answers with the payload
+its return value encodes to. The deployed handler implemented the first and refused the second with
+a `405`. So a `'use server'` function — `useActionState`, an inline `'use server'` in a server
+component, an actions file a client component imports — worked under `ruvyxa dev` and `ruvyxa start`
+and did not exist in production.
+
+The build compiles the action bundle for a route now, exactly as `worker-pool.mjs` does for the
+local hosts, and the generated route module loads it on the first call that needs it. Both hosts
+build it from the _union_ of the two graphs' `'use server'` modules, which is not an optimisation:
+an actions file the page imports is in the `react-server` graph and nowhere else, and one imported
+only by a `'use client'` component is in the browser graph and nowhere else, because a reference's
+own imports are never walked.
+
+**A `<form action={fn}>` submitted without JavaScript was the same bug wearing different clothes.**
+React writes the reference into hidden fields rather than into an `action` attribute, so the
+submission posts to the page's own URL. `posted_form()` recognises that on the native host; nothing
+in the deployed handler did, so the page re-rendered with its initial state and answered `200` —
+indistinguishable from a form that was never submitted. It runs the action and replays the
+`useActionState` result now, and answers `no-store` whatever the route's strategy says, because a
+`ssg` route serves a file to readers and renders to submitters.
+
+This is the third capability to have existed on one request host and not the other, after
+`/__ruvyxa/action` and the payload endpoint above.
+`tests/fixtures/framework-endpoint-conformance.json` is the table that is supposed to catch it, and
+it did not: it probed one verb per path and said nothing about the others. It takes a list now, and
+the handler is asserted not to answer `405` to anything the table lists.
+
+### No live-rendered page in any deployed build hydrated
+
+Found on the way to the above, and older than it. The generated route registry **is** the renderer
+once the build is over, so it has to write everything a document needs. It wrote markup and nothing
+else — no bootstrap block, no module preloads, no `<script type="module">` — because both writers of
+those are Rust: `client_hydration_script` for a live render, `inject_prerender_client_assets` for a
+baked page. Neither runs inside a deployed function.
+
+So every SSR route in every deployed build shipped inert markup, and every ISR route lost its script
+from its first revalidation onward, because revalidation persists what the registry rendered over
+the file the build had injected into. Nothing logged anything.
+
+`documentAssetsPrelude()` is the JavaScript twin of `safe_json_for_script`, `escape_html`,
+`hydration_loader_url`, and the head/tail placement rules, emitted as source text because a function
+bundle resolves no sibling specifiers. Per-route assets come from `<outDir>/client/manifest.json`,
+the same file the Rust side reads, and are baked in as literals.
+
+The check that matters is not "is a script present" but **"does the live render byte-match the baked
+file"** — they are the same page, so comparing their tails is one line, and it is what closed this.
+
+### `pnpm release:validate` failed on a clean working tree
+
+With an unhandled `ENOENT` and a Node stack, naming a `package.json` nobody had touched. Four
+scripts enumerated `packages/@ruvyxa/*` and opened a manifest in every entry, and a directory under
+that scope is a package only if it _has_ one — pnpm resolves the same glob and skips the ones that
+do not. What triggered it was ordinary: a package removed from git while its `dist/` and
+`node_modules/` stayed on disk. That leaves a directory `git status` cannot even mention, because
+every file in it is ignored and git has nothing to say about a directory.
+
+One helper answers the question for all four now, the way pnpm answers it, and
+`validate-package-metadata` prints a line naming any directory it skipped rather than leaving it
+invisible. A package whose manifest genuinely went missing is still caught: its name stays in the
+hand-maintained publish order and disappears from the discovered set, which is exactly the mismatch
+`validate-release-publish-plan` exists to report.
+
 ### `ruvyxa start` was reachable on `[::1]` and refused on `127.0.0.1`
 
 `localhost` is two addresses on any dual-stack machine, and the server took whichever one the
@@ -88,11 +235,13 @@ not a speed one; the opt-in `{ params, cache }` return remains the way to ask fo
 ### The deployment smoke was asking the demo to do something no adapter can
 
 CI built `examples/demo` with the bun and deno adapters and then launched the result. That build
-cannot succeed: the demo has a `force-dynamic` server-components route, and every adapter serves
-pages through a generated module built by the ordinary SSR entry, so such a route is refused with
-`RUV2213` — documented behaviour, not a gap that appeared here. `--adapter node` fails on the demo
-in exactly the same way; the bun and deno jobs were simply the only ones that built the demo with an
-adapter at all, which made a framework-wide limit look like a runtime-specific one.
+could not succeed at the time: the demo has a `force-dynamic` server-components route, every adapter
+served pages through a generated module built by the ordinary SSR entry, and such a route was
+refused with `RUV2213` — documented behaviour, not a gap that appeared here. `--adapter node` failed
+on the demo in exactly the same way; the bun and deno jobs were simply the only ones that built the
+demo with an adapter at all, which made a framework-wide limit look like a runtime-specific one.
+(`RUV2213` is gone further down this release, and the demo deploys — but these jobs are about the
+emitted server, not about the demo's feature list, so they still build the smaller fixture.)
 
 `examples/deploy-smoke` is the smallest application every self-hosted adapter _can_ deploy, and it
 is what those jobs build now. Node joins them, so the next time something makes an adapter refuse
@@ -103,8 +252,9 @@ nothing else, and the three transports differ in how a request reaches the handl
 becomes a response body — a Bun range bug that served a whole file for a sliced `BunFile` went
 through a health check without a mark on it. It now checks the pre-rendered page, an ISR route, the
 generated route registry, a public asset's content type and cache lifetime, the security defaults on
-a rendered page, and that an unknown path is a 404. All six pass on Node, on Bun 1.4.0, and on Deno
-2.9.5.
+a rendered page, that an unknown path is a 404, both directions of content negotiation, a dynamic
+server-components document, `/__ruvyxa/rsc` in both its verbs, and a real server-function call. All
+eleven pass on Node, on Bun 1.4.0, and on Deno 2.9.5.
 
 ### Bun and Deno serve with their own servers
 
