@@ -42,6 +42,36 @@ The smoke now asserts a deployed server-components document contains no `file://
 cheap observable for both halves of this: development React's frames and the path leak are the same
 string.
 
+### A server function blanked the page it was called from, in every deployed build
+
+Found by clicking a button on a deployed page, which is the only way it could have been found. React
+posts a server-function call to `POST /__ruvyxa/rsc` — the same path that serves a route's payload
+for a soft navigation. The emitted handler accepted `GET` there and refused every other verb with a
+`405`, so the call failed, the promise rejected with `Connection closed.`, and React unmounted the
+tree: a blank document, from a page that had rendered correctly a moment earlier.
+
+Nothing above the browser could see it. The document was right, hydration worked, the status was
+`200`, and the smoke's ten checks were green. The same page worked under `ruvyxa dev` and
+`ruvyxa start`, because the native host has had the endpoint since server functions shipped.
+
+The deployed function builds an action bundle per server-components route now — the `react-server`
+build again, imported on the first call rather than at module scope, since most requests never make
+one — and `POST` runs the reference the `x-ruvyxa-action` header names. Same header gate as the
+`GET`, same content type on the reply, and the body bound is applied where the other endpoint bounds
+are so a call accepted locally is accepted here.
+
+The bundle is built from the union of both graphs' `'use server'` modules, which is not an
+optimisation: an actions file the page imports is in the `react-server` graph and nowhere else, and
+one imported only by a `'use client'` component is in the browser graph and nowhere else, because a
+client reference's own imports are never walked. `examples/deploy-smoke` now has the second shape —
+the one a server-graph-only bundle answers `RUV1861` for — and the smoke calls it over HTTP on Node,
+Bun, and Deno.
+
+This is the third capability that existed on one of the two request hosts and not the other, after
+`/__ruvyxa/action` and the `GET` half of this endpoint.
+`tests/fixtures/framework-endpoint-conformance.json` lists both verbs now, so the next one is a test
+failure rather than a blank page.
+
 ### Dynamic server-components routes deploy
 
 `RUV2213` refused every server-components route that was not pre-rendered, on every adapter, because
