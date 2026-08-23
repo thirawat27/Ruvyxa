@@ -17,7 +17,6 @@
     "rust",
     "x86_64",
     "amd64",
-    "gnu",
     "musl",
     "linux",
     "x64",
@@ -29,7 +28,9 @@
     "compiler",
     "dev-server",
     "framework",
-    "optional-dependency"
+    "optional-dependency",
+    "alpine",
+    "static-binary"
   ],
   "repository": {
     "type": "git",

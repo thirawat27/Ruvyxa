@@ -19,7 +19,6 @@
     "react-server-components",
     "server-components",
     "hydration",
-    "streaming",
     "jsx",
     "tsx",
     "components",
@@ -32,12 +31,13 @@
     "meta-tags",
     "head",
     "error-boundary",
-    "suspense",
     "progressive-enhancement",
     "framework",
     "web-framework",
     "fullstack",
-    "typescript"
+    "typescript",
+    "json-ld",
+    "prefetch"
   ],
   "repository": {
     "type": "git",

@@ -17,14 +17,12 @@
     "magic-link",
     "passwordless",
     "webauthn",
-    "passkey",
     "passkeys",
     "session",
     "sessions",
     "cookies",
     "login",
     "sign-in",
-    "sso",
     "credentials",
     "providers",
     "google",
@@ -35,7 +33,11 @@
     "server-actions",
     "typescript",
     "fullstack",
-    "framework"
+    "framework",
+    "pkce",
+    "logout",
+    "refresh-token",
+    "scopes"
   ],
   "repository": {
     "type": "git",

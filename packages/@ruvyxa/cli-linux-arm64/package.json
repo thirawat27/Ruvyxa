@@ -16,7 +16,6 @@
     "prebuilt",
     "rust",
     "aarch64",
-    "gnu",
     "musl",
     "linux",
     "arm64",
@@ -28,7 +27,9 @@
     "compiler",
     "dev-server",
     "framework",
-    "optional-dependency"
+    "optional-dependency",
+    "alpine",
+    "static-binary"
   ],
   "repository": {
     "type": "git",

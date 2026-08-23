@@ -18,7 +18,6 @@
     "cloudflare-workers",
     "workers",
     "worker",
-    "cloudflare-pages",
     "wrangler",
     "edge",
     "edge-runtime",
@@ -28,11 +27,11 @@
     "prerender",
     "ssr",
     "ssg",
-    "isr",
     "static-assets",
     "typescript",
     "fullstack",
-    "framework"
+    "framework",
+    "csr"
   ],
   "repository": {
     "type": "git",

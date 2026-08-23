@@ -91,8 +91,9 @@
     "i18n",
     "postcss",
     "jamstack",
-    "nextjs-alternative",
-    "vite-alternative"
+    "csr",
+    "ppr",
+    "partial-prerendering"
   ],
   "repository": {
     "type": "git",

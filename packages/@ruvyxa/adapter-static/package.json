@@ -23,13 +23,14 @@
     "static-hosting",
     "cdn",
     "html",
-    "ssr",
     "ssg",
-    "isr",
     "static-assets",
     "typescript",
     "fullstack",
-    "framework"
+    "framework",
+    "csr",
+    "github-pages",
+    "s3"
   ],
   "repository": {
     "type": "git",
