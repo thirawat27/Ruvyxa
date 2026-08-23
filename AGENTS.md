@@ -21,7 +21,13 @@ work in the repository.
   and route manifests.
 - `packages/` contains npm packages: `ruvyxa`, `create-ruvyxa`, `@ruvyxa/core`, `@ruvyxa/react`,
   adapters, and platform CLI packages.
-- `examples/demo/` is the broad integration fixture.
+- `examples/demo/` is the broad integration fixture. It is deliberately **not** deployable: it
+  includes a dynamic server-components route, and every adapter refuses one with `RUV2213`, so
+  `ruvyxa build --adapter <name>` against it always fails.
+- `examples/deploy-smoke/` is the smallest application every self-hosted adapter _can_ deploy, and
+  is what CI builds and then launches on real Node, Bun, and Deno through
+  `scripts/smoke-runtime-adapter.mjs`. Keep it deployable: a route or feature no adapter supports
+  belongs in the demo instead.
 - `templates/minimal/` is copied into new projects by `create-ruvyxa`.
 - `docs/` is user-facing documentation.
 

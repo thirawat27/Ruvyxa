@@ -11,6 +11,10 @@
     "examples/demo": {
       "entry": ["ruvyxa.config.ts", "instrumentation.ts", "app/**/*.{ts,tsx}", "plugins/**/*.ts"],
       "project": ["**/*.{ts,tsx}"]
+    },
+    "examples/deploy-smoke": {
+      "entry": ["ruvyxa.config.ts", "app/**/*.{ts,tsx}"],
+      "project": ["**/*.{ts,tsx}"]
     }
   },
   "ignoreDependencies": ["@ruvyxa/adapter-.*", "oxc-transform", "react-server-dom-webpack"],

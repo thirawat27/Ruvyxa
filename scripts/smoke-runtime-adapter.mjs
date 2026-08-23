@@ -11,6 +11,7 @@ if (!['node', 'bun', 'deno'].includes(runtime) || !deploymentDirectory || !portA
 }
 
 const port = Number(portArg)
+const base = `http://127.0.0.1:${port}`
 const entry = path.join('server', 'index.mjs')
 const args = runtime === 'deno' ? ['run', '-A', '--no-prompt', entry] : [entry]
 const child = spawn(runtimeExecutable(runtime), args, {
@@ -23,32 +24,108 @@ let output = ''
 child.stdout.on('data', (chunk) => (output += chunk))
 child.stderr.on('data', (chunk) => (output += chunk))
 
+/**
+ * What the emitted server has to get right, checked against the real runtime.
+ *
+ * One endpoint was not enough. The three transports differ in how a request
+ * reaches the handler and how a file becomes a response body, so the cases
+ * below are chosen for the decisions that differ: the publish directory, the
+ * generated route registry, the pre-rendered read, and the headers the shared
+ * core attaches. A Bun range bug that served a whole file for a sliced
+ * `BunFile` got through a health check without a mark on it.
+ */
+const checks = [
+  {
+    name: 'GET /api/health reaches the generated route registry',
+    path: '/api/health',
+    assert: (response, body) => {
+      if (response.status !== 200) return `status ${response.status}`
+      if (!body.includes('Ruvyxa')) return `body ${body.slice(0, 120)}`
+      return null
+    },
+  },
+  {
+    name: 'GET / serves the pre-rendered page',
+    path: '/',
+    assert: (response, body) => {
+      if (response.status !== 200) return `status ${response.status}`
+      if (!body.includes('data-smoke="page"')) return `body ${body.slice(0, 120)}`
+      return null
+    },
+  },
+  {
+    name: 'GET /cached serves an ISR route',
+    path: '/cached',
+    assert: (response, body) => {
+      if (response.status !== 200) return `status ${response.status}`
+      if (!body.includes('data-smoke="cached"')) return `body ${body.slice(0, 120)}`
+      return null
+    },
+  },
+  {
+    name: 'GET /smoke.svg serves a public asset with its cache policy',
+    path: '/smoke.svg',
+    assert: (response) => {
+      if (response.status !== 200) return `status ${response.status}`
+      const type = response.headers.get('content-type')
+      if (type !== 'image/svg+xml') return `content-type ${type}`
+      const cache = response.headers.get('cache-control')
+      if (cache !== 'public, max-age=3600, must-revalidate') return `cache-control ${cache}`
+      return null
+    },
+  },
+  {
+    name: 'a served page carries the security defaults',
+    path: '/',
+    assert: (response) => {
+      const nosniff = response.headers.get('x-content-type-options')
+      if (nosniff !== 'nosniff') return `x-content-type-options ${nosniff}`
+      const frame = response.headers.get('x-frame-options')
+      if (frame !== 'DENY') return `x-frame-options ${frame}`
+      return null
+    },
+  },
+  {
+    name: 'an unknown path is a 404 rather than a crash',
+    path: '/definitely-not-a-route',
+    assert: (response) => (response.status === 404 ? null : `status ${response.status}`),
+  },
+]
+
 try {
-  const deadline = Date.now() + 15_000
-  let lastError
-  while (Date.now() < deadline) {
-    if (child.exitCode !== null) throw new Error(`server exited with ${child.exitCode}: ${output}`)
-    try {
-      const response = await fetch(`http://127.0.0.1:${port}/api/health`)
-      const body = await response.text()
-      if (response.status !== 200 || !body.includes('Ruvyxa')) {
-        throw new Error(`unexpected health response ${response.status}: ${body}`)
-      }
-      console.log(`[ok] ${runtime} deployment artifact served /api/health`)
-      lastError = undefined
-      break
-    } catch (error) {
-      lastError = error
-      await new Promise((resolve) => setTimeout(resolve, 200))
-    }
+  await waitUntilServing()
+  for (const check of checks) {
+    const response = await fetch(base + check.path)
+    const body = await response.text()
+    const failure = check.assert(response, body)
+    if (failure) throw new Error(`${runtime}: ${check.name} — ${failure}\n${output}`)
+    console.log(`[ok] ${runtime} · ${check.name}`)
   }
-  if (lastError) throw lastError
+  console.log(`[ok] ${runtime} deployment artifact passed ${checks.length} checks`)
 } finally {
   child.kill()
   await Promise.race([
     new Promise((resolve) => child.once('exit', resolve)),
     new Promise((resolve) => setTimeout(resolve, 2_000)),
   ])
+}
+
+/** Poll until the server answers, so a slow cold start is not read as a failure. */
+async function waitUntilServing() {
+  const deadline = Date.now() + 15_000
+  let lastError
+  while (Date.now() < deadline) {
+    if (child.exitCode !== null) throw new Error(`server exited with ${child.exitCode}: ${output}`)
+    try {
+      const response = await fetch(`${base}/api/health`)
+      await response.arrayBuffer()
+      return
+    } catch (error) {
+      lastError = error
+      await new Promise((resolve) => setTimeout(resolve, 200))
+    }
+  }
+  throw new Error(`${runtime} server never answered: ${lastError}\n${output}`)
 }
 
 /** Real executables a Windows command shim of `name` could be standing in front of. */

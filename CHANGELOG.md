@@ -2,6 +2,27 @@
 
 ## v1.0.32 (unreleased)
 
+### The deployment smoke was asking the demo to do something no adapter can
+
+CI built `examples/demo` with the bun and deno adapters and then launched the result. That build
+cannot succeed: the demo has a `force-dynamic` server-components route, and every adapter serves
+pages through a generated module built by the ordinary SSR entry, so such a route is refused with
+`RUV2213` — documented behaviour, not a gap that appeared here. `--adapter node` fails on the demo
+in exactly the same way; the bun and deno jobs were simply the only ones that built the demo with an
+adapter at all, which made a framework-wide limit look like a runtime-specific one.
+
+`examples/deploy-smoke` is the smallest application every self-hosted adapter _can_ deploy, and it
+is what those jobs build now. Node joins them, so the next time something makes an adapter refuse
+the fixture, all three say so rather than two.
+
+The smoke itself asks more than it used to. One health endpoint told you the process had started and
+nothing else, and the three transports differ in how a request reaches the handler and how a file
+becomes a response body — a Bun range bug that served a whole file for a sliced `BunFile` went
+through a health check without a mark on it. It now checks the pre-rendered page, an ISR route, the
+generated route registry, a public asset's content type and cache lifetime, the security defaults on
+a rendered page, and that an unknown path is a 404. All six pass on Node, on Bun 1.4.0, and on Deno
+2.9.5.
+
 ### Bun and Deno serve with their own servers
 
 `Bun.serve` and `Deno.serve` take a function from `Request` to `Response`. `createHandler` **is** a

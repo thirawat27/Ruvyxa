@@ -85,6 +85,34 @@ importers:
         specifier: ^19.2.4
         version: 19.2.4(@types/react@19.2.18)
 
+  examples/deploy-smoke:
+    dependencies:
+      '@ruvyxa/react':
+        specifier: workspace:*
+        version: link:../../packages/@ruvyxa/react
+      react:
+        specifier: 19.2.8
+        version: 19.2.8
+      react-dom:
+        specifier: 19.2.8
+        version: 19.2.8(react@19.2.8)
+      ruvyxa:
+        specifier: workspace:*
+        version: link:../../packages/ruvyxa
+    devDependencies:
+      '@ruvyxa/adapter-bun':
+        specifier: workspace:^
+        version: link:../../packages/@ruvyxa/adapter-bun
+      '@ruvyxa/adapter-deno':
+        specifier: workspace:^
+        version: link:../../packages/@ruvyxa/adapter-deno
+      '@ruvyxa/adapter-node':
+        specifier: workspace:^
+        version: link:../../packages/@ruvyxa/adapter-node
+      '@types/react':
+        specifier: ^19.2.18
+        version: 19.2.18
+
   packages/@ruvyxa/adapter-aws:
     dependencies:
       '@ruvyxa/core':

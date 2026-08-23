@@ -1,0 +1,28 @@
+{
+  "name": "deploy-smoke",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "cargo run -p ruvyxa_cli -- dev --root .",
+    "deploy:node": "cargo run -p ruvyxa_cli -- build --root . --adapter node",
+    "deploy:bun": "cargo run -p ruvyxa_cli -- build --root . --runtime bun --adapter bun",
+    "deploy:deno": "cargo run -p ruvyxa_cli -- build --root . --runtime deno --adapter deno",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@ruvyxa/react": "workspace:*",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "ruvyxa": "workspace:*"
+  },
+  "devDependencies": {
+    "@ruvyxa/adapter-bun": "workspace:^",
+    "@ruvyxa/adapter-deno": "workspace:^",
+    "@ruvyxa/adapter-node": "workspace:^",
+    "@types/react": "^19.2.18"
+  },
+  "engines": {
+    "node": ">=24.19.0"
+  }
+}

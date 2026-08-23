@@ -108,6 +108,18 @@ jobs:
         run: pnpm release:validate
       - name: Smoke test package tarballs
         run: pnpm pack:smoke
+      # The deployment smoke builds examples/deploy-smoke, not examples/demo.
+      # The demo is the broad integration fixture and includes a dynamic
+      # server-components route, which no adapter can deploy — every adapter
+      # serves pages through a generated module built by the ordinary SSR entry,
+      # so such a route is refused at build time with RUV2213. Building the demo
+      # with an adapter therefore cannot succeed, and these steps are about the
+      # emitted server rather than the demo's feature list.
+      - name: Build and launch Node deployment artifact
+        shell: bash
+        run: |
+          cargo run -p ruvyxa_cli -- build --root examples/deploy-smoke --adapter node
+          node scripts/smoke-runtime-adapter.mjs node examples/deploy-smoke/.ruvyxa/deploy/node 4390
       - name: Set up Bun runtime parity
         if: matrix.os == 'ubuntu-latest' || matrix.os == 'windows-latest'
         uses: oven-sh/setup-bun@v2
@@ -121,8 +133,8 @@ jobs:
         if: matrix.os == 'ubuntu-latest' || matrix.os == 'windows-latest'
         shell: bash
         run: |
-          cargo run -p ruvyxa_cli -- build --root examples/demo --runtime bun --adapter bun
-          node scripts/smoke-runtime-adapter.mjs bun examples/demo/.ruvyxa/deploy/bun 4391
+          cargo run -p ruvyxa_cli -- build --root examples/deploy-smoke --runtime bun --adapter bun
+          node scripts/smoke-runtime-adapter.mjs bun examples/deploy-smoke/.ruvyxa/deploy/bun 4391
       - name: Set up Deno runtime parity
         if: matrix.os == 'ubuntu-latest' || matrix.os == 'windows-latest'
         uses: denoland/setup-deno@v2
@@ -136,5 +148,5 @@ jobs:
         if: matrix.os == 'ubuntu-latest' || matrix.os == 'windows-latest'
         shell: bash
         run: |
-          cargo run -p ruvyxa_cli -- build --root examples/demo --runtime deno --adapter deno
-          node scripts/smoke-runtime-adapter.mjs deno examples/demo/.ruvyxa/deploy/deno 4392
+          cargo run -p ruvyxa_cli -- build --root examples/deploy-smoke --runtime deno --adapter deno
+          node scripts/smoke-runtime-adapter.mjs deno examples/deploy-smoke/.ruvyxa/deploy/deno 4392
