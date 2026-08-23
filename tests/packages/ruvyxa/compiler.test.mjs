@@ -350,6 +350,58 @@ describe('runtime compiler', () => {
   })
 
   /**
+   * `nodeEnv` overrides the ambient value, and on an edge target it is the only
+   * value there is.
+   *
+   * A deployment passes it because a build artifact is a production build
+   * whichever way the host starts it. On Node the emitted statement assigns to
+   * the real `process.env`, so the wrapper's literal is never consulted — but a
+   * Cloudflare worker has no `process` at all, and that literal is the only
+   * `NODE_ENV` its code will ever read. Reasoning that an outer bundle's runtime
+   * pin covered a bundle linked into it was true on Node and false on edge, and
+   * it left every worker's server-components SSR pass compiling the client
+   * modules it inlines under `"development"`.
+   */
+  it('pins a bundle to the NODE_ENV it was compiled for, whatever the host exports', async () => {
+    await withFixture(async ({ root, outDir }) => {
+      const previous = process.env.NODE_ENV
+      process.env.NODE_ENV = 'development'
+      try {
+        for (const platform of ['browser', 'node']) {
+          const outfile = path.join(outDir, `pinned-${platform}.js`)
+          await compileBundleWithMetadata({
+            projectRoot: root,
+            entrySource: 'export const mode = process.env.NODE_ENV\n',
+            sourcefile: 'ruvyxa:entry.ts',
+            outfile,
+            platform,
+            nodeEnv: 'production',
+            sourceMap: false,
+          })
+          const code = await readFile(outfile, 'utf8')
+          // The stand-in literal, which is the whole story on a host with no
+          // `process` — and it must not still say what the build machine did.
+          assert.match(
+            code,
+            /globalThis\.process \?\? \{ env: \{ NODE_ENV: "production" \} \}/,
+            `${platform}: the module stand-in was not pinned`,
+          )
+          assert.doesNotMatch(code, /NODE_ENV: "development"/, `${platform}`)
+          // And the runtime assignment, for a host that does have one. Ahead of
+          // every module factory, because React reads the value while its own
+          // factory runs.
+          const pin = code.indexOf('globalThis.process.env.NODE_ENV = "production"')
+          assert.notEqual(pin, -1, `${platform}: no runtime pin`)
+          assert.ok(pin < code.indexOf('const __m'), `${platform}: the pin runs too late`)
+        }
+      } finally {
+        if (previous === undefined) delete process.env.NODE_ENV
+        else process.env.NODE_ENV = previous
+      }
+    })
+  })
+
+  /**
    * A module imported only for its side effect runs where the source put it.
    *
    * The specifier scan runs one regex per import *form*, and the side-effect

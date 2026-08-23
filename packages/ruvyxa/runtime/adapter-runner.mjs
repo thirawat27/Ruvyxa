@@ -837,9 +837,16 @@ async function buildServerComponentBundles(route, pageFile, index) {
     // both number their modules `__m0` upward cannot share a scope, so this one
     // is numbered differently.
     identifierPrefix: `__rsc${index}_`,
-    // No `nodeEnv` here, unlike every other bundle a deployment emits: this one
-    // is never loaded on its own, and the registry it is linked into pins the
-    // value before any factory of the combined bundle runs.
+    // Pinned here too, even though this bundle is linked into one that already
+    // pins it. The outer pin is a *runtime* assignment to `globalThis.process`,
+    // and on an edge target there is no `process` to assign to — the literal
+    // compiled into each module wrapper is the only `NODE_ENV` its code will
+    // ever read. Reasoning that the outer bundle covered this left every
+    // Cloudflare worker's SSR pass running the client modules it inlines under
+    // `NODE_ENV: "development"`, which is where a component library's dev-only
+    // branches live. The duplicated statement in the combined output is
+    // idempotent.
+    nodeEnv: 'production',
   })
 
   // Every `'use server'` module either graph can reach. Both lists are needed:
