@@ -140,6 +140,11 @@ impl RenderContext {
         })
     }
 
+    /// The head fragment carrying this project's CSS.
+    ///
+    /// Holds the finished tag rather than the rule text, so this context writes
+    /// the same thing every other host does: a link to the built stylesheet
+    /// when there is one, and the collection inline when there is not.
     fn styles(&self, config: &ServerConfig) -> Result<&str> {
         if let Some(styles) = self.styles.get() {
             return Ok(styles);
@@ -151,9 +156,10 @@ impl RenderContext {
             config.runtime,
         )?
         .css;
+        let tag = crate::style_head_tag(None, &css);
         // A concurrent caller may have won the race; either value is the same
         // collection of the same sources, so whichever lands first stands.
-        Ok(self.styles.get_or_init(|| css))
+        Ok(self.styles.get_or_init(|| tag))
     }
 }
 
@@ -321,7 +327,7 @@ pub(crate) async fn render_request_pooled(
 
     match route_match.route.kind {
         RouteKind::Page => {
-            let styles = state.runtime_cache.styles(&state.config).await?;
+            let styles = state.runtime_cache.style_tag(&state.config).await?;
             let page_headers = worker_request_headers(request_headers);
             let form_action = posted_form(route_match.route, method, request_headers, request_body);
             let page_request = PageRequestContext {
@@ -505,8 +511,10 @@ async fn render_page_streamed(
 
     let asset_links = state.runtime_cache.asset_links(&state.config).await;
     let plugin_head = render_plugin_head(&state.config.plugin_head);
-    let head_content =
-        format!(r#"{asset_links}{plugin_head}<style data-ruvyxa-css>{styles}</style>"#);
+    // Composed per stream rather than once: the framework's defaults stand down
+    // for a document that declares its own, and the prefix — the first frame,
+    // which carries the shell's `<head>` — is the only place to read that from.
+    let head_tail = format!("{plugin_head}{styles}");
     // Resolved before the stream starts: the request is out of reach by the time
     // the head prefix arrives, and the answer is the same for every chunk.
     let locale = crate::i18n::localized_head(
@@ -516,6 +524,10 @@ async fn render_page_streamed(
         params,
     );
     let compose = move |prefix: &str| {
+        let head_content = format!(
+            "{}{head_tail}",
+            crate::document_head_defaults(prefix, &asset_links)
+        );
         crate::html_document::compose_document_head(
             prefix,
             &head_content,
@@ -722,8 +734,10 @@ async fn render_page_ssg(
     let client_script = client_hydration_script(&state.config, route, request_path, params);
     let rsc_payload = rsc_payload_block(route, response.rsc_payload.as_deref());
     let plugin_head = render_plugin_head(&state.config.plugin_head);
-    let head_content =
-        format!(r#"{asset_links}{plugin_head}<style data-ruvyxa-css>{styles}</style>"#);
+    let head_content = format!(
+        "{}{plugin_head}{styles}",
+        crate::document_head_defaults(&rendered, &asset_links)
+    );
     let html = compose_localized_document(
         &rendered,
         &head_content,
@@ -836,8 +850,10 @@ async fn render_isr_background(
     let client_script = client_hydration_script(&state.config, route, request_path, params);
     let rsc_payload = rsc_payload_block(route, response.rsc_payload.as_deref());
     let plugin_head = render_plugin_head(&state.config.plugin_head);
-    let head_content =
-        format!(r#"{asset_links}{plugin_head}<style data-ruvyxa-css>{styles}</style>"#);
+    let head_content = format!(
+        "{}{plugin_head}{styles}",
+        crate::document_head_defaults(&rendered, &asset_links)
+    );
     Ok(compose_localized_document(
         &rendered,
         &head_content,
@@ -1147,7 +1163,7 @@ async fn render_page_csr(
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   {asset_links}
-  <style data-ruvyxa-css>{styles}</style>
+  {styles}
   {bootstrap}
 </head>
 <body>
@@ -1254,8 +1270,10 @@ async fn render_page_ppr(
     };
     let client_script = client_hydration_script(&state.config, route, request_path, params);
     let plugin_head = render_plugin_head(&state.config.plugin_head);
-    let head_content =
-        format!(r#"{asset_links}{plugin_head}<style data-ruvyxa-css>{styles}</style>"#);
+    let head_content = format!(
+        "{}{plugin_head}{styles}",
+        crate::document_head_defaults(&rendered, &asset_links)
+    );
     let html = compose_localized_document(
         &rendered,
         &head_content,
@@ -1292,13 +1310,16 @@ async fn render_page_pooled(
     params: &RouteParams,
     styles: &str,
 ) -> Result<CachedDocument> {
-    // Check render cache first. A submitted form skips it in both directions:
-    // a stored document was rendered before this action ran, and the one this
-    // produces answers a submission nobody else made.
+    // Check render cache first. Three things skip it. A submitted form skips it
+    // in both directions: a stored document was rendered before this action ran,
+    // and the one this produces answers a submission nobody else made. A route
+    // that declared `export const dynamic = 'force-dynamic'` skips it because
+    // that is what the declaration asks for — reading the export used to mean
+    // only "do not pre-render this", so the page was rendered once per process
+    // and every later visitor got that first document, timestamps and all.
     let cache_key = render_cache::ssr_cache_key(request.path, params);
-    if request.form_action.is_none()
-        && let Some(cached) = state.render_cache.get_document(&cache_key).await
-    {
+    let cacheable = request.form_action.is_none() && !route.render.force_dynamic;
+    if cacheable && let Some(cached) = state.render_cache.get_document(&cache_key).await {
         return Ok(cached);
     }
 
@@ -1356,7 +1377,9 @@ async fn render_page_pooled(
     // Reported by the worker when the render actually read a cookie, a header,
     // or draft mode. Such a document is one user's page: putting it in the
     // shared render cache would serve it to the next visitor of the same URL.
-    let request_scoped = response.request_scoped.unwrap_or(false) || request.form_action.is_some();
+    let request_scoped = response.request_scoped.unwrap_or(false)
+        || request.form_action.is_some()
+        || route.render.force_dynamic;
 
     // A server function the submitted form ran may have called
     // `revalidatePath()`. Applied before the response is returned so a visitor
@@ -1382,8 +1405,10 @@ async fn render_page_pooled(
     // deferred module runs, but a reader that precedes its data reads as a bug.
     let rsc_payload = rsc_payload_block(route, response.rsc_payload.as_deref());
     let plugin_head = render_plugin_head(&state.config.plugin_head);
-    let head_content =
-        format!(r#"{asset_links}{plugin_head}<style data-ruvyxa-css>{styles}</style>"#);
+    let head_content = format!(
+        "{}{plugin_head}{styles}",
+        crate::document_head_defaults(&rendered, &asset_links)
+    );
 
     let html = compose_localized_document(
         &rendered,
@@ -1859,8 +1884,10 @@ fn render_page(
     };
     let client_script = client_hydration_script(config, route, request_path, params);
     let plugin_head = render_plugin_head(&config.plugin_head);
-    let head_content =
-        format!(r#"{asset_links}{plugin_head}<style data-ruvyxa-css>{styles}</style>"#);
+    let head_content = format!(
+        "{}{plugin_head}{styles}",
+        crate::document_head_defaults(&rendered, &asset_links)
+    );
 
     Ok(compose_localized_document(
         &rendered,

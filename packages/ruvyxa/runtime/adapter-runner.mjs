@@ -709,6 +709,29 @@ async function materializeFunction(buildDir, destination, handlerSource, target)
  * this existed, so a build that somehow produced no manifest degrades to it
  * rather than failing.
  */
+/**
+ * The stylesheet link a deployed document carries, or an empty string.
+ *
+ * `ruvyxa build` writes the project's compiled CSS as a content-addressed asset
+ * and records it in the client route manifest; the adapter copies the whole
+ * client directory, so the file is already beside the function. Before this
+ * existed a request-time render on a deployed build had no stylesheet at all —
+ * the pre-rendered pages carried theirs inline and every other route was
+ * unstyled.
+ */
+async function styleHeadTag(buildDir) {
+  try {
+    const manifest = JSON.parse(
+      await readFile(path.join(buildDir, 'client', 'route-manifest.json'), 'utf8'),
+    )
+    const href = Array.isArray(manifest?.styles) ? manifest.styles[0] : null
+    if (typeof href !== 'string' || href === '') return ''
+    return `<link rel="stylesheet" href="${href.replaceAll('"', '&quot;')}">`
+  } catch {
+    return ''
+  }
+}
+
 async function loadClientAssets(buildDir) {
   let manifest
   try {
@@ -928,7 +951,7 @@ async function materializeRouteModules(manifest, destination, target, buildDir) 
     // deployment has them: `client_hydration_script` and
     // `inject_prerender_client_assets` are both Rust, and this registry is the
     // renderer once the build is over.
-    definitions.push(documentAssetsPrelude())
+    definitions.push(documentAssetsPrelude(await styleHeadTag(buildDir)))
     // Imported only when a route needs it, so an app with no server-components
     // route ships neither the renderer nor the second React it links.
     if (routes.some((route) => route?.render?.serverComponents === true)) {

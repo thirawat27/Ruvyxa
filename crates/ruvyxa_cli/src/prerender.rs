@@ -62,6 +62,9 @@ pub(crate) struct PrerenderArtifactCache {
 #[derive(Debug, Clone)]
 pub(crate) struct PrerenderHead {
     pub(crate) asset_links: Arc<str>,
+    /// The finished stylesheet tag, not the rule text: a build links the asset
+    /// it emitted, so a baked page and a request-time render reference the same
+    /// file rather than one carrying a copy of the CSS the other links.
     pub(crate) styles: Arc<str>,
 }
 
@@ -910,7 +913,7 @@ pub(crate) fn csr_shell_html(
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Loading...</title>
   {asset_links}
-  <style data-ruvyxa-css>{styles}</style>
+  {styles}
   {preload_links}
   {bootstrap}
 </head>
@@ -935,8 +938,9 @@ pub(crate) fn csr_shell_html(
 /// the two documents differ only where they have to.
 pub(crate) fn inject_prerender_head(html: &str, head: &PrerenderHead) -> String {
     let head_tags = format!(
-        r#"{}<style data-ruvyxa-css>{}</style>"#,
-        head.asset_links, head.styles
+        "{}{}",
+        ruvyxa_dev_server::document_head_defaults(html, &head.asset_links),
+        head.styles
     );
     let lower = html.to_ascii_lowercase();
     if let Some(head_end) = lower.find("</head>") {

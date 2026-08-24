@@ -23,7 +23,54 @@ import {
   resolveExportsEntry,
 } from './package-exports.mjs'
 import { createCodeIndex, directivePrologueEnd, findInCode, maskNonCode } from './scanner.mjs'
-const JS_EXTENSIONS = ['', '.ts', '.tsx', '.js', '.jsx', '.mts', '.mjs', '.md', '.mdx']
+/**
+ * File extensions probed when a specifier names no file directly, in priority
+ * order — one list for project files and package files alike, mirroring
+ * `PROBE_EXTENSIONS` in `crates/ruvyxa_bundler/src/resolver.rs`. A `.ts` source
+ * beside a `.js` build is the one this project meant to compile.
+ */
+const FILE_PROBE_EXTENSIONS = ['ts', 'tsx', 'js', 'jsx', 'mts', 'cts', 'mjs', 'cjs', 'md', 'mdx']
+
+/**
+ * TypeScript sources a written extension may stand for: `./x.js` names `x.ts`
+ * in a project whose TypeScript has not been emitted. Mirrors
+ * `typescript_source_extensions` in the Rust resolver.
+ *
+ * Only these four are rewritten. Replacing the last dotted segment of anything
+ * else asks for the wrong file and never asks for the right one:
+ * `./util.inspect` becomes `util.js`, which does not exist, while
+ * `util.inspect.js` — the file `object-inspect` ships, and the one Node finds
+ * by appending — is never probed. Node appends; a dot inside a basename is
+ * ordinary.
+ */
+const TYPESCRIPT_SOURCE_EXTENSIONS = {
+  '.js': ['ts', 'tsx', 'jsx'],
+  '.mjs': ['mts', 'ts'],
+  '.cjs': ['cts', 'ts'],
+  '.jsx': ['tsx'],
+}
+/**
+ * A JavaScript identifier, as source text for a `u`-flagged regular expression.
+ *
+ * `[A-Za-z_$][\w$]*` — what every rewrite here used to match — is ASCII, and
+ * JavaScript identifiers are not: `café` matched only `caf`, so the linker
+ * emitted `__exports.caf = caf` and the module threw `caf is not defined` on
+ * import, while `ชื่อ` and `Δelta` matched nothing at all and their exports were
+ * dropped with no diagnostic. The Rust linker reads the same names with
+ * `char::is_alphanumeric`, which is why only this graph was wrong.
+ */
+const IDENTIFIER_SOURCE = String.raw`[\p{ID_Start}$_][\p{ID_Continue}$\u200C\u200D]*`
+
+/** `IDENTIFIER_SOURCE` spliced into `pattern`, compiled Unicode-aware. */
+function identifierPattern(pattern) {
+  return new RegExp(pattern.replaceAll('%IDENT%', IDENTIFIER_SOURCE), 'u')
+}
+
+/** Whether `text` is exactly one identifier. */
+function isIdentifier(text) {
+  return identifierPattern('^%IDENT%$').test(text)
+}
+
 export const MDX_COMPONENT_EXTENSIONS = ['.tsx', '.ts', '.jsx', '.js', '.mts', '.mjs']
 const ASSET_EXTENSIONS = new Set(['.css', '.scss', '.sass', '.less'])
 /// Every file extension this compiler knows how to turn into a module. A
@@ -362,6 +409,7 @@ export async function compileBundleWithMetadata({
     externalUrls,
     nodeEnv,
   })
+  assertLinkedSyntax(linked.code, outfile, linked.lineOrigins)
   await mkdir(path.dirname(outfile), { recursive: true })
   await writeIfChanged(outfile, linked.code)
   if (linked.map) {
@@ -1254,9 +1302,15 @@ function functionNameBefore(source, braceOffset) {
  * makes no difference to that.
  */
 const HEADER_PATTERNS = [
-  /(?:^|[;{}])\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)$/,
-  /(?:^|[;{}])\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s*)?$/,
-  /(?:^|[;{}])\s*(?:export\s+)?(?:const|let|var)\s+([A-Za-z_$][\w$]*)\s*=\s*(?:async\s+)?function\s*\*?\s*[A-Za-z_$]*$/,
+  identifierPattern(
+    String.raw`(?:^|[;{}])\s*(?:export\s+)?(?:default\s+)?(?:async\s+)?function\s*\*?\s*(%IDENT%)$`,
+  ),
+  identifierPattern(
+    String.raw`(?:^|[;{}])\s*(?:export\s+)?(?:const|let|var)\s+(%IDENT%)\s*=\s*(?:async\s*)?$`,
+  ),
+  identifierPattern(
+    String.raw`(?:^|[;{}])\s*(?:export\s+)?(?:const|let|var)\s+(%IDENT%)\s*=\s*(?:async\s+)?function\s*\*?\s*(?:%IDENT%)?$`,
+  ),
 ]
 
 function skipBackWhitespace(source, from) {
@@ -1567,21 +1621,87 @@ function linkModules(
     push('')
   }
 
+  // Which modules sit in an import cycle, and with whom. A cycle is legal ESM
+  // and common in published packages — `zod` has one between `schemas.js` and
+  // `iso.js` — so the linker orders around it rather than refusing the graph.
+  const cycles = findCycleGroups(modules)
+  for (const module of modules) {
+    module.cycleGroup = cycles.get(module.id) ?? null
+  }
+
   const rewrittenModules = new Map(modules.map((module) => [module.id, rewriteModule(module)]))
 
-  for (const module of orderModulesByDependencies(modules)) {
+  const ordered = orderModulesByDependencies(modules)
+  // Where each cycle starts and finishes. Neither is always the module beside
+  // the group: an acyclic dependency of one member can be emitted between two
+  // of them.
+  const firstOfCycleGroup = new Map()
+  const lastOfCycleGroup = new Map()
+  const membersOfCycleGroup = new Map()
+  for (const [position, module] of ordered.entries()) {
+    if (module.cycleGroup === null) continue
+    if (!firstOfCycleGroup.has(module.cycleGroup))
+      firstOfCycleGroup.set(module.cycleGroup, position)
+    lastOfCycleGroup.set(module.cycleGroup, position)
+    const members = membersOfCycleGroup.get(module.cycleGroup) ?? []
+    members.push(module)
+    membersOfCycleGroup.set(module.cycleGroup, members)
+  }
+  if (ordered.some((module) => module.cycleGroup !== null)) {
+    // Bindings a cyclic import could not read yet, re-read once its group has
+    // finished initialising. See `rewriteImportClause`.
+    push(`const __ruvyxaRebind = [];`)
+    // What such a binding holds until then. ESM answers a read of a binding
+    // whose module has not finished with a ReferenceError, and the linked form
+    // would otherwise answer `undefined` and carry on — the same wrong value,
+    // with nothing to trace it back to.
+    push(
+      `const __ruvyxaCycleTdz = (name, from) => new Proxy(function () {}, ` +
+        `{ get(target, key) { if (key === Symbol.toStringTag) return 'Uninitialized'; ` +
+        `throw new ReferenceError(\`Cannot access '\${name}' before initialization: it is imported from \${from}, which imports this module back, and the value is read while that cycle is still running.\`) }, ` +
+        `apply() { throw new ReferenceError(\`Cannot call '\${name}' before initialization (import cycle with \${from}).\`) }, ` +
+        `construct() { throw new ReferenceError(\`Cannot construct '\${name}' before initialization (import cycle with \${from}).\`) } });`,
+    )
+    push('')
+  }
+
+  for (const [position, module] of ordered.entries()) {
     const rewritten = rewrittenModules.get(module.id)
     const sourceIndex = sourceMap
       ? sourceMapIndex(mapSources, module.sourceName, module.source)
       : null
 
-    push(`const ${module.id} = (() => {`)
-    push(`  const __exports = {};`)
-    push(`  const module = { exports: __exports };`)
-    push(`  const exports = module.exports;`)
-    push(
-      `  const process = globalThis.process ?? { env: { NODE_ENV: ${JSON.stringify(nodeEnv ?? browserNodeEnv())} } };`,
-    )
+    // A module in a cycle publishes its exports object before its body runs, so
+    // a module further into the cycle has something to hold. An acyclic module
+    // keeps the original shape, so its bytes do not change.
+    if (module.cycleGroup === null) {
+      push(`const ${module.id} = (() => {`)
+      push(`  const __exports = {};`)
+    } else {
+      // Every namespace in the group is declared before the first body runs:
+      // the member that closes the cycle reads the one that opened it.
+      if (firstOfCycleGroup.get(module.cycleGroup) === position) {
+        for (const member of membersOfCycleGroup.get(module.cycleGroup)) {
+          push(`const ${member.id} = {};`)
+        }
+      }
+      push(`;(() => {`)
+      push(`  const __exports = ${module.id};`)
+    }
+    // A module that declares one of these itself keeps its own; the wrapper
+    // would otherwise redeclare a name in the same scope and the bundle would
+    // not parse.
+    const declared = topLevelDeclaredNames(rewritten.code)
+    const ownsModule = declared.has('module')
+    if (!ownsModule) push(`  const module = { exports: __exports };`)
+    if (!declared.has('exports')) {
+      push(`  const exports = ${ownsModule ? '__exports' : 'module.exports'};`)
+    }
+    if (!declared.has('process')) {
+      push(
+        `  const process = globalThis.process ?? { env: { NODE_ENV: ${JSON.stringify(nodeEnv ?? browserNodeEnv())} } };`,
+      )
+    }
     const codeLines = rewritten.code.split('\n')
     for (let index = 0; index < codeLines.length; index++) {
       const line = codeLines[index]
@@ -1591,9 +1711,29 @@ function linkModules(
         sourceIndex !== null && originalLine !== null ? { sourceIndex, originalLine } : null,
       )
     }
-    push(`  return module.exports;`)
-    push(`})();`)
+    // `module.exports` unless the module declared its own `module`, in which
+    // case that name means something else entirely and only `__exports` holds
+    // what this module exported.
+    const exportsExpression = ownsModule ? '__exports' : 'module.exports'
+    if (module.cycleGroup === null) {
+      push(`  return ${exportsExpression};`)
+      push(`})();`)
+    } else {
+      // A CommonJS module in the cycle may have replaced `module.exports`
+      // wholesale; the identity its importers hold is the one published above.
+      push(
+        `  if (${exportsExpression} !== __exports) Object.assign(__exports, ${exportsExpression});`,
+      )
+      push(`})();`)
+    }
     push('')
+
+    // The moment a cycle is complete is the moment its members can read each
+    // other's named bindings, so the fixups run there rather than at the end.
+    if (module.cycleGroup !== null && lastOfCycleGroup.get(module.cycleGroup) === position) {
+      push(`__ruvyxaRebind.splice(0).forEach((rebind) => rebind());`)
+      push('')
+    }
   }
 
   const entry = modules[0]
@@ -1608,12 +1748,19 @@ function linkModules(
   if (sourceMap && !minify) push(`//# sourceMappingURL=${path.basename(outfile)}.map`)
 
   const code = out.join('\n')
+  const sourceNames = [...mapSources.keys()]
   return {
     // Whitespace replacement is not JavaScript minification: it corrupts strings,
     // regexes, template literals, and line comments. Native production builds use
     // the Oxc minifier; the runtime compiler keeps generated code semantically exact.
     code,
     map: sourceMap ? buildSourceMap(outfile, lineMappings, mapSources) : null,
+    // Where each emitted line came from, so a failure found in the linked text
+    // can name project source rather than a line in a file nobody wrote. Built
+    // whether or not a source map was asked for.
+    lineOrigins: lineMappings.map((mapping) =>
+      mapping ? { source: sourceNames[mapping.sourceIndex], line: mapping.originalLine } : null,
+    ),
   }
 }
 
@@ -1627,25 +1774,24 @@ function linkModules(
  */
 function orderModulesByDependencies(modules) {
   const ordered = []
-  const visiting = new Map()
+  const onStack = new Set()
   const visited = new Set()
-  const stack = []
 
   const visit = (module) => {
     if (visited.has(module.id)) return
-    if (visiting.has(module.id)) {
-      const cycleStart = visiting.get(module.id)
-      const cycle = [...stack.slice(cycleStart), module].map(moduleDisplayName).join(' -> ')
-      throw new Error(`RUV1803 circular dependency detected: ${cycle}`)
-    }
+    // A dependency already being initialised further up this walk is a cycle
+    // edge. ESM does not re-enter one either: evaluation is a depth-first
+    // post-order, and the module that closes the cycle sees the partially
+    // filled namespace of the one that started it. Refusing the graph instead
+    // — which this did — made every package with an internal cycle, `zod`
+    // among them, impossible to bundle at all.
+    if (onStack.has(module.id)) return
 
-    visiting.set(module.id, stack.length)
-    stack.push(module)
+    onStack.add(module.id)
     for (const dependency of module.deps.values()) {
       if (!dependency.external) visit(dependency)
     }
-    stack.pop()
-    visiting.delete(module.id)
+    onStack.delete(module.id)
     visited.add(module.id)
     ordered.push(module)
   }
@@ -1654,8 +1800,60 @@ function orderModulesByDependencies(modules) {
   return ordered
 }
 
-function moduleDisplayName(module) {
-  return module.filePath ? path.basename(module.filePath) : module.key
+/**
+ * Group the modules that sit in an import cycle, by Tarjan's algorithm.
+ *
+ * Returns a map from module id to a group id, holding only modules in a cycle:
+ * a strongly connected component with more than one member, or a module that
+ * imports itself. Everything else links exactly as it did before, which is what
+ * keeps an ordinary bundle's bytes unchanged.
+ */
+function findCycleGroups(modules) {
+  const index = new Map()
+  const lowLink = new Map()
+  const onStack = new Set()
+  const stack = []
+  const groups = new Map()
+  let counter = 0
+  let groupId = 0
+
+  const strongConnect = (module) => {
+    index.set(module.id, counter)
+    lowLink.set(module.id, counter)
+    counter += 1
+    stack.push(module)
+    onStack.add(module.id)
+
+    let selfReferential = false
+    for (const dependency of module.deps.values()) {
+      if (dependency.external) continue
+      if (dependency.id === module.id) selfReferential = true
+      if (!index.has(dependency.id)) {
+        strongConnect(dependency)
+        lowLink.set(module.id, Math.min(lowLink.get(module.id), lowLink.get(dependency.id)))
+      } else if (onStack.has(dependency.id)) {
+        lowLink.set(module.id, Math.min(lowLink.get(module.id), index.get(dependency.id)))
+      }
+    }
+
+    if (lowLink.get(module.id) !== index.get(module.id)) return
+    const component = []
+    let member
+    do {
+      member = stack.pop()
+      onStack.delete(member.id)
+      component.push(member)
+    } while (member.id !== module.id)
+    if (component.length > 1 || selfReferential) {
+      groupId += 1
+      for (const each of component) groups.set(each.id, groupId)
+    }
+  }
+
+  for (const module of modules) {
+    if (!index.has(module.id)) strongConnect(module)
+  }
+  return groups
 }
 
 function collectLinkedExportNames(moduleId, rewrittenModules, seen = new Set()) {
@@ -1765,15 +1963,26 @@ function rewriteModule(module) {
     createHash('sha256').update(module.source).digest('hex'),
     module.jsxRuntime,
     module.reactCompiler ? 'react-compiler' : 'baseline',
+    // Which imports close a cycle changes what this rewrite emits, so it is
+    // part of the identity of the result. A key that named only the dependency
+    // ids would hand a cyclic graph the copy-binding rewrite it cached earlier.
+    `cycle:${module.cycleGroup ?? 'none'}`,
     [...module.deps.entries()]
-      .map(([specifier, dep]) => `${specifier}:${dep.external ? dep.alias : dep.id}`)
+      .map(
+        ([specifier, dep]) =>
+          `${specifier}:${dep.external ? dep.alias : dep.id}:${dep.cycleGroup ?? 'none'}`,
+      )
       .join('|'),
   ].join('\0')
   const cached = compilerCache.rewrites.get(rewriteKey)
   if (cached) return cached
 
   const source = module.transformedSource ?? transformModuleSource(module)
-  const codeOnly = maskNonCode(source)
+  // Specifiers stay readable in the mask because an `import`/`export` clause is
+  // rewritten from the masked text, not from the raw line: a clause wrapped
+  // across lines has to be joined before it can be read, and joining raw lines
+  // would fold a `// comment` between them over everything after it.
+  const codeOnly = maskNonCode(source, { preserveImportExportSpecifiers: true })
 
   const lines = []
   const lineMap = []
@@ -1791,12 +2000,22 @@ function rewriteModule(module) {
       continue
     }
 
-    if (/^import\b/.test(line)) {
-      const rewritten = rewriteImport(rawLine.trim(), module)
-      if (rewritten) {
+    if (IMPORT_STATEMENT.test(line)) {
+      const statement = gatherClauseStatement(codeLines, sourceLine)
+      const rewritten = rewriteImport(statement.text, module)
+      // `null` means the text only looked like an import. Nothing generated
+      // can be trusted for it, so every line it consumed is emitted as written:
+      // a masked line would have its string literals blanked.
+      if (rewritten === null) {
+        for (let at = sourceLine; at <= statement.endLine; at += 1) {
+          lines.push(sourceLines[at])
+          lineMap.push(module.transformLineMap?.[at] ?? at)
+        }
+      } else if (rewritten) {
         lines.push(rewritten)
         lineMap.push(module.transformLineMap?.[sourceLine] ?? sourceLine)
       }
+      sourceLine = statement.endLine
       continue
     }
 
@@ -1820,12 +2039,28 @@ function rewriteModule(module) {
       continue
     }
 
-    if (/^export\b/.test(line)) {
-      const result = rewriteExport(rawLine.trim(), module, exported, reExportAll)
-      if (result) {
+    if (EXPORT_STATEMENT.test(line)) {
+      // A clause form (`export { … }`, `export * …`) is rewritten into
+      // generated assignments, so it is read from the joined masked statement.
+      // A declaration form (`export const x = {`) keeps its own text and its
+      // continuation lines pass through untouched, as they always have.
+      const isClause = /^export\s*(?:\{|\*)/.test(line)
+      const statement = isClause
+        ? gatherClauseStatement(codeLines, sourceLine)
+        : { text: rawLine.trim(), endLine: sourceLine }
+      const result = rewriteExport(statement.text, module, exported, reExportAll)
+      if (isClause && result === statement.text) {
+        // Nothing matched, so the masked text is not safe to emit; see the
+        // import branch above.
+        for (let at = sourceLine; at <= statement.endLine; at += 1) {
+          lines.push(sourceLines[at])
+          lineMap.push(module.transformLineMap?.[at] ?? at)
+        }
+      } else if (result) {
         lines.push(result)
         lineMap.push(module.transformLineMap?.[sourceLine] ?? sourceLine)
       }
+      sourceLine = statement.endLine
       continue
     }
 
@@ -1842,12 +2077,112 @@ function rewriteModule(module) {
     code: lines.join('\n'),
     lineMap,
     exportedNames: exported
-      .map((item) => item.match(/__exports\.([A-Za-z_$][\w$]*)\s=/)?.[1])
+      .map((item) => item.match(identifierPattern(String.raw`__exports\.(%IDENT%)\s=`))?.[1])
       .filter(Boolean),
     reExportAll,
   }
   setBoundedCacheEntry(compilerCache.rewrites, rewriteKey, result)
   return result
+}
+
+/**
+ * Names a module declares at its own top level.
+ *
+ * The wrapper each module is linked into declares `module`, `exports`, and
+ * `process` for it, and a module that declares one of those itself collided
+ * with the wrapper: `zod` has a top-level `function process(schema, ctx)`, and
+ * the emitted bundle failed to parse with "Identifier 'process' has already
+ * been declared" — from a file the author never wrote. Depth is counted over
+ * the mask, so a brace inside a string cannot close a block early.
+ */
+function topLevelDeclaredNames(code) {
+  const masked = maskNonCode(code)
+  const declaration = identifierPattern(
+    String.raw`^(?:function|class|const|let|var)\s*\*?\s+(%IDENT%)`,
+  )
+  const names = new Set()
+  let depth = 0
+  for (let index = 0; index < masked.length; index += 1) {
+    const character = masked[index]
+    if (character === '{' || character === '(' || character === '[') {
+      depth += 1
+      continue
+    }
+    if (character === '}' || character === ')' || character === ']') {
+      depth -= 1
+      continue
+    }
+    if (depth !== 0 || !/[a-z]/.test(character)) continue
+    const before = masked[index - 1]
+    if (before && /[\w$.]/.test(before)) continue
+    const match = declaration.exec(masked.slice(index, index + 200))
+    if (match) names.add(match[1])
+  }
+  return names
+}
+
+/**
+ * An `import` statement, and not the reserved word used as something else.
+ *
+ * A reserved word is a legal property name, so `{ import: './x' }` opens a line
+ * with `import` and is not a statement; neither is `import(…)` or
+ * `import.meta`. The distinction never mattered while a non-statement fell
+ * through returning its own text, and mattered immediately once the rewriter
+ * started reading the masked line, where a string literal is blanked.
+ */
+const IMPORT_STATEMENT = /^import(?=[\s{*"'])(?!\s*:)/
+
+/** An `export` statement, held apart from `{ export: … }` the same way. */
+const EXPORT_STATEMENT = /^export(?=[\s{*])(?!\s*:)/
+
+/**
+ * Join an `import`/`export` clause statement that spans lines into one.
+ *
+ * Both linkers rewrite a line at a time. A clause list wrapped across lines —
+ * what Prettier produces, and what `chalk` ships — used to have its first line
+ * rewritten and its continuation lines copied through as bare tokens, so the
+ * bundle carried `modifierNames as modifiers, … } from "…"` on its own and did
+ * not parse. The build reported success; the deployed server died on the
+ * `SyntaxError` at startup.
+ *
+ * Lines are joined from the mask, where a comment between clause members is
+ * already blanked and the specifier is preserved.
+ */
+function gatherClauseStatement(codeLines, start) {
+  const parts = []
+  let endLine = start
+  while (endLine < codeLines.length) {
+    parts.push((codeLines[endLine] ?? '').trim())
+    if (isCompleteClauseStatement(parts.join(' ').trim(), codeLines, endLine)) break
+    endLine += 1
+  }
+  return {
+    text: parts.join(' ').replace(/\s+/g, ' ').trim(),
+    endLine: Math.min(endLine, codeLines.length - 1),
+  }
+}
+
+/** Whether a gathered `import`/`export` statement needs no further line. */
+function isCompleteClauseStatement(text, codeLines, endLine) {
+  let depth = 0
+  for (const character of text) {
+    if (character === '{' || character === '[' || character === '(') depth += 1
+    else if (character === '}' || character === ']' || character === ')') depth -= 1
+  }
+  if (depth > 0) return false
+  const trimmed = text.trim()
+  if (trimmed.endsWith(',')) return false
+  // `from` written, specifier still to come.
+  if (/\bfrom\s*$/.test(trimmed)) return false
+  // A closed clause with no `from` may still be followed by one.
+  if (/\}$/.test(trimmed) && !/\bfrom\b/.test(trimmed)) {
+    for (let next = endLine + 1; next < codeLines.length; next += 1) {
+      const candidate = codeLines[next].trim()
+      if (!candidate) continue
+      return !/^from\b/.test(candidate)
+    }
+  }
+  return true
 }
 
 function isBalancedDefaultExpression(lines) {
@@ -1865,21 +2200,30 @@ function rewriteImport(line, module) {
   if (/^import\s+["']/.test(line)) return ''
 
   const match = line.match(/^import\s+(.+?)\s+from\s+["'](.+?)["'];?$/)
-  if (!match) return line
+  if (!match) return null
 
   const [, clause, specifier] = match
   const source = module.deps.get(specifier)
   if (!source) return ''
 
   const sourceRef = source.external ? source.alias : source.id
-  return rewriteImportClause(clause, sourceRef)
+  // An import that closes a cycle reads a namespace whose body has not run yet,
+  // so a copied binding would hold `undefined` for the life of the bundle. The
+  // binding is re-read once the cycle finishes instead, which is the closest a
+  // concatenating linker gets to ESM's live bindings. A namespace import needs
+  // none of this: it holds the object itself.
+  const cyclic =
+    !source.external && module.cycleGroup !== null && module.cycleGroup === source.cycleGroup
+  return rewriteImportClause(clause, sourceRef, cyclic)
 }
 
 function rewriteExport(line, module, exported, reExportAll) {
   line = rewriteDynamicImports(line, module)
 
   if (line.startsWith('export default function ')) {
-    const name = line.match(/^export\s+default\s+function\s+([A-Za-z_$][\w$]*)/)?.[1]
+    const name = line.match(
+      identifierPattern(String.raw`^export\s+default\s+function\s+(%IDENT%)`),
+    )?.[1]
     const declaration = line.replace(/^export\s+default\s+/, '')
     if (name) exported.push(`__exports.default = ${name};`)
     return name
@@ -1892,8 +2236,18 @@ function rewriteExport(line, module, exported, reExportAll) {
   }
 
   if (/^export\s+(const|let|var)\s+/.test(line)) {
-    const name = line.match(/^export\s+(?:const|let|var)\s+([A-Za-z_$][\w$]*)/)?.[1]
+    const name = line.match(
+      identifierPattern(String.raw`^export\s+(?:const|let|var)\s+(%IDENT%)`),
+    )?.[1]
     if (name) exported.push(`__exports.${name} = ${name};`)
+    // A destructuring declaration binds several names and matches no single
+    // one, so it used to export nothing at all. The Rust linker reads them
+    // with `destructured_binding_names`; this is the same walk.
+    else {
+      for (const bound of destructuredBindingNames(line.replace(/^export\s+/, ''))) {
+        exported.push(`__exports.${bound} = ${bound};`)
+      }
+    }
     return line.replace(/^export\s+/, '')
   }
 
@@ -1904,14 +2258,16 @@ function rewriteExport(line, module, exported, reExportAll) {
   // inside generated code. `declared_lane`'s neighbour in
   // `crates/ruvyxa_bundler/src/linker.rs` had the same blind spot, written as a
   // list of prefixes with trailing spaces — one bug, once per module graph.
-  if (/^export\s+(?:async\s+)?function\s*\*?\s*[A-Za-z_$]/.test(line)) {
-    const name = line.match(/^export\s+(?:async\s+)?function\s*\*?\s*([A-Za-z_$][\w$]*)/)?.[1]
+  if (identifierPattern(String.raw`^export\s+(?:async\s+)?function\s*\*?\s*%IDENT%`).test(line)) {
+    const name = line.match(
+      identifierPattern(String.raw`^export\s+(?:async\s+)?function\s*\*?\s*(%IDENT%)`),
+    )?.[1]
     if (name) exported.push(`__exports.${name} = ${name};`)
     return line.replace(/^export\s+/, '')
   }
 
   if (/^export\s+class\s+/.test(line)) {
-    const name = line.match(/^export\s+class\s+([A-Za-z_$][\w$]*)/)?.[1]
+    const name = line.match(identifierPattern(String.raw`^export\s+class\s+(%IDENT%)`))?.[1]
     if (name) exported.push(`__exports.${name} = ${name};`)
     return line.replace(/^export\s+/, '')
   }
@@ -1923,14 +2279,29 @@ function rewriteExport(line, module, exported, reExportAll) {
     const source = module.deps.get(specifier)
     if (!source) return ''
     const sourceRef = source.external ? source.alias : source.id
+    // A re-export that closes a cycle copies from a namespace whose body has
+    // not run; it is copied again once the cycle finishes. See `rewriteImport`.
+    const cyclic =
+      !source.external && module.cycleGroup !== null && module.cycleGroup === source.cycleGroup
+    const rebind = (statement) =>
+      cyclic ? `${statement} __ruvyxaRebind.push(() => { ${statement} });` : statement
     if (clause.trim() === '*') {
       if (!source.external) reExportAll.push(source.id)
-      return `Object.assign(__exports, ${sourceRef});`
+      return rebind(`Object.assign(__exports, ${sourceRef});`)
+    }
+    // `export * as ns from '…'` names the namespace object. Read as a named
+    // binding list it produced `__exports.ns = __m8.*`, which does not parse —
+    // `zod` re-exports its `util` module exactly this way.
+    const namespaceAlias = clause.trim().match(identifierPattern(String.raw`^\*\s+as\s+(%IDENT%)$`))
+    if (namespaceAlias) {
+      const assignment = `__exports.${namespaceAlias[1]} = ${sourceRef};`
+      exported.push(assignment)
+      return assignment
     }
     const assignments = parseNamedBindings(clause).map(([original, alias]) => {
       const assignment = `__exports.${alias} = ${sourceRef}.${original};`
       exported.push(assignment)
-      return assignment
+      return rebind(assignment)
     })
     return assignments.join(' ')
   }
@@ -1949,24 +2320,36 @@ function rewriteExport(line, module, exported, reExportAll) {
   return line
 }
 
-function rewriteImportClause(clause, sourceRef) {
+function rewriteImportClause(clause, sourceRef, cyclic = false) {
+  /**
+   * A binding, plus — when the import closes a cycle — the re-read that gives
+   * it its value once the cycle finishes, and a stand-in that refuses to be
+   * used until then.
+   */
+  const bind = (name, expression) =>
+    cyclic
+      ? `let ${name} = ${expression} ?? __ruvyxaCycleTdz(${JSON.stringify(name)}, ${JSON.stringify(sourceRef)}); ` +
+        `__ruvyxaRebind.push(() => { ${name} = ${expression}; });`
+      : `const ${name} = ${expression};`
+
   const cleaned = clause.trim()
   if (cleaned.startsWith('* as ')) {
+    // The namespace object itself, which is published before the cycle runs.
     return `const ${cleaned.slice(5).trim()} = ${sourceRef};`
   }
   if (cleaned.startsWith('{')) {
     return parseNamedBindings(cleaned)
-      .map(([original, alias]) => `const ${alias} = ${sourceRef}.${original};`)
+      .map(([original, alias]) => bind(alias, `${sourceRef}.${original}`))
       .join(' ')
   }
   if (cleaned.includes(',')) {
     const [defaultName, rest] = cleaned.split(/,(.+)/)
     return [
-      `const ${defaultName.trim()} = ${sourceRef}.default ?? ${sourceRef};`,
-      rewriteImportClause(rest.trim(), sourceRef),
+      bind(defaultName.trim(), `${sourceRef}.default ?? ${sourceRef}`),
+      rewriteImportClause(rest.trim(), sourceRef, cyclic),
     ].join(' ')
   }
-  return `const ${cleaned} = ${sourceRef}.default ?? ${sourceRef};`
+  return bind(cleaned, `${sourceRef}.default ?? ${sourceRef}`)
 }
 
 function rewriteDynamicImports(line, module) {
@@ -1987,6 +2370,111 @@ function rewriteCommonJsRequires(line, module) {
     if (!source) return match
     return source.external ? source.alias : source.id
   })
+}
+
+/**
+ * Names bound by a destructuring declaration: `const { a, b: c } = …`.
+ *
+ * Empty for anything that is not a destructuring pattern, and for a pattern
+ * whose closing delimiter is not in the text handed over — the caller rewrites
+ * one statement at a time and cannot see past it. Mirrors
+ * `destructured_binding_names` in `crates/ruvyxa_bundler/src/linker.rs`.
+ */
+function destructuredBindingNames(declaration) {
+  const rest = declaration.trim().replace(/^(?:const|let|var)\s+/, '')
+  if (rest === declaration.trim()) return []
+  const pattern = balancedPattern(rest.trimStart())
+  if (!pattern) return []
+  const names = []
+  collectPatternNames(pattern, names)
+  return names
+}
+
+/**
+ * The leading `{…}` or `[…]` of `source`, when it closes within the text.
+ *
+ * Delimiters are counted over `maskNonCode`, so a brace inside a string or a
+ * comment cannot close the pattern early.
+ */
+function balancedPattern(source) {
+  const open = source[0]
+  if (open !== '{' && open !== '[') return null
+  const close = open === '{' ? '}' : ']'
+  const masked = maskNonCode(source)
+  let depth = 0
+  for (let index = 0; index < masked.length; index += 1) {
+    if (masked[index] === open) depth += 1
+    else if (masked[index] === close) {
+      depth -= 1
+      if (depth === 0) return source.slice(0, index + 1)
+    }
+  }
+  return null
+}
+
+/**
+ * Collect the identifiers a destructuring pattern introduces.
+ *
+ * Object elements bind the target after `:` when there is one and the key
+ * otherwise; array elements bind their own target; `...rest` binds `rest`; a
+ * default (`= expr`) belongs to the target, not to the names. Nested patterns
+ * recurse, which is why `{ a: { b } }` reports `b` and not `a`.
+ */
+function collectPatternNames(pattern, names) {
+  for (const raw of splitTopLevel(pattern.slice(1, -1))) {
+    const element = raw
+      .trim()
+      .replace(/^\.\.\./, '')
+      .trim()
+    if (!element) continue
+    const afterKey = splitTopLevelOnce(element, ':')
+    const withDefault = afterKey === null ? element : afterKey[1].trim()
+    const beforeDefault = splitTopLevelOnce(withDefault, '=')
+    const target = (beforeDefault === null ? withDefault : beforeDefault[0]).trim()
+    if (target.startsWith('{') || target.startsWith('[')) {
+      const nested = balancedPattern(target)
+      if (nested) collectPatternNames(nested, names)
+      continue
+    }
+    if (isIdentifier(target)) names.push(target)
+  }
+}
+
+/** Split on commas that sit at depth zero of `source`. */
+function splitTopLevel(source) {
+  const masked = maskNonCode(source)
+  const parts = []
+  let depth = 0
+  let start = 0
+  for (let index = 0; index < masked.length; index += 1) {
+    const character = masked[index]
+    if (character === '{' || character === '[' || character === '(') depth += 1
+    else if (character === '}' || character === ']' || character === ')') depth -= 1
+    else if (character === ',' && depth === 0) {
+      parts.push(source.slice(start, index))
+      start = index + 1
+    }
+  }
+  parts.push(source.slice(start))
+  return parts
+}
+
+/** Split `source` once on the first `separator` at depth zero. */
+function splitTopLevelOnce(source, separator) {
+  const masked = maskNonCode(source)
+  let depth = 0
+  for (let index = 0; index < masked.length; index += 1) {
+    const character = masked[index]
+    if (character === '{' || character === '[' || character === '(') depth += 1
+    else if (character === '}' || character === ']' || character === ')') depth -= 1
+    else if (character === separator && depth === 0) {
+      // `=>` and `==` are not an assignment; neither is `:` inside `?:`.
+      if (separator === '=' && (masked[index + 1] === '=' || masked[index + 1] === '>')) continue
+      if (separator === '=' && masked[index - 1] === '=') continue
+      return [source.slice(0, index), source.slice(index + 1)]
+    }
+  }
+  return null
 }
 
 function parseNamedBindings(clause) {
@@ -2077,28 +2565,6 @@ function normalizeBundleTarget(bundleTarget, platform) {
 }
 
 /**
- * File extensions probed when a package path names no file directly.
- *
- * Mirrors `resolve_file_candidate` in `crates/ruvyxa_bundler/src/resolver.rs`,
- * including its order: a `.ts` source beside a `.js` build is the one this
- * project meant to compile. `.cts`/`.cjs` are here and not in `JS_EXTENSIONS`
- * because only a published package ships them.
- */
-const PACKAGE_FILE_EXTENSIONS = [
-  '',
-  '.ts',
-  '.tsx',
-  '.js',
-  '.jsx',
-  '.mts',
-  '.cts',
-  '.mjs',
-  '.cjs',
-  '.md',
-  '.mdx',
-]
-
-/**
  * The importer directory a `node_modules` walk starts from.
  *
  * Node resolves from a module's *real* path, and under pnpm that is the whole
@@ -2157,18 +2623,7 @@ function nodeModulesCandidates(importerDir, projectRoot) {
 /** Probe a package-relative path, refusing anything that escapes the package. */
 function resolvePackageRelative(pkgDir, relative) {
   if (!isSafePackageRelativePath(relative)) return null
-  const joined = path.join(pkgDir, relative)
-  for (const extension of PACKAGE_FILE_EXTENSIONS) {
-    const candidate = extension
-      ? `${joined.slice(0, joined.length - path.extname(joined).length)}${extension}`
-      : joined
-    if (existsSync(candidate) && !isDirectory(candidate)) return path.resolve(candidate)
-  }
-  for (const extension of PACKAGE_FILE_EXTENSIONS.slice(1)) {
-    const candidate = path.join(joined, `index${extension}`)
-    if (existsSync(candidate) && !isDirectory(candidate)) return path.resolve(candidate)
-  }
-  return null
+  return probeFileCandidate(path.join(pkgDir, relative))
 }
 
 /** An `exports` target names an exact file: no extension probing applies. */
@@ -2251,31 +2706,36 @@ function firstMatch(candidates, probe) {
   return null
 }
 
-function resolveFile(base) {
-  const extensionFallbacks = {
-    '.js': ['.ts', '.tsx', '.jsx'],
-    '.mjs': ['.mts', '.ts'],
-    '.cjs': ['.cts', '.ts'],
-    '.jsx': ['.tsx'],
-  }
-  const ext = path.extname(base)
-  if (extensionFallbacks[ext]) {
-    const withoutExt = base.slice(0, -ext.length)
-    for (const fallback of extensionFallbacks[ext]) {
-      const candidate = `${withoutExt}${fallback}`
-      if (existsSync(candidate) && !isDirectory(candidate)) return path.resolve(candidate)
-    }
-  }
+/**
+ * Probe `base` for a file: the TypeScript source a written extension stands
+ * for, then the exact path, then an appended extension, then a directory index.
+ *
+ * Replays the `fileProbe` section of
+ * `tests/fixtures/module-resolution-conformance.json`; the Rust half is
+ * `resolve_file_candidate` in `crates/ruvyxa_bundler/src/resolver.rs`.
+ */
+export function probeFileCandidate(base) {
+  const written = path.extname(base)
+  const withoutExtension = written ? base.slice(0, base.length - written.length) : base
 
-  for (const extension of JS_EXTENSIONS) {
-    const candidate = extension ? `${base}${extension}` : base
+  for (const extension of TYPESCRIPT_SOURCE_EXTENSIONS[written] ?? []) {
+    const candidate = `${withoutExtension}.${extension}`
     if (existsSync(candidate) && !isDirectory(candidate)) return path.resolve(candidate)
   }
-  for (const extension of JS_EXTENSIONS.slice(1)) {
-    const candidate = path.join(base, `index${extension}`)
+  if (existsSync(base) && !isDirectory(base)) return path.resolve(base)
+  for (const extension of FILE_PROBE_EXTENSIONS) {
+    const candidate = `${base}.${extension}`
+    if (existsSync(candidate) && !isDirectory(candidate)) return path.resolve(candidate)
+  }
+  for (const extension of FILE_PROBE_EXTENSIONS) {
+    const candidate = path.join(base, `index.${extension}`)
     if (existsSync(candidate) && !isDirectory(candidate)) return path.resolve(candidate)
   }
   return null
+}
+
+function resolveFile(base) {
+  return probeFileCandidate(base)
 }
 
 function isTypeOnlySpecifier(source, index) {
@@ -3402,6 +3862,48 @@ function transformModuleSource(module) {
     lineMap: module.transformLineMap,
   })
   return result.code
+}
+
+/**
+ * Refuse a linked bundle that does not parse, before anything can run it.
+ *
+ * Any pass that rewrites or deletes code needs its output parsed by a test —
+ * and by the build. This linker rewrites ESM one statement at a time, and when
+ * it got a statement wrong (a clause list wrapped across lines, `chalk`'s
+ * shape) the bundle it wrote was accepted, the build reported success, and the
+ * `SyntaxError` arrived when a deployed server tried to import it. The check is
+ * one parse of a file this compile just produced, at the moment it is cheapest
+ * to explain.
+ */
+function assertLinkedSyntax(code, outfile, lineOrigins = []) {
+  const { transformSync } = createRequire(
+    path.join(path.dirname(fileURLToPath(import.meta.url)), '__ruvyxa-transform.cjs'),
+  )('oxc-transform')
+  const parsed = transformSync('ruvyxa-linked.mjs', code, { lang: 'js', sourceType: 'module' })
+  if (parsed.errors.length === 0) return
+
+  const where = describeSyntaxError(code, parsed.errors[0], lineOrigins)
+  // A top-level `await` is the one shape a caller cannot read out of the
+  // parser's own words: every module is wrapped in an ordinary function, so it
+  // is a syntax error only after linking, in a file the author never wrote.
+  const hint = /await/.test(where)
+    ? '\n\nA module in this graph awaits at its top level. A linked bundle wraps each module in an ordinary function, so a top-level `await` cannot survive it — move the await inside an async function, or into a server module the browser graph does not reach.'
+    : ''
+  throw new Error(
+    `RUV1804 the linked bundle for ${path.basename(outfile)} does not parse: ${where}${hint}`,
+  )
+}
+
+/** One oxc diagnostic, named against the module the failing line came from. */
+function describeSyntaxError(code, error, lineOrigins) {
+  const message = error.message ?? String(error)
+  const offset = error.labels?.[0]?.start
+  if (typeof offset !== 'number') return message
+  const generatedLine = code.slice(0, offset).split('\n').length - 1
+  const text = code.split('\n')[generatedLine]?.trim() ?? ''
+  const origin = lineOrigins?.[generatedLine]
+  const where = origin ? `${origin.source}:${origin.line + 1}` : 'code the linker wrote itself'
+  return `${message} (from ${where}: ${text.slice(0, 120)})`
 }
 
 function composeLineMaps(outerMap, innerMap) {

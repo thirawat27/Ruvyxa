@@ -1169,7 +1169,13 @@ pub(crate) fn normalize_route_path(app_dir: &Path, path: &Path) -> String {
         .join("/")
 }
 
-pub(crate) fn copy_style_sources(
+/// Copy project files into the staged server tree, keeping each one's path
+/// relative to the project root.
+///
+/// Used for the stylesheets a build collects and for every module the routes
+/// reach from outside `app/`: `ruvyxa start` compiles pages out of this copy,
+/// so anything missing from it cannot be resolved at request time.
+pub(crate) fn copy_project_sources(
     root: &Path,
     server_dir: &Path,
     files: &[PathBuf],

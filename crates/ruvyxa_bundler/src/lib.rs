@@ -698,6 +698,16 @@ fn emit_prepared_bundle(
         linked_origins.resize(newline_count(&linked), None);
     }
 
+    // 6b. Refuse a bundle that does not parse, naming the module the failing
+    // text came from. Every pass here rewrites or deletes code, and the two
+    // ways this has gone wrong before both reported nothing: a rewritten
+    // statement the linker read a line at a time, and syntax a wrapped module
+    // cannot carry — a top-level `await` becomes an `await` inside the
+    // module's ordinary function. Both surfaced as
+    // "Oxc could not parse linked JavaScript", from a stage with no file name
+    // in reach. The minifier parses too, but only when minification is on.
+    verify_linked_syntax(&linked, &linked_origins, &linked_bundle.modules)?;
+
     // 7. Optionally tree-shake, then minify. Tree-shaking is controlled
     // independently from whitespace/identifier minification. Each pass carries
     // the line provenance forward: a map that describes the text before a pass
@@ -959,6 +969,65 @@ fn stable_path(path: &std::path::Path) -> String {
 /// Newlines in a buffer every writer newline-terminates.
 fn newline_count(text: &str) -> usize {
     text.bytes().filter(|byte| *byte == b'\n').count()
+}
+
+/// Parse a linked bundle and refuse it if it does not, naming where it broke.
+///
+/// The message a caller sees has to point at project source, because that is
+/// the only place the reader can act. `line_origins` already answers "which
+/// module, which line" for the source map, so the same table answers it here.
+fn verify_linked_syntax(
+    code: &str,
+    line_origins: &[Option<linker::LineOrigin>],
+    modules: &[PathBuf],
+) -> Result<()> {
+    let allocator = oxc::allocator::Allocator::default();
+    let parsed = oxc::parser::Parser::new(
+        &allocator,
+        code,
+        oxc::span::SourceType::unambiguous().with_module(true),
+    )
+    .parse();
+    let Some(first) = parsed.diagnostics.first() else {
+        return Ok(());
+    };
+
+    let offset = first.labels.first().map_or(0, |label| label.offset());
+    // Floored to a character boundary: an offset inside a multi-byte character
+    // would panic the slice, and this path already runs while reporting a
+    // different failure.
+    let mut offset = usize::try_from(offset).unwrap_or(0).min(code.len());
+    while offset > 0 && !code.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    let generated_line = code[..offset].bytes().filter(|byte| *byte == b'\n').count();
+    let text = code.lines().nth(generated_line).unwrap_or_default().trim();
+    let origin = line_origins
+        .get(generated_line)
+        .copied()
+        .flatten()
+        .and_then(|origin| {
+            modules
+                .get(origin.module as usize)
+                .map(|module| format!("{}:{}", module.display(), origin.line + 1))
+        })
+        .unwrap_or_else(|| "code the linker wrote itself".to_string());
+
+    // A top-level `await` is the one shape a caller cannot read out of
+    // "unexpected reserved word": every module is wrapped in an ordinary
+    // function, so awaiting at a module's top level is a syntax error only
+    // after linking, in a file the author never wrote.
+    let hint = if text.contains("await ") || first.message.contains("await") {
+        "\n\nA module in this graph awaits at its top level. A linked bundle wraps each module in an ordinary function, so a top-level `await` cannot survive it — move the await inside an async function, or into a server module the browser graph does not reach."
+    } else {
+        ""
+    };
+
+    Err(BundleError::Compiler(format!(
+        "the linked bundle does not parse: {} (from {origin}: {}){hint}",
+        first.message,
+        text.chars().take(120).collect::<String>(),
+    )))
 }
 
 /// Everything the source map is assembled from.

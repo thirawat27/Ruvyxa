@@ -103,9 +103,11 @@ if (__ruvyxaBootstrap.csr === true) globalThis.__RUVYXA_CSR__ = true`
  * route module, because the values come from the request URL and a writer that
  * forgot would let a path segment close the script element.
  */
-export function documentAssetsPrelude() {
+export function documentAssetsPrelude(styleHead = '') {
   return `const __RUVYXA_BOOTSTRAP_ID = ${JSON.stringify(BOOTSTRAP_ELEMENT_ID)}
 const __RUVYXA_RSC_ID = ${JSON.stringify(RSC_PAYLOAD_ELEMENT_ID)}
+/** The stylesheet the build emitted, linked by every document this renders. */
+const __RUVYXA_STYLE_HEAD = ${JSON.stringify(styleHead)}
 
 /** Twin of \`safe_json_for_script\`: make JSON safe as raw text inside a script. */
 function __ruvyxaSafeJson(json) {
@@ -183,6 +185,15 @@ function __ruvyxaHydrationSrc(assets) {
  * \`</body>\` is not one this can splice.
  */
 function __ruvyxaInjectDocumentAssets(html, head, tail) {
+  // Twin of \`document_head_defaults\`: without a viewport declaration a phone
+  // lays the page out at 980px and scales it down, so every breakpoint in the
+  // application is evaluated against a width no device has. A document that
+  // declares its own keeps it.
+  const viewport =
+    /name=["']viewport["']/i.test(html)
+      ? ""
+      : '<meta name="viewport" content="width=device-width, initial-scale=1">'
+  head = viewport + head
   if (head === "" && tail === "") return html
   const lower = html.toLowerCase()
   const headEnd = lower.indexOf("</head>")
@@ -197,20 +208,30 @@ function __ruvyxaInjectDocumentAssets(html, head, tail) {
  * The head and tail one page render contributes.
  *
  * \`assets\` is null for a route that ships no client bundle —
- * \`export const hydrate = false\` — and then only an RSC payload can be added.
- * A deferred bundle emits no preloads, matching both Rust writers: preloading a
- * module the page has decided not to run yet is work for nothing.
+ * \`export const hydrate = false\` — and then only an RSC payload and the
+ * stylesheet can be added. A deferred bundle emits no preloads, matching both
+ * Rust writers: preloading a module the page has decided not to run yet is work
+ * for nothing.
+ *
+ * The stylesheet link is added whatever the route ships, because a deployed
+ * function has no \`app/\` to compile CSS from and no collector to run: without
+ * it every request-time render on a deployed build reached the browser
+ * unstyled, while the pre-rendered pages beside it looked correct.
  */
 function __ruvyxaDocumentAssets(assets, ctx, rscPayload) {
+  const styles = __RUVYXA_STYLE_HEAD
   if (!assets) {
-    return { head: "", tail: rscPayload == null ? "" : __ruvyxaRscPayloadBlock(rscPayload) }
+    return {
+      head: styles,
+      tail: rscPayload == null ? "" : __ruvyxaRscPayloadBlock(rscPayload),
+    }
   }
   const deferred = assets.hydration === "idle" || assets.hydration === "visible"
-  const head = deferred
+  const head = styles + (deferred
     ? ""
     : (assets.preloads ?? [])
         .map((src) => '<link rel="modulepreload" href="' + __ruvyxaEscapeAttribute(src) + '">')
-        .join("")
+        .join(""))
   const payload = rscPayload == null ? "" : __ruvyxaRscPayloadBlock(rscPayload)
   const bootstrap = __ruvyxaBootstrapBlock(ctx.params ?? {}, ctx.path, false)
   const script =

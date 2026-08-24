@@ -1395,6 +1395,38 @@ pub(crate) fn emit_shared_route_chunk(
 /// page route, so `@ruvyxa/react`'s router downloads kilobytes, not the full
 /// build manifest. The dev server synthesizes the same shape at
 /// `/__ruvyxa/client/route-manifest.json`.
+/// Write the project's compiled CSS as a content-addressed client asset.
+///
+/// Returns the URL a document should link, or `None` when the project has no
+/// CSS at all. Named by the hash of its own bytes, like every other emitted
+/// chunk, so a byte-identical rebuild produces the same URL and a changed
+/// stylesheet can never be served from a cache under the old one.
+///
+/// The URL is also recorded in `route-manifest.json`, which is the file every
+/// host already reads to find a route's scripts: the Rust server, the generated
+/// standalone server, and each adapter's function bundle.
+pub(crate) fn write_style_asset(client_dir: &Path, css: &str) -> std::io::Result<Option<String>> {
+    if css.trim().is_empty() {
+        return Ok(None);
+    }
+    fs::create_dir_all(client_dir)?;
+    let digest = blake3::hash(css.as_bytes()).to_hex();
+    let file_name = format!("styles.{}.css", &digest[..16]);
+    fs::write(client_dir.join(&file_name), css)?;
+
+    let url = format!("/__ruvyxa/client/{file_name}");
+    let manifest_path = client_dir.join("route-manifest.json");
+    if manifest_path.exists() {
+        let mut manifest: serde_json::Value = serde_json::from_slice(&fs::read(&manifest_path)?)
+            .unwrap_or_else(
+                |_| serde_json::json!({ "routes": serde_json::Value::Array(Vec::new()) }),
+            );
+        manifest["styles"] = serde_json::json!([url.clone()]);
+        fs::write(&manifest_path, serde_json::to_vec(&manifest)?)?;
+    }
+    Ok(Some(url))
+}
+
 pub(crate) fn write_client_route_manifest(
     client_dir: &Path,
     routes: &[serde_json::Value],

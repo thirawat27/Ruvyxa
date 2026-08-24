@@ -111,7 +111,9 @@ use plugin_bridge::{
 mod plugin_head;
 pub use plugin_head::{PluginHeadEntry, render_plugin_head};
 mod static_assets;
-pub use static_assets::public_asset_links;
+pub use static_assets::{
+    DEFAULT_VIEWPORT_META, document_head_defaults, public_asset_links, style_head_tag,
+};
 #[cfg(test)]
 use static_assets::{is_safe_relative_path, resolve_public_asset};
 
@@ -689,6 +691,11 @@ pub(crate) const INSTRUMENTATION_FILES: [&str; 3] = [
 pub(crate) struct RuntimeCache {
     routes: tokio::sync::RwLock<CacheSlot<RouteCacheEntry>>,
     styles: tokio::sync::RwLock<CacheSlot<StyleCacheEntry>>,
+    /// The stylesheet URL a production build recorded, or `None` when there is
+    /// none — `ruvyxa dev` never has one. Cached beside the links below for the
+    /// same reason: it is a filesystem read whose answer changes only when the
+    /// build writes a new manifest.
+    style_asset: tokio::sync::RwLock<CacheSlot<Option<Arc<str>>>>,
     /// `<link>` tags derived from the public directory's contents.
     ///
     /// Resolved once and reused. `public_asset_links` stats the public directory
@@ -779,6 +786,7 @@ impl RuntimeCache {
         Self {
             routes: tokio::sync::RwLock::new(CacheSlot::with_value(RouteCacheEntry::new(manifest))),
             styles: tokio::sync::RwLock::new(CacheSlot::default()),
+            style_asset: tokio::sync::RwLock::new(CacheSlot::default()),
             asset_links: tokio::sync::RwLock::new(CacheSlot::default()),
             client_routes: tokio::sync::RwLock::new(CacheSlot::default()),
         }
@@ -902,6 +910,50 @@ impl RuntimeCache {
             observe_manifest(config, &entry.manifest);
             return Ok(entry.pair());
         }
+    }
+
+    /// The head fragment that gives a document its project stylesheet.
+    ///
+    /// A production build writes the compiled CSS as a client asset, and every
+    /// host links it: the browser caches one file instead of receiving the
+    /// whole stylesheet inside each document, and a deployed function — which
+    /// has no `app/` to compile from — can serve a request-time render with the
+    /// same stylesheet a pre-rendered page got. `ruvyxa dev` has no such asset
+    /// and inlines the collection, because HMR replaces the rule text in place.
+    async fn style_tag(&self, config: &ServerConfig) -> Result<String> {
+        if !config.watch
+            && let Some(url) = self.built_style_asset(config).await
+        {
+            return Ok(style_head_tag(Some(&url), ""));
+        }
+        let css = self.styles(config).await?;
+        Ok(style_head_tag(None, &css))
+    }
+
+    /// The stylesheet URL `ruvyxa build` recorded, read once per cache
+    /// generation rather than per request.
+    async fn built_style_asset(&self, config: &ServerConfig) -> Option<Arc<str>> {
+        {
+            let cached = self.style_asset.read().await;
+            if let Some(value) = cached.value.as_ref() {
+                return value.clone();
+            }
+        }
+        let manifest_path = config.client_dir.join("route-manifest.json");
+        let discovered = tokio::task::spawn_blocking(move || {
+            let source = std::fs::read(&manifest_path).ok()?;
+            let manifest: serde_json::Value = serde_json::from_slice(&source).ok()?;
+            let url = manifest.get("styles")?.as_array()?.first()?.as_str()?;
+            Some(Arc::<str>::from(url))
+        })
+        .await
+        .ok()
+        .flatten();
+
+        let mut cached = self.style_asset.write().await;
+        let generation = cached.generation;
+        cached.insert_if_current(generation, discovered.clone());
+        discovered
     }
 
     async fn styles(&self, config: &ServerConfig) -> Result<String> {

@@ -2240,41 +2240,73 @@ pub fn import_case_mismatch(requested: &Path, resolved: &Path) -> Option<ImportC
     None
 }
 
+/// Extensions probed by **appending** to what the import wrote, in priority
+/// order. Mirrors `JS_EXTENSIONS`/`PACKAGE_FILE_EXTENSIONS` in
+/// `packages/ruvyxa/runtime/compiler.mjs`.
+pub(crate) const PROBE_EXTENSIONS: [&str; 10] = [
+    "ts", "tsx", "js", "jsx", "mts", "cts", "mjs", "cjs", "md", "mdx",
+];
+
+/// TypeScript sources a written extension may stand for, keyed by that
+/// extension: `./x.js` names `x.ts` in a project whose TypeScript has not been
+/// emitted. Mirrors `extensionFallbacks` in `resolveFile` (`compiler.mjs`).
+///
+/// Only these four are rewritten. Replacing the last dotted segment of anything
+/// else asks for the wrong file and never asks for the right one:
+/// `./util.inspect` becomes `util.js`, which does not exist, while
+/// `util.inspect.js` — the file `object-inspect` actually ships, and the one
+/// Node finds by appending — is never probed. Node appends; it does not
+/// replace, and a basename with a dot in it is ordinary.
+fn typescript_source_extensions(extension: &str) -> &'static [&'static str] {
+    match extension {
+        "js" => &["ts", "tsx", "jsx"],
+        "mjs" => &["mts", "ts"],
+        "cjs" => &["cts", "ts"],
+        "jsx" => &["tsx"],
+        _ => &[],
+    }
+}
+
+/// `path` with `.extension` on the end — appended, never substituted.
+fn with_appended_extension(path: &Path, extension: &str) -> PathBuf {
+    let mut name = path.as_os_str().to_os_string();
+    name.push(".");
+    name.push(extension);
+    PathBuf::from(name)
+}
+
 fn resolve_file_candidate(joined: &Path) -> Option<PathBuf> {
-    // Probe extensions in priority order. Each candidate is a stat syscall.
-    let candidates = [
-        joined.to_path_buf(),
-        joined.with_extension("ts"),
-        joined.with_extension("tsx"),
-        joined.with_extension("js"),
-        joined.with_extension("jsx"),
-        joined.with_extension("mts"),
-        joined.with_extension("cts"),
-        joined.with_extension("mjs"),
-        joined.with_extension("cjs"),
-        joined.with_extension("md"),
-        joined.with_extension("mdx"),
-        joined.join("index.ts"),
-        joined.join("index.tsx"),
-        joined.join("index.js"),
-        joined.join("index.jsx"),
-        joined.join("index.mts"),
-        joined.join("index.cts"),
-        joined.join("index.mjs"),
-        joined.join("index.cjs"),
-        joined.join("index.md"),
-        joined.join("index.mdx"),
-    ];
+    // Probe in priority order; each candidate is a stat syscall. The order is
+    // the shared one: a `.ts` source the written `.js` stands for, then the
+    // exact path, then appended extensions, then a directory index. Replayed
+    // against the JavaScript graph by the `fileProbe` section of
+    // `tests/fixtures/module-resolution-conformance.json`.
+    let written = joined
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .unwrap_or_default();
+
+    let rewritten = typescript_source_extensions(written)
+        .iter()
+        .map(|extension| joined.with_extension(extension));
+    let appended = PROBE_EXTENSIONS
+        .iter()
+        .map(|extension| with_appended_extension(joined, extension));
+    let indexed = PROBE_EXTENSIONS
+        .iter()
+        .map(|extension| joined.join(format!("index.{extension}")));
 
     // `normalized_canonical_path` already falls back to its argument when
     // canonicalization fails, so probing with a separate `canonicalize()` only
     // repeated the syscall on the path that succeeds — the branch could not
     // change the answer. One call per resolved module, on the hottest path in
     // the resolver.
-    candidates
-        .into_iter()
-        .find(|p| p.is_file())
-        .map(|p| ruvyxa_diagnostics::normalized_canonical_path(&p))
+    rewritten
+        .chain(std::iter::once(joined.to_path_buf()))
+        .chain(appended)
+        .chain(indexed)
+        .find(|candidate| candidate.is_file())
+        .map(|candidate| ruvyxa_diagnostics::normalized_canonical_path(&candidate))
 }
 
 fn is_project_local(path: &Path, project_root: &Path) -> bool {
@@ -3625,6 +3657,29 @@ export default function Card() { return <div className={cn("card")} /> }"#,
             assert!(
                 resolve_package_relative(temp.path(), relative).is_none(),
                 "the shared fixture refuses {relative:?} and this host joined it onto a package"
+            );
+        }
+
+        for case in fixture["fileProbe"].as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            let temp = tempfile::tempdir().unwrap();
+            for file in case["files"].as_array().unwrap() {
+                let path = temp.path().join(file.as_str().unwrap());
+                std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+                std::fs::write(&path, "").unwrap();
+            }
+
+            let resolved = resolve_specifier(temp.path(), case["specifier"].as_str().unwrap());
+            let answered = resolved.as_ref().map(|path| {
+                path.strip_prefix(ruvyxa_diagnostics::normalized_canonical_path(temp.path()))
+                    .unwrap_or(path)
+                    .to_string_lossy()
+                    .replace('\\', "/")
+            });
+            assert_eq!(
+                answered.as_deref(),
+                case["expect"].as_str(),
+                "{name} disagrees with the shared fixture"
             );
         }
     }

@@ -542,6 +542,21 @@ fn resolve_client_file(client_dir: &Path, request_path: &str) -> Option<PathBuf>
     contained_public_asset(client_dir, &client_dir.join(file_name))
 }
 
+/// The content type an emitted client asset is served with.
+///
+/// The client directory held nothing but JavaScript until the build started
+/// emitting the project's compiled stylesheet there, and a fixed
+/// `text/javascript` on a `.css` file is refused by every browser: the
+/// framework sends `X-Content-Type-Options: nosniff`, so a stylesheet served
+/// under the wrong type is not applied at all.
+fn client_asset_content_type(file: &Path) -> HeaderValue {
+    match file.extension().and_then(|extension| extension.to_str()) {
+        Some("css") => HeaderValue::from_static("text/css; charset=utf-8"),
+        Some("map" | "json") => HeaderValue::from_static("application/json; charset=utf-8"),
+        _ => HeaderValue::from_static("text/javascript; charset=utf-8"),
+    }
+}
+
 /// Sync fallback for client file serving (used by render_request test/bench path).
 pub(crate) fn serve_client_file_sync(
     client_dir: &Path,
@@ -554,11 +569,11 @@ pub(crate) fn serve_client_file_sync(
         return Ok(None);
     }
     let bytes = fs::read(&file)?;
+    let content_type = client_asset_content_type(&file);
     let mut response = bytes.into_response();
-    response.headers_mut().insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("text/javascript; charset=utf-8"),
-    );
+    response
+        .headers_mut()
+        .insert(header::CONTENT_TYPE, content_type);
     response.headers_mut().insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static("public, max-age=31536000, immutable"),
@@ -612,12 +627,10 @@ pub(crate) async fn serve_client_file(
         return Ok(Some(not_modified_response()));
     }
 
+    let content_type = client_asset_content_type(&file);
     let mut response = bytes.into_response();
     let headers = response.headers_mut();
-    headers.insert(
-        header::CONTENT_TYPE,
-        HeaderValue::from_static("text/javascript; charset=utf-8"),
-    );
+    headers.insert(header::CONTENT_TYPE, content_type);
     headers.insert(
         header::CACHE_CONTROL,
         HeaderValue::from_static("public, max-age=31536000, immutable"),
@@ -876,6 +889,75 @@ const DOCUMENT_ICONS: &[(&str, &str)] =
 /// nothing downstream is left to add these. When the icon link was missing from
 /// baked pages, every browser fell back to requesting `/favicon.ico` and every
 /// production page load logged a 404 that `ruvyxa dev` never showed.
+///
+/// What a document ends up with is decided by [`document_head_defaults`]: these
+/// are defaults, and an application that declares its own icon keeps it.
+
+/// The viewport declaration a document gets when it declares none.
+///
+/// Without it a phone lays the page out at the legacy 980px viewport and scales
+/// the result down, so every breakpoint in the application is evaluated against
+/// a width no device has. `Meta` has no viewport field, so an author following
+/// the documentation has nowhere to put one — the framework supplies the value
+/// every comparable framework defaults to, and stands aside for a document that
+/// writes its own.
+pub const DEFAULT_VIEWPORT_META: &str =
+    r#"<meta name="viewport" content="width=device-width, initial-scale=1">"#;
+
+/// Head tags the framework contributes, minus anything the document already has.
+///
+/// Two of them are defaults rather than requirements: the viewport declaration
+/// above, and the icon link derived from `public/`. An application that declares
+/// either owns it — a project shipping `public/ruvyxa.png` alongside its own
+/// icon used to get both links in the document, and the framework's won.
+#[must_use]
+pub fn document_head_defaults(document: &str, asset_links: &str) -> String {
+    let lower = document.to_ascii_lowercase();
+    let mut head = String::with_capacity(asset_links.len() + DEFAULT_VIEWPORT_META.len());
+    if !lower.contains("name=\"viewport\"") && !lower.contains("name='viewport'") {
+        head.push_str(DEFAULT_VIEWPORT_META);
+    }
+    // `asset_links` is the icon link and nothing else today; a document that
+    // declares any icon keeps its own set whole rather than being merged with.
+    if !lower.contains("rel=\"icon\"")
+        && !lower.contains("rel='icon'")
+        && !lower.contains("rel=\"shortcut icon\"")
+        && !lower.contains("rel=\"apple-touch-icon\"")
+    {
+        head.push_str(asset_links);
+    }
+    head
+}
+
+/// The head fragment that gives a document its project stylesheet.
+///
+/// One writer for all three hosts. A build emits the compiled CSS as a
+/// content-addressed asset and every document links it; `ruvyxa dev` has no such
+/// asset — HMR replaces the rule text in place — and inlines the collection
+/// instead. Before this existed only the inline form was written, so a route
+/// rendered at request time on a deployed build had no stylesheet at all: the
+/// function that rendered it has no `app/` to compile from.
+#[must_use]
+pub fn style_head_tag(asset_url: Option<&str>, css: &str) -> String {
+    match asset_url {
+        Some(url) => format!(
+            r#"<link rel="stylesheet" href="{}">"#,
+            escape_attribute(url)
+        ),
+        None if css.is_empty() => String::new(),
+        None => format!(r#"<style data-ruvyxa-css>{css}</style>"#),
+    }
+}
+
+/// Minimal attribute escaping for a URL this crate emitted itself.
+fn escape_attribute(value: &str) -> String {
+    value
+        .replace('&', "&amp;")
+        .replace('"', "&quot;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+}
+
 pub fn public_asset_links(public_dir: &Path) -> String {
     let mut links = Vec::new();
 
@@ -894,6 +976,65 @@ pub fn public_asset_links(public_dir: &Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The framework's head defaults are defaults, and the document wins.
+    ///
+    /// Both of these shipped wrong in opposite directions: no document had a
+    /// viewport declaration at all, so every breakpoint in every application was
+    /// evaluated against a phone's legacy 980px layout width; and the icon link
+    /// derived from `public/` was added even to a document that declared its
+    /// own, so a project that shipped `ruvyxa.png` alongside its own mark got
+    /// both links and the framework's answered.
+    #[test]
+    fn head_defaults_stand_down_for_a_document_that_declares_its_own() {
+        let icon = r#"<link rel="icon" type="image/png" href="/ruvyxa.png">"#;
+
+        let bare = document_head_defaults("<html><head><title>x</title></head></html>", icon);
+        assert!(bare.contains("name=\"viewport\""), "{bare}");
+        assert!(bare.contains("/ruvyxa.png"), "{bare}");
+
+        let with_viewport = document_head_defaults(
+            r#"<html><head><meta name="viewport" content="width=device-width"></head></html>"#,
+            icon,
+        );
+        assert!(
+            !with_viewport.contains("initial-scale=1"),
+            "{with_viewport}"
+        );
+        assert!(with_viewport.contains("/ruvyxa.png"), "{with_viewport}");
+
+        let with_icon = document_head_defaults(
+            r#"<html><head><link rel="icon" href="/mark.svg"></head></html>"#,
+            icon,
+        );
+        assert!(!with_icon.contains("/ruvyxa.png"), "{with_icon}");
+        assert!(with_icon.contains("name=\"viewport\""), "{with_icon}");
+
+        // Single quotes and a differing case are the same declaration.
+        let quoted = document_head_defaults(
+            "<html><HEAD><META NAME='viewport' CONTENT='width=device-width'></HEAD></html>",
+            icon,
+        );
+        assert!(!quoted.contains("initial-scale=1"), "{quoted}");
+    }
+
+    /// A stylesheet is linked when the build emitted one and inlined otherwise.
+    #[test]
+    fn the_style_tag_links_a_built_asset_and_inlines_a_collection() {
+        assert_eq!(
+            style_head_tag(Some("/__ruvyxa/client/styles.abc.css"), ""),
+            r#"<link rel="stylesheet" href="/__ruvyxa/client/styles.abc.css">"#
+        );
+        assert_eq!(
+            style_head_tag(None, "body{color:red}"),
+            "<style data-ruvyxa-css>body{color:red}</style>"
+        );
+        assert_eq!(
+            style_head_tag(None, ""),
+            "",
+            "no CSS declares no stylesheet"
+        );
+    }
 
     /// The icon link has to survive the build's own image optimization.
     ///

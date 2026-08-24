@@ -224,7 +224,7 @@ pub(crate) fn prepare_build_assets(
 
     // Style sources can overlap app/components destinations, so copy them only
     // after the directory workers finish instead of racing writes to one file.
-    copy_style_sources(root, server_dir, &styles.files)?;
+    copy_project_sources(root, server_dir, &styles.files)?;
     let asset_files = count_files(assets_dir);
 
     Ok(PreparedBuildAssets {
@@ -736,6 +736,21 @@ pub(crate) async fn build_with_cache_override(
         duration: preparation_duration,
     } = prepared_assets;
 
+    // Stage every module the routes reach from outside `app/`.
+    //
+    // `ruvyxa start` compiles pages out of this copy, so a module it does not
+    // contain cannot be resolved at request time. Only `app/` and two
+    // hard-coded directory names were staged, and the ordinary `app/` + `lib/`
+    // layout therefore answered a request-time render with
+    // `RUV1801 cannot resolve '../../lib/x'` — naming a path under `.ruvyxa`
+    // that nobody wrote, on a build that reported success. The set comes from
+    // the route graph rather than a directory list, so it follows whatever the
+    // application actually imports.
+    let reachable_modules = ruvyxa_graph::reachable_project_modules(&args.root, &manifest)
+        .into_iter()
+        .collect::<Vec<_>>();
+    copy_project_sources(&args.root, &server_dir, &reachable_modules)?;
+
     // The optimizer converted these images; a raw `<img>` still references the
     // source extension. Depending on `keepOriginal`, that either 404s on a
     // static host or bypasses the smaller WebP. A server-only build converts
@@ -763,6 +778,21 @@ pub(crate) async fn build_with_cache_override(
         attach_client_artifacts(&staging_dir.join("manifest.json"), &client_manifest)?;
         write_render_manifests(&staging_dir, &manifest, &client_manifest)?;
     }
+
+    // The project's compiled CSS, written as a client asset rather than inlined
+    // into each document.
+    //
+    // A deployed function has no `app/` to compile from and no style collector
+    // to run, so a route rendered at request time on a deployed build reached
+    // the browser with **no stylesheet at all** — the pre-rendered pages carried
+    // theirs inline and everything else was unstyled. Emitting it here puts the
+    // stylesheet where every adapter already copies from and where `start`
+    // already serves from, so all three hosts reference one file.
+    let style_asset = if args.server_only {
+        None
+    } else {
+        crate::client_bundle::write_style_asset(&client_dir, &style_collection.css)?
+    };
     let client_bundles = client_manifest
         .get("routes")
         .and_then(|routes| routes.as_array())
@@ -798,7 +828,11 @@ pub(crate) async fn build_with_cache_override(
                 // deployed server publishes — not from the project's `public/`,
                 // which still holds an original the build converted away.
                 asset_links: ruvyxa_dev_server::public_asset_links(&assets_dir).into(),
-                styles: style_collection.css.as_str().into(),
+                styles: ruvyxa_dev_server::style_head_tag(
+                    style_asset.as_deref(),
+                    &style_collection.css,
+                )
+                .into(),
             },
             &config.build,
             RuvyxaBuildCache {
@@ -823,6 +857,20 @@ pub(crate) async fn build_with_cache_override(
             ),
             prerender_duration,
         );
+    }
+
+    // What was actually written, read back. Every other check in this build
+    // asks about the inputs; this one asks whether the output can load. A
+    // client chunk carrying a specifier the linker never rewrote, or a document
+    // referencing a stylesheet no directory holds, both look like a working
+    // build and fail in the browser — one silently stops hydration, the other
+    // renders the site unstyled.
+    if !args.server_only {
+        let dangling =
+            crate::output_audit::audit_emitted_output(&client_dir, &prerender_dir, &assets_dir);
+        if let Some(diagnostic) = crate::output_audit::dangling_reference_diagnostic(&dangling) {
+            fail_on_diagnostics(&[diagnostic])?;
+        }
     }
 
     // Discovery files are written after prerendering: a dynamic route has no

@@ -46,70 +46,102 @@ use rayon::prelude::*;
 use crate::compiler::CompiledModule;
 use crate::{BundleError, BundleInput, BundleTarget, Result};
 
-/// Detect circular dependencies in the module graph.
+/// Group the modules that sit in an import cycle, by Tarjan's algorithm.
 ///
-/// If a cycle is found, returns `Err(BundleError::CircularDependency)` with a
-/// human-readable path: `a -> b -> c -> a`.
-pub fn detect_cycles(modules: &[CompiledModule]) -> Result<()> {
+/// A cycle is legal ESM and common inside published packages — `zod` has one
+/// between `schemas.js` and `iso.js` — so the linker links around it rather
+/// than refusing the graph, which is what it used to do. Only modules in a
+/// strongly connected component of more than one module, or importing
+/// themselves, appear in the result; every other bundle links byte for byte as
+/// it did.
+pub fn cycle_groups(modules: &[CompiledModule]) -> BTreeMap<PathBuf, u32> {
     let module_map: BTreeMap<PathBuf, &CompiledModule> = modules
         .iter()
-        .filter(|m| !m.is_external)
-        .map(|m| (m.path.clone(), m))
+        .filter(|module| !module.is_external)
+        .map(|module| (module.path.clone(), module))
         .collect();
 
-    let mut visited: BTreeSet<PathBuf> = BTreeSet::new();
-    let mut stack: Vec<PathBuf> = Vec::new();
+    let mut state = TarjanState {
+        index: BTreeMap::new(),
+        low_link: BTreeMap::new(),
+        on_stack: BTreeSet::new(),
+        stack: Vec::new(),
+        groups: BTreeMap::new(),
+        counter: 0,
+        next_group: 0,
+    };
 
-    for module in modules.iter().filter(|m| !m.is_external) {
-        if !visited.contains(&module.path) {
-            dfs_detect_cycle(&module.path, &module_map, &mut visited, &mut stack)?;
+    for module in modules.iter().filter(|module| !module.is_external) {
+        if !state.index.contains_key(&module.path) {
+            strong_connect(&module.path, &module_map, &mut state);
         }
     }
 
-    Ok(())
+    state.groups
 }
 
-fn dfs_detect_cycle(
+struct TarjanState {
+    index: BTreeMap<PathBuf, u32>,
+    low_link: BTreeMap<PathBuf, u32>,
+    on_stack: BTreeSet<PathBuf>,
+    stack: Vec<PathBuf>,
+    groups: BTreeMap<PathBuf, u32>,
+    counter: u32,
+    next_group: u32,
+}
+
+fn strong_connect(
     path: &PathBuf,
     module_map: &BTreeMap<PathBuf, &CompiledModule>,
-    visited: &mut BTreeSet<PathBuf>,
-    stack: &mut Vec<PathBuf>,
-) -> Result<()> {
-    if stack.contains(path) {
-        let cycle_start = stack.iter().position(|p| p == path).unwrap_or(0);
-        let mut parts: Vec<String> = stack[cycle_start..]
-            .iter()
-            .map(|p| {
-                p.file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| p.display().to_string())
-            })
-            .collect();
-        // Close the cycle by repeating the start.
-        let start_name = parts[0].clone();
-        parts.push(start_name);
-        let cycle_str = parts.join(" -> ");
-        return Err(BundleError::CircularDependency { cycle: cycle_str });
-    }
+    state: &mut TarjanState,
+) {
+    state.index.insert(path.clone(), state.counter);
+    state.low_link.insert(path.clone(), state.counter);
+    state.counter += 1;
+    state.stack.push(path.clone());
+    state.on_stack.insert(path.clone());
 
-    if visited.contains(path) {
-        return Ok(());
-    }
-
-    stack.push(path.clone());
-
+    let mut self_referential = false;
     if let Some(module) = module_map.get(path) {
         for dep in module.deps.iter() {
-            if module_map.contains_key(dep) {
-                dfs_detect_cycle(dep, module_map, visited, stack)?;
+            if !module_map.contains_key(dep) {
+                continue;
+            }
+            if dep == path {
+                self_referential = true;
+            }
+            if !state.index.contains_key(dep) {
+                strong_connect(dep, module_map, state);
+                let dep_low = state.low_link.get(dep).copied().unwrap_or(u32::MAX);
+                let own = state.low_link.get(path).copied().unwrap_or(u32::MAX);
+                state.low_link.insert(path.clone(), own.min(dep_low));
+            } else if state.on_stack.contains(dep) {
+                let dep_index = state.index.get(dep).copied().unwrap_or(u32::MAX);
+                let own = state.low_link.get(path).copied().unwrap_or(u32::MAX);
+                state.low_link.insert(path.clone(), own.min(dep_index));
             }
         }
     }
 
-    stack.pop();
-    visited.insert(path.clone());
+    if state.low_link.get(path) != state.index.get(path) {
+        return;
+    }
 
-    Ok(())
+    let mut component = Vec::new();
+    while let Some(member) = state.stack.pop() {
+        state.on_stack.remove(&member);
+        let done = &member == path;
+        component.push(member);
+        if done {
+            break;
+        }
+    }
+    if component.len() > 1 || self_referential {
+        state.next_group += 1;
+        for member in component {
+            state.groups.insert(member, state.next_group);
+        }
+    }
 }
 
 /// Link all compiled modules into a single concatenated JS string.
@@ -166,36 +198,91 @@ fn count_lines(text: &str) -> usize {
 fn write_module_segment(
     module: &CompiledModule,
     dynamic_import_files: &BTreeMap<PathBuf, String>,
+    cyclic_deps: &BTreeSet<PathBuf>,
+    in_cycle: bool,
 ) -> Result<ModuleSegment> {
     let id = module_id(&module.path);
     let label = module.path.to_string_lossy().into_owned();
-    let mut text = String::with_capacity(module.js.len() + 200);
 
-    text.push_str("// \u{2500}\u{2500} ");
-    text.push_str(&label);
-    text.push_str(" \u{2500}\u{2500}\n");
-    text.push_str("var ");
-    text.push_str(&id);
-    text.push_str(" = (function() {\n");
-    text.push_str("  \"use strict\";\n");
-    text.push_str("  var __exports = {};\n");
-    text.push_str("  var module = { exports: __exports };\n");
-    text.push_str("  var exports = module.exports;\n");
-    text.push_str("  var process = globalThis.process || { env: { NODE_ENV: \"production\" } };\n");
-
-    let mut origins = vec![None; count_lines(&text)];
-    origins.extend(rewrite_module_into(
+    // The body is rewritten first, because the wrapper's own declarations
+    // depend on what it binds. A module that binds `module`, `exports`, or
+    // `process` itself — `zod` imports a function called `process` from a
+    // sibling — would otherwise have the wrapper redeclare that name in the
+    // same scope, and the whole chunk fails to parse in the browser with
+    // "Identifier 'process' has already been declared", naming a line the
+    // author never wrote.
+    let mut body = String::with_capacity(module.js.len() + 64);
+    let body_origins = rewrite_module_into(
         &module.js,
         &DepIndex::new(&module.deps, &module.dependency_aliases),
         dynamic_import_files,
-        &mut text,
+        &mut body,
         true,
         true,
         &label,
-    )?);
+        cyclic_deps,
+    )?;
+    let bound = top_level_bound_names(&body);
+    let owns_module = bound.contains("module");
+    let exports_expression = if owns_module {
+        "__exports"
+    } else {
+        "module.exports"
+    };
 
-    text.push_str("  return module.exports;\n");
-    text.push_str("})();\n\n");
+    let mut text = String::with_capacity(body.len() + 200);
+    text.push_str("// \u{2500}\u{2500} ");
+    text.push_str(&label);
+    text.push_str(" \u{2500}\u{2500}\n");
+    if in_cycle {
+        // A module in a cycle publishes its exports object before its body
+        // runs, so the module that closes the cycle has something to hold. Its
+        // `var` was declared with the rest of the group above.
+        text.push_str("(function() {\n");
+        text.push_str("  \"use strict\";\n");
+        text.push_str("  var __exports = ");
+        text.push_str(&id);
+        text.push_str(";\n");
+    } else {
+        text.push_str("var ");
+        text.push_str(&id);
+        text.push_str(" = (function() {\n");
+        text.push_str("  \"use strict\";\n");
+        text.push_str("  var __exports = {};\n");
+    }
+    if !owns_module {
+        text.push_str("  var module = { exports: __exports };\n");
+    }
+    if !bound.contains("exports") {
+        text.push_str("  var exports = ");
+        text.push_str(exports_expression);
+        text.push_str(";\n");
+    }
+    if !bound.contains("process") {
+        text.push_str(
+            "  var process = globalThis.process || { env: { NODE_ENV: \"production\" } };\n",
+        );
+    }
+
+    let mut origins = vec![None; count_lines(&text)];
+    text.push_str(&body);
+    origins.extend(body_origins);
+
+    if in_cycle {
+        // A CommonJS module in the cycle may have replaced `module.exports`
+        // wholesale; the identity its importers hold is the one published above.
+        text.push_str("  if (");
+        text.push_str(exports_expression);
+        text.push_str(" !== __exports) Object.assign(__exports, ");
+        text.push_str(exports_expression);
+        text.push_str(");\n");
+        text.push_str("})();\n\n");
+    } else {
+        text.push_str("  return ");
+        text.push_str(exports_expression);
+        text.push_str(";\n");
+        text.push_str("})();\n\n");
+    }
     origins.resize(count_lines(&text), None);
     Ok(ModuleSegment { text, origins })
 }
@@ -206,6 +293,7 @@ fn assemble_linked(
     segments: &[ModuleSegment],
     input: &BundleInput,
     shared_modules: &BTreeSet<PathBuf>,
+    cycle_groups: &BTreeMap<PathBuf, u32>,
 ) -> LinkedBundle {
     let estimated = segments
         .iter()
@@ -225,9 +313,43 @@ fn assemble_linked(
     code.push_str("// Generated by ruvyxa_bundler \u{2014} do not edit\n");
     code.push_str("\"use strict\";\n\n");
     write_shared_module_bindings(&mut code, shared_modules);
+    write_cycle_prelude(&mut code, cycle_groups);
+
+    // Where each cycle starts and ends among the emitted modules. Neither is
+    // always the module beside the group: an acyclic dependency of one member
+    // is emitted between two of them.
+    let mut first_of_group: BTreeMap<u32, usize> = BTreeMap::new();
+    let mut last_of_group: BTreeMap<u32, usize> = BTreeMap::new();
+    let mut members_of_group: BTreeMap<u32, Vec<&CompiledModule>> = BTreeMap::new();
+    for (position, module) in project_modules.iter().enumerate() {
+        let Some(group) = cycle_groups.get(&module.path).copied() else {
+            continue;
+        };
+        first_of_group.entry(group).or_insert(position);
+        last_of_group.insert(group, position);
+        members_of_group.entry(group).or_default().push(module);
+    }
 
     let mut line_origins: Vec<Option<LineOrigin>> = vec![None; count_lines(&code)];
     for (index, segment) in segments.iter().enumerate() {
+        let group = project_modules
+            .get(index)
+            .and_then(|module| cycle_groups.get(&module.path).copied());
+
+        // Every namespace in the group is declared before the first body runs:
+        // the member that closes the cycle reads the one that opened it.
+        if let Some(group) = group
+            && first_of_group.get(&group) == Some(&index)
+        {
+            for member in members_of_group.get(&group).into_iter().flatten() {
+                code.push_str("var ");
+                code.push_str(&module_id(&member.path));
+                code.push_str(" = {};\n");
+            }
+            code.push('\n');
+            line_origins.resize(count_lines(&code), None);
+        }
+
         code.push_str(&segment.text);
         line_origins.extend(segment.origins.iter().map(|origin| {
             origin.map(|line| LineOrigin {
@@ -235,6 +357,15 @@ fn assemble_linked(
                 line,
             })
         }));
+
+        // The moment a cycle is complete is the moment its members can read
+        // each other's named bindings.
+        if let Some(group) = group
+            && last_of_group.get(&group) == Some(&index)
+        {
+            code.push_str("__ruvyxaRebind.splice(0).forEach(function (rebind) { rebind(); });\n\n");
+            line_origins.resize(count_lines(&code), None);
+        }
     }
 
     if matches!(input.target, BundleTarget::Ssr | BundleTarget::Edge) {
@@ -310,8 +441,22 @@ pub(crate) fn link_with_origins(
     dynamic_import_files: &BTreeMap<PathBuf, String>,
     shared_modules: &BTreeSet<PathBuf>,
 ) -> Result<LinkedBundle> {
-    // Cycle detection runs regardless of graph size — cheap O(V+E) DFS.
-    detect_cycles(modules)?;
+    // Which modules sit in a cycle — cheap O(V+E) — and, for each of them, the
+    // dependencies that close it. An import that closes a cycle reads a
+    // namespace whose body has not run yet, so the binding is re-read once the
+    // cycle finishes rather than copied while it is empty.
+    let groups = cycle_groups(modules);
+    let cyclic_deps = |module: &CompiledModule| -> BTreeSet<PathBuf> {
+        let Some(group) = groups.get(&module.path) else {
+            return BTreeSet::new();
+        };
+        module
+            .deps
+            .iter()
+            .filter(|dep| groups.get(*dep) == Some(group))
+            .cloned()
+            .collect()
+    };
 
     let project_modules = ordered_project_modules(modules);
     const PARALLEL_SEGMENT_THRESHOLD: usize = 8;
@@ -319,12 +464,26 @@ pub(crate) fn link_with_origins(
     let segments: Vec<ModuleSegment> = if project_modules.len() < PARALLEL_SEGMENT_THRESHOLD {
         project_modules
             .iter()
-            .map(|module| write_module_segment(module, dynamic_import_files))
+            .map(|module| {
+                write_module_segment(
+                    module,
+                    dynamic_import_files,
+                    &cyclic_deps(module),
+                    groups.contains_key(&module.path),
+                )
+            })
             .collect::<Result<_>>()?
     } else {
         project_modules
             .par_iter()
-            .map(|module| write_module_segment(module, dynamic_import_files))
+            .map(|module| {
+                write_module_segment(
+                    module,
+                    dynamic_import_files,
+                    &cyclic_deps(module),
+                    groups.contains_key(&module.path),
+                )
+            })
             .collect::<Result<_>>()?
     };
 
@@ -333,6 +492,7 @@ pub(crate) fn link_with_origins(
         &segments,
         input,
         shared_modules,
+        &groups,
     ))
 }
 
@@ -342,8 +502,22 @@ pub(crate) fn link_shared_route_modules(
     modules: &[CompiledModule],
     input: &BundleInput,
 ) -> Result<String> {
-    detect_cycles(modules)?;
+    // The shared registry links the way a route bundle does, cycles included:
+    // a group's namespaces are declared before its first body runs, and a
+    // binding that closes the cycle is re-read once it finishes.
+    let groups = cycle_groups(modules);
     let project_modules = ordered_project_modules(modules);
+    let mut first_of_group: BTreeMap<u32, usize> = BTreeMap::new();
+    let mut last_of_group: BTreeMap<u32, usize> = BTreeMap::new();
+    let mut members_of_group: BTreeMap<u32, Vec<&CompiledModule>> = BTreeMap::new();
+    for (position, module) in project_modules.iter().enumerate() {
+        let Some(group) = groups.get(&module.path).copied() else {
+            continue;
+        };
+        first_of_group.entry(group).or_insert(position);
+        last_of_group.insert(group, position);
+        members_of_group.entry(group).or_default().push(module);
+    }
     let mut out = String::new();
     for import in collect_external_imports(&project_modules, input.target) {
         out.push_str(&import);
@@ -358,21 +532,56 @@ pub(crate) fn link_shared_route_modules(
         "const __ruvyxa_shared_modules__ = globalThis.__RUVYXA_SHARED_MODULES__ ??= Object.create(null);\n\n",
     );
 
-    for module in project_modules {
+    write_cycle_prelude(&mut out, &groups);
+
+    for (position, module) in project_modules.iter().enumerate() {
         let id = module_id(&module.path);
         let label = module.path.to_string_lossy().into_owned();
-        out.push_str("var ");
-        out.push_str(&id);
-        out.push_str(" = __ruvyxa_shared_modules__[\"");
-        out.push_str(&id);
-        out.push_str("\"] = (function() {\n");
-        out.push_str("  \"use strict\";\n");
-        out.push_str("  var __exports = {};\n");
+        let group = groups.get(&module.path).copied();
+
+        if let Some(group) = group
+            && first_of_group.get(&group) == Some(&position)
+        {
+            for member in members_of_group.get(&group).into_iter().flatten() {
+                let member_id = module_id(&member.path);
+                out.push_str("var ");
+                out.push_str(&member_id);
+                out.push_str(" = __ruvyxa_shared_modules__[\"");
+                out.push_str(&member_id);
+                out.push_str("\"] = {};\n");
+            }
+            out.push('\n');
+        }
+
+        if group.is_some() {
+            out.push_str("(function() {\n");
+            out.push_str("  \"use strict\";\n");
+            out.push_str("  var __exports = ");
+            out.push_str(&id);
+            out.push_str(";\n");
+        } else {
+            out.push_str("var ");
+            out.push_str(&id);
+            out.push_str(" = __ruvyxa_shared_modules__[\"");
+            out.push_str(&id);
+            out.push_str("\"] = (function() {\n");
+            out.push_str("  \"use strict\";\n");
+            out.push_str("  var __exports = {};\n");
+        }
         out.push_str("  var module = { exports: __exports };\n");
         out.push_str("  var exports = module.exports;\n");
         out.push_str(
             "  var process = globalThis.process || { env: { NODE_ENV: \"production\" } };\n",
         );
+        let cyclic_deps: BTreeSet<PathBuf> = match group {
+            Some(group) => module
+                .deps
+                .iter()
+                .filter(|dep| groups.get(*dep) == Some(&group))
+                .cloned()
+                .collect(),
+            None => BTreeSet::new(),
+        };
         rewrite_module_into(
             &module.js,
             &DepIndex::new(&module.deps, &module.dependency_aliases),
@@ -381,12 +590,86 @@ pub(crate) fn link_shared_route_modules(
             true,
             true,
             &label,
+            &cyclic_deps,
         )?;
-        out.push_str("  return module.exports;\n})();\n\n");
+        if group.is_some() {
+            out.push_str(
+                "  if (module.exports !== __exports) Object.assign(__exports, module.exports);\n})();\n\n",
+            );
+        } else {
+            out.push_str("  return module.exports;\n})();\n\n");
+        }
+
+        if let Some(group) = group
+            && last_of_group.get(&group) == Some(&position)
+        {
+            out.push_str("__ruvyxaRebind.splice(0).forEach(function (rebind) { rebind(); });\n\n");
+        }
     }
 
     let _ = input;
     Ok(out)
+}
+
+/// Names a rewritten module body binds at its own top level.
+///
+/// Every import has already become a `const` by the time this runs, so one walk
+/// answers for declarations and imported names alike. Depth is counted over
+/// [`crate::ast::masked_code`], so a brace inside a string or a comment cannot
+/// close a block early and make an inner declaration look top-level.
+fn top_level_bound_names(body: &str) -> BTreeSet<String> {
+    const KEYWORDS: [&str; 5] = ["var ", "let ", "const ", "function ", "class "];
+    let masked = crate::ast::masked_code(body);
+    let bytes = masked.as_bytes();
+    let mut names = BTreeSet::new();
+    let mut depth = 0i32;
+
+    for (index, byte) in bytes.iter().enumerate() {
+        match byte {
+            b'{' | b'(' | b'[' => depth += 1,
+            b'}' | b')' | b']' => depth -= 1,
+            _ => {}
+        }
+        if depth != 0 {
+            continue;
+        }
+        let previous = index.checked_sub(1).map(|at| bytes[at]);
+        if previous.is_some_and(is_linker_identifier_byte) {
+            continue;
+        }
+        let rest = &masked[index..];
+        let Some(keyword) = KEYWORDS.iter().find(|keyword| rest.starts_with(**keyword)) else {
+            continue;
+        };
+        let after = rest[keyword.len()..].trim_start().trim_start_matches('*');
+        let name: String = after
+            .trim_start()
+            .chars()
+            .take_while(|character| character.is_alphanumeric() || matches!(character, '_' | '$'))
+            .collect();
+        if !name.is_empty() {
+            names.insert(name);
+        }
+    }
+    names
+}
+
+/// The two helpers a bundle with an import cycle needs, and nothing when it has
+/// none — an acyclic bundle keeps the bytes it always had.
+///
+/// `__ruvyxaRebind` holds the bindings a cyclic import could not read yet;
+/// `__ruvyxaCycleTdz` is what such a binding holds until then. ESM answers a
+/// read of a binding whose module has not finished with a ReferenceError, and
+/// a copied `undefined` would be the same wrong value with nothing to trace it
+/// back to.
+fn write_cycle_prelude(out: &mut String, cycle_groups: &BTreeMap<PathBuf, u32>) {
+    if cycle_groups.is_empty() {
+        return;
+    }
+    out.push_str("var __ruvyxaRebind = [];\n");
+    out.push_str(
+        "var __ruvyxaCycleTdz = function (name, from) { return new Proxy(function () {}, { get: function (target, key) { if (key === Symbol.toStringTag) return \"Uninitialized\"; throw new ReferenceError(\"Cannot access '\" + name + \"' before initialization: it is imported from \" + from + \", which imports this module back, and the value is read while that cycle is still running.\"); }, apply: function () { throw new ReferenceError(\"Cannot call '\" + name + \"' before initialization (import cycle with \" + from + \").\"); }, construct: function () { throw new ReferenceError(\"Cannot construct '\" + name + \"' before initialization (import cycle with \" + from + \").\"); } }); };\n\n",
+    );
 }
 
 fn write_shared_module_bindings(out: &mut String, shared_modules: &BTreeSet<PathBuf>) {
@@ -503,6 +786,7 @@ fn rewrite_module_into(
     indent: bool,
     drop_external_imports: bool,
     importer: &str,
+    cyclic_deps: &BTreeSet<PathBuf>,
 ) -> Result<Vec<Option<u32>>> {
     let mut pending_exports = Vec::new();
     let mut in_block_comment = false;
@@ -532,7 +816,7 @@ fn rewrite_module_into(
         let statement = normalized.as_deref().unwrap_or(trimmed);
 
         let rewritten = if module_ast.is_code_offset(statement_start) {
-            try_rewrite_import(statement, deps, drop_external_imports)?
+            try_rewrite_import(statement, deps, drop_external_imports, cyclic_deps)?
                 .map(Rewrite::Inline)
                 .or_else(|| try_rewrite_export_statement(statement, deps))
         } else {
@@ -995,6 +1279,43 @@ enum Rewrite {
     Pending { line: String, assignment: String },
 }
 
+/// `export /*hint*/ function f()` without the comment, or `None` for a
+/// statement that has none.
+///
+/// Only block comments directly after `import`/`export` are removed, and only
+/// up to the next token: a comment anywhere else in the statement is left where
+/// the author put it.
+fn strip_comment_after_module_keyword(line: &str) -> Option<String> {
+    let bytes = line.as_bytes();
+    let keyword = ["import", "export"].into_iter().find(|keyword| {
+        bytes.starts_with(keyword.as_bytes())
+            && bytes
+                .get(keyword.len())
+                .is_none_or(|byte| !is_linker_identifier_byte(*byte))
+    })?;
+
+    let rest = &line[keyword.len()..];
+    let mut at = 0usize;
+    let mut removed = false;
+    loop {
+        at += rest[at..]
+            .bytes()
+            .take_while(u8::is_ascii_whitespace)
+            .count();
+        if !rest[at..].starts_with("/*") {
+            break;
+        }
+        let end = rest[at + 2..].find("*/")?;
+        at = at + 2 + end + 2;
+        removed = true;
+    }
+
+    if !removed {
+        return None;
+    }
+    Some(format!("{keyword} {}", rest[at..].trim_start()))
+}
+
 /// Give a minified ESM statement the spacing every rewriter below expects.
 ///
 /// The rewriters detect statements with `starts_with("export ")` /
@@ -1011,6 +1332,17 @@ enum Rewrite {
 /// Returns `None` when the line needs no change, so the common already-spaced
 /// path allocates nothing.
 fn normalize_esm_statement(line: &str) -> Option<String> {
+    // A comment may sit between the keyword and what it exports. `zod` ships
+    // `export /*@__NO_SIDE_EFFECTS__*/ function $constructor(…)`, and every
+    // rewriter below reads the token straight after `export ` — so the
+    // declaration branch was never reached, the `export` survived into the
+    // module wrapper, and `RUV1612` blamed a minified dependency. The hint the
+    // comment carries is a tree-shaking annotation for a bundler that is not
+    // this one.
+    if let Some(stripped) = strip_comment_after_module_keyword(line) {
+        return Some(normalize_esm_statement(&stripped).unwrap_or(stripped));
+    }
+
     let bytes = line.as_bytes();
     let keyword = ["import", "export"].into_iter().find(|keyword| {
         bytes.starts_with(keyword.as_bytes())
@@ -1107,6 +1439,7 @@ fn try_rewrite_import(
     line: &str,
     deps: &DepIndex<'_>,
     drop_external_imports: bool,
+    cyclic_deps: &BTreeSet<PathBuf>,
 ) -> Result<Option<String>> {
     if !line.starts_with("import ") {
         return Ok(None);
@@ -1138,7 +1471,11 @@ fn try_rewrite_import(
     };
     let clause = clause.trim();
 
-    Ok(Some(rewrite_import_clause(clause, &dep_id)?))
+    Ok(Some(rewrite_import_clause(
+        clause,
+        &dep_id,
+        cyclic_deps.contains(dep_path),
+    )?))
 }
 
 /// Hoist the import statements that stay external to the bundle.
@@ -1399,6 +1736,20 @@ fn try_rewrite_export_statement(line: &str, deps: &DepIndex<'_>) -> Option<Rewri
             )));
         }
 
+        // `export * as ns from "./mod"` names the namespace object. Read as a
+        // clause it matched nothing, so the `export` survived the link and
+        // `RUV1612` blamed the dependency — `zod` re-exports two of its own
+        // modules exactly this way.
+        if let Some(alias) = clause
+            .strip_prefix('*')
+            .map(str::trim_start)
+            .and_then(|rest| rest.strip_prefix("as "))
+            .map(str::trim)
+            && is_identifier(alias)
+        {
+            return Some(Rewrite::Inline(format!("__exports.{alias} = {dep_id};")));
+        }
+
         // `export { a, b as c } from "./mod"` → `__exports.a = dep.a; __exports.c = dep.b;`
         if clause.starts_with('{') {
             let names = parse_named_bindings(clause);
@@ -1609,15 +1960,27 @@ fn declares_esm_syntax(source: &str, module_ast: &crate::ast::ModuleAst) -> bool
 /// - `{ a, b as c }` → `const a = dep.a; const c = dep.b;`
 /// - `* as ns` → `const ns = dep;`
 /// - `Default, { a, b }` and `Default, * as ns` → combined
-fn rewrite_import_clause(clause: &str, dep_id: &str) -> Result<String> {
+fn rewrite_import_clause(clause: &str, dep_id: &str, cyclic: bool) -> Result<String> {
+    // An import that closes a cycle reads a namespace whose body has not run
+    // yet, so a copied binding would hold `undefined` for the life of the
+    // bundle. It is re-read once the cycle finishes instead, and refuses to be
+    // used before that. A namespace import needs none of this: it holds the
+    // object itself, which is published before the group runs.
+    let bind = |local: &str, expression: String, namespace: bool| {
+        if !cyclic || namespace {
+            return format!("const {local} = {expression};");
+        }
+        format!(
+            "let {local} = {expression} ?? __ruvyxaCycleTdz(\"{local}\", \"{dep_id}\"); __ruvyxaRebind.push(function () {{ {local} = {expression}; }});"
+        )
+    };
+
     let bindings = parse_import_clause(clause)?
         .into_iter()
         .map(|(local, source)| match source {
-            ImportBinding::Default => {
-                format!("const {local} = {};", interop_default(dep_id))
-            }
-            ImportBinding::Named(original) => format!("const {local} = {dep_id}.{original};"),
-            ImportBinding::Namespace => format!("const {local} = {dep_id};"),
+            ImportBinding::Default => bind(&local, interop_default(dep_id), false),
+            ImportBinding::Named(original) => bind(&local, format!("{dep_id}.{original}"), false),
+            ImportBinding::Namespace => bind(&local, dep_id.to_string(), true),
         })
         .collect::<Vec<_>>();
 
@@ -2338,7 +2701,7 @@ mod tests {
     #[test]
     fn rewrite_default_import_interops_with_commonjs() {
         let dep_id = "__ruv_test1234567890__";
-        let result = rewrite_import_clause("React", dep_id).unwrap();
+        let result = rewrite_import_clause("React", dep_id, false).unwrap();
         assert_eq!(
             result,
             format!("const React = {};", interop_default(dep_id))
@@ -2348,7 +2711,7 @@ mod tests {
     #[test]
     fn rewrite_named_imports() {
         let dep_id = "__ruv_abc__";
-        let result = rewrite_import_clause("{ useState, useEffect }", dep_id).unwrap();
+        let result = rewrite_import_clause("{ useState, useEffect }", dep_id, false).unwrap();
         assert!(result.contains("const useState = __ruv_abc__.useState;"));
         assert!(result.contains("const useEffect = __ruv_abc__.useEffect;"));
     }
@@ -2356,28 +2719,29 @@ mod tests {
     #[test]
     fn rewrite_named_import_with_alias() {
         let dep_id = "__ruv_abc__";
-        let result = rewrite_import_clause("{ foo as bar }", dep_id).unwrap();
+        let result = rewrite_import_clause("{ foo as bar }", dep_id, false).unwrap();
         assert_eq!(result, "const bar = __ruv_abc__.foo;");
     }
 
     #[test]
     fn rewrite_namespace_import() {
         let dep_id = "__ruv_abc__";
-        let result = rewrite_import_clause("* as utils", dep_id).unwrap();
+        let result = rewrite_import_clause("* as utils", dep_id, false).unwrap();
         assert_eq!(result, "const utils = __ruv_abc__;");
     }
 
     #[test]
     fn rewrite_default_plus_named() {
         let dep_id = "__ruv_abc__";
-        let result = rewrite_import_clause("React, { useState }", dep_id).unwrap();
+        let result = rewrite_import_clause("React, { useState }", dep_id, false).unwrap();
         assert!(result.contains(&format!("const React = {};", interop_default(dep_id))));
         assert!(result.contains("const useState = __ruv_abc__.useState;"));
     }
 
     #[test]
     fn rewrite_default_plus_namespace() {
-        let result = rewrite_import_clause("React, * as ReactNamespace", "__ruv_abc__").unwrap();
+        let result =
+            rewrite_import_clause("React, * as ReactNamespace", "__ruv_abc__", false).unwrap();
         assert_eq!(
             result,
             format!(
@@ -2389,7 +2753,7 @@ mod tests {
 
     #[test]
     fn rejects_unsupported_import_clauses() {
-        let error = rewrite_import_clause("React, invalid", "__ruv_abc__").unwrap_err();
+        let error = rewrite_import_clause("React, invalid", "__ruv_abc__", false).unwrap_err();
         assert!(
             error
                 .to_string()
@@ -2510,6 +2874,7 @@ mod tests {
             "import \"./styles.css\"",
             &DepIndex::without_aliases(&[]),
             false,
+            &BTreeSet::new(),
         );
         assert!(result.unwrap().unwrap().starts_with("// [bundled]"));
     }
@@ -3163,8 +3528,15 @@ export default function Layout({ children }) {
         )));
     }
 
+    /// A cycle is grouped, not refused.
+    ///
+    /// The linker used to answer a cycle with `RUV1803 circular dependency
+    /// detected`, which made every package carrying one impossible to bundle;
+    /// `zod` carries one between two of its own files. Both halves of the group
+    /// have to be found, because the emitted form depends on it: their exports
+    /// objects are published before their bodies run.
     #[test]
-    fn detect_cycles_finds_simple_cycle() {
+    fn a_cycle_is_grouped_rather_than_refused() {
         let a = PathBuf::from("/app/a.ts");
         let b = PathBuf::from("/app/b.ts");
 
@@ -3173,17 +3545,17 @@ export default function Layout({ children }) {
             fixture(b.clone(), "import A from './a';", vec![a.clone()]),
         ];
 
-        let result = detect_cycles(&modules);
-        assert!(result.is_err(), "circular dep should be an error");
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("circular dependency"),
-            "error message should mention circular dependency: {err}"
+        let groups = cycle_groups(&modules);
+        assert_eq!(groups.len(), 2, "both modules are in the cycle: {groups:?}");
+        assert_eq!(
+            groups.get(&a),
+            groups.get(&b),
+            "the two sides of one cycle share a group"
         );
     }
 
     #[test]
-    fn detect_cycles_no_false_positive_on_diamond() {
+    fn a_diamond_is_not_a_cycle() {
         // Diamond: page → A, page → B, A → shared, B → shared
         let page = PathBuf::from("/app/page.ts");
         let a = PathBuf::from("/app/a.ts");
@@ -3197,8 +3569,10 @@ export default function Layout({ children }) {
             fixture(shared.clone(), String::new(), vec![]),
         ];
 
-        // Diamond graph is NOT circular.
-        assert!(detect_cycles(&modules).is_ok(), "diamond is not circular");
+        assert!(
+            cycle_groups(&modules).is_empty(),
+            "a diamond shares a dependency; it does not close a cycle"
+        );
     }
 
     /// Link a source and prove the result is still JavaScript.
@@ -3218,6 +3592,77 @@ export default function Layout({ children }) {
         crate::compiler::transform(&linked, false)
             .unwrap_or_else(|error| panic!("linked output does not parse: {error}\n---\n{linked}"));
         linked
+    }
+
+    /// A cycle links, and the emitted form is the one that can run.
+    ///
+    /// Three things have to be true at once and none of them is visible in a
+    /// text match: both namespaces are declared before either body runs, the
+    /// binding that closes the cycle is re-read rather than copied out of an
+    /// empty object, and the result parses. The linker used to refuse the graph
+    /// outright, which took every package with an internal cycle — `zod` among
+    /// them — out of reach of a browser bundle.
+    #[test]
+    fn a_cycle_links_with_late_bound_bindings() {
+        let first = PathBuf::from("/p/first.ts");
+        let second = PathBuf::from("/p/second.ts");
+        let modules = vec![
+            fixture(
+                first.clone(),
+                "import { second } from './second'\nexport const firstValue = 'first'\nexport function useIt() { return second() }\n",
+                vec![second.clone()],
+            ),
+            fixture(
+                second.clone(),
+                "import { firstValue } from './first'\nexport function second() { return firstValue }\n",
+                vec![first.clone()],
+            ),
+        ];
+
+        let linked = link(&modules, &client_input(first.clone()))
+            .unwrap_or_else(|error| panic!("link refused a cycle: {error}"));
+        crate::compiler::transform(&linked, false)
+            .unwrap_or_else(|error| panic!("linked output does not parse: {error}\n{linked}"));
+
+        let first_id = module_id(&first);
+        let second_id = module_id(&second);
+        assert!(
+            linked.contains(&format!("var {first_id} = {{}};"))
+                && linked.contains(&format!("var {second_id} = {{}};")),
+            "both namespaces are declared before the group runs:\n{linked}"
+        );
+        assert!(
+            linked.contains("__ruvyxaRebind.push("),
+            "the binding that closes the cycle is re-read:\n{linked}"
+        );
+        assert!(
+            linked.contains("__ruvyxaRebind.splice(0)"),
+            "the cycle flushes its re-reads when it completes:\n{linked}"
+        );
+    }
+
+    /// An acyclic graph keeps the bytes it always had.
+    ///
+    /// The cycle support is invisible unless a cycle is present: no helper
+    /// declarations, no `let` bindings, no flush. Reproducible output and every
+    /// content-addressed cache downstream depend on that.
+    #[test]
+    fn an_acyclic_graph_is_untouched_by_cycle_support() {
+        let entry = PathBuf::from("/p/a.ts");
+        let dep = PathBuf::from("/p/b.ts");
+        let modules = vec![
+            fixture(
+                entry.clone(),
+                "import { value } from './b'\nexport const doubled = value * 2\n",
+                vec![dep.clone()],
+            ),
+            fixture(dep.clone(), "export const value = 21\n", Vec::new()),
+        ];
+
+        let linked = link(&modules, &client_input(entry)).unwrap();
+        assert!(!linked.contains("__ruvyxaRebind"), "{linked}");
+        assert!(!linked.contains("__ruvyxaCycleTdz"), "{linked}");
+        assert!(linked.contains("const value = "), "{linked}");
     }
 
     /// `from` is ordinary English, and a quoted one is not a re-export.

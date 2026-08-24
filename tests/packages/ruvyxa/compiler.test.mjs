@@ -1485,30 +1485,86 @@ export const marker = 'reached'
     })
   })
 
-  it('rejects circular local dependencies before emitting an invalid bundle', async () => {
+  /**
+   * An import cycle is legal ESM, and the linker links it the way ESM
+   * evaluates it: depth-first, without re-entering a module already running.
+   *
+   * Refusing the graph — which this did — made every package with an internal
+   * cycle impossible to bundle, `zod` among them, and the refusal reached the
+   * author as `RUV1803 circular dependency detected: schemas.js -> iso.js`,
+   * naming two files inside a dependency they did not write.
+   *
+   * The two shapes are worth keeping apart. A binding used inside a function is
+   * the shape real packages have, and it has to work. A binding read while the
+   * cycle is still running is the shape ESM answers with a ReferenceError, and
+   * answering `undefined` instead would hand the caller a wrong value with
+   * nothing to trace it back to.
+   */
+  it('links an import cycle and evaluates it the way ESM does', async () => {
     await withFixture(async ({ root, outDir }) => {
-      const firstFile = path.join(root, 'first.js')
-      const secondFile = path.join(root, 'second.js')
-      const outfile = path.join(outDir, 'circular.mjs')
-
       await writeFile(
-        firstFile,
+        path.join(root, 'first.js'),
+        [
+          "import { second, secondValue } from './second.js'",
+          "import * as everything from './second.js'",
+          "export const firstValue = 'first'",
+          'export function first() { return firstValue + secondValue }',
+          'export function viaNamespace() { return everything.secondValue }',
+          'export function throughFunction() { return second() }',
+          '',
+        ].join('\n'),
+      )
+      await writeFile(
+        path.join(root, 'second.js'),
+        [
+          "import { firstValue } from './first.js'",
+          "export const secondValue = 'second'",
+          'export function second() { return secondValue + firstValue }',
+          '',
+        ].join('\n'),
+      )
+
+      const outfile = path.join(outDir, 'circular.mjs')
+      await compileBundle({
+        projectRoot: root,
+        entrySource: `export { first, viaNamespace, throughFunction } from ${JSON.stringify(toImportPath(path.join(root, 'first.js')))}`,
+        sourcefile: 'ruvyxa:circular-entry.js',
+        outfile,
+        platform: 'node',
+      })
+
+      const mod = await import(pathToFileURL(outfile).href + `?t=${Date.now()}`)
+      assert.equal(mod.first(), 'firstsecond')
+      assert.equal(mod.viaNamespace(), 'second')
+      assert.equal(mod.throughFunction(), 'secondfirst')
+    })
+  })
+
+  it('refuses a cyclic binding read while the cycle is still running', async () => {
+    await withFixture(async ({ root, outDir }) => {
+      await writeFile(
+        path.join(root, 'first.js'),
         `import { second } from './second.js'\nexport const first = 'first:' + second\n`,
       )
       await writeFile(
-        secondFile,
+        path.join(root, 'second.js'),
         `import { first } from './first.js'\nexport const second = 'second:' + first\n`,
       )
 
+      const outfile = path.join(outDir, 'circular-init.mjs')
+      await compileBundle({
+        projectRoot: root,
+        entrySource: `export { first } from ${JSON.stringify(toImportPath(path.join(root, 'first.js')))}`,
+        sourcefile: 'ruvyxa:circular-init-entry.js',
+        outfile,
+        platform: 'node',
+      })
+
+      // ESM answers this with `Cannot access 'first' before initialization`;
+      // so does the bundle, rather than folding `undefined` into a string.
       await assert.rejects(
-        compileBundle({
-          projectRoot: root,
-          entrySource: `export { first } from ${JSON.stringify(toImportPath(firstFile))}`,
-          sourcefile: 'ruvyxa:circular-entry.js',
-          outfile,
-          platform: 'browser',
-        }),
-        /RUV1803 circular dependency detected: first\.js -> second\.js -> first\.js/,
+        () => import(pathToFileURL(outfile).href + `?t=${Date.now()}`),
+        /before initialization/,
       )
     })
   })
@@ -3399,6 +3455,97 @@ export const marker = 'reached'
       })
 
       assert.match(await readFile(outfile, 'utf8'), /dependency-was-bundled/)
+    })
+  })
+
+  /**
+   * Export shapes the line-based linker has to read as whole statements.
+   *
+   * Every case here is a real defect: `chalk` ships a re-export whose clause
+   * wraps across lines with a comment inside it, and the linker rewrote the
+   * first line and copied the rest through as bare tokens, so the bundle did
+   * not parse — reported by nothing until the deployed server died at startup.
+   * `café` matched an ASCII identifier pattern only as far as `caf`, so the
+   * emitted module threw `caf is not defined`, and a name with no ASCII start
+   * (`ชื่อ`) matched nothing and was dropped in silence.
+   *
+   * The bundle is imported rather than matched: a text assertion passes on
+   * exactly the bugs this class produces.
+   */
+  it('links clause statements that wrap across lines and names outside ASCII', async () => {
+    await withFixture(async ({ root, outDir }) => {
+      await writeFile(
+        path.join(root, 'names.js'),
+        [
+          'const first = 1',
+          'const second = 2',
+          'const third = 3',
+          'export {',
+          '  first,',
+          '  second,',
+          '  // a comment between clause members, as chalk ships',
+          '  third as renamedThird,',
+          '}',
+          '',
+        ].join('\n'),
+      )
+      await writeFile(
+        path.join(root, 'reexport.js'),
+        [
+          'export {',
+          '  first, second,',
+          '  // TODO: remove these aliases in the next major version',
+          '  first as firstAlias, second as secondAlias,',
+          "} from './names.js'",
+          '',
+        ].join('\n'),
+      )
+      await writeFile(
+        path.join(root, 'unicode.js'),
+        [
+          "export const café = 'accented'",
+          "export const ชื่อ = 'thai'",
+          "export const Δelta = 'greek'",
+          "export const { destructured, renamed: renamedBinding } = { destructured: 'd', renamed: 'r' }",
+          "export const [firstOfArray] = ['array']",
+          '',
+        ].join('\n'),
+      )
+      await writeFile(
+        path.join(root, 'entry.js'),
+        [
+          'import {',
+          '  first,',
+          '  // a comment inside an import clause',
+          '  renamedThird,',
+          "} from './names.js'",
+          "import { firstAlias, secondAlias } from './reexport.js'",
+          "import * as unicode from './unicode.js'",
+          'export const summary = [first, renamedThird, firstAlias, secondAlias].join(",")',
+          "export const accented = unicode['café']",
+          "export const thai = unicode['ชื่อ']",
+          "export const greek = unicode['Δelta']",
+          'export const destructuredExports = [unicode.destructured, unicode.renamedBinding, unicode.firstOfArray].join(",")',
+          '',
+        ].join('\n'),
+      )
+
+      const outfile = path.join(outDir, 'clause-statements.mjs')
+      clearCompilerCache()
+      await compileBundle({
+        projectRoot: root,
+        entrySource: `export * from ${JSON.stringify(toImportPath(path.join(root, 'entry.js')))}`,
+        sourcefile: 'ruvyxa:clause-entry.ts',
+        outfile,
+        platform: 'node',
+      })
+
+      const linked = await import(pathToFileURL(outfile).href + `?t=${Date.now()}`)
+      assert.equal(linked.summary, '1,3,1,2')
+      assert.equal(linked.accented, 'accented')
+      assert.equal(linked.thai, 'thai')
+      assert.equal(linked.greek, 'greek')
+      assert.equal(linked.destructuredExports, 'd,r,array')
     })
   })
 })

@@ -169,6 +169,17 @@ pub struct RenderMeta {
     /// switch would change every existing page at once.
     #[serde(default)]
     pub server_components: bool,
+    /// `export const dynamic = 'force-dynamic'`: this route asked to be
+    /// rendered per request.
+    ///
+    /// Distinct from an ordinary SSR strategy, which is only the *default*.
+    /// Reading the export used to decide one thing — do not pre-render this —
+    /// and nothing downstream could tell the two apart afterwards, so the
+    /// runtime render cache stored the document and served it unchanged for the
+    /// life of the process. The page asked for the opposite of that, and Next,
+    /// whose convention this is, also takes it to mean "do not cache".
+    #[serde(default)]
+    pub force_dynamic: bool,
 }
 
 impl RenderMeta {
@@ -188,6 +199,7 @@ impl Default for RenderMeta {
             has_dynamic_slots: false,
             hydration: HydrationMode::Load,
             server_components: false,
+            force_dynamic: false,
         }
     }
 }
@@ -353,6 +365,58 @@ impl ValidationReport {
     }
 }
 
+/// Every project module the routes reach that does **not** live in `app/`.
+///
+/// `ruvyxa build` stages the application into `<out>/server/` and `ruvyxa start`
+/// compiles pages from that copy, so a module the copy does not contain cannot
+/// be resolved at request time. Only `app/` and two hard-coded directory names
+/// were staged, and the ordinary layout — `app/` beside `lib/` — therefore
+/// answered a request-time render with
+/// `RUV1801 cannot resolve '../../lib/x'`, naming a path under `.ruvyxa` that
+/// the author never wrote. A page importing the same module through a tsconfig
+/// alias worked, because that path resolves from the project root.
+///
+/// Returned as absolute, normalized paths. Anything under `node_modules` is
+/// left out: a deployed function bundles what it needs, and `start` resolves
+/// packages from the project's own tree.
+pub fn reachable_project_modules(root: &Path, manifest: &RouteManifest) -> BTreeSet<PathBuf> {
+    let canonical_root = normalized_canonical_path(root);
+    let canonical_app = normalized_canonical_path(&manifest.app_dir);
+    let mut cache = ModuleCache::in_root(root);
+    let mut modules = BTreeSet::new();
+
+    for route in &manifest.routes {
+        let mut entries = vec![route.file.clone()];
+        for layout in &route.layout_chain {
+            entries.extend(resolve_layout_file(&manifest.app_dir, layout));
+        }
+        for template in &route.template_chain {
+            entries.extend(resolve_layout_file(&manifest.app_dir, template));
+        }
+        entries.extend(route.server_modules.iter().map(PathBuf::from));
+        entries.extend(route.client_modules.iter().map(PathBuf::from));
+
+        for entry in entries {
+            for module in collect_relative_graph(&entry, &mut cache) {
+                if module.starts_with(&canonical_app) {
+                    continue;
+                }
+                let Ok(relative) = module.strip_prefix(&canonical_root) else {
+                    continue;
+                };
+                if relative
+                    .components()
+                    .any(|component| component.as_os_str() == "node_modules")
+                {
+                    continue;
+                }
+                modules.insert(module);
+            }
+        }
+    }
+    modules
+}
+
 pub fn validate_app(root: &Path, manifest: &RouteManifest) -> Result<ValidationReport> {
     let mut diagnostics = Vec::new();
     let mut client_modules = BTreeSet::new();
@@ -392,17 +456,50 @@ pub fn validate_app(root: &Path, manifest: &RouteManifest) -> Result<ValidationR
                         graph.extend(collect_relative_graph(&layout, &mut cache));
                     }
                 }
+
+                // Which side of the boundary this route's graph is on.
+                //
+                // An ordinary page hydrates, so every module it reaches is a
+                // client module. A server-components route does not: the client
+                // compile stops at `'use client'`, the page itself is
+                // serialised into a payload, and nothing above that boundary is
+                // in any browser bundle. Validating its whole graph as client
+                // code refused exactly the things a server component is for —
+                // `import 'server-only'` (RUV1007) and a private
+                // `process.env` read (RUV1008) — in the one place they are
+                // correct.
                 for module in graph {
-                    client_modules.insert(module.clone());
-                    // Skip if already validated — the cache makes the re-read
-                    // free, but the diagnostics would be emitted twice.
-                    if validated_client.insert(module.clone()) {
-                        validate_client_module(
-                            &canonical_root,
-                            &module,
-                            &mut cache,
-                            &mut diagnostics,
-                        )?;
+                    let client_lane =
+                        !route.render.server_components || is_client_boundary(&module, &mut cache);
+                    if !client_lane {
+                        server_modules.insert(module.clone());
+                        if validated_server.insert(module.clone()) {
+                            validate_server_module(&module, &mut cache, &mut diagnostics)?;
+                        }
+                        continue;
+                    }
+
+                    // A `'use client'` module owns its whole dependency
+                    // closure: everything it reaches is in the browser bundle
+                    // with it.
+                    let reachable = if route.render.server_components {
+                        collect_relative_graph(&module, &mut cache)
+                    } else {
+                        BTreeSet::from([module.clone()])
+                    };
+                    for module in reachable {
+                        client_modules.insert(module.clone());
+                        // Skip if already validated — the cache makes the
+                        // re-read free, but the diagnostics would be emitted
+                        // twice.
+                        if validated_client.insert(module.clone()) {
+                            validate_client_module(
+                                &canonical_root,
+                                &module,
+                                &mut cache,
+                                &mut diagnostics,
+                            )?;
+                        }
                     }
                 }
             }
@@ -584,6 +681,17 @@ fn markdown_without_code_examples(source: &str) -> String {
     }
 
     output
+}
+
+/// Whether a module declares itself the start of the browser's half of a
+/// server-components route.
+///
+/// The same question the compilers ask — `'use client'` is a directive, and the
+/// scanner that reads it is the bundler's, not a second text search here.
+fn is_client_boundary(file: &Path, cache: &mut ModuleCache) -> bool {
+    cache.module(file).is_some_and(|module| {
+        ruvyxa_bundler::reference_manifest::has_module_directive(&module.source, "use client")
+    })
 }
 
 fn validate_server_module(
@@ -1545,6 +1653,7 @@ fn detect_render_meta(
         Some("force-dynamic") => {
             return RenderMeta {
                 hydration,
+                force_dynamic: true,
                 ..Default::default()
             };
         }
@@ -3135,6 +3244,77 @@ mod tests {
 
         let manifest = discover_routes(DiscoverOptions::new(&app)).unwrap();
         assert_eq!(manifest.routes[0].render.strategy, RenderStrategy::Ssr);
+    }
+
+    /// A server component is server code, and validation has to know that.
+    ///
+    /// The client compile of a server-components route stops at `'use client'`:
+    /// the page is serialised into a payload and never reaches a browser
+    /// bundle. Validating its whole graph as client code refused the two things
+    /// a server component exists to do — `import 'server-only'` and reading a
+    /// private `process.env` value — while the module they were refused in was
+    /// provably absent from every emitted chunk. The boundary below is the
+    /// dividing line, and what sits under it is still browser code.
+    #[test]
+    fn a_server_components_route_is_validated_on_the_server_side_of_its_boundary() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app").join("rsc");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(
+            app.join("page.tsx"),
+            r#"
+                import "server-only";
+                import Island from "./island";
+
+                export const serverComponents = true;
+
+                export default function Page() {
+                    return <main>{process.env.DATABASE_URL}<Island /></main>;
+                }
+            "#,
+        )
+        .unwrap();
+        fs::write(
+            app.join("island.tsx"),
+            r#"
+                'use client'
+                import { secret } from "./browser-secret";
+                export default function Island() { return <button>{secret}</button> }
+            "#,
+        )
+        .unwrap();
+        fs::write(
+            app.join("browser-secret.ts"),
+            "export const secret = process.env.DATABASE_URL;\n",
+        )
+        .unwrap();
+
+        let manifest = discover_routes(DiscoverOptions::new(&temp.path().join("app"))).unwrap();
+        assert!(
+            manifest.routes[0].render.server_components,
+            "the fixture must opt into server components"
+        );
+        let report = validate_app(temp.path(), &manifest).unwrap();
+        let codes = report
+            .diagnostics
+            .iter()
+            .map(|diagnostic| diagnostic.code)
+            .collect::<Vec<_>>();
+
+        // The page's own `server-only` import and env read are correct here.
+        assert!(
+            !codes.contains(&"RUV1007"),
+            "server-only is what a server component is for: {:?}",
+            report.diagnostics
+        );
+        // The module under the client boundary is still browser code, and its
+        // private env read is still a leak.
+        assert_eq!(
+            codes.iter().filter(|code| **code == "RUV1008").count(),
+            1,
+            "only the module below the client boundary leaks: {:?}",
+            report.diagnostics
+        );
     }
 
     #[test]

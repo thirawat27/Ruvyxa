@@ -43,7 +43,20 @@
     "with no useState in it. Ordering it ahead of `node` is what makes a package",
     "that ships both reach its server-components build — the last case here is",
     "react-server-dom-webpack's own exports map, which returns a stub that",
-    "refuses to load unless the condition is on."
+    "refuses to load unless the condition is on.",
+    "",
+    "`fileProbe` is the other half of resolution: once a specifier names a path,",
+    "which file on disk that path stands for. Both hosts probe in one order —",
+    "the TypeScript source a written extension stands for, the exact path, an",
+    "appended extension, a directory index — and both had the same defect at",
+    "opposite ends. The Rust probe substituted the last dotted segment for every",
+    "candidate, so `./util.inspect` asked for `util.js` and never for",
+    "`util.inspect.js`, the file `object-inspect` ships and the one Node finds;",
+    "`resolvePackageRelative` in compiler.mjs substituted the same way for a",
+    "package entry. A dot inside a basename is ordinary, and Node appends.",
+    "",
+    "`files` are created empty under a temporary directory, `specifier` is",
+    "resolved against it, and `expect` is the file that must answer or null."
   ],
   "exports": [
     {
@@ -474,5 +487,67 @@
       }
     }
   ],
-  "unsafeRelativePaths": ["", "../escape.js", "a/../../escape.js", "/absolute.js", "a\\b.js", "./"]
+  "unsafeRelativePaths": ["", "../escape.js", "a/../../escape.js", "/absolute.js", "a\\b.js", "./"],
+  "fileProbe": [
+    {
+      "name": "a basename with a dot is appended to, not replaced",
+      "files": ["util.inspect.js"],
+      "specifier": "./util.inspect",
+      "expect": "util.inspect.js"
+    },
+    {
+      "name": "appending beats replacing when both files exist",
+      "files": ["util.inspect.js", "util.js"],
+      "specifier": "./util.inspect",
+      "expect": "util.inspect.js"
+    },
+    {
+      "name": "a minified basename keeps both dots",
+      "files": ["deep.min.js"],
+      "specifier": "./deep.min",
+      "expect": "deep.min.js"
+    },
+    {
+      "name": "a written .js names the TypeScript source it stands for",
+      "files": ["x.ts", "x.js"],
+      "specifier": "./x.js",
+      "expect": "x.ts"
+    },
+    {
+      "name": "a written .js answers itself when no source is beside it",
+      "files": ["x.js"],
+      "specifier": "./x.js",
+      "expect": "x.js"
+    },
+    {
+      "name": "a written .mjs names the .mts source",
+      "files": ["m.mts"],
+      "specifier": "./m.mjs",
+      "expect": "m.mts"
+    },
+    {
+      "name": "an exact file wins over an appended one",
+      "files": ["y", "y.ts"],
+      "specifier": "./y",
+      "expect": "y"
+    },
+    {
+      "name": "a .cjs file is found by appending",
+      "files": ["c.cjs"],
+      "specifier": "./c",
+      "expect": "c.cjs"
+    },
+    {
+      "name": "a directory index is the last resort",
+      "files": ["pkg/index.ts"],
+      "specifier": "./pkg",
+      "expect": "pkg/index.ts"
+    },
+    {
+      "name": "nothing answers a specifier with no file behind it",
+      "files": ["other.ts"],
+      "specifier": "./missing",
+      "expect": null
+    }
+  ]
 }

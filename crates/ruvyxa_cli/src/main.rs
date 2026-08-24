@@ -34,6 +34,7 @@ mod environment;
 mod host_resources;
 mod image_optimizer;
 mod image_usage;
+mod output_audit;
 mod plugins;
 mod prerender;
 mod route_types;

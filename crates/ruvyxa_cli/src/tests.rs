@@ -2551,7 +2551,7 @@ fn copies_external_style_sources_into_server_output() {
     std::fs::create_dir_all(source.parent().unwrap()).unwrap();
     std::fs::write(&source, ":root { color-scheme: dark; }").unwrap();
 
-    copy_style_sources(root, &server, std::slice::from_ref(&source)).unwrap();
+    copy_project_sources(root, &server, std::slice::from_ref(&source)).unwrap();
 
     assert_eq!(
         std::fs::read_to_string(server.join("styles/theme.css")).unwrap(),
@@ -2574,7 +2574,7 @@ fn skips_directory_watch_inputs_when_copying_style_sources() {
     std::fs::create_dir_all(source.parent().unwrap()).unwrap();
     std::fs::write(&source, ":root { color-scheme: dark; }").unwrap();
 
-    copy_style_sources(root, &server, &[scanned, source]).unwrap();
+    copy_project_sources(root, &server, &[scanned, source]).unwrap();
 
     assert!(server.join("styles/theme.css").is_file());
     assert!(

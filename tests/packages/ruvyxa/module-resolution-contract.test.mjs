@@ -11,13 +11,17 @@
  * `crates/ruvyxa_bundler/src/resolver.rs`.
  */
 import assert from 'node:assert/strict'
-import { readFileSync } from 'node:fs'
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import path from 'node:path'
 import { describe, it } from 'node:test'
 import { fileURLToPath } from 'node:url'
 
 const workspaceRoot = path.resolve(fileURLToPath(new URL('../../..', import.meta.url)))
 const modulePath = path.join(workspaceRoot, 'packages/ruvyxa/runtime/package-exports.mjs')
+
+const compilerPath = path.join(workspaceRoot, 'packages/ruvyxa/runtime/compiler.mjs')
+const { probeFileCandidate } = await import(`file://${compilerPath.replaceAll('\\', '/')}`)
 
 const {
   PACKAGE_EXPORT_TARGETS,
@@ -114,4 +118,27 @@ describe('package-relative path safety', () => {
       assert.equal(isSafePackageRelativePath(relative), true, relative)
     }
   })
+})
+
+describe('file probing', () => {
+  for (const testCase of contract.fileProbe) {
+    it(testCase.name, () => {
+      const directory = mkdtempSync(path.join(tmpdir(), 'ruvyxa-probe-'))
+      try {
+        for (const file of testCase.files) {
+          const target = path.join(directory, file)
+          mkdirSync(path.dirname(target), { recursive: true })
+          writeFileSync(target, '')
+        }
+
+        const resolved = probeFileCandidate(path.resolve(directory, testCase.specifier))
+        const answered = resolved
+          ? path.relative(realpathSync(directory), resolved).replaceAll('\\', '/')
+          : null
+        assert.equal(answered, testCase.expect, `${testCase.name} disagrees with the shared table`)
+      } finally {
+        rmSync(directory, { recursive: true, force: true })
+      }
+    })
+  }
 })
