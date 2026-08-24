@@ -2103,6 +2103,7 @@ dependencies = [
  "ruvyxa_tui",
  "serde",
  "serde_json",
+ "serde_yaml_ng",
  "tempfile",
  "tokio",
  "tracing",

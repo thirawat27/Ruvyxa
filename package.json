@@ -26,7 +26,7 @@
     "pack:smoke": "node scripts/pack-smoke.mjs",
     "verify:reproducible": "node scripts/verify-reproducible.mjs",
     "test:full-flow": "pwsh -NoProfile -ExecutionPolicy Bypass -File scripts/test-full-flow.ps1",
-    "publish:dry-run": "pnpm -r --filter './packages/**' publish --access public --dry-run"
+    "publish:dry-run": "pnpm -r --filter '{./packages/**}' --filter '!@ruvyxa/cli-*' publish --access public --dry-run"
   },
   "devDependencies": {
     "@types/node": "24.13.3",

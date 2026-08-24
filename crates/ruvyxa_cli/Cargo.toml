@@ -46,6 +46,10 @@ windows-sys = { version = "0.61.2", features = ["Win32_System_ProcessStatus", "W
 libc = "0.2.189"
 
 [dev-dependencies]
+# `tests/ci_workflows.rs` asserts properties of `.github/workflows/*.yml`, and
+# a workflow is a machine-read document: matching its text passes on exactly
+# the bugs that class produces, so the gate parses it.
+serde_yaml_ng = { workspace = true }
 # Test fixtures only: these tests must put real encoded files on disk for the
 # optimizer to sniff and decode. Decoding in this crate goes through
 # `ruvyxa_dev_server::image_decode`.

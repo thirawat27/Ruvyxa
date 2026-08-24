@@ -28,7 +28,11 @@ describe('dependency security workflow', () => {
     // got remembered while the other failed CI.
     assert.match(workspacePackage.packageManager, /^pnpm@\d+\.\d+\.\d+$/)
     assert.match(workflow, /node-version: 24\.19\.0/)
-    assert.match(workflow, /uses: pnpm\/action-setup@v6/)
+    // Pinned to a commit, with the readable major in the trailing comment.
+    // `crates/ruvyxa_cli/tests/ci_workflows.rs` holds the pin *format* for
+    // every action in every workflow; what this line still owns is which
+    // major this workflow is meant to be on.
+    assert.match(workflow, /uses: pnpm\/action-setup@[0-9a-f]{40} # v6/)
   })
 
   it('runs on a schedule and dependency changes', () => {

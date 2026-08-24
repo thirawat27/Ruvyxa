@@ -1,7 +1,13 @@
 name: Ruvyxa Framework CI
 
 on:
+  # `push` used to carry no filter, so a branch with an open pull request ran
+  # the whole five-platform matrix twice for one change — once for the push and
+  # once for the pull request. Branch pushes are covered by `pull_request`; what
+  # stays here is what nothing else verifies.
   push:
+    branches: [main]
+    tags: ['v*.*.*']
   pull_request:
 
 permissions:
@@ -9,12 +15,20 @@ permissions:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  # A branch may cancel its own earlier run. `main` and a release tag may not:
+  # cancelling there leaves a commit with no verdict at all, and this is not
+  # hypothetical — the run on 307aece was cancelled by the next push, that
+  # commit never went green, and it was inside the tag that shipped. Whatever
+  # is released has to have been verified on every platform it claims.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/') }}
 
 env:
   CARGO_HTTP_TIMEOUT: '120'
   CARGO_NET_RETRY: '10'
   CARGO_REGISTRIES_CRATES_IO_PROTOCOL: sparse
+  # A panic with no backtrace costs a whole round trip to reproduce, and a CI
+  # round trip here is a five-platform matrix.
+  RUST_BACKTRACE: '1'
 
 defaults:
   run:
@@ -30,11 +44,13 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
         with:
           toolchain: 1.98.0
-      - uses: Swatinem/rust-cache@v2
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: ruvyxa-msrv
       - run: cargo check --workspace --locked
@@ -59,13 +75,15 @@ jobs:
             node: '24.19.0'
 
     steps:
-      - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
         with:
           shared-key: 'ruvyxa-${{ matrix.os }}'
-      - uses: pnpm/action-setup@v6
-      - uses: actions/setup-node@v7
+      - uses: pnpm/action-setup@0977fd99725f1db4007ccb2928dbb4e90d06cc86 # v6
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: ${{ matrix.node }}
           cache: pnpm
@@ -118,13 +136,14 @@ jobs:
       # these steps are about the emitted server, so they build the smallest app
       # that exercises every part of it and check the answers over HTTP.
       - name: Build and launch Node deployment artifact
+        timeout-minutes: 15
         shell: bash
         run: |
           cargo run -p ruvyxa_cli -- build --root examples/deploy-smoke --adapter node
           node scripts/smoke-runtime-adapter.mjs node examples/deploy-smoke/.ruvyxa/deploy/node 4390
       - name: Set up Bun runtime parity
         if: matrix.os == 'ubuntu-latest' || matrix.os == 'windows-latest'
-        uses: oven-sh/setup-bun@v2
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
           bun-version: '1.4.0'
       - name: Verify Bun JavaScript runtime parity
@@ -132,6 +151,7 @@ jobs:
         shell: bash
         run: cargo run -p ruvyxa_cli -- check --root examples/demo --runtime bun
       - name: Build and launch Bun deployment artifact
+        timeout-minutes: 15
         if: matrix.os == 'ubuntu-latest' || matrix.os == 'windows-latest'
         shell: bash
         run: |
@@ -139,7 +159,7 @@ jobs:
           node scripts/smoke-runtime-adapter.mjs bun examples/deploy-smoke/.ruvyxa/deploy/bun 4391
       - name: Set up Deno runtime parity
         if: matrix.os == 'ubuntu-latest' || matrix.os == 'windows-latest'
-        uses: denoland/setup-deno@v2
+        uses: denoland/setup-deno@22d081ff2d3a40755e97629de92e3bcbfa7cf2ed # v2
         with:
           deno-version: '2.9.5'
       - name: Verify Deno JavaScript runtime parity
@@ -147,6 +167,7 @@ jobs:
         shell: bash
         run: cargo run -p ruvyxa_cli -- check --root examples/demo --runtime deno
       - name: Build and launch Deno deployment artifact
+        timeout-minutes: 15
         if: matrix.os == 'ubuntu-latest' || matrix.os == 'windows-latest'
         shell: bash
         run: |
@@ -162,6 +183,7 @@ jobs:
       # has no ISR — the build refuses it with RUV2202, correctly. Add another
       # ISR route and this step fails by name rather than skipping quietly.
       - name: Build and exercise the Cloudflare worker
+        timeout-minutes: 15
         shell: bash
         run: |
           FIXTURE=$(node scripts/edge-fixture.mjs examples/deploy-smoke --drop cached)
