@@ -408,7 +408,12 @@ impl RouteManifestObserver {
         Self(Arc::new(observe))
     }
 
-    fn notify(&self, manifest: &RouteManifest) {
+    /// Hand a freshly discovered manifest to the observer.
+    ///
+    /// Public because an observer composes: `ruvyxa dev` installs one that
+    /// regenerates both the typed-routes file and the discovery documents, and
+    /// the composed observer forwards to the one it wraps.
+    pub fn notify(&self, manifest: &RouteManifest) {
         if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| (self.0)(manifest))).is_err() {
             tracing::warn!(
                 "route manifest observer panicked; generated route artifacts may be stale"
@@ -428,6 +433,15 @@ pub struct ServerConfig {
     pub root: PathBuf,
     pub app_dir: PathBuf,
     pub public_dir: PathBuf,
+    /// Where generated discovery files (`sitemap.xml`, `robots.txt`) are
+    /// written for `ruvyxa dev`, consulted after `public/`.
+    ///
+    /// A build writes them into the published assets directory, so
+    /// `ruvyxa start` and every deployment serve them like any other file.
+    /// Development had no such directory and answered both with 404, so the one
+    /// command a project runs while working on its SEO output was the one
+    /// command that could not show it.
+    pub discovery_dir: Option<PathBuf>,
     pub client_dir: PathBuf,
     /// Directory containing pre-rendered HTML files from the build step.
     pub prerender_dir: PathBuf,
@@ -539,6 +553,7 @@ impl ServerConfig {
         Self {
             app_dir: root.join("app"),
             public_dir: root.join("public"),
+            discovery_dir: None,
             client_dir: root.join(".ruvyxa/client"),
             prerender_dir: root.join(".ruvyxa/prerender"),
             root,
@@ -580,6 +595,7 @@ impl ServerConfig {
         Self {
             app_dir: root.join(".ruvyxa/server/app"),
             public_dir: root.join(".ruvyxa/assets"),
+            discovery_dir: None,
             client_dir: root.join(".ruvyxa/client"),
             prerender_dir: root.join(".ruvyxa/prerender"),
             root,

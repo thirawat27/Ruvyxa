@@ -524,7 +524,7 @@ export function createHandler(options) {
     })
     const result = await runWithRequestContext(context, () => handler({ request, params }))
     recordRevalidations(collectRevalidations(context))
-    return normalizeResponse(result)
+    return normalizeResponse(result, `${request.method} ${new URL(request.url).pathname}`)
   }
 
   /**
@@ -2033,7 +2033,27 @@ export function resolveRouteForTesting(routes, pathname) {
 
 // ─── Response Normalization ─────────────────────────────────────────────────
 
-function normalizeResponse(result) {
+function normalizeResponse(result, route = 'this route') {
   if (result instanceof Response) return result
-  return Response.json(result)
+  // Returning serialisable data instead of a Response is a supported
+  // convenience. Returning nothing is not: `Response.json(undefined)` throws
+  // "Value is not JSON serializable" from inside undici, and the message that
+  // reached the caller named neither the handler nor the fact that it returned
+  // nothing — the suggested fix was to check the module's imports.
+  if (result === undefined) {
+    throw new Error(
+      `RUV1504 the handler for ${route} returned nothing. A route handler must return a Response, ` +
+        'or data that can be serialised as JSON, which is sent as `Response.json(data)`.',
+    )
+  }
+  try {
+    return Response.json(result)
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    throw new Error(
+      `RUV1504 the handler for ${route} returned a value that cannot be serialised as JSON ` +
+        `(${detail}). Return a Response, or data built from plain objects, arrays, strings, ` +
+        'numbers, booleans, and null.',
+    )
+  }
 }

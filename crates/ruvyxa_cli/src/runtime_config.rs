@@ -156,10 +156,67 @@ pub(crate) fn dev_server_config(
     server.dynamic_images.enabled = config.images.on_demand.enabled();
     server.dynamic_images.max_width = config.images.on_demand.max_width();
     server.dynamic_images.default_quality = config.images.quality.clamp(1, 100);
-    if config.typed_routes() {
-        server.route_manifest_observer = Some(route_types_observer(args.root.clone()));
-    }
+    // Generated `sitemap.xml` and `robots.txt`, written where the dev server
+    // looks for them after `public/`. A build publishes both into the assets
+    // directory; development had neither, so the command a project runs while
+    // working on its SEO output was the one that answered 404 for it.
+    let discovery_dir = out_dir.join("cache").join("discovery");
+    server.discovery_dir = Some(discovery_dir.clone());
+    server.route_manifest_observer = Some(discovery_observer(
+        discovery_dir,
+        config.site.clone(),
+        resolve_site_url(config.site.url.as_deref(), |name| std::env::var(name).ok())
+            .ok()
+            .flatten(),
+        config.typed_routes().then(|| args.root.clone()),
+    ));
     Ok(server)
+}
+
+/// Regenerate what a route set implies, whenever the dev server re-discovers it.
+///
+/// Two artifacts derive from the routes: the typed-routes declaration file and
+/// the discovery documents (`sitemap.xml`, `robots.txt`). Only the first had an
+/// observer, and the second was written by `ruvyxa build` alone — which is why
+/// `ruvyxa dev` answered 404 for the two URLs a project checks while working on
+/// them.
+///
+/// `typed_routes_root` is `Some` only when the project turned typed routes on.
+fn discovery_observer(
+    discovery_dir: PathBuf,
+    site: crate::site_discovery::SiteConfigOptions,
+    site_url: Option<String>,
+    typed_routes_root: Option<PathBuf>,
+) -> ruvyxa_dev_server::RouteManifestObserver {
+    let types_observer = typed_routes_root.map(route_types_observer);
+    ruvyxa_dev_server::RouteManifestObserver::new(move |manifest| {
+        if let Some(observer) = &types_observer {
+            observer.notify(manifest);
+        }
+        // Development has no pre-rendered path list; every page route is a URL
+        // a crawler could reach, which is what a build's list amounts to for a
+        // project whose pages are all static.
+        let paths: Vec<String> = manifest
+            .routes
+            .iter()
+            .filter(|route| route.kind == ruvyxa_graph::RouteKind::Page)
+            .map(|route| route.path.clone())
+            .collect();
+        if let Err(error) = crate::site_discovery::write_discovery_files(
+            manifest,
+            &paths,
+            &discovery_dir,
+            site_url.as_deref(),
+            &site,
+        ) {
+            // A page render must not fail because a convenience file could not
+            // be written; report and let the next discovery retry.
+            eprintln!(
+                "{}",
+                warn_text(format!("discovery files not written: {error}"))
+            );
+        }
+    })
 }
 
 /// Keep `.ruvyxa/types/routes.d.ts` in step with the dev server's route set.

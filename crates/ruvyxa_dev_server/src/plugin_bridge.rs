@@ -61,7 +61,12 @@ pub(crate) async fn apply_response_plugins(
     let plugin_response = PluginHttpResponse {
         status: parts.status.as_u16(),
         headers: headers_to_plugin_pairs(&parts.headers),
-        body_base64: Some(encode_plugin_body(&body)),
+        // `None` rather than an empty string: a zero-length body still *is* a
+        // body once it crosses the bridge, and `new Response(<empty>, { status:
+        // 204 })` throws — so every 204, 205, and 304 answered by a project
+        // with any response plugin became a 500 saying
+        // "Invalid response status code 204".
+        body_base64: (!body.is_empty()).then(|| encode_plugin_body(&body)),
     };
     let result = runtime.execute_response(request, &plugin_response).await?;
     plugin_response_into_response(result)

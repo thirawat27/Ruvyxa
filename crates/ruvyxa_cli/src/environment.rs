@@ -169,6 +169,10 @@ pub(crate) fn local_binary_upwards(root: &Path, binary: &str) -> Option<PathBuf>
             return Some(candidate);
         }
 
+        // The walk climbs the way Node's own binary lookup does, so a package
+        // installed at a workspace root is found from a package inside it. What
+        // it must not do is *stand in* for a missing one: see `run_typecheck`,
+        // which reports the binary it found rather than falling back to PATH.
         if !current.pop() {
             return None;
         }

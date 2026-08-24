@@ -336,9 +336,27 @@ function requestFromPayload(value = {}) {
   })
 }
 
+/**
+ * Whether the fetch specification says this status carries no body.
+ *
+ * `new Response(body, { status })` throws for any of them unless the body is
+ * exactly `null`, and a zero-length body is not null — so a host that encoded
+ * "no body" as an empty string handed every plugin a Response it could not
+ * rebuild, and a project with any response hook answered 500 for every 204.
+ */
+/// Written as a function rather than a `const` set: this module awaits at its
+/// top level, and every hook it answers runs inside that await — so a `const`
+/// declared below it is in the temporal dead zone for the whole session and
+/// every response failed with "Cannot access … before initialization".
+function isNullBodyStatus(status) {
+  return status === 101 || status === 103 || status === 204 || status === 205 || status === 304
+}
+
 function responseFromPayload(value = {}) {
-  return new Response(decodeBody(value.bodyBase64), {
-    status: Number(value.status ?? 200),
+  const status = Number(value.status ?? 200)
+  const body = isNullBodyStatus(status) ? undefined : decodeBody(value.bodyBase64)
+  return new Response(body, {
+    status,
     headers: headersFromPairs(value.headers),
   })
 }
@@ -379,7 +397,10 @@ function headerPairs(headers) {
 }
 
 function decodeBody(value) {
-  return typeof value === 'string' ? Buffer.from(value, 'base64') : undefined
+  // An empty string is "no body", not "a body of no bytes": the difference
+  // decides whether a null-body status can be reconstructed at all.
+  if (typeof value !== 'string' || value === '') return undefined
+  return Buffer.from(value, 'base64')
 }
 
 async function encodeBody(message) {

@@ -283,7 +283,18 @@ pub(crate) fn run_typecheck(root: &Path) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let tsc = local_binary_upwards(root, "tsc").unwrap_or_else(|| PathBuf::from("tsc"));
+    // The project's own TypeScript, or none. A `tsc` from PATH used to stand in
+    // for a missing one, so a check could be reported as passing by a compiler
+    // the project never declared — and saying nothing at all is worse than
+    // saying "install TypeScript", because the reader believes their types were
+    // checked.
+    let Some(tsc) = local_binary_upwards(root, "tsc") else {
+        println!(
+            "{} TypeScript skipped (no local `tsc`; add typescript to devDependencies)",
+            success()
+        );
+        return Ok(());
+    };
     let mut command = ProcessCommand::new(&tsc);
     command.arg("--noEmit").current_dir(root);
     let output = ruvyxa_dev_server::process::output_with_timeout(
@@ -293,7 +304,16 @@ pub(crate) fn run_typecheck(root: &Path) -> anyhow::Result<()> {
     .with_context(|| format!("failed to run TypeScript type check with {}", tsc.display()))?;
 
     if output.status.success() {
-        println!("{} TypeScript type check passed", success());
+        // The binary is named, because which one ran is not obvious: the lookup
+        // climbs out of the project the way Node's does, and a compiler
+        // installed above the project checks with different defaults than the
+        // one the project declared. A passing check from an unexpected path is
+        // exactly the thing a reader needs to be able to see.
+        println!(
+            "{} TypeScript type check passed ({})",
+            success(),
+            path_text(&tsc)
+        );
         return Ok(());
     }
 

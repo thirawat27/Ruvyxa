@@ -3856,12 +3856,52 @@ function transformModuleSource(module) {
       `RUV1802 build.target \`${esTarget}\` needs the runtime helpers ${named} for ${filename}, and Ruvyxa ships no helper runtime — raise build.target (ordinary application code compiles helper-free at es2022 and above) or remove the syntax that needs downlevelling`,
     )
   }
+  const code = substitutePublicEnv(result.code)
   module.transformLineMap = composeLineMaps(result.map, reactCompiled?.rawMap)
   setBoundedCacheEntry(compilerCache.transforms, transformKey, {
-    code: result.code,
+    code,
     lineMap: module.transformLineMap,
   })
-  return result.code
+  return code
+}
+
+/**
+ * Replace `import.meta.env` with the public environment, as a literal.
+ *
+ * Documented in the configuration chapter and implemented by nothing: the
+ * expression was left as written, `import.meta` carries no `env` in Node or in
+ * a browser, and the documented client component threw
+ * `Cannot read properties of undefined` during the server render of its own
+ * page. Substituting at compile time is what makes the value the same in both
+ * graphs and keeps the boundary intact — only `RUVYXA_PUBLIC_*` names are in
+ * the object, so this can never widen what a browser bundle may read.
+ *
+ * The replacement is length-preserving-agnostic: line structure is kept because
+ * the literal contains no newline, so the transform's line map still describes
+ * the file.
+ */
+function substitutePublicEnv(code) {
+  const marker = 'import.meta.env'
+  const positions = findInCode(code, marker)
+  if (positions.length === 0) return code
+
+  const literal = `Object.freeze(${JSON.stringify(publicEnvValues())})`
+  let out = ''
+  let cursor = 0
+  for (const at of positions) {
+    out += code.slice(cursor, at) + literal
+    cursor = at + marker.length
+  }
+  return out + code.slice(cursor)
+}
+
+/** Every `RUVYXA_PUBLIC_*` value this process can see, in name order. */
+function publicEnvValues() {
+  const values = {}
+  for (const name of Object.keys(process.env).sort(compareCodeUnits)) {
+    if (name.startsWith('RUVYXA_PUBLIC_')) values[name] = process.env[name] ?? ''
+  }
+  return values
 }
 
 /**

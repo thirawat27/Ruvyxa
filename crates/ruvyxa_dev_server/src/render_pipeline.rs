@@ -286,6 +286,15 @@ pub(crate) async fn render_request_pooled(
         return Ok(public_response);
     }
 
+    // Generated discovery files, after the project's own: a `public/robots.txt`
+    // the application ships still wins.
+    if let Some(discovery_dir) = &state.config.discovery_dir
+        && let Some(discovery_response) =
+            serve_public_file(discovery_dir, request_path, Some(request_headers)).await?
+    {
+        return Ok(discovery_response);
+    }
+
     let (manifest, router) = state.runtime_cache.router(&state.config).await?;
     let route_match = match router.find(&manifest, request_path) {
         Some(route_match) => route_match,

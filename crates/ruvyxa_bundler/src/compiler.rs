@@ -575,7 +575,59 @@ pub(crate) fn transform_with_plan(
 
     let code = Codegen::new().build(&program).code;
     reject_runtime_helpers(&code, es_target)?;
-    Ok(code)
+    Ok(substitute_public_env(&code))
+}
+
+/// Replace `import.meta.env` with the public environment, as a literal.
+///
+/// Documented in the configuration chapter and implemented by nothing: the
+/// expression was left as written, `import.meta` carries no `env` in Node or in
+/// a browser, and the documented client component threw
+/// `Cannot read properties of undefined` during the server render of its own
+/// page. Substituting at compile time is what makes the value the same in both
+/// graphs, and only `RUVYXA_PUBLIC_*` names are in the object, so it can never
+/// widen what a browser bundle may read.
+///
+/// Twin of `substitutePublicEnv` in `packages/ruvyxa/runtime/compiler.mjs`.
+fn substitute_public_env(code: &str) -> String {
+    const MARKER: &str = "import.meta.env";
+    if !code.contains(MARKER) {
+        return code.to_string();
+    }
+
+    // Asked of the code, so a mention inside a string or a comment is left as
+    // the text it is.
+    let masked = crate::ast::masked_code(code);
+    let mut out = String::with_capacity(code.len());
+    let literal = public_env_literal();
+    let mut cursor = 0usize;
+    for (at, _) in masked.match_indices(MARKER) {
+        out.push_str(&code[cursor..at]);
+        out.push_str(&literal);
+        cursor = at + MARKER.len();
+    }
+    out.push_str(&code[cursor..]);
+    out
+}
+
+/// `Object.freeze({...})` over every `RUVYXA_PUBLIC_*` value, in name order.
+fn public_env_literal() -> String {
+    let mut entries: Vec<(String, String)> = std::env::vars()
+        .filter(|(name, _)| name.starts_with("RUVYXA_PUBLIC_"))
+        .collect();
+    entries.sort();
+    let body = entries
+        .iter()
+        .map(|(name, value)| {
+            format!(
+                "{}:{}",
+                crate::output::js_string(name),
+                crate::output::js_string(value)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+    format!("Object.freeze({{{body}}})")
 }
 
 /// Refuse output that depends on a helper runtime Ruvyxa does not deliver.
