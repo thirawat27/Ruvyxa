@@ -23,7 +23,7 @@ describe('dependency security workflow', () => {
 
   it('uses a package manager compatible with the exact minimum Node runtime', () => {
     assert.equal(workspacePackage.engines.node, '>=24.19.0')
-    assert.equal(workspacePackage.packageManager, 'pnpm@11.22.0')
+    assert.equal(workspacePackage.packageManager, 'pnpm@11.23.0')
     assert.match(workflow, /node-version: 24\.19\.0/)
     assert.match(workflow, /uses: pnpm\/action-setup@v6/)
   })
