@@ -41,7 +41,7 @@
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use dashmap::DashMap;
@@ -2045,6 +2045,31 @@ fn collect_deps_uncached(
 
         match resolved {
             Some(abs_path) => {
+                // A relative specifier is the one spelling the author controls
+                // and the one `base_dir` cannot distort — `base_dir` is itself
+                // a resolved, canonical path, so a segment that differs only in
+                // case came from this specifier and nothing above it.
+                //
+                // Package and alias specifiers stay out of scope on purpose:
+                // pnpm reaches a package through a symlink farm, so the
+                // canonical path there differs from the request for reasons
+                // that have nothing to do with how anybody spelled it.
+                if specifier.starts_with('.')
+                    && let Some(mismatch) =
+                        import_case_mismatch(&base_dir.join(&specifier), &abs_path)
+                {
+                    return Err(BundleError::Compiler(format!(
+                        "RUV1807 import {specifier:?} from {} asks for {:?}, but the file on disk is \
+                         named {:?}. This filesystem matches names case-insensitively, so the \
+                         import resolves here and resolves nothing on a case-sensitive one — \
+                         Linux CI, or the host the build is deployed to. Spell the import the \
+                         way the file is named.",
+                        base_dir.display(),
+                        mismatch.requested,
+                        mismatch.resolved
+                    )));
+                }
+
                 if is_project_local(&abs_path, project_root) || target == BundleTarget::Client {
                     dependencies
                         .aliases
@@ -2116,6 +2141,103 @@ fn resolve_project_specifier(project_root: &Path, specifier: &str) -> Option<Pat
         project_root.join(path)
     };
     resolve_file_candidate(&candidate)
+}
+
+/// One path segment an import spelled differently from the file on disk.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ImportCaseMismatch {
+    /// The segment as the import spelled it.
+    pub requested: String,
+    /// The segment as the filesystem actually holds it.
+    pub resolved: String,
+}
+
+/// Segments of `path`, with `.` dropped and `..` applied lexically.
+///
+/// Lexical rather than by `canonicalize`: the point is to compare what the
+/// import *asked for* with what the filesystem *answered*, so the request must
+/// not be run through the filesystem first.
+fn lexical_segments(path: &Path) -> Vec<String> {
+    let mut segments: Vec<String> = Vec::new();
+    for component in path.components() {
+        match component {
+            Component::Normal(value) => match value.to_str() {
+                Some(text) => segments.push(text.to_string()),
+                // A segment that is not UTF-8 cannot be compared as text, and
+                // guessing at its case would be worse than saying nothing.
+                None => return Vec::new(),
+            },
+            Component::ParentDir => {
+                segments.pop();
+            }
+            Component::CurDir => {}
+            // A prefix or root carries no spelling an import chose: a drive
+            // letter's case is the shell's, not the source file's.
+            Component::Prefix(_) | Component::RootDir => segments.clear(),
+        }
+    }
+    segments
+}
+
+/// True when two segments are the same letters differing only in ASCII case.
+///
+/// ASCII-only on purpose. Case outside ASCII is decided by the host's locale
+/// tables — the reason `localeCompare` and `toLocaleLowerCase` are banned in
+/// this repository — so a non-ASCII difference is never reported rather than
+/// reported on one machine and not another.
+fn differs_only_by_ascii_case(requested: &str, resolved: &str) -> bool {
+    requested.eq_ignore_ascii_case(resolved) && requested != resolved
+}
+
+/// Report the first segment an import spelled in a case the filesystem does not
+/// hold.
+///
+/// `is_file()` answers case-insensitively on Windows and on default macOS, so
+/// `import "./Header"` resolves `header.tsx` and the project builds. On Linux
+/// the same import resolves nothing. The failure is therefore invisible on the
+/// machine that writes it and arrives in CI or on the deployed host, so this
+/// comparison exists to move it back to the author's build.
+///
+/// Pure string work over two paths the caller already holds: no syscall, and on
+/// a case-sensitive filesystem it can never fire, because a mis-spelled import
+/// does not resolve there in the first place.
+///
+/// Replays `tests/fixtures/import-case-conformance.json`, whose JavaScript half
+/// is `importCaseMismatch` in `packages/ruvyxa/runtime/compiler.mjs`.
+#[must_use]
+pub fn import_case_mismatch(requested: &Path, resolved: &Path) -> Option<ImportCaseMismatch> {
+    let requested_segments = lexical_segments(requested);
+    let resolved_segments = lexical_segments(resolved);
+    if requested_segments.is_empty() || resolved_segments.len() < requested_segments.len() {
+        return None;
+    }
+
+    let last = requested_segments.len() - 1;
+    for (index, requested_segment) in requested_segments.iter().enumerate() {
+        let resolved_segment = &resolved_segments[index];
+
+        // The resolver appends an extension, so the last requested segment can
+        // be a prefix of what is on disk. Compare only the characters the
+        // import actually spelled; anywhere else the segments are directory
+        // names and must match whole.
+        let comparable = if index == last && resolved_segment.len() > requested_segment.len() {
+            let cut = requested_segment.len();
+            if !resolved_segment.is_char_boundary(cut) {
+                continue;
+            }
+            &resolved_segment[..cut]
+        } else {
+            resolved_segment.as_str()
+        };
+
+        if differs_only_by_ascii_case(requested_segment, comparable) {
+            return Some(ImportCaseMismatch {
+                requested: requested_segment.clone(),
+                resolved: comparable.to_string(),
+            });
+        }
+    }
+    None
 }
 
 fn resolve_file_candidate(joined: &Path) -> Option<PathBuf> {
@@ -2231,6 +2353,51 @@ mod tests {
         );
     }
 
+    /// Replay the shared import-case table.
+    ///
+    /// The JavaScript half is
+    /// `tests/packages/ruvyxa/import-case-contract.test.mjs` over
+    /// `importCaseMismatch` in `packages/ruvyxa/runtime/compiler.mjs`. The two
+    /// module graphs both resolve imports, so a rule enforced by one alone is a
+    /// build that refuses under `ruvyxa build` and passes at prerender, or the
+    /// reverse.
+    ///
+    /// Fixture paths are written with forward slashes only, which `Path`
+    /// splits on every platform this ships to, so the table replays the same
+    /// way on Windows and on Linux.
+    #[test]
+    fn import_case_comparison_matches_the_shared_conformance_table() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/import-case-conformance.json"
+        ))
+        .unwrap();
+
+        for case in fixture["cases"].as_array().unwrap() {
+            let name = case["name"].as_str().unwrap();
+            let requested = Path::new(case["requested"].as_str().unwrap());
+            let resolved = Path::new(case["resolved"].as_str().unwrap());
+            let actual = import_case_mismatch(requested, resolved);
+
+            match case["mismatch"].as_object() {
+                None => assert_eq!(actual, None, "{name}: expected no mismatch"),
+                Some(expected) => {
+                    let mismatch = actual
+                        .unwrap_or_else(|| panic!("{name}: expected a mismatch and got none"));
+                    assert_eq!(
+                        mismatch.requested,
+                        expected["requested"].as_str().unwrap(),
+                        "{name}: requested segment"
+                    );
+                    assert_eq!(
+                        mismatch.resolved,
+                        expected["resolved"].as_str().unwrap(),
+                        "{name}: resolved segment"
+                    );
+                }
+            }
+        }
+    }
+
     #[test]
     fn resolve_cache_stores_none_for_unresolved() {
         let cache = ResolveGraphCache::new();
@@ -2298,6 +2465,95 @@ mod tests {
         assert_eq!(
             deps.paths[0],
             ruvyxa_diagnostics::normalized_canonical_path(&page)
+        );
+    }
+
+    /// True when this filesystem answers `is_file()` without regard to case.
+    ///
+    /// Probed rather than assumed from the target triple: macOS ships
+    /// case-insensitive by default and case-sensitive on request, and a Linux
+    /// checkout can sit on a mounted volume that folds case. The behaviour
+    /// under test is the filesystem's, so ask the filesystem.
+    fn filesystem_folds_case(dir: &Path) -> bool {
+        let probe = dir.join("ruvyxa-case-probe.ts");
+        fs::write(&probe, "export {};").unwrap();
+        let folded = dir.join("RUVYXA-CASE-PROBE.ts").is_file();
+        fs::remove_file(&probe).unwrap();
+        folded
+    }
+
+    /// An import spelled in the wrong case fails here instead of on Linux.
+    ///
+    /// This is the whole point of RUV1807: on a case-folding filesystem the
+    /// import resolves and the project builds, and the identical source tree
+    /// resolves nothing on the case-sensitive host it deploys to. On a
+    /// case-sensitive filesystem there is nothing to report, because the
+    /// import does not resolve in the first place — so the assertion flips
+    /// rather than the test skipping, and both halves stay exercised.
+    #[test]
+    fn a_wrongly_cased_relative_import_is_refused_before_linux_sees_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = ruvyxa_diagnostics::normalized_canonical_path(temp.path());
+        let app = root.join("app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(app.join("header.tsx"), "export default function H() {}").unwrap();
+
+        let tsconfig = TsConfigPaths::load(&root);
+        let result = collect_deps_cached(
+            "import Header from \"./Header\";",
+            &app,
+            &root,
+            &tsconfig,
+            &ResolveGraphCache::new(),
+            &BuildHookPipeline::empty(),
+            BundleTarget::Client,
+            JsxRuntime::Automatic,
+        );
+
+        if filesystem_folds_case(&app) {
+            let message = result
+                .expect_err("a case-folding filesystem resolves ./Header and must refuse it")
+                .to_string();
+            assert!(message.contains("RUV1807"), "{message}");
+            assert!(message.contains("Header"), "{message}");
+            assert!(message.contains("header"), "{message}");
+        } else {
+            assert!(
+                result.unwrap().paths.is_empty(),
+                "a case-sensitive filesystem never resolves ./Header, so there is nothing to report"
+            );
+        }
+    }
+
+    /// The correctly spelled import of the same file stays silent.
+    ///
+    /// Written because the cheapest way to pass the test above is a check that
+    /// fires on everything.
+    #[test]
+    fn a_correctly_cased_relative_import_is_untouched() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = ruvyxa_diagnostics::normalized_canonical_path(temp.path());
+        let app = root.join("app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(app.join("header.tsx"), "export default function H() {}").unwrap();
+
+        let tsconfig = TsConfigPaths::load(&root);
+        let deps = collect_deps_cached(
+            "import Header from \"./header\";",
+            &app,
+            &root,
+            &tsconfig,
+            &ResolveGraphCache::new(),
+            &BuildHookPipeline::empty(),
+            BundleTarget::Client,
+            JsxRuntime::Automatic,
+        )
+        .expect("the spelling matches the file on disk");
+
+        assert_eq!(deps.paths.len(), 1);
+        assert_eq!(
+            deps.paths[0],
+            ruvyxa_diagnostics::normalized_canonical_path(&app.join("header.tsx"))
         );
     }
 

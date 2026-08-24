@@ -1,0 +1,104 @@
+{
+  "description": "Whether an import's spelling matches the file the filesystem actually resolved it to.",
+  "why": "is_file()/existsSync answer case-insensitively on Windows and on default macOS, so `import './Header'` finds `header.tsx` and the project builds. On Linux it does not resolve at all. The bug is therefore invisible on the machine that writes it and fails in CI or on the deployed host, which is the most expensive place to learn it. Both module graphs run this comparison so the answer does not depend on which graph built the lane.",
+  "algorithm": "Compare the requested path against the resolved path segment by segment, left to right, after resolving `.` and `..` lexically. Report the first segment that is equal ignoring ASCII case but not equal exactly. When the resolver appended an extension (the resolved segment is longer than the requested one and this is the last requested segment), compare only the leading characters the request actually spelled.",
+  "asciiOnly": "Folding is ASCII-only on purpose. Case outside ASCII is decided by the host's locale tables — the same reason localeCompare and toLocaleLowerCase are banned in this repository — so a non-ASCII difference is never reported rather than reported differently on two machines.",
+  "cases": [
+    {
+      "name": "an exact path is not a mismatch",
+      "requested": "app/components/button.tsx",
+      "resolved": "app/components/button.tsx",
+      "mismatch": null
+    },
+    {
+      "name": "an appended extension is not a mismatch",
+      "requested": "app/components/button",
+      "resolved": "app/components/button.tsx",
+      "mismatch": null
+    },
+    {
+      "name": "the file name differs by case",
+      "requested": "app/components/Button",
+      "resolved": "app/components/button.tsx",
+      "mismatch": { "requested": "Button", "resolved": "button" }
+    },
+    {
+      "name": "the file name differs by case with the extension spelled out",
+      "requested": "app/components/Button.tsx",
+      "resolved": "app/components/button.tsx",
+      "mismatch": { "requested": "Button.tsx", "resolved": "button.tsx" }
+    },
+    {
+      "name": "only the extension differs by case",
+      "requested": "app/components/button.TSX",
+      "resolved": "app/components/button.tsx",
+      "mismatch": { "requested": "button.TSX", "resolved": "button.tsx" }
+    },
+    {
+      "name": "a directory differs by case",
+      "requested": "app/Components/button",
+      "resolved": "app/components/button.tsx",
+      "mismatch": { "requested": "Components", "resolved": "components" }
+    },
+    {
+      "name": "a directory differs by case when the import resolved to index",
+      "requested": "app/Components",
+      "resolved": "app/components/index.ts",
+      "mismatch": { "requested": "Components", "resolved": "components" }
+    },
+    {
+      "name": "an index resolution with an exact directory is not a mismatch",
+      "requested": "app/components",
+      "resolved": "app/components/index.ts",
+      "mismatch": null
+    },
+    {
+      "name": "the leftmost mismatch is the one reported",
+      "requested": "app/Components/Button",
+      "resolved": "app/components/button.tsx",
+      "mismatch": { "requested": "Components", "resolved": "components" }
+    },
+    {
+      "name": "an upper-case file spelled the way it is on disk is not a mismatch",
+      "requested": "app/Header.tsx",
+      "resolved": "app/Header.tsx",
+      "mismatch": null
+    },
+    {
+      "name": "an upper-case extension on disk spelled the way it is is not a mismatch",
+      "requested": "app/header.TSX",
+      "resolved": "app/header.TSX",
+      "mismatch": null
+    },
+    {
+      "name": "different letters are a rename or a symlink, never a case report",
+      "requested": "app/foo",
+      "resolved": "app/bar.tsx",
+      "mismatch": null
+    },
+    {
+      "name": "a parent segment is resolved lexically before comparing",
+      "requested": "app/routes/../components/Button",
+      "resolved": "app/components/button.tsx",
+      "mismatch": { "requested": "Button", "resolved": "button" }
+    },
+    {
+      "name": "a current-directory segment is dropped before comparing",
+      "requested": "app/./components/Button",
+      "resolved": "app/components/button.tsx",
+      "mismatch": { "requested": "Button", "resolved": "button" }
+    },
+    {
+      "name": "a resolved path with fewer segments cannot be aligned",
+      "requested": "app/components/deep/button",
+      "resolved": "app/components",
+      "mismatch": null
+    },
+    {
+      "name": "a difference outside ASCII is never reported",
+      "requested": "app/Ünicode",
+      "resolved": "app/ünicode.tsx",
+      "mismatch": null
+    }
+  ]
+}

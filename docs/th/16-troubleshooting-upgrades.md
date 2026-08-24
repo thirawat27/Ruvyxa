@@ -31,6 +31,7 @@ npm run test:parity
 | `RUV1406`                                     | PostCSS plugin throw หรือ stylesheet มี syntax error ที่ chain ปฏิเสธ                         | แก้ error ของ plugin/stylesheet ที่รายงาน build จะไม่ปล่อย CSS ที่ยังไม่ transform ออกไป    |
 | `RUV1805`                                     | ไฟล์ `.json` ที่ import ไม่ใช่ JSON ที่ถูกต้อง                                                | ข้อความระบุไฟล์และตำแหน่งที่ parse ไม่ผ่าน ให้แก้เอกสารนั้น                                 |
 | `RUV1806`                                     | import resolve ไปยังไฟล์ชนิดที่ Ruvyxa ไม่ compile (`.node`, `.wasm`, binary asset)           | เพิ่ม package นั้นใน `build.external` ให้ runtime โหลดไฟล์แทน bundler                       |
+| `RUV1807`                                     | ตัวพิมพ์ของ import ไม่ตรงกับชื่อไฟล์บนดิสก์ ระบบไฟล์นี้ไม่แยกตัวพิมพ์ แต่ Linux แยก           | สะกด import ให้ตรงกับชื่อไฟล์ ข้อความจะระบุการสะกดทั้งสองแบบ                                |
 
 **หน้าแสดงด้วย browser default ทั้งที่ class name ถูกต้อง** global stylesheet ถึง browser
 โดยยังไม่ถูก transform ให้ตรวจว่ามี `@import "tailwindcss"` เหลืออยู่ใน CSS ที่เสิร์ฟหรือไม่

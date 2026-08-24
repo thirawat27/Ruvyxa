@@ -31,6 +31,7 @@ npm run test:parity
 | `RUV1406`                                      | A PostCSS plugin threw, or a stylesheet has a syntax error the chain rejected.                   | Fix the reported plugin/stylesheet error; the build will not emit untransformed CSS.            |
 | `RUV1805`                                      | An imported `.json` file is not valid JSON.                                                      | The message names the file and the parse position; fix the document.                            |
 | `RUV1806`                                      | An import resolved to a file kind Ruvyxa does not compile (`.node`, `.wasm`, a binary asset).    | Add the package to `build.external` so the runtime loads the file instead of the bundler.       |
+| `RUV1807`                                      | An import's case does not match the file on disk. This filesystem folds case; Linux does not.    | Spell the import the way the file is named; the message names both spellings.                   |
 
 **Page renders with browser defaults while class names are correct.** The global stylesheet reached
 the browser untransformed. Check for `@import "tailwindcss"` in the served CSS: a project using

@@ -224,6 +224,66 @@ describe('runtime compiler', () => {
   })
 
   /**
+   * An import spelled in the wrong case fails here instead of on Linux.
+   *
+   * `existsSync` folds case on Windows and on default macOS, so `./Header`
+   * resolves `header.tsx` and the project builds — then resolves nothing on
+   * the case-sensitive host it deploys to. RUV1807 moves that failure back to
+   * the author's machine. On a case-sensitive filesystem there is nothing to
+   * report because the import never resolves, so the assertion flips rather
+   * than the test skipping, and both halves stay exercised.
+   *
+   * The Rust half is
+   * `a_wrongly_cased_relative_import_is_refused_before_linux_sees_it` in
+   * `crates/ruvyxa_bundler/src/resolver.rs`.
+   */
+  it('refuses a relative import whose case does not match the file on disk', async () => {
+    await withFixture(async ({ root, outDir }) => {
+      await mkdir(path.join(root, 'app'), { recursive: true })
+      await writeFile(path.join(root, 'app', 'header.tsx'), 'export default function H() {}\n')
+
+      const probe = path.join(root, 'app', 'ruvyxa-case-probe.ts')
+      await writeFile(probe, 'export {}\n')
+      const foldsCase = existsSync(path.join(root, 'app', 'RUVYXA-CASE-PROBE.ts'))
+
+      const compile = () =>
+        compileBundleWithMetadata({
+          projectRoot: root,
+          entrySource: 'import H from "./app/Header"\nexport const go = H\n',
+          sourcefile: 'ruvyxa:client.tsx',
+          outfile: path.join(outDir, 'cased.js'),
+          platform: 'browser',
+          sourceMap: false,
+        })
+
+      if (foldsCase) {
+        await assert.rejects(compile, /RUV1807/)
+      } else {
+        await assert.rejects(compile, /Header/)
+      }
+    })
+  })
+
+  /**
+   * Written because the cheapest way to pass the test above is a check that
+   * fires on every import.
+   */
+  it('leaves a correctly cased relative import alone', async () => {
+    await withFixture(async ({ root, outDir }) => {
+      await mkdir(path.join(root, 'app'), { recursive: true })
+      await writeFile(path.join(root, 'app', 'header.tsx'), 'export default function H() {}\n')
+      await compileBundleWithMetadata({
+        projectRoot: root,
+        entrySource: 'import H from "./app/header"\nexport const go = H\n',
+        sourcefile: 'ruvyxa:client.tsx',
+        outfile: path.join(outDir, 'exact.js'),
+        platform: 'browser',
+        sourceMap: false,
+      })
+    })
+  })
+
+  /**
    * `RUV1007` still describes a real mistake: a route with no Flight machinery
    * has no way to call a server function, so importing one into its bundle is
    * exactly the crossing that check exists to refuse.

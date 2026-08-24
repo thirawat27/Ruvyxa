@@ -994,6 +994,7 @@ async function visitModule(context) {
       })
     ) {
       assertSupportedModuleKind(resolved, specifier, filePath || sourcefile)
+      assertImportCaseMatches(resolved, specifier, baseDir, filePath || sourcefile)
       const depSource = await readSourceFile(resolved)
       const dep = await visitModule({
         key: moduleGraphKey(resolved),
@@ -2323,6 +2324,127 @@ function isJsonModuleFile(file) {
 /// The alternative is what this replaces: the file reaches the JavaScript
 /// transform and Oxc reports a syntax error inside a dependency the application
 /// never wrote, with no indication of which import pulled it in.
+/** Path separator on either host: a forward slash, or a Windows backslash. */
+const SEPARATOR = /[\\/]+/
+/** A `C:` style drive prefix, which no import spells. */
+const DRIVE_PREFIX = /^[A-Za-z]:$/
+/** Platforms whose filesystem folds case by default, and only where it can fire. */
+const CASE_FOLDING_PLATFORM = process.platform === 'win32' || process.platform === 'darwin'
+
+/// Segments of `p`, with `.` dropped and `..` applied lexically.
+///
+/// Lexical rather than through the filesystem: the point is to compare what an
+/// import *asked for* against what the filesystem *answered*, so the request
+/// must not be run through the filesystem first. Mirrors `lexical_segments` in
+/// `crates/ruvyxa_bundler/src/resolver.rs`.
+function lexicalSegments(p) {
+  const segments = []
+  for (const raw of String(p).split(SEPARATOR)) {
+    // A leading empty segment is the root and a `C:` segment is a drive
+    // prefix; neither carries a spelling an import chose.
+    if (raw === '' || raw === '.' || DRIVE_PREFIX.test(raw)) continue
+    if (raw === '..') {
+      segments.pop()
+      continue
+    }
+    segments.push(raw)
+  }
+  return segments
+}
+
+/// Fold one ASCII letter to lower case, leaving every other code unit alone.
+///
+/// ASCII-only on purpose: case outside ASCII is decided by the host's locale
+/// tables, the reason `localeCompare` and `toLocaleLowerCase` are banned here.
+/// `toLowerCase()` would fold `U+00DC` where the Rust half does not, and the
+/// two graphs would answer differently on the same file.
+function foldAscii(code) {
+  return code >= 0x41 && code <= 0x5a ? code + 0x20 : code
+}
+
+function equalIgnoringAsciiCase(left, right) {
+  if (left.length !== right.length) return false
+  for (let index = 0; index < left.length; index += 1) {
+    if (foldAscii(left.charCodeAt(index)) !== foldAscii(right.charCodeAt(index))) return false
+  }
+  return true
+}
+
+/**
+ * The first segment an import spelled in a case the filesystem does not hold.
+ *
+ * `existsSync` answers case-insensitively on Windows and on default macOS, so
+ * `import './Header'` resolves `header.tsx` and the project builds. On Linux the
+ * same import resolves nothing, so the failure is invisible on the machine that
+ * writes it and arrives in CI or on the deployed host.
+ *
+ * Replays `tests/fixtures/import-case-conformance.json`; the Rust half is
+ * `import_case_mismatch` in `crates/ruvyxa_bundler/src/resolver.rs`.
+ *
+ * @returns {{requested: string, resolved: string}|null}
+ */
+export function importCaseMismatch(requested, resolved) {
+  const requestedSegments = lexicalSegments(requested)
+  const resolvedSegments = lexicalSegments(resolved)
+  if (requestedSegments.length === 0 || resolvedSegments.length < requestedSegments.length) {
+    return null
+  }
+
+  const last = requestedSegments.length - 1
+  for (const [index, requestedSegment] of requestedSegments.entries()) {
+    const resolvedSegment = resolvedSegments[index]
+    // The resolver appends an extension, so the last requested segment can be
+    // a prefix of what is on disk. Compare only the characters the import
+    // actually spelled; every other segment is a directory name and must
+    // match whole.
+    const comparable =
+      index === last && resolvedSegment.length > requestedSegment.length
+        ? resolvedSegment.slice(0, requestedSegment.length)
+        : resolvedSegment
+
+    if (comparable !== requestedSegment && equalIgnoringAsciiCase(requestedSegment, comparable)) {
+      return { requested: requestedSegment, resolved: comparable }
+    }
+  }
+  return null
+}
+
+/**
+ * Refuse a relative import whose spelling does not match the file on disk.
+ *
+ * Only relative specifiers, matching the Rust graph: `baseDir` is itself a
+ * resolved path, so a segment differing only in case came from this specifier
+ * and nothing above it. Package specifiers stay out of scope because pnpm
+ * reaches a package through a symlink farm, where the real path differs from
+ * the request for reasons that have nothing to do with spelling.
+ *
+ * Skipped where the filesystem is case-sensitive. That is not an optimization
+ * standing in for the check: there, a mis-spelled import resolves nothing in
+ * the first place, so there is never anything to report — and it keeps the
+ * realpath syscall off the Linux builds that do the deploying.
+ */
+function assertImportCaseMatches(resolved, specifier, baseDir, importer) {
+  if (!CASE_FOLDING_PLATFORM || !specifier.startsWith('.')) return
+
+  let onDisk
+  try {
+    onDisk = realpathSync.native(resolved)
+  } catch {
+    // Unreadable here means the read that follows reports the real problem.
+    return
+  }
+
+  const mismatch = importCaseMismatch(path.resolve(baseDir, specifier), onDisk)
+  if (!mismatch) return
+  throw new Error(
+    `RUV1807 import '${specifier}' from ${importer} asks for '${mismatch.requested}', but the ` +
+      `file on disk is named '${mismatch.resolved}'. This filesystem matches names ` +
+      `case-insensitively, so the import resolves here and resolves nothing on a case-sensitive ` +
+      `one — Linux CI, or the host the build is deployed to. Spell the import the way the file ` +
+      `is named.`,
+  )
+}
+
 export function assertSupportedModuleKind(resolved, specifier, importer) {
   const extension = path.extname(resolved).toLowerCase()
   if (!extension || MODULE_KIND_EXTENSIONS.has(extension)) return
