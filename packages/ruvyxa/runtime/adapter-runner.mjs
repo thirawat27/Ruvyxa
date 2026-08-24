@@ -1423,6 +1423,11 @@ function pageRouteDefinition(
     routePath: ${JSON.stringify(routePath)},${
       serverComponents.actionSpecifier ? `\n    formState: posted?.formState ?? null,` : ''
     }
+    // Serving a request, not building a page: a suspended child that rejects
+    // after the shell has rendered is answered by its own error boundary, and
+    // the rest of the document is correct. Failing the whole render here is
+    // what made a route that streams fine locally answer 500 in production.
+    tolerateStreamErrors: true,
   })
   const assets = __ruvyxaDocumentAssets(${assetsLiteral}, ctx, rendered.payload)
   const withAssets = __ruvyxaInjectDocumentAssets(rendered.html, assets.head, assets.tail)
@@ -1443,6 +1448,9 @@ async function ${payloadName}(ctx) {
     ctx,
     routePath: ${JSON.stringify(routePath)},
     html: false,
+    // Same reason as the document render above: the payload carries the error
+    // row, and the browser renders the boundary from it.
+    tolerateStreamErrors: true,
   })
   return rendered.payload
 }${

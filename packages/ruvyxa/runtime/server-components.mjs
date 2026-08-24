@@ -68,6 +68,7 @@ export async function renderServerComponents({
   routePath,
   html: withHtml = true,
   formState = null,
+  tolerateStreamErrors = false,
 }) {
   if (typeof serverModule?.flight !== 'function') {
     throw new Error(
@@ -95,16 +96,44 @@ export async function renderServerComponents({
   // branch is not created rather than created and dropped.
   if (!withHtml) {
     const payload = await readStreamText(stream)
-    if (failure) throw failure
-    return { html: null, payload }
+    if (failure && !tolerateStreamErrors) throw failure
+    reportStreamFailure(failure)
+    return { html: null, payload, failures: failure ? [failure] : [] }
   }
   const [forHtml, forPayload] = stream.tee()
   const [html, payload] = await Promise.all([
     flightStreamToHtml(forHtml, ctx, routePath, { formState }),
     readStreamText(forPayload),
   ])
-  if (failure) throw failure
-  return { html, payload }
+  // Reaching here means the HTML shell rendered: a component that threw before
+  // the shell was ready fails `flightStreamToHtml` and never gets this far. So
+  // what is left is a `<Suspense>` child that threw after the shell, which
+  // React has already answered by writing the switch to the nearest error
+  // boundary into both the payload and the markup.
+  //
+  // A caller serving a request says so and keeps the document: throwing
+  // replaced a page that was correct apart from one section with a 500 for the
+  // whole page — locally the same route streamed its shell and rendered the
+  // boundary, and only the deployed build went blank. A caller *building* the
+  // page does not: a static page whose component throws is a broken build, and
+  // baking the fallback into a file would ship it.
+  if (failure && !tolerateStreamErrors) throw failure
+  reportStreamFailure(failure)
+  return { html, payload, failures: failure ? [failure] : [] }
+}
+
+/**
+ * Report a render failure the caller chose to survive.
+ *
+ * Behind `RUVYXA_DEBUG`, matching every other tolerated stream error: the page
+ * itself shows the error boundary, and a server that logged each one at normal
+ * verbosity would fill production logs with what the document already says.
+ */
+function reportStreamFailure(failure) {
+  if (!failure) return
+  if (globalThis.process?.env?.RUVYXA_DEBUG) {
+    console.error('[ruvyxa] server components render error', failure)
+  }
 }
 
 /**
