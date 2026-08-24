@@ -19,6 +19,7 @@ import {
 } from './compiler.mjs'
 import {
   documentAssetsPrelude,
+  documentStreamPrelude,
   metaSourceImports,
   routeBoundaryPrelude,
   routeContextPrelude,
@@ -1023,6 +1024,10 @@ async function materializeRouteModules(manifest, destination, target, buildDir) 
     // `inject_prerender_client_assets` are both Rust, and this registry is the
     // renderer once the build is over.
     definitions.push(documentAssetsPrelude(await styleHeadTag(buildDir)))
+    // The shared streaming-render policy: a suspended child that rejects
+    // must not take the whole document down, which is what every other
+    // Ruvyxa host already did.
+    definitions.push(documentStreamPrelude())
     // Imported only when a route needs it, so an app with no server-components
     // route ships neither the renderer nor the second React it links.
     if (routes.some((route) => route?.render?.serverComponents === true)) {
@@ -1488,15 +1493,7 @@ async function ${actionName}({ reference, body }) {
 async function ${renderName}(ctx) {
   const tree = ${treeName}(ctx)
 
-  let html
-  if (typeof ReactDomServer.renderToReadableStream === "function") {
-    const stream = await ReactDomServer.renderToReadableStream(tree)
-    html = await new Response(stream).text()
-  } else if (typeof ReactDomServer.renderToString === "function") {
-    html = ReactDomServer.renderToString(tree)
-  } else {
-    throw new Error("React server renderer is unavailable")
-  }
+  const html = await __ruvyxaRenderDocumentHtml(tree)
   const assets = __ruvyxaDocumentAssets(${assetsLiteral}, ctx, null)
   const withAssets = __ruvyxaInjectDocumentAssets(html, assets.head, assets.tail)
   const document = withAssets.trimStart().toLowerCase().startsWith("<!doctype") ? withAssets : "<!doctype html>" + withAssets

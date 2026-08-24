@@ -103,6 +103,60 @@ if (__ruvyxaBootstrap.csr === true) globalThis.__RUVYXA_CSR__ = true`
  * route module, because the values come from the request URL and a writer that
  * forgot would let a path segment close the script element.
  */
+/**
+ * Emit `__ruvyxaRenderDocumentHtml(tree)`: what a host does with a render that
+ * fails after the shell has already gone out.
+ *
+ * A `<Suspense>` child that rejects is survivable, and every Ruvyxa host but
+ * one treated it that way: React has already written the switch to the nearest
+ * error boundary into the stream, so the document that comes out is the one the
+ * application asked for, with its fallback in place of the section that failed.
+ * `ruvyxa dev` and `ruvyxa start` pass `tolerateStreamErrors` to say so.
+ *
+ * The deployed function had its own copy of this render and said nothing, so
+ * the rejected promise took the whole page down: a route that streamed a shell
+ * and two sections locally answered 500 in production, and the browser's own
+ * console reported only `Uncaught Error: Connection closed`. This is the policy
+ * the other hosts already had, in one place they can all emit.
+ *
+ * A shell that never produced a document is *not* survivable — there is nothing
+ * to send in its place — so that still throws.
+ */
+export function documentStreamPrelude() {
+  return `async function __ruvyxaRenderDocumentHtml(tree) {
+  if (typeof ReactDomServer.renderToReadableStream !== "function") {
+    // The synchronous legacy renderer, and the last resort: it throws on any
+    // component that awaits, so it is only ever right for a runtime that ships
+    // no streaming renderer at all.
+    if (typeof ReactDomServer.renderToString !== "function") {
+      throw new Error("React server renderer is unavailable")
+    }
+    return ReactDomServer.renderToString(tree)
+  }
+
+  let captured = null
+  let html = null
+  try {
+    const stream = await ReactDomServer.renderToReadableStream(tree, {
+      onError(error) {
+        if (!captured) captured = error
+      },
+    })
+    html = await new Response(stream).text()
+  } catch (error) {
+    if (!captured) captured = error
+  }
+
+  if (captured) {
+    if (html === null) throw captured
+    if (globalThis.process?.env?.RUVYXA_DEBUG) {
+      console.error("[ruvyxa] streaming render error", captured)
+    }
+  }
+  return html
+}`
+}
+
 export function documentAssetsPrelude(styleHead = '') {
   return `const __RUVYXA_BOOTSTRAP_ID = ${JSON.stringify(BOOTSTRAP_ELEMENT_ID)}
 const __RUVYXA_RSC_ID = ${JSON.stringify(RSC_PAYLOAD_ELEMENT_ID)}
