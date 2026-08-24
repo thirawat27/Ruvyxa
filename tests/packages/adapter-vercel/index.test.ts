@@ -8,6 +8,7 @@ import { pathToFileURL } from 'node:url'
 
 import { repoRoot } from '../../repo-root.ts'
 import { staticAssetPattern } from '../../../packages/@ruvyxa/core/dist/utils.js'
+import { nonPublishableStrategies } from '../../../packages/@ruvyxa/core/dist/deploy-manifest.js'
 import { vercel } from '../../../packages/@ruvyxa/adapter-vercel/dist/index.js'
 
 const workspaceRoot = repoRoot
@@ -91,8 +92,12 @@ describe('vercel', () => {
 
     // ISR and PPR pages must stay out of the publish directory, or
     // `handle: filesystem` answers them before the function can revalidate.
+    //
+    // Compared against the derived rule rather than a literal copy of it.
     for (const artifact of output.artifacts?.filter((item) => item.kind === 'static-site') ?? []) {
-      assert.deepEqual(artifact.excludeStrategies, ['isr', 'ppr'])
+      assert.deepEqual(artifact.excludeStrategies, nonPublishableStrategies())
+      assert.ok(artifact.excludeStrategies?.includes('isr'))
+      assert.ok(artifact.excludeStrategies?.includes('ppr'))
     }
 
     // Verify function config

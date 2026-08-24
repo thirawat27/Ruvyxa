@@ -1927,13 +1927,19 @@ fn prerender_html_includes_the_document_head_the_live_renderer_composes() {
         "<!doctype html><html><head><title>Docs</title></head><body><main>Guide</main></body></html>",
         &PrerenderHead {
             asset_links: Arc::from(r#"<link rel="icon" type="image/png" href="/ruvyxa.png">"#),
-            styles: Arc::from("body { color: rebeccapurple; }"),
+            // The finished tag, which is what a build now hands over: it links
+            // the stylesheet it emitted rather than inlining the rule text, so
+            // a baked page and a request-time render reference one file.
+            styles: Arc::from(r#"<link rel="stylesheet" href="/__ruvyxa/client/styles.abc.css">"#),
         },
     );
 
-    assert!(html.contains(r#"<style data-ruvyxa-css>body { color: rebeccapurple; }</style>"#));
+    assert!(html.contains(r#"<link rel="stylesheet" href="/__ruvyxa/client/styles.abc.css">"#));
     assert!(html.contains(r#"<link rel="icon" type="image/png" href="/ruvyxa.png">"#));
-    assert!(html.find("data-ruvyxa-css").unwrap() < html.find("</head>").unwrap());
+    assert!(
+        html.contains(r#"<meta name="viewport" content="width=device-width, initial-scale=1">"#)
+    );
+    assert!(html.find("stylesheet").unwrap() < html.find("</head>").unwrap());
     assert!(html.find(r#"rel="icon""#).unwrap() < html.find("</head>").unwrap());
     assert!(html.contains("<main>Guide</main>"));
 }

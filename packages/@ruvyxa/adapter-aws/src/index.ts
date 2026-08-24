@@ -5,6 +5,7 @@ import {
   CLIENT_BUNDLE_PREFIX,
   clientBuildOutput,
   IMMUTABLE_CACHE_CONTROL,
+  nonPublishableStrategies,
   PUBLIC_ASSET_CACHE_CONTROL,
   runtimeBuildPolicy,
   standaloneServerSource,
@@ -75,7 +76,7 @@ export function aws(options: AwsAdapterOptions = {}): Adapter {
                 path: '.amplify-hosting/static',
                 scope: 'project',
                 optional: true,
-                excludeStrategies: ['isr', 'ppr'],
+                excludeStrategies: nonPublishableStrategies(),
               },
               {
                 kind: 'function',
@@ -111,7 +112,7 @@ export function aws(options: AwsAdapterOptions = {}): Adapter {
             kind: 'static-site',
             path: `${deployRoot}/static`,
             optional: true,
-            excludeStrategies: ['isr', 'ppr'],
+            excludeStrategies: nonPublishableStrategies(),
           },
           {
             kind: 'function',

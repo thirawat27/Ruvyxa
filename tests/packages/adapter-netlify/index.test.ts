@@ -6,6 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import type { AdapterArtifact } from '../../../packages/@ruvyxa/core/dist/types.js'
+import { nonPublishableStrategies } from '../../../packages/@ruvyxa/core/dist/deploy-manifest.js'
 import { netlify } from '../../../packages/@ruvyxa/adapter-netlify/dist/index.js'
 import {
   deployFunction,
@@ -135,8 +136,14 @@ describe('netlify', () => {
 
     // preferStatic serves a published page without invoking the function, so
     // ISR and PPR pages must stay out of the publish directory to revalidate.
+    //
+    // Compared against the derived rule, not a literal: this list used to be
+    // written out in six places, and the value of deriving it is exactly that
+    // no copy of it has to be kept correct — including this one.
     for (const artifact of output.artifacts?.filter((item) => item.kind === 'static-site') ?? []) {
-      assert.deepEqual(artifact.excludeStrategies, ['isr', 'ppr'])
+      assert.deepEqual(artifact.excludeStrategies, nonPublishableStrategies())
+      assert.ok(artifact.excludeStrategies?.includes('isr'))
+      assert.ok(artifact.excludeStrategies?.includes('ppr'))
     }
 
     // Opt-in project netlify.toml embeds project-relative paths only — the

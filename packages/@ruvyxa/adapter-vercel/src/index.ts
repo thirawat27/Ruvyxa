@@ -1,6 +1,7 @@
 import type { Adapter, AdapterOutput, BuildContext } from '@ruvyxa/core'
 import {
   clientBuildOutput,
+  nonPublishableStrategies,
   runtimeBuildPolicy,
   staticAssetPattern,
   validateBuildContext,
@@ -127,6 +128,10 @@ const handler = createHandler({
     mkdirSync(path.dirname(htmlPath), { recursive: true });
     writeFileSync(htmlPath, html, 'utf8');
   },
+  // The project's own not-found page, pre-rendered by the build and carried
+  // inline in the manifest: an unmatched URL is answered with the page the
+  // application actually wrote, on every host.
+  notFoundDocument: manifest.notFoundDocument,
   supportedStrategies: ['ssr', 'ssg', 'csr', 'isr', 'ppr', 'api'],
 });
 
@@ -226,6 +231,10 @@ const handler = createHandler({
   middleware: runtimePolicy.middleware,
   i18n: manifest.i18n,
   optimizeImage: runtimePolicy.image?.onDemand === true ? optimizeImage : undefined,
+  // The project's own not-found page, pre-rendered by the build and carried
+  // inline in the manifest: an unmatched URL is answered with the page the
+  // application actually wrote, on every host.
+  notFoundDocument: manifest.notFoundDocument,
   supportedStrategies: ['ssr', 'ssg', 'csr', 'api'],
 });
 
@@ -398,7 +407,7 @@ export function vercel(options: VercelAdapterOptions = {}): Adapter {
                 // `handle: filesystem` runs before the function, so a
                 // published ISR/PPR page would be served forever from its
                 // build-time snapshot and never revalidate.
-                excludeStrategies: ['isr', 'ppr'],
+                excludeStrategies: nonPublishableStrategies(),
               },
               {
                 kind: 'function',
@@ -439,7 +448,7 @@ export function vercel(options: VercelAdapterOptions = {}): Adapter {
             kind: 'static-site',
             path: 'deploy/vercel/.vercel/output/static',
             optional: true,
-            excludeStrategies: ['isr', 'ppr'],
+            excludeStrategies: nonPublishableStrategies(),
           },
           // Serverless function bundle
           {

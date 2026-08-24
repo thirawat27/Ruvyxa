@@ -95,6 +95,25 @@
     "`ruvyxa_graph` reports it as RUV1010 and the Node graph as RUV1007."
   ],
   "serverDirectory": "server/",
+  "$markerNote": [
+    "Packages that exist only to be imported, and must never appear in emitted",
+    "output.",
+    "",
+    "`server-only` and `client-only` ship no runtime behaviour: importing one is a",
+    "declaration for the boundary checker, which has already run by the time a",
+    "bundle is written. Both linkers used to carry the import through into the",
+    "output anyway -- the Rust one re-emits any specifier it did not inline, and",
+    "the Node one hoisted it into a namespace import -- so a deployed function",
+    "directory, which has no node_modules of its own, failed to start with",
+    "ERR_MODULE_NOT_FOUND for a package whose whole purpose was to not be there.",
+    "The application was a correct one: an RSC page that declares `server-only` is",
+    "exactly what the marker is for.",
+    "",
+    "Dropped from every server, edge, and worker bundle. A client bundle never",
+    "reaches this rule: importing `server-only` there is RUV1007, and the build",
+    "fails before anything is emitted."
+  ],
+  "markerPackages": ["client-only", "server-only"],
   "cases": [
     {
       "file": "app/blog/server.ts",

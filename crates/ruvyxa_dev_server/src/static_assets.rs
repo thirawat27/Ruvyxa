@@ -880,19 +880,6 @@ pub(crate) fn content_type_for(path: &Path) -> &'static str {
 const DOCUMENT_ICONS: &[(&str, &str)] =
     &[("ruvyxa.png", "image/png"), ("ruvyxa.webp", "image/webp")];
 
-/// `<link>` tags for the files a project publishes that a document should
-/// declare.
-///
-/// Public because a pre-rendered page has to end up with the same head this
-/// server composes for a live render: `ruvyxa build` bakes the document and
-/// `ruvyxa start` serves it from disk without ever running a renderer, so
-/// nothing downstream is left to add these. When the icon link was missing from
-/// baked pages, every browser fell back to requesting `/favicon.ico` and every
-/// production page load logged a 404 that `ruvyxa dev` never showed.
-///
-/// What a document ends up with is decided by [`document_head_defaults`]: these
-/// are defaults, and an application that declares its own icon keeps it.
-
 /// The viewport declaration a document gets when it declares none.
 ///
 /// Without it a phone lays the page out at the legacy 980px viewport and scales
@@ -958,6 +945,18 @@ fn escape_attribute(value: &str) -> String {
         .replace('>', "&gt;")
 }
 
+/// `<link>` tags for the files a project publishes that a document should
+/// declare.
+///
+/// Public because a pre-rendered page has to end up with the same head this
+/// server composes for a live render: `ruvyxa build` bakes the document and
+/// `ruvyxa start` serves it from disk without ever running a renderer, so
+/// nothing downstream is left to add these. When the icon link was missing from
+/// baked pages, every browser fell back to requesting `/favicon.ico` and every
+/// production page load logged a 404 that `ruvyxa dev` never showed.
+///
+/// What a document ends up with is decided by [`document_head_defaults`]: these
+/// are defaults, and an application that declares its own icon keeps it.
 pub fn public_asset_links(public_dir: &Path) -> String {
     let mut links = Vec::new();
 

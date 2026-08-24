@@ -38,6 +38,26 @@ import { createPluginRegistry } from './plugin-http.mjs'
 import { HANDLER_RUNTIME_FILES, prerenderRelativePath } from './serverless-handler.mjs'
 import { actionReferenceId } from './action-runtime.mjs'
 
+// Declared above the top-level `await` this file runs, not beside the function
+// that reads them: a `const` below a top-level await is in its temporal dead
+// zone while that await is pending, so reading one from the build path threw
+// `Cannot access before initialization` — the same trap `isNullBodyStatus` in
+// plugin-runtime.mjs documents.
+/** The file `ruvyxa build` writes its deployment description to. */
+const DEPLOY_MANIFEST_FILE = 'deploy-manifest.json'
+
+/**
+ * The pre-rendered not-found document, inside the prerender directory.
+ *
+ * `404.html` is the name every static host already looks for, so a static-only
+ * publish gets a real not-found page without being configured to, and a
+ * function build carries the same bytes.
+ */
+const NOT_FOUND_DOCUMENT_FILE = '404.html'
+
+/** The deployment-output contract version this runtime understands. */
+const DEPLOY_MANIFEST_VERSION = 1
+
 const [projectRootArg, outputDirArg, adapterNameArg] = process.argv.slice(2)
 const runnerMode = process.env.RUVYXA_ADAPTER_RUNNER_MODE ?? 'build'
 
@@ -137,7 +157,13 @@ try {
     process.exitCode = 1
   } else {
     const buildInfo = await loadBuildInfo(outputDir)
-    const output = await adapter.build({ root: projectRoot, outDir: outputDir, buildInfo })
+    const deployManifest = await loadDeployManifest(outputDir)
+    const output = await adapter.build({
+      root: projectRoot,
+      outDir: outputDir,
+      buildInfo,
+      deployManifest,
+    })
     if (runnerMode === 'inspect') {
       writeResponse(success(inspectAdapter(adapter, output)))
     } else if (runnerMode === 'build') {
@@ -163,6 +189,37 @@ async function loadBuildInfo(buildDir) {
   } catch {
     // Inspection can run before a build exists. Build metadata is additive,
     // so adapters retain their previous behavior when it is unavailable.
+    return undefined
+  }
+}
+
+/**
+ * The build's deployment description, or `undefined`.
+ *
+ * Read once here and handed to every adapter, so eleven adapters do not each
+ * re-derive which routes may be published as files and what cache-control their
+ * URLs carry. A version this package does not understand is treated as absent
+ * rather than guessed at: `parseDeployManifest` returns null, and every helper
+ * that reads the manifest falls back to deriving the same answer, which is what
+ * each adapter did before the manifest existed.
+ */
+async function loadDeployManifest(buildDir) {
+  try {
+    const source = await readFile(path.join(buildDir, DEPLOY_MANIFEST_FILE), 'utf8')
+    const manifest = JSON.parse(source)
+    // The same three checks `parseDeployManifest` makes in @ruvyxa/core, which
+    // this file cannot import: the runtime ships as plain `.mjs` beside the
+    // framework package and resolves no workspace specifiers. Both are replayed
+    // against tests/fixtures/deploy-output-conformance.json.
+    if (!manifest || typeof manifest !== 'object') return undefined
+    if (manifest.framework !== 'ruvyxa') return undefined
+    if (typeof manifest.version !== 'number' || manifest.version > DEPLOY_MANIFEST_VERSION) {
+      return undefined
+    }
+    return Array.isArray(manifest.routes) ? manifest : undefined
+  } catch {
+    // Inspection runs before a build exists, and an older build has no
+    // manifest at all.
     return undefined
   }
 }
@@ -671,6 +728,20 @@ async function materializeFunction(buildDir, destination, handlerSource, target)
   const prerenderDir = path.join(buildDir, 'prerender')
   if (existsSync(prerenderDir)) {
     await cp(prerenderDir, path.join(destination, 'prerender'), { recursive: true })
+  }
+
+  // The document an unmatched URL is answered with.
+  //
+  // `ruvyxa build` pre-renders the project's own `app/not-found.tsx` into
+  // `prerender/404.html`; carried inline in the manifest rather than read from
+  // disk at request time because an edge runtime has no filesystem, and because
+  // a platform bundler that rewrites this directory into one file would not
+  // find a `readFileSync` of a sibling. Without it a deployed application
+  // answered every unmatched URL with the bare string `Not Found`, while the
+  // same code under `ruvyxa dev` rendered the project's page.
+  const notFoundDocument = path.join(prerenderDir, NOT_FOUND_DOCUMENT_FILE)
+  if (existsSync(notFoundDocument)) {
+    manifest.notFoundDocument = await readFile(notFoundDocument, 'utf8')
   }
 
   // Write the route manifest so the handler can do request routing.

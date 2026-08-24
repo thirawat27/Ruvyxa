@@ -6,7 +6,7 @@
  * See `tests/fixtures/module-lane-conformance.json` for what that cost.
  */
 import assert from 'node:assert/strict'
-import { mkdtemp, mkdir, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { readFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
@@ -109,5 +109,54 @@ describe('client bundle lane crossings', () => {
     // this graph has no hook on the server compile, so an action module
     // importing a client module is caught by `references.rs` alone.
     assert.equal(fixture.invalidCrossings.actionToClient.bothHosts, false)
+  })
+})
+
+describe('marker packages', () => {
+  /**
+   * Compile a server module that declares a marker and report the bundle.
+   *
+   * A marker package is not installed here on purpose: the point is that the
+   * emitted bundle must not name it, so a deployed function directory with no
+   * node_modules of its own still starts.
+   */
+  async function compileServerBundle(source) {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-marker-'))
+    try {
+      const entry = path.join(root, 'app', 'page.tsx')
+      await mkdir(path.dirname(entry), { recursive: true })
+      await writeFile(entry, source, 'utf8')
+      const { outfile } = await compileBundleWithMetadata({
+        projectRoot: root,
+        entrySource: source,
+        sourcefile: 'app/page.tsx',
+        filePath: entry,
+        outfile: path.join(root, 'out.mjs'),
+        platform: 'node',
+        external: ['react', 'react/jsx-runtime'],
+      })
+      return await readFile(outfile, 'utf8')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  }
+
+  for (const marker of fixture.markerPackages) {
+    it(`drops ${marker} from a server bundle`, async () => {
+      const code = await compileServerBundle(
+        [`import ${JSON.stringify(marker)}`, 'export const q = 1', ''].join('\n'),
+      )
+      assert.ok(
+        !code.includes(marker),
+        `${marker} is a declaration for the boundary checker, not a runtime dependency: ${code}`,
+      )
+    })
+  }
+
+  it('still emits an ordinary external import', async () => {
+    const code = await compileServerBundle(
+      ["import { readFile } from 'node:fs'", 'export const q = readFile', ''].join('\n'),
+    )
+    assert.ok(code.includes('node:fs'), `an ordinary dependency must survive: ${code}`)
   })
 })

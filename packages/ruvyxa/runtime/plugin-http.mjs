@@ -181,6 +181,36 @@ export async function dispatchPluginResponse(registry, request, initialResponse)
   return response
 }
 
+/**
+ * Diagnostics a registry's shape implies, added to the ones plugins reported.
+ *
+ * `build.onResolve` and `build.onLoad` are answered by the native bundler,
+ * which builds the browser graph. The server and prerender graph is compiled by
+ * `runtime/compiler.mjs`, which has no plugin host to ask — so a route that
+ * *imports* a plugin-provided module renders with
+ * `Cannot find package '<id>'` while its browser bundle is built correctly.
+ * Nothing said so, and `examples/demo` registers such a hook without importing
+ * what it provides, so the gap had never been exercised.
+ */
+function registryShapeDiagnostics(registry) {
+  if (registry.buildResolve.length === 0 && registry.buildLoad.length === 0) return []
+  return [
+    {
+      plugin: 'ruvyxa',
+      code: 'RUV2107',
+      // Informational, not a warning: registering these hooks is a supported
+      // thing to do, and a project whose plugin-provided modules are imported
+      // only from client components is entirely correct. `PluginDiagnosticLevel`
+      // has no `warn` either — the three levels are info, warning, and error.
+      level: 'info',
+      message:
+        'build.onResolve/onLoad apply to the browser graph only. A module they provide cannot be ' +
+        'resolved while a page is server-rendered or pre-rendered, so import it from a client ' +
+        'component, or write the file the resolve hook names.',
+    },
+  ]
+}
+
 /** Summary of what the registry declared, used by `ruvyxa` tooling output. */
 export function describeRegistry(registry) {
   return {
@@ -203,7 +233,7 @@ export function describeRegistry(registry) {
       complete: registry.buildComplete.length,
     },
     dev: { fileChange: registry.devFileChange.length },
-    diagnostics: registry.diagnostics,
+    diagnostics: [...registry.diagnostics, ...registryShapeDiagnostics(registry)],
     capabilities: [...registry.capabilities.values()],
   }
 }

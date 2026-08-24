@@ -215,12 +215,14 @@ fn write_module_segment(
     let body_origins = rewrite_module_into(
         &module.js,
         &DepIndex::new(&module.deps, &module.dependency_aliases),
-        dynamic_import_files,
         &mut body,
-        true,
-        true,
-        &label,
-        cyclic_deps,
+        &ModuleRewrite {
+            dynamic_import_files,
+            indent: true,
+            drop_external_imports: true,
+            importer: &label,
+            cyclic_deps,
+        },
     )?;
     let bound = top_level_bound_names(&body);
     let owns_module = bound.contains("module");
@@ -585,12 +587,14 @@ pub(crate) fn link_shared_route_modules(
         rewrite_module_into(
             &module.js,
             &DepIndex::new(&module.deps, &module.dependency_aliases),
-            &BTreeMap::new(),
             &mut out,
-            true,
-            true,
-            &label,
-            &cyclic_deps,
+            &ModuleRewrite {
+                dynamic_import_files: &BTreeMap::new(),
+                indent: true,
+                drop_external_imports: true,
+                importer: &label,
+                cyclic_deps: &cyclic_deps,
+            },
         )?;
         if group.is_some() {
             out.push_str(
@@ -778,16 +782,37 @@ pub fn module_id(path: &Path) -> String {
 /// in and one line out — the namespace marker goes in front, deferred export
 /// assignments go at the end, and a rewriter may return text containing a
 /// newline of its own.
+/// Everything a module rewrite needs besides the source and its dependency
+/// index.
+///
+/// Grouped rather than passed one by one: they are read together, they are
+/// decided together by the caller, and four of them are booleans and paths that
+/// read identically at a call site.
+struct ModuleRewrite<'a> {
+    dynamic_import_files: &'a BTreeMap<PathBuf, String>,
+    /// Indent the rewritten body, because it is emitted inside a wrapper.
+    indent: bool,
+    /// Replace an import of a module this bundle inlined with a reference to it.
+    drop_external_imports: bool,
+    /// The importing module, named in any error this rewrite raises.
+    importer: &'a str,
+    /// Dependencies that close an import cycle with this module.
+    cyclic_deps: &'a BTreeSet<PathBuf>,
+}
+
 fn rewrite_module_into(
     source: &str,
     deps: &DepIndex<'_>,
-    dynamic_import_files: &BTreeMap<PathBuf, String>,
     out: &mut String,
-    indent: bool,
-    drop_external_imports: bool,
-    importer: &str,
-    cyclic_deps: &BTreeSet<PathBuf>,
+    rewrite: &ModuleRewrite<'_>,
 ) -> Result<Vec<Option<u32>>> {
+    let ModuleRewrite {
+        dynamic_import_files,
+        indent,
+        drop_external_imports,
+        importer,
+        cyclic_deps,
+    } = *rewrite;
     let mut pending_exports = Vec::new();
     let mut in_block_comment = false;
     let mut in_commonjs_block_comment = false;
@@ -1488,6 +1513,17 @@ fn try_rewrite_import(
 /// imports with bindings that throw a `RUV1611` naming both, which keeps the
 /// rest of the page alive and the failure attributable. This mirrors what the
 /// CommonJS path does with `RUV1610`.
+/// Packages whose import is a declaration for the boundary checker and nothing
+/// else, so no emitted bundle may import them.
+///
+/// A client bundle never reaches this: importing `server-only` there is
+/// RUV1007 and the build fails before output exists. Replayed against
+/// `tests/fixtures/module-lane-conformance.json` alongside
+/// `packages/ruvyxa/runtime/compiler.mjs`, which drops the same two.
+pub(crate) fn is_marker_package(specifier: &str) -> bool {
+    matches!(specifier, "server-only" | "client-only")
+}
+
 fn collect_external_imports(modules: &[&CompiledModule], target: BundleTarget) -> Vec<String> {
     let mut imports = BTreeSet::new();
     // specifier -> (local bindings, importing modules). Collected across all
@@ -1520,6 +1556,20 @@ fn collect_external_imports(modules: &[&CompiledModule], target: BundleTarget) -
             };
 
             if is_non_js_asset_specifier(&specifier) {
+                continue;
+            }
+
+            // A marker package is a declaration, not a dependency.
+            //
+            // `server-only` and `client-only` ship no runtime behaviour: the
+            // whole point of importing one is the boundary check, which has
+            // already run by the time anything is emitted. Carrying the import
+            // through meant a deployed function directory — which has no
+            // `node_modules` of its own — failed to start with
+            // ERR_MODULE_NOT_FOUND for a package whose only job was to not be
+            // there. See `markerPackages` in
+            // tests/fixtures/module-lane-conformance.json.
+            if is_marker_package(&specifier) {
                 continue;
             }
 
@@ -2865,6 +2915,60 @@ mod tests {
         assert_eq!(
             extract_var_declaration_name("var baz = {};"),
             Some("baz".into())
+        );
+    }
+
+    /// Marker packages, held to the table the Node compiler replays.
+    ///
+    /// A marker is a declaration for the boundary checker and nothing else, so
+    /// no emitted bundle may import one. Both linkers used to carry it through,
+    /// and a deployed function directory — which has no `node_modules` — then
+    /// failed to start with ERR_MODULE_NOT_FOUND for a package whose only job
+    /// was to not be there.
+    #[test]
+    fn marker_packages_match_the_shared_conformance_contract() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/module-lane-conformance.json"
+        ))
+        .unwrap();
+        let markers = fixture["markerPackages"].as_array().unwrap();
+        assert!(!markers.is_empty(), "the fixture must name the markers");
+        for marker in markers {
+            assert!(
+                is_marker_package(marker.as_str().unwrap()),
+                "{marker} must be dropped from emitted output"
+            );
+        }
+        assert!(!is_marker_package("react"), "an ordinary package is a dep");
+    }
+
+    /// A server bundle that declares `server-only` emits no import of it.
+    ///
+    /// The end the deployment sees: the module the boundary marker was written
+    /// in still compiles, and the bundle it lands in imports nothing that has
+    /// to exist at run time.
+    #[test]
+    fn a_server_bundle_drops_the_marker_import_it_declares() {
+        let module = CompiledModule::new(
+            PathBuf::from("C:/project/app/page.tsx"),
+            "import 'server-only';
+import { readFile } from 'node:fs';
+export const q = readFile;
+"
+            .to_string(),
+            Vec::new(),
+            BTreeMap::new(),
+            false,
+            false,
+        );
+        let imports = collect_external_imports(&[&module], BundleTarget::Ssr);
+        assert!(
+            !imports.iter().any(|line| line.contains("server-only")),
+            "a marker must not reach the bundle: {imports:?}"
+        );
+        assert!(
+            imports.iter().any(|line| line.contains("node:fs")),
+            "an ordinary external import still has to be emitted: {imports:?}"
         );
     }
 

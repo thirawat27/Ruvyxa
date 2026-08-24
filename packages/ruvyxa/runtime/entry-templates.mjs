@@ -180,9 +180,15 @@ function __ruvyxaHydrationSrc(assets) {
  *
  * Twin of the placement in \`inject_prerender_client_assets\`: preloads before
  * \`</head>\`, scripts before \`</body>\`, and a whole document synthesised when
- * the render produced a fragment rather than a page. The \`head_end <= body_end\`
- * guard is the same one — a document whose \`</head>\` follows its last
- * \`</body>\` is not one this can splice.
+ * the render produced a fragment rather than a page.
+ *
+ * The two ends are placed independently, because a rendered document does not
+ * always have both. A root layout that returns \`<html><body>…</body></html>\`
+ * with no \`<head>\` used to fall all the way through to the synthesise branch
+ * and be wrapped in a second \`<html>\` and \`<body>\` — valid enough that a
+ * browser recovers, and wrong enough that the document it parsed was not the
+ * one the application wrote. A head is inserted before the body it already has
+ * instead.
  */
 function __ruvyxaInjectDocumentAssets(html, head, tail) {
   // Twin of \`document_head_defaults\`: without a viewport declaration a phone
@@ -197,11 +203,17 @@ function __ruvyxaInjectDocumentAssets(html, head, tail) {
   if (head === "" && tail === "") return html
   const lower = html.toLowerCase()
   const headEnd = lower.indexOf("</head>")
-  const bodyEnd = lower.lastIndexOf("</body>")
-  if (headEnd !== -1 && bodyEnd !== -1 && headEnd <= bodyEnd) {
-    return html.slice(0, headEnd) + head + html.slice(headEnd, bodyEnd) + tail + html.slice(bodyEnd)
+  const bodyStart = lower.indexOf("<body")
+  if (headEnd !== -1) {
+    html = html.slice(0, headEnd) + head + html.slice(headEnd)
+  } else if (bodyStart !== -1) {
+    html = html.slice(0, bodyStart) + "<head>" + head + "</head>" + html.slice(bodyStart)
+  } else {
+    return "<!doctype html><html><head>" + head + "</head><body>" + html + tail + "</body></html>"
   }
-  return "<!doctype html><html><head>" + head + "</head><body>" + html + tail + "</body></html>"
+  const bodyEnd = html.toLowerCase().lastIndexOf("</body>")
+  if (bodyEnd === -1) return html + tail
+  return html.slice(0, bodyEnd) + tail + html.slice(bodyEnd)
 }
 
 /**

@@ -89,6 +89,22 @@ impl ruvyxa_bundler::hooks::BuildHooks for TypeScriptPluginBridge {
             return Ok(None);
         };
 
+        // A resolve hook answers with a **path**. The file itself may be
+        // virtual — a load hook can supply its contents — but the value still
+        // has to name a location, because everything downstream treats it as
+        // one. The two spellings every other ecosystem uses for a virtual
+        // module are not paths, and both were joined onto the project root and
+        // handed to the filesystem: `'\0virtual:x'` came back as
+        // `strings passed to WinAPI cannot contain NULs` and `'virtual:x'` as
+        // `The system cannot find the file specified`, neither naming a plugin.
+        if !looks_like_a_path(path) {
+            return Err(ruvyxa_bundler::BundleError::Compiler(format!(
+                "a plugin resolved `{specifier}` to `{path}`, which is not a file path. Return a \
+                 path — the file may be virtual and a `build.onLoad` hook can supply its contents \
+                 — such as `${{root}}/virtual-{specifier}.ts`."
+            )));
+        }
+
         let resolved = PathBuf::from(path);
         let resolved = if resolved.is_absolute() {
             resolved
@@ -517,4 +533,20 @@ pub(crate) fn bundle_context_for_build(
         config_dependency_hash,
         artifact_graph_enabled,
     ))
+}
+
+/// Whether a resolve hook's answer names a location on disk.
+///
+/// A separator or a file extension is what distinguishes a path from an id:
+/// `virtual:x` and `\0virtual:x` have neither, and both used to be joined onto
+/// the project root and opened.
+fn looks_like_a_path(value: &str) -> bool {
+    if value.contains('\0') {
+        return false;
+    }
+    let has_separator = value.contains('/') || value.contains('\\');
+    let has_extension = Path::new(value)
+        .extension()
+        .is_some_and(|extension| !extension.is_empty());
+    has_separator || has_extension
 }

@@ -3,6 +3,7 @@ import {
   CLIENT_BUNDLE_PREFIX,
   clientBuildOutput,
   IMMUTABLE_CACHE_CONTROL,
+  nonPublishableStrategies,
   projectRelativeOutDir,
   PUBLIC_ASSET_CACHE_CONTROL,
   publicAssetGlobs,
@@ -143,7 +144,7 @@ export function firebase(options: FirebaseAdapterOptions = {}): Adapter {
             kind: 'static-site',
             path: 'deploy/firebase/public',
             optional: true,
-            excludeStrategies: ['isr', 'ppr'],
+            excludeStrategies: nonPublishableStrategies(),
           },
           {
             kind: 'function',
@@ -240,6 +241,10 @@ const handler = createHandler({
     mkdirSync(path.dirname(htmlPath), { recursive: true });
     writeFileSync(htmlPath, html, 'utf8');
   },
+  // The project's own not-found page, pre-rendered by the build and carried
+  // inline in the manifest: an unmatched URL is answered with the page the
+  // application actually wrote, on every host.
+  notFoundDocument: manifest.notFoundDocument,
   supportedStrategies: ['ssr', 'ssg', 'csr', 'isr', 'ppr', 'api'],
 });
 

@@ -137,6 +137,10 @@ const handler = createHandler({
     mkdirSync(path.dirname(htmlPath), { recursive: true });
     writeFileSync(htmlPath, html, 'utf8');
   },
+  // The project's own not-found page, pre-rendered by the build and carried
+  // inline in the manifest: an unmatched URL is answered with the page the
+  // application actually wrote, on every host.
+  notFoundDocument: manifest.notFoundDocument,
   supportedStrategies: ['ssr', 'ssg', 'csr', 'isr', 'ppr', 'api'],
 });
 

@@ -2467,6 +2467,22 @@ export const marker = 'reached'
           code: 'ALL001',
           message: 'All sockets are active',
         },
+        // Implied by the registry's shape, not reported by the plugin: this
+        // one registers `build.onResolve`/`onLoad`, which the native bundler
+        // answers for the browser graph and `runtime/compiler.mjs` — the
+        // server and prerender compiler — has no host to ask. A route that
+        // imports a module those hooks provide renders with `Cannot find
+        // package` while its browser bundle is built correctly, and nothing
+        // said so.
+        {
+          plugin: 'ruvyxa',
+          level: 'info',
+          code: 'RUV2107',
+          message:
+            'build.onResolve/onLoad apply to the browser graph only. A module they provide ' +
+            'cannot be resolved while a page is server-rendered or pre-rendered, so import it ' +
+            'from a client component, or write the file the resolve hook names.',
+        },
       ])
 
       const route = await runJson(pluginRuntime, [root, 'http.request'], {

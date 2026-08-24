@@ -615,6 +615,176 @@ pub(crate) async fn render_prerender_job(
     })
 }
 
+/// Where the pre-rendered not-found document is written inside the build
+/// output.
+///
+/// `404.html` at the publish root is the name every static host already looks
+/// for — Netlify, Vercel, Cloudflare Pages, GitHub Pages, S3 website hosting
+/// and `python -m http.server` all serve it for an unmatched path without being
+/// configured to. One file therefore answers both halves of a deploy: a
+/// static-only publish gets a real 404 page for free, and a function build
+/// carries the same bytes for [`createHandler`] to return.
+pub(crate) const NOT_FOUND_DOCUMENT_FILE: &str = "404.html";
+
+/// The route path the not-found document is rendered under.
+///
+/// Reserved rather than real: it is never routed to, and it exists so the
+/// renderer, the artifact cache key, and `localize_document` all have the same
+/// stable identity to work from. The dev and `start` hosts render the same file
+/// under the same reserved path.
+const NOT_FOUND_ROUTE_PATH: &str = "/__ruvyxa/not-found";
+
+/// The project's own `app/not-found.tsx`, if it has one.
+pub(crate) fn root_not_found_file(app_dir: &Path) -> Option<PathBuf> {
+    ["not-found.tsx", "not-found.jsx"]
+        .into_iter()
+        .map(|name| app_dir.join(name))
+        .find(|candidate| candidate.is_file())
+}
+
+/// What rendering the not-found document needs besides where to put it.
+///
+/// The same four values [`prerender_static_routes`] takes, grouped because they
+/// are decided together by the build and read together here.
+pub(crate) struct NotFoundPrerender<'a> {
+    pub(crate) build: &'a BuildConfigOptions,
+    pub(crate) cache: RuvyxaBuildCache<'a>,
+    pub(crate) runtime: JavaScriptRuntime,
+    pub(crate) i18n: Option<&'a ruvyxa_graph::I18nRouting>,
+    /// Whether this build emits documents at all. A `--server-only` artifact
+    /// serves no HTML, so there is nothing for a not-found page to be part of.
+    pub(crate) documents: bool,
+}
+
+/// Pre-render `app/not-found.tsx` into `prerender/404.html`.
+///
+/// An unmatched URL is the one request every deployed application receives and
+/// no route owns, and until this existed the answer was the string `Not Found`
+/// with no layout, no styles, and no way for a project to change it — while the
+/// same application under `ruvyxa dev` rendered its own page. The document is
+/// baked rather than rendered per request because the two hosts that would have
+/// to render it are a CDN with no function at all and a function that may not
+/// be able to read a file, and one string satisfies both.
+///
+/// Rendered without the RSC pipeline and without a client bundle, matching what
+/// the dev and `start` hosts compose for the same file: the client router has
+/// no route for this URL, so a script that tried to hydrate one would replace
+/// the document with an empty tree.
+///
+/// Returns the written file, or `None` when the project has no not-found page.
+pub(crate) async fn prerender_not_found_document(
+    root: &Path,
+    app_dir: &Path,
+    prerender_dir: &Path,
+    head: &PrerenderHead,
+    context: NotFoundPrerender<'_>,
+) -> anyhow::Result<Option<PathBuf>> {
+    let NotFoundPrerender {
+        build,
+        cache,
+        runtime,
+        i18n,
+        documents,
+    } = context;
+    if !documents {
+        return Ok(None);
+    }
+    let Some(route_file) = root_not_found_file(app_dir) else {
+        return Ok(None);
+    };
+
+    let worker_env = build_worker_env(root, build, runtime)?;
+    let client_assets = BTreeMap::new();
+    let artifact_cache = PrerenderArtifactCache {
+        directory: cache.directory.to_path_buf(),
+        dependency_hash: cache.dependency_hash.to_string(),
+        render_context_hash: prerender_context_hash(root, head, &client_assets, build, &worker_env),
+        fingerprints: Arc::new(ArtifactFingerprintCache::default()),
+        enabled: build.prerender_cache.unwrap_or(true),
+    };
+    let job = PrerenderJob {
+        route_path: NOT_FOUND_ROUTE_PATH.to_string(),
+        render_path: NOT_FOUND_ROUTE_PATH.to_string(),
+        params: RouteParams::new(),
+        strategy: RenderStrategy::Ssg,
+        revalidate: None,
+        kind: PrerenderJobKind::Render {
+            route_file: route_file.clone(),
+            mode: "full",
+            server_components: false,
+        },
+    };
+
+    let cached = artifact_cache
+        .enabled
+        .then(|| load_prerender_artifact(&artifact_cache, &job))
+        .flatten();
+    let html = match cached {
+        Some(html) => html,
+        None => {
+            // One worker, because there is exactly one document: the pool this
+            // build already used for routes has been dropped by now, and a
+            // project whose not-found page is unchanged never reaches this arm.
+            let worker_pool = start_prerender_worker_pool(root, &worker_env, 1, runtime).await?;
+            let result = worker_pool
+                .render_ssg_isolated(ruvyxa_dev_server::RenderSsgRequest {
+                    project_root: root,
+                    app_dir,
+                    page_file: &route_file,
+                    request_path: NOT_FOUND_ROUTE_PATH,
+                    route_path: NOT_FOUND_ROUTE_PATH,
+                    params: &RouteParams::new(),
+                    mode: "full",
+                    server_components: false,
+                })
+                .await
+                .map_err(|error| anyhow::anyhow!("Pre-rendering not-found.tsx failed: {error}"))?;
+            if !result.ok {
+                let message = result
+                    .message
+                    .unwrap_or_else(|| "unknown error".to_string());
+                let code = result.code.unwrap_or_default();
+                anyhow::bail!("Pre-rendering not-found.tsx failed: {code} {message}");
+            }
+            let html = result.html.ok_or_else(|| {
+                anyhow::anyhow!("Pre-rendering not-found.tsx completed without HTML")
+            })?;
+            let html = inject_prerender_head(&html, head);
+            if artifact_cache.enabled {
+                let mut inputs =
+                    stable_prerender_inputs(root, app_dir, &result.inputs.unwrap_or_default());
+                inputs.extend(stable_prerender_inputs(
+                    root,
+                    app_dir,
+                    std::slice::from_ref(&route_file),
+                ));
+                store_prerender_artifact(
+                    &artifact_cache,
+                    &job,
+                    &result
+                        .dependency_hash
+                        .unwrap_or_else(|| "worker-legacy-renderer".to_string()),
+                    &inputs,
+                    &html,
+                );
+            }
+            html
+        }
+    };
+
+    let html = ruvyxa_dev_server::localize_document(
+        &html,
+        i18n,
+        NOT_FOUND_ROUTE_PATH,
+        NOT_FOUND_ROUTE_PATH,
+        &RouteParams::new(),
+    );
+    fs::create_dir_all(prerender_dir)?;
+    let document = prerender_dir.join(NOT_FOUND_DOCUMENT_FILE);
+    fs::write(&document, html)?;
+    Ok(Some(document))
+}
+
 pub(crate) fn stable_prerender_inputs(
     root: &Path,
     app_dir: &Path,

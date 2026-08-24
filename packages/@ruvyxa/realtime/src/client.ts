@@ -73,6 +73,13 @@ export function createRealtimeClient(options: RealtimeClientOptions = {}): Realt
 
   const connect = () => {
     if (stopped || listeners.size === 0) return
+    // A server render has no `location` to dial from, and Node has carried a
+    // global `WebSocket` since 24 — so a subscription created while a
+    // `'use client'` component rendered for the initial document opened a real
+    // connection to `http://localhost/`, per request, with nothing to close it.
+    // An injected transport is the caller saying what to dial with, so a test
+    // (and a deliberate server-side client) still connects.
+    if (!options.webSocket && typeof globalThis.location?.href !== 'string') return
     const currentGeneration = ++generation
     socket?.close(1000, 'subscriptions changed')
     socket = createSocket(socketUrl(options.url, [...listeners.keys()]))

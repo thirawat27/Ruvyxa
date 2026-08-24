@@ -121,6 +121,7 @@ const DEFAULT_ACTION_RATE_WINDOW_SECONDS = 60
  *   deployed runtimes ignored it entirely: a function had no request body cap
  *   at all, `security.headers: false` had no effect, and `trustedProxyIps` was
  *   unused, while `ruvyxa start` enforced all three.
+ * @property {string} [notFoundDocument] - Pre-rendered `app/not-found.tsx`, returned with 404 for an unmatched URL.
  * @property {(path: string, revalidate?: number) => string|{html: string, stale: boolean}|null} [readPrerendered]
  *   Synchronous read of a pre-rendered HTML file. ISR-capable adapters return
  *   freshness explicitly; a legacy string result is treated as stale.
@@ -161,6 +162,35 @@ export const HANDLER_RUNTIME_FILES = Object.freeze([
   'flight.mjs',
 ])
 
+/**
+ * Cache-control for a document served as a file, and the default for a page
+ * that did not choose its own.
+ *
+ * Safe to store, never safe to pin: a redeploy replaces the document under the
+ * same URL, and a reader holding a heuristically cached copy would keep seeing
+ * the old site with nothing to tell it otherwise.
+ */
+export const DOCUMENT_CACHE_CONTROL = 'public, max-age=0, must-revalidate'
+
+/**
+ * What a server sends with a document it just served, by rendering strategy.
+ *
+ * ISR advertises the project's own clock so a CDN in front of the function can
+ * hold the page for exactly as long as the project asked, and refresh it
+ * without a gap. A per-request render advertises nothing cacheable: it may
+ * carry one visitor's data.
+ *
+ * The same table as `document_cache_control` in
+ * `crates/ruvyxa_cli/src/deploy_manifest.rs` and `documentCacheControl` in
+ * `@ruvyxa/core`; all three are replayed against
+ * `tests/fixtures/deploy-output-conformance.json`.
+ */
+export function documentCacheControl(strategy, revalidate) {
+  if (strategy === 'isr') return `s-maxage=${revalidate ?? 60}, stale-while-revalidate`
+  if (strategy === 'ssg' || strategy === 'csr') return DOCUMENT_CACHE_CONTROL
+  return 'no-store'
+}
+
 /** Security defaults shared with the native and standalone runtimes. */
 export const DEFAULT_SECURITY_HEADERS = Object.freeze({
   'x-content-type-options': 'nosniff',
@@ -193,6 +223,7 @@ export function createHandler(options) {
     middleware,
     i18n,
     optimizeImage,
+    notFoundDocument,
   } = options
   // An explicit `securityHeaders` option still wins, so a caller constructing
   // the handler directly keeps full control; otherwise the project's own
@@ -449,6 +480,23 @@ export function createHandler(options) {
     if (!match) {
       const redirect = localeRedirect(request, pathname, basePath, matchRoute, i18n)
       if (redirect) return Response.redirect(new URL(redirect, request.url), 307)
+      // The application's own not-found page, pre-rendered by the build.
+      //
+      // `app/not-found.tsx` is the file every reader coming from another
+      // framework writes for this, and a deployed build ignored it: only a
+      // `notFound()` call inside a *matched* route reached it, so the one
+      // request every deployment receives and no route owns was answered with
+      // this bare string — while the same code under `ruvyxa dev` rendered the
+      // project's page with its layout and styles.
+      if (notFoundDocument) {
+        return new Response(notFoundDocument, {
+          status: 404,
+          headers: {
+            'content-type': 'text/html; charset=utf-8',
+            'cache-control': DOCUMENT_CACHE_CONTROL,
+          },
+        })
+      }
       return new Response('Not Found', { status: 404 })
     }
 
@@ -1041,7 +1089,36 @@ export function createHandler(options) {
     await revalidation
   }
 
+  /**
+   * Serve a page, and say how long the answer may be reused.
+   *
+   * Every document leaving this handler carries a `cache-control`. It did not
+   * before, and "no header" is not "do not cache" to a shared cache: a CDN
+   * given nothing may store a response under heuristic freshness, which on an
+   * `ssr` page means one visitor's document served to the next. The policy
+   * itself is one table — `documentCacheControl` — so the value a deployed
+   * function sends and the value the native host sends for the same route
+   * cannot drift. A header the render already set always wins: a page that
+   * chose its own caching meant it.
+   */
   async function handlePage(route, request, pathname, params, runtimeContext) {
+    const rendered = await servePageDocument(route, request, pathname, params, runtimeContext)
+    // Only a document this handler produced. A redirect carries immutable
+    // headers and describes no body to cache, and an error response is not the
+    // page whose policy this is.
+    if (rendered.status !== 200 || rendered.headers.has('cache-control')) return rendered
+    try {
+      rendered.headers.set(
+        'cache-control',
+        documentCacheControl(route.render.strategy, route.render.revalidate),
+      )
+    } catch {
+      // A response whose headers are immutable already decided.
+    }
+    return rendered
+  }
+
+  async function servePageDocument(route, request, pathname, params, runtimeContext) {
     const strategy = route.render.strategy
     const forcedClaim = claimForcedRevalidation(pathname)
     const forced = forcedClaim !== null

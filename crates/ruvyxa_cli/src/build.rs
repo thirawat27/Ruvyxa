@@ -865,6 +865,39 @@ pub(crate) async fn build_with_cache_override(
         );
     }
 
+    // The application's own answer for a URL no route owns.
+    //
+    // Written beside the pre-rendered pages as `404.html`, which is the name a
+    // static host already serves without configuration and the file a function
+    // build carries so `createHandler` can return the same document. Before
+    // this, a deployed application answered an unmatched URL with the bare
+    // string `Not Found` while the same code under `ruvyxa dev` rendered the
+    // project's page.
+    let not_found_document = crate::prerender::prerender_not_found_document(
+        &args.root,
+        &app_dir,
+        &prerender_dir,
+        &PrerenderHead {
+            asset_links: ruvyxa_dev_server::public_asset_links(&assets_dir).into(),
+            styles: ruvyxa_dev_server::style_head_tag(
+                style_asset.as_deref(),
+                &style_collection.css,
+            )
+            .into(),
+        },
+        NotFoundPrerender {
+            build: &config.build,
+            cache: RuvyxaBuildCache {
+                dependency_hash: &config.config_dependency_hash,
+                directory: &build_cache_directory,
+            },
+            runtime: config.javascript_runtime(),
+            i18n: manifest.i18n.as_ref(),
+            documents: !args.server_only,
+        },
+    )
+    .await?;
+
     // What was actually written, read back. Every other check in this build
     // asks about the inputs; this one asks whether the output can load. A
     // client chunk carrying a specifier the linker never rewrote, or a document
@@ -931,6 +964,30 @@ pub(crate) async fn build_with_cache_override(
     fs::write(
         staging_dir.join("build.json"),
         serde_json::to_string_pretty(&build_info)?,
+    )?;
+
+    // The deployment description, written for whoever has to serve this build.
+    //
+    // `build.json` reports what the build did; this says how the result must be
+    // served — which URLs a CDN may answer from a file, which must reach the
+    // function, and what cache-control each class of emitted file carries.
+    // Adapters used to re-derive all of that from route metadata, one copy per
+    // adapter, and the copies disagreed.
+    write_deploy_manifest(
+        &staging_dir,
+        &DeployManifestInput {
+            manifest: &manifest,
+            prerendered: &prerendered,
+            prerender_dir: &prerender_dir,
+            not_found_document: not_found_document.as_deref(),
+            client_assets: emitted_client_assets(&client_dir),
+            base_path: String::new(),
+            adapter: args
+                .adapter
+                .as_deref()
+                .or_else(|| config.adapter.as_ref().and_then(serde_json::Value::as_str))
+                .or_else(|| detected_adapter.as_ref().map(|(name, _)| name.as_str())),
+        },
     )?;
 
     // The commit path retries renames with blocking backoff sleeps on
@@ -1345,6 +1402,19 @@ pub(crate) fn styled_render_symbol(strategy: RenderStrategy) -> String {
     }
 }
 
+/// Write the deployment description into the staged build output.
+fn write_deploy_manifest(
+    staging_dir: &Path,
+    input: &DeployManifestInput<'_>,
+) -> anyhow::Result<()> {
+    let manifest = crate::deploy_manifest::deploy_manifest(input);
+    fs::write(
+        staging_dir.join(DEPLOY_MANIFEST_FILE),
+        serde_json::to_string_pretty(&manifest)?,
+    )?;
+    Ok(())
+}
+
 pub(crate) fn styled_strategy_word(strategy: RenderStrategy) -> String {
     match strategy {
         RenderStrategy::Csr => dim("csr"),
@@ -1406,7 +1476,8 @@ pub(crate) const BUILD_OUTPUT_DIRS: [&str; 6] = [
     "deploy",
     "static",
 ];
-pub(crate) const BUILD_OUTPUT_FILES: [&str; 2] = ["manifest.json", "build.json"];
+pub(crate) const BUILD_OUTPUT_FILES: [&str; 3] =
+    ["manifest.json", "build.json", DEPLOY_MANIFEST_FILE];
 // Default cap balances Node process memory against prerender throughput; an
 // explicit `build.parallelism` config value may raise it up to the pool limit.
 

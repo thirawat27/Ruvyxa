@@ -42,6 +42,24 @@ export type {
   TransformResult,
 } from './types.js'
 export type * from './plugin.js'
+export {
+  DEPLOY_MANIFEST_FILE,
+  DEPLOY_MANIFEST_VERSION,
+  DOCUMENT_CACHE_CONTROL,
+  deployHeaderRules,
+  documentCacheControl,
+  nonPublishableStrategies,
+  parseDeployManifest,
+  routeServeMode,
+} from './deploy-manifest.js'
+export type {
+  DeployHeaderRule,
+  DeployManifest,
+  DeployNotFound,
+  DeployPrerenderedPath,
+  DeployRoute,
+  DeployServeMode,
+} from './deploy-manifest.js'
 export { standaloneServerSource } from './standalone-server.js'
 export type { StandaloneServerOptions, StandaloneServerRuntime } from './standalone-server.js'
 export {

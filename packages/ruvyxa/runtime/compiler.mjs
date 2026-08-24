@@ -246,6 +246,15 @@ function slotPageFor(slotDir, remaining) {
 }
 
 /** File names of the special files a segment may declare, by kind. */
+/**
+ * Packages whose import is a declaration for the boundary checker and nothing
+ * else, so no emitted bundle may import them.
+ *
+ * A browser bundle never reaches the rule: importing `server-only` there is
+ * RUV1007 and the build fails before output exists.
+ */
+const MARKER_PACKAGES = new Set(['server-only', 'client-only'])
+
 const SPECIAL_FILES = { error: 'error.tsx', loading: 'loading.tsx', notFound: 'not-found.tsx' }
 
 /**
@@ -1001,6 +1010,17 @@ async function visitModule(context) {
   for (const specifier of extractSpecifiers(transformedSource)) {
     if (isAssetSpecifier(specifier) && !isCssModuleSpecifier(specifier)) continue
 
+    // A marker package is a declaration, not a dependency. `server-only` and
+    // `client-only` ship no runtime behaviour — importing one exists so the
+    // boundary checker can see it, and that has already run. Registering it as
+    // an external hoisted `import * as __ext0 from "server-only"` into the
+    // bundle, so a deployed function directory, which carries no node_modules,
+    // failed to start with ERR_MODULE_NOT_FOUND for a package whose only job
+    // was to not be there. See `markerPackages` in
+    // tests/fixtures/module-lane-conformance.json; the Rust linker drops the
+    // same two in `is_marker_package`.
+    if (MARKER_PACKAGES.has(specifier)) continue
+
     // A rewritten specifier is answered before resolution, not after. A browser
     // bundle inlines everything it can reach — that is what `platform:
     // 'browser'` means — so asking `shouldBundleResolved` about React would
@@ -1588,31 +1608,7 @@ function linkModules(
     lineMappings.push(mapping)
   }
 
-  for (const [specifier, alias] of externals) {
-    const sharedUrl = externalUrls?.[specifier]
-    if (!sharedUrl) {
-      push(`import * as ${alias} from ${JSON.stringify(specifier)};`)
-      continue
-    }
-    // Read out of a runtime registry rather than imported by name. These are
-    // CommonJS packages, and a generated `export *` cannot enumerate a CommonJS
-    // module's names — a re-exporting shim gave consumers a namespace with only
-    // `default` on it, and every `__ext0.useState` came back undefined. The
-    // registry holds the module's own exports object, so a named read and a
-    // `default ?? namespace` read both find what they are looking for.
-    push(`import ${JSON.stringify(sharedUrl)};`)
-    push(
-      `const ${alias} = (globalThis.${VENDOR_REGISTRY_GLOBAL} ?? {})[${JSON.stringify(specifier)}];`,
-    )
-    push(
-      `if (!${alias}) throw new Error(${JSON.stringify(`RUV1306 shared browser module ${specifier} was not loaded`)});`,
-    )
-  }
-  // The rewritten specifier when one is in play: with `externalUrls` the map is
-  // keyed by the URL the import names, not by `react`.
-  const reactAlias = externals.get('react') ?? externals.get(externalUrls?.react)
-  if (reactAlias) push(`const React = ${reactAlias}.default ?? ${reactAlias};`)
-  if (externals.size > 0) push('')
+  writeExternalImports(push, externals, externalUrls)
 
   // Ahead of every module factory: React reads `NODE_ENV` while its own factory
   // runs, and a host that has a real `process` ignores the stand-in below.
@@ -1635,35 +1631,8 @@ function linkModules(
   // Where each cycle starts and finishes. Neither is always the module beside
   // the group: an acyclic dependency of one member can be emitted between two
   // of them.
-  const firstOfCycleGroup = new Map()
-  const lastOfCycleGroup = new Map()
-  const membersOfCycleGroup = new Map()
-  for (const [position, module] of ordered.entries()) {
-    if (module.cycleGroup === null) continue
-    if (!firstOfCycleGroup.has(module.cycleGroup))
-      firstOfCycleGroup.set(module.cycleGroup, position)
-    lastOfCycleGroup.set(module.cycleGroup, position)
-    const members = membersOfCycleGroup.get(module.cycleGroup) ?? []
-    members.push(module)
-    membersOfCycleGroup.set(module.cycleGroup, members)
-  }
-  if (ordered.some((module) => module.cycleGroup !== null)) {
-    // Bindings a cyclic import could not read yet, re-read once its group has
-    // finished initialising. See `rewriteImportClause`.
-    push(`const __ruvyxaRebind = [];`)
-    // What such a binding holds until then. ESM answers a read of a binding
-    // whose module has not finished with a ReferenceError, and the linked form
-    // would otherwise answer `undefined` and carry on — the same wrong value,
-    // with nothing to trace it back to.
-    push(
-      `const __ruvyxaCycleTdz = (name, from) => new Proxy(function () {}, ` +
-        `{ get(target, key) { if (key === Symbol.toStringTag) return 'Uninitialized'; ` +
-        `throw new ReferenceError(\`Cannot access '\${name}' before initialization: it is imported from \${from}, which imports this module back, and the value is read while that cycle is still running.\`) }, ` +
-        `apply() { throw new ReferenceError(\`Cannot call '\${name}' before initialization (import cycle with \${from}).\`) }, ` +
-        `construct() { throw new ReferenceError(\`Cannot construct '\${name}' before initialization (import cycle with \${from}).\`) } });`,
-    )
-    push('')
-  }
+  const { firstOfCycleGroup, lastOfCycleGroup, membersOfCycleGroup } = cycleLayout(ordered)
+  if (ordered.some((module) => module.cycleGroup !== null)) writeCycleRuntime(push)
 
   for (const [position, module] of ordered.entries()) {
     const rewritten = rewrittenModules.get(module.id)
@@ -1688,20 +1657,7 @@ function linkModules(
       push(`;(() => {`)
       push(`  const __exports = ${module.id};`)
     }
-    // A module that declares one of these itself keeps its own; the wrapper
-    // would otherwise redeclare a name in the same scope and the bundle would
-    // not parse.
-    const declared = topLevelDeclaredNames(rewritten.code)
-    const ownsModule = declared.has('module')
-    if (!ownsModule) push(`  const module = { exports: __exports };`)
-    if (!declared.has('exports')) {
-      push(`  const exports = ${ownsModule ? '__exports' : 'module.exports'};`)
-    }
-    if (!declared.has('process')) {
-      push(
-        `  const process = globalThis.process ?? { env: { NODE_ENV: ${JSON.stringify(nodeEnv ?? browserNodeEnv())} } };`,
-      )
-    }
+    const ownsModule = writeModuleScope(push, rewritten.code, nodeEnv)
     const codeLines = rewritten.code.split('\n')
     for (let index = 0; index < codeLines.length; index++) {
       const line = codeLines[index]
@@ -1762,6 +1718,120 @@ function linkModules(
       mapping ? { source: sourceNames[mapping.sourceIndex], line: mapping.originalLine } : null,
     ),
   }
+}
+
+/**
+ * Emit the import (or registry read) for every external the bundle needs.
+ *
+ * A shared browser build hands the linker a URL per package and expects the
+ * module to come out of a runtime registry; everything else is an ordinary
+ * namespace import.
+ */
+function writeExternalImports(push, externals, externalUrls) {
+  for (const [specifier, alias] of externals) {
+    const sharedUrl = externalUrls?.[specifier]
+    if (!sharedUrl) {
+      push(`import * as ${alias} from ${JSON.stringify(specifier)};`)
+      continue
+    }
+    // Read out of a runtime registry rather than imported by name. These are
+    // CommonJS packages, and a generated `export *` cannot enumerate a CommonJS
+    // module's names — a re-exporting shim gave consumers a namespace with only
+    // `default` on it, and every `__ext0.useState` came back undefined. The
+    // registry holds the module's own exports object, so a named read and a
+    // `default ?? namespace` read both find what they are looking for.
+    push(`import ${JSON.stringify(sharedUrl)};`)
+    push(
+      `const ${alias} = (globalThis.${VENDOR_REGISTRY_GLOBAL} ?? {})[${JSON.stringify(specifier)}];`,
+    )
+    push(
+      `if (!${alias}) throw new Error(${JSON.stringify(`RUV1306 shared browser module ${specifier} was not loaded`)});`,
+    )
+  }
+  // The rewritten specifier when one is in play: with `externalUrls` the map is
+  // keyed by the URL the import names, not by `react`.
+  const reactAlias = externals.get('react') ?? externals.get(externalUrls?.react)
+  if (reactAlias) push(`const React = ${reactAlias}.default ?? ${reactAlias};`)
+  if (externals.size > 0) push('')
+}
+
+/**
+ * Where each import cycle starts and finishes in the emitted order, and who
+ * belongs to it.
+ *
+ * Neither end is always the module beside the group: an acyclic dependency of
+ * one member can be emitted between two of them.
+ */
+function cycleLayout(ordered) {
+  const firstOfCycleGroup = new Map()
+  const lastOfCycleGroup = new Map()
+  const membersOfCycleGroup = new Map()
+  for (const [position, module] of ordered.entries()) {
+    if (module.cycleGroup === null) continue
+    if (!firstOfCycleGroup.has(module.cycleGroup))
+      firstOfCycleGroup.set(module.cycleGroup, position)
+    lastOfCycleGroup.set(module.cycleGroup, position)
+    const members = membersOfCycleGroup.get(module.cycleGroup) ?? []
+    members.push(module)
+    membersOfCycleGroup.set(module.cycleGroup, members)
+  }
+  return { firstOfCycleGroup, lastOfCycleGroup, membersOfCycleGroup }
+}
+
+/**
+ * Declare what a cyclic import needs at run time.
+ *
+ * `__ruvyxaRebind` holds the re-reads that give a cyclic binding its value
+ * once its group has finished initialising, and `__ruvyxaCycleTdz` is what one
+ * holds until then — ESM answers a read of an unfinished binding with a
+ * ReferenceError, and the linked form would otherwise answer `undefined` and
+ * carry on with nothing to trace it back to.
+ */
+function writeCycleRuntime(push) {
+  // Bindings a cyclic import could not read yet, re-read once its group has
+  // finished initialising. See `rewriteImportClause`.
+  push(`const __ruvyxaRebind = [];`)
+  // What such a binding holds until then. ESM answers a read of a binding
+  // whose module has not finished with a ReferenceError, and the linked form
+  // would otherwise answer `undefined` and carry on — the same wrong value,
+  // with nothing to trace it back to.
+  push(
+    `const __ruvyxaCycleTdz = (name, from) => new Proxy(function () {}, ` +
+      `{ get(target, key) { if (key === Symbol.toStringTag) return 'Uninitialized'; ` +
+      `throw new ReferenceError(\`Cannot access '\${name}' before initialization: it is imported from \${from}, which imports this module back, and the value is read while that cycle is still running.\`) }, ` +
+      `apply() { throw new ReferenceError(\`Cannot call '\${name}' before initialization (import cycle with \${from}).\`) }, ` +
+      `construct() { throw new ReferenceError(\`Cannot construct '\${name}' before initialization (import cycle with \${from}).\`) } });`,
+  )
+  push('')
+}
+
+/**
+ * Declare the CommonJS-shaped scope a wrapped module body expects.
+ *
+ * A module that declares `module`, `exports`, or `process` itself keeps its
+ * own — `zod` imports a function called `process` from a sibling — because the
+ * wrapper would otherwise redeclare the name in the same scope and the whole
+ * chunk fails to parse with an error naming a line the author never wrote.
+ *
+ * Returns whether the module owns `module`, which decides where its exports
+ * are read from afterwards.
+ */
+function writeModuleScope(push, code, nodeEnv) {
+  // A module that declares one of these itself keeps its own; the wrapper
+  // would otherwise redeclare a name in the same scope and the bundle would
+  // not parse.
+  const declared = topLevelDeclaredNames(code)
+  const ownsModule = declared.has('module')
+  if (!ownsModule) push(`  const module = { exports: __exports };`)
+  if (!declared.has('exports')) {
+    push(`  const exports = ${ownsModule ? '__exports' : 'module.exports'};`)
+  }
+  if (!declared.has('process')) {
+    push(
+      `  const process = globalThis.process ?? { env: { NODE_ENV: ${JSON.stringify(nodeEnv ?? browserNodeEnv())} } };`,
+    )
+  }
+  return ownsModule
 }
 
 /**
@@ -1957,6 +2027,84 @@ function moduleGraphKey(resolved) {
   }
 }
 
+/**
+ * Emit every line one statement consumed exactly as it was written.
+ *
+ * Used where a rewrite produced nothing trustworthy: the masked text a rewriter
+ * reads has its string literals blanked, so emitting *that* would delete the
+ * module's own strings. Returns the last line consumed.
+ */
+function passThroughStatement({ module, sourceLines, lines, lineMap }, from, to) {
+  for (let at = from; at <= to; at += 1) {
+    lines.push(sourceLines[at])
+    lineMap.push(module.transformLineMap?.[at] ?? at)
+  }
+  return to
+}
+
+/** Rewrite one import statement, however many lines its clause spans. */
+function writeRewrittenImport(statements, sourceLine) {
+  const { module, codeLines, lines, lineMap } = statements
+  const statement = gatherClauseStatement(codeLines, sourceLine)
+  const rewritten = rewriteImport(statement.text, module)
+  // `null` means the text only looked like an import.
+  if (rewritten === null) {
+    passThroughStatement(statements, sourceLine, statement.endLine)
+  } else if (rewritten) {
+    lines.push(rewritten)
+    lineMap.push(module.transformLineMap?.[sourceLine] ?? sourceLine)
+  }
+  return statement.endLine
+}
+
+/**
+ * Rewrite `export default <expression>` into an assignment.
+ *
+ * The expression is collected until it balances, because a default export is
+ * routinely an object or a call that spans lines, and half of one assigned to
+ * `__exports.default` does not parse.
+ */
+function writeRewrittenDefaultExport(statements, sourceLine) {
+  const { module, sourceLines, codeLines, lines, lineMap } = statements
+  const collectedRaw = [sourceLines[sourceLine].trim()]
+  const collectedCode = [(codeLines[sourceLine] ?? '').trim()]
+  let endLine = sourceLine
+  while (!isBalancedDefaultExpression(collectedCode) && endLine + 1 < sourceLines.length) {
+    endLine += 1
+    collectedRaw.push(sourceLines[endLine].trim())
+    collectedCode.push((codeLines[endLine] ?? '').trim())
+  }
+
+  const expression = collectedRaw
+    .join('\n')
+    .replace(/^export\s+default\s+/, '')
+    .replace(/;$/, '')
+  lines.push(`__exports.default = ${rewriteDynamicImports(expression, module)};`)
+  lineMap.push(module.transformLineMap?.[sourceLine] ?? sourceLine)
+  return endLine
+}
+
+/** Rewrite one export statement, clause form or declaration form. */
+function writeRewrittenExport(statements, sourceLine, exported, reExportAll) {
+  const { module, sourceLines, codeLines, lines, lineMap } = statements
+  // A clause form (`export { … }`, `export * …`) is rewritten into generated
+  // assignments, so it is read from the joined masked statement. A declaration
+  // form (`export const x = {`) keeps its own text and its continuation lines
+  // pass through untouched, as they always have.
+  const isClause = /^export\s*(?:\{|\*)/.test((codeLines[sourceLine] ?? '').trim())
+  const statement = isClause
+    ? gatherClauseStatement(codeLines, sourceLine)
+    : { text: sourceLines[sourceLine].trim(), endLine: sourceLine }
+  const result = rewriteExport(statement.text, module, exported, reExportAll)
+  if (isClause && result === statement.text) {
+    passThroughStatement(statements, sourceLine, statement.endLine)
+  } else if (result) {
+    lines.push(result)
+    lineMap.push(module.transformLineMap?.[sourceLine] ?? sourceLine)
+  }
+  return statement.endLine
+}
+
 function rewriteModule(module) {
   const rewriteKey = [
     module.key,
@@ -1991,6 +2139,10 @@ function rewriteModule(module) {
 
   const sourceLines = source.split('\n')
   const codeLines = codeOnly.split('\n')
+  // What every statement rewriter below reads and writes. Passed as one value
+  // because they are one walk over one module, and threading five parameters
+  // through each of them said nothing the name does not.
+  const statements = { module, sourceLines, codeLines, lines, lineMap }
   for (let sourceLine = 0; sourceLine < sourceLines.length; sourceLine++) {
     const rawLine = sourceLines[sourceLine]
     const line = (codeLines[sourceLine] ?? '').trim()
@@ -2001,66 +2153,17 @@ function rewriteModule(module) {
     }
 
     if (IMPORT_STATEMENT.test(line)) {
-      const statement = gatherClauseStatement(codeLines, sourceLine)
-      const rewritten = rewriteImport(statement.text, module)
-      // `null` means the text only looked like an import. Nothing generated
-      // can be trusted for it, so every line it consumed is emitted as written:
-      // a masked line would have its string literals blanked.
-      if (rewritten === null) {
-        for (let at = sourceLine; at <= statement.endLine; at += 1) {
-          lines.push(sourceLines[at])
-          lineMap.push(module.transformLineMap?.[at] ?? at)
-        }
-      } else if (rewritten) {
-        lines.push(rewritten)
-        lineMap.push(module.transformLineMap?.[sourceLine] ?? sourceLine)
-      }
-      sourceLine = statement.endLine
+      sourceLine = writeRewrittenImport(statements, sourceLine)
       continue
     }
 
     if (/^export\s+default\b/.test(line) && !line.startsWith('export default function ')) {
-      const collectedRaw = [rawLine.trim()]
-      const collectedCode = [line]
-      let endLine = sourceLine
-      while (!isBalancedDefaultExpression(collectedCode) && endLine + 1 < sourceLines.length) {
-        endLine += 1
-        collectedRaw.push(sourceLines[endLine].trim())
-        collectedCode.push((codeLines[endLine] ?? '').trim())
-      }
-
-      const expression = collectedRaw
-        .join('\n')
-        .replace(/^export\s+default\s+/, '')
-        .replace(/;$/, '')
-      lines.push(`__exports.default = ${rewriteDynamicImports(expression, module)};`)
-      lineMap.push(module.transformLineMap?.[sourceLine] ?? sourceLine)
-      sourceLine = endLine
+      sourceLine = writeRewrittenDefaultExport(statements, sourceLine)
       continue
     }
 
     if (EXPORT_STATEMENT.test(line)) {
-      // A clause form (`export { … }`, `export * …`) is rewritten into
-      // generated assignments, so it is read from the joined masked statement.
-      // A declaration form (`export const x = {`) keeps its own text and its
-      // continuation lines pass through untouched, as they always have.
-      const isClause = /^export\s*(?:\{|\*)/.test(line)
-      const statement = isClause
-        ? gatherClauseStatement(codeLines, sourceLine)
-        : { text: rawLine.trim(), endLine: sourceLine }
-      const result = rewriteExport(statement.text, module, exported, reExportAll)
-      if (isClause && result === statement.text) {
-        // Nothing matched, so the masked text is not safe to emit; see the
-        // import branch above.
-        for (let at = sourceLine; at <= statement.endLine; at += 1) {
-          lines.push(sourceLines[at])
-          lineMap.push(module.transformLineMap?.[at] ?? at)
-        }
-      } else if (result) {
-        lines.push(result)
-        lineMap.push(module.transformLineMap?.[sourceLine] ?? sourceLine)
-      }
-      sourceLine = statement.endLine
+      sourceLine = writeRewrittenExport(statements, sourceLine, exported, reExportAll)
       continue
     }
 
@@ -2175,7 +2278,7 @@ function isCompleteClauseStatement(text, codeLines, endLine) {
   // `from` written, specifier still to come.
   if (/\bfrom\s*$/.test(trimmed)) return false
   // A closed clause with no `from` may still be followed by one.
-  if (/\}$/.test(trimmed) && !/\bfrom\b/.test(trimmed)) {
+  if (trimmed.endsWith('}') && !/\bfrom\b/.test(trimmed)) {
     for (let next = endLine + 1; next < codeLines.length; next += 1) {
       const candidate = codeLines[next].trim()
       if (!candidate) continue

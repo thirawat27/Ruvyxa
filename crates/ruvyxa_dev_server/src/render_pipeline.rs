@@ -315,6 +315,16 @@ pub(crate) async fn render_request_pooled(
                         .into_response(),
                 ));
             }
+            // The application's own not-found page, if it has one.
+            //
+            // `app/not-found.tsx` is the file every reader coming from another
+            // framework writes for this, and it was rendered for nothing: only
+            // a `notFound()` call inside a matched route reached it, so an
+            // unmatched URL got the framework's own error card — which also
+            // links `/ruvyxa.png`, an image most projects do not publish.
+            if let Some(html) = render_root_not_found(state, request_path, request_headers).await {
+                return Ok(html_response(StatusCode::NOT_FOUND, html));
+            }
             return Ok(html_response(
                 StatusCode::NOT_FOUND,
                 error_page(
@@ -1312,6 +1322,66 @@ fn rsc_payload_block(route: &RouteEntry, payload: Option<&str>) -> String {
         .unwrap_or_default()
 }
 
+/// The document `app/not-found.tsx` renders, or `None` when the project has no
+/// such file — or when rendering it failed, which must not turn a 404 into a
+/// 500.
+///
+/// Rendered as an ordinary page through the worker pool, with the root layout
+/// around it, so it gets the same head, styles, and locale handling every other
+/// document does. It ships no client bundle: the client router has no route for
+/// this URL, and a script that tried to hydrate one would replace the document
+/// with an empty tree.
+async fn render_root_not_found(
+    state: &AppState,
+    request_path: &str,
+    request_headers: &HeaderMap,
+) -> Option<String> {
+    let file = ["not-found.tsx", "not-found.jsx"]
+        .into_iter()
+        .map(|name| state.config.app_dir.join(name))
+        .find(|candidate| candidate.is_file())?;
+
+    let has_root_layout = ["layout.tsx", "layout.jsx"]
+        .into_iter()
+        .any(|name| state.config.app_dir.join(name).is_file());
+    let layout_chain = if has_root_layout {
+        vec!["app/layout".to_string()]
+    } else {
+        Vec::new()
+    };
+
+    let route = RouteEntry {
+        id: "app/not-found".to_string(),
+        path: "/__ruvyxa/not-found".to_string(),
+        kind: RouteKind::Page,
+        file,
+        layout_chain,
+        template_chain: Vec::new(),
+        slots: Vec::new(),
+        intercepts: Vec::new(),
+        server_modules: Vec::new(),
+        client_modules: Vec::new(),
+        runtime: ruvyxa_graph::RuntimeTarget::Node,
+        render: ruvyxa_graph::RenderMeta {
+            hydration: ruvyxa_graph::HydrationMode::None,
+            ..Default::default()
+        },
+    };
+
+    let styles = state.runtime_cache.style_tag(&state.config).await.ok()?;
+    let headers = worker_request_headers(request_headers);
+    let request = PageRequestContext {
+        path: request_path,
+        target: request_path,
+        headers: &headers,
+        method: "GET",
+        form_action: None,
+    };
+    render_page_pooled(state, &route, &request, &RouteParams::new(), &styles)
+        .await
+        .ok()
+        .map(|document| document.html.to_string())
+}
 async fn render_page_pooled(
     state: &AppState,
     route: &RouteEntry,

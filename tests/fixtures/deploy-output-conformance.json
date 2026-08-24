@@ -1,0 +1,137 @@
+{
+  "$comment": [
+    "Shared deployment-output conformance table.",
+    "",
+    "`ruvyxa build` writes `deploy-manifest.json`: the provider-agnostic",
+    "description of what the build produced and how it must be served. Eleven",
+    "adapters, the standalone server, and the Rust host all have to agree on two",
+    "questions that this file answers once:",
+    "",
+    "  1. Which routes may a CDN answer from a file, and which must reach the",
+    "     function. Getting this wrong is silent: publishing an ISR page as a",
+    "     static file means the host serves the build-time snapshot forever and",
+    "     the function that owns revalidation is never invoked, so ISR and PPR",
+    "     quietly become SSG. Three adapters had already grown their own",
+    "     `excludeStrategies` list before this table existed.",
+    "  2. What cache-control each class of emitted file carries. The same two",
+    "     policies were hand-written in the Rust static handler, the standalone",
+    "     server, and four adapters; one of them had drifted.",
+    "",
+    "Replayed by crates/ruvyxa_cli/src/deploy_manifest.rs (Rust, the writer) and",
+    "by tests/packages/ruvyxa/deploy-manifest.test.mjs against",
+    "packages/@ruvyxa/core/src/deploy-manifest.ts (JavaScript, what every adapter",
+    "reads). A rule added to one side and not the other fails there rather than",
+    "in somebody's production deploy."
+  ],
+  "version": 1,
+  "assetClasses": {
+    "$comment": [
+      "Cache-control by class of emitted file. `client` chunks are named by the",
+      "hash of their contents, so a URL never changes meaning and the answer is",
+      "immutable. `asset` covers everything published from `public/`, whose URL",
+      "is chosen by the author and can change meaning on the next deploy.",
+      "`document` is a pre-rendered page: safe to cache, never safe to pin,",
+      "because a redeploy replaces it under the same URL."
+    ],
+    "client": {
+      "urlPrefix": "/__ruvyxa/client/",
+      "cacheControl": "public, max-age=31536000, immutable"
+    },
+    "asset": {
+      "urlPrefix": "/",
+      "cacheControl": "public, max-age=3600, must-revalidate"
+    },
+    "document": {
+      "urlPrefix": "/",
+      "cacheControl": "public, max-age=0, must-revalidate"
+    }
+  },
+  "reservedEndpoints": {
+    "$comment": [
+      "Paths the framework owns. A host that serves the publish directory before",
+      "invoking the function must still forward these, and no route may claim",
+      "one. Kept level with FRAMEWORK_ENDPOINTS in the endpoint conformance",
+      "fixture."
+    ],
+    "action": "/__ruvyxa/action",
+    "flight": "/__ruvyxa/flight",
+    "rsc": "/__ruvyxa/rsc",
+    "image": "/__ruvyxa/image",
+    "client": "/__ruvyxa/client/"
+  },
+  "serve": {
+    "$comment": [
+      "How each route is served, given its kind, strategy, and whether the build",
+      "produced a document for it. `static` means a file the CDN may answer",
+      "directly; `function` means the request must reach the server.",
+      "",
+      "`why` is the reason, not decoration: every one of these was a decision",
+      "somebody has to be able to re-derive."
+    ],
+    "cases": [
+      {
+        "kind": "page",
+        "strategy": "ssg",
+        "prerendered": true,
+        "expect": "static",
+        "why": "A fully baked page with no revalidation clock. The whole point is that no server is involved."
+      },
+      {
+        "kind": "page",
+        "strategy": "ssg",
+        "prerendered": false,
+        "expect": "function",
+        "why": "A dynamic SSG route with no matching static params was never rendered, so there is no file to serve."
+      },
+      {
+        "kind": "page",
+        "strategy": "csr",
+        "prerendered": true,
+        "expect": "static",
+        "why": "The shell is a fixed document; everything else happens in the browser."
+      },
+      {
+        "kind": "page",
+        "strategy": "isr",
+        "prerendered": true,
+        "expect": "function",
+        "why": "The function owns revalidation. Serving the baked file directly pins the page to its build-time snapshot forever."
+      },
+      {
+        "kind": "page",
+        "strategy": "ppr",
+        "prerendered": true,
+        "expect": "function",
+        "why": "The pre-rendered part is a shell; the dynamic holes are filled per request."
+      },
+      {
+        "kind": "page",
+        "strategy": "ssr",
+        "prerendered": false,
+        "expect": "function",
+        "why": "Rendered per request by definition."
+      },
+      {
+        "kind": "api",
+        "strategy": "ssr",
+        "prerendered": false,
+        "expect": "function",
+        "why": "An API route is code, not a document."
+      }
+    ]
+  },
+  "documentCacheControl": {
+    "$comment": [
+      "What a function returns with a document it rendered, by strategy. ISR",
+      "advertises its own clock so a CDN in front of the function can hold the",
+      "page for exactly as long as the project asked."
+    ],
+    "cases": [
+      { "strategy": "isr", "revalidate": 60, "expect": "s-maxage=60, stale-while-revalidate" },
+      { "strategy": "ssg", "revalidate": null, "expect": "public, max-age=0, must-revalidate" },
+      { "strategy": "csr", "revalidate": null, "expect": "public, max-age=0, must-revalidate" },
+      { "strategy": "ssr", "revalidate": null, "expect": "no-store" },
+      { "strategy": "ppr", "revalidate": null, "expect": "no-store" }
+    ]
+  }
+}

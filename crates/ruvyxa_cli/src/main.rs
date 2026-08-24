@@ -30,6 +30,7 @@ mod cli_args;
 mod client_bundle;
 mod commands;
 mod config;
+mod deploy_manifest;
 mod environment;
 mod host_resources;
 mod image_optimizer;
@@ -56,6 +57,7 @@ pub(crate) use cli_args::*;
 pub(crate) use client_bundle::*;
 pub(crate) use commands::*;
 pub(crate) use config::*;
+pub(crate) use deploy_manifest::*;
 pub(crate) use environment::*;
 pub(crate) use image_optimizer::{
     ImageOptimizationOptions, ImageOptimizationReport, optimize_public_images,

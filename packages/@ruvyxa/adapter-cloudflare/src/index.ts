@@ -110,6 +110,10 @@ const handler = createHandler({
     // ISR revalidation requires KV or Durable Objects (not yet supported).
     return null;
   },
+  // The project's own not-found page, pre-rendered by the build and carried
+  // inline in the manifest: an unmatched URL is answered with the page the
+  // application actually wrote, on every host.
+  notFoundDocument: manifest.notFoundDocument,
   supportedStrategies: ['ssr', 'ssg', 'csr', 'api'],
 });
 

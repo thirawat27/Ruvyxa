@@ -118,10 +118,36 @@ impl BuildHookPipeline {
                     ))
                 })?
             {
+                Self::validate_resolved_id(&path, specifier, host.host_name())?;
                 return Ok(Some(path));
             }
         }
         Ok(None)
+    }
+
+    /// Refuse a resolved id this bundler cannot open, and say what it needed.
+    ///
+    /// `build.onResolve` answers with a **path**, and the loader hook then
+    /// supplies its contents — the file itself need not exist. The two spellings
+    /// every other ecosystem uses for a virtual module are not paths, and both
+    /// were passed straight to the filesystem: `'\0virtual:x'` reached Windows
+    /// as `strings passed to WinAPI cannot contain NULs`, and `'virtual:x'` as
+    /// `The system cannot find the file specified`, each naming a plugin
+    /// nowhere in the message.
+    fn validate_resolved_id(path: &Path, specifier: &str, host: &str) -> Result<()> {
+        let text = path.to_string_lossy();
+        // A NUL can never be opened on any platform this runs on; the host
+        // above applies the rest of the rule, where the plugin's own string is
+        // still in hand.
+        if !text.contains('\0') {
+            return Ok(());
+        }
+        Err(BundleError::Compiler(format!(
+            "plugin host `{host}` resolved `{specifier}` to `{text}`, which is not a file path. \
+             A resolve hook answers with a path — the file itself may be virtual, and a load hook \
+             can supply its contents — so return something like \
+             `${{root}}/virtual-{specifier}.ts` rather than a bare or NUL-prefixed id."
+        )))
     }
 
     pub fn load(&self, id: &Path, context: &BuildHookContext) -> Result<Option<TransformOutput>> {

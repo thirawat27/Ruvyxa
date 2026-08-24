@@ -263,6 +263,12 @@ export function createCollabClient(options: CollabClientOptions): CollabClient {
 
   function connect(): void {
     if (stopped) return
+    // A server render has no `location` to dial from, and Node has had a global
+    // `WebSocket` since 24 — so a `'use client'` provider rendered for the
+    // initial document opened a real connection per request, to
+    // `http://localhost/`, and left it open. Staying inert here is what makes
+    // the same component safe on both sides: the browser connects on mount.
+    if (!options.webSocket && !hasBrowserLocation()) return
     const current = ++generation
     socket = createSocket(collabUrl(options.url, room))
     socket.addEventListener('open', () => {
@@ -375,6 +381,19 @@ export function createCollabClient(options: CollabClientOptions): CollabClient {
       publish()
     },
   })
+}
+
+/**
+ * Whether this runtime is a browser with an address to dial from.
+ *
+ * A `'use client'` component still renders on the server for the initial
+ * document, and Node has carried a global `WebSocket` since 24 — so nothing
+ * stopped a server render from opening a connection, and `collabUrl` fell back
+ * to `http://localhost/` when there was no `location` to resolve against. The
+ * connection was per render and nothing closed it.
+ */
+function hasBrowserLocation(): boolean {
+  return typeof globalThis.location?.href === 'string'
 }
 
 function collabUrl(configured: string | undefined, room: string): string {

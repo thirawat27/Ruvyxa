@@ -1,3 +1,5 @@
+import type { DeployManifest } from './deploy-manifest.js'
+
 /**
  * Accepted values for `build.target`.
  *
@@ -847,6 +849,18 @@ export interface BuildContext {
    * serverless/edge handlers without evaluating project config a second time.
    */
   buildInfo?: Readonly<Record<string, unknown>>
+  /**
+   * The build's `deploy-manifest.json`, read once by the adapter runner.
+   *
+   * Says which routes may be answered from a file, which must reach the
+   * function, and what cache-control each class of emitted file carries.
+   * Adapters used to re-derive all three from route metadata, one copy each,
+   * and the copies disagreed. `undefined` when the output came from a Ruvyxa
+   * older than the manifest, or newer than this package understands; the
+   * helpers in `deploy-manifest.ts` all fall back to deriving it, so an adapter
+   * keeps working either way.
+   */
+  deployManifest?: DeployManifest | null
 }
 
 /** The platforms the adapters in this repository target. */

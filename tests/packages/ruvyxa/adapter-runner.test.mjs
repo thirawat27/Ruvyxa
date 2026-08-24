@@ -318,7 +318,7 @@ export default createHandler({ routes, importPage: loadRouteModule, importApi: l
       // reading the source it was compiled from.
       assert.equal(
         await renderThroughFunction(functionDir, '/mode'),
-        '<!doctype html><body><main>production</main></body>',
+        '<!doctype html><head><meta name="viewport" content="width=device-width, initial-scale=1"></head><body><main>production</main></body>',
       )
     } finally {
       await rm(root, { recursive: true, force: true })
@@ -589,7 +589,10 @@ export default handler
       )
       const pageResponse = await handler(new Request('http://localhost/hello/Ada'))
       assert.equal(pageResponse.status, 200)
-      assert.equal(await pageResponse.text(), '<!doctype html><body><main>Hello Ada</main></body>')
+      assert.equal(
+        await pageResponse.text(),
+        '<!doctype html><head><meta name="viewport" content="width=device-width, initial-scale=1"></head><body><main>Hello Ada</main></body>',
+      )
 
       const apiResponse = await handler(
         new Request('http://localhost/api/echo', { method: 'POST', body: 'payload' }),
