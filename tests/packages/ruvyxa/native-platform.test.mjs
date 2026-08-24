@@ -4,6 +4,7 @@ import { describe, it } from 'node:test'
 
 import {
   nativeBinaryPackageName,
+  nativeBinaryVersionError,
   exitCodeForSpawnResult,
   supportedPlatforms,
 } from '../../../packages/ruvyxa/scripts/native-platform.mjs'
@@ -26,9 +27,47 @@ describe('Ruvyxa CLI platforms', () => {
       executable: 'ruvyxa.exe',
     })
     assert.equal(nativeBinaryPackageName('win32-arm64'), '@ruvyxa/cli-win32-arm64')
-    assert.equal(ruvyxaPackage.optionalDependencies['@ruvyxa/cli-win32-arm64'], 'workspace:^')
+    assert.equal(ruvyxaPackage.optionalDependencies['@ruvyxa/cli-win32-arm64'], 'workspace:*')
     assert.deepEqual(windowsArmPackage.os, ['win32'])
     assert.deepEqual(windowsArmPackage.cpu, ['arm64'])
+  })
+
+  /**
+   * The native binary and this package are one release, and the pin is what
+   * keeps them one install.
+   *
+   * `workspace:^` publishes as a caret range, so `ruvyxa@1.0.31` accepted
+   * `@ruvyxa/cli-*@1.1.0`. A release that published the platform packages and
+   * then failed before the framework left exactly that on the registry, and a
+   * clean install of the older version silently picked up the newer bundler.
+   * `workspace:*` publishes the exact version instead.
+   */
+  it('pins every platform package to this exact version', () => {
+    const pins = ruvyxaPackage.optionalDependencies
+    for (const platformKey of Object.keys(supportedPlatforms)) {
+      assert.equal(
+        pins[nativeBinaryPackageName(platformKey)],
+        'workspace:*',
+        `${platformKey} must resolve the binary built from this release, not a later one`,
+      )
+    }
+    assert.equal(Object.keys(pins).length, Object.keys(supportedPlatforms).length)
+  })
+
+  /** The check that notices a mismatched pair the pin did not prevent. */
+  it('refuses a binary from a different release, and only then', () => {
+    assert.equal(nativeBinaryVersionError('1.1.0', '1.1.0', '@ruvyxa/cli-linux-x64'), null)
+
+    const message = nativeBinaryVersionError('1.0.31', '1.1.0', '@ruvyxa/cli-linux-x64')
+    assert.match(message, /version mismatch/)
+    assert.match(message, /1\.0\.31/)
+    assert.match(message, /1\.1\.0/)
+    assert.match(message, /@ruvyxa\/cli-linux-x64/)
+
+    // An unreadable manifest is not evidence that the pair is wrong, and a
+    // guess would refuse a working install.
+    assert.equal(nativeBinaryVersionError(null, '1.1.0', '@ruvyxa/cli-linux-x64'), null)
+    assert.equal(nativeBinaryVersionError('1.1.0', null, '@ruvyxa/cli-linux-x64'), null)
   })
 
   it('builds Linux release packages against static musl targets', () => {

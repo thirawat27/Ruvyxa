@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process'
-import { chmodSync, existsSync } from 'node:fs'
+import { chmodSync, existsSync, readFileSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -8,6 +8,7 @@ import {
   currentPlatformKey,
   exitCodeForSpawnResult,
   nativeBinaryPackageName,
+  nativeBinaryVersionError,
 } from '../scripts/native-platform.mjs'
 
 const here = dirname(fileURLToPath(import.meta.url))
@@ -61,17 +62,57 @@ function findBinary() {
 
   const optionalPackage = optionalBinaryPackageName()
   if (optionalPackage) {
-    try {
-      const packageJson = import.meta.resolve(`${optionalPackage}/package.json`)
-      const packageRoot = dirname(fileURLToPath(packageJson))
-      const optionalBinary = join(packageRoot, 'bin', executable)
-      if (existsSync(optionalBinary)) return prepareExecutable(optionalBinary)
-    } catch {
-      // Optional platform package is absent on unsupported platforms.
+    const optionalRoot = resolveOptionalPackageRoot(optionalPackage)
+    if (optionalRoot) {
+      const optionalBinary = join(optionalRoot, 'bin', executable)
+      if (existsSync(optionalBinary)) {
+        // Outside the resolution `try` on purpose: a catch wide enough to
+        // cover this refusal would turn it into "binary not found", which is
+        // a different problem with a different fix.
+        refuseOnVersionMismatch(optionalRoot, optionalPackage)
+        return prepareExecutable(optionalBinary)
+      }
     }
   }
 
   return null
+}
+
+/** Directory of the installed platform package, or null when it is absent. */
+function resolveOptionalPackageRoot(optionalPackage) {
+  try {
+    return dirname(fileURLToPath(import.meta.resolve(`${optionalPackage}/package.json`)))
+  } catch {
+    // Absent on an unsupported platform; `findBinary` reports that itself.
+    return null
+  }
+}
+
+/**
+ * Stop when the platform package and this one are from different releases.
+ *
+ * Only this path can drift. A binary found in `target/` or in `native-bin/`
+ * was produced from this package's own version; one resolved through
+ * `optionalDependencies` is whatever the registry and the lockfile agreed on.
+ */
+function refuseOnVersionMismatch(optionalRoot, optionalPackage) {
+  const message = nativeBinaryVersionError(
+    readPackageVersion(packageRoot),
+    readPackageVersion(optionalRoot),
+    optionalPackage,
+  )
+  if (!message) return
+  console.error(message)
+  process.exit(1)
+}
+
+function readPackageVersion(root) {
+  try {
+    return JSON.parse(readFileSync(join(root, 'package.json'), 'utf8')).version ?? null
+  } catch {
+    // Unreadable: `nativeBinaryVersionError` declines to guess.
+    return null
+  }
 }
 
 function findSourceBinary() {

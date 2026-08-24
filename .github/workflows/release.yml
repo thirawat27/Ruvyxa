@@ -185,8 +185,17 @@ jobs:
             sleep "$delay"
           done
           pnpm install --frozen-lockfile --prefer-offline
+      # Only the packages that get published. An unfiltered `pnpm -r build`
+      # also builds `examples/demo`, whose build script is
+      # `cargo run -p ruvyxa_cli` — and this is the one cargo-touching job in
+      # this workflow with no `dtolnay/rust-toolchain` step, so it would use
+      # whatever rustc the runner image happens to ship. That was below the
+      # workspace MSRV the day it was raised to 1.98, and the release failed
+      # here after the native packages had already published. Nothing in CI
+      # can catch it: every job there installs Rust before building, and this
+      # job only runs on a tag. Keep the publish path free of cargo.
       - name: Build packages
-        run: pnpm -r build
+        run: pnpm -r --filter './packages/**' build
         env:
           SKIP_NATIVE_BUILD: '1'
       - name: Validate release metadata

@@ -177,11 +177,11 @@
     "@types/node": "24.13.3"
   },
   "optionalDependencies": {
-    "@ruvyxa/cli-darwin-arm64": "workspace:^",
-    "@ruvyxa/cli-linux-arm64": "workspace:^",
-    "@ruvyxa/cli-linux-x64": "workspace:^",
-    "@ruvyxa/cli-win32-arm64": "workspace:^",
-    "@ruvyxa/cli-win32-x64": "workspace:^"
+    "@ruvyxa/cli-darwin-arm64": "workspace:*",
+    "@ruvyxa/cli-linux-arm64": "workspace:*",
+    "@ruvyxa/cli-linux-x64": "workspace:*",
+    "@ruvyxa/cli-win32-arm64": "workspace:*",
+    "@ruvyxa/cli-win32-x64": "workspace:*"
   },
   "scripts": {
     "build": "node scripts/sync-shared-runtime.mjs --check && tsc -p tsconfig.json",
