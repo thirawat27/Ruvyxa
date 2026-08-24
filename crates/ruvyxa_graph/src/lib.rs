@@ -1429,11 +1429,17 @@ fn resolve_layout_file(app_dir: &Path, layout_id: &str) -> Option<PathBuf> {
         .unwrap_or_else(|_| layout.clone());
     let candidates = [project_root.join(&layout), app_dir.join(app_relative)];
 
+    // `normalized_canonical_path`, not `Path::canonicalize`: the raw call
+    // returns the Windows extended-length prefix, and every caller feeds this
+    // path into `ModuleCache`, which keys on it. The cache normalizes on the
+    // way in, so nothing is wrong today — but handing out a verbatim path is
+    // the shape that broke server-component builds once already, and the next
+    // caller has no reason to expect it.
     candidates.into_iter().find_map(|candidate| {
         [candidate.clone(), candidate.with_extension("tsx")]
             .into_iter()
             .find(|file| file.is_file())
-            .and_then(|file| file.canonicalize().ok().or(Some(file)))
+            .map(|file| normalized_canonical_path(&file))
     })
 }
 

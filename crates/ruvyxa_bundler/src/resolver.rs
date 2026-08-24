@@ -1374,9 +1374,14 @@ fn resolve_export_target(pkg_dir: &Path, target: &str) -> Option<PathBuf> {
     // Canonicalize to verify existence, then strip Windows verbatim prefixes so
     // module paths compare equal across every resolver branch (shared-route
     // chunk planning keys on these paths).
-    pkg_dir.join(relative).canonicalize().ok()?;
+    //
+    // The existence probe and the compared path are the same canonicalization,
+    // so it is taken once. `normalized_canonical_path` cannot stand in for the
+    // probe: it falls back to its argument when canonicalization fails, which
+    // would admit a subpath that does not exist.
+    let canonical = pkg_dir.join(relative).canonicalize().ok()?;
+    let candidate = ruvyxa_diagnostics::without_verbatim_prefix(&canonical);
     let package_root = ruvyxa_diagnostics::normalized_canonical_path(pkg_dir);
-    let candidate = ruvyxa_diagnostics::normalized_canonical_path(&pkg_dir.join(relative));
     candidate.starts_with(package_root).then_some(candidate)
 }
 
@@ -2139,13 +2144,15 @@ fn resolve_file_candidate(joined: &Path) -> Option<PathBuf> {
         joined.join("index.mdx"),
     ];
 
-    candidates.into_iter().find(|p| p.is_file()).map(|p| {
-        if p.canonicalize().is_ok() {
-            ruvyxa_diagnostics::normalized_canonical_path(&p)
-        } else {
-            p
-        }
-    })
+    // `normalized_canonical_path` already falls back to its argument when
+    // canonicalization fails, so probing with a separate `canonicalize()` only
+    // repeated the syscall on the path that succeeds — the branch could not
+    // change the answer. One call per resolved module, on the hottest path in
+    // the resolver.
+    candidates
+        .into_iter()
+        .find(|p| p.is_file())
+        .map(|p| ruvyxa_diagnostics::normalized_canonical_path(&p))
 }
 
 fn is_project_local(path: &Path, project_root: &Path) -> bool {

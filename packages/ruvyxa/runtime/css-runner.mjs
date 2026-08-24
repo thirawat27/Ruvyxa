@@ -27,23 +27,6 @@ import { createRequire } from 'node:module'
 import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
-const CONFIG_FILE_NAMES = Object.freeze([
-  'postcss.config.mjs',
-  'postcss.config.js',
-  'postcss.config.cjs',
-  'postcss.config.ts',
-  'postcss.config.mts',
-  'postcss.config.cts',
-  'postcss.config.json',
-  '.postcssrc.mjs',
-  '.postcssrc.js',
-  '.postcssrc.cjs',
-  '.postcssrc.json',
-  '.postcssrc',
-])
-
-export { CONFIG_FILE_NAMES }
-
 async function main() {
   const requestFile = process.argv[2]
   if (!requestFile) {

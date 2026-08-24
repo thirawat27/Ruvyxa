@@ -1,0 +1,24 @@
+{
+  "description": "File extensions the two module graphs compile into a module.",
+  "why": "crates/ruvyxa_bundler/src/compiler.rs resolves and compiles the client graph; packages/ruvyxa/runtime/compiler.mjs does the same for the server and prerender graph. Each keeps its own list because neither can import the other's, and a project is built by whichever graph owns that lane. An extension one accepts and the other refuses is a build that succeeds on the client and fails at prerender with RUV1806 naming a dependency the application never wrote.",
+  "note": "Both hosts match case-insensitively: sources with an upper-case extension exist on case-insensitive filesystems, and rejecting them in one graph only would be the same divergence in a costume. `extensions` is the canonical lower-case spelling; `acceptedCasing` pins the folding.",
+  "extensions": [
+    ".ts",
+    ".tsx",
+    ".js",
+    ".jsx",
+    ".mts",
+    ".cts",
+    ".mjs",
+    ".cjs",
+    ".md",
+    ".mdx",
+    ".json",
+    ".css",
+    ".scss",
+    ".sass"
+  ],
+  "acceptedCasing": [".TS", ".Tsx", ".JSON", ".MJS"],
+  "rejected": [".node", ".wasm", ".txt", ".yaml", ".html", ".vue"],
+  "extensionlessIsAccepted": true
+}

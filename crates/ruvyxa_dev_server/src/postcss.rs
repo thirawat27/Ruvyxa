@@ -21,11 +21,17 @@ use std::process::Command;
 use ruvyxa_diagnostics::{Diagnostic, Result, RuvyxaError};
 use serde::Deserialize;
 
-/// Configuration filenames recognised at the project root.
+/// Configuration filenames recognised at the project root, in priority order:
+/// the first that exists is the project's PostCSS configuration.
 ///
-/// Mirrors `CONFIG_FILE_NAMES` in `packages/ruvyxa/runtime/css-runner.mjs`;
-/// the Rust side decides whether a project has PostCSS at all, so the two lists
-/// have to agree or a config would be found by one and rejected by the other.
+/// This is the only such list. `packages/ruvyxa/runtime/css-runner.mjs` carried
+/// a second copy, which its doc comment here described as a mirror the two had
+/// to keep in agreement — but the runner never consulted it. Detection happens
+/// entirely on this side, and the runner is handed the resolved `configFile`
+/// path in its request, so the copy could not accept or reject anything. A
+/// comment promising a contract that does not exist is worse than no comment,
+/// because it tells the next reader a gate is watching this list. The copy is
+/// gone; keep this list single.
 const CONFIG_FILE_NAMES: &[&str] = &[
     "postcss.config.mjs",
     "postcss.config.js",

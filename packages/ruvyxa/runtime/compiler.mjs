@@ -2323,7 +2323,7 @@ function isJsonModuleFile(file) {
 /// The alternative is what this replaces: the file reaches the JavaScript
 /// transform and Oxc reports a syntax error inside a dependency the application
 /// never wrote, with no indication of which import pulled it in.
-function assertSupportedModuleKind(resolved, specifier, importer) {
+export function assertSupportedModuleKind(resolved, specifier, importer) {
   const extension = path.extname(resolved).toLowerCase()
   if (!extension || MODULE_KIND_EXTENSIONS.has(extension)) return
   throw new Error(

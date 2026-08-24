@@ -1206,6 +1206,59 @@ mod tests {
         reject_unsupported_module_kind("", Path::new("bin/cli")).unwrap();
     }
 
+    /// Both module graphs compile the same set of extensions.
+    ///
+    /// The JavaScript half is
+    /// `tests/packages/ruvyxa/module-kind-contract.test.mjs` over
+    /// `assertSupportedModuleKind` in `packages/ruvyxa/runtime/compiler.mjs`.
+    /// The two lists cannot be shared as code, and the doc comment on
+    /// [`MODULE_KIND_EXTENSIONS`] used to be the only thing asking them to
+    /// agree — the arrangement `tests/fixtures/` exists to replace. An
+    /// extension accepted here and refused there is a build that passes on the
+    /// client and fails at prerender.
+    #[test]
+    fn compilable_module_kinds_match_the_shared_conformance_table() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/module-kind-conformance.json"
+        ))
+        .unwrap();
+
+        // The fixture writes extensions the way a file name does, with the
+        // leading dot; this side stores them without one.
+        let expected = fixture["extensions"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap().trim_start_matches('.'))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            expected, MODULE_KIND_EXTENSIONS,
+            "the compilable extension list disagrees with the shared fixture; the RUV1806 message both hosts print lists it in this order"
+        );
+
+        for value in fixture["acceptedCasing"].as_array().unwrap() {
+            let written = value.as_str().unwrap().trim_start_matches('.');
+            reject_unsupported_module_kind(written, Path::new("module")).unwrap_or_else(|error| {
+                panic!("upper-case extension .{written} must compile: {error}")
+            });
+        }
+
+        for value in fixture["rejected"].as_array().unwrap() {
+            let written = value.as_str().unwrap().trim_start_matches('.');
+            assert!(
+                reject_unsupported_module_kind(written, Path::new("module")).is_err(),
+                "the shared fixture refuses .{written}, this graph accepts it"
+            );
+        }
+
+        assert_eq!(
+            fixture["extensionlessIsAccepted"].as_bool(),
+            Some(true),
+            "the fixture describes the extensionless case both hosts allow"
+        );
+        reject_unsupported_module_kind("", Path::new("bin/cli")).unwrap();
+    }
+
     /// Sources whose `@` is not a decorator, and decorators that are hard to
     /// measure.
     ///

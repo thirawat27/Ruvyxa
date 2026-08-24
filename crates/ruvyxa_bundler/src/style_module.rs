@@ -1,7 +1,7 @@
 //! Deterministic CSS Modules naming and Sass compilation shared with style collection.
 
 use std::collections::BTreeMap;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 /// CSS produced for a module together with its JavaScript-facing class map.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -342,11 +342,21 @@ fn fnv1a_64(input: &[u8]) -> u64 {
     hash
 }
 
+/// The project-relative key a CSS Module's scoped class names hash from.
+///
+/// Both sides go through `normalized_canonical_path` rather than
+/// `Path::canonicalize`, because the two fallbacks have to have the same shape.
+/// On Windows `canonicalize` returns the extended-length `\\?\` prefix while
+/// the fallback does not, so a module whose file cannot be canonicalized — a
+/// generated or virtual stylesheet — produced an unprefixed path against a
+/// prefixed root, `strip_prefix` failed, and the *absolute* path became the
+/// hash input. That bakes the build machine's directory layout into a class
+/// name shipped in the CSS and the JavaScript, so two machines building one
+/// project disagree. `verify:reproducible` cannot see it: it builds twice on
+/// the same machine, where the wrong answer is still the same wrong answer.
 pub(crate) fn normalized_relative_path(path: &Path, project_root: &Path) -> String {
-    let path = path.canonicalize().unwrap_or_else(|_| PathBuf::from(path));
-    let root = project_root
-        .canonicalize()
-        .unwrap_or_else(|_| PathBuf::from(project_root));
+    let path = ruvyxa_diagnostics::normalized_canonical_path(path);
+    let root = ruvyxa_diagnostics::normalized_canonical_path(project_root);
     path.strip_prefix(&root)
         .unwrap_or(&path)
         .display()
