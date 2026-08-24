@@ -44,8 +44,8 @@ import { actionReferenceId } from './action-runtime.mjs'
 // zone while that await is pending, so reading one from the build path threw
 // `Cannot access before initialization` — the same trap `isNullBodyStatus` in
 // plugin-runtime.mjs documents.
-/** The file `ruvyxa build` writes its deployment description to. */
-const DEPLOY_MANIFEST_FILE = 'deploy-manifest.json'
+/** The key the deployment description occupies in `manifest.json`. */
+const DEPLOY_MANIFEST_KEY = 'deploy'
 
 /**
  * The pre-rendered not-found document, inside the prerender directory.
@@ -203,11 +203,15 @@ async function loadBuildInfo(buildDir) {
  * rather than guessed at: `parseDeployManifest` returns null, and every helper
  * that reads the manifest falls back to deriving the same answer, which is what
  * each adapter did before the manifest existed.
+ *
+ * Read from the `deploy` section of `manifest.json`, not from a file of its
+ * own: an older build simply has no such section, which the same fallback
+ * covers.
  */
 async function loadDeployManifest(buildDir) {
   try {
-    const source = await readFile(path.join(buildDir, DEPLOY_MANIFEST_FILE), 'utf8')
-    const manifest = JSON.parse(source)
+    const source = await readFile(path.join(buildDir, 'manifest.json'), 'utf8')
+    const manifest = JSON.parse(source)[DEPLOY_MANIFEST_KEY]
     // The same three checks `parseDeployManifest` makes in @ruvyxa/core, which
     // this file cannot import: the runtime ships as plain `.mjs` beside the
     // framework package and resolves no workspace specifiers. Both are replayed
@@ -691,6 +695,12 @@ function artifactDestination(buildDir, artifactPath) {
 async function materializeFunction(buildDir, destination, handlerSource, target) {
   const manifestPath = path.join(buildDir, 'manifest.json')
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+
+  // How to *serve* the build is a build-time question, answered by the adapter
+  // before this directory exists. The function routes with the manifest and has
+  // no use for the deploy section, and on an edge runtime the whole registry is
+  // inlined into one worker — so it is dropped rather than shipped.
+  delete manifest[DEPLOY_MANIFEST_KEY]
 
   // A function artifact is a complete deployment unit. Replacing it prevents
   // removed or renamed route bundles from surviving incremental builds.

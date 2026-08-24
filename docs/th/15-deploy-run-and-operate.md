@@ -72,6 +72,69 @@ socket upgrade ซึ่ง build artifact ทำไม่ได้; `ruvyxa bui
 การเลือก adapter ที่ให้บริการสิ่งที่โปรเจกต์ใช้ไม่ได้ จะทำให้ build ล้มเหลว แทนที่จะ deploy
 เว็บที่ตอบ 404: static adapter ที่มี server action หรือ plugin HTTP route จะรายงาน `RUV2204`
 
+## build output คือสัญญา
+
+build ชุดเดียว deploy ได้ทุกที่เพราะ build อธิบายตัวเองไว้ — `ruvyxa build` จะเขียนส่วน `deploy`
+ลงใน `manifest.json`: คำอธิบายที่มีเลขเวอร์ชันและไม่ผูกกับผู้ให้บริการรายใด ว่า build สร้างอะไรออกมา
+และต้องเสิร์ฟอย่างไร adapter ทุกตัวอ่านส่วนนี้แทนการเดาเอาเองจาก route metadata
+และอะไรก็ตามที่คุณวางไว้หน้า build ก็อ่านได้เหมือนกัน
+
+ที่เป็นส่วนหนึ่งของไฟล์เดิม ไม่ใช่ไฟล์แยก เพราะต้องการให้ manifest เดียวอธิบาย build ทั้งหมด
+ส่วนสำเนาที่ถูกคัดลอกเข้าไปในโฟลเดอร์ฟังก์ชันจะถูกตัดส่วนนี้ออก — "เสิร์ฟอย่างไร" เป็นคำถามตอน build
+ฟังก์ชันที่กำลังรันอยู่ไม่ได้ใช้คำตอบนั้น
+
+```jsonc
+// .ruvyxa/manifest.json
+{
+  "appDir": "app",
+  "routes": [/* the route graph, unchanged */],
+  "deploy": {
+    "version": 1,
+    "framework": "ruvyxa",
+    "buildId": "…", // derived from the emitted output, not a timestamp
+    "directories": { "client": "client", "assets": "assets", "prerender": "prerender" },
+    "routes": [
+      {
+        "path": "/",
+        "serve": "static", // answerable from a file
+        "strategy": "ssg",
+        "document": "index.html",
+        "cacheControl": "public, max-age=0, must-revalidate",
+      },
+      {
+        "path": "/cached",
+        "serve": "function", // must reach the server
+        "strategy": "isr",
+        "revalidate": 60,
+        "cacheControl": "s-maxage=60, stale-while-revalidate",
+      },
+    ],
+    "staticPaths": ["/"],
+    "functionPaths": ["/cached", "/api/health"],
+    "headers": [
+      { "source": "/__ruvyxa/client/(.*)", "headers": { "cache-control": "…, immutable" } },
+    ],
+    "notFound": { "status": 404, "document": "404.html" },
+  },
+}
+```
+
+สามข้อที่ควรรู้ แม้จะไม่เคยเปิดไฟล์นี้เลย:
+
+- **static กับ dynamic ถูกแยกให้แล้ว** `serve: "static"` แปลว่า CDN ตอบ URL นั้นจากไฟล์ได้ ส่วน
+  `serve: "function"` แปลว่าคำขอต้องวิ่งถึงเซิร์ฟเวอร์ หน้า ISR/PPR เป็น `function`
+  เสมอแม้จะมีเอกสาร พร้อมอยู่ — โฮสต์ที่ตอบจากไฟล์จะเสิร์ฟภาพนิ่งตอน build ไปตลอดกาล
+  และไม่มีวันเรียกโค้ดที่ทำ revalidate
+- **`buildId` มาจากผลลัพธ์ ไม่ใช่แสตมป์** เป็นแฮชของสิ่งที่ emit ออกมา ซอร์สเดิมจึงได้ id เดิม
+  และผลลัพธ์ที่เปลี่ยนก็เก็บ id เดิมไว้ไม่ได้ นั่นคือเหตุผลที่มันอยู่ใน build ที่ reproducible ได้
+- **`version` คือจุดที่ยอมปฏิเสธ** adapter ที่เขียนตามเวอร์ชัน 1 ใช้ได้เรื่อย ๆ เมื่อมีการเพิ่มฟิลด์
+  แต่ถ้าความหมายของฟิลด์เดิมเปลี่ยน เวอร์ชันจะขยับ และ adapter รุ่นเก่าจะปฏิเสธ build
+  แทนที่จะอ่านผิด
+
+`404.html` ในโฟลเดอร์ prerender ก็แนวคิดเดียวกัน ถ้าโปรเจกต์มี `app/not-found.tsx` build จะเรนเดอร์
+ไว้หนึ่งครั้งพร้อม root layout และ stylesheet ของคุณ: static host เสิร์ฟไฟล์นี้ให้ URL ที่ไม่มี
+route โดยไม่ต้องตั้งค่าอะไร ส่วน build ที่มีฟังก์ชันก็พกไบต์ชุดเดียวกันไปตอบเอง
+
 ## Reproducible build
 
 source เดิมกับ config เดิม จะได้ output เป็น byte เดิมเสมอ ไม่ว่ารันบนเครื่องไหน นี่เป็นคุณสมบัติที่

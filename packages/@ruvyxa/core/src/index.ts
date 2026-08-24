@@ -43,7 +43,7 @@ export type {
 } from './types.js'
 export type * from './plugin.js'
 export {
-  DEPLOY_MANIFEST_FILE,
+  DEPLOY_MANIFEST_KEY,
   DEPLOY_MANIFEST_VERSION,
   DOCUMENT_CACHE_CONTROL,
   deployHeaderRules,

@@ -850,7 +850,8 @@ export interface BuildContext {
    */
   buildInfo?: Readonly<Record<string, unknown>>
   /**
-   * The build's `deploy-manifest.json`, read once by the adapter runner.
+   * The `deploy` section of the build's `manifest.json`, read once by the
+   * adapter runner.
    *
    * Says which routes may be answered from a file, which must reach the
    * function, and what cache-control each class of emitted file carries.

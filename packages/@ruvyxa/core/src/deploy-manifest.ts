@@ -14,6 +14,8 @@
  * never invoked, and `revalidate` silently becomes decoration. An adapter that
  * forgets the rule produces a deployment that looks completely correct.
  *
+ * The description lives in the `deploy` section of the build's `manifest.json`.
+ *
  * The rules in this file are replayed against
  * `tests/fixtures/deploy-output-conformance.json`, the same table the Rust
  * writer (`crates/ruvyxa_cli/src/deploy_manifest.rs`) is tested against, so the
@@ -27,8 +29,16 @@
 import { IMMUTABLE_CACHE_CONTROL, PUBLIC_ASSET_CACHE_CONTROL } from './utils.js'
 import type { RenderStrategy } from './types.js'
 
-/** The file a build writes its deployment description to, inside the build output. */
-export const DEPLOY_MANIFEST_FILE = 'deploy-manifest.json'
+/**
+ * The key the deployment description occupies in the build's `manifest.json`.
+ *
+ * One manifest, not two. A second top-level file describing the same routes was
+ * one more thing to find, to keep in sync, and to guess the authority of, and
+ * the route manifest is already what every consumer opens. The copy written
+ * into a function directory has this section removed: how to *serve* a build is
+ * a build-time question, and a serverless bundle should not carry the answer.
+ */
+export const DEPLOY_MANIFEST_KEY = 'deploy'
 
 /**
  * The contract version this package understands.
@@ -101,7 +111,6 @@ export interface DeployManifest {
   functionPaths: string[]
   prerendered: DeployPrerenderedPath[]
   notFound: DeployNotFound | null
-  i18n: unknown
 }
 
 /** Every rendering strategy, in one place, so the derivations below are total. */
@@ -185,7 +194,10 @@ export function deployHeaderRules(manifest?: DeployManifest | null): DeployHeade
 }
 
 /**
- * Read a deployment manifest out of a parsed JSON value, or `null`.
+ * Read a deployment description out of a parsed JSON value, or `null`.
+ *
+ * The value is the `deploy` section of a build's `manifest.json`; `null` for a
+ * build that predates it.
  *
  * A build from a newer Ruvyxa with a higher contract version is rejected rather
  * than partially understood: an adapter that guessed at fields it does not know

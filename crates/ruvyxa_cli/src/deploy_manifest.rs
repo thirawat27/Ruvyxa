@@ -11,11 +11,18 @@
 //! cache-control strings ended up hand-written in six places with one of them
 //! drifted.
 //!
-//! `deploy-manifest.json` answers both once, in the one place that already
-//! knows: the build that produced the output. It is a *derived* document — no
-//! field is a stamp somebody has to remember to bump — and it is versioned, so
-//! an adapter can refuse a build it does not understand instead of misreading
-//! it.
+//! The `deploy` section of `manifest.json` answers both once, in the one place
+//! that already knows: the build that produced the output. It is a *derived*
+//! document — no field is a stamp somebody has to remember to bump — and it is
+//! versioned, so an adapter can refuse a build it does not understand instead
+//! of misreading it.
+//!
+//! It lives inside the route manifest rather than beside it. A second top-level
+//! file describing the same routes is one more thing to find, to keep in sync,
+//! and to guess the authority of; the route manifest is already what every
+//! consumer opens. The copy written into a function directory has this section
+//! removed — how to *serve* a build is a build-time question, and a serverless
+//! bundle should not carry the answer.
 //!
 //! The classification rules themselves live in
 //! `tests/fixtures/deploy-output-conformance.json`, replayed here and by
@@ -30,8 +37,12 @@ use ruvyxa_graph::{RouteKind, RouteManifest, RuntimeTarget};
 use crate::artifact_cache::content_hash;
 use crate::prerender::{NOT_FOUND_DOCUMENT_FILE, PrerenderedRoute};
 
-/// The file a build writes its deployment description to.
-pub(crate) const DEPLOY_MANIFEST_FILE: &str = "deploy-manifest.json";
+/// The key the deployment description occupies in `manifest.json`.
+///
+/// One manifest, not two. A second top-level file describing the same routes
+/// left a reader with no way to tell which one was authoritative, and the route
+/// manifest is already what every consumer opens.
+pub(crate) const DEPLOY_MANIFEST_KEY: &str = "deploy";
 
 /// The version of the deployment-output contract this build writes.
 ///
@@ -248,7 +259,9 @@ pub(crate) fn deploy_manifest(input: &DeployManifestInput<'_>) -> serde_json::Va
             "status": 404,
             "document": NOT_FOUND_DOCUMENT_FILE,
         })),
-        "i18n": input.manifest.i18n,
+        // No `i18n` here: this section sits inside the route manifest, which
+        // already carries it. Repeating a value one level up is a second place
+        // for it to be wrong.
     })
 }
 

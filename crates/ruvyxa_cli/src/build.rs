@@ -966,15 +966,16 @@ pub(crate) async fn build_with_cache_override(
         serde_json::to_string_pretty(&build_info)?,
     )?;
 
-    // The deployment description, written for whoever has to serve this build.
+    // The deployment description, added to the route manifest for whoever has
+    // to serve this build.
     //
     // `build.json` reports what the build did; this says how the result must be
     // served — which URLs a CDN may answer from a file, which must reach the
     // function, and what cache-control each class of emitted file carries.
     // Adapters used to re-derive all of that from route metadata, one copy per
     // adapter, and the copies disagreed.
-    write_deploy_manifest(
-        &staging_dir,
+    attach_deploy_description(
+        &staging_dir.join("manifest.json"),
         &DeployManifestInput {
             manifest: &manifest,
             prerendered: &prerendered,
@@ -1402,16 +1403,25 @@ pub(crate) fn styled_render_symbol(strategy: RenderStrategy) -> String {
     }
 }
 
-/// Write the deployment description into the staged build output.
-fn write_deploy_manifest(
-    staging_dir: &Path,
+/// Add the deployment description to the route manifest.
+///
+/// Written into `manifest.json` under one key rather than beside it as a second
+/// file. Two top-level manifests that both describe routes gave a reader no way
+/// to tell which one was authoritative, and the route manifest is already the
+/// file everything downstream opens.
+fn attach_deploy_description(
+    manifest_path: &Path,
     input: &DeployManifestInput<'_>,
 ) -> anyhow::Result<()> {
-    let manifest = crate::deploy_manifest::deploy_manifest(input);
-    fs::write(
-        staging_dir.join(DEPLOY_MANIFEST_FILE),
-        serde_json::to_string_pretty(&manifest)?,
-    )?;
+    let mut manifest: serde_json::Value = serde_json::from_slice(&fs::read(manifest_path)?)?;
+    let Some(object) = manifest.as_object_mut() else {
+        anyhow::bail!("route manifest is not an object")
+    };
+    object.insert(
+        DEPLOY_MANIFEST_KEY.to_string(),
+        crate::deploy_manifest::deploy_manifest(input),
+    );
+    fs::write(manifest_path, serde_json::to_string_pretty(&manifest)?)?;
     Ok(())
 }
 
@@ -1476,8 +1486,7 @@ pub(crate) const BUILD_OUTPUT_DIRS: [&str; 6] = [
     "deploy",
     "static",
 ];
-pub(crate) const BUILD_OUTPUT_FILES: [&str; 3] =
-    ["manifest.json", "build.json", DEPLOY_MANIFEST_FILE];
+pub(crate) const BUILD_OUTPUT_FILES: [&str; 2] = ["manifest.json", "build.json"];
 // Default cap balances Node process memory against prerender throughput; an
 // explicit `build.parallelism` config value may raise it up to the pool limit.
 

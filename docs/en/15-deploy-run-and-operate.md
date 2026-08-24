@@ -75,6 +75,70 @@ Selecting an adapter that cannot serve something the project uses fails the buil
 deploying a site that answers 404: a static adapter with a server action or a plugin HTTP route
 reports `RUV2204`.
 
+## The build output is a contract
+
+One build deploys anywhere because the build describes itself. `ruvyxa build` writes a `deploy`
+section into `manifest.json`: a versioned, provider-agnostic account of what was produced and how it
+must be served. Every adapter reads it instead of re-deriving the same answers from route metadata,
+and so can anything else you put in front of a build.
+
+It is a section rather than a file of its own so that one manifest describes the build. The copy
+that travels inside a function bundle has the section removed — how to serve a build is a build-time
+question, and the running function has no use for the answer.
+
+```jsonc
+// .ruvyxa/manifest.json
+{
+  "appDir": "app",
+  "routes": [/* the route graph, unchanged */],
+  "deploy": {
+    "version": 1,
+    "framework": "ruvyxa",
+    "buildId": "…", // derived from the emitted output, not a timestamp
+    "directories": { "client": "client", "assets": "assets", "prerender": "prerender" },
+    "routes": [
+      {
+        "path": "/",
+        "serve": "static", // answerable from a file
+        "strategy": "ssg",
+        "document": "index.html",
+        "cacheControl": "public, max-age=0, must-revalidate",
+      },
+      {
+        "path": "/cached",
+        "serve": "function", // must reach the server
+        "strategy": "isr",
+        "revalidate": 60,
+        "cacheControl": "s-maxage=60, stale-while-revalidate",
+      },
+    ],
+    "staticPaths": ["/"],
+    "functionPaths": ["/cached", "/api/health"],
+    "headers": [
+      { "source": "/__ruvyxa/client/(.*)", "headers": { "cache-control": "…, immutable" } },
+    ],
+    "notFound": { "status": 404, "document": "404.html" },
+  },
+}
+```
+
+Three things in it are worth knowing even if you never read the file:
+
+- **Static and dynamic are separated for you.** `serve: "static"` means a CDN may answer that URL
+  from a file; `serve: "function"` means the request has to reach the server. An ISR or PPR page is
+  always `function` even though a document exists for it — a host that answered from the file would
+  serve the build-time snapshot forever and never invoke the code that revalidates it.
+- **`buildId` is derived, never stamped.** It is a hash of what was emitted, so the same sources
+  produce the same id and a changed output cannot keep the old one. That is what lets it sit inside
+  a reproducible build.
+- **`version` is a refusal point.** An adapter written against version 1 keeps working as fields are
+  added; if the meaning of an existing field ever changes, the version moves and an older adapter
+  refuses the build instead of misreading it.
+
+`404.html` in the prerender output is the same idea. If your project has `app/not-found.tsx`, the
+build renders it once, with your root layout and stylesheet: static hosts serve that file for an
+unmatched URL with no configuration, and function builds carry the same bytes and answer with them.
+
 ## Reproducible builds
 
 The same source and the same configuration produce the same output bytes, on any machine. This is a

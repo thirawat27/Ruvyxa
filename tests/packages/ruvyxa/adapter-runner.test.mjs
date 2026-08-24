@@ -88,7 +88,15 @@ describe('adapter runner', () => {
         await writeFile(path.join(outputDir, 'assets', 'logo.svg'), '<svg/>')
         await writeFile(path.join(outputDir, 'client', 'app.js'), 'export {}')
         await writeFile(path.join(outputDir, 'prerender', 'index.html'), '<main>home</main>')
-        await writeFile(path.join(outputDir, 'manifest.json'), JSON.stringify({ routes: [] }))
+        // With a `deploy` section, which is what a real build writes: the
+        // adapter reads it and the function bundle must not carry it.
+        await writeFile(
+          path.join(outputDir, 'manifest.json'),
+          JSON.stringify({
+            routes: [],
+            deploy: { version: 1, framework: 'ruvyxa', routes: [], staticPaths: [] },
+          }),
+        )
 
         const result = await runRunner(root, outputDir, adapter.name)
         assert.ok(result.result.length > 0, `${adapter.name} emitted no artifact descriptors`)
@@ -103,7 +111,19 @@ describe('adapter runner', () => {
           if (artifact.kind === 'function') {
             await readFile(path.join(resolved, 'index.mjs'), 'utf8')
             await readFile(path.join(resolved, 'serverless-handler.mjs'), 'utf8')
-            await readFile(path.join(resolved, 'manifest.mjs'), 'utf8')
+            const registry = await readFile(path.join(resolved, 'manifest.mjs'), 'utf8')
+            // How to serve the build is a build-time answer. The function
+            // routes with this manifest and has no use for the deploy section,
+            // and on an edge runtime the whole registry is inlined into one
+            // worker.
+            assert.ok(
+              !JSON.parse(await readFile(path.join(resolved, 'manifest.json'), 'utf8')).deploy,
+              `${adapter.name} shipped the deploy section inside its function bundle`,
+            )
+            assert.ok(
+              !registry.includes('"deploy"'),
+              `${adapter.name}: manifest.mjs carries deploy`,
+            )
           }
         }
       } finally {
