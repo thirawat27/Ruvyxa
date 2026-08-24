@@ -222,13 +222,22 @@ pub fn diagnostics_to_sarif(
             "tool": { "driver": {
                 "name": tool_name,
                 "version": tool_version,
-                "informationUri": "https://github.com/ruvyxa/ruvyxa",
+                "informationUri": PROJECT_URL,
                 "rules": rules,
             }},
             "results": results,
         }],
     })
 }
+
+/// Where a reader of a SARIF report is sent to find out what this tool is.
+///
+/// It named `github.com/ruvyxa/ruvyxa` — an owner this project has never used —
+/// so every report uploaded to a code-scanning dashboard linked somewhere that
+/// does not exist. Nothing pointed at it, in Rust or in the docs, so nothing
+/// noticed. Spelled once here and asserted below; the casing is the canonical
+/// one GitHub reports for the repository.
+const PROJECT_URL: &str = "https://github.com/thirawat27/Ruvyxa";
 
 /// Windows extended-length ("verbatim") path prefix that `canonicalize` adds.
 #[cfg(windows)]
@@ -316,6 +325,13 @@ mod path_tests {
         let sarif = diagnostics_to_sarif(&diagnostics, "Ruvyxa", "1.0.23", root);
 
         assert_eq!(sarif["version"], "2.1.0");
+        // The link a code-scanning dashboard renders. It pointed at a
+        // nonexistent owner for as long as this function had existed, because
+        // no assertion and no doc named it.
+        assert_eq!(
+            sarif["runs"][0]["tool"]["driver"]["informationUri"],
+            "https://github.com/thirawat27/Ruvyxa"
+        );
         assert_eq!(
             sarif["runs"][0]["tool"]["driver"]["rules"]
                 .as_array()

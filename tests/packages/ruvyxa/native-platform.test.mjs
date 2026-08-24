@@ -105,13 +105,30 @@ describe('Ruvyxa CLI platforms', () => {
       'utf8',
     )
 
-    assert.match(workspaceManifest, /rust-version = "1\.96"/)
+    // The floors themselves stay written down here, so moving one is a
+    // deliberate edit somebody reviews.
     assert.equal(workspacePackage.engines.node, '>=24.19.0')
     assert.equal(workspacePackage.packageManager, 'pnpm@11.22.0')
     assert.equal(ruvyxaPackage.engines.node, '>=24.19.0')
-    assert.match(ciWorkflow, /toolchain: 1\.96\.0/)
-    assert.match(ciWorkflow, /node: '24\.19\.0'/)
-    assert.equal([...ciWorkflow.matchAll(/node: '24\.19\.0'/g)].length, 5)
+
+    // What CI installs is derived from them rather than pinned again. A literal
+    // here made this test the third place to edit on an MSRV bump, and the one
+    // that gets forgotten: `Cargo.toml` and `ci.yml` moved to the new floor
+    // together while the assertion below still named the old one, so the only
+    // thing it caught was itself.
+    const [, rustVersion] = workspaceManifest.match(/^rust-version = "(\d+\.\d+)"$/m) ?? []
+    assert.ok(rustVersion, 'the workspace Cargo.toml must declare rust-version')
+    assert.ok(
+      ciWorkflow.includes(`toolchain: ${rustVersion}.0`),
+      `ci.yml must install the declared Rust floor ${rustVersion}.0`,
+    )
+
+    const nodeFloor = workspacePackage.engines.node.replace(/^>=/, '')
+    const nodePins = [...ciWorkflow.matchAll(/node: '(\d+\.\d+\.\d+)'/g)]
+    assert.equal(nodePins.length, 5)
+    for (const [, pinned] of nodePins) {
+      assert.equal(pinned, nodeFloor)
+    }
     assert.match(ciWorkflow, /node-version: \$\{\{ matrix\.node \}\}/)
   })
 

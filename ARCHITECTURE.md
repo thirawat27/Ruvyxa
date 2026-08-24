@@ -3447,7 +3447,7 @@ Produces SARIF 2.1.0:
         "driver": {
           "name": "ruvyxa",
           "version": "<the CLI crate version it was built from>",
-          "informationUri": "https://github.com/ruvyxa/ruvyxa",
+          "informationUri": "https://github.com/thirawat27/Ruvyxa",
           "rules": [
             {
               "id": "RUV1001",
