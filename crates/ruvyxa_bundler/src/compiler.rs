@@ -610,9 +610,36 @@ fn substitute_public_env(code: &str) -> String {
     out
 }
 
+/// The project's public environment, as the host loaded it.
+///
+/// A build reads `.env` and `.env.local` itself and hands the values to the
+/// processes that need them; it does not put them in its own environment, so
+/// this cannot be answered from `std::env` alone — a client bundle built that
+/// way substituted `Object.freeze({})` for every project that keeps its public
+/// values in a file, which is all of them.
+static PUBLIC_ENV: std::sync::OnceLock<std::collections::BTreeMap<String, String>> =
+    std::sync::OnceLock::new();
+
+/// Record the project environment this process compiles against.
+///
+/// Called once by the host before any bundling; a second call is ignored, so a
+/// caller cannot change what earlier output was built from.
+pub fn set_public_env(values: std::collections::BTreeMap<String, String>) {
+    let _ = PUBLIC_ENV.set(values);
+}
+
 /// `Object.freeze({...})` over every `RUVYXA_PUBLIC_*` value, in name order.
 fn public_env_literal() -> String {
-    let mut entries: Vec<(String, String)> = std::env::vars()
+    let mut entries: Vec<(String, String)> = PUBLIC_ENV
+        .get()
+        .map(|values| {
+            values
+                .iter()
+                .map(|(name, value)| (name.clone(), value.clone()))
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_else(|| std::env::vars().collect())
+        .into_iter()
         .filter(|(name, _)| name.starts_with("RUVYXA_PUBLIC_"))
         .collect();
     entries.sort();

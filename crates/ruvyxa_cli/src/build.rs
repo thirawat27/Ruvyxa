@@ -602,6 +602,12 @@ pub(crate) async fn build_with_cache_override(
 ) -> anyhow::Result<()> {
     let started = Instant::now();
     let config = load_project_config(&args.root)?;
+    // The project's `.env` values, recorded for the compilers that substitute
+    // `import.meta.env`. Read here rather than from this process's own
+    // environment: a build hands env values to the workers it spawns and never
+    // adopts them itself, so a client bundle asking `std::env` saw none of the
+    // project's public values.
+    ruvyxa_bundler::compiler::set_public_env(ruvyxa_dev_server::project_env(&args.root)?);
     let target = config.build_target(args.target);
     let app_dir = args.root.join(config.app_dir());
     let out_dir = args.root.join(config.out_dir());
