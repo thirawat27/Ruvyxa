@@ -1,7 +1,24 @@
-# @ruvyxa/adapter-railway
+<p align="center">
+  <a href="https://github.com/thirawat27/ruvyxa">
+    <img src="https://raw.githubusercontent.com/thirawat27/ruvyxa/main/assets/branding/ruvyxa.png" alt="Ruvyxa" width="140" height="140" />
+  </a>
+</p>
 
-Full-stack Railway adapter for Ruvyxa. Railway builds auto-select it through `RAILWAY_PROJECT_ID`;
-no `ruvyxa.config.ts` change or separate install is required.
+<h1 align="center">@ruvyxa/adapter-railway</h1>
+
+<p align="center">
+  Full-stack Railway adapter for Ruvyxa. Railway builds auto-select it through<br/>
+  <code>RAILWAY_PROJECT_ID</code>; no <code>ruvyxa.config.ts</code> change or separate install is<br/>
+  required.
+</p>
+
+<p align="center">
+  <a href="https://www.npmjs.com/package/@ruvyxa/adapter-railway"><img src="https://img.shields.io/npm/v/@ruvyxa/adapter-railway?style=flat-square" alt="npm version" /></a>
+  <a href="https://www.npmjs.com/package/@ruvyxa/adapter-railway"><img src="https://img.shields.io/node/v/@ruvyxa/adapter-railway?style=flat-square&label=node" alt="Supported Node version" /></a>
+  <img src="https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square" alt="License" />
+</p>
+
+---
 
 ```ts
 import { railway } from '@ruvyxa/adapter-railway'

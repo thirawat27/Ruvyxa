@@ -144,10 +144,12 @@ payload เดินทางมาใน data block `<script type="application/
 
 ### การติดตั้ง runtime
 
-Server components ต้องใช้ `react-server-dom-webpack` เวอร์ชันเดียวกับ React:
+Server components ต้องใช้ `react-server-dom-webpack` ที่เป็นเวอร์ชัน **ตรงกันเป๊ะ** กับ React
+ที่โปรเจกต์ resolve ได้อยู่ ไม่ใช่แค่ range ที่เข้ากันได้ ให้อ่านค่าก่อนแล้วค่อยติดตั้ง:
 
 ```bash
-npm install react-server-dom-webpack@19.2.8
+npm ls react
+npm install react-server-dom-webpack@<เวอร์ชันที่พิมพ์ออกมา>
 ```
 
 แพ็กเกจนี้เป็น optional: แอปที่ไม่เคยเขียน export นี้ก็ไม่ต้องมี และ route ที่เขียนจะได้ `RUV1863`

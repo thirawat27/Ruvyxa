@@ -9,9 +9,14 @@ to submit changes.
 
 ### Prerequisites
 
-- [Rust](https://rustup.rs/) (1.96+)
-- [Node.js](https://nodejs.org/) (24.19+ LTS)
-- [pnpm](https://pnpm.io/) (11+)
+Install these three. The exact floors are declared in the repository rather than repeated here, so
+they cannot drift out of date:
+
+| Tool                           | Floor declared in                             |
+| ------------------------------ | --------------------------------------------- |
+| [Rust](https://rustup.rs/)     | `rust-version` in the workspace `Cargo.toml`  |
+| [Node.js](https://nodejs.org/) | `.nvmrc` and `engines.node` in `package.json` |
+| [pnpm](https://pnpm.io/)       | `packageManager` in `package.json`            |
 
 ### Clone and Install
 
@@ -47,8 +52,16 @@ cargo clippy --workspace --locked -- -D warnings
 pnpm -r build
 pnpm -r check
 pnpm -r test
+pnpm lint
+pnpm format:check
 pnpm check:unused
+pnpm release:validate
+pnpm pack:smoke
 ```
+
+This is the full battery, and it is the same list CI runs. While iterating, run the narrowest check
+that can actually fail; run the relevant subset before opening a PR. `AGENTS.md` explains what each
+one gates.
 
 ### Run the Example App
 
@@ -76,11 +89,18 @@ ruvyxa/
 │   ├── ruvyxa/                # Main package (CLI wrapper + runtime Node scripts)
 │   ├── create-ruvyxa/         # Project scaffolding
 │   └── @ruvyxa/               # Scoped packages (core, react, adapters, cli-*)
-├── examples/demo/             # Full-featured demo app with all features
-├── templates/minimal/         # Template for new user projects
-├── tests/                     # Node package tests (organized by package)
-└── docs/                      # User-facing documentation
+├── examples/
+│   ├── demo/                  # Broad integration fixture — deliberately NOT deployable
+│   └── deploy-smoke/          # Smallest app every adapter can deploy; CI runs it on Node/Bun/Deno
+├── templates/                 # minimal, blog, crud, api — copied into new projects by
+│                              # create-ruvyxa; plugin/ backs `ruvyxa plugin create`
+├── tests/                     # Node package tests (organized by package) and shared fixtures/
+├── scripts/                   # Release, validation, and repository check scripts
+└── docs/                      # User-facing documentation (en/ and th/ editions)
 ```
+
+`packages/create-ruvyxa/template/` is generated from `templates/` at pack time and is git-ignored —
+edit `templates/`, never the copy.
 
 ---
 
@@ -105,8 +125,11 @@ ruvyxa/
 
 - Keep dev and production behavior aligned. Shared logic goes in shared paths.
 - Build validation must catch boundary leaks before output is emitted.
-- Update `templates/minimal/` when a feature affects new projects.
+- Update the starters under `templates/` when a feature affects new projects.
 - Update `examples/demo/` when a feature needs demonstration.
+- A few files are deliberately byte-identical between `templates/minimal/` and `examples/demo/`.
+  `pnpm check:template-mirrors` fails on drift; run `node scripts/check-template-mirrors.mjs` to
+  resync, and commit both copies together.
 
 ### Worker pool changes
 
@@ -142,7 +165,11 @@ cargo clippy --workspace --locked -- -D warnings
 pnpm -r build
 pnpm -r check
 pnpm -r test
+pnpm lint
+pnpm format:check
 pnpm check:unused
+pnpm release:validate
+pnpm pack:smoke
 ```
 
 `check:unused` runs [Knip](https://knip.dev) and fails on unused files, exports, types, and

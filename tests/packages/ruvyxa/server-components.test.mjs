@@ -14,7 +14,7 @@
  * project outside the workspace has none to find.
  */
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import path from 'node:path'
 import { after, describe, it } from 'node:test'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -324,5 +324,37 @@ describe('streaming the document', () => {
       document += new TextDecoder().decode(value)
     }
     assert.equal(document, rendered.html)
+  })
+})
+
+/**
+ * The dependency contract around the feature, which the render tests above
+ * cannot see because the workspace always has `react-server-dom-webpack`
+ * installed.
+ */
+describe('the server-components dependency contract', () => {
+  const manifest = async (specifier) =>
+    JSON.parse(await readFile(new URL(specifier, import.meta.url), 'utf8'))
+
+  it('declares react-server-dom-webpack as an optional peer of ruvyxa', async () => {
+    const { peerDependencies, peerDependenciesMeta } = await manifest(
+      '../../../packages/ruvyxa/package.json',
+    )
+
+    // Optional, because an app that never writes `export const serverComponents
+    // = true` should not be made to carry the RSC runtime — but declared, so the
+    // version it needs is written down rather than left to RUV1863 to explain.
+    assert.equal(peerDependenciesMeta['react-server-dom-webpack'].optional, true)
+    assert.ok(peerDependencies['react-server-dom-webpack'])
+  })
+
+  it('asks for the same version of the RSC runtime as of React itself', async () => {
+    const { peerDependencies } = await manifest('../../../packages/ruvyxa/package.json')
+
+    // The RSC runtime reaches into React internals rather than a public API, so
+    // one range covering all three is the only honest declaration: a project on
+    // react 19.2.8 with react-server-dom-webpack 19.3.0 fails inside React.
+    assert.equal(peerDependencies['react-server-dom-webpack'], peerDependencies.react)
+    assert.equal(peerDependencies['react-server-dom-webpack'], peerDependencies['react-dom'])
   })
 })

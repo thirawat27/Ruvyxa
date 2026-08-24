@@ -7,7 +7,9 @@ work in the repository.
 
 - `crates/` contains the Rust workspace.
 - `crates/ruvyxa_cli` owns the Ruvyxa CLI commands: `dev`, `build`, `check`, `start`, `preview`,
-  `routes`, `analyze`, `doctor`, `clean`, `trace`, `bench`, and `test:parity`.
+  `routes`, `analyze`, `adds`, `doctor`, `clean`, `trace`, `bench`, `test:parity`, and
+  `plugin create`. The `Command` enum in `crates/ruvyxa_cli/src/main.rs` is the list; nothing else
+  enumerates them.
 - `crates/ruvyxa_bundler` owns TypeScript/JSX compilation, module resolution, linking, minification,
   source maps, and server/client boundary checks.
 - `crates/ruvyxa_dev_server` owns Axum serving, HMR, render cache, router, worker pool, style
@@ -30,8 +32,10 @@ work in the repository.
 - `packages/` contains the npm packages:
   - `ruvyxa` — the framework package. `runtime/*.mjs` are the modules the Rust CLI resolves by path
     and spawns or imports; `src/plugins/` is the first-party plugin API behind the `plugins.ts`
-    barrel; `scripts/sync-shared-runtime.mjs` regenerates the committed copies of shared modules.
-  - `create-ruvyxa` — the scaffolder, with its own copy of `template/minimal`.
+    barrel; `packages/ruvyxa/scripts/sync-shared-runtime.mjs` regenerates the committed copies of
+    shared modules.
+  - `create-ruvyxa` — the scaffolder. Its `template/` directory holds a generated copy of every
+    starter, not just `minimal`.
   - `@ruvyxa/core` — primitives both the Rust host and a deployed build need: `route-match`,
     `origin-policy`, the standalone server, shared server utilities.
   - `@ruvyxa/react` — the client router, `not-found`, and the React-facing surface.
@@ -68,8 +72,9 @@ work in the repository.
 
 - `tests/` holds the Node suites, one directory per package under `tests/packages/`, plus the
   cross-language tables in `tests/fixtures/`. Rust tests live beside the crate they cover.
-- `docs/` is the user-facing guide, numbered `01`–`11` and mirrored in `docs/en/` and `docs/th/`.
-  `scripts/check-doc-links.mjs` resolves every markdown link and gates a release.
+- `docs/` is the user-facing guide, numbered `01`–`21` and mirrored chapter-for-chapter in
+  `docs/en/` and `docs/th/`. `scripts/check-doc-links.mjs` resolves every markdown link and gates a
+  release.
 - `scripts/` holds the repository's own tooling: release validation, packaging smoke tests, adapter
   sync, template mirrors, git hooks, and the benchmark harness. They are entry points to Knip, so a
   new one needs no registration but a deleted one does.
@@ -177,13 +182,16 @@ with the reason beside it: sequential `await` in a loop is how the bundler appli
 globals are a contract with the generated entry, not a naming slip. Add a rule to the off list only
 with the reason it does not apply here, never to clear a finding.
 
-It also bans `localeCompare` outright. Ordering in this repository decides cache keys, content
-fingerprints, and the bytes of files the build writes, and `localeCompare` answers by the host's ICU
-locale — so two machines building the same project disagreed, and the JavaScript and Rust graphs
-sorted the same glob differently. Sort with `compareCodeUnits`/`compareEntryKeys` from
-`packages/ruvyxa/runtime/order.mjs`, `compareStable` in `packages/ruvyxa/src/plugins/shared.ts`, or
-a bare `.sort()` for an array of strings. Code emitted into a function artifact writes the
-comparison out inline, because a deployed function directory resolves no sibling specifiers.
+It also bans three host-locale methods outright: `localeCompare`, `toLocaleLowerCase`, and
+`toLocaleUpperCase`. Ordering and case-folding in this repository decide cache keys, content
+fingerprints, heading slugs, and the bytes of files the build writes, and all three answer by the
+host's ICU locale — so two machines building the same project disagreed, the JavaScript and Rust
+graphs sorted the same glob differently, and a Turkish host folds `I` to `ı` where every other host
+and the Rust compiler give `i`. Case-fold with `toLowerCase`/`toUpperCase`. Sort with
+`compareCodeUnits`/`compareEntryKeys` from `packages/ruvyxa/runtime/order.mjs`, `compareStable` in
+`packages/ruvyxa/src/plugins/shared.ts`, or a bare `.sort()` for an array of strings. Code emitted
+into a function artifact writes the comparison out inline, because a deployed function directory
+resolves no sibling specifiers.
 
 It also caps structure directly: `complexity` at 30, `max-depth` at 4, `max-nested-callbacks` at 4,
 and `max-params` at 8. `max-lines-per-function` is deliberately off — a long flat function is a
@@ -240,10 +248,10 @@ before believing it.
   serverless handler is copied into function bundles that resolve no bare specifiers. After changing
   the shared module run `pnpm --filter ruvyxa sync:runtime` and commit both; `ruvyxa`'s build fails
   on a stale copy. `packages/@ruvyxa/core/src/origin-policy.ts` is copied the same way, by the same
-  script — `scripts/sync-shared-runtime.mjs` takes a table of modules, so a new shared runtime
-  module is one entry there rather than a new script. The Rust router cannot share the module, so
-  both languages are held to `tests/fixtures/route-match-conformance.json` — add a case there before
-  changing match behavior.
+  script — `packages/ruvyxa/scripts/sync-shared-runtime.mjs` takes a `SYNCED_MODULES` table, so a
+  new shared runtime module is one entry there rather than a new script. The Rust router cannot
+  share the module, so both languages are held to `tests/fixtures/route-match-conformance.json` —
+  add a case there before changing match behavior.
 - `packages/ruvyxa/src/plugins.ts` is a barrel, not an implementation file: it re-exports the public
   plugin API by name from `packages/ruvyxa/src/plugins/`, one module per plugin family (`http`,
   `pwa`, `seo`, `search`, `content-engine`, `openapi`, `build`) plus `shared` for helpers two or

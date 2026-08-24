@@ -22,11 +22,20 @@ starts hot reload; its default root is the current directory. Visit the URL prin
 
 ## Install into an existing React project
 
-The templates prove the minimum runtime dependencies below. Keep compatible React versions together.
+On npm the framework is one package. `react` and `react-dom` are peer dependencies that npm installs
+for you, and `@ruvyxa/react` is a dependency of `ruvyxa`.
 
 ```bash
-npm install ruvyxa @ruvyxa/react react react-dom
+npm install ruvyxa
 npm install -D typescript @types/react @types/react-dom
+```
+
+pnpm and Yarn install neither peer dependencies nor a transitive package at the project root, so
+name the set the templates declare. Keep compatible React versions together.
+
+```bash
+pnpm add ruvyxa @ruvyxa/react react react-dom
+pnpm add -D typescript @types/react @types/react-dom
 ```
 
 Create `ruvyxa.config.ts`:

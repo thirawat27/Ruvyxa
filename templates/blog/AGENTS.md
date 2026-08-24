@@ -29,7 +29,8 @@ route shape:
 
 ## Rules
 
-- Use Node.js 24.19 or newer.
+- Use a Node.js release at or above the `engines.node` floor in `package.json`. `npm run doctor`
+  reports the resolved version and says when it is too old.
 - Keep route files under `app/`. Pages use `page.tsx`; API routes use `route.ts`.
 - Server-rendered pages are the default. Add `'use client'` only when browser-only interactivity is
   required.

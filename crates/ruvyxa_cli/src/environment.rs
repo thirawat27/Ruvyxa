@@ -257,11 +257,52 @@ pub(crate) fn cli_version_match(package_version: Option<&str>, cli_version: &str
     }
 }
 
-pub(crate) fn react_compatibility(package: &serde_json::Value) -> String {
-    let Some(react) = dependency_version(package, "react") else {
+/// The version of `name` as it is actually installed under `node_modules`,
+/// searching upward so a package hoisted to a workspace root still counts.
+///
+/// A declared range and an installed copy are different facts, and only the
+/// second one decides whether a page can render. npm installs a dependency's
+/// peer dependencies without writing them into the project manifest, so a
+/// project that declares neither `react` nor `react-dom` and gets both through
+/// `ruvyxa` is correct, not broken — reading the manifest alone would report it
+/// as missing React.
+pub(crate) fn installed_dependency_version(root: &Path, name: &str) -> Option<String> {
+    let mut current = ruvyxa_diagnostics::normalized_canonical_path(root);
+
+    loop {
+        let mut manifest = current.join("node_modules");
+        for segment in name.split('/') {
+            manifest.push(segment);
+        }
+        manifest.push("package.json");
+
+        if let Ok(package) = read_package_json(&manifest)
+            && let Some(version) = package.get("version").and_then(|value| value.as_str())
+        {
+            return Some(version.to_string());
+        }
+
+        if !current.pop() {
+            return None;
+        }
+    }
+}
+
+/// What the project will actually load: the installed copy when there is one,
+/// and the declared range only as a fallback for an uninstalled project.
+pub(crate) fn resolved_dependency_version(
+    root: &Path,
+    package: &serde_json::Value,
+    name: &str,
+) -> Option<String> {
+    installed_dependency_version(root, name).or_else(|| dependency_version(package, name))
+}
+
+pub(crate) fn react_compatibility(root: &Path, package: &serde_json::Value) -> String {
+    let Some(react) = resolved_dependency_version(root, package, "react") else {
         return "missing react".to_string();
     };
-    let Some(react_dom) = dependency_version(package, "react-dom") else {
+    let Some(react_dom) = resolved_dependency_version(root, package, "react-dom") else {
         return "missing react-dom".to_string();
     };
 
@@ -269,6 +310,29 @@ pub(crate) fn react_compatibility(package: &serde_json::Value) -> String {
         (Some(left), Some(right)) if left == right => format!("ok (major {left})"),
         (Some(left), Some(right)) => format!("mismatch react {left} vs react-dom {right}"),
         _ => "unknown version format".to_string(),
+    }
+}
+
+/// Whether the installed React server-components runtime agrees with React.
+///
+/// `react-server-dom-webpack` reaches into React internals rather than a public
+/// API, so it has to be the same version rather than a compatible major. It is
+/// an optional peer of `ruvyxa`: a project that never writes
+/// `export const serverComponents = true` should not carry it, so `None` here
+/// means "not an RSC project", not "broken" — the row is left off entirely
+/// rather than reported as missing on every app that does not use it.
+pub(crate) fn server_components_compatibility(root: &Path) -> Option<String> {
+    let flight = installed_dependency_version(root, "react-server-dom-webpack")?;
+    let Some(react) = installed_dependency_version(root, "react") else {
+        return Some(format!("{flight} installed without react"));
+    };
+
+    if flight == react {
+        Some(format!("ok ({flight})"))
+    } else {
+        Some(format!(
+            "mismatch react {react} vs react-server-dom-webpack {flight}"
+        ))
     }
 }
 

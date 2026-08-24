@@ -1,7 +1,23 @@
-# @ruvyxa/realtime
+<p align="center">
+  <a href="https://github.com/thirawat27/ruvyxa">
+    <img src="https://raw.githubusercontent.com/thirawat27/ruvyxa/main/assets/branding/ruvyxa.png" alt="Ruvyxa" width="140" height="140" />
+  </a>
+</p>
 
-Action-driven realtime updates using Ruvyxa's native Axum WebSocket transport. No Socket.IO or
-application-owned WebSocket server is required.
+<h1 align="center">@ruvyxa/realtime</h1>
+
+<p align="center">
+  Action-driven realtime updates using Ruvyxa's native Axum WebSocket transport. No Socket.IO or<br/>
+  application-owned WebSocket server is required.
+</p>
+
+<p align="center">
+  <a href="https://www.npmjs.com/package/@ruvyxa/realtime"><img src="https://img.shields.io/npm/v/@ruvyxa/realtime?style=flat-square" alt="npm version" /></a>
+  <a href="https://www.npmjs.com/package/@ruvyxa/realtime"><img src="https://img.shields.io/node/v/@ruvyxa/realtime?style=flat-square&label=node" alt="Supported Node version" /></a>
+  <img src="https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square" alt="License" />
+</p>
+
+---
 
 ```ts
 // ruvyxa.config.ts

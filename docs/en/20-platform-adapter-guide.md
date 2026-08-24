@@ -94,11 +94,15 @@ All three generated servers default to `PORT=3000` and `HOST=0.0.0.0`. Each adap
 runtime image should not carry the CLI. The Deno standalone command deliberately grants the server
 its required permissions, so run only the artifact built from a project you trust.
 
-**Supported runtime versions.** Node follows the `engines.node` floor in the package manifests. Bun
-needs **1.1.26 or newer** — the release that added `Bun.serve`'s `idleTimeout`, the newest API the
-emitted server can reach for — and Deno needs **2.0 or newer**, where the Node built-ins it imports
-(`node:process`, `node:fs`, `node:path`) became the supported path. `ruvyxa doctor` reports the
-installed version of each and flags one below the floor. Verified against Bun 1.4.0 and Deno 2.9.5.
+**Supported runtime versions.** Node follows the `engines.node` floor in the package manifests. The
+Bun and Deno floors are `MINIMUM_BUN_VERSION` and `MINIMUM_DENO_VERSION` in
+[`crates/ruvyxa_cli/src/environment.rs`](../../crates/ruvyxa_cli/src/environment.rs), each recorded
+next to the reason it exists: Bun's floor is the release that added `Bun.serve`'s `idleTimeout`, the
+newest API the emitted server reaches for, and Deno's is where the Node built-ins it imports
+(`node:process`, `node:fs`, `node:path`) became the supported path rather than a flag.
+
+Do not check this by eye. `ruvyxa doctor` reads the installed version of each and flags one below
+the floor, which is the whole reason those constants exist.
 
 Each server uses its own runtime's HTTP server: `node:http` on Node, `Bun.serve` on Bun, and
 `Deno.serve` on Deno. Everything above the transport is one shared program — which URL names which
@@ -156,10 +160,10 @@ node .ruvyxa/deploy/railway/server/index.mjs
 node .ruvyxa/deploy/render/server/index.mjs
 ```
 
-Railway's generated config uses Railpack and `ON_FAILURE` with 10 retries. Render's Blueprint
-selects the latest Node `24.x` release with a `>=24.19.0 <25` range. Both generated handlers bind
-`0.0.0.0` and read `PORT`. If you own the provider file, set `projectConfig: false` and preserve the
-same build/start relationship.
+Railway's generated config uses Railpack and `ON_FAILURE` with 10 retries. Render's Blueprint pins
+Node to the major the framework's `engines.node` floor names, so Render picks the newest patch
+within it. Both generated handlers bind `0.0.0.0` and read `PORT`. If you own the provider file, set
+`projectConfig: false` and preserve the same build/start relationship.
 
 ## Firebase and AWS Amplify Hosting
 

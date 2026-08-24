@@ -461,19 +461,26 @@ pub(crate) fn doctor(args: DoctorArgs) -> anyhow::Result<()> {
         print_field(
             "react",
             tool_status(
-                dependency_version(package, "react").unwrap_or_else(|| "missing".to_string()),
+                resolved_dependency_version(&args.root, package, "react")
+                    .unwrap_or_else(|| "missing".to_string()),
             ),
         );
         print_field(
             "react-dom",
             tool_status(
-                dependency_version(package, "react-dom").unwrap_or_else(|| "missing".to_string()),
+                resolved_dependency_version(&args.root, package, "react-dom")
+                    .unwrap_or_else(|| "missing".to_string()),
             ),
         );
         print_field(
             "react compatibility",
-            compatibility_status(react_compatibility(package)),
+            compatibility_status(react_compatibility(&args.root, package)),
         );
+        // Only when the project has it: server components are opt-in, and a
+        // permanent "missing" row for the apps that never enable them is noise.
+        if let Some(status) = server_components_compatibility(&args.root) {
+            print_field("server components", compatibility_status(status));
+        }
 
         let duplicates = duplicate_dependencies(package);
         if duplicates.is_empty() {

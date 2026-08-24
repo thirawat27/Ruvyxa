@@ -93,11 +93,15 @@ generated server ทั้งสามใช้ `PORT=3000` และ `HOST=0.0.
 ไม่ควรมี CLI Deno standalone command ตั้ง permission ที่ server ต้องใช้โดยตั้งใจ จึงรันเฉพาะ
 artifact ที่ build จาก project ที่คุณเชื่อถือ
 
-**เวอร์ชัน runtime ที่รองรับ** Node ใช้ค่า `engines.node` ใน package manifest ส่วน Bun ต้อง **1.1.26
-ขึ้นไป** — รุ่นที่เพิ่ม `idleTimeout` ให้ `Bun.serve` ซึ่งเป็น API ใหม่สุดที่ server ที่ emit
-ออกมาใช้ — และ Deno ต้อง **2.0 ขึ้นไป** ซึ่งเป็นรุ่นที่ Node built-in ที่มัน import (`node:process`,
-`node:fs`, `node:path`) กลายเป็นทางที่รองรับจริง `ruvyxa doctor` รายงานเวอร์ชัน
-ที่ติดตั้งของแต่ละตัวและเตือนเมื่อต่ำกว่าเกณฑ์ ทดสอบกับ Bun 1.4.0 และ Deno 2.9.5
+**เวอร์ชัน runtime ที่รองรับ** Node ใช้ค่า `engines.node` ใน package manifest ส่วนเกณฑ์ขั้นต่ำของ
+Bun และ Deno อยู่ที่ `MINIMUM_BUN_VERSION` และ `MINIMUM_DENO_VERSION` ใน
+[`crates/ruvyxa_cli/src/environment.rs`](../../crates/ruvyxa_cli/src/environment.rs)
+โดยแต่ละตัวบันทึกเหตุผลไว้ข้าง ๆ ค่า: ของ Bun คือรุ่นที่เพิ่ม `idleTimeout` ให้ `Bun.serve` ซึ่งเป็น
+API ใหม่สุดที่ server ที่ emit ออกมาเรียกใช้ ส่วนของ Deno คือรุ่นที่ Node built-in ที่มัน import
+(`node:process`, `node:fs`, `node:path`) กลายเป็นทางที่รองรับจริงแทนการเปิดด้วย flag
+
+อย่าตรวจด้วยสายตา ให้ `ruvyxa doctor` อ่านเวอร์ชันที่ติดตั้งของแต่ละตัวและเตือนเมื่อต่ำกว่าเกณฑ์
+ซึ่งเป็นเหตุผลทั้งหมดที่ค่าคงที่สองตัวนั้นมีอยู่
 
 server แต่ละตัวใช้ HTTP server ของ runtime ตัวเอง: `node:http` บน Node, `Bun.serve` บน Bun และ
 `Deno.serve` บน Deno ทุกอย่างเหนือ transport เป็นโปรแกรมชุดเดียวกัน — URL ไหนหมายถึงไฟล์ไหน, serve
@@ -154,9 +158,10 @@ node .ruvyxa/deploy/railway/server/index.mjs
 node .ruvyxa/deploy/render/server/index.mjs
 ```
 
-Railway config ที่สร้างใช้ Railpack และ `ON_FAILURE` ที่มี 10 retry Render Blueprint เลือก Node
-`24.x` ล่าสุดด้วยช่วง `>=24.19.0 <25` handler ทั้งคู่ bind `0.0.0.0` และอ่าน `PORT` หากคุณดูแล
-provider file เอง ให้ใช้ `projectConfig: false` และคง build/start relationship เดียวกัน
+Railway config ที่สร้างใช้ Railpack และ `ON_FAILURE` ที่มี 10 retry Render Blueprint ตรึง Node
+ไว้ที่เมเจอร์ที่ framework ระบุไว้ใน `engines.node` ทำให้ Render เลือก patch ใหม่สุดในเมเจอร์นั้น
+handler ทั้งคู่ bind `0.0.0.0` และอ่าน `PORT` หากคุณดูแล provider file เอง ให้ใช้
+`projectConfig: false` และคง build/start relationship เดียวกัน
 
 ## Firebase และ AWS Amplify Hosting
 

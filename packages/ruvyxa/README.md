@@ -1,14 +1,42 @@
-# ruvyxa
+<p align="center">
+  <a href="https://github.com/thirawat27/ruvyxa">
+    <img src="https://raw.githubusercontent.com/thirawat27/ruvyxa/main/assets/branding/ruvyxa.png" alt="Ruvyxa" width="140" height="140" />
+  </a>
+</p>
 
-CLI, runtime bridge, and public framework entrypoints for Ruvyxa apps.
+<h1 align="center">ruvyxa</h1>
+
+<p align="center">
+  CLI, runtime bridge, and public framework entrypoints for Ruvyxa apps.
+</p>
+
+<p align="center">
+  <a href="https://www.npmjs.com/package/ruvyxa"><img src="https://img.shields.io/npm/v/ruvyxa?style=flat-square" alt="npm version" /></a>
+  <a href="https://www.npmjs.com/package/ruvyxa"><img src="https://img.shields.io/node/v/ruvyxa?style=flat-square&label=node" alt="Supported Node version" /></a>
+  <img src="https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square" alt="License" />
+</p>
+
+---
 
 ## Install
 
-Ruvyxa requires Node.js 24.19 or later. The framework workspace uses pnpm 11.
+Ruvyxa requires the Node.js release declared by `engines.node` in this package. Run `ruvyxa doctor`
+in a project to see what resolved on your machine and whether it is new enough.
 
 ```bash
-npm install ruvyxa react react-dom
+npm install ruvyxa
 ```
+
+One package is enough on npm. `react` and `react-dom` are peer dependencies, which npm installs on
+your behalf, and `@ruvyxa/react` is a dependency of this package. Package managers that leave peer
+dependencies to you — pnpm and Yarn — need the full set named instead:
+
+```bash
+pnpm add ruvyxa @ruvyxa/react react react-dom
+```
+
+Either way `npm create ruvyxa@latest` writes all four into the generated `package.json`, so a
+scaffolded app never depends on which package manager installs peers.
 
 Published installs include the TypeScript runtime files, a persistent JavaScript worker pool, and a
 native CLI binary for the current platform. Rust and Cargo are only required when developing Ruvyxa

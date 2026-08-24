@@ -145,10 +145,12 @@ The payload rides in a `<script type="application/json">` data block, like the r
 
 ### Installing the runtime
 
-Server components need `react-server-dom-webpack`, at the same version as React:
+Server components need `react-server-dom-webpack`, at **exactly** the version of React your project
+already resolves — not merely a compatible range. Read it, then install that:
 
 ```bash
-npm install react-server-dom-webpack@19.2.8
+npm ls react
+npm install react-server-dom-webpack@<the version that printed>
 ```
 
 It is optional: an app that never writes the export does not need it, and a route that does gets

@@ -52,12 +52,14 @@ dependency ของ route เข้า function ปัญหาจึงเห�
 **ทำไม environment value หายจาก browser?** มีเพียง `RUVYXA_PUBLIC_*` ที่ตั้งใจให้ client ใช้ ย้าย
 secret หรือ server-only computation ออกจาก client code แทนการเปลี่ยน prefix
 
-**อัปเกรดได้โดยไม่มี migration guide ไหม?** repository มี `CHANGELOG.md` แต่เอกสารนี้ไม่อนุมาน
-migration ราย version จากมัน ก่อนอัปเกรดให้เปรียบเทียบ export/config type แล้วรัน `npm run check`,
-`npm run build` และ `npm run test:parity` กับ app ของคุณ ใช้ `Seo.card` แทน `Seo.twitterCard`
-ซึ่งถูกถอดออกแล้ว เช่นเดียวกับ config key `react`, `typescript` และ `build.target` ที่ถูกถอดออกจาก
-`RuvyxaConfig` ด้วยเหตุผลเดียวกันคือไม่เคยมีผลต่อ behavior ใดๆ config
-เดิมที่ยังตั้งค่าเหล่านี้ยังโหลดได้ แต่ type ไม่มีให้แล้ว จึงจะเห็นตอนรัน `npm run check`
+**อัปเกรดอย่างปลอดภัยต้องทำอย่างไร?** ย้าย `ruvyxa` และ `@ruvyxa/*` ทุกตัวไปพร้อมกัน
+เพราะปล่อยเป็นชุดเดียวกัน และคาดหวังเวอร์ชันที่ตรงกัน จากนั้นรัน `npm run check`, `npm run build`
+และ `npm run test:parity` กับ app ของคุณตามลำดับนี้ `check` typecheck ก่อน config key หรือ export
+ที่ไม่ได้อยู่ใน public surface แล้วจึงถูกรายงาน เป็นชื่อ แทนที่จะไปพังตอน runtime ส่วน `build` กับ
+`test:parity` จับ behavior ที่ย้ายที่
+
+คู่มือนี้อธิบาย framework ตามสภาพปัจจุบัน ไม่ใช่สภาพในอดีต ประวัติการเปลี่ยนแปลงราย release อยู่ที่
+`CHANGELOG.md` ใน repository
 
 **ก่อนหน้า:** [Deploy, run และ operate ใน production](15-deploy-run-and-operate.md) · **ถัดไป:**
 [Public API reference](17-public-api-reference.md)

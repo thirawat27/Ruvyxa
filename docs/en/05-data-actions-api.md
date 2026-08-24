@@ -32,6 +32,33 @@ Cache durations accept a positive integer plus `ms`, `s`, `m`, `h`, or `d`.
 `invalidateCache('products')` removes `products` and keys beginning `products:`; no argument clears
 the complete process cache. Call `cacheStats()` to obtain `{ size, maxEntries }`.
 
+`.scope('request')` keeps a value for the current request instead of sharing it across requests. Use
+it when the producer reads cookies, headers, or draft mode — a shared producer that reads request
+state fails closed rather than leaking one visitor's data to another.
+
+### Invalidate by tag instead of by key
+
+A key names one entry. A tag labels a group of them, so unrelated keys that go stale together can be
+cleared in one call.
+
+```ts
+import { cache, revalidateTag } from 'ruvyxa/server'
+
+const list = await cache('products:list').tags('products').get(loadList)
+const featured = await cache('home:featured').tags('products', 'home').get(loadFeatured)
+
+revalidateTag('products') // drops both `products:list` and `home:featured`
+```
+
+`revalidateTag(tag)` removes every cache entry carrying that exact tag. Tags are matched exactly —
+there is no prefix or wildcard form — and each is 1–128 characters of letters, digits, `:`, `.`,
+`_`, `/`, or `-`; anything else throws. Like `invalidateCache()`, it acts on the cache of the
+process that calls it, so on a serverless platform it clears the calling instance and not the ones
+already warm elsewhere.
+
+It clears cached **values**, not pre-rendered HTML. To make the server re-render a stored document,
+use [`revalidatePath()`](#on-demand-revalidation).
+
 ## Public Flight payloads
 
 > **Not React Server Components.** Ruvyxa's Flight is its own thing: a per-route JSON payload a page
@@ -232,9 +259,12 @@ and is the normal webhook case. One request may queue at most 64 distinct URLs, 
 contain at most 2,048 characters. `revalidatePath()` throws when either bound is exceeded; split a
 larger batch across requests so no invalidation is silently dropped.
 
-Ruvyxa has no `revalidateTag()`. In Next.js a tag labels a `fetch()` cache entry; Ruvyxa has no
-fetch cache for one to label, so tags would need a page-level tag declaration and a tag-to-route
-index — a design decision rather than an addition to this function.
+`revalidateTag()` is the sibling call and does a different job:
+[it clears tagged cache entries](#invalidate-by-tag-instead-of-by-key), while `revalidatePath()`
+re-renders a stored document. Ruvyxa tags a value you cached yourself with `cache().tags(...)`,
+which is not what a Next.js tag labels — there is no `fetch()` cache here for a tag to attach to,
+and a tag does not name a route. Clearing the data a page reads does not by itself rewrite HTML the
+build already wrote; call `revalidatePath()` when the document has to change.
 
 On a serverless deployment, `revalidatePath` clears the calling function instance and the next
 request rewrites the stored document for every later request. A different instance that is already

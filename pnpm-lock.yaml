@@ -82,8 +82,8 @@ importers:
         specifier: ^19.2.18
         version: 19.2.18
       '@types/react-dom':
-        specifier: ^19.2.4
-        version: 19.2.4(@types/react@19.2.18)
+        specifier: ^19.2.5
+        version: 19.2.5(@types/react@19.2.18)
 
   examples/deploy-smoke:
     dependencies:
@@ -313,18 +313,30 @@ importers:
       '@ruvyxa/core':
         specifier: workspace:^
         version: link:../@ruvyxa/core
+      '@ruvyxa/react':
+        specifier: workspace:^
+        version: link:../@ruvyxa/react
       babel-plugin-react-compiler:
         specifier: ^1.0.0
         version: 1.0.0
       oxc-transform:
         specifier: 0.146.0
         version: 0.146.0
+      react:
+        specifier: 19.2.8
+        version: 19.2.8
+      react-dom:
+        specifier: 19.2.8
+        version: 19.2.8(react@19.2.8)
+      react-server-dom-webpack:
+        specifier: ^19.2.8
+        version: 19.2.8(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(webpack@5.109.2(postcss@8.5.26))
       remark-gfm:
         specifier: ^4.0.1
         version: 4.0.1(supports-color@8.1.1)
       sass:
-        specifier: ^1.103.0
-        version: 1.103.0
+        specifier: ^1.103.1
+        version: 1.103.1
       yaml:
         specifier: ^2.9.0
         version: 2.9.0
@@ -1440,10 +1452,10 @@ packages:
         integrity: sha512-Dh8vAsV36ig5wa9OX4pXvMc9D3Veibfw2wix0CUwYODLD8nkj9UsLjASr49nPg+2eKzxhBV+v7L8pXvT4e639Q==,
       }
 
-  '@types/react-dom@19.2.4':
+  '@types/react-dom@19.2.5':
     resolution:
       {
-        integrity: sha512-Bsc+QHgp+P/F02XDzNCY9jnZNCUuLki36KT7VKrTXXLdHf+vHMNZnW1rVu5DNW/rCK+fya3DATySbLM4yhtKUw==,
+        integrity: sha512-fMPwH9v7r/pp43yUd2/Mbiex5KouJwwR3dzHkhLREUC6764VyDsqxhAxv6OFEYR1RhjOyD1naqba8ECDBe7ZQg==,
       }
     peerDependencies:
       '@types/react': ^19.2.0
@@ -2906,10 +2918,10 @@ packages:
         integrity: sha512-seS2Tj26TBVOC2NIc2rOe2y2ZO7efxITtLZcGSOnHHNOQ7CkiUBfw0Iw2ck6xkIhPwLhKNLS8BO+hEpngQlqzw==,
       }
 
-  sass@1.103.0:
+  sass@1.103.1:
     resolution:
       {
-        integrity: sha512-+QpdXUDw19lVqRDlYIyje1Lq/0gHsnNHIl4x1CqeUg13zRhaQN11UvTvouwHWLXc9Q3rQVT6oBhFGRYJ5Z8gHw==,
+        integrity: sha512-9icZURbP51S6S0QGoyaeqk9uB06GNWxsFYWfH5RgpFgqK5FA8tJcM3AdVxrZEVJ7dz+L87nG95gBKf4VuaMHGw==,
       }
     engines: { node: '>=20.19.0' }
     hasBin: true
@@ -3680,7 +3692,7 @@ snapshots:
     dependencies:
       undici-types: 7.18.2
 
-  '@types/react-dom@19.2.4(@types/react@19.2.18)':
+  '@types/react-dom@19.2.5(@types/react@19.2.18)':
     dependencies:
       '@types/react': 19.2.18
 
@@ -4812,7 +4824,7 @@ snapshots:
 
   resolve-pkg-maps@1.0.0: {}
 
-  sass@1.103.0:
+  sass@1.103.1:
     dependencies:
       chokidar: 5.0.0
       immutable: 5.1.9

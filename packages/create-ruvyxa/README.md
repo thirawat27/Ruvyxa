@@ -1,6 +1,22 @@
-# create-ruvyxa
+<p align="center">
+  <a href="https://github.com/thirawat27/ruvyxa">
+    <img src="https://raw.githubusercontent.com/thirawat27/ruvyxa/main/assets/branding/ruvyxa.png" alt="Ruvyxa" width="140" height="140" />
+  </a>
+</p>
 
-Create a Ruvyxa app from a minimal or focused file-system route starter.
+<h1 align="center">create-ruvyxa</h1>
+
+<p align="center">
+  Create a Ruvyxa app from a minimal or focused file-system route starter.
+</p>
+
+<p align="center">
+  <a href="https://www.npmjs.com/package/create-ruvyxa"><img src="https://img.shields.io/npm/v/create-ruvyxa?style=flat-square" alt="npm version" /></a>
+  <a href="https://www.npmjs.com/package/create-ruvyxa"><img src="https://img.shields.io/node/v/create-ruvyxa?style=flat-square&label=node" alt="Supported Node version" /></a>
+  <img src="https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square" alt="License" />
+</p>
+
+---
 
 ## Usage
 

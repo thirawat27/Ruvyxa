@@ -2640,14 +2640,24 @@ async function handleServerComponentsClient(request) {
  */
 function ensureServerComponentDeps(projectRoot) {
   if (serverComponentDepsChecked.has(projectRoot)) return
+  const requireFromProject = createRequire(path.join(projectRoot, 'package.json'))
   try {
-    createRequire(path.join(projectRoot, 'package.json')).resolve(
-      'react-server-dom-webpack/package.json',
-    )
+    requireFromProject.resolve('react-server-dom-webpack/package.json')
     serverComponentDepsChecked.add(projectRoot)
   } catch {
+    // The two share React internals rather than a public API, so the version has
+    // to match exactly. Reading it off the copy this project resolved keeps the
+    // command correct without a React version written down a second time here.
+    let pinned = ''
+    try {
+      pinned = `@${requireFromProject('react/package.json').version}`
+    } catch {
+      pinned = ''
+    }
     const error = new Error(
-      'RUV1863 `export const serverComponents = true` needs react-server-dom-webpack, which is not installed. Install it at the same version as react (`npm install react-server-dom-webpack@19.2.8`).',
+      'RUV1863 `export const serverComponents = true` needs react-server-dom-webpack, which is ' +
+        'not installed. Install it at the same version as react ' +
+        `(\`npm install react-server-dom-webpack${pinned}\`).`,
     )
     error.code = 'RUV1863'
     throw error

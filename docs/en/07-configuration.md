@@ -27,7 +27,7 @@ nested source types.
 
 | Group         | Keys                                                                                                                             | Operational decision                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                       |
 | ------------- | -------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Root          | `appDir`, `outDir`, `runtime`, `typedRoutes`                                                                                     | Keep defaults unless the source/output layout or target requires a change. `runtime` is `node`, `bun`, `deno`, `edge`, or `static`; the CLI target can override it. `typedRoutes` also requires `.ruvyxa/types/**/*.d.ts` in the tsconfig `include`. `react` and `typescript.strict` are still accepted so existing configs validate, but nothing reads them — set strictness in your own `tsconfig.json`.                                                                                                                                 |
+| Root          | `appDir`, `outDir`, `runtime`, `typedRoutes`, `reactCompiler`                                                                    | Keep defaults unless the source/output layout or target requires a change. `runtime` is `node`, `bun`, `deno`, `edge`, or `static`; the CLI target can override it. `typedRoutes` also requires `.ruvyxa/types/**/*.d.ts` in the tsconfig `include`. `reactCompiler` is off by default — see [The React Compiler](#the-react-compiler). `react` and `typescript` are accepted by the validator but read by nothing — set strictness in your own `tsconfig.json`.                                                                           |
 | CSS and debug | `css.entries`, `debug.overlay`, `debug.traces`                                                                                   | `entries` is for project-relative global styles not imported by a module. Debug flags change development diagnostics, not production access control.                                                                                                                                                                                                                                                                                                                                                                                       |
 | Build         | `minify`, `map`, `treeShake`, `split`, `workers`, `jsx`, `target`, `manifest`, `warm`, `prerenderCache`                          | `split` is `single`, `route`, or `manual`; `jsx` is `classic` or `automatic`; `target` is `es2015` through `es2026` or `esnext` (default), and both compilers apply it. A target below the syntax your code uses may need runtime helper functions — Ruvyxa ships no helper runtime, so a module that would need one fails the build by name instead of emitting an import nothing can resolve. Ordinary application code compiles helper-free at `es2022` and above. Use source maps deliberately because they can expose source content. |
 | Rendering     | `render.strategy`, `render.revalidate`                                                                                           | Strategy is `ssr`, `ssg`, `isr`, `csr`, or `ppr`. The default strategy is SSR and default revalidation is 60 seconds.                                                                                                                                                                                                                                                                                                                                                                                                                      |
@@ -144,6 +144,30 @@ export default config({
   i18n: { locales: ['en', 'th'], defaultLocale: 'en' },
 })
 ```
+
+## The React Compiler
+
+`reactCompiler: true` runs the stable React Compiler over your components before Ruvyxa's own Oxc
+transform, so memoization is inferred instead of hand-written with `useMemo` and `useCallback`.
+
+```ts
+export default config({ reactCompiler: true })
+```
+
+It is **off by default** and deliberately has no options of its own. Two consequences are worth
+knowing before you turn it on:
+
+- It runs in the upstream default **inference mode**, targeting React 19 — the peer version Ruvyxa
+  already requires. There is no per-file opt-in or opt-out setting here; the compiler's own
+  directives are what a component uses to escape it.
+- Babel configuration files are **ignored** (`babelrc: false`, `configFile: false`). That is
+  intentional: a `.babelrc` in the project could otherwise make the server lane and the client lane
+  compile the same component differently, which is the kind of divergence that only shows up as a
+  hydration mismatch in production.
+
+Compiled output is content-keyed like every other transform, so the setting participates in build
+caching rather than defeating it. Turn it on, run `ruvyxa build`, and compare — it changes the
+emitted JavaScript, not the semantics of correct code.
 
 ## Markdown and MDX compiler
 

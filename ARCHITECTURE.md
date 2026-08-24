@@ -57,18 +57,23 @@ while preserving the JavaScript ecosystem at the application boundary.
 
 ### Crate Dependency Graph
 
-```
-ruvyxa_diagnostics          (diagnostic types, codes, SARIF — no workspace dependencies)
-    ↑
-    ├── ruvyxa_graph        (route discovery, validation, manifest)
-    ├── ruvyxa_bundler      (Oxc compiler, resolver, linker, minifier, CSS modules)
-    ├── ruvyxa_middleware   (Tower middleware, plugin bridge)
-    └── ruvyxa_dev_server   (Axum serving, HMR, cache, worker pool, router, TUI data)
-         │
-         └── ruvyxa_tui     (terminal presentation primitives)
-              │
-              └── ruvyxa_cli (command orchestration and build pipeline — binary entry via clap)
-```
+Read each row as "depends on everything above it". Two crates sit at the bottom because they depend
+on no other workspace crate.
+
+| Crate                | Workspace dependencies                                 | Owns                                                     |
+| -------------------- | ------------------------------------------------------ | -------------------------------------------------------- |
+| `ruvyxa_diagnostics` | none                                                   | diagnostic types, `RUV####` codes, SARIF                 |
+| `ruvyxa_tui`         | none                                                   | terminal layout, progress, mascot, theme                 |
+| `ruvyxa_bundler`     | `diagnostics`                                          | Oxc compiler, resolver, linker, minifier, CSS modules    |
+| `ruvyxa_middleware`  | `diagnostics`                                          | Tower middleware, plugin bridge                          |
+| `ruvyxa_graph`       | `bundler`, `diagnostics`                               | route discovery, validation, manifest                    |
+| `ruvyxa_dev_server`  | `bundler`, `graph`, `middleware`, `tui`, `diagnostics` | Axum serving, HMR, cache, worker pool, router            |
+| `ruvyxa_cli`         | every crate above                                      | command orchestration, build pipeline, clap binary entry |
+
+`ruvyxa_graph` depending on `ruvyxa_bundler` is the edge worth remembering: discovery calls the
+bundler's own `ast::parse_module`, `ast::masked_code`, `boundary::env_read_is_private`, and
+`resolver::TsConfigPaths` rather than hand-rolling a second scanner. That is the same rule
+`AGENTS.md` states as one source scanner per language.
 
 ---
 
@@ -131,6 +136,7 @@ ruvyxa (CLI + re-exports)
 ├── @ruvyxa/auth          — sessions, OAuth, magic-link, WebAuthn
 ├── @ruvyxa/database      — typed CRUD with adapter pattern
 ├── @ruvyxa/realtime      — WebSocket action transport
+├── @ruvyxa/testing       — loader, action, and cache test doubles
 ├── @ruvyxa/adapter-*     — 11 platform adapters
 ├── @ruvyxa/cli-*         — 5 platform binaries
 └── create-ruvyxa         — project scaffold
@@ -142,6 +148,7 @@ ruvyxa (CLI + re-exports)
 - `ruvyxa/server` → `@ruvyxa/core/server`
 - `ruvyxa/plugin` → `@ruvyxa/core/plugin`
 - `ruvyxa/plugins` → built-in plugins (redirects, headers, sitemap, PWA, etc.)
+- `ruvyxa/plugin-harness` → `@ruvyxa/core/plugin-harness`, the in-process plugin test harness
 
 ---
 
@@ -168,17 +175,30 @@ ruvyxa (CLI + re-exports)
 
 ### Project Structure (created by `create-ruvyxa`)
 
+The exact file list is asserted by `tests/packages/create-ruvyxa/index.test.ts`, and
+`REQUIRED_TEMPLATE_FILES` in `packages/create-ruvyxa/src/index.ts` is what refuses to scaffold a
+template missing one of them.
+
 ```
 my-app/
 ├── app/
-│   ├── globals.css       # Global styles
-│   ├── layout.tsx        # Root layout (HTML shell)
-│   └── page.tsx          # Home page
-├── public/               # Static assets served from /
-├── ruvyxa.config.ts      # Framework config
-├── tsconfig.json
-└── package.json
+│   ├── components/
+│   │   └── ruvyxa-runner.tsx  # Starter component
+│   ├── globals.css            # Global styles
+│   ├── layout.tsx             # Root layout (HTML shell)
+│   └── page.tsx               # Home page
+├── public/
+│   └── ruvyxa.png             # Static assets served from /
+├── .gitignore                 # Shipped as `gitignore`; renamed while scaffolding
+├── AGENTS.md                  # Project rules for a coding agent
+├── CLAUDE.md                  # Defers to AGENTS.md
+├── README.md                  # Project orientation for a person
+├── package.json
+├── ruvyxa.config.ts           # Framework config
+└── tsconfig.json
 ```
+
+The `blog`, `crud`, and `api` starters add their own routes on top of this shape.
 
 ---
 
@@ -1408,7 +1428,7 @@ module comes into existence, so no later stage re-walks `js`.
 
 ### Boundary Checking
 
-#### `check_boundary()`
+#### `boundary::check()`
 
 ```rust
 pub fn check(
@@ -3426,7 +3446,7 @@ Produces SARIF 2.1.0:
       "tool": {
         "driver": {
           "name": "ruvyxa",
-          "version": "0.1.0",
+          "version": "<the CLI crate version it was built from>",
           "informationUri": "https://github.com/ruvyxa/ruvyxa",
           "rules": [
             {

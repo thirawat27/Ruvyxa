@@ -16,9 +16,9 @@
 <p align="center">
   <img src="https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square" alt="License" />
   <img src="https://img.shields.io/badge/node-%3E%3D24.19-blue?style=flat-square" alt="Node 24.19+" />
-  <img src="https://img.shields.io/badge/rust-1.96%2B-orange?style=flat-square" alt="Rust 1.98+" />
-  <img src="https://img.shields.io/badge/pnpm-11%2B-yellow?style=flat-square" alt="pnpm 11+" />
-  <img src="https://img.shields.io/badge/TypeScript-7%2B-blue?style=flat-square" alt="TypeScript 7+" />
+  <img src="https://img.shields.io/badge/compiler-Rust-orange?style=flat-square" alt="Compiler written in Rust" />
+  <img src="https://img.shields.io/badge/runtime-TypeScript-blue?style=flat-square" alt="Runtime written in TypeScript" />
+  <a href="https://www.npmjs.com/package/ruvyxa"><img src="https://img.shields.io/npm/v/ruvyxa?style=flat-square" alt="npm version" /></a>
 </p>
 
 ---
@@ -37,7 +37,7 @@
 | [Configuration](docs/en/07-configuration.md)                               | `ruvyxa.config.ts` and environment variables     |
 | [Plugins & Middleware](docs/en/08-plugins-middleware.md)                   | Plugin hooks and the middleware chain            |
 | [Integrations](docs/en/09-integrations-auth-data-and-realtime.md)          | `@ruvyxa/auth`, `database`, `realtime`           |
-| [CLI](docs/en/10-cli.md)                                                   | Every command, flag, and exit code               |
+| [CLI](docs/en/10-cli.md)                                                   | Scripts, scaffolding, and the build loop         |
 | [Architecture](docs/en/11-architecture.md)                                 | Graph, bundler, dev server, diagnostics          |
 | [Development & Testing](docs/en/12-development-testing.md)                 | Develop, test, and package the framework         |
 | [Security](docs/en/13-security.md)                                         | Boundary enforcement and env safety              |
@@ -276,11 +276,17 @@ documents: [ARCHITECTURE.md](ARCHITECTURE.md), [CHANGELOG.md](CHANGELOG.md),
 
 ## Requirements
 
-| Use case                | Requirement                                                                                      |
-| ----------------------- | ------------------------------------------------------------------------------------------------ |
-| Building an app         | Node.js **24.19+** (Bun can run SSR instead). No Rust toolchain needed — the CLI ships prebuilt. |
-| Supported CLI platforms | `win32-x64`, `win32-arm64`, `linux-x64`, `linux-arm64`, `darwin-arm64`                           |
-| Building the framework  | Node.js 24.19+, pnpm 11+, Rust 1.96+ (edition 2024)                                              |
+Version floors are declared once, in the manifests, and this table points at them rather than
+restating numbers that go stale:
+
+| Use case                | Requirement                                                                           | Declared in                                     |
+| ----------------------- | ------------------------------------------------------------------------------------- | ----------------------------------------------- |
+| Building an app         | Node.js (Bun can run SSR instead). No Rust toolchain needed — the CLI ships prebuilt. | `engines.node` in each published `package.json` |
+| Supported CLI platforms | `win32-x64`, `win32-arm64`, `linux-x64`, `linux-arm64`, `darwin-arm64`                | `optionalDependencies` of `ruvyxa`              |
+| Building the framework  | Node.js, pnpm, and a Rust toolchain (edition 2024)                                    | `.nvmrc`, `packageManager`, `rust-version`      |
+
+`ruvyxa doctor` prints the versions it actually resolved on your machine and says which ones are too
+old, which is the answer that matters more than any number written here.
 
 The `ruvyxa` npm package resolves one `@ruvyxa/cli-<platform>` optional dependency that carries the
 prebuilt native binary, so `npm install` is all that is required to get a working `ruvyxa` command.
@@ -363,17 +369,17 @@ Measured on 2026-08-21 with the repository harness against minimal starters. The
 only for the exact versions, machine, and run conditions shown below; re-run the harness when
 comparing newer releases.
 
-| Metric (lower is better)             | **Ruvyxa 1.0.32** | Next.js 16.3.2 | Astro 7.2.4 |
-| ------------------------------------ | ----------------: | -------------: | ----------: |
-| Production build (cold-cache median) |       **1.131 s** |        7.667 s |     2.309 s |
-| Dev server → first rendered response |       **1.115 s** |        3.310 s |     5.855 s |
-| Prod server start → first response   |       **0.845 s** |        1.074 s |     2.813 s |
-| Client JS shipped (minimal page)     |          235 KB ¹ |         568 KB |      0 KB ² |
+| Metric (lower is better)             |  **Ruvyxa** | Next.js |   Astro |
+| ------------------------------------ | ----------: | ------: | ------: |
+| Production build (cold-cache median) | **1.131 s** | 7.667 s | 2.309 s |
+| Dev server → first rendered response | **1.115 s** | 3.310 s | 5.855 s |
+| Prod server start → first response   | **0.845 s** | 1.074 s | 2.813 s |
+| Client JS shipped (minimal page)     |    235 KB ¹ |  568 KB |  0 KB ² |
 
-| Throughput (higher is better)        | **Ruvyxa 1.0.32** | Next.js 16.3.2 | Astro 7.2.4 |
-| ------------------------------------ | ----------------: | -------------: | ----------: |
-| Requests/second (`/`, prod server) ³ |        **44,528** |          3,647 |       3,611 |
-| Latency p50 / p99                    |      **0 / 1 ms** |      6 / 12 ms |   6 / 10 ms |
+| Throughput (higher is better)        |   **Ruvyxa** |   Next.js |     Astro |
+| ------------------------------------ | -----------: | --------: | --------: |
+| Requests/second (`/`, prod server) ³ |   **44,528** |     3,647 |     3,611 |
+| Latency p50 / p99                    | **0 / 1 ms** | 6 / 12 ms | 6 / 10 ms |
 
 In this run, Ruvyxa's median cold build completed **6.8× / 2.0×** faster than Next.js / Astro
 respectively, dev-server readiness was **3.0× / 5.3×** faster, production-server readiness **1.3× /
@@ -394,20 +400,20 @@ has no client bundle and its `preview` server serves static files only. ³ The h
 `autocannon` once for 10 seconds with 25 connections against the final production server of each
 framework; throughput and latency are not medians.
 
-**Methodology** — measured on Windows 11 Home, AMD Ryzen 7 8845HS, 31 GB RAM, Node.js 24.19.0, npm
-11.17.0, and pnpm 11.22.0. Each framework used a freshly scaffolded minimal starter in the isolated
-`D:\RuvyxaBench-20260821` benchmark root with `RUNS=3` and the same
-[`scripts/bench-frameworks.mjs`](scripts/bench-frameworks.mjs) harness. Build = `build` script wall
+**Methodology** — measured on Windows 11 Home, AMD Ryzen 7 8845HS, 31 GB RAM. Each framework used a
+freshly scaffolded minimal starter in an isolated benchmark root with `RUNS=3` and the same
+[`scripts/bench-frameworks.mjs`](scripts/bench-frameworks.mjs) harness. The harness reports timings
+only, not framework versions; capture those from each starter's own lockfile at the moment you run
+it, because that is the only record that will still be accurate later. Build = `build` script wall
 time. Dev/prod readiness = time from process spawn to first HTTP 200 on `/`. Cold-cache runs remove
 `.ruvyxa`/`.next`/`dist`/`.astro`/Vite caches before each run; dependencies remain installed during
-the harness. The Ruvyxa column is a **development build of the unreleased 1.0.32**, packed from this
-working tree with `pnpm pack:smoke` and installed from local tarballs together with the matching
-Windows native CLI package — not a published release. Next.js 16.3.2 and Astro 7.2.4 were the
-resolved starter dependencies, and the Ruvyxa and Next starters both ran React 19.2.8. The machine
-was not otherwise idle during this run, so the absolute readiness and build timings run slightly
-high; the three frameworks were measured back to back under the same conditions, so the comparison
-between them holds. To reproduce, prepare the three isolated starters, use local tarball overrides
-for an unpublished Ruvyxa release candidate, then run
+the harness. The Ruvyxa column was packed from this repository with `pnpm pack:smoke` and installed
+from local tarballs together with the matching Windows native CLI package, rather than installed
+from the npm registry; the Ruvyxa and Next starters ran the same React. The machine was not
+otherwise idle during this run, so the absolute readiness and build timings run slightly high; the
+three frameworks were measured back to back under the same conditions, so the comparison between
+them holds. To reproduce, prepare the three isolated starters, use local tarball overrides for an
+unpublished Ruvyxa release candidate, then run
 `BENCH_ROOT=<benchmark-root> RUNS=3 node scripts/bench-frameworks.mjs`.
 
 ---
@@ -707,25 +713,27 @@ remain part of it. The ordinary `bench --json` array is unchanged for existing c
 
 ### Verified end to end
 
-Every command in the table above was run against [`examples/demo`](examples/demo) (23 routes: 21
-pages, 2 API routes) on Windows 11 / Node 22.23.1 with the 1.0.27 workspace binary:
+Every command in the table above was run on 2026-08-24 against [`examples/demo`](examples/demo) — 30
+routes: 27 pages and 3 API routes — with a `--release` binary built from this working tree.
+Scaffolding commands ran against a throwaway copy of `templates/minimal` so the fixture stayed
+clean. Timings are one machine's, not a specification; re-run them rather than quoting them.
 
-| Command         | Observed result                                                               |
-| --------------- | ----------------------------------------------------------------------------- |
-| `routes`        | 23 routes discovered, strategy per route                                      |
-| `doctor`        | 0 diagnostics, adapter `ruvyxa-native`, all routes supported by the target    |
-| `analyze`       | 0 diagnostics; human, JSON, SARIF (`--output`), and HTML (`--html`) all wrote |
-| `trace`         | route id, file, layout chain, runtime, and render strategy as JSON            |
-| `build`         | 21 client bundles, 20 prerendered pages, `.ruvyxa/` in **2.40s**              |
-| `start`         | ready in **745ms**; `GET /` → 200, `GET /api/health` → 200                    |
-| `preview`       | ready and serving the same production build → 200                             |
-| `dev`           | ready in **781ms**; `GET /` → 200 in 72ms with HMR enabled                    |
-| `check`         | typecheck + build + parity + smoke render over 23 routes, **11.70s**, exit 0  |
-| `test:parity`   | parity passed for 23 routes in **11.05s**, exit 0                             |
-| `bench`         | discovery 15ms · analyze-validation 25ms · production build 1.32s             |
-| `adds form`     | created `app/form-example/page.tsx` and `action.ts`                           |
-| `plugin create` | created a publishable `ruvyxa-plugin-<name>` package                          |
-| `clean`         | removed `.ruvyxa/` in **611ms**                                               |
+| Command         | Observed result                                                                        |
+| --------------- | -------------------------------------------------------------------------------------- |
+| `routes`        | 30 routes discovered (27 pages, 3 API), strategy resolved per route                    |
+| `doctor`        | 0 diagnostics, adapter `ruvyxa-native`, every route supported by the target, **1.17s** |
+| `analyze`       | 0 diagnostics; 38 client modules and 4 server modules reported                         |
+| `trace`         | route id, file, layout chain, runtime, and render strategy as JSON                     |
+| `build`         | cold build of all 30 routes into `.ruvyxa/` in **8.15s**, 247 kB shared by every page  |
+| `start`         | ready in **425ms**; `GET /`, `GET /api/health`, and `GET /blog/hello-world` all → 200  |
+| `preview`       | ready and serving the same production build → 200                                      |
+| `dev`           | ready in **482ms** with HMR enabled; `GET /` → 200                                     |
+| `check`         | typecheck + build + parity + smoke render over 30 routes, **16.01s**, exit 0           |
+| `test:parity`   | parity passed for 30 routes in **14.40s**, exit 0                                      |
+| `bench`         | discovery 77ms · analyze-validation 80ms · production build 1.91s                      |
+| `adds`          | `form` wrote `page.tsx` + `action.ts`; `data-table` wrote the generic client component |
+| `plugin create` | created a publishable `ruvyxa-plugin-<name>` package with a harness test               |
+| `clean`         | removed `.ruvyxa/` in **141ms**                                                        |
 
 ---
 

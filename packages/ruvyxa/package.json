@@ -156,11 +156,22 @@
     "@ruvyxa/adapter-static": "workspace:^",
     "@ruvyxa/adapter-vercel": "workspace:^",
     "@ruvyxa/core": "workspace:^",
+    "@ruvyxa/react": "workspace:^",
     "babel-plugin-react-compiler": "^1.0.0",
     "oxc-transform": "0.146.0",
     "remark-gfm": "^4.0.1",
-    "sass": "^1.103.0",
+    "sass": "^1.103.1",
     "yaml": "^2.9.0"
+  },
+  "peerDependencies": {
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8",
+    "react-server-dom-webpack": "^19.2.8"
+  },
+  "peerDependenciesMeta": {
+    "react-server-dom-webpack": {
+      "optional": true
+    }
   },
   "devDependencies": {
     "@types/node": "24.13.3"

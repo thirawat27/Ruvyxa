@@ -22,17 +22,21 @@ defaults:
 
 jobs:
   msrv:
-    name: Rust 1.96 compatibility
+    # Must match `rust-version` in the workspace Cargo.toml. When that floor
+    # moves, this pin is the only other place that has to move with it: the job
+    # name and the cache key deliberately carry no version, and rust-cache
+    # already keys its cache on the resolved rustc.
+    name: MSRV compatibility
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
-          toolchain: 1.96.0
+          toolchain: 1.98.0
       - uses: Swatinem/rust-cache@v2
         with:
-          shared-key: ruvyxa-msrv-1.96
+          shared-key: ruvyxa-msrv
       - run: cargo check --workspace --locked
 
   test:

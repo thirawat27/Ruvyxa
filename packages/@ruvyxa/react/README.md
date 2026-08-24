@@ -1,6 +1,22 @@
-# @ruvyxa/react
+<p align="center">
+  <a href="https://github.com/thirawat27/ruvyxa">
+    <img src="https://raw.githubusercontent.com/thirawat27/ruvyxa/main/assets/branding/ruvyxa.png" alt="Ruvyxa" width="140" height="140" />
+  </a>
+</p>
 
-React integration package for Ruvyxa apps.
+<h1 align="center">@ruvyxa/react</h1>
+
+<p align="center">
+  React integration package for Ruvyxa apps.
+</p>
+
+<p align="center">
+  <a href="https://www.npmjs.com/package/@ruvyxa/react"><img src="https://img.shields.io/npm/v/@ruvyxa/react?style=flat-square" alt="npm version" /></a>
+  <a href="https://www.npmjs.com/package/@ruvyxa/react"><img src="https://img.shields.io/node/v/@ruvyxa/react?style=flat-square&label=node" alt="Supported Node version" /></a>
+  <img src="https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square" alt="License" />
+</p>
+
+---
 
 ## Install
 
@@ -8,8 +24,12 @@ React integration package for Ruvyxa apps.
 npm install @ruvyxa/react react react-dom
 ```
 
-React and ReactDOM are peer dependencies. Most app users do not import this package directly; the
-main `ruvyxa` runtime uses React SSR and route-level client bundling internally.
+Most apps never run that command: `ruvyxa` depends on this package, so installing the framework
+brings it along. Install it directly when the package manager does not hoist a transitive dependency
+to the project root, which is pnpm's and Yarn's default.
+
+React and ReactDOM are peer dependencies here and on `ruvyxa`, declared at the same range in both so
+one app cannot end up satisfying two.
 
 ## Optimized images
 

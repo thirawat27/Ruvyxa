@@ -511,8 +511,24 @@ fn parses_dependency_major_versions() {
     assert_eq!(major_version("workspace:*"), None);
 }
 
+/// Write a `node_modules/<name>/package.json` carrying nothing but a version,
+/// which is all the installed-version probe reads.
+fn install_package(root: &std::path::Path, name: &str, version: &str) {
+    let mut dir = root.join("node_modules");
+    for segment in name.split('/') {
+        dir.push(segment);
+    }
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("package.json"),
+        format!(r#"{{"name":"{name}","version":"{version}"}}"#),
+    )
+    .unwrap();
+}
+
 #[test]
 fn detects_react_version_compatibility() {
+    let temp = tempfile::tempdir().unwrap();
     let package = json!({
         "dependencies": {
             "react": "^19.0.0",
@@ -520,7 +536,98 @@ fn detects_react_version_compatibility() {
         }
     });
 
-    assert_eq!(react_compatibility(&package), "ok (major 19)");
+    assert_eq!(react_compatibility(temp.path(), &package), "ok (major 19)");
+}
+
+/// npm installs a dependency's peers without adding them to the project
+/// manifest, so an app that only ever ran `npm install ruvyxa` declares no
+/// React at all and still renders. Reading the manifest alone reported that
+/// working app as broken.
+#[test]
+fn reads_react_versions_installed_as_peer_dependencies() {
+    let temp = tempfile::tempdir().unwrap();
+    install_package(temp.path(), "react", "19.2.8");
+    install_package(temp.path(), "react-dom", "19.2.8");
+    let package = json!({ "dependencies": { "ruvyxa": "^1.0.32" } });
+
+    assert_eq!(
+        resolved_dependency_version(temp.path(), &package, "react").as_deref(),
+        Some("19.2.8")
+    );
+    assert_eq!(react_compatibility(temp.path(), &package), "ok (major 19)");
+}
+
+/// The installed copy is what renders, so a manifest range that no longer
+/// matches it must not decide the answer.
+#[test]
+fn installed_react_version_outranks_the_declared_range() {
+    let temp = tempfile::tempdir().unwrap();
+    install_package(temp.path(), "react", "19.2.8");
+    let package = json!({ "dependencies": { "react": "^18.3.1" } });
+
+    assert_eq!(
+        resolved_dependency_version(temp.path(), &package, "react").as_deref(),
+        Some("19.2.8")
+    );
+}
+
+/// A project nested under a workspace root installs into that root, and the
+/// probe walks up to find it — the same way the local binary lookup does.
+#[test]
+fn finds_react_installed_at_a_workspace_root() {
+    let temp = tempfile::tempdir().unwrap();
+    install_package(temp.path(), "react", "19.2.8");
+    let app = temp.path().join("apps/site");
+    std::fs::create_dir_all(&app).unwrap();
+
+    assert_eq!(
+        installed_dependency_version(&app, "react").as_deref(),
+        Some("19.2.8")
+    );
+}
+
+/// Neither installed nor declared is the one case that is genuinely broken.
+#[test]
+fn reports_react_missing_when_it_is_neither_installed_nor_declared() {
+    let temp = tempfile::tempdir().unwrap();
+    let package = json!({ "dependencies": { "ruvyxa": "^1.0.32" } });
+
+    assert_eq!(react_compatibility(temp.path(), &package), "missing react");
+}
+
+/// Server components are opt-in, so a project without the RSC runtime gets no
+/// row at all. Reporting it as missing would put a permanent warning on every
+/// app that never enables the feature.
+#[test]
+fn says_nothing_about_the_rsc_runtime_when_the_project_does_not_use_it() {
+    let temp = tempfile::tempdir().unwrap();
+    install_package(temp.path(), "react", "19.2.8");
+
+    assert_eq!(server_components_compatibility(temp.path()), None);
+}
+
+/// `react-server-dom-webpack` reaches into React internals rather than a public
+/// API, so the versions have to be equal — a matching major is not enough, and
+/// the pair that fails this way fails inside React with no mention of either.
+#[test]
+fn holds_the_rsc_runtime_to_the_exact_react_version() {
+    let matched = tempfile::tempdir().unwrap();
+    install_package(matched.path(), "react", "19.2.8");
+    install_package(matched.path(), "react-server-dom-webpack", "19.2.8");
+
+    assert_eq!(
+        server_components_compatibility(matched.path()).as_deref(),
+        Some("ok (19.2.8)")
+    );
+
+    let drifted = tempfile::tempdir().unwrap();
+    install_package(drifted.path(), "react", "19.2.8");
+    install_package(drifted.path(), "react-server-dom-webpack", "19.3.0");
+
+    assert_eq!(
+        server_components_compatibility(drifted.path()).as_deref(),
+        Some("mismatch react 19.2.8 vs react-server-dom-webpack 19.3.0")
+    );
 }
 
 #[test]

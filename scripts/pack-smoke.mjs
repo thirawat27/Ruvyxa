@@ -360,10 +360,12 @@ for (const starter of starters) {
   }
 }
 
-// The ruvyxa package depends on the official adapter packages, which are
-// unpublished at this point in the release; the freshly packed tarballs must
-// satisfy those ranges instead of the registry.
-const adapterOverrides = [
+// Every workspace package the ruvyxa package itself depends on — the official
+// adapters and the React integration — is unpublished at this point in the
+// release, so the freshly packed tarballs must satisfy those ranges instead of
+// the registry. A workspace dependency added to `ruvyxa` and left out here
+// sends the scaffolded install to npm for a version that does not exist yet.
+const workspaceOverrides = [
   '@ruvyxa/adapter-aws',
   '@ruvyxa/adapter-bun',
   '@ruvyxa/adapter-deno',
@@ -375,6 +377,7 @@ const adapterOverrides = [
   '@ruvyxa/adapter-render',
   '@ruvyxa/adapter-static',
   '@ruvyxa/adapter-vercel',
+  '@ruvyxa/react',
 ].map((name) => `  '${name}': ${JSON.stringify(workspaceTarball(packedTarball(name)))}`)
 
 writeFileSync(
@@ -385,7 +388,7 @@ writeFileSync(
     'overrides:',
     `  '@ruvyxa/core': ${JSON.stringify(workspaceTarball(coreTgz))}`,
     `  '${currentPlatformPackage}': ${JSON.stringify(workspaceTarball(currentPlatformTgz))}`,
-    ...adapterOverrides,
+    ...workspaceOverrides,
     'allowBuilds:',
     "  '@parcel/watcher': false",
     '',

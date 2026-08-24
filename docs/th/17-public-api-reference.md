@@ -9,19 +9,37 @@ detail ใน Rust/runtime file ออกจาก API ที่ application imp
 
 ## `ruvyxa`, `ruvyxa/server` และ `ruvyxa/config`
 
-| Export                                          | Signature / วัตถุประสงค์                                                                        |
-| ----------------------------------------------- | ----------------------------------------------------------------------------------------------- |
-| `config`                                        | `<T extends RuvyxaConfig>(config: T) => T`; typed config identity helper                        |
-| `loader`                                        | `(handler: LoaderHandler<T>) => Loader<T>`; handler รับ `params`, `request`, `cache`            |
-| `action`                                        | Builder: `.input(schema)`, `.realtime(channels?)`, `.handler(fn)`                               |
-| `cache`                                         | `(key) => CacheBuilder`; `.ttl`, `.swr`, `.tags(...keys)`, `.scope(...)` และ `.get(...)`        |
-| `invalidateCache`, `cacheStats`                 | ลบ cache entry แบบ exact/prefix/all; รายงาน `{ size, maxEntries }`                              |
-| `FlightContext`, `FlightHandler`, `FlightValue` | type สำหรับ route export `flight` แบบ public และ payload ที่มันคืน                              |
-| `json`, `redirect`, `notFound`                  | Response helper; redirect อนุญาตเฉพาะ status 3xx                                                |
-| `cookies`, `headers`, `draftMode`               | อ่าน request ที่กำลังให้บริการ เรียกตัวใดตัวหนึ่งแล้วจะกัน render นี้ออกจาก cache ที่ใช้ร่วมกัน |
-| `revalidatePath`                                | `(path: string) => void`; คิว URL จริงหนึ่งอันให้ render ใหม่ในคำขอถัดไป                        |
-| `definePlugin`, `withResponseHeader`            | plugin definition และ response-header helper                                                    |
-| `standaloneServerSource`                        | source generator สำหรับ standalone server artifact                                              |
+คอลัมน์ **จาก** คือสิ่งที่ควรอ่านก่อน เพราะ entry point แต่ละตัวใช้แทนกันไม่ได้ `ruvyxa` re-export
+primitive ที่โมดูลไหนก็ใช้ได้ ส่วนการเรียกที่ผูกกับ request — `cookies`, `headers`, `params`,
+`draftMode` — มีเฉพาะบน `ruvyxa/server` และอ่านจาก store ที่ runtime ติดตั้งไว้รอบ render หรือ
+handler การเรียกที่ระดับ module scope หรือจากโค้ดฝั่ง browser จะ throw
+`… was called outside a request` แทนที่จะคืนค่าว่าง path ที่ import
+จึงเป็นคำอธิบายที่ชัดที่สุดว่าโค้ดนั้นตั้งใจให้รันที่ไหน
+
+| Export                                          | จาก                           | Signature / วัตถุประสงค์                                                                        |
+| ----------------------------------------------- | ----------------------------- | ----------------------------------------------------------------------------------------------- |
+| `config`                                        | `ruvyxa/config` หรือ `ruvyxa` | `<T extends RuvyxaConfig>(config: T) => T`; typed config identity helper                        |
+| `loader`                                        | ทั้งสอง                       | `(handler: LoaderHandler<T>) => Loader<T>`; handler รับ `params`, `request`, `cache`            |
+| `action`                                        | ทั้งสอง                       | Builder: `.input(schema)`, `.realtime(channels?)`, `.handler(fn)`                               |
+| `cache`                                         | ทั้งสอง                       | `(key) => CacheBuilder`; `.ttl`, `.swr`, `.tags(...keys)`, `.scope(...)` และ `.get(...)`        |
+| `invalidateCache`, `cacheStats`                 | ทั้งสอง                       | ลบ cache entry แบบ exact/prefix/all; รายงาน `{ size, maxEntries }`                              |
+| `revalidateTag`                                 | `ruvyxa/server`               | `(tag: string) => void`; ลบทุก cache entry ที่มี tag นั้นแบบตรงตัว                              |
+| `json`, `redirect`, `notFound`                  | ทั้งสอง                       | Response helper; redirect อนุญาตเฉพาะ status 3xx                                                |
+| `cookies`, `headers`, `draftMode`               | `ruvyxa/server`               | อ่าน request ที่กำลังให้บริการ เรียกตัวใดตัวหนึ่งแล้วจะกัน render นี้ออกจาก cache ที่ใช้ร่วมกัน |
+| `params`                                        | `ruvyxa/server`               | route parameter ของหน้าที่กำลัง render อ่านได้จากใต้ component ที่รับ props มาแล้ว              |
+| `revalidatePath`                                | `ruvyxa/server`               | `(path: string) => void`; คิว URL จริงหนึ่งอันให้ render ใหม่ในคำขอถัดไป                        |
+| `FlightContext`, `FlightHandler`, `FlightValue` | `ruvyxa/server`               | type สำหรับ route export `flight` แบบ public และ payload ที่มันคืน                              |
+| `definePlugin`, `withResponseHeader`            | `ruvyxa/plugin` หรือ `ruvyxa` | plugin definition และ response-header helper                                                    |
+| `standaloneServerSource`                        | `ruvyxa`                      | source generator สำหรับ standalone server artifact                                              |
+
+"ทั้งสอง" หมายถึงชื่อนั้น re-export ทั้งจาก `ruvyxa` และ `ruvyxa/server` ในโมดูลที่รันฝั่ง server
+อย่างเดียว ควรเลือก `ruvyxa/server` เพื่อให้ตัว import เองบอกขอบเขตไว้
+
+ผู้เขียน adapter ยังได้ build helper จาก `ruvyxa` ด้วย — `validateBuildContext`,
+`clientBuildOutput`, `runtimeBuildPolicy`, `projectRelativeOutDir`, `staticAssetGlobs`,
+`publicAssetGlobs`, `headersFileContents`, `DEFAULT_SECURITY_HEADERS`, `IMMUTABLE_CACHE_CONTROL`,
+`PUBLIC_ASSET_CACHE_CONTROL`, `STATIC_ASSET_EXTENSIONS` และ `CLIENT_BUNDLE_PREFIX`
+ดูการใช้งานจริงได้ที่ [คู่มือ adapter สำหรับแพลตฟอร์ม](20-platform-adapter-guide.md)
 
 type มี `RuvyxaConfig`, `PageProps`, `GetStaticParams`, `RenderStrategy`, `Adapter`,
 `MiddlewareConfig`, `ImageConfig`, `I18nConfig`, `SiteConfig` และ plugin contract ใช้ import จาก
@@ -68,19 +86,18 @@ server resolve URL ผ่าน module เดียวกันนี้ กา�
 ปกติ application ต้องการแค่ `useParams()` จาก `@ruvyxa/react` ส่วนเหล่านี้มีไว้สำหรับโค้ดที่ต้อง
 resolve route นอก React tree เช่น custom server หรือ adapter
 
-> **เปลี่ยนใน 1.0.28** ชื่อเหล่านี้เคย re-export จาก `@ruvyxa/react` และตอนนี้ไม่แล้ว
-> `@ruvyxa/react` ยัง export type `RouteParams` อยู่ ส่วนที่เหลือให้ import จาก
-> `@ruvyxa/core/route-match`
+> `@ruvyxa/react` export type `RouteParams` ส่วนชื่ออื่นทั้งหมดในตารางนี้มาจาก
+> `@ruvyxa/core/route-match` และมาจากที่นั่นที่เดียว
 
 ## Public package อื่น
 
-| Package             | Integration ที่ export                                                                      |
-| ------------------- | ------------------------------------------------------------------------------------------- |
-| `@ruvyxa/auth`      | `createAuth`, provider, store, client/plugin entry point, auth type/error                   |
-| `@ruvyxa/database`  | `createDatabase`, operation/type, `prismaAdapter`, `dynamoAdapter`, `defineDatabaseAdapter` |
-| `@ruvyxa/realtime`  | plugin entry point; client export `createRealtimeClient`                                    |
-| `@ruvyxa/testing`   | `mockLoader`, `mockAction`, `mockCache`                                                     |
-| `@ruvyxa/adapter-*` | typed build adapter package                                                                 |
+| Package             | Integration ที่ export                                                                                                                          |
+| ------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------- |
+| `@ruvyxa/auth`      | `createAuth`, provider, store, client/plugin entry point, auth type/error และ `forwardedClientIp(request)` สำหรับ rate limit หลัง trusted proxy |
+| `@ruvyxa/database`  | `createDatabase`, operation/type, `prismaAdapter`, `dynamoAdapter`, `defineDatabaseAdapter`                                                     |
+| `@ruvyxa/realtime`  | plugin entry point; client export `createRealtimeClient`                                                                                        |
+| `@ruvyxa/testing`   | `mockLoader`, `mockAction`, `mockCache`                                                                                                         |
+| `@ruvyxa/adapter-*` | typed build adapter package                                                                                                                     |
 
 สำหรับ option/default detail ให้ดู [Configuration](07-configuration.md) และ exported TypeScript
 declaration ใน package ที่ติดตั้ง ชื่อ public API ที่แสดงถูกยืนยันจาก source; runtime name

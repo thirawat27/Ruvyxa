@@ -1,6 +1,22 @@
-# @ruvyxa/adapter-netlify
+<p align="center">
+  <a href="https://github.com/thirawat27/ruvyxa">
+    <img src="https://raw.githubusercontent.com/thirawat27/ruvyxa/main/assets/branding/ruvyxa.png" alt="Ruvyxa" width="140" height="140" />
+  </a>
+</p>
 
-Netlify deployment adapter for Ruvyxa production builds.
+<h1 align="center">@ruvyxa/adapter-netlify</h1>
+
+<p align="center">
+  Netlify deployment adapter for Ruvyxa production builds.
+</p>
+
+<p align="center">
+  <a href="https://www.npmjs.com/package/@ruvyxa/adapter-netlify"><img src="https://img.shields.io/npm/v/@ruvyxa/adapter-netlify?style=flat-square" alt="npm version" /></a>
+  <a href="https://www.npmjs.com/package/@ruvyxa/adapter-netlify"><img src="https://img.shields.io/node/v/@ruvyxa/adapter-netlify?style=flat-square&label=node" alt="Supported Node version" /></a>
+  <img src="https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square" alt="License" />
+</p>
+
+---
 
 ## Install
 

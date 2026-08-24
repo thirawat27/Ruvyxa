@@ -22,11 +22,20 @@ reload; root เริ่มต้นคือ current directory เปิด UR
 
 ## ติดตั้งใน React project เดิม
 
-template ยืนยัน dependency ขั้นต่ำด้านล่าง ควรรักษา React version ให้เข้ากันทั้งชุด
+บน npm framework เป็น package เดียว `react` กับ `react-dom` เป็น peer dependency ที่ npm
+ติดตั้งให้เอง ส่วน `@ruvyxa/react` เป็น dependency ของ `ruvyxa` อยู่แล้ว
 
 ```bash
-npm install ruvyxa @ruvyxa/react react react-dom
+npm install ruvyxa
 npm install -D typescript @types/react @types/react-dom
+```
+
+pnpm และ Yarn ไม่ติดตั้ง peer dependency ให้ และไม่ยก transitive package ขึ้นมาที่ project root
+จึงต้องระบุชุดเดียวกับที่ template ประกาศไว้ ควรรักษา React version ให้เข้ากันทั้งชุด
+
+```bash
+pnpm add ruvyxa @ruvyxa/react react react-dom
+pnpm add -D typescript @types/react @types/react-dom
 ```
 
 สร้าง `ruvyxa.config.ts`:

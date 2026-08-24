@@ -27,11 +27,26 @@ flowchart LR
 
 ## ข้อกำหนดเบื้องต้น
 
-- root และ JavaScript package ที่เผยแพร่ระบุ Node.js `>=24.19.0`
-- project ที่ generator สร้างระบุ Node `>=24.19.0` และติดตั้ง/รันด้วย npm ได้ ส่วน monorepo ใช้ pnpm
-  `11.21.0`; เรื่องนี้เกี่ยวกับผู้พัฒนา framework เท่านั้น
-- template ใช้ React และ React DOM `19.2.8`
-- project ต้องมี `package.json`, `ruvyxa.config.ts` และ application directory (โดยทั่วไปคือ `app/`)
+การ **สร้างแอปด้วย Ruvyxa** ต้องการเพียง Node.js กับ package manager เท่านั้น compiler และ server
+เขียนด้วย Rust ก็จริง แต่ถูก build มาให้แล้ว: `npm install ruvyxa` จะ resolve package
+`@ruvyxa/cli-<platform>` ที่บรรจุ binary ของเครื่องคุณ จึงไม่ต้องติดตั้ง Rust toolchain
+
+คู่มือนี้จะไม่ระบุเลขเวอร์ชันตายตัว เพราะเลขที่เขียนไว้จะล้าสมัยทันทีที่มี release ใหม่
+ข้อกำหนดแต่ละข้อจึงชี้ไปยังไฟล์ที่ประกาศค่านั้นไว้ ซึ่งเป็นแหล่งที่ถูกต้องเสมอ
+
+| สิ่งที่ต้องมี        | ประกาศไว้ที่                                                       |
+| -------------------- | ------------------------------------------------------------------ |
+| ขั้นต่ำของ Node.js   | `engines.node` ในทุก package ที่เผยแพร่ และใน project ที่สร้างขึ้น |
+| React และ TypeScript | `dependencies` และ `devDependencies` ของ starter template          |
+| package manager      | npm, pnpm, yarn หรือ bun ก็ได้ — project ที่สร้างขึ้นใช้ได้ทั้งหมด |
+
+รัน `ruvyxa doctor` ใน project เพื่อดูเวอร์ชันที่ resolve ได้จริงบนเครื่องคุณ
+และดูว่าตัวไหนต่ำกว่าขั้นต่ำ นอกจากนี้ project ต้องมี `package.json`, `ruvyxa.config.ts` และ
+application directory (โดยทั่วไปคือ `app/`)
+
+การ **พัฒนาตัว framework เอง** ต้องมี Rust toolchain (edition 2024 โดยขั้นต่ำอยู่ที่ `rust-version`
+ใน `Cargo.toml` ของ workspace) และ pnpm รุ่นที่ pin ไว้ใน `packageManager` เพิ่มด้วย ดู
+[การพัฒนาและการทดสอบ](12-development-testing.md)
 
 > **ขอบเขต:** framework รองรับ runtime option `node`, `bun` และ `deno` ใน CLI/config Node ยังคงเป็น
 > package prerequisite ที่ประกาศไว้; ติดตั้ง Bun หรือ Deno เฉพาะเมื่อเลือก runtime นั้น Deno local

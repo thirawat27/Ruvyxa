@@ -1,8 +1,24 @@
-# @ruvyxa/auth
+<p align="center">
+  <a href="https://github.com/thirawat27/ruvyxa">
+    <img src="https://raw.githubusercontent.com/thirawat27/ruvyxa/main/assets/branding/ruvyxa.png" alt="Ruvyxa" width="140" height="140" />
+  </a>
+</p>
 
-Production-shaped authentication for Ruvyxa with explicit state and provider contracts. It supports
-credentials, OAuth 2.0 with PKCE, magic links, and delegated WebAuthn verification without storing
-passwords or pinning an ORM/Redis vendor.
+<h1 align="center">@ruvyxa/auth</h1>
+
+<p align="center">
+  Production-shaped authentication for Ruvyxa with explicit state and provider contracts. It<br/>
+  supports credentials, OAuth 2.0 with PKCE, magic links, and delegated WebAuthn verification<br/>
+  without storing passwords or pinning an ORM/Redis vendor.
+</p>
+
+<p align="center">
+  <a href="https://www.npmjs.com/package/@ruvyxa/auth"><img src="https://img.shields.io/npm/v/@ruvyxa/auth?style=flat-square" alt="npm version" /></a>
+  <a href="https://www.npmjs.com/package/@ruvyxa/auth"><img src="https://img.shields.io/node/v/@ruvyxa/auth?style=flat-square&label=node" alt="Supported Node version" /></a>
+  <img src="https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square" alt="License" />
+</p>
+
+---
 
 ```ts
 import { createAuth, google } from '@ruvyxa/auth'

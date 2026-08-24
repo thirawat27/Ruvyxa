@@ -5,10 +5,14 @@
 > [Create your first app](02-create-your-first-app.md) provides one. **Checkpoint:** inspect the
 > route list, application check, and analyzer output for your app.
 
-The root [README](../../README.md) is the authoritative project overview. In a generated Ruvyxa
-application, use the npm scripts below. They are the stable, copy-pasteable interface provided by
-every starter; in particular, use `routes:json` and `analyze:html` rather than teaching readers to
-reconstruct the flags behind those scripts.
+This chapter is the task-oriented view: which script to reach for, and what it does to your project.
+**The per-command flag table lives in the root [README](../../README.md#cli)**, which is where every
+command, its flags, and its normalization rules are listed — this page does not repeat them.
+`ruvyxa help <command>` prints the same reference from the binary you actually have installed.
+
+In a generated Ruvyxa application, use the npm scripts below. They are the stable, copy-pasteable
+interface provided by every starter; in particular, use `routes:json` and `analyze:html` rather than
+reconstructing the flags behind those scripts.
 
 | Application command                                                                                                                   | Runs                                  | Purpose                                                                                |
 | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------- | -------------------------------------------------------------------------------------- |

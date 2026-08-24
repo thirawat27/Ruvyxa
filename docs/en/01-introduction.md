@@ -27,12 +27,27 @@ flowchart LR
 
 ## Requirements
 
-- Node.js `>=24.19.0` is declared by the root and published JavaScript packages.
-- Generated projects declare Node `>=24.19.0` and can be installed and run with npm. The framework
-  monorepo itself uses pnpm `11.21.0`; that is relevant only to framework contributors.
-- React and React DOM `19.2.8` are the template dependencies.
-- A project needs a `package.json`, `ruvyxa.config.ts`, and an application directory (normally
-  `app/`).
+To **build an app with Ruvyxa** you need only Node.js and a package manager. The compiler and server
+are Rust, but they ship prebuilt: `npm install ruvyxa` resolves a `@ruvyxa/cli-<platform>` package
+carrying the binary for your machine, so no Rust toolchain is involved.
+
+This manual does not restate version numbers, because a number written here goes stale the moment a
+release moves it. Each requirement below names the file that declares it, which is the copy that is
+always right:
+
+| You need             | Declared in                                                         |
+| -------------------- | ------------------------------------------------------------------- |
+| A Node.js floor      | `engines.node` in every published package and in generated projects |
+| React and TypeScript | `dependencies` and `devDependencies` of the starter templates       |
+| A package manager    | any of npm, pnpm, yarn, or bun — generated projects work with all   |
+
+Run `ruvyxa doctor` in a project to see the versions actually resolved on your machine and which of
+them are below the floor. A project also needs a `package.json`, a `ruvyxa.config.ts`, and an
+application directory (normally `app/`).
+
+To **work on the framework itself** you additionally need a Rust toolchain (edition 2024, floor in
+`rust-version` in the workspace `Cargo.toml`) and the pnpm release pinned in `packageManager`. See
+[Development and testing](12-development-testing.md).
 
 > **Scope note:** the framework supports `node`, `bun`, and `deno` runtime options in its
 > CLI/config. Node remains the declared package prerequisite; install Bun or Deno only when

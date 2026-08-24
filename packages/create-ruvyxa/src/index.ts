@@ -27,6 +27,7 @@ export interface CreateRuvyxaResult {
 const REQUIRED_TEMPLATE_FILES = [
   'AGENTS.md',
   'CLAUDE.md',
+  'README.md',
   'app/page.tsx',
   'app/layout.tsx',
   'app/globals.css',

@@ -17,7 +17,12 @@
       "project": ["**/*.{ts,tsx}"]
     }
   },
-  "ignoreDependencies": ["@ruvyxa/adapter-.*", "oxc-transform", "react-server-dom-webpack"],
+  "ignoreDependencies": [
+    "@ruvyxa/adapter-.*",
+    "@ruvyxa/react",
+    "oxc-transform",
+    "react-server-dom-webpack"
+  ],
   "ignoreBinaries": ["pwsh", "readelf"],
   "tags": ["-@public"],
   "exclude": ["duplicates", "optionalPeerDependencies"]

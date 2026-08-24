@@ -22,7 +22,7 @@ strip = "symbols"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/thirawat27/ruvyxa"
-rust-version = "1.96"
+rust-version = "1.98"
 
 [workspace.lints.clippy]
 # Nursery lint, off by default. Turned on because the JavaScript side now has
@@ -35,7 +35,7 @@ cognitive_complexity = "warn"
 anyhow = "1.0.104"
 axum = { version = "0.8.9", features = ["ws"] }
 base64 = "0.23.1"
-blake3 = "1.8.6"
+blake3 = "1.8.7"
 chrono = { version = "0.4.45", default-features = false, features = ["clock", "std"] }
 clap = { version = "4.6.6", features = ["derive"] }
 dashmap = "6.2.1"

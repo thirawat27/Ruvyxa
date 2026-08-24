@@ -31,6 +31,32 @@ export const products = loader(async ({ cache }) =>
 `products` และ key ที่ขึ้นต้นด้วย `products:`; หากไม่ส่ง argument จะล้าง cache ทั้ง process เรียก
 `cacheStats()` เพื่อได้ `{ size, maxEntries }`
 
+`.scope('request')` จะเก็บค่าไว้เฉพาะ request ปัจจุบันแทนการใช้ร่วมกันข้าม request ใช้เมื่อ producer
+อ่าน cookie, header หรือ draft mode — producer ที่ใช้ร่วมกันแล้วไปอ่าน request state จะ fail closed
+แทนที่จะรั่วข้อมูลของผู้ใช้คนหนึ่งไปให้อีกคน
+
+### invalidate ด้วย tag แทน key
+
+key ระบุ entry เดียว ส่วน tag กำกับกลุ่มของ entry ทำให้ key
+ที่ไม่เกี่ยวข้องกันแต่หมดอายุพร้อมกันถูกล้างได้ในครั้งเดียว
+
+```ts
+import { cache, revalidateTag } from 'ruvyxa/server'
+
+const list = await cache('products:list').tags('products').get(loadList)
+const featured = await cache('home:featured').tags('products', 'home').get(loadFeatured)
+
+revalidateTag('products') // ลบทั้ง `products:list` และ `home:featured`
+```
+
+`revalidateTag(tag)` ลบทุก cache entry ที่มี tag นั้นแบบตรงตัว — การ match เป็นแบบ exact ไม่มีรูป
+prefix หรือ wildcard และแต่ละ tag ยาว 1–128 ตัวอักษร ประกอบด้วยตัวอักษร ตัวเลข `:`, `.`, `_`, `/`
+หรือ `-` เท่านั้น นอกเหนือจากนี้จะ throw เช่นเดียวกับ `invalidateCache()` มันทำงานกับ cache ของ
+process ที่เรียกมัน บน serverless จึงล้างเฉพาะ instance ที่เรียก ไม่ใช่ instance อื่นที่อุ่นอยู่แล้ว
+
+มันล้าง **ค่า** ที่ cache ไว้ ไม่ใช่ HTML ที่ pre-render แล้ว หากต้องการให้ server render
+เอกสารที่เก็บไว้ใหม่ ให้ใช้ [`revalidatePath()`](#revalidate-ตามคำสั่ง)
+
 ## Public Flight payload
 
 > **ไม่ใช่ React Server Components** Flight ของ Ruvyxa เป็นคนละอย่าง: เป็น JSON payload ต่อ route
@@ -225,9 +251,12 @@ export async function POST({ request }: { request: Request }) {
 ระบบจะคง revalidation ไว้เพื่อลองใหม่ใน request ถัดไป และเซิร์ฟเวอร์ที่เขียนไม่ได้เลยจะ log
 คำเตือนเมื่อรายการที่ค้างเริ่มเต็ม
 
-Ruvyxa ไม่มี `revalidateTag()` ใน Next.js tag ใช้กำกับรายการใน cache ของ `fetch()` แต่ Ruvyxa ไม่มี
-fetch cache ให้กำกับ การรองรับ tag จึงต้องมีการประกาศ tag ระดับหน้าและดัชนี tag-to-route
-ซึ่งเป็นการตัดสินใจเชิงออกแบบ ไม่ใช่ส่วนเพิ่มของฟังก์ชันนี้
+`revalidateTag()` เป็นฟังก์ชันคู่กันแต่ทำคนละหน้าที่:
+[มันล้าง cache entry ที่ติด tag](#invalidate-ด้วย-tag-แทน-key) ส่วน `revalidatePath()` สั่ง render
+เอกสารที่เก็บไว้ใหม่ tag ของ Ruvyxa กำกับค่าที่คุณ cache เองด้วย `cache().tags(...)`
+ซึ่งไม่ใช่สิ่งเดียวกับ tag ของ Next.js — ที่นี่ไม่มี cache ของ `fetch()` ให้ tag ไปเกาะ และ tag
+ไม่ได้ระบุ route การล้างข้อมูลที่หน้าหนึ่งอ่านจึงไม่ได้เขียน HTML ที่ build
+สร้างไว้ใหม่ด้วยตัวมันเอง ถ้าต้องการให้เอกสารเปลี่ยน ให้เรียก `revalidatePath()`
 
 บน deployment แบบ serverless `revalidatePath` จะล้าง function instance ที่เรียกมัน และคำขอถัดไป
 จะเขียนเอกสารที่เก็บไว้ใหม่ให้กับคำขอหลังจากนั้นทั้งหมด ส่วน instance

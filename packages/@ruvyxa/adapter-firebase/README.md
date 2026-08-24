@@ -1,7 +1,23 @@
-# @ruvyxa/adapter-firebase
+<p align="center">
+  <a href="https://github.com/thirawat27/ruvyxa">
+    <img src="https://raw.githubusercontent.com/thirawat27/ruvyxa/main/assets/branding/ruvyxa.png" alt="Ruvyxa" width="140" height="140" />
+  </a>
+</p>
 
-Full-stack Firebase Hosting adapter for Ruvyxa. It publishes static assets to Firebase's CDN and
-rewrites dynamic requests to a generated second-generation HTTPS function.
+<h1 align="center">@ruvyxa/adapter-firebase</h1>
+
+<p align="center">
+  Full-stack Firebase Hosting adapter for Ruvyxa. It publishes static assets to Firebase's CDN and<br/>
+  rewrites dynamic requests to a generated second-generation HTTPS function.
+</p>
+
+<p align="center">
+  <a href="https://www.npmjs.com/package/@ruvyxa/adapter-firebase"><img src="https://img.shields.io/npm/v/@ruvyxa/adapter-firebase?style=flat-square" alt="npm version" /></a>
+  <a href="https://www.npmjs.com/package/@ruvyxa/adapter-firebase"><img src="https://img.shields.io/node/v/@ruvyxa/adapter-firebase?style=flat-square&label=node" alt="Supported Node version" /></a>
+  <img src="https://img.shields.io/badge/license-Apache%202.0-green?style=flat-square" alt="License" />
+</p>
+
+---
 
 ```bash
 npm run build -- --adapter firebase

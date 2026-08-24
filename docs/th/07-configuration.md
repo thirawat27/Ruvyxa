@@ -27,7 +27,7 @@ source type ของมัน
 
 | กลุ่ม         | Key                                                                                                                              | การตัดสินใจเชิงปฏิบัติการ                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                        |
 | ------------- | -------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Root          | `appDir`, `outDir`, `runtime`, `typedRoutes`                                                                                     | ใช้ default จนกว่าจะต้องเปลี่ยน source/output layout หรือ target `runtime` คือ `node`, `bun`, `deno`, `edge` หรือ `static`; CLI target override ได้ `typedRoutes` ต้องมี `.ruvyxa/types/**/*.d.ts` ใน `include` ของ tsconfig ด้วย ส่วน `react` และ `typescript.strict` ยังรับค่าอยู่เพื่อให้ config เดิมผ่าน validation แต่ไม่มีอะไรอ่านค่านั้น — ตั้ง strictness ใน `tsconfig.json` ของโปรเจกต์เอง                                                                                                                                              |
+| Root          | `appDir`, `outDir`, `runtime`, `typedRoutes`, `reactCompiler`                                                                    | ใช้ default จนกว่าจะต้องเปลี่ยน source/output layout หรือ target `runtime` คือ `node`, `bun`, `deno`, `edge` หรือ `static`; CLI target override ได้ `typedRoutes` ต้องมี `.ruvyxa/types/**/*.d.ts` ใน `include` ของ tsconfig ด้วย ส่วน `react` และ `typescript` ตัว validator รับค่าอยู่แต่ไม่มีอะไรอ่าน — ตั้ง strictness ใน `tsconfig.json` ของโปรเจกต์เอง ส่วน `reactCompiler` ปิดไว้เป็นค่าเริ่มต้น — ดู [React Compiler](#react-compiler)                                                                                                   |
 | CSS และ debug | `css.entries`, `debug.overlay`, `debug.traces`                                                                                   | `entries` สำหรับ global style แบบ project-relative ที่ไม่มี module import debug flag เปลี่ยน development diagnostic ไม่ใช่ production access control                                                                                                                                                                                                                                                                                                                                                                                             |
 | Build         | `minify`, `map`, `treeShake`, `split`, `workers`, `jsx`, `target`, `manifest`, `warm`, `prerenderCache`                          | `split` เป็น `single`, `route` หรือ `manual`; `jsx` เป็น `classic` หรือ `automatic`; `target` เป็น `es2015` ถึง `es2026` หรือ `esnext` (ค่าปริยาย) และ compiler ทั้งสองตัวใช้ค่านี้จริง target ที่ต่ำกว่า syntax ที่โค้ดใช้อาจต้องพึ่ง runtime helper — Ruvyxa ไม่ได้ ship helper runtime มาด้วย ดังนั้นโมดูลที่ต้องใช้ helper จะทำให้ build ล้มเหลวพร้อมบอกชื่อ helper แทนที่จะ emit import ที่ resolve ไม่ได้ โค้ดแอปพลิเคชันทั่วไปคอมไพล์ได้โดยไม่ต้องใช้ helper ที่ `es2022` ขึ้นไป ใช้ source map อย่างตั้งใจเพราะอาจเปิดเผย source content |
 | Rendering     | `render.strategy`, `render.revalidate`                                                                                           | Strategy คือ `ssr`, `ssg`, `isr`, `csr` หรือ `ppr` strategy ปริยายคือ SSR และ revalidation ปริยาย 60 วินาที                                                                                                                                                                                                                                                                                                                                                                                                                                      |
@@ -145,6 +145,29 @@ export default config({
   i18n: { locales: ['en', 'th'], defaultLocale: 'en' },
 })
 ```
+
+## React Compiler
+
+`reactCompiler: true` จะรัน React Compiler ตัวจริงกับ component ของคุณก่อน Oxc transform ของ Ruvyxa
+เอง ทำให้การ memoize ถูกอนุมานให้แทนที่จะเขียน `useMemo` กับ `useCallback` เอง
+
+```ts
+export default config({ reactCompiler: true })
+```
+
+ค่าเริ่มต้นคือ **ปิด** และตั้งใจไม่มี option ย่อยของตัวเอง มีสองข้อที่ควรรู้ก่อนเปิดใช้:
+
+- มันรันใน **inference mode** ซึ่งเป็นค่าเริ่มต้นของ upstream และ target React 19 อันเป็นเวอร์ชัน
+  peer ที่ Ruvyxa ต้องการอยู่แล้ว ที่นี่ไม่มีการ opt-in/opt-out รายไฟล์ — component ใช้ directive
+  ของ compiler เองในการหลีกเลี่ยง
+- ไฟล์ config ของ Babel จะถูก **ละเว้น** (`babelrc: false`, `configFile: false`)
+  ซึ่งตั้งใจไว้เช่นนั้น: `.babelrc` ในโปรเจกต์อาจทำให้ lane ฝั่ง server กับ lane ฝั่ง client compile
+  component เดียวกันไม่เหมือนกัน ซึ่งเป็นความต่างที่มักโผล่มาในรูป hydration mismatch บน production
+  เท่านั้น
+
+output ที่ compile แล้วถูก key ด้วยเนื้อหาเหมือน transform อื่นทุกตัว การตั้งค่านี้จึงยังใช้ build
+cache ได้ตามปกติ เปิดใช้ แล้วรัน `ruvyxa build` เพื่อเทียบดู — มันเปลี่ยน JavaScript ที่ emit ออกมา
+ไม่ใช่ semantics ของโค้ดที่ถูกต้องอยู่แล้ว
 
 ## Compiler สำหรับ Markdown และ MDX
 

@@ -46,3 +46,4 @@ minimumReleaseAgeExclude:
   - '@oxc-transform/binding-win32-x64-msvc@0.142.0 || 0.143.0'
   - oxc-transform@0.142.0 || 0.143.0
   - sass@1.103.0
+  - '@types/react-dom@19.2.5'

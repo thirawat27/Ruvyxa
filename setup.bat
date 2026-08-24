@@ -2,8 +2,8 @@
 setlocal
 pushd "%~dp0"
 
-where pnpm >nul 2>&1 || (echo [ERROR] pnpm 11+ is required.& exit /b 1)
-where cargo >nul 2>&1 || (echo [ERROR] Rust/Cargo 1.96+ is required.& exit /b 1)
+where pnpm >nul 2>&1 || (echo [ERROR] pnpm is required - see packageManager in package.json.& exit /b 1)
+where cargo >nul 2>&1 || (echo [ERROR] Rust/Cargo is required - see rust-version in Cargo.toml.& exit /b 1)
 
 echo [Ruvyxa] Installing workspace dependencies...
 call pnpm install --frozen-lockfile || exit /b 1
