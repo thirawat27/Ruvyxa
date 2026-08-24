@@ -431,8 +431,14 @@ pub(crate) async fn flight_endpoint(
 
 /// Header that keeps `/__ruvyxa/rsc` out of reach of a cross-origin page.
 ///
-/// Spelled once here and once in `rsc-client-runtime.mjs`, which is the browser
-/// half of the same request.
+/// Four spellings, not two, and this comment claimed two until the count was
+/// taken: here, in `createHandler` (`serverless-handler.mjs`, the host every
+/// deployed build runs), and in both browser halves —
+/// `rsc-client-runtime.mjs` and `@ruvyxa/react`'s router. They cannot share a
+/// module across the language boundary or into a function bundle, so
+/// `requiredHeaders` on `/__ruvyxa/rsc` in
+/// `tests/fixtures/framework-endpoint-conformance.json` is the table both
+/// request hosts replay instead.
 const RSC_REQUEST_HEADER: &str = "x-ruvyxa-rsc";
 
 /// One server-components route, resolved and owned.
@@ -1190,6 +1196,72 @@ fn debug_traces_enabled(config: &ServerConfig) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The `/__ruvyxa/rsc` gate is one rule with two implementations.
+    ///
+    /// This host spells the header names as the constants above; `createHandler`
+    /// in `packages/ruvyxa/runtime/serverless-handler.mjs` spells them again for
+    /// the deployed half, and `@ruvyxa/react`'s router and
+    /// `rsc-client-runtime.mjs` are the browser that sends them. Nothing held
+    /// the set together, and the endpoint contract could not express it: its
+    /// probes sent no headers, so the 400 a missing header produces satisfied
+    /// "the endpoint is dispatched" and a host that dropped the check would have
+    /// stayed green while answering a cross-origin server-function call. The
+    /// contract carries `requiredHeaders` now; this is the native replay of it,
+    /// and `framework-endpoints.test.mjs` is the serverless one.
+    #[test]
+    fn the_rsc_gate_headers_match_the_shared_endpoint_contract() {
+        let contract: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/framework-endpoint-conformance.json"
+        ))
+        .expect("the framework endpoint contract must be valid JSON");
+
+        let endpoint = contract["endpoints"]
+            .as_array()
+            .expect("endpoints must be an array")
+            .iter()
+            .find(|endpoint| endpoint["path"] == "/__ruvyxa/rsc")
+            .expect("the contract must describe /__ruvyxa/rsc");
+
+        // Collected across every probe: `GET` requires the navigation header
+        // alone and `POST` requires the reference header beside it, so asserting
+        // the union keeps a probe that loses its headers from silently reducing
+        // what this test covers.
+        let mut required: std::collections::BTreeMap<&str, &str> =
+            std::collections::BTreeMap::new();
+        for probe in endpoint["probes"]
+            .as_array()
+            .expect("/__ruvyxa/rsc answers more than one verb, so it lists probes")
+        {
+            for (name, value) in probe["requiredHeaders"]
+                .as_object()
+                .expect("every /__ruvyxa/rsc probe must declare the headers it needs")
+            {
+                required.insert(
+                    name.as_str(),
+                    value.as_str().expect("a required header value is a string"),
+                );
+            }
+        }
+
+        assert_eq!(
+            required.get(RSC_REQUEST_HEADER).copied(),
+            Some("1"),
+            "{RSC_REQUEST_HEADER} is this host's cross-origin gate for /__ruvyxa/rsc; \
+             the contract must require it so the serverless host is held to it too"
+        );
+        assert!(
+            required.contains_key(SERVER_ACTION_HEADER),
+            "{SERVER_ACTION_HEADER} names the server function a POST runs; \
+             the contract must require it"
+        );
+        assert_eq!(
+            required.len(),
+            2,
+            "the contract requires a header on /__ruvyxa/rsc that this host does not check: \
+             {required:?}"
+        );
+    }
 
     #[tokio::test]
     async fn builds_runtime_trace_for_matched_routes() {

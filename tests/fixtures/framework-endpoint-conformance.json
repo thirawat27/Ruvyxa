@@ -6,7 +6,8 @@
     "native": "Served by the Axum host. `always` in every mode, `dev` only when config.watch is set.",
     "serverless": "How createHandler answers. `dispatch` means the path is handled before route matching and must never fall through to the generic route-miss 404. `static` means the build emits the bytes and a CDN or publish directory answers, so a function never sees it. `none` means the endpoint does not exist outside the native host.",
     "probe": "Request the Node conformance test sends when serverless is `dispatch`. Use `probes` instead when an endpoint answers more than one verb: a single probe checks one verb and says nothing about the others, which is how `POST /__ruvyxa/rsc` -- every server-function call on a deployed server-components page -- returned 405 with this table green.",
-    "probes": "Several such requests, replayed one at a time. An endpoint that answers more than one verb lists each of them here rather than one in `probe`."
+    "probes": "Several such requests, replayed one at a time. An endpoint that answers more than one verb lists each of them here rather than one in `probe`.",
+    "requiredHeaders": "Request headers the endpoint refuses with 400 when absent, as name -> value. This is where a same-origin gate that is not CORS is written down. `/__ruvyxa/rsc` renders with the visitor's cookies on GET and runs a server function on POST, and its only cross-origin defence is a header a third-party page cannot set without a preflight nothing answers -- spelled independently in `framework_endpoints.rs`, `serverless-handler.mjs`, `rsc-client-runtime.mjs`, and `@ruvyxa/react`'s router. The dispatch probes send these, and a companion test drops them one at a time, so a host that stopped checking answers 404-or-200 instead of 400 and fails here."
   },
   "endpoints": [
     {
@@ -52,11 +53,18 @@
       "probes": [
         {
           "method": "GET",
-          "query": "path=/"
+          "query": "path=/",
+          "requiredHeaders": {
+            "x-ruvyxa-rsc": "1"
+          }
         },
         {
           "method": "POST",
-          "query": "path=/"
+          "query": "path=/",
+          "requiredHeaders": {
+            "x-ruvyxa-rsc": "1",
+            "x-ruvyxa-action": "sample-module#action"
+          }
         }
       ],
       "note": "React Server Components. `GET` renders a route's payload for a soft navigation; `POST` runs one of the server functions that route exposes and answers with the payload its return value encodes to. Unlike /__ruvyxa/flight both are renders and carry the visitor's headers, so neither is cacheable. The deployed function answered 501 to `GET` and 405 to `POST` until the generated route registry learned to render through the server-components pipeline and to call into an action bundle."

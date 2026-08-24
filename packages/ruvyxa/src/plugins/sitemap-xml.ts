@@ -10,6 +10,17 @@ import {
 
 const SITEMAP_MAX_URLS = 50_000
 const SITEMAP_MAX_BYTES = 50 * 1024 * 1024
+/**
+ * The protocol's per-`<loc>` character limit.
+ *
+ * Named to match `SITEMAP_MAX_LOCATION_CHARS` in
+ * `crates/ruvyxa_cli/src/site_discovery.rs`, which builds the same document for
+ * the CLI's own sitemap: the two limits are one protocol rule, while the other
+ * three bounds in this file were already named and this one was a literal —
+ * written once in the comparison and again, without its separator, in the
+ * message it throws.
+ */
+const SITEMAP_MAX_LOCATION_CHARS = 2_048
 const SITEMAP_FOOTER = '</urlset>\n'
 
 interface ResolvedPluginSitemapEntry extends Omit<SiteSitemapEntry, 'url' | 'lastModified'> {
@@ -223,7 +234,9 @@ function pluginSitemapLocation(value: string, siteUrl: string, field: string): s
     if (parsed.origin !== siteUrl) throw new TypeError(`${field} must use origin ${siteUrl}`)
     location = parsed.href === `${siteUrl}/` ? `${siteUrl}/` : parsed.href
   }
-  if ([...location].length > 2_048) throw new TypeError(`${field} exceeds 2048 characters`)
+  if ([...location].length > SITEMAP_MAX_LOCATION_CHARS) {
+    throw new TypeError(`${field} exceeds ${SITEMAP_MAX_LOCATION_CHARS} characters`)
+  }
   return location
 }
 

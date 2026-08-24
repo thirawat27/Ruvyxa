@@ -177,6 +177,18 @@ const MANIFEST_URL = '/__ruvyxa/client/route-manifest.json'
 const FLIGHT_URL = '/__ruvyxa/flight'
 /** Where a soft navigation asks for a server-components route's payload. */
 const RSC_URL = '/__ruvyxa/rsc'
+/**
+ * The header that makes {@link RSC_URL} same-origin-only.
+ *
+ * That endpoint renders with the visitor's cookies and runs server functions,
+ * and it carries no origin policy: a cross-origin page being unable to set a
+ * non-safelisted header without a preflight nothing answers is the whole
+ * defence. Both request hosts check it, and
+ * `tests/fixtures/framework-endpoint-conformance.json` requires it of them —
+ * this is the browser end of the same rule, named rather than inlined so the
+ * grep that finds every spelling finds this one too.
+ */
+const RSC_REQUEST_HEADER = 'x-ruvyxa-rsc'
 const FLIGHT_PROTOCOL = 'ruvyxa.flight'
 const FLIGHT_PROTOCOL_VERSION = 1
 const FLIGHT_BYTE_LIMIT = 1024 * 1024
@@ -581,7 +593,7 @@ function createRouter(): RouterInstance {
     requestUrl.searchParams.set('path', pathname)
     const response = await fetch(requestUrl, {
       credentials: 'same-origin',
-      headers: { 'x-ruvyxa-rsc': '1' },
+      headers: { [RSC_REQUEST_HEADER]: '1' },
       signal,
     })
     if (!response.ok) {

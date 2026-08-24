@@ -62,6 +62,23 @@ const ACTION_PATH = '/__ruvyxa/action'
 const FLIGHT_PATH = '/__ruvyxa/flight'
 const RSC_PATH = '/__ruvyxa/rsc'
 
+/**
+ * The header that keeps {@link RSC_PATH} out of reach of a cross-origin page,
+ * and the one naming the server function a `POST` there runs.
+ *
+ * This endpoint has no origin policy the way `/__ruvyxa/action` does: a
+ * third-party page being unable to set a non-safelisted header without a
+ * preflight nothing answers *is* the whole defence. It was four inline literals
+ * in this file, matching two constants in `framework_endpoints.rs`, an export in
+ * `rsc-client-runtime.mjs`, and one more literal in `@ruvyxa/react`'s router.
+ * Named locally rather than imported, because this module is copied into
+ * function bundles whose file set is registered in three places; the names are
+ * held across hosts by `requiredHeaders` in
+ * `tests/fixtures/framework-endpoint-conformance.json` instead.
+ */
+const RSC_REQUEST_HEADER = 'x-ruvyxa-rsc'
+const SERVER_ACTION_HEADER = 'x-ruvyxa-action'
+
 /** Defaults matching `ruvyxa build`'s validated `security` block. */
 const DEFAULT_API_BODY_LIMIT = 10 * 1024 * 1024
 const DEFAULT_ACTION_BODY_LIMIT = 1024 * 1024
@@ -610,7 +627,7 @@ export function createHandler(options) {
     // The header a cross-origin page cannot set without a preflight. Same gate
     // the native server applies, and the reason this endpoint needs no CORS
     // rule of its own.
-    if (request.headers.get('x-ruvyxa-rsc') !== '1') {
+    if (request.headers.get(RSC_REQUEST_HEADER) !== '1') {
       return textResponse(400, 'Server-components payload requests require the Ruvyxa header')
     }
 
@@ -642,7 +659,7 @@ export function createHandler(options) {
         headers: {
           'content-type': 'text/x-component; charset=utf-8',
           'cache-control': 'private, no-store',
-          vary: 'x-ruvyxa-rsc',
+          vary: RSC_REQUEST_HEADER,
         },
       })
     } catch (error) {
@@ -674,10 +691,10 @@ export function createHandler(options) {
    * which is what `tests/fixtures/framework-endpoint-conformance.json` exists to catch.
    */
   async function handleRscAction(request, url) {
-    if (request.headers.get('x-ruvyxa-rsc') !== '1') {
+    if (request.headers.get(RSC_REQUEST_HEADER) !== '1') {
       return textResponse(400, 'Server-components payload requests require the Ruvyxa header')
     }
-    const reference = request.headers.get('x-ruvyxa-action') ?? ''
+    const reference = request.headers.get(SERVER_ACTION_HEADER) ?? ''
     if (reference === '') {
       return textResponse(400, 'Server-function calls must name a reference')
     }
@@ -725,7 +742,7 @@ export function createHandler(options) {
         headers: {
           'content-type': 'text/x-component; charset=utf-8',
           'cache-control': 'private, no-store',
-          vary: 'x-ruvyxa-rsc',
+          vary: RSC_REQUEST_HEADER,
         },
       })
     } catch (error) {

@@ -31,7 +31,29 @@ const htmlDocumentRs = readFileSync(
   'utf8',
 )
 
+/**
+ * The wire contract both HMR halves answer to.
+ *
+ * `watcher.rs` replayed this fixture from the producing side and nothing read it
+ * from the consuming side, so the client's copy of the same three decisions --
+ * which protocol name and version it accepts, which `(type, kind)` pairs it
+ * knows, and what it does with a stale sequence -- lived here as hand-written
+ * literals. A `protocolVersion` bump would have kept `watcher.rs` green while
+ * every dev browser silently full-reloaded on every save, and this suite would
+ * have kept building its own `protocolVersion: 1` message and passing.
+ */
+const WIRE = JSON.parse(
+  readFileSync(path.join(workspaceRoot, 'tests/fixtures/hmr-contract.json'), 'utf8'),
+)
+
 const TRACE_ID = '0123456789abcdef0123456789abcdef'
+
+/** The fixture entry for one declared event, so a rename fails loudly here. */
+function wireMessage(event) {
+  const declared = WIRE.messages.find((entry) => entry.event === event)
+  assert.ok(declared, `tests/fixtures/hmr-contract.json declares no "${event}" message`)
+  return { type: declared.type, kind: declared.kind }
+}
 
 /**
  * Read the client out of the Rust raw literal that emits it.
@@ -165,12 +187,11 @@ function runClient({
 /** A well-formed message; individual tests override only what they are about. */
 function message(overrides = {}) {
   return {
-    protocol: 'ruvyxa.hmr',
-    protocolVersion: 1,
+    protocol: WIRE.protocol,
+    protocolVersion: WIRE.protocolVersion,
     traceId: TRACE_ID,
     sequence: 1,
-    type: 'partial',
-    kind: 'css',
+    ...wireMessage('css'),
     affectedRoutes: [],
     traceAck: false,
     ...overrides,
@@ -192,10 +213,11 @@ describe('the emitted HMR client', () => {
   })
 
   it('reloads on a payload it cannot trust', async () => {
+    assert.equal(WIRE.fallback, 'reload', 'the fixture must still name reload as the fallback')
     const cases = {
       'malformed JSON': 'not json at all',
       'another protocol': message({ protocol: 'vite.hmr' }),
-      'another protocol version': message({ protocolVersion: 2 }),
+      'another protocol version': message({ protocolVersion: WIRE.protocolVersion + 1 }),
       'a malformed trace id': message({ traceId: 'nope' }),
       'a fractional sequence': message({ sequence: 1.5 }),
     }
@@ -207,7 +229,76 @@ describe('the emitted HMR client', () => {
     }
   })
 
+  it('recognises every message the wire contract declares', async () => {
+    // Read the fixture's message table *inwards*: each declared event names a
+    // behaviour here, and an event with no entry fails rather than being
+    // skipped. Without this, a producer taught a new `kind` kept `watcher.rs`
+    // green while the client dropped through to its final `reload()` -- the
+    // fallback is correct for an unknown message and wrong for a known one, and
+    // the two are indistinguishable from the outside.
+    const behaviours = {
+      // A CSS update patches the link in place. An unrecognised message could
+      // only reload, so a rewritten href is the discriminating observation.
+      css: async () => {
+        const links = [stylesheetLink('http://localhost:3000/app.css')]
+        const client = runClient({ links })
+        await client.deliver(message({ sequence: 1, ...wireMessage('css') }))
+        assert.match(links[0].href, /__ruvyxa_hmr=1/, 'a css update must patch the stylesheet')
+        assert.equal(client.reloads.length, 0)
+      },
+      // Consulting the refresh boundary at all is the discriminator: an
+      // unrecognised message reloads without asking.
+      client: async () => {
+        const client = runClient({ refresh: async () => true })
+        await client.deliver(message({ sequence: 1, ...wireMessage('client') }))
+        assert.equal(client.reloads.length, 0, 'an accepted boundary must keep the page')
+      },
+      // Route scoping is the discriminator: an unrecognised message reloads
+      // regardless of which route changed.
+      server: async () => {
+        const client = runClient({ routePattern: '/docs' })
+        await client.deliver(
+          message({ sequence: 1, ...wireMessage('server'), affectedRoutes: ['/blog'] }),
+        )
+        assert.equal(client.reloads.length, 0, 'another route changing must not reload this one')
+      },
+      // A restart shares the unknown-message fallback by design, so the claim
+      // here is only that it reloads and patches nothing.
+      structural: async () => {
+        const links = [stylesheetLink('http://localhost:3000/app.css')]
+        const client = runClient({ links })
+        await client.deliver(message({ sequence: 1, ...wireMessage('structural') }))
+        assert.equal(client.reloads.length, 1, 'a structural change must reload')
+        assert.doesNotMatch(links[0].href, /__ruvyxa_hmr/, 'and must not patch anything first')
+      },
+      // Reporting without reloading is the discriminator.
+      failure: async () => {
+        const client = runClient()
+        await client.deliver(message({ sequence: 1, ...wireMessage('failure'), fullReload: false }))
+        assert.equal(client.consoleErrors.length, 1, 'issues must be reported')
+        assert.equal(client.reloads.length, 0, 'issues alone must not reload')
+      },
+    }
+
+    assert.deepEqual(
+      WIRE.messages.map((entry) => entry.event).sort(),
+      Object.keys(behaviours).sort(),
+      'every message in tests/fixtures/hmr-contract.json needs a behaviour here',
+    )
+    for (const [event, check] of Object.entries(behaviours)) {
+      await check().catch((error) => {
+        error.message = `${event}: ${error.message}`
+        throw error
+      })
+    }
+  })
+
   it('ignores a sequence it has already applied', async () => {
+    assert.equal(
+      WIRE.stalePolicy,
+      'reject-sequence-less-than-or-equal-to-last-applied',
+      'this test encodes the fixture stale policy; a new policy needs a new test',
+    )
     const links = [stylesheetLink('http://localhost:3000/app.css')]
     const client = runClient({ links })
 

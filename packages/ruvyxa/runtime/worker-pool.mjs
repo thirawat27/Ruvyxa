@@ -21,7 +21,6 @@
  */
 import { availableParallelism } from 'node:os'
 import { createHash, randomUUID } from 'node:crypto'
-import { once } from 'node:events'
 import { existsSync } from 'node:fs'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
@@ -433,10 +432,33 @@ function workerError(error) {
   }
 }
 
-async function writeWorkerMessage(message) {
-  if (!process.stdout.write(`${JSON.stringify(message)}\n`)) {
-    await once(process.stdout, 'drain')
-  }
+/**
+ * Write one NDJSON response frame and resolve once it has actually left.
+ *
+ * The completion callback rather than `'drain'`, because the two answer
+ * different questions and only one of them is what the callers ask. `'drain'`
+ * fires when the stream's buffer falls back under its high-water mark, so a
+ * `write()` that returned `true` — the ordinary case for a small frame —
+ * skipped the wait entirely and this promise resolved while the bytes were
+ * still queued in libuv. stdout is a pipe here and `process.exit()` does not
+ * drain a queued asynchronous write, while the request loop's `finally` exits
+ * the moment the last in-flight request settles during shutdown: a worker the
+ * pool had retired could take its own final response down with it. The callback
+ * resolves only once the chunk is written, which is both the flush guarantee the
+ * exit paths need and a stricter backpressure signal than `'drain'` for the
+ * chunk loop in `emitApiStream`.
+ *
+ * Same shape as `writeResponse` in `api-renderer.mjs`, `ssr-renderer.mjs`, and
+ * `config-renderer.mjs`. AGENTS.md lets the six local writers differ in shape
+ * but not in semantics, and this one had diverged: it honoured the backpressure
+ * rule and not the flush-before-exit rule written beside it.
+ */
+function writeWorkerMessage(message) {
+  return new Promise((resolve, reject) => {
+    process.stdout.write(`${JSON.stringify(message)}\n`, (error) =>
+      error ? reject(error) : resolve(),
+    )
+  })
 }
 
 /**

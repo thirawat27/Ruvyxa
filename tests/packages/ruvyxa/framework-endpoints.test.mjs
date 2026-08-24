@@ -64,7 +64,10 @@ describe('framework endpoint conformance', () => {
         const query = probe.query ? `?${probe.query}` : ''
         const method = probe.method ?? 'GET'
         const response = await handler(
-          new Request(`https://example.test${endpoint.path}${query}`, { method }),
+          new Request(`https://example.test${endpoint.path}${query}`, {
+            method,
+            headers: probe.requiredHeaders ?? {},
+          }),
         )
         assert.equal(
           await isRouteMiss(response),
@@ -78,6 +81,45 @@ describe('framework endpoint conformance', () => {
         )
       }
     }
+  })
+
+  it('refuses a dispatched endpoint that is missing a header the contract requires', async () => {
+    // The other direction of the probe above. `/__ruvyxa/rsc` renders with the
+    // visitor's cookies and runs server functions, and its only cross-origin
+    // defence is a header a third-party page cannot set without a preflight
+    // nothing answers -- there is no origin policy on this path the way there
+    // is on `/__ruvyxa/action`. That gate was written twice, once per request
+    // host, and held by neither this table nor anything else: a probe that
+    // omitted the header got a 400 and passed the dispatch assertion, so a host
+    // that stopped checking would have stayed green while answering a
+    // cross-origin server-function call.
+    const handler = handlerWithNoRoutes()
+    let checked = 0
+
+    for (const endpoint of contract.endpoints.filter((e) => e.serverless === 'dispatch')) {
+      for (const probe of endpoint.probes ?? [endpoint.probe ?? {}]) {
+        const required = probe.requiredHeaders ?? {}
+        for (const omitted of Object.keys(required)) {
+          const headers = { ...required }
+          delete headers[omitted]
+          const query = probe.query ? `?${probe.query}` : ''
+          const response = await handler(
+            new Request(`https://example.test${endpoint.path}${query}`, {
+              method: probe.method ?? 'GET',
+              headers,
+            }),
+          )
+          assert.equal(
+            response.status,
+            400,
+            `${probe.method ?? 'GET'} ${endpoint.path} without ${omitted} must be refused`,
+          )
+          checked++
+        }
+      }
+    }
+
+    assert.ok(checked > 0, 'the contract must require a header on at least one dispatched endpoint')
   })
 
   it('does not claim paths the contract does not list', async () => {
