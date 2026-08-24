@@ -108,6 +108,26 @@ export function hasPluginHttp(registry) {
 }
 
 /**
+ * The request a hook is handed as context.
+ *
+ * A clone, so a hook that reads the body cannot take it from the route handler
+ * that has to read it next. But a `Request` whose body has already been
+ * consumed cannot be cloned at all — `clone()` throws `TypeError: unusable` —
+ * and by the time the *response* hooks run, the route handler has usually
+ * consumed it. That turned every request with a body into a 500 in any
+ * deployment whose project registered an `http.onResponse` hook: the route ran,
+ * produced its answer, and the response stage threw it away.
+ *
+ * A used body is gone either way, so the fallback hands over the same URL,
+ * method, and headers with no body rather than failing. A hook that needs the
+ * body reads it on the request side, where it is still there.
+ */
+function contextRequest(request) {
+  if (!request.bodyUsed) return request.clone()
+  return new Request(request.url, { method: request.method, headers: request.headers })
+}
+
+/**
  * Run the request-side hooks.
  *
  * Returns the short-circuit `Response` a hook produced, or the (possibly
@@ -125,7 +145,11 @@ export async function dispatchPluginRequest(registry, initialRequest) {
         continue
       }
       const result = await entry.handler(
-        Object.freeze({ plugin: entry.plugin, root: registry.root, request: request.clone() }),
+        Object.freeze({
+          plugin: entry.plugin,
+          root: registry.root,
+          request: contextRequest(request),
+        }),
       )
       if (!(result instanceof Response)) throw unsupportedReturn(entry.plugin, 'http.route')
       return { kind: 'response', response: result }
@@ -136,7 +160,7 @@ export async function dispatchPluginRequest(registry, initialRequest) {
     const context = Object.freeze({
       plugin: entry.plugin,
       root: registry.root,
-      request: request.clone(),
+      request: contextRequest(request),
       next(value = request) {
         if (!(value instanceof Request)) {
           throw new TypeError(`plugin "${entry.plugin}" http.onRequest().next() expects a Request`)
@@ -162,7 +186,7 @@ export async function dispatchPluginResponse(registry, request, initialResponse)
     const context = Object.freeze({
       plugin: entry.plugin,
       root: registry.root,
-      request: request.clone(),
+      request: contextRequest(request),
       response: response.clone(),
       next(value = response) {
         if (!(value instanceof Response)) {

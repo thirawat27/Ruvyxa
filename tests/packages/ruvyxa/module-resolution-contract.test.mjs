@@ -123,7 +123,12 @@ describe('package-relative path safety', () => {
 describe('file probing', () => {
   for (const testCase of contract.fileProbe) {
     it(testCase.name, () => {
-      const directory = mkdtempSync(path.join(tmpdir(), 'ruvyxa-probe-'))
+      // Realpath once, and probe from the resolved form. On macOS `os.tmpdir()`
+      // is `/var/folders/…`, a symlink to `/private/var/folders/…`: probing the
+      // symlinked path and measuring the answer against the real one produced a
+      // relative path of nothing but `../`, and the whole table failed on that
+      // host alone.
+      const directory = realpathSync(mkdtempSync(path.join(tmpdir(), 'ruvyxa-probe-')))
       try {
         for (const file of testCase.files) {
           const target = path.join(directory, file)
@@ -132,9 +137,7 @@ describe('file probing', () => {
         }
 
         const resolved = probeFileCandidate(path.resolve(directory, testCase.specifier))
-        const answered = resolved
-          ? path.relative(realpathSync(directory), resolved).replaceAll('\\', '/')
-          : null
+        const answered = resolved ? path.relative(directory, resolved).replaceAll('\\', '/') : null
         assert.equal(answered, testCase.expect, `${testCase.name} disagrees with the shared table`)
       } finally {
         rmSync(directory, { recursive: true, force: true })
