@@ -1,6 +1,91 @@
 # Changelog
 
-## v1.0.32 (unreleased)
+## v1.1.0 (2026-08-24)
+
+### Breaking: an import whose case does not match the file is refused
+
+`existsSync` and `is_file()` answer without regard to case on Windows and on macOS's default
+filesystem. So `import Header from './Header'` finds `header.tsx`, the project builds, and every
+check anybody runs locally is green. On Linux the same import resolves nothing at all — and Linux is
+where CI runs and where the build is deployed. The failure is invisible on the machine that writes
+it and arrives on the machine that ships it.
+
+Both module graphs compare an import's spelling against the file the filesystem actually handed
+back, and refuse a mismatch with `RUV1807` naming both spellings:
+
+```
+RUV1807 import "./Header" from <dir> asks for "Header", but the file on disk is named "header".
+```
+
+Scope is deliberately narrow. Only **relative** specifiers are checked: the importer's directory is
+itself a resolved path, so a segment differing only in case came from the specifier and nothing
+above it. Package specifiers stay out, because pnpm reaches a package through a symlink farm where
+the real path differs from the request for reasons that have nothing to do with spelling. Folding is
+ASCII-only, for the reason `localeCompare` is banned here — case outside ASCII is decided by the
+host's locale tables, and a rule that answered differently on two machines would be the bug it
+exists to prevent.
+
+The comparison is pure string work over two paths the Rust resolver already holds, so it costs no
+syscall there. The JavaScript graph needs one `realpath` and takes it only on the platforms that
+fold case; on a case-sensitive filesystem there is nothing to report, because a mis-spelled import
+does not resolve in the first place.
+
+**Breaking for a project that has an import spelled in the wrong case and has only ever been built
+on Windows or macOS.** That project was already broken on Linux; the build now says so while it is
+still cheap to fix. Spell the import the way the file is named.
+
+`tests/fixtures/import-case-conformance.json` holds both graphs to one answer, and its two halves
+are exercised by different runners: the case-folding branch on Windows and macOS, the
+unresolved-import branch on Linux. A file that exists in no casing is still an ordinary `RUV1801`,
+pinned in both languages so `RUV1807` cannot take over a plain missing import.
+
+### A CSS Module class name could name the machine that built it
+
+`normalized_relative_path` produces the key a scoped class name hashes from, and it canonicalized
+both the module path and the project root with `Path::canonicalize` — whose failure shape does not
+match its success shape. Succeeding returns the Windows extended-length `\\?\` prefix; failing
+returns the path unchanged. When one side succeeded and the other did not — a generated or virtual
+stylesheet, whose file is not on disk — `strip_prefix` failed and the **absolute** path became the
+hash input.
+
+That bakes the build machine's directory layout into a class name shipped in the CSS and in the
+JavaScript, so two machines building one project disagree about what to call it.
+`pnpm verify:reproducible` cannot see it: it builds twice on one machine, where the wrong answer is
+still the same wrong answer.
+
+Both sides go through `normalized_canonical_path` now, so the two fallbacks have one shape and
+`strip_prefix` succeeds in every combination. Emitted bytes are unchanged for every project whose
+stylesheets are real files, which is why nothing had caught it.
+
+`resolve_layout_file` in the route graph was handing out a verbatim path for the same reason.
+Nothing downstream was wrong — `ModuleCache` normalizes on the way in — but it is the shape that
+broke every server-components build once already, and the next caller has no reason to expect it.
+
+### The two module graphs agreed on which files compile by comment alone
+
+`MODULE_KIND_EXTENSIONS` exists twice: in `crates/ruvyxa_bundler/src/compiler.rs` for the client
+graph and in `packages/ruvyxa/runtime/compiler.mjs` for the server and prerender graph. Neither can
+import the other's, and the only thing asking them to agree was a doc comment on each. An extension
+accepted by one and refused by the other is a build that passes on the client and fails at prerender
+with `RUV1806` naming a dependency the application never wrote.
+
+`tests/fixtures/module-kind-conformance.json` holds them now: the list and its order, the case
+folding both apply, the extensions both refuse, and the extensionless package entry point both
+allow.
+
+The same pass found `CONFIG_FILE_NAMES` in `runtime/css-runner.mjs` — exported, and read by nothing
+in the repository including its own module, since the commit that introduced it. The doc comment
+beside the Rust list called it a mirror the two "have to agree" on or a config would be found by one
+and rejected by the other. PostCSS detection happens entirely on the Rust side and the runner is
+handed the resolved `configFile` path in its request, so the copy could not accept or reject
+anything. A comment promising a gate that does not exist is worse than no comment, because it tells
+the next reader something is watching. The copy is gone and there is one list.
+
+`resolve_file_candidate` also canonicalized twice for every module it resolved: it probed with
+`canonicalize()` and then called `normalized_canonical_path`, which already falls back to its
+argument when canonicalization fails — so the branch could not change the answer. One call now, on
+the hottest path in the resolver, and one fewer again in package-exports resolution, where the
+existence probe and the compared path had been the same canonicalization taken twice.
 
 ### A deployed server-components page was blank in a real browser
 

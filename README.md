@@ -369,17 +369,17 @@ Measured on 2026-08-21 with the repository harness against minimal starters. The
 only for the exact versions, machine, and run conditions shown below; re-run the harness when
 comparing newer releases.
 
-| Metric (lower is better)             |  **Ruvyxa** | Next.js |   Astro |
-| ------------------------------------ | ----------: | ------: | ------: |
-| Production build (cold-cache median) | **1.131 s** | 7.667 s | 2.309 s |
-| Dev server → first rendered response | **1.115 s** | 3.310 s | 5.855 s |
-| Prod server start → first response   | **0.845 s** | 1.074 s | 2.813 s |
-| Client JS shipped (minimal page)     |    235 KB ¹ |  568 KB |  0 KB ² |
+| Metric (lower is better)             | **Ruvyxa 1.1.0** | Next.js 16.3.0 | Astro 7.2.4 |
+| ------------------------------------ | ---------------: | -------------: | ----------: |
+| Production build (cold-cache median) |      **1.131 s** |        7.667 s |     2.309 s |
+| Dev server → first rendered response |      **1.115 s** |        3.310 s |     5.855 s |
+| Prod server start → first response   |      **0.845 s** |        1.074 s |     2.813 s |
+| Client JS shipped (minimal page)     |         235 KB ¹ |         568 KB |      0 KB ² |
 
-| Throughput (higher is better)        |   **Ruvyxa** |   Next.js |     Astro |
-| ------------------------------------ | -----------: | --------: | --------: |
-| Requests/second (`/`, prod server) ³ |   **44,528** |     3,647 |     3,611 |
-| Latency p50 / p99                    | **0 / 1 ms** | 6 / 12 ms | 6 / 10 ms |
+| Throughput (higher is better)        | **Ruvyxa 1.1.0** | Next.js 16.3.0 | Astro 7.2.4 |
+| ------------------------------------ | ---------------: | -------------: | ----------: |
+| Requests/second (`/`, prod server) ³ |       **44,528** |          3,647 |       3,611 |
+| Latency p50 / p99                    |     **0 / 1 ms** |      6 / 12 ms |   6 / 10 ms |
 
 In this run, Ruvyxa's median cold build completed **6.8× / 2.0×** faster than Next.js / Astro
 respectively, dev-server readiness was **3.0× / 5.3×** faster, production-server readiness **1.3× /
