@@ -259,8 +259,37 @@ describe('runtime compiler', () => {
       if (foldsCase) {
         await assert.rejects(compile, /RUV1807/)
       } else {
-        await assert.rejects(compile, /Header/)
+        // Nothing to report on a case-sensitive filesystem: `./app/Header`
+        // names no file there, so this is the ordinary unresolved-import
+        // failure and RUV1807 must stay out of it.
+        await assert.rejects(compile, /RUV1801/)
       }
+    })
+  })
+
+  /**
+   * An import naming a file that exists in no casing is unresolved, not a case
+   * report.
+   *
+   * Runs the same on every filesystem, which is the point: the branch above can
+   * only exercise whichever answer the host gives. This pins the invariant that
+   * matters — RUV1807 speaks only when a real file with a different spelling is
+   * behind it — and pins it everywhere.
+   */
+  it('reports an import with no file behind it as unresolved, not as a case mismatch', async () => {
+    await withFixture(async ({ root, outDir }) => {
+      await mkdir(path.join(root, 'app'), { recursive: true })
+      await assert.rejects(
+        compileBundleWithMetadata({
+          projectRoot: root,
+          entrySource: 'import M from "./app/Missing"\nexport const go = M\n',
+          sourcefile: 'ruvyxa:client.tsx',
+          outfile: path.join(outDir, 'missing.js'),
+          platform: 'browser',
+          sourceMap: false,
+        }),
+        (error) => /RUV1801/.test(error.message) && !/RUV1807/.test(error.message),
+      )
     })
   })
 

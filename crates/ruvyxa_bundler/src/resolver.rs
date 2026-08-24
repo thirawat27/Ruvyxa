@@ -2518,11 +2518,53 @@ mod tests {
             assert!(message.contains("Header"), "{message}");
             assert!(message.contains("header"), "{message}");
         } else {
+            // Nothing to report on a case-sensitive filesystem: `./Header`
+            // names no file there, so this is the ordinary unresolved-import
+            // failure and RUV1807 must stay out of it.
+            let error =
+                result.expect_err("a case-sensitive filesystem never resolves ./Header at all");
             assert!(
-                result.unwrap().paths.is_empty(),
-                "a case-sensitive filesystem never resolves ./Header, so there is nothing to report"
+                matches!(error, BundleError::Unresolved { .. }),
+                "expected an unresolved import, got: {error}"
             );
+            assert!(!error.to_string().contains("RUV1807"), "{error}");
         }
+    }
+
+    /// An import naming a file that exists in no casing is unresolved, not a
+    /// case report.
+    ///
+    /// Runs the same on every filesystem, which is the point: the branch above
+    /// can only exercise whichever answer the host gives, and the first version
+    /// of it asserted the wrong one for the host it could not run on. This one
+    /// pins the invariant that actually matters — RUV1807 speaks only when
+    /// there is a real file with a different spelling behind it — and pins it
+    /// everywhere.
+    #[test]
+    fn an_import_with_no_file_behind_it_is_unresolved_not_a_case_report() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = ruvyxa_diagnostics::normalized_canonical_path(temp.path());
+        let app = root.join("app");
+        fs::create_dir_all(&app).unwrap();
+
+        let tsconfig = TsConfigPaths::load(&root);
+        let error = collect_deps_cached(
+            "import Missing from \"./Missing\";",
+            &app,
+            &root,
+            &tsconfig,
+            &ResolveGraphCache::new(),
+            &BuildHookPipeline::empty(),
+            BundleTarget::Client,
+            JsxRuntime::Automatic,
+        )
+        .expect_err("nothing on disk answers ./Missing");
+
+        assert!(
+            matches!(error, BundleError::Unresolved { .. }),
+            "expected an unresolved import, got: {error}"
+        );
+        assert!(!error.to_string().contains("RUV1807"), "{error}");
     }
 
     /// The correctly spelled import of the same file stays silent.
