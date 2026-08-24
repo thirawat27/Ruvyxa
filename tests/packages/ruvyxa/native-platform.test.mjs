@@ -108,7 +108,7 @@ describe('Ruvyxa CLI platforms', () => {
     // The floors themselves stay written down here, so moving one is a
     // deliberate edit somebody reviews.
     assert.equal(workspacePackage.engines.node, '>=24.19.0')
-    assert.equal(workspacePackage.packageManager, 'pnpm@11.22.0')
+    assert.equal(workspacePackage.packageManager, 'pnpm@11.23.0')
     assert.equal(ruvyxaPackage.engines.node, '>=24.19.0')
 
     // What CI installs is derived from them rather than pinned again. A literal
