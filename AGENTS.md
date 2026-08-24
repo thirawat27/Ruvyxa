@@ -28,7 +28,10 @@ work in the repository.
   fifth.
 - `crates/ruvyxa_diagnostics` owns error codes, `Result`, and the path helpers every other crate
   agrees on (`normalized_canonical_path` in particular — see the Windows note under Change
-  Guidance). `crates/ruvyxa_tui` owns terminal layout, spinners, progress, the mascot, and theme.
+  Guidance). `crates/ruvyxa_tui` owns terminal layout, spinners, progress, the mascot, the command
+  header and success banner, the colour roles, and the decorative gradients.
+  `cargo run -p ruvyxa_tui --example preview` draws every one of those surfaces in one screen, which
+  is the only way to see the animated ones without rebuilding an application.
 - `packages/` contains the npm packages:
   - `ruvyxa` — the framework package. `runtime/*.mjs` are the modules the Rust CLI resolves by path
     and spawns or imports; `src/plugins/` is the first-party plugin API behind the `plugins.ts`
@@ -534,6 +537,30 @@ before believing it.
   owns the ordering for `dev`, `start`, and `preview` together, takes the environment through a
   closure so it is testable, and fails on an unparseable `PORT` rather than falling back to 3000 — a
   silent fallback surfaces only as a health check that never passes.
+- Terminal colour is two systems with one boundary between them. A **role** in `ruvyxa_tui::theme`
+  is the only carrier of a distinction — `ok` against `warn`, a page route against an API route — so
+  every role stays inside the sixteen colours, because a terminal that cannot render a 24-bit code
+  approximates it and two roles become one colour on somebody else's machine. **Decoration** in
+  `ruvyxa_tui::gradient` carries no distinction, names the single role it collapses to, and may
+  therefore be as rich as `ColorDepth` allows. Adding a 24-bit colour to a role looks like an
+  improvement and is a regression; a gradient with no `fallback` simply vanishes below 256 colours.
+  Anything that writes its own escapes has to ask `capabilities()` first — `tracing_subscriber`
+  enables ANSI by default and consulted neither the terminal nor `NO_COLOR`, so every warning in a
+  redirected build log carried a literal escape sequence while every other line in the same file was
+  plain.
+- Results go to stdout and everything else goes to stderr, and `--json` is what makes that a
+  contract rather than a preference. That same `tracing_subscriber` also defaulted its writer to
+  stdout, which is where `write_machine_report` writes; one warning during `ruvyxa bench --json` put
+  ` WARN ...` ahead of the opening bracket and the output stopped parsing as JSON at character one.
+  Diagnostics, progress frames, and spinners share the other stream for the same reason. When adding
+  output, settle which of the two streams it belongs on before deciding what it should look like.
+- A column is measured in characters, never in bytes. `display_width` exists for this, and
+  `field_line`, `phase_line`, `track_line`, and `spinner_line` all pad through it. Every label the
+  CLI prints today is ASCII, where `len()` gives the same answer — which is exactly why the byte
+  count survived in four places until a label with a middle dot in it landed a column short of its
+  neighbours. Anything drawn onto a live line is also sized against eighty columns and pinned by a
+  test: the runner is an emoji and occupies two cells, and a frame that overflows cannot be erased
+  by `[2K`, which clears one line and not a wrapped one.
 - Documentation changes should describe actual supported behavior, not intended future behavior.
 - If a check was already failing before your work, report it as baseline and do not weaken tests to
   pass.

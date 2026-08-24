@@ -1,6 +1,6 @@
 <p align="center">
-  <a href="https://github.com/thirawat27/ruvyxa">
-    <img src="https://raw.githubusercontent.com/thirawat27/ruvyxa/main/assets/branding/ruvyxa.png" alt="Ruvyxa" width="140" height="140" />
+  <a href="https://github.com/thirawat27/Ruvyxa">
+    <img src="https://raw.githubusercontent.com/thirawat27/Ruvyxa/main/assets/branding/ruvyxa.png" alt="Ruvyxa" width="140" height="140" />
   </a>
 </p>
 

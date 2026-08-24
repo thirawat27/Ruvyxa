@@ -69,6 +69,6 @@ Build API-only output with `npm run build -- --server-only` when the project shi
 ## Going further
 
 - Configuration, rendering strategies, deployment, and the full API live in the
-  [Ruvyxa documentation](https://github.com/thirawat27/ruvyxa#documentation).
+  [Ruvyxa documentation](https://github.com/thirawat27/Ruvyxa#documentation).
 - `AGENTS.md` and `CLAUDE.md` in this folder describe the same project to a coding agent. Keep them
   accurate as the app grows.

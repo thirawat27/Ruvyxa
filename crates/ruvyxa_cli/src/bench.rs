@@ -11,9 +11,10 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Component, Path, PathBuf};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, ensure};
+use ruvyxa_graph::validate_app;
 use serde::{Deserialize, Serialize};
 use walkdir::{DirEntry, WalkDir};
 
@@ -101,6 +102,29 @@ struct BenchmarkWorkspace {
     parent: PathBuf,
 }
 
+impl BenchmarkWorkspace {
+    /// A uniquely named directory under `parent`, removed when this value is
+    /// dropped — and `parent` with it, if nothing else put anything there.
+    fn disposable(parent: PathBuf, prefix: &str) -> anyhow::Result<Self> {
+        let path = create_build_temp_dir(&parent, prefix)?;
+        Ok(Self { path, parent })
+    }
+
+    /// Empties the directory without giving up the handle, for a scenario that
+    /// needs the same path to start each sample with nothing in it.
+    fn reset(&self) -> anyhow::Result<()> {
+        ensure!(
+            self.path.starts_with(&self.parent),
+            "a benchmark directory must stay inside the directory it was created in"
+        );
+        if self.path.exists() {
+            fs::remove_dir_all(&self.path)?;
+        }
+        fs::create_dir_all(&self.path)?;
+        Ok(())
+    }
+}
+
 impl Drop for BenchmarkWorkspace {
     fn drop(&mut self) {
         // `path` is created below `parent` and never reassigned. Keep the
@@ -118,6 +142,205 @@ impl Drop for BenchmarkWorkspace {
             let _ = fs::remove_dir(&self.parent);
         }
     }
+}
+
+/// The scenarios `ruvyxa bench` reports, in the order a build reaches them,
+/// each with the one line printed under the table to say what it measures.
+///
+/// The table is the declaration and [`run_project_benchmark`] is the
+/// implementation; the two are checked against each other at the end of every
+/// run rather than trusted to stay in step, because a scenario added to one and
+/// not the other is invisible — the table would simply be missing a row nobody
+/// knew to look for.
+///
+/// `build-cold` and `build-warm` replaced a single `production-build` row that
+/// was reporting a lie. It ran N builds back to back against the project's own
+/// cache, so the first sample was cold only if the project had never been
+/// built, and the average mixed two costs that differ by an order of magnitude:
+/// on the demo application the row reported a 938ms average while a genuinely
+/// cold build took 7.7s. Splitting them is what makes the cache saving below
+/// the table a measurement rather than an impression.
+pub(crate) const PROJECT_SCENARIOS: [(&str, &str); 6] = [
+    (
+        "config-load",
+        "reads ruvyxa.config.ts through the JavaScript runtime",
+    ),
+    (
+        "route-discovery",
+        "scans the app directory into a route manifest",
+    ),
+    (
+        "route-validation",
+        "checks every route and its server/client boundaries",
+    ),
+    (
+        "build-cold",
+        "a full production build against an empty cache",
+    ),
+    ("build-warm", "the same build with that cache reused"),
+    (
+        "first-route-render",
+        "renders the first static page through the production server",
+    ),
+];
+
+/// How much the build cache saved, as the two medians it is read from.
+///
+/// Carried as both numbers rather than as a percentage so the report can print
+/// what was compared. A ratio with no operands is a claim; these are evidence.
+pub(crate) struct CacheSaving {
+    cold_ms: f64,
+    warm_ms: f64,
+}
+
+impl CacheSaving {
+    fn percent(&self) -> f64 {
+        if self.cold_ms <= 0.0 {
+            return 0.0;
+        }
+        ((self.cold_ms - self.warm_ms) / self.cold_ms) * 100.0
+    }
+}
+
+/// The ordinary project probe: where this application's time actually goes.
+///
+/// Deliberately *not* the baseline. Nothing here clones the project or edits a
+/// source file, so it stays cheap enough to run while working — the cost is
+/// that only the cache can be controlled, not the source, which is why the edit
+/// classes live in `--baseline` and not here.
+pub(crate) async fn run_project_benchmark(args: &BenchArgs) -> anyhow::Result<()> {
+    let started = Instant::now();
+    let samples = args.samples.max(1);
+    let root = args.root.clone();
+    let config = load_project_config(&root)?;
+    let runtime = config.javascript_runtime().command().to_string();
+    let app_dir = root.join(config.app_dir());
+    let mut results = Vec::with_capacity(PROJECT_SCENARIOS.len());
+
+    results.push(run_benchmark("config-load", &runtime, samples, || {
+        load_project_config(&root)?;
+        Ok(())
+    })?);
+    results.push(run_benchmark("route-discovery", &runtime, samples, || {
+        discover_project_routes(&root, &config)?;
+        Ok(())
+    })?);
+    results.push(run_benchmark(
+        "route-validation",
+        &runtime,
+        samples,
+        || {
+            let manifest = discover_project_routes(&root, &config)?;
+            let validation = validate_app(&root, &manifest)?;
+            fail_on_diagnostics(&validation.diagnostics)?;
+            Ok(())
+        },
+    )?);
+
+    // A private cache directory, so neither scenario deletes or warms the cache
+    // the project's own builds use. Cold is real: emptying this directory is
+    // enough on its own, because reuse is decided here and nowhere else - a
+    // build against a fresh cache costs the same whether or not the output
+    // directory is already populated.
+    let cache = BenchmarkWorkspace::disposable(root.join(".ruvyxa").join("bench"), ".cache")?;
+    let mut cold = Vec::with_capacity(samples);
+    for _ in 0..samples {
+        cache.reset()?;
+        let sample = Instant::now();
+        build_with_cache_override(project_build_args(&root), false, Some(&cache.path)).await?;
+        cold.push(sample.elapsed());
+    }
+    results.push(summarize_benchmark("build-cold", &runtime, cold));
+
+    // The last cold sample already left the cache populated. Priming again
+    // anyway keeps this scenario true on its own terms rather than true because
+    // of what happens to run before it.
+    build_with_cache_override(project_build_args(&root), false, Some(&cache.path)).await?;
+    let mut warm = Vec::with_capacity(samples);
+    for _ in 0..samples {
+        let sample = Instant::now();
+        build_with_cache_override(project_build_args(&root), false, Some(&cache.path)).await?;
+        warm.push(sample.elapsed());
+    }
+    results.push(summarize_benchmark("build-warm", &runtime, warm));
+
+    // Runs last because it needs the build the two scenarios above produced.
+    let manifest = discover_project_routes(&root, &config)?;
+    results.push(run_benchmark(
+        "first-route-render",
+        &runtime,
+        samples,
+        || render_first_route(&root, &config, &manifest),
+    )?);
+
+    ensure!(
+        results
+            .iter()
+            .map(|result| result.name.as_str())
+            .eq(PROJECT_SCENARIOS.iter().map(|(id, _)| *id)),
+        "the benchmark produced scenarios the table in PROJECT_SCENARIOS does not declare, or skipped one it does"
+    );
+    let saving = cache_saving(&results);
+
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&results)?);
+    } else {
+        print_benchmark_table(samples, &results, &root, &app_dir, started.elapsed());
+        print_cache_saving(saving);
+        print_section("what each row measures");
+        for (id, description) in PROJECT_SCENARIOS {
+            print_field(id, dim(description));
+        }
+        println!();
+    }
+
+    Ok(())
+}
+
+/// The build every build scenario runs: this project, its configured target and
+/// adapter, nothing overridden. A benchmark that measures a build no user asks
+/// for is measuring the wrong thing.
+fn project_build_args(root: &Path) -> BuildArgs {
+    BuildArgs {
+        root: root.to_path_buf(),
+        target: None,
+        adapter: None,
+        runtime: None,
+        server_only: false,
+    }
+}
+
+fn cache_saving(results: &[BenchmarkResult]) -> Option<CacheSaving> {
+    let median = |name: &str| {
+        results
+            .iter()
+            .find(|result| result.name == name)
+            .map(|result| result.median_ms)
+    };
+    Some(CacheSaving {
+        cold_ms: median("build-cold")?,
+        warm_ms: median("build-warm")?,
+    })
+}
+
+fn print_cache_saving(saving: Option<CacheSaving>) {
+    let Some(saving) = saving else {
+        return;
+    };
+    let summary = format!(
+        "{:.0}% · {} cold, {} warm",
+        saving.percent(),
+        format_duration(Duration::from_secs_f64(saving.cold_ms / 1000.0)),
+        format_duration(Duration::from_secs_f64(saving.warm_ms / 1000.0)),
+    );
+    print_field(
+        "cache saving",
+        if saving.percent() >= 50.0 {
+            ok_text(summary)
+        } else {
+            warn_text(summary)
+        },
+    );
 }
 
 /// Run the versioned production-build and edit-class baseline.
@@ -393,8 +616,7 @@ fn create_benchmark_workspace(
     source_out_dir: &Path,
 ) -> anyhow::Result<BenchmarkWorkspace> {
     let parent = source_root.join(".ruvyxa").join("bench");
-    let path = create_build_temp_dir(&parent, ".workspace")?;
-    let workspace = BenchmarkWorkspace { path, parent };
+    let workspace = BenchmarkWorkspace::disposable(parent, ".workspace")?;
     copy_benchmark_project(source_root, &workspace.path, source_out_dir)?;
     Ok(workspace)
 }
@@ -525,7 +747,7 @@ fn benchmark_source_file(root: &Path, kind: &str, fallback: &Path) -> anyhow::Re
     }
 }
 
-fn render_first_route(
+pub(crate) fn render_first_route(
     root: &Path,
     config: &ProjectConfig,
     manifest: &ruvyxa_graph::RouteManifest,

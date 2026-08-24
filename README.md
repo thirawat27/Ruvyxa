@@ -718,22 +718,22 @@ routes: 27 pages and 3 API routes — with a `--release` binary built from this 
 Scaffolding commands ran against a throwaway copy of `templates/minimal` so the fixture stayed
 clean. Timings are one machine's, not a specification; re-run them rather than quoting them.
 
-| Command         | Observed result                                                                        |
-| --------------- | -------------------------------------------------------------------------------------- |
-| `routes`        | 30 routes discovered (27 pages, 3 API), strategy resolved per route                    |
-| `doctor`        | 0 diagnostics, adapter `ruvyxa-native`, every route supported by the target, **1.17s** |
-| `analyze`       | 0 diagnostics; 38 client modules and 4 server modules reported                         |
-| `trace`         | route id, file, layout chain, runtime, and render strategy as JSON                     |
-| `build`         | cold build of all 30 routes into `.ruvyxa/` in **8.15s**, 247 kB shared by every page  |
-| `start`         | ready in **425ms**; `GET /`, `GET /api/health`, and `GET /blog/hello-world` all → 200  |
-| `preview`       | ready and serving the same production build → 200                                      |
-| `dev`           | ready in **482ms** with HMR enabled; `GET /` → 200                                     |
-| `check`         | typecheck + build + parity + smoke render over 30 routes, **16.01s**, exit 0           |
-| `test:parity`   | parity passed for 30 routes in **14.40s**, exit 0                                      |
-| `bench`         | discovery 77ms · analyze-validation 80ms · production build 1.91s                      |
-| `adds`          | `form` wrote `page.tsx` + `action.ts`; `data-table` wrote the generic client component |
-| `plugin create` | created a publishable `ruvyxa-plugin-<name>` package with a harness test               |
-| `clean`         | removed `.ruvyxa/` in **141ms**                                                        |
+| Command         | Observed result                                                                         |
+| --------------- | --------------------------------------------------------------------------------------- |
+| `routes`        | 30 routes discovered (27 pages, 3 API), strategy resolved per route                     |
+| `doctor`        | 0 diagnostics, adapter `ruvyxa-native`, every route supported by the target, **1.17s**  |
+| `analyze`       | 0 diagnostics; 38 client modules and 4 server modules reported                          |
+| `trace`         | route id, file, layout chain, runtime, and render strategy as JSON                      |
+| `build`         | cold build of all 30 routes into `.ruvyxa/` in **8.15s**, 247 kB shared by every page   |
+| `start`         | ready in **425ms**; `GET /`, `GET /api/health`, and `GET /blog/hello-world` all → 200   |
+| `preview`       | ready and serving the same production build → 200                                       |
+| `dev`           | ready in **482ms** with HMR enabled; `GET /` → 200                                      |
+| `check`         | typecheck + build + parity + smoke render over 30 routes, **16.01s**, exit 0            |
+| `test:parity`   | parity passed for 30 routes in **14.40s**, exit 0                                       |
+| `bench`         | 6 scenarios; cold build **8.27s** against warm **657ms** — 92% of it saved by the cache |
+| `adds`          | `form` wrote `page.tsx` + `action.ts`; `data-table` wrote the generic client component  |
+| `plugin create` | created a publishable `ruvyxa-plugin-<name>` package with a harness test                |
+| `clean`         | removed `.ruvyxa/` in **141ms**                                                         |
 
 ---
 

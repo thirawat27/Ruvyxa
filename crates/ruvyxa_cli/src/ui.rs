@@ -1,11 +1,15 @@
 //! Terminal presentation for the Ruvyxa CLI.
 //!
 //! Everything shared with the dev server — colour, field layout, tables, the
-//! progress track, the mascot, byte and duration formatting — lives in
-//! `ruvyxa_tui` and is re-exported here so call sites keep reading `accent(..)`
-//! rather than a crate path. What stays in this file is presentation only the
-//! CLI has: the command header and the tables specific to `bench`, `doctor`,
-//! and `check`.
+//! progress track, the mascot, the command header, the success banner, byte and
+//! duration formatting — lives in `ruvyxa_tui` and is re-exported here so call
+//! sites keep reading `accent(..)` rather than a crate path. What stays in this
+//! file is presentation only the CLI has: the tables specific to `bench`,
+//! `doctor`, and `check`.
+//!
+//! The header and the success banner used to live here, and the dev server
+//! printed its own copy of the header inline. They are in `ruvyxa_tui::banner`
+//! now, which is why the two agree.
 //!
 //! Nothing here decides anything. Keeping it separate is what stops
 //! presentation details from being edited in the same file as build logic.
@@ -15,13 +19,12 @@ use std::time::Duration;
 
 // Re-exported rather than imported: sibling modules reach these through
 // `crate::*`, and a plain `use` would keep the names private to this file.
-use ruvyxa_tui::badge;
 pub(crate) use ruvyxa_tui::{
-    Spinner, accent, alert_text, bar, brand, clear_progress_bar, column_widths, current_timestamp,
-    dim, display_path_relative, display_width, draw_progress_bar, error_label, exists_status,
-    format_bytes, format_duration, heading, info, label, note, number, ok_text, path_text,
-    print_box_row, print_field, print_phase, print_section, print_table_separator, spaces, success,
-    tui_header_title, warn_text,
+    ProgressTrack, Spinner, TableRule, accent, alert_text, bar, column_widths, dim,
+    display_path_relative, display_width, error_label, exists_status, format_bytes,
+    format_duration, heat_bar, info, label, note, number, ok_text, path_text, print_box_row,
+    print_field, print_header, print_phase, print_section, print_success_banner,
+    print_success_banner_at, print_table_rule, spaces, success, warn_text,
 };
 
 use crate::commands::BenchmarkResult;
@@ -33,7 +36,7 @@ pub(crate) fn print_benchmark_table(
     app_dir: &Path,
     elapsed: Duration,
 ) {
-    print_tui_header(format!("Benchmark ({samples} sample(s))"));
+    print_header(format!("Benchmark ({samples} sample(s))"));
     print_field("root", path_text(root));
     print_field("app dir", path_text(app_dir));
     print_field("scenarios", number(results.len().to_string()));
@@ -67,7 +70,7 @@ pub(crate) fn print_benchmark_table(
     let headers = ["Scenario", "Min", "Median", "Avg", "Max", "Median share"];
     let widths = column_widths(&headers, &rows);
 
-    print_table_separator(&widths);
+    print_table_rule(&widths, TableRule::Top);
     print_box_row(
         headers,
         [
@@ -81,7 +84,7 @@ pub(crate) fn print_benchmark_table(
         &widths,
         BENCHMARK_ALIGNMENT,
     );
-    print_table_separator(&widths);
+    print_table_rule(&widths, TableRule::Middle);
 
     for row in rows {
         print_box_row(
@@ -92,13 +95,16 @@ pub(crate) fn print_benchmark_table(
                 number(&row[2]),
                 info(&row[3]),
                 warn_text(&row[4]),
-                note(&row[5]),
+                // Coloured against the full column rather than against its own
+                // length, so only a row that actually reaches the right edge
+                // reads as the expensive one.
+                heat_bar(&row[5], BENCHMARK_BAR_WIDTH),
             ],
             &widths,
             BENCHMARK_ALIGNMENT,
         );
     }
-    print_table_separator(&widths);
+    print_table_rule(&widths, TableRule::Bottom);
 }
 
 const BENCHMARK_BAR_WIDTH: usize = 12;
@@ -106,44 +112,6 @@ const BENCHMARK_BAR_WIDTH: usize = 12;
 /// Scenario name left, the four timings right, and the bar left again so every
 /// bar grows from the same edge.
 const BENCHMARK_ALIGNMENT: [bool; 6] = [false, true, true, true, true, false];
-
-pub(crate) fn print_tui_header(title: impl AsRef<str>) {
-    let title = title.as_ref();
-    let badge = badge(title);
-    println!("\n{}", heading(tui_header_title(title)));
-    println!();
-    println!("  {} {}", badge.icon, dim(badge.tagline));
-    println!();
-    print_field("time", dim(current_timestamp()));
-}
-
-/// The line a command ends on when it succeeded. The mascot appears here and
-/// nowhere else in a result, so a finished run is recognisable by shape from
-/// across the room.
-pub(crate) fn print_success_banner(message: impl AsRef<str>, duration: Duration) {
-    print_success_banner_at(message, None, duration);
-}
-
-/// The same banner with a location. The message and the path are painted
-/// separately — a path is the one part of the line a reader copies, and it
-/// carries the same blue it has in every field above.
-pub(crate) fn print_success_banner_at(
-    message: impl AsRef<str>,
-    path: Option<&Path>,
-    duration: Duration,
-) {
-    let location = match path {
-        Some(path) => format!(" {}", path_text(path)),
-        None => String::new(),
-    };
-    println!(
-        "\n  {} {}{} {}\n",
-        brand("🦊"),
-        note(message.as_ref()),
-        location,
-        dim(format!("· {}", format_duration(duration)))
-    );
-}
 
 pub(crate) fn tool_status(value: String) -> String {
     if value == "missing" {

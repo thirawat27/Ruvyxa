@@ -73,8 +73,8 @@ pub use dynamic_image::DynamicImageConfig;
 
 mod cli_output;
 use cli_output::{
-    accent, badge, current_timestamp, dim, enabled_text, heading, info, link, middleware_summary,
-    note, number, ok, paint, path_text, print_field,
+    accent, dim, enabled_text, info, link, middleware_summary, note, number, ok, paint, path_text,
+    print_field, print_header,
 };
 
 mod port_binding;
@@ -1496,20 +1496,13 @@ fn print_server_ready(
         .filter(|route| route.kind == RouteKind::Api)
         .count();
 
-    // The same header shape every CLI command prints: title, badge, blank line.
-    // The dev server used to print its own two-line variant, which is why it
-    // was the one surface with no command badge.
-    let (title, badge) = if config.watch {
-        ("🦊 Ruvyxa Dev Server", badge("Dev"))
-    } else {
-        ("🦊 Ruvyxa Server", badge("Server"))
-    };
-    println!();
-    println!("{}", heading(title));
-    println!();
-    println!("  {} {}", badge.icon, dim(badge.tagline));
-    println!();
-    print_field("time", dim(current_timestamp()));
+    // Drawn by `ruvyxa_tui::banner`, exactly as every CLI command draws it.
+    // The dev server used to print its own copy of these four lines, which is
+    // why it was for a long time the one surface with no command badge — and
+    // why a change to the header shape had to be made twice to be visible
+    // everywhere. The badge resolves from the title's first word, so `Dev
+    // Server` and `Dev` are the same badge.
+    print_header(if config.watch { "Dev Server" } else { "Server" });
     print_field("mode", accent(mode));
     print_field("local", link(&url));
     print_field("root", path_text(&config.root));

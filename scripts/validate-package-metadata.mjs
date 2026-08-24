@@ -10,7 +10,7 @@ const requiredRuntimeNodeEngine = rootPkg.engines?.node
 const requiredRuntimeNodeVersion = requiredRuntimeNodeEngine.replace(/^>=/, '')
 const requiredRuntimeNodeMajor = requiredRuntimeNodeVersion.split('.')[0]
 const workspaceNodeTypesVersion = rootPkg.devDependencies?.['@types/node']
-const repoUrl = 'git+https://github.com/thirawat27/ruvyxa.git'
+const repoUrl = 'git+https://github.com/thirawat27/Ruvyxa.git'
 const { dirs: packageDirs, ignored: ignoredPackageDirs } = workspacePackageDirs()
 
 const failures = []
@@ -33,13 +33,13 @@ for (const dir of packageDirs) {
   check(pkg.version === expectedVersion, `${pkg.name} version must be ${expectedVersion}`)
   check(pkg.description?.length >= 40, `${pkg.name} needs a useful npm description`)
   check(pkg.license === expectedLicense, `${pkg.name} license must be ${expectedLicense}`)
-  check(pkg.repository?.url === repoUrl, `${pkg.name} repository must point to thirawat27/ruvyxa`)
+  check(pkg.repository?.url === repoUrl, `${pkg.name} repository must point to thirawat27/Ruvyxa`)
   check(
-    pkg.bugs?.url === 'https://github.com/thirawat27/ruvyxa/issues',
+    pkg.bugs?.url === 'https://github.com/thirawat27/Ruvyxa/issues',
     `${pkg.name} bugs URL is invalid`,
   )
   check(
-    pkg.homepage === 'https://github.com/thirawat27/ruvyxa#readme',
+    pkg.homepage === 'https://github.com/thirawat27/Ruvyxa#readme',
     `${pkg.name} homepage is invalid`,
   )
   check(pkg.publishConfig?.access === 'public', `${pkg.name} must publish with public access`)

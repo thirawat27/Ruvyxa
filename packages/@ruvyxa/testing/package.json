@@ -31,13 +31,13 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/thirawat27/ruvyxa.git",
+    "url": "git+https://github.com/thirawat27/Ruvyxa.git",
     "directory": "packages/@ruvyxa/testing"
   },
   "bugs": {
-    "url": "https://github.com/thirawat27/ruvyxa/issues"
+    "url": "https://github.com/thirawat27/Ruvyxa/issues"
   },
-  "homepage": "https://github.com/thirawat27/ruvyxa#readme",
+  "homepage": "https://github.com/thirawat27/Ruvyxa#readme",
   "engines": {
     "node": ">=24.19.0"
   },

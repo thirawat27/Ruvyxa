@@ -13,11 +13,18 @@ fn env_from<'a>(pairs: &'a [(&'a str, &'a str)]) -> impl Fn(&str) -> Option<Stri
 
 #[test]
 fn a_terminal_gets_colour_animation_and_unicode() {
-    let capabilities = detect_capabilities(true, true, env_from(&[]));
+    // Asked as a non-Windows console, because a Windows one answers TrueColor
+    // whatever the environment says and would decide this on the platform the
+    // suite happens to run on rather than on the rule being asserted.
+    let capabilities = detect_capabilities_on(true, true, env_from(&[]), false);
     assert_eq!(
         capabilities,
         Capabilities {
             color: true,
+            // Nothing in the environment claims more, so the depth every
+            // terminal is known to have is what it gets. Roles render
+            // identically at every depth; only decoration notices.
+            depth: ColorDepth::Ansi16,
             animate: true,
             unicode: true
         }
@@ -30,6 +37,7 @@ fn a_pipe_gets_no_colour_and_no_movement_but_keeps_its_glyphs() {
         detect_capabilities(false, false, env_from(&[])),
         Capabilities {
             color: false,
+            depth: ColorDepth::None,
             animate: false,
             unicode: true
         }
@@ -239,7 +247,17 @@ fn roles_that_share_a_column_get_different_colours() {
     // `info` and `note` sit in the same column in the route table and the
     // benchmark table; identical codes would make the distinction invisible.
     let codes = [
-        "1;35", "1;33", "36", "1;96", "94", "95", "32", "33", "31", "34", "90",
+        HEADING_CODE,
+        "1;33",
+        "36",
+        "1;96",
+        "94",
+        "95",
+        "32",
+        "33",
+        "31",
+        "34",
+        "90",
     ];
     let painted = codes
         .iter()

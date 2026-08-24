@@ -225,21 +225,34 @@ plugin `contentEngine(options)` แบบเดิมยังรองรับ
 
 ## Environment variable
 
-| Variable                                                                                                                                    | วัตถุประสงค์ที่ยืนยันจากหลักฐาน                                                    |
-| ------------------------------------------------------------------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------- |
-| `RUVYXA_SITE_URL`                                                                                                                           | fallback canonical origin ของ site discovery                                       |
-| `RUVYXA_RUNTIME`                                                                                                                            | CLI/runtime override (`node`, `bun` หรือ `deno`) ที่ dev/build ใช้                 |
-| `RUVYXA_ADAPTER`                                                                                                                            | build adapter selection override                                                   |
-| `RUVYXA_BUILD_CACHE_DIR`                                                                                                                    | shared build cache directory override                                              |
-| `RUVYXA_RENDER_CACHE_SIZE`                                                                                                                  | render-cache capacity                                                              |
-| `RUVYXA_WORKER_POOL_SIZE`, `RUVYXA_WORKER_TIMEOUT_MS`, `RUVYXA_WORKER_MAX_CONCURRENCY`, `RUVYXA_WORKER_MAX_QUEUE`, `RUVYXA_MEMORY_LIMIT_MB` | worker-pool operational control                                                    |
-| `RUVYXA_PUBLIC_*`                                                                                                                           | browser-safe value ที่ inject เพื่อใช้ใน client                                    |
-| `RUVYXA_FUN`                                                                                                                                | ตั้งเป็น `0`/`false`/`off` เพื่อปิด spinner และมาสคอตที่วิ่งใน CLI โดยสีไม่เปลี่ยน |
-| `RUVYXA_ASCII`                                                                                                                              | ตั้งเป็น `1` เพื่อวาด progress และ status ด้วย glyph แบบ ASCII เท่านั้น            |
+| Variable                                                                                                                                    | วัตถุประสงค์ที่ยืนยันจากหลักฐาน                                                                     |
+| ------------------------------------------------------------------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------- |
+| `RUVYXA_SITE_URL`                                                                                                                           | fallback canonical origin ของ site discovery                                                        |
+| `RUVYXA_RUNTIME`                                                                                                                            | CLI/runtime override (`node`, `bun` หรือ `deno`) ที่ dev/build ใช้                                  |
+| `RUVYXA_ADAPTER`                                                                                                                            | build adapter selection override                                                                    |
+| `RUVYXA_BUILD_CACHE_DIR`                                                                                                                    | shared build cache directory override                                                               |
+| `RUVYXA_RENDER_CACHE_SIZE`                                                                                                                  | render-cache capacity                                                                               |
+| `RUVYXA_WORKER_POOL_SIZE`, `RUVYXA_WORKER_TIMEOUT_MS`, `RUVYXA_WORKER_MAX_CONCURRENCY`, `RUVYXA_WORKER_MAX_QUEUE`, `RUVYXA_MEMORY_LIMIT_MB` | worker-pool operational control                                                                     |
+| `RUVYXA_PUBLIC_*`                                                                                                                           | browser-safe value ที่ inject เพื่อใช้ใน client                                                     |
+| `RUVYXA_FUN`                                                                                                                                | ตั้งเป็น `0`/`false`/`off` เพื่อปิด spinner และมาสคอตที่วิ่งใน CLI โดยสีไม่เปลี่ยน                  |
+| `RUVYXA_ASCII`                                                                                                                              | ตั้งเป็น `1` เพื่อวาด progress และ status ด้วย glyph แบบ ASCII เท่านั้น                             |
+| `FORCE_COLOR`, `CLICOLOR_FORCE`                                                                                                             | บังคับให้ output ที่ถูก redirect มีสี และกำหนดความลึกของสีได้: `1` = 16 สี, `2` = 256, `3` = 24-bit |
 
 output ของ CLI ยังเคารพ opt-out มาตรฐานของเทอร์มินัลสองตัว: `NO_COLOR` ปิดสี และ `TERM=dumb`
 ปิดทั้งสี อนิเมชัน และ glyph ที่ไม่ใช่ ASCII ส่วน output ที่ถูก pipe หรือ redirect
 จะไม่มีอนิเมชันเสมอ
+
+`FORCE_COLOR` มีไว้สำหรับกรณีที่สองตัวนั้นตอบผิด: log ของ CI ที่ render ANSI ได้ มันมีลำดับเหนือทั้ง
+`NO_COLOR` และ `TERM=dumb` เพราะมันเป็นตัวเดียวที่ถูกตั้งโดยตั้งใจสำหรับการรันครั้งนั้น
+ไม่ใช่ค่าที่ติดมาจาก shell profile หรือ build image ส่วน `FORCE_COLOR=0` คือวิธีที่ variable
+เดียวกันใช้ปฏิเสธ การบังคับสีไม่เคยบังคับอนิเมชัน เพราะ spinner ต้องวาดทับบนบรรทัดเดิม ซึ่ง log file
+ทำไม่ได้
+
+เมื่อเทอร์มินัลรายงานว่ารองรับสี 24-bit ส่วนที่เป็นการตกแต่งของ output — wordmark, เส้นคั่นใต้
+header และหัวข้อ section, หางที่ลากตามมาสคอตใน progress, และแท่งขนาดใน `bench` — จะถูกวาดเป็น
+gradient ส่วนสิ่งที่สื่อความหมายไม่ถูกวาดแบบนั้น: ทุก status, จำนวน, path และการจำแนกประเภท
+ยังอยู่ในชุดสิบหกสีที่ทุกเทอร์มินัล render เหมือนกัน
+ดังนั้นเทอร์มินัลที่มีสีน้อยกว่าจึงเสียแค่การตกแต่ง ไม่เคยเสียความแตกต่าง
 
 variable ภายในที่ขึ้นต้นหรือลงท้ายด้วย double underscore เป็น runtime transport detail ไม่ใช่
 application configuration ห้ามตั้งเอง ค่าเช่น `RUVYXA_AUTH_SECRET` ปรากฏใน auth scaffolder; ให้ใช้

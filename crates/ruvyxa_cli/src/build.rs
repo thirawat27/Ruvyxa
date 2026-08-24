@@ -237,7 +237,7 @@ pub(crate) fn prepare_build_assets(
 
 /// Print the fixed banner a summarized build opens with.
 fn print_build_header(args: &BuildArgs, target: BuildTarget, app_dir: &Path, out_dir: &Path) {
-    print_tui_header("Build");
+    print_header("Build");
     print_field("target", accent(format!("{:?}", target).to_lowercase()));
     print_field(
         "profile",

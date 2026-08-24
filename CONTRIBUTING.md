@@ -21,7 +21,7 @@ they cannot drift out of date:
 ### Clone and Install
 
 ```bash
-git clone https://github.com/thirawat27/ruvyxa.git
+git clone https://github.com/thirawat27/Ruvyxa.git
 cd ruvyxa
 ```
 

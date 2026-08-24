@@ -37,7 +37,7 @@ pub(crate) fn print_routes(args: RoutesArgs) -> anyhow::Result<()> {
         .count();
     let api_routes = manifest.routes.len().saturating_sub(page_routes);
 
-    print_tui_header("Routes");
+    print_header("Routes");
     print_field("root", path_text(&args.root));
     print_field("app dir", path_text(&app_dir));
     print_field("routes", number(manifest.routes.len().to_string()));
@@ -67,7 +67,7 @@ pub(crate) fn print_routes(args: RoutesArgs) -> anyhow::Result<()> {
     let headers = ["kind", "path", "file", "strategy"];
     let widths = column_widths(&headers, &rows);
 
-    print_table_separator(&widths);
+    print_table_rule(&widths, TableRule::Top);
     print_box_row(
         headers,
         [
@@ -79,7 +79,7 @@ pub(crate) fn print_routes(args: RoutesArgs) -> anyhow::Result<()> {
         &widths,
         ROUTE_TABLE_ALIGNMENT,
     );
-    print_table_separator(&widths);
+    print_table_rule(&widths, TableRule::Middle);
     for (row, route) in rows.iter().zip(manifest.routes.iter()) {
         let strategy = match route.kind {
             ruvyxa_graph::RouteKind::Page => styled_strategy_word(route.render.strategy),
@@ -97,7 +97,7 @@ pub(crate) fn print_routes(args: RoutesArgs) -> anyhow::Result<()> {
             ROUTE_TABLE_ALIGNMENT,
         );
     }
-    print_table_separator(&widths);
+    print_table_rule(&widths, TableRule::Bottom);
     println!();
 
     Ok(())
@@ -174,7 +174,7 @@ pub(crate) fn analyze(args: AnalyzeArgs) -> anyhow::Result<()> {
             fs::write(output, format!("{report}\n"))
                 .with_context(|| format!("failed to write analysis report {}", output.display()))?;
             if format == AnalyzeFormat::Html {
-                print_tui_header("Analyze");
+                print_header("Analyze");
                 print_field("format", accent("interactive html"));
                 print_field("report", path_text(output));
                 println!();
@@ -183,7 +183,7 @@ pub(crate) fn analyze(args: AnalyzeArgs) -> anyhow::Result<()> {
             write_machine_report(&report)?;
         }
     } else {
-        print_tui_header("Analyze");
+        print_header("Analyze");
         print_field("root", path_text(&args.root));
         print_field("routes", number(validation.routes.to_string()));
         print_field("pages", info(validation.page_routes.to_string()));
@@ -237,7 +237,7 @@ fn write_machine_report_to(writer: &mut impl Write, report: &str) -> anyhow::Res
 
 pub(crate) async fn check(args: ProjectArgs) -> anyhow::Result<()> {
     let started = Instant::now();
-    print_tui_header("Check");
+    print_header("Check");
     print_field("root", path_text(&args.root));
     println!();
 
@@ -388,7 +388,7 @@ pub(crate) fn doctor(args: DoctorArgs) -> anyhow::Result<()> {
         .then(|| read_package_json(&package_json))
         .transpose()?;
 
-    print_tui_header("Doctor");
+    print_header("Doctor");
 
     // Twenty-five fields in one block is a wall. The groups below are the
     // questions a reader actually arrives with: which Ruvyxa is this, where is
@@ -564,7 +564,7 @@ pub(crate) fn clean(args: ProjectArgs) -> anyhow::Result<()> {
     if removed {
         fs::remove_dir_all(&out_dir)?;
     }
-    print_tui_header("Clean");
+    print_header("Clean");
     print_field(
         "status",
         if removed {
@@ -603,60 +603,7 @@ pub(crate) async fn bench(args: BenchArgs) -> anyhow::Result<()> {
     if args.baseline {
         return run_baseline_benchmark(&args).await;
     }
-
-    let started = Instant::now();
-    let samples = args.samples.max(1);
-    let root = args.root;
-    let config = load_project_config(&root)?;
-    let runtime = config.javascript_runtime().command().to_string();
-    let app_dir = root.join(config.app_dir());
-    let mut results = Vec::new();
-
-    results.push(run_benchmark("route-discovery", &runtime, samples, || {
-        let _manifest = discover_project_routes(&root, &config)?;
-        Ok(())
-    })?);
-    results.push(run_benchmark(
-        "analyze-validation",
-        &runtime,
-        samples,
-        || {
-            let manifest = discover_project_routes(&root, &config)?;
-            let validation = validate_app(&root, &manifest)?;
-            fail_on_diagnostics(&validation.diagnostics)?;
-            Ok(())
-        },
-    )?);
-    let mut build_timings = Vec::with_capacity(samples);
-    for _ in 0..samples {
-        let started = Instant::now();
-        build_with_output(
-            BuildArgs {
-                root: root.clone(),
-                target: None,
-                adapter: None,
-                runtime: None,
-                server_only: false,
-            },
-            false,
-        )
-        .await?;
-        build_timings.push(started.elapsed());
-    }
-    results.push(summarize_benchmark(
-        "production-build",
-        &runtime,
-        build_timings,
-    ));
-
-    if args.json {
-        println!("{}", serde_json::to_string_pretty(&results)?);
-    } else {
-        print_benchmark_table(samples, &results, &root, &app_dir, started.elapsed());
-        println!();
-    }
-
-    Ok(())
+    run_project_benchmark(&args).await
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -741,7 +688,7 @@ pub(crate) fn duration_ms(duration: Duration) -> f64 {
 pub(crate) async fn test_parity(args: ProjectArgs) -> anyhow::Result<()> {
     let started = Instant::now();
     let config = load_project_config(&args.root)?;
-    print_tui_header("Parity");
+    print_header("Parity");
     print_field("root", path_text(&args.root));
     print_field("dev app", path_text(&args.root.join(config.app_dir())));
     print_field(

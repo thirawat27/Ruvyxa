@@ -96,7 +96,7 @@ pub(crate) fn scaffold_plugin(args: PluginCreateArgs) -> anyhow::Result<()> {
         fs::write(destination, contents)?;
     }
 
-    print_tui_header("Plugin");
+    print_header("Plugin");
     print_field("status", ok_text("created"));
     print_field("plugin", accent(&plugin_name));
     print_field("package", accent(format!("ruvyxa-plugin-{plugin_name}")));

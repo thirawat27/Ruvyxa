@@ -11,12 +11,35 @@
 //! This crate is a leaf: it depends on nothing in the workspace, and nothing
 //! here knows what a route, a bundle, or a request is. It decides how output
 //! looks and never what output means.
+//!
+//! # The modules, and the line between two of them
+//!
+//! - [`theme`] — what the terminal can do, and the **roles**: the sixteen-colour
+//!   palette that carries every distinction the output makes.
+//! - [`gradient`] — **decoration**: 24-bit ramps that carry no distinction and
+//!   therefore may be as rich as the terminal allows, each naming the single
+//!   role it collapses to when it cannot.
+//! - [`mascot`] — every glyph, in a Unicode set and an ASCII one.
+//! - [`layout`] — fields, sections, rules, tables, and unit formatting.
+//! - [`progress`] — the two live surfaces: the runner track and the spinner.
+//! - [`banner`] — the header every command opens with and the line a
+//!   successful one closes on.
+//!
+//! The split between `theme` and `gradient` is the one worth holding on to.
+//! Adding a 24-bit colour to a role looks like an improvement and is a
+//! regression: a terminal that cannot render it approximates, and two roles
+//! that meant different things become one colour on somebody else's machine. A
+//! ramp has nothing to lose that way, which is why it lives somewhere else.
 
+pub mod banner;
+pub mod gradient;
 pub mod layout;
 pub mod mascot;
 pub mod progress;
 pub mod theme;
 
+pub use banner::*;
+pub use gradient::{BRAND, Gradient, HEAT, PULSE, RULE, Rgb, TRAIL, to_ansi256};
 pub use layout::*;
 pub use mascot::*;
 pub use progress::*;
@@ -24,3 +47,5 @@ pub use theme::*;
 
 #[cfg(test)]
 mod tests;
+#[cfg(test)]
+mod tests_visual;

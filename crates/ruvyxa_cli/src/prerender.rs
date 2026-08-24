@@ -290,7 +290,7 @@ pub(crate) async fn prerender_static_routes(
         let mut jobs = jobs.into_iter().enumerate();
         let mut prerendered = Vec::new();
 
-        draw_progress_bar(show_progress, "prerender", completed_jobs, total_jobs);
+        let progress = ProgressTrack::start(show_progress, "prerender", total_jobs);
         loop {
             while pending.len() < parallelism {
                 let Some((index, job)) = jobs.next() else {
@@ -329,9 +329,11 @@ pub(crate) async fn prerender_static_routes(
                     .map_err(|error| anyhow::anyhow!("pre-render worker panicked: {error}"))??,
             );
             completed_jobs += 1;
-            draw_progress_bar(show_progress, "prerender", completed_jobs, total_jobs);
+            progress.set(completed_jobs);
         }
-        clear_progress_bar(show_progress);
+        // Dropping the track is what clears its line; doing it explicitly keeps
+        // the clear where the loop ends rather than wherever the scope does.
+        drop(progress);
 
         prerendered.sort_by_key(|(index, _)| *index);
         let prerendered = prerendered

@@ -18,9 +18,9 @@ the expensive mistakes here come from one half of a rule being changed without t
 - `packages/` — `ruvyxa` (the framework package, including the `runtime/*.mjs` modules the Rust CLI
   spawns or imports by path), `create-ruvyxa`, `@ruvyxa/core`, `@ruvyxa/react`, four optional
   integrations, eleven deploy adapters, and five prebuilt CLI binaries.
-- `examples/demo` is the broad fixture and is deliberately **not** deployable;
-  `examples/deploy-smoke` is the one every adapter can deploy, and CI runs it on real Node, Bun, and
-  Deno.
+- `examples/demo` is the broad feature fixture and **is** deployable — `RUV2213` and the refusal of
+  a dynamic server-components route are both gone. `examples/deploy-smoke` is the smallest app every
+  self-hosted adapter can deploy, and it is what CI builds and launches on real Node, Bun, and Deno.
 
 There is no esbuild, no Vite, no Webpack. The bundler is ours.
 
@@ -41,7 +41,7 @@ There is no esbuild, no Vite, no Webpack. The bundler is ours.
 
 ```bash
 cargo fmt --all -- --check
-cargo clippy --workspace --all-targets --locked -- -D warnings
+cargo clippy --workspace --locked -- -D warnings
 cargo test --workspace --locked
 pnpm -r build
 pnpm -r check

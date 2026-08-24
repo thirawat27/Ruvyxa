@@ -170,6 +170,30 @@ files, because the atomic commit replaces the complete set of named build output
 
 The flag is opt-in. `ruvyxa build` without it is unchanged.
 
+## Benchmark scenarios
+
+`npm run bench` measures six scenarios against the project as it stands, in the order a build
+reaches them:
+
+| Scenario             | What it measures                                              |
+| -------------------- | ------------------------------------------------------------- |
+| `config-load`        | reading `ruvyxa.config.ts` through the JavaScript runtime     |
+| `route-discovery`    | scanning the app directory into a route manifest              |
+| `route-validation`   | checking every route and its server/client boundaries         |
+| `build-cold`         | a full production build against an empty cache                |
+| `build-warm`         | the same build with that cache reused                         |
+| `first-route-render` | rendering the first static page through the production server |
+
+The two build scenarios use a private cache directory under `.ruvyxa/bench/`, emptied before every
+cold sample and reused for every warm one, and removed when the run ends. The project's own build
+cache is never deleted or warmed. A cold build costs the same whether or not the output directory is
+already populated, because cache reuse is decided by that directory alone — which is what makes the
+`cache saving` line under the table a measurement rather than an impression.
+
+Nothing in this mode edits a source file, so it stays cheap enough to run while working. The cost is
+that only the cache can be controlled and not the source, which is why the edit classes live in the
+baseline mode below. Cold builds dominate the run time; pass `--samples 1` for a quick look.
+
 ## Reproducible production-build baseline
 
 Use the baseline mode before and after changing compiler, cache, chunking, HMR, or adapter behavior:

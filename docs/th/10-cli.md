@@ -169,6 +169,29 @@ ruvyxa build --server-only --target bun --adapter node
 
 flag นี้เป็น opt-in `ruvyxa build` ที่ไม่ใส่ flag ยังทำงานเหมือนเดิมทุกประการ
 
+## Scenario ของ benchmark
+
+`npm run bench` วัดหกอย่างกับโปรเจกต์ตามสภาพจริง เรียงตามลำดับที่ build ไปถึง:
+
+| Scenario             | วัดอะไร                                          |
+| -------------------- | ------------------------------------------------ |
+| `config-load`        | อ่าน `ruvyxa.config.ts` ผ่าน JavaScript runtime  |
+| `route-discovery`    | สแกน app directory ออกมาเป็น route manifest      |
+| `route-validation`   | ตรวจทุก route และขอบเขต server/client            |
+| `build-cold`         | production build เต็มรูปแบบบน cache ที่ว่างเปล่า |
+| `build-warm`         | build เดียวกันโดยใช้ cache นั้นซ้ำ               |
+| `first-route-render` | render static page แรกผ่าน production server     |
+
+สอง scenario ที่เป็น build ใช้ cache directory ส่วนตัวใต้ `.ruvyxa/bench/` ซึ่งถูกล้างก่อนทุก sample
+ของ cold และใช้ซ้ำสำหรับทุก sample ของ warm แล้วลบทิ้งเมื่อจบ — cache ของโปรเจกต์เองไม่เคยถูกลบหรือ
+ถูกทำให้อุ่น cold build มีต้นทุนเท่าเดิมไม่ว่า output directory จะมีของอยู่แล้วหรือไม่ เพราะการใช้
+cache ซ้ำถูกตัดสินที่ directory นั้นที่เดียว ซึ่งเป็นเหตุผลว่าทำไมบรรทัด `cache saving`
+ใต้ตารางจึงเป็นค่าที่วัดได้จริง ไม่ใช่ความรู้สึก
+
+โหมดนี้ไม่แก้ไฟล์ source เลย จึงเบาพอที่จะรันระหว่างทำงาน แลกกับการที่ควบคุมได้แค่ cache ไม่ใช่
+source ซึ่งเป็นเหตุผลว่าทำไม edit class ต่าง ๆ จึงอยู่ใน baseline mode ด้านล่างแทน
+เวลาส่วนใหญ่หมดไปกับ cold build ถ้าอยากดูเร็ว ๆ ให้ใส่ `--samples 1`
+
 ## Baseline สำหรับ production build ที่ทำซ้ำได้
 
 ใช้ baseline mode ก่อนและหลังแก้ compiler, cache, chunking, HMR หรือ adapter:

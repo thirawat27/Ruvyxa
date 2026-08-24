@@ -699,6 +699,45 @@ fn detects_duplicate_dependency_versions() {
 }
 
 #[test]
+fn every_benchmark_scenario_is_named_once_and_explained() {
+    // The run itself checks that the table and the runner agree, which is the
+    // drift that matters. What it cannot catch is a duplicate id: two rows
+    // spelled the same would satisfy that comparison while the table describes
+    // one scenario twice and another not at all.
+    let ids = PROJECT_SCENARIOS
+        .iter()
+        .map(|(id, _)| *id)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(
+        ids.len(),
+        PROJECT_SCENARIOS.len(),
+        "two benchmark scenarios share an id"
+    );
+    for (id, description) in PROJECT_SCENARIOS {
+        assert!(!id.trim().is_empty(), "a scenario has no id");
+        assert!(
+            !description.trim().is_empty(),
+            "{id} has no line explaining what it measures"
+        );
+    }
+}
+
+#[test]
+fn the_benchmark_measures_a_cold_build_and_a_warm_one_separately() {
+    // The row these two replaced ran every sample against the project's own
+    // cache and averaged the results, so its number was neither cold nor warm.
+    // Keeping both names asserted here is what stops them being folded back
+    // into one row that looks tidier and means less.
+    let ids = PROJECT_SCENARIOS.map(|(id, _)| id);
+    assert!(ids.contains(&"build-cold"));
+    assert!(ids.contains(&"build-warm"));
+    assert!(
+        !ids.contains(&"production-build"),
+        "the row that mixed cold and warm costs is back"
+    );
+}
+
+#[test]
 fn summarizes_benchmark_samples() {
     let result = summarize_benchmark(
         "sample",
@@ -2420,6 +2459,8 @@ fn top_level_help_uses_framework_name_and_command_descriptions() {
 
 #[test]
 fn tui_headers_use_the_shared_fox_branding() {
+    use ruvyxa_tui::tui_header_title;
+
     assert_eq!(tui_header_title("Build"), "🦊 Ruvyxa Build");
     assert_eq!(tui_header_title("Check"), "🦊 Ruvyxa Check");
     assert_eq!(

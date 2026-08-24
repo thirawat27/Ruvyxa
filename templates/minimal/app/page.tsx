@@ -13,10 +13,10 @@ export default function Home() {
           Edit <code>app/page.tsx</code> to start building your application.
         </p>
         <div className="links">
-          <a className="link primary" href="https://github.com/thirawat27/ruvyxa">
+          <a className="link primary" href="https://github.com/thirawat27/Ruvyxa">
             Docs
           </a>
-          <a className="link" href="https://github.com/thirawat27/ruvyxa/tree/main/examples/demo">
+          <a className="link" href="https://github.com/thirawat27/Ruvyxa/tree/main/examples/demo">
             Examples
           </a>
         </div>

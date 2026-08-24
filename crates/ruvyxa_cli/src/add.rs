@@ -9,7 +9,7 @@ use anyhow::Context;
 
 use crate::{
     AddArgs, AddTemplate, accent, dim, info, load_project_config, note, number, ok_text,
-    print_field, print_success_banner, print_tui_header,
+    print_field, print_header, print_success_banner,
 };
 
 struct ScaffoldFile {
@@ -63,7 +63,7 @@ pub(crate) fn scaffold_add(args: AddArgs) -> anyhow::Result<()> {
     // This command used to print its own header and hand-count its own column
     // padding, which is how it ended up as the one command with no colour and a
     // field column two spaces off from every other.
-    print_tui_header("Adds");
+    print_header("Adds");
     print_field("scaffolds", number(files.len().to_string()));
     println!();
 

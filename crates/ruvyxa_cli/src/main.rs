@@ -84,10 +84,12 @@ struct Cli {
 /// [`ruvyxa_tui::theme`] so `ruvyxa --help` and `ruvyxa build` are recognisably
 /// the same tool. clap takes `AnsiColor` values rather than escape codes, which
 /// is why the palette is restated here instead of imported; each line names the
-/// theme function it mirrors, and the two must be changed together.
+/// theme role it mirrors, and the two must be changed together. The header
+/// mirrors a constant rather than a function because the only heading Ruvyxa
+/// prints is the gradient wordmark, and that constant is what it degrades to.
 fn cli_styles() -> Styles {
     Styles::styled()
-        // heading()
+        // theme::HEADING_CODE
         .header(AnsiColor::Magenta.on_default().effects(Effects::BOLD))
         // brand()
         .usage(AnsiColor::Yellow.on_default().effects(Effects::BOLD))
@@ -438,6 +440,20 @@ async fn main() -> anyhow::Result<()> {
         )
         .without_time()
         .with_target(false)
+        // Warnings are the one part of the output that was not asking
+        // `ruvyxa_tui` whether colour was wanted. `fmt()` turns ANSI on by
+        // default and consults neither the terminal nor `NO_COLOR`, so
+        // `ruvyxa build > log` recorded a literal escape sequence in front of
+        // every warning while every other line in the same file was plain.
+        .with_ansi(ruvyxa_tui::capabilities().color)
+        // And they were going to stdout, which is where `--json` writes its
+        // report. One warning during `ruvyxa bench --json` put ` WARN ...`
+        // ahead of the opening bracket and the output stopped parsing as JSON
+        // at the first character. Every machine-readable mode in this CLI
+        // shares that stream, so diagnostics belong on the other one — the same
+        // split `ruvyxa_tui::progress` already keeps for animation frames:
+        // results on stdout, everything transient beside them on stderr.
+        .with_writer(std::io::stderr)
         .init();
 
     let cli = Cli::parse_from(normalized_cli_args(std::env::args_os()));

@@ -227,21 +227,34 @@ composition. Do not configure both forms in the same application.
 
 ## Environment variables
 
-| Variable                                                                                                                                    | Evidence-backed purpose                                                                     |
-| ------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------- |
-| `RUVYXA_SITE_URL`                                                                                                                           | Fallback canonical origin for site discovery.                                               |
-| `RUVYXA_RUNTIME`                                                                                                                            | CLI/runtime override (`node`, `bun`, or `deno`) used by dev/build paths.                    |
-| `RUVYXA_ADAPTER`                                                                                                                            | Build adapter selection override.                                                           |
-| `RUVYXA_BUILD_CACHE_DIR`                                                                                                                    | Shared build cache directory override.                                                      |
-| `RUVYXA_RENDER_CACHE_SIZE`                                                                                                                  | Render-cache capacity.                                                                      |
-| `RUVYXA_WORKER_POOL_SIZE`, `RUVYXA_WORKER_TIMEOUT_MS`, `RUVYXA_WORKER_MAX_CONCURRENCY`, `RUVYXA_WORKER_MAX_QUEUE`, `RUVYXA_MEMORY_LIMIT_MB` | Worker-pool operational controls.                                                           |
-| `RUVYXA_PUBLIC_*`                                                                                                                           | Browser-safe values injected for client use.                                                |
-| `RUVYXA_FUN`                                                                                                                                | Set to `0`/`false`/`off` to stop CLI spinners and the running mascot; colour is unaffected. |
-| `RUVYXA_ASCII`                                                                                                                              | Set to `1` to draw progress and status with ASCII glyphs only.                              |
+| Variable                                                                                                                                    | Evidence-backed purpose                                                                            |
+| ------------------------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------- |
+| `RUVYXA_SITE_URL`                                                                                                                           | Fallback canonical origin for site discovery.                                                      |
+| `RUVYXA_RUNTIME`                                                                                                                            | CLI/runtime override (`node`, `bun`, or `deno`) used by dev/build paths.                           |
+| `RUVYXA_ADAPTER`                                                                                                                            | Build adapter selection override.                                                                  |
+| `RUVYXA_BUILD_CACHE_DIR`                                                                                                                    | Shared build cache directory override.                                                             |
+| `RUVYXA_RENDER_CACHE_SIZE`                                                                                                                  | Render-cache capacity.                                                                             |
+| `RUVYXA_WORKER_POOL_SIZE`, `RUVYXA_WORKER_TIMEOUT_MS`, `RUVYXA_WORKER_MAX_CONCURRENCY`, `RUVYXA_WORKER_MAX_QUEUE`, `RUVYXA_MEMORY_LIMIT_MB` | Worker-pool operational controls.                                                                  |
+| `RUVYXA_PUBLIC_*`                                                                                                                           | Browser-safe values injected for client use.                                                       |
+| `RUVYXA_FUN`                                                                                                                                | Set to `0`/`false`/`off` to stop CLI spinners and the running mascot; colour is unaffected.        |
+| `RUVYXA_ASCII`                                                                                                                              | Set to `1` to draw progress and status with ASCII glyphs only.                                     |
+| `FORCE_COLOR`, `CLICOLOR_FORCE`                                                                                                             | Colour redirected output, and optionally pin its depth: `1` = 16 colours, `2` = 256, `3` = 24-bit. |
 
 CLI output also honours the two conventional terminal opt-outs: `NO_COLOR` removes colour, and
 `TERM=dumb` removes colour, animation, and non-ASCII glyphs. Output that is piped or redirected is
 never animated.
+
+`FORCE_COLOR` is for the case those two get wrong: a CI log that renders ANSI. It outranks both
+`NO_COLOR` and `TERM=dumb`, because it is the one of the three set deliberately for a single run
+rather than inherited from a shell profile or a build image. `FORCE_COLOR=0` is how the same
+variable says no. Forcing colour never forces animation — a spinner repaints its line, and a log
+file has nowhere to repaint to.
+
+When the terminal reports 24-bit colour, decorative parts of the output — the wordmark, the rules
+under a header and a section title, the trail behind the progress mascot, the magnitude bars in
+`bench` — are drawn as gradients. Nothing that carries meaning is: every status, count, path, and
+classification stays inside the sixteen colours every terminal renders identically, so a smaller
+palette loses the decoration and never a distinction.
 
 Internal variables beginning or ending in double underscores are runtime transport details, not
 application configuration. Never set them manually. Values such as `RUVYXA_AUTH_SECRET` occur in the

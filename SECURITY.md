@@ -10,7 +10,7 @@
 
 Report vulnerabilities privately through GitHub security advisories for:
 
-https://github.com/thirawat27/ruvyxa
+https://github.com/thirawat27/Ruvyxa
 
 Do not open a public issue for suspected vulnerabilities.
 
