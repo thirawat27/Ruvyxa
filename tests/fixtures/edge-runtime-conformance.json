@@ -1,0 +1,104 @@
+{
+  "$comment": [
+    "Per-route runtime: `export const runtime = 'edge'`.",
+    "",
+    "What the declaration means here is the API surface, not the datacentre. A",
+    "route that declares `edge` promises to use only what a V8 isolate offers —",
+    "`Request`, `Response`, `fetch`, `URL`, `crypto` — and the build refuses it if",
+    "anything in its module graph reaches for a Node built-in that an isolate does",
+    "not have. That is the property the whole edge story rests on: it is what",
+    "makes the route runnable on Cloudflare Workers, Vercel Edge, or Deno Deploy",
+    "at all.",
+    "",
+    "Where the route physically runs is then the adapter's business, and it is",
+    "always safe for a Node host to answer an edge route — every API an edge route",
+    "may use exists in Node too, so the constraint is a subset rather than a",
+    "different set. The route manifest carries the declaration so an adapter that",
+    "can place work on an edge network has the information to do it; an adapter",
+    "that cannot simply serves the route from its function, correctly.",
+    "",
+    "`nodejs` is spelled the way Next.js spells it, so a route moved between the",
+    "two frameworks keeps its meaning.",
+    "",
+    "Replayed by `mod tests` in crates/ruvyxa_graph/src/lib.rs (the parser and the",
+    "graph check) and by tests/packages/ruvyxa/edge-runtime.test.mjs (the manifest",
+    "shape every adapter reads)."
+  ],
+
+  "$declarationNote": [
+    "Accepted values and what each resolves to in the route manifest. An",
+    "unrecognised value is refused rather than defaulted: the export exists",
+    "because the author meant somewhere specific, and reading `'Edge'` as Node",
+    "would move the route with nothing said."
+  ],
+  "declaration": {
+    "export": "runtime",
+    "default": "node",
+    "unknownDiagnostic": "RUV1012",
+    "values": [
+      { "source": "export const runtime = 'edge'", "runtime": "edge" },
+      { "source": "export const runtime = \"edge\"", "runtime": "edge" },
+      { "source": "export const runtime = 'edge' as const", "runtime": "edge" },
+      { "source": "export const runtime = 'nodejs'", "runtime": "node" },
+      { "source": "export const runtime = 'node'", "runtime": "node" },
+      { "source": "const runtime = 'edge'", "runtime": "node" },
+      { "source": "// export const runtime = 'edge'", "runtime": "node" },
+      { "source": "const help = \"export const runtime = 'edge'\"", "runtime": "node" }
+    ],
+    "rejected": [
+      "export const runtime = 'Edge'",
+      "export const runtime = 'worker'",
+      "export const runtime = 'deno'"
+    ]
+  },
+
+  "$builtinNote": [
+    "Node built-ins an edge route may not reach, by bare name or under the",
+    "`node:` prefix. The list is deliberately conservative: it names the modules",
+    "that need a filesystem, a process table, or a socket, and leaves out the ones",
+    "every edge runtime ships a polyfill for. A name absent from both lists is not",
+    "checked — a false refusal on a module that does work costs more than a",
+    "missing one, because the missing one still fails loudly at deploy time.",
+    "",
+    "`fs/promises` and the other subpaths are covered by matching the segment",
+    "before the first `/`."
+  ],
+  "unavailableOnEdge": [
+    "child_process",
+    "cluster",
+    "dgram",
+    "dns",
+    "fs",
+    "http2",
+    "inspector",
+    "module",
+    "net",
+    "os",
+    "readline",
+    "repl",
+    "tls",
+    "trace_events",
+    "tty",
+    "v8",
+    "vm",
+    "wasi",
+    "worker_threads"
+  ],
+  "availableOnEdge": [
+    "assert",
+    "async_hooks",
+    "buffer",
+    "crypto",
+    "diagnostics_channel",
+    "events",
+    "path",
+    "process",
+    "querystring",
+    "stream",
+    "string_decoder",
+    "timers",
+    "url",
+    "util"
+  ],
+  "graphDiagnostic": "RUV1013"
+}

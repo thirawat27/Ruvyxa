@@ -104,6 +104,36 @@ config ตัวเดียวกับที่ Next.js ใช้ และล
 `export const metadata` **ไม่ถูกอ่าน** เพราะ metadata object ของ Next เป็นโครงซ้อนชั้น ขณะที่ `meta`
 ของ Ruvyxa เป็นโครงแบน ทั้งสองจึงใช้แทนกันไม่ได้ ให้ใช้ `export const meta` ด้านล่างแทน
 
+## การเลือก runtime
+
+`export const runtime = 'edge'` เป็นการประกาศว่า route นั้นใช้เฉพาะสิ่งที่ runtime มาตรฐานเว็บมีให้
+— `Request`, `Response`, `fetch`, `URL`, `crypto` ส่วน `'nodejs'` เป็นค่าเริ่มต้นและไม่ต้องเขียน
+ทั้งสองสะกดแบบเดียวกับที่ Next.js สะกด
+
+```tsx
+// app/ping/route.ts
+export const runtime = 'edge'
+
+export function GET({ request }: { request: Request }) {
+  return Response.json({ ok: true, from: new URL(request.url).hostname })
+}
+```
+
+การประกาศนี้ **ถูกตรวจ ไม่ใช่แค่บันทึกไว้** อะไรก็ตามใน module graph ของ route ที่ import Node
+built-in ซึ่ง V8 isolate ไม่มี — `fs`, `child_process`, `net`, `worker_threads` และตัวอื่นในรายการ —
+จะทำให้ build ล้มด้วย `RUV1013` พร้อมบอกชื่อโมดูลและ import ที่เป็นต้นเหตุ ส่วนค่าที่ไม่ใช่ทั้ง
+`'edge'` และ `'nodejs'` จะได้ `RUV1012` แทนการเงียบๆ ตกกลับไปเป็น Node เพราะ export ตัวนี้มีไว้เพื่อ
+บอกว่า route ควรอยู่ที่ไหนโดยเฉพาะ
+
+ส่วนที่ว่า route จะรันอยู่ตรงไหนจริงๆ เป็นการตัดสินใจของ adapter ตัว build จะเขียนการประกาศนี้ลงใน
+section `deploy` ของ `manifest.json` ดังนั้น adapter ที่วางงานบนเครือข่าย edge ได้ก็มีข้อมูลครบ ส่วน
+adapter ที่มีแต่ Node จะตอบ route นั้นจากฟังก์ชันของตัวเอง ซึ่งถูกต้องเสมอ — เพราะทุก API ที่ edge
+route ใช้ได้นั้นมีใน Node ด้วย การประกาศจึงเป็นการ*จำกัด*สิ่งที่ route ทำได้
+ไม่ใช่การเปลี่ยนว่าใครตอบได้
+
+นี่คือการแลกที่ต้องจำไว้: ประกาศ `'edge'` แล้ว route ได้สิทธิ์ไปรันบนเครือข่าย edge แต่เสีย standard
+library ของ Node ไป route ที่ต้องอ่านไฟล์ควรใช้ค่าเริ่มต้น
+
 ## React Server Components
 
 `export const serverComponents = true` ทำให้ route หนึ่งเรนเดอร์ผ่านไปป์ไลน์ server components ของ

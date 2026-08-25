@@ -308,7 +308,7 @@ pub fn discover_routes(options: DiscoverOptions) -> Result<RouteManifest> {
                 &["server.ts", "server.js", "action.ts", "action.js"],
             ),
             client_modules: sibling_module(route_dir, "client.tsx"),
-            runtime: RuntimeTarget::Node,
+            runtime: detect_runtime_target(&file, &mut cache)?,
             render: if kind == RouteKind::Page {
                 apply_rendering_defaults(
                     detect_render_strategy(&app_dir, &file, &path, &layout_chain, &mut cache),
@@ -597,6 +597,43 @@ pub fn validate_app(root: &Path, manifest: &RouteManifest) -> Result<ValidationR
                     if validated_server.insert(module.clone()) {
                         validate_server_module(&module, &mut cache, &mut diagnostics)?;
                     }
+                }
+            }
+        }
+
+        // A route that declared the edge runtime promises an API surface, and
+        // this is where the promise is checked. Without it the declaration is a
+        // label: the build succeeds, the adapter places the route on a Worker,
+        // and the first request fails there with a module-not-found for
+        // something that was never going to exist — on the one host where the
+        // developer cannot attach a debugger.
+        if route.runtime == RuntimeTarget::Edge {
+            let mut graph = collect_relative_graph(&route.file, &mut cache);
+            for layout in &route.layout_chain {
+                if let Some(layout) = resolve_layout_file(&manifest.app_dir, layout) {
+                    graph.extend(collect_relative_graph(&layout, &mut cache));
+                }
+            }
+            for module in graph {
+                let Some(scanned) = cache.module(&module) else {
+                    continue;
+                };
+                for specifier in scanned.ast.import_specifiers() {
+                    let Some(builtin) = edge_forbidden_builtin(&specifier) else {
+                        continue;
+                    };
+                    let mut diagnostic =
+                        Diagnostic::new("RUV1013", "Edge route reaches a Node built-in")
+                            .explain(format!(
+                                "{} imports `{specifier}`, and `{builtin}` does not exist in a Web-standards runtime. This route declares `export const runtime = 'edge'`.",
+                                module.display()
+                            ))
+                            .at_file(&module)
+                            .suggest(
+                                "Replace the import with a Web API — `fetch`, `crypto.subtle`, `URL` — or drop `export const runtime = 'edge'` so the route runs on Node.",
+                            );
+                    diagnostic.affected_routes = vec![route.id.clone()];
+                    diagnostics.push(diagnostic);
                 }
             }
         }
@@ -1826,6 +1863,108 @@ fn detect_render_meta(
 /// the author disabled, and a false positive drops the hydration a working page
 /// depends on. Both happened while this read the raw source — see
 /// [`export_const_value`].
+/// Node built-ins an edge route may not reach.
+///
+/// Conservative on purpose: these are the modules that need a filesystem, a
+/// process table, or a socket, and no V8 isolate has them. The ones every edge
+/// runtime ships a polyfill for — `buffer`, `crypto`, `path`, `stream`, `util`
+/// — are deliberately absent, because a false refusal on a module that does
+/// work costs more than a missing one. The missing one still fails at deploy,
+/// loudly, on the platform that knows its own surface.
+///
+/// Kept level with `unavailableOnEdge` in
+/// `tests/fixtures/edge-runtime-conformance.json`, which the tests replay.
+const EDGE_UNAVAILABLE_BUILTINS: &[&str] = &[
+    "child_process",
+    "cluster",
+    "dgram",
+    "dns",
+    "fs",
+    "http2",
+    "inspector",
+    "module",
+    "net",
+    "os",
+    "readline",
+    "repl",
+    "tls",
+    "trace_events",
+    "tty",
+    "v8",
+    "vm",
+    "wasi",
+    "worker_threads",
+];
+
+/// The forbidden built-in this specifier names, if it names one.
+///
+/// Matches the segment before the first `/` so `node:fs/promises` and
+/// `fs/promises` are the same answer as `fs`.
+fn edge_forbidden_builtin(specifier: &str) -> Option<&'static str> {
+    let bare = specifier.strip_prefix("node:").unwrap_or(specifier);
+    let head = bare.split('/').next().unwrap_or(bare);
+    EDGE_UNAVAILABLE_BUILTINS
+        .iter()
+        .find(|name| **name == head)
+        .copied()
+}
+
+/// The runtime one `export const runtime = …` value names, or `None` when it
+/// names nothing this framework has.
+///
+/// Split from the file walk so the accepted spellings can be replayed against
+/// the shared table without a temporary project on disk.
+fn runtime_target_from_value(raw: &str) -> Option<RuntimeTarget> {
+    let value = raw.trim_end_matches(';').trim();
+    let value = value.strip_suffix("as const").unwrap_or(value).trim();
+    match value.trim_matches(['\'', '"', '`']) {
+        "edge" => Some(RuntimeTarget::Edge),
+        "nodejs" | "node" => Some(RuntimeTarget::Node),
+        _ => None,
+    }
+}
+
+/// The runtime a route asks to run on — `export const runtime = 'edge'`.
+///
+/// Read from the route's own file and from nothing it imports: a dependency
+/// cannot move the route that uses it, and the whole value of the declaration
+/// is that one glance at the route says where it runs.
+///
+/// An unrecognised value is an error rather than a fall back to Node. The
+/// declaration exists because the author meant somewhere specific; accepting
+/// `'Edge'` or `'worker'` silently would put the route on the other runtime
+/// with nothing said, and the difference only shows up in production, where an
+/// edge route has no filesystem and a Node route has no Worker globals.
+///
+/// `nodejs` is spelled the way Next.js spells it, so a route moved between the
+/// two frameworks does not change meaning.
+fn detect_runtime_target(file: &Path, cache: &mut ModuleCache) -> Result<RuntimeTarget> {
+    let Some(module) = cache.module(file) else {
+        return Ok(RuntimeTarget::Node);
+    };
+    let source = Arc::clone(&module.source);
+    let Some(masked) = cache.masked(file) else {
+        return Ok(RuntimeTarget::Node);
+    };
+    let Some(raw) = export_const_value(&source, &masked, "runtime") else {
+        return Ok(RuntimeTarget::Node);
+    };
+
+    match runtime_target_from_value(raw) {
+        Some(target) => Ok(target),
+        None => Err(Diagnostic::new("RUV1012", "Unknown route runtime")
+            .explain(format!(
+                "`export const runtime = {}` names a runtime this framework does not have. The choices are `'edge'` and `'nodejs'`.",
+                raw.trim()
+            ))
+            .at_file(file)
+            .suggest(
+                "Use `export const runtime = 'edge'` to run this route on a Web-standards runtime, or remove the export to keep the Node default.",
+            )
+            .into()),
+    }
+}
+
 fn parse_hydration_mode(source: &str, masked: &str) -> HydrationMode {
     let Some(value) = export_const_value(source, masked, "hydrate") else {
         return HydrationMode::Load;
@@ -2271,6 +2410,103 @@ mod tests {
 
     fn hydration_of(source: &str) -> HydrationMode {
         parse_hydration_mode(source, &code_without_strings_and_comments(source))
+    }
+
+    /// The runtime a source declares, read the way the route walk reads it.
+    fn runtime_of(source: &str) -> Option<RuntimeTarget> {
+        export_const_value(
+            source,
+            &code_without_strings_and_comments(source),
+            "runtime",
+        )
+        .map_or(Some(RuntimeTarget::Node), |raw| {
+            runtime_target_from_value(&raw)
+        })
+    }
+
+    fn edge_fixture() -> serde_json::Value {
+        serde_json::from_str(include_str!(
+            "../../../tests/fixtures/edge-runtime-conformance.json"
+        ))
+        .expect("the edge runtime fixture parses")
+    }
+
+    /// Every spelling of `export const runtime` the shared table lists.
+    ///
+    /// The declaration decides where a route is allowed to run and what it may
+    /// import, so a spelling read differently here than by the manifest readers
+    /// moves a route with nothing said.
+    #[test]
+    fn route_runtime_declarations_match_the_shared_conformance_table() {
+        let fixture = edge_fixture();
+        let declaration = &fixture["declaration"];
+        assert_eq!(declaration["export"], "runtime");
+
+        let cases = declaration["values"].as_array().expect("values");
+        assert!(!cases.is_empty(), "the table must carry cases");
+        for case in cases {
+            let source = case["source"].as_str().expect("source");
+            let expected = case["runtime"].as_str().expect("runtime");
+            let actual = match runtime_of(source) {
+                Some(RuntimeTarget::Edge) => "edge",
+                Some(RuntimeTarget::Node) => "node",
+                Some(RuntimeTarget::Static) => "static",
+                None => "rejected",
+            };
+            assert_eq!(actual, expected, "{source}");
+        }
+
+        for source in declaration["rejected"].as_array().expect("rejected") {
+            let source = source.as_str().expect("rejected source");
+            assert_eq!(
+                runtime_of(source),
+                None,
+                "{source} names no runtime this framework has, and defaulting it \
+                 to Node would place the route somewhere the author did not ask for"
+            );
+        }
+    }
+
+    /// The built-in list this crate refuses is the list the table publishes.
+    #[test]
+    fn edge_unavailable_builtins_match_the_shared_conformance_table() {
+        let fixture = edge_fixture();
+
+        let expected: Vec<&str> = fixture["unavailableOnEdge"]
+            .as_array()
+            .expect("unavailableOnEdge")
+            .iter()
+            .map(|name| name.as_str().expect("name"))
+            .collect();
+        assert_eq!(EDGE_UNAVAILABLE_BUILTINS, expected.as_slice());
+
+        // Bare, prefixed, and sub-path spellings are one answer.
+        assert_eq!(edge_forbidden_builtin("fs"), Some("fs"));
+        assert_eq!(edge_forbidden_builtin("node:fs"), Some("fs"));
+        assert_eq!(edge_forbidden_builtin("node:fs/promises"), Some("fs"));
+        assert_eq!(edge_forbidden_builtin("fs/promises"), Some("fs"));
+
+        // Everything the table calls available must pass, under both spellings:
+        // a false refusal costs more than a missing one, because the missing one
+        // still fails at deploy on the platform that knows its own surface.
+        for name in fixture["availableOnEdge"]
+            .as_array()
+            .expect("availableOnEdge")
+        {
+            let name = name.as_str().expect("name");
+            assert_eq!(edge_forbidden_builtin(name), None, "{name}");
+            assert_eq!(
+                edge_forbidden_builtin(&format!("node:{name}")),
+                None,
+                "{name}"
+            );
+        }
+
+        // A package whose name merely starts with a built-in's is not that
+        // built-in: `os-locale` and `fs-extra` are ordinary dependencies.
+        for specifier in ["os-locale", "fs-extra", "net-utils", "@scope/vm"] {
+            assert_eq!(edge_forbidden_builtin(specifier), None, "{specifier}");
+        }
     }
 
     /// A route export only counts where it is real code.

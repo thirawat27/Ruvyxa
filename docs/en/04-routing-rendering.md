@@ -105,6 +105,36 @@ pre-render path even if it also exports `revalidate`; `'force-static'` and `'err
 `export const metadata` is **not** read: Next's metadata object is nested where Ruvyxa's `meta` is
 flat, so the two are not interchangeable. Use `export const meta` below.
 
+## Choosing a runtime
+
+`export const runtime = 'edge'` declares that a route uses only what a Web-standards runtime offers
+— `Request`, `Response`, `fetch`, `URL`, `crypto`. `'nodejs'` is the default and does not need
+writing. Both are spelled the way Next.js spells them.
+
+```tsx
+// app/ping/route.ts
+export const runtime = 'edge'
+
+export function GET({ request }: { request: Request }) {
+  return Response.json({ ok: true, from: new URL(request.url).hostname })
+}
+```
+
+The declaration is **checked, not just recorded**. Anything in the route's module graph that imports
+a Node built-in a V8 isolate does not have — `fs`, `child_process`, `net`, `worker_threads`, and the
+rest of the list — fails the build with `RUV1013`, naming the module and the import. A value that is
+neither `'edge'` nor `'nodejs'` is `RUV1012` rather than a silent fall back to Node, because the
+export exists precisely to say where the route belongs.
+
+Where the route physically runs is then the adapter's decision. The build writes the declaration
+into the `deploy` section of `manifest.json`, so an adapter that can place work on an edge network
+has what it needs; an adapter whose only host is Node serves the route from its function, which is
+always correct — every API an edge route may use exists in Node too, so the declaration narrows what
+the route may do rather than changing what can answer it.
+
+That is the trade to hold in mind: declaring `'edge'` buys a route the option of running on an edge
+network and costs it the Node standard library. A route that reads a file wants the default.
+
 ## React Server Components
 
 `export const serverComponents = true` renders a route through React's server-components pipeline.
