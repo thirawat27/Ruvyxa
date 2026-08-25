@@ -69,6 +69,12 @@ const WORKER_RUNTIME_FILES: &[&str] = &[
     "rsc-client-install.mjs",
     "flight.mjs",
     "react-compiler.mjs",
+    // The project's own `build.onTransform` hooks, which `compiler.mjs` runs
+    // over every module it reads. A plugin that rewrites source changes what a
+    // pre-rendered page was built from, and the registry that dispatches those
+    // hooks lives here — so a change to the dispatch changes rendered output
+    // exactly like a change to the compiler does.
+    "plugin-http.mjs",
 ];
 
 pub(crate) fn content_hash(input: &str) -> String {

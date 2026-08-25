@@ -171,6 +171,33 @@ mean:
 Pass `--strict` to fail on all three, which is what you want if you are attesting that a deployment
 artifact matches a specific commit.
 
+## Answers that look like faults
+
+Four responses are deliberate, and each one has been reported as a bug by someone testing a
+deployment with a script rather than a browser.
+
+**A URL containing `%2F` is answered `400`, not routed.** `/blog/a%2Fb` and `/blog/a/b` are
+different requests, and a router that decoded the first into the second would let an encoded
+separator cross a path boundary it was never allowed to cross. Ruvyxa rejects the request instead of
+choosing an interpretation. Encode a slash-bearing value into a query parameter, or use a catch-all
+segment.
+
+**A server action posted without an `Origin` header is answered `403`.** The check is a CSRF
+defence, and it fails closed: a request with no `Origin` and no `sec-fetch-site: same-origin` cannot
+be shown to have come from your own site, so it is refused. Every browser sends one of the two on a
+cross-document POST; `curl` sends neither. Add `-H "Origin: https://your-host"` when calling an
+action by hand, or set `security.sameOrigin: false` if you are deliberately serving actions to
+non-browser clients.
+
+**A second `ruvyxa build` on the same output fails while the first is still running.** The build
+takes a lock on its output directory. Two builds writing one directory produce a mixture of both,
+and a mixture that starts is worse than a build that refuses. Wait, or build into a different
+`--out-dir`.
+
+**Node prints `DEP0190` when the standalone server starts a subprocess.** It comes from Node itself,
+not from Ruvyxa, and names a deprecated spawn form used by a dependency in the chain. It is a
+notice, not an error, and nothing in the deployment misbehaves because of it.
+
 ## Platform limits
 
 Native realtime requires a long-lived Node/Bun build; Deno supports the full server route set but

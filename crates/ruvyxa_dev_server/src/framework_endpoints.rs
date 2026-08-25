@@ -799,6 +799,20 @@ pub(crate) async fn client_bundle(
         Err(error) => {
             error!(%error, path = %query.path, "client bundle request failed");
             let message = public_internal_error(&state.config, &error);
+            // Tell the page, not just the terminal.
+            //
+            // A browser reports a script that answered 500 as a load failure
+            // and nothing else, so the document around it — already
+            // server-rendered and already 200 — sat there looking finished
+            // while nothing on it worked. The overlay listens on the HMR
+            // channel, and this is the only place that knows the bundle failed.
+            if state.config.watch && state.config.error_overlay {
+                let _ = state.reload_tx.send(crate::watcher::hmr_issue_payload(
+                    "RUV1300",
+                    &message,
+                    &query.path,
+                ));
+            }
             (
                 StatusCode::INTERNAL_SERVER_ERROR,
                 format!("console.error({message:?});"),

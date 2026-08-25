@@ -47,6 +47,37 @@ transformation คืน code, `{ code, map }`, null หรือไม่คื
 plugin report diagnostic และเพิ่ม document-head entry ได้ อย่าพึ่งพา module-level middleware state
 ข้าม worker: config ระบุชัดว่า worker ไม่ share state นี้
 
+### `onTransform` แก้บันเดิลฝั่งเบราว์เซอร์ ไม่ได้แก้การเรนเดอร์ฝั่งเซิร์ฟเวอร์
+
+build จะคอมไพล์แต่ละโมดูลสองครั้ง และมีแค่ครั้งเดียวที่เรียก hook ของคุณ
+บันเดิลฝั่งเบราว์เซอร์สร้างโดย Rust bundler ซึ่งเรียก `onTransform` ส่วนการเรนเดอร์ฝั่งเซิร์ฟเวอร์ —
+`dev`, `start`, การ prerender และทุกฟังก์ชันที่ deploy — อ่านไฟล์เดียวกันผ่านคอมไพเลอร์ฝั่ง
+JavaScript ซึ่งไม่เรียก ในทางปฏิบัติ `environment` ที่อยู่ใน transform จึงเป็น `client` เสมอ
+
+แบบนี้ไม่มีปัญหากับอะไรที่มีแต่เบราว์เซอร์เห็น แต่ผิดทันทีถ้าค่านั้นไปโผล่ใน markup:
+
+```ts
+// ค่าที่ถูกเขียนทับถูกเรนเดอร์โดยทั้งสองฝั่ง จากซอร์สคนละชุด
+build.onTransform(({ code, id }) =>
+  id.endsWith('/marker.ts') ? code.replace("'original'", "'rewritten'") : undefined,
+)
+```
+
+```tsx
+// app/page.tsx — เรนเดอร์ฝั่งเซิร์ฟเวอร์แล้ว hydrate
+export default () => <p>{MARKER}</p> // เซิร์ฟเวอร์เขียน "original" เบราว์เซอร์คาดหวัง "rewritten"
+```
+
+เมื่อสองฝั่งไม่ตรงกัน React จะทิ้ง tree ทั้งหมดที่เซิร์ฟเวอร์ส่งมาแล้วเรนเดอร์ใหม่ (#418)
+ไม่มีอะไรพัง — หน้าเว็บได้ผลลัพธ์ถูกต้องหลังจากกะพริบให้เห็นค่าที่ผิดหนึ่งครั้ง
+และในโปรดักชันไม่มีคำเตือนใด ๆ เลย `ruvyxa build` จะรายงานคู่ที่เสี่ยงให้ — โมดูลที่ถูก transform
+ซึ่งมี route ที่ทั้งเรนเดอร์ฝั่งเซิร์ฟเวอร์และ hydrate เข้าถึงได้
+
+มีสองทางที่ทำให้มันตรงกัน: ย้ายค่าไปอยู่หลัง route ที่เป็น `'use client'`
+ซึ่งไม่มีเอกสารฝั่งเซิร์ฟเวอร์ให้ขัดกัน — นี่คือสิ่งที่ `examples/demo` ทำ —
+หรือคำนวณค่าตอนรันไทม์ผ่าน environment variable หรือโมดูลที่เซิร์ฟเวอร์ อ่านด้วย
+แทนการเขียนทับข้อความในซอร์ส
+
 ## First-party plugin
 
 `ruvyxa/plugins` มี implementation ของ `redirects`, `headers`, `observability`, `securityHeaders`,

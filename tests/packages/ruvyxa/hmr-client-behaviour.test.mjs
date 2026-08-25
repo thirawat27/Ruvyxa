@@ -101,6 +101,32 @@ function runClient({
   const consoleErrors = []
   const marks = []
   const created = []
+  // Enough of an element for the issue overlay to be built and mounted. The
+  // overlay is what a developer sees when a build fails while the page is
+  // already open, so a harness that could not hold one could not test it.
+  const mounted = []
+  const makeElement = (tag) => ({
+    tag,
+    id: '',
+    style: { cssText: '' },
+    children: [],
+    textContent: '',
+    setAttribute() {},
+    addEventListener() {},
+    append(...nodes) {
+      this.children.push(...nodes)
+    },
+    remove() {
+      const at = mounted.indexOf(this)
+      if (at !== -1) mounted.splice(at, 1)
+    },
+  })
+  const body = {
+    ...makeElement('body'),
+    append(...nodes) {
+      mounted.push(...nodes)
+    },
+  }
   let socketUrl = null
   let messageHandler = null
 
@@ -145,8 +171,11 @@ function runClient({
       // reads as a harness gap rather than as the invariant it is.
       createElement: (tag) => {
         created.push(tag)
-        return {}
+        return makeElement(tag)
       },
+      getElementById: (id) => mounted.find((element) => element.id === id) ?? null,
+      body,
+      documentElement: body,
     },
     DOMParser: class {
       parseFromString() {
@@ -179,6 +208,7 @@ function runClient({
     consoleErrors,
     marks,
     created,
+    mounted,
     deliver: (message) =>
       messageHandler({ data: typeof message === 'string' ? message : JSON.stringify(message) }),
   }
@@ -409,6 +439,55 @@ describe('the emitted HMR client', () => {
     const hard = runClient()
     await hard.deliver(message({ sequence: 1, type: 'issues', fullReload: true }))
     assert.equal(hard.reloads.length, 1)
+  })
+
+  it('paints reported issues over the page and clears them when the build recovers', async () => {
+    // The failure this covers is silent by construction: the document was
+    // already server-rendered and answered 200, and a client bundle that fails
+    // comes back as a script the browser reports as "failed to load". Without
+    // an overlay the page looks finished and does nothing.
+    const client = runClient()
+    await client.deliver(
+      message({
+        sequence: 1,
+        type: 'issues',
+        fullReload: false,
+        issues: [{ code: 'RUV1300', message: 'Client hydration bundling failed' }],
+      }),
+    )
+    assert.equal(client.mounted.length, 1, 'an issue must be shown in the page')
+    const overlay = client.mounted[0]
+    const text = overlay.children.map((child) => child.textContent ?? '').join(' ')
+    assert.match(text, /RUV1300/)
+    assert.match(text, /Client hydration bundling failed/)
+
+    // A recovery takes it away: the next successful update means the error the
+    // overlay is reporting is no longer true.
+    await client.deliver(message({ sequence: 2, kind: 'css' }))
+    assert.equal(client.mounted.length, 0, 'a successful update must clear the overlay')
+  })
+
+  it('never builds the overlay from markup a compiler produced', async () => {
+    // Compiler output routinely contains the author's own markup, and the
+    // overlay is injected into the page they are editing.
+    const client = runClient()
+    await client.deliver(
+      message({
+        sequence: 1,
+        type: 'issues',
+        fullReload: false,
+        issues: [{ code: 'RUV1300', message: '<img src=x onerror=alert(1)>' }],
+      }),
+    )
+    const overlay = client.mounted[0]
+    assert.ok(
+      overlay.children.some((child) => (child.textContent ?? '').includes('<img src=x')),
+      'the message must be set as text',
+    )
+    assert.ok(
+      overlay.children.every((child) => child.innerHTML === undefined),
+      'nothing may be assigned as HTML',
+    )
   })
 
   it('ignores a server-route update aimed at a different route', async () => {

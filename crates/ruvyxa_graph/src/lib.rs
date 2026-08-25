@@ -356,6 +356,17 @@ pub struct ValidationReport {
     pub api_routes: usize,
     pub client_modules: usize,
     pub server_modules: usize,
+    /// Server-components routes that ship a browser bundle with nothing in it
+    /// to hydrate.
+    ///
+    /// Not a diagnostic: the page is correct and the cost is a few hundred
+    /// kilobytes of React runtime the route never uses. Surfaced so it can be
+    /// seen at all — an unused bundle is invisible in every other report — and
+    /// left as the project's decision, because `export const hydrate = false`
+    /// also drops the route from the client router and turns navigation to it
+    /// into a full page load.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub inert_hydration_routes: Vec<String>,
     pub diagnostics: Vec<Diagnostic>,
 }
 
@@ -379,6 +390,58 @@ impl ValidationReport {
 /// Returned as absolute, normalized paths. Anything under `node_modules` is
 /// left out: a deployed function bundles what it needs, and `start` resolves
 /// packages from the project's own tree.
+/// Routes that would render one of `modules` on the server *and* hydrate it in
+/// the browser, paired with the module they reach.
+///
+/// The question a plugin transform raises. `build.onTransform` is applied by
+/// the browser compile and by nothing else: the server render reads the same
+/// file through `runtime/compiler.mjs`, which runs no plugin hooks. For a route
+/// that only runs in the browser that is harmless, and for a route that ships
+/// no client bundle it never comes up — but a route that does both renders the
+/// original text into the document and then hydrates against the rewritten one.
+/// React discards the server markup and re-renders (#418), which looks like a
+/// flicker rather than like a build problem.
+///
+/// Answers the pairs so a caller can name both halves; empty when nothing is at
+/// risk, which is the common case and costs one graph walk.
+pub fn hydrated_routes_reaching(
+    manifest: &RouteManifest,
+    modules: &BTreeSet<PathBuf>,
+) -> Vec<(String, PathBuf)> {
+    if modules.is_empty() {
+        return Vec::new();
+    }
+    let mut cache = ModuleCache::in_root(&manifest.app_dir);
+    let mut found = Vec::new();
+    for route in &manifest.routes {
+        if route.kind != RouteKind::Page
+            || route.render.strategy == RenderStrategy::Csr
+            || !route.render.ships_client_bundle()
+        {
+            continue;
+        }
+        let mut entries = vec![route.file.clone()];
+        for layout in &route.layout_chain {
+            entries.extend(resolve_layout_file(&manifest.app_dir, layout));
+        }
+        for template in &route.template_chain {
+            entries.extend(resolve_layout_file(&manifest.app_dir, template));
+        }
+        entries.extend(route.client_modules.iter().map(PathBuf::from));
+
+        for entry in entries {
+            for module in collect_relative_graph(&entry, &mut cache) {
+                if modules.contains(&module) {
+                    found.push((route.path.clone(), module));
+                }
+            }
+        }
+    }
+    found.sort();
+    found.dedup();
+    found
+}
+
 pub fn reachable_project_modules(root: &Path, manifest: &RouteManifest) -> BTreeSet<PathBuf> {
     let canonical_root = normalized_canonical_path(root);
     let canonical_app = normalized_canonical_path(&manifest.app_dir);
@@ -421,6 +484,7 @@ pub fn validate_app(root: &Path, manifest: &RouteManifest) -> Result<ValidationR
     let mut diagnostics = Vec::new();
     let mut client_modules = BTreeSet::new();
     let mut server_modules = BTreeSet::new();
+    let mut inert_hydration_routes = Vec::new();
 
     // Pre-canonicalize root once instead of per-module (avoids repeated syscalls).
     // Use the verbatim-prefix-free helper so `strip_prefix` against module
@@ -468,9 +532,11 @@ pub fn validate_app(root: &Path, manifest: &RouteManifest) -> Result<ValidationR
                 // `import 'server-only'` (RUV1007) and a private
                 // `process.env` read (RUV1008) — in the one place they are
                 // correct.
+                let mut reaches_client_code = false;
                 for module in graph {
                     let client_lane =
                         !route.render.server_components || is_client_boundary(&module, &mut cache);
+                    reaches_client_code |= client_lane;
                     if !client_lane {
                         server_modules.insert(module.clone());
                         if validated_server.insert(module.clone()) {
@@ -501,6 +567,27 @@ pub fn validate_app(root: &Path, manifest: &RouteManifest) -> Result<ValidationR
                             )?;
                         }
                     }
+                }
+
+                // A server-components route whose graph never crosses a
+                // `'use client'` boundary has nothing for a browser bundle to
+                // hydrate: the page is serialised into a payload, and every
+                // module above the boundary stays on the server. It still ships
+                // the shared React runtime — a few hundred kilobytes on a page
+                // that does not use a byte of it.
+                //
+                // Reported rather than fixed here, because the fix is not free:
+                // `export const hydrate = false` also removes the route from
+                // the client router's registry, so navigating to it becomes a
+                // full page load instead of a soft one. Which of the two costs
+                // matters is the project's call, and it cannot be read from the
+                // source.
+                if route.render.server_components
+                    && route.render.ships_client_bundle()
+                    && !reaches_client_code
+                    && route.client_modules.is_empty()
+                {
+                    inert_hydration_routes.push(route.path.clone());
                 }
             }
             RouteKind::Api => {
@@ -548,6 +635,7 @@ pub fn validate_app(root: &Path, manifest: &RouteManifest) -> Result<ValidationR
             .count(),
         client_modules: client_modules.len(),
         server_modules: server_modules.len(),
+        inert_hydration_routes,
         diagnostics,
     })
 }
@@ -2938,6 +3026,131 @@ mod tests {
         assert!(manifest.routes[0].render.server_components);
         assert_eq!(manifest.routes[0].render.strategy, RenderStrategy::Isr);
         assert_eq!(manifest.routes[0].render.revalidate, Some(60));
+    }
+
+    /// The pairing that produces a hydration mismatch nobody is told about, and
+    /// the two that do not.
+    ///
+    /// A plugin transform is applied by the browser compile alone. Rendering
+    /// the same module on the server and then hydrating against the rewritten
+    /// version makes React throw the server markup away (#418) — which shows up
+    /// as a flicker, never as a failure. A `'use client'` route has no server
+    /// document to disagree with, and a route that ships no bundle never
+    /// hydrates, so neither is at risk.
+    #[test]
+    fn only_a_route_that_both_renders_and_hydrates_diverges_on_a_plugin_transform() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        for route in ["ssr", "csr", "static"] {
+            fs::create_dir_all(app.join(route)).unwrap();
+        }
+        fs::write(
+            app.join("marker.ts"),
+            "export const MARKER = 'untouched'
+",
+        )
+        .unwrap();
+        fs::write(
+            app.join("ssr/page.tsx"),
+            "import { MARKER } from '../marker'
+export default function Page() { return MARKER }
+",
+        )
+        .unwrap();
+        fs::write(
+            app.join("csr/page.tsx"),
+            "'use client'
+import { MARKER } from '../marker'
+export default function Page() { return MARKER }
+",
+        )
+        .unwrap();
+        fs::write(
+            app.join("static/page.tsx"),
+            "export const hydrate = false
+import { MARKER } from '../marker'
+export default function Page() { return MARKER }
+",
+        )
+        .unwrap();
+
+        let manifest = discover_routes(DiscoverOptions::new(&app)).unwrap();
+        let transformed = BTreeSet::from([normalized_canonical_path(&app.join("marker.ts"))]);
+        let at_risk = hydrated_routes_reaching(&manifest, &transformed);
+
+        assert_eq!(
+            at_risk
+                .iter()
+                .map(|(route, _)| route.as_str())
+                .collect::<Vec<_>>(),
+            vec!["/ssr"],
+            "only the route that renders on the server and hydrates can disagree with itself"
+        );
+    }
+
+    /// The common case has to stay free: a build with no plugin transforms must
+    /// not walk the graph at all.
+    #[test]
+    fn no_transformed_modules_asks_no_questions() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        fs::create_dir_all(&app).unwrap();
+        fs::write(
+            app.join("page.tsx"),
+            "export default function Page() { return null }
+",
+        )
+        .unwrap();
+
+        let manifest = discover_routes(DiscoverOptions::new(&app)).unwrap();
+        assert!(hydrated_routes_reaching(&manifest, &BTreeSet::new()).is_empty());
+    }
+
+    /// A bundle that hydrates nothing is invisible in every other report: it is
+    /// real, referenced, and correct, so no check flags it and the page just
+    /// downloads a few hundred kilobytes of React it never uses.
+    ///
+    /// The signal has to be the boundary walk, not the route's declared client
+    /// modules: `client_modules` holds a sibling `client.tsx` by convention and
+    /// is empty for a route whose island is any other file, so a check written
+    /// against it would tell an interactive page to switch its JavaScript off.
+    #[test]
+    fn reports_a_server_components_route_whose_bundle_hydrates_nothing() {
+        let temp = tempfile::tempdir().unwrap();
+        let app = temp.path().join("app");
+        fs::create_dir_all(app.join("static")).unwrap();
+        fs::create_dir_all(app.join("island")).unwrap();
+        fs::write(
+            app.join("static/page.tsx"),
+            "export const serverComponents = true
+export default function Page() { return null }
+",
+        )
+        .unwrap();
+        fs::write(
+            app.join("island/counter.tsx"),
+            "'use client'
+export default function Counter() { return null }
+",
+        )
+        .unwrap();
+        fs::write(
+            app.join("island/page.tsx"),
+            "export const serverComponents = true
+import Counter from './counter'
+export default function Page() { return Counter }
+",
+        )
+        .unwrap();
+
+        let manifest = discover_routes(DiscoverOptions::new(&app)).unwrap();
+        let report = validate_app(temp.path(), &manifest).unwrap();
+
+        assert_eq!(
+            report.inert_hydration_routes,
+            vec!["/static".to_string()],
+            "only the route that reaches no client module ships a bundle for nothing"
+        );
     }
 
     /// A `'use client'` page has no server half, so the export would do nothing

@@ -16,11 +16,14 @@ import {
 // This module owns only the stdio protocol the Rust host speaks, and the build
 // hooks, which have no meaning outside a build.
 import {
+  buildHookContext,
   createPluginRegistry,
   describeRegistry,
+  dispatchBuildTransform,
   dispatchPluginRequest,
   dispatchPluginResponse,
   matchesPatterns,
+  normalizeCodeResult,
   unsupportedReturn,
 } from './plugin-http.mjs'
 import { transformWithReactCompiler } from './react-compiler.mjs'
@@ -198,7 +201,7 @@ async function handleHook(registry, hook, payload) {
 }
 
 async function runBuildResolve(registry, payload) {
-  const base = buildContext(registry, payload)
+  const base = buildHookContext(registry, payload.environment)
   const context = Object.freeze({
     ...base,
     id: String(payload.id ?? ''),
@@ -215,7 +218,7 @@ async function runBuildResolve(registry, payload) {
 
 async function runBuildLoad(registry, payload) {
   const context = Object.freeze({
-    ...buildContext(registry, payload),
+    ...buildHookContext(registry, payload.environment),
     id: String(payload.id ?? ''),
   })
   for (const entry of registry.buildLoad) {
@@ -230,6 +233,9 @@ async function runBuildTransform(registry, payload) {
   let code = String(payload.code ?? '')
   let map
   let changed = false
+  // The React compiler runs before the project's own hooks and only in this
+  // host: it is a compilation of React components, not a plugin, and the
+  // JavaScript compiler applies it on its own path.
   if (reactCompilerEnabled) {
     const compiled = transformWithReactCompiler(code, String(payload.id ?? ''))
     if (compiled) {
@@ -238,13 +244,14 @@ async function runBuildTransform(registry, payload) {
       changed = true
     }
   }
-  const base = buildContext(registry, payload)
-  for (const entry of registry.buildTransform) {
-    const context = Object.freeze({ ...base, code, id: String(payload.id ?? '') })
-    const result = normalizeCodeResult(entry.plugin, 'build.onTransform', await entry.hook(context))
-    if (!result) continue
-    code = result.code
-    if (result.map !== undefined) map = result.map
+  const transformed = await dispatchBuildTransform(registry, {
+    code,
+    id: payload.id,
+    environment: payload.environment,
+  })
+  if (transformed) {
+    code = transformed.code
+    if (transformed.map !== undefined) map = transformed.map
     changed = true
   }
   return changed ? { code, ...(map === undefined ? {} : { map }) } : null
@@ -261,26 +268,6 @@ async function runContentCompile(registry, payload) {
     registry.markdown ?? null,
   )
   return { code: compiled.source }
-}
-
-function normalizeCodeResult(plugin, socket, result) {
-  if (result === null || result === undefined) return null
-  if (typeof result === 'string') return { code: result }
-  if (result && typeof result === 'object' && typeof result.code === 'string') {
-    return {
-      code: result.code,
-      ...(result.map === undefined || result.map === null
-        ? {}
-        : { map: typeof result.map === 'string' ? result.map : JSON.stringify(result.map) }),
-    }
-  }
-  throw unsupportedReturn(plugin, socket)
-}
-
-function buildContext(registry, payload) {
-  const allowed = new Set(['client', 'server', 'edge', 'worker', 'shared'])
-  const environment = allowed.has(payload.environment) ? payload.environment : 'client'
-  return { root: registry.root, environment }
 }
 
 async function runBuildStart(registry, payload) {

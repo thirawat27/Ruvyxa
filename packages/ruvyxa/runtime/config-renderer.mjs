@@ -319,7 +319,17 @@ async function writeRuntimeConfigPointer(root, bundleFile, dependencyHash) {
   let specifier = path.relative(directory, bundleFile).replaceAll('\\', '/')
   if (!specifier.startsWith('.')) specifier = `./${specifier}`
   const versioned = JSON.stringify(`${specifier}?v=${dependencyHash}`)
-  const source = `import config from ${versioned}\nexport default config?.markdown\n`
+  // `default` stays the Markdown configuration, which is what the compiler has
+  // always imported from here. `plugins` is added beside it so the JavaScript
+  // compiler can run the project's `build.onTransform` hooks: those reached the
+  // Rust bundler alone, so a plugin rewrote the browser bundle while every
+  // server render read the original file, and a rewritten value that landed in
+  // markup made the two documents disagree.
+  const source =
+    `import config from ${versioned}\n` +
+    `export default config?.markdown\n` +
+    `export const plugins = config?.plugins ?? []\n` +
+    `export const dependencyHash = ${JSON.stringify(dependencyHash)}\n`
   await mkdir(directory, { recursive: true })
   try {
     if ((await readFile(pointer, 'utf8')) === source) return

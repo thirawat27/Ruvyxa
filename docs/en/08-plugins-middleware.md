@@ -48,6 +48,36 @@ Resolve/load/transform hooks receive an environment of `client`, `server`, `edge
 not rely on module-level middleware state across workers: config explicitly states workers do not
 share it.
 
+### `onTransform` rewrites the browser bundle, not the server render
+
+A build compiles each module twice, and only one of the two runs your hook. The browser bundle is
+built by the Rust bundler, which calls `onTransform`; the server render — `dev`, `start`,
+pre-rendering, and every deployed function — reads the same file through the JavaScript compiler,
+which does not. In practice `environment` is therefore always `client` inside a transform.
+
+That is fine for anything the browser alone observes, and wrong for anything that ends up in markup:
+
+```ts
+// The rewritten value is rendered by both halves, from different sources.
+build.onTransform(({ code, id }) =>
+  id.endsWith('/marker.ts') ? code.replace("'original'", "'rewritten'") : undefined,
+)
+```
+
+```tsx
+// app/page.tsx — server-rendered and hydrated
+export default () => <p>{MARKER}</p> // server writes "original", browser expects "rewritten"
+```
+
+React discards the whole server tree and re-renders when they disagree (#418). Nothing fails: the
+page ends up correct, after a flash of the wrong content, and in production there is no warning at
+all. `ruvyxa build` reports the pairing when it sees it — a transformed module reached by a route
+that both renders on the server and hydrates.
+
+Two ways to keep it honest. Put the value behind a `'use client'` route, which has no server
+document to disagree with — this is what `examples/demo` does. Or compute it at runtime, through an
+environment variable or a module the server reads too, instead of rewriting source text.
+
 ## First-party plugins
 
 `ruvyxa/plugins` implements: `redirects`, `headers`, `observability`, `securityHeaders`,

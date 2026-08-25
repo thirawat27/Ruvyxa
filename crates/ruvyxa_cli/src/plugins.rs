@@ -10,6 +10,7 @@
 //! One worker is shared by every route in a build session, so plugin startup
 //! cost is paid once instead of once per route.
 
+use std::collections::BTreeSet;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command as ProcessCommand, Stdio};
@@ -27,6 +28,24 @@ pub(crate) struct TypeScriptPluginBridge {
     pub(crate) workers: Arc<Vec<Mutex<TypeScriptPluginWorker>>>,
     pub(crate) next_worker: Arc<AtomicUsize>,
     pub(crate) content_compiler_enabled: bool,
+    /// Modules a `build.onTransform` hook actually rewrote.
+    ///
+    /// Recorded because a transform is applied in the browser compile and
+    /// nowhere else: the server render reads the module through
+    /// `runtime/compiler.mjs`, which has no plugin hooks, so a rewritten value
+    /// that reaches rendered markup makes the two documents disagree. Nothing
+    /// downstream can notice on its own — both halves are internally
+    /// consistent — so the build has to remember what was changed in order to
+    /// say so. See `plugin_transform_divergence_diagnostics`.
+    pub(crate) transformed_modules: Arc<Mutex<BTreeSet<PathBuf>>>,
+}
+
+/// What modules a plugin transform rewrote, remembered across builds.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StoredPluginTransforms {
+    dependency_hash: String,
+    modules: Vec<String>,
 }
 
 /// Longest one build-plugin hook may run before its worker is stopped.
@@ -164,6 +183,13 @@ impl ruvyxa_bundler::hooks::BuildHooks for TypeScriptPluginBridge {
             .and_then(|value| value.as_str())
             .map(str::to_string);
 
+        // Remembered, not merely applied: this rewrite happens in one of the
+        // two compiles that read the module, and only the build can tell that
+        // the other one will disagree.
+        if let Ok(mut transformed) = self.transformed_modules.lock() {
+            transformed.insert(ruvyxa_diagnostics::normalized_canonical_path(id));
+        }
+
         Ok(Some(ruvyxa_bundler::hooks::TransformOutput {
             code: code.to_string(),
             map,
@@ -256,12 +282,116 @@ impl TypeScriptPluginBuildSession {
                 workers: Arc::new(vec![Mutex::new(worker)]),
                 next_worker: Arc::new(AtomicUsize::new(0)),
                 content_compiler_enabled,
+                transformed_modules: Arc::new(Mutex::new(BTreeSet::new())),
             }),
         })
     }
 
     pub(crate) fn bridge(&self) -> Option<&TypeScriptPluginBridge> {
         self.bridge.as_ref()
+    }
+
+    /// Whether a plugin rewrites this module for the browser but not for the
+    /// server.
+    ///
+    /// Both compilers run `build.onTransform` now, so an unguarded hook
+    /// produces the same text on both sides and there is nothing to report. A
+    /// hook that inspects `environment` can still rewrite one lane only — which
+    /// is a legitimate thing to do, and a guaranteed hydration mismatch on a
+    /// route that renders on the server and hydrates.
+    ///
+    /// Asked rather than inferred: the hook is right here, and running it twice
+    /// over one file answers exactly the question. A handful of calls, once per
+    /// build, for the modules a plugin actually touched.
+    fn transform_differs_by_environment(&self, module: &Path) -> bool {
+        let Some(bridge) = self.bridge.as_ref() else {
+            return false;
+        };
+        let Ok(source) = std::fs::read_to_string(module) else {
+            return false;
+        };
+        let lane = |environment: &str| -> Option<String> {
+            let payload = serde_json::json!({
+                "code": source,
+                "id": module.display().to_string(),
+                "environment": environment,
+            });
+            let value = bridge.call_runner("build.transform", payload).ok()??;
+            value
+                .get("code")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+        };
+        let client = lane("client").unwrap_or_else(|| source.clone());
+        let server = lane("server").unwrap_or_else(|| source.clone());
+        client != server
+    }
+
+    /// Modules a `build.onTransform` hook rewrote during this build.
+    pub(crate) fn transformed_modules(&self) -> BTreeSet<PathBuf> {
+        self.bridge
+            .as_ref()
+            .and_then(|bridge| bridge.transformed_modules.lock().ok())
+            .map(|transformed| transformed.clone())
+            .unwrap_or_default()
+    }
+
+    /// Every module a transform hook has rewritten for these plugins, including
+    /// the ones this build was too warm to recompile.
+    ///
+    /// A hook only runs on a compile that actually happens, so on a second
+    /// build the browser bundle comes from cache, no hook is called, and the
+    /// build learns nothing about what a plugin rewrites. A warning that
+    /// appears once and then goes away is worse than no warning: it reads as
+    /// something that was fixed.
+    ///
+    /// Keyed by the config dependency hash, which covers the plugin sources
+    /// themselves — editing a plugin invalidates the record along with the
+    /// bundle. Merged rather than replaced, because a partially warm build
+    /// records only the modules it recompiled. A remembered module that no
+    /// route reaches any more produces no warning, so a stale entry is inert
+    /// rather than wrong.
+    pub(crate) fn lane_divergent_modules(
+        &self,
+        cache_dir: &Path,
+        dependency_hash: &str,
+    ) -> BTreeSet<PathBuf> {
+        self.remembered_transformed_modules(cache_dir, dependency_hash)
+            .into_iter()
+            .filter(|module| self.transform_differs_by_environment(module))
+            .collect()
+    }
+
+    fn remembered_transformed_modules(
+        &self,
+        cache_dir: &Path,
+        dependency_hash: &str,
+    ) -> BTreeSet<PathBuf> {
+        let store = cache_dir.join("plugin-transforms.json");
+        let mut modules = self.transformed_modules();
+        if let Ok(source) = std::fs::read_to_string(&store)
+            && let Ok(stored) = serde_json::from_str::<StoredPluginTransforms>(&source)
+            && stored.dependency_hash == dependency_hash
+        {
+            modules.extend(stored.modules.into_iter().map(PathBuf::from));
+        }
+        if modules.is_empty() {
+            return modules;
+        }
+        let record = StoredPluginTransforms {
+            dependency_hash: dependency_hash.to_string(),
+            modules: modules
+                .iter()
+                .map(|module| module.display().to_string())
+                .collect(),
+        };
+        if let Ok(serialized) = serde_json::to_string(&record) {
+            let _ = std::fs::create_dir_all(cache_dir);
+            // A cache the build can rebuild: a failed write costs the next
+            // build a warning it can recompute, not correctness.
+            let _ = std::fs::write(&store, serialized);
+        }
+        modules
     }
 
     pub(crate) fn run_start(&self, out_dir: &Path) -> anyhow::Result<()> {
@@ -474,6 +604,13 @@ impl Drop for TypeScriptPluginWorker {
     }
 }
 
+/// The `environment` a build hook is told it is transforming for.
+///
+/// Replayed against `tests/fixtures/plugin-transform-lane-conformance.json`,
+/// which `runtime/compiler.mjs` answers from too. Both compilers read every
+/// module and both run `build.onTransform`, so a plugin that branches on
+/// `environment` is choosing a lane — and it can only choose correctly while
+/// the two agree on what the lanes are called.
 pub(crate) fn plugin_environment(target: ruvyxa_bundler::BundleTarget) -> &'static str {
     match target {
         ruvyxa_bundler::BundleTarget::Client => "client",
@@ -549,4 +686,47 @@ fn looks_like_a_path(value: &str) -> bool {
         .extension()
         .is_some_and(|extension| !extension.is_empty());
     has_separator || has_extension
+}
+
+#[cfg(test)]
+mod plugin_lane_tests {
+    use super::*;
+
+    /// The Rust half of the plugin-transform lane contract.
+    ///
+    /// The JavaScript half is `tests/packages/ruvyxa/plugin-transform-lane.test.mjs`,
+    /// which drives `runtime/compiler.mjs` through the same table. Both
+    /// compilers read every module and both run `build.onTransform`; a lane
+    /// renamed on one side and not the other would silently change which half
+    /// of a project a plugin rewrites.
+    #[test]
+    fn build_hook_environments_match_the_shared_conformance_table() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/plugin-transform-lane-conformance.json");
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        let fixture: serde_json::Value =
+            serde_json::from_str(&source).expect("the lane fixture parses");
+        let cases = fixture["environments"]["cases"]
+            .as_array()
+            .expect("environment cases");
+        assert!(!cases.is_empty(), "the fixture must carry cases");
+
+        for case in cases {
+            let target = match case["rustTarget"].as_str().expect("rustTarget") {
+                "Client" => ruvyxa_bundler::BundleTarget::Client,
+                "Ssr" => ruvyxa_bundler::BundleTarget::Ssr,
+                "Edge" => ruvyxa_bundler::BundleTarget::Edge,
+                "ReactServer" => ruvyxa_bundler::BundleTarget::ReactServer,
+                other => panic!("unknown bundle target in fixture: {other}"),
+            };
+            assert_eq!(
+                plugin_environment(target),
+                case["expect"].as_str().expect("expect"),
+                "{:?} — {}",
+                target,
+                case["why"].as_str().unwrap_or_default()
+            );
+        }
+    }
 }

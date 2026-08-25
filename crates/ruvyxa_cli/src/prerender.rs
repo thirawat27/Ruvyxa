@@ -66,6 +66,38 @@ pub(crate) struct PrerenderHead {
     /// it emitted, so a baked page and a request-time render reference the same
     /// file rather than one carrying a copy of the CSS the other links.
     pub(crate) styles: Arc<str>,
+    /// What a client-rendered shell says about the site.
+    ///
+    /// Read only by [`csr_shell_html`]. Every other document is produced by a
+    /// render that composes its own title and description from the page's
+    /// `meta` export, and a site-wide default written over that would replace
+    /// what the page said with something less specific.
+    pub(crate) shell: CsrShell,
+}
+
+/// The site-level metadata a client-rendered shell carries.
+///
+/// A CSR route is never rendered on the server, so nothing composes a `<head>`
+/// for it: the shell shipped `<title>Loading...</title>` with no description
+/// and no `lang`, and that is the document every crawler and every link preview
+/// saw. None of it can be per-page — the page's own `meta` lives in a component
+/// that only runs in the browser — but the project's `site` config already says
+/// these three things, and saying them is strictly better than saying nothing.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct CsrShell {
+    pub(crate) title: Option<Arc<str>>,
+    pub(crate) description: Option<Arc<str>>,
+    pub(crate) language: Option<Arc<str>>,
+}
+
+impl CsrShell {
+    pub(crate) fn from_site(site: &SiteConfigOptions) -> Self {
+        Self {
+            title: site.title.as_deref().map(Arc::from),
+            description: site.description.as_deref().map(Arc::from),
+            language: site.language.as_deref().map(Arc::from),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -1075,13 +1107,33 @@ pub(crate) fn csr_shell_html(
             route_path.trim_start_matches('/').replace('/', "__")
         )
     });
+    // A shell has no render behind it, so everything a document normally gets
+    // from its page has to come from the project's `site` config or not at all.
+    let lang = head
+        .shell
+        .language
+        .as_deref()
+        .map(|language| format!(r#" lang="{}""#, escape_html(language)))
+        .unwrap_or_default();
+    let title = head.shell.title.as_deref().unwrap_or("Loading…");
+    let description = head
+        .shell
+        .description
+        .as_deref()
+        .map(|description| {
+            format!(
+                "\n  <meta name=\"description\" content=\"{}\" />",
+                escape_html(description)
+            )
+        })
+        .unwrap_or_default();
     format!(
         r#"<!doctype html>
-<html>
+<html{lang}>
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Loading...</title>
+  <title>{title}</title>{description}
   {asset_links}
   {styles}
   {preload_links}
@@ -1089,9 +1141,11 @@ pub(crate) fn csr_shell_html(
 </head>
 <body>
   <div id="__ruvyxa"></div>
+  <noscript>This page is rendered in the browser and needs JavaScript enabled.</noscript>
   <script type="module" src="{client_src}"></script>
 </body>
 </html>"#,
+        title = escape_html(title),
         asset_links = head.asset_links,
         styles = head.styles,
         client_src = escape_html(&client_src),
@@ -1255,6 +1309,62 @@ mod csr_shell_tests {
     /// The shell is not rendered from the route tree, so the client bootstrap
     /// has to be told to mount rather than hydrate. Without the flag React
     /// hydrates against markup that cannot match and reports #418.
+    /// What a crawler, a link preview, and a reader with JavaScript off get
+    /// from a route that is never rendered on the server.
+    ///
+    /// All three used to get the same thing: a blank page titled `Loading...`.
+    /// The page's own metadata is unreachable here — it lives in a component
+    /// that only runs in the browser — but the project already declares these
+    /// three values, and a shell that repeats them says something true.
+    #[test]
+    fn csr_shell_carries_what_the_site_declares() {
+        let html = csr_shell_html(
+            "/hooks",
+            &BTreeMap::new(),
+            &PrerenderHead {
+                asset_links: Arc::from(""),
+                styles: Arc::from(""),
+                shell: CsrShell {
+                    title: Some(Arc::from("Stress Lab")),
+                    description: Some(Arc::from("A \"quoted\" description")),
+                    language: Some(Arc::from("th")),
+                },
+            },
+        );
+
+        assert!(html.contains("<title>Stress Lab</title>"), "{html}");
+        assert!(html.contains(r#"<html lang="th">"#), "{html}");
+        assert!(
+            html.contains("needs JavaScript"),
+            "a shell must say so: {html}"
+        );
+        assert!(
+            html.contains(r#"content="A &quot;quoted&quot; description""#),
+            "config text is author input and has to be escaped: {html}"
+        );
+    }
+
+    /// A project that declares none of it still gets a valid document.
+    #[test]
+    fn csr_shell_without_site_config_keeps_a_title_and_no_empty_attributes() {
+        let html = csr_shell_html(
+            "/hooks",
+            &BTreeMap::new(),
+            &PrerenderHead {
+                asset_links: Arc::from(""),
+                styles: Arc::from(""),
+                shell: CsrShell::default(),
+            },
+        );
+
+        assert!(
+            html.contains("<html>"),
+            "no lang means no attribute: {html}"
+        );
+        assert!(!html.contains("<meta name=\"description\""), "{html}");
+        assert!(html.contains("<title>"), "{html}");
+    }
+
     #[test]
     fn csr_shell_marks_itself_as_not_server_rendered() {
         let html = csr_shell_html(
@@ -1263,6 +1373,7 @@ mod csr_shell_tests {
             &PrerenderHead {
                 asset_links: Arc::from(""),
                 styles: Arc::from(""),
+                shell: CsrShell::default(),
             },
         );
 

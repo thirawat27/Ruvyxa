@@ -639,6 +639,21 @@ export type PluginBuildLoadHandler = (
   context: PluginBuildLoadContext,
 ) => string | TransformResult | null | void | Promise<string | TransformResult | null | void>
 
+/**
+ * What a `build.onTransform` hook is given.
+ *
+ * The hook runs in the browser compile and nowhere else, so `environment` is
+ * always `'client'` here. The server render — `dev`, `start`, pre-rendering,
+ * and every deployed function — reads the same module through the JavaScript
+ * compiler, which runs no plugin hooks.
+ *
+ * That makes a transform safe for anything only the browser observes, and
+ * unsafe for anything that reaches rendered markup: the server writes the
+ * original text, the browser hydrates against the rewritten one, and React
+ * discards the server tree and re-renders (#418). `ruvyxa build` warns when a
+ * transformed module is reached by a route that both renders on the server and
+ * hydrates.
+ */
 export interface PluginBuildTransformContext extends PluginTransformContext {
   readonly code: string
   readonly id: string

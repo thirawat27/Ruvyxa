@@ -785,6 +785,20 @@ pub(crate) async fn build_with_cache_override(
         write_render_manifests(&staging_dir, &manifest, &client_manifest)?;
     }
 
+    // A plugin rewrote a module the server is about to render unchanged.
+    //
+    // Checked here because this is the first moment both halves are known: the
+    // browser compile has run and recorded what it rewrote, and the route graph
+    // says which routes render on the server and hydrate. Neither half can see
+    // the problem alone — each is internally consistent — and the deployed
+    // symptom is a flicker, not an error.
+    report_plugin_transform_divergence(
+        &plugin_session,
+        &manifest,
+        &build_cache_directory,
+        &config.config_dependency_hash,
+    );
+
     // The project's compiled CSS, written as a client asset rather than inlined
     // into each document.
     //
@@ -839,6 +853,7 @@ pub(crate) async fn build_with_cache_override(
                     &style_collection.css,
                 )
                 .into(),
+                shell: CsrShell::from_site(&config.site),
             },
             &config.build,
             RuvyxaBuildCache {
@@ -884,6 +899,9 @@ pub(crate) async fn build_with_cache_override(
                 &style_collection.css,
             )
             .into(),
+            // Unused on this path: the not-found document is rendered, so it
+            // composes its own head.
+            shell: CsrShell::default(),
         },
         NotFoundPrerender {
             build: &config.build,
@@ -1073,6 +1091,7 @@ fn discover_and_validate_routes(
     let validation_duration = phase_started.elapsed();
     if show_summary {
         print_build_phase(spinner, "validated", "ok".to_string(), validation_duration);
+        report_inert_hydration(&validation.inert_hydration_routes);
     }
     if args.server_only {
         ensure_server_only_supported(target, &manifest)?;
@@ -1401,6 +1420,91 @@ pub(crate) fn styled_render_symbol(strategy: RenderStrategy) -> String {
         RenderStrategy::Isr | RenderStrategy::Ppr => warn_text("◐"),
         RenderStrategy::Ssr => accent("ƒ"),
     }
+}
+
+/// Warn when a plugin transform makes the two documents disagree.
+///
+/// Both compilers run `build.onTransform`, so an ordinary hook rewrites the
+/// browser bundle and the server render alike and there is nothing to report.
+/// A hook that branches on `environment` can still rewrite one lane only — a
+/// legitimate thing to do, and the demo plugin does exactly that — but on a
+/// route that renders on the server *and* hydrates it means the document is
+/// built from one text and hydrated against another. React throws the server
+/// markup away and re-renders (#418): the page ends up correct, nothing fails,
+/// and the only evidence is a flash of the wrong content.
+///
+/// Both halves of the condition are checked rather than assumed. The plugin is
+/// asked whether it really produces different text for `client` and `server`,
+/// and the route graph is asked whether anything that both renders and hydrates
+/// reaches the module. A client-only transform behind a `'use client'` route,
+/// which is what the demo pairs it with, satisfies neither.
+fn report_plugin_transform_divergence(
+    plugin_session: &TypeScriptPluginBuildSession,
+    manifest: &RouteManifest,
+    cache_dir: &Path,
+    dependency_hash: &str,
+) {
+    let divergent = plugin_session.lane_divergent_modules(cache_dir, dependency_hash);
+    let at_risk = ruvyxa_graph::hydrated_routes_reaching(manifest, &divergent);
+    let Some(((route, module), rest)) = at_risk.split_first() else {
+        return;
+    };
+    let module = module
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| module.display().to_string());
+    let more = match rest.len() {
+        0 => String::new(),
+        count => format!(" and {count} more"),
+    };
+    warn!(
+        route = %route,
+        module = %module,
+        "a plugin transform differs between the browser and the server"
+    );
+    println!(
+        "  {} {}",
+        warn_text("warn"),
+        dim(format!(
+            "a build.onTransform hook rewrites {module} differently for the browser than for the server, and \
+             {route}{more} both renders it on the server and hydrates it. The two documents will differ and \
+             React will discard the server markup (#418). Drop the `environment` branch so both compiles \
+             agree, or move the value behind a `'use client'` route, which has no server document to \
+             disagree with."
+        ))
+    );
+}
+
+/// Name the routes that ship a browser bundle with nothing in it to hydrate.
+///
+/// A server-components route whose graph never crosses a `'use client'`
+/// boundary has no browser code of its own, yet it still downloads the shared
+/// React runtime — a few hundred kilobytes on a page that uses none of it. That
+/// cost appears in no other report: the bundle is real, referenced, and
+/// correct, so nothing flags it and nobody looks.
+///
+/// A hint rather than an automatic opt-out. `export const hydrate = false`
+/// removes the route from the client router's registry too, so navigating to it
+/// stops being a soft navigation and becomes a full page load. Which cost
+/// matters is the project's decision, and it cannot be read from the source.
+fn report_inert_hydration(routes: &[String]) {
+    let Some((first, rest)) = routes.split_first() else {
+        return;
+    };
+    let more = match rest.len() {
+        0 => String::new(),
+        count => format!(" and {count} more"),
+    };
+    println!(
+        "  {} {} {}",
+        warn_text("hint"),
+        dim(format!(
+            "{first}{more} ship a client bundle with nothing to hydrate."
+        )),
+        dim(
+            "Add `export const hydrate = false` to serve them without JavaScript (navigation to them becomes a full page load)."
+        )
+    );
 }
 
 /// Add the deployment description to the route manifest.

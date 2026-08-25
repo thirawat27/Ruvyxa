@@ -1931,6 +1931,7 @@ fn prerender_html_includes_the_document_head_the_live_renderer_composes() {
             // the stylesheet it emitted rather than inlining the rule text, so
             // a baked page and a request-time render reference one file.
             styles: Arc::from(r#"<link rel="stylesheet" href="/__ruvyxa/client/styles.abc.css">"#),
+            shell: CsrShell::default(),
         },
     );
 
@@ -2230,6 +2231,7 @@ register({ build }) {
         )]),
         next_worker: Arc::new(AtomicUsize::new(0)),
         content_compiler_enabled: false,
+        transformed_modules: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
     };
     let context = ruvyxa_bundler::hooks::BuildHookContext {
         project_root: root.to_path_buf(),
@@ -2288,6 +2290,7 @@ export default { markdown: { remarkPlugins: [remarkConfigured] } }
         )]),
         next_worker: Arc::new(AtomicUsize::new(0)),
         content_compiler_enabled: true,
+        transformed_modules: Arc::new(Mutex::new(std::collections::BTreeSet::new())),
     };
     let context = ruvyxa_bundler::hooks::BuildHookContext {
         project_root: root.to_path_buf(),

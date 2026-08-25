@@ -15,6 +15,7 @@ import {
 } from './client-references.mjs'
 import { compareCodeUnits } from './order.mjs'
 import { toImportPath } from './paths.mjs'
+import { createPluginRegistry, dispatchBuildTransform } from './plugin-http.mjs'
 import {
   isSafePackageRelativePath,
   legacyEntryCandidates,
@@ -102,9 +103,11 @@ const compilerCache = (globalThis.__RUVYXA_COMPILER_CACHE__ ??= {
   rewrites: new Map(),
   content: new Map(),
   markdownConfigurations: new Map(),
+  pluginTransforms: new Map(),
 })
 compilerCache.transforms ??= new Map()
 compilerCache.markdownConfigurations ??= new Map()
+compilerCache.pluginTransforms ??= new Map()
 
 /**
  * Drop compiler entries associated with changed files, or every entry when the
@@ -132,6 +135,7 @@ export function clearCompilerCache() {
   compilerCache.rewrites.clear()
   compilerCache.content.clear()
   compilerCache.markdownConfigurations.clear()
+  compilerCache.pluginTransforms.clear()
 }
 
 export function compilerCacheStats() {
@@ -380,6 +384,17 @@ export async function compileBundleWithMetadata({
   // URL instead of inlining it, so the caller does not have to list it twice.
   const externalSet = new Set([...external, ...Object.keys(externalUrls ?? {})])
   const tsconfigPaths = loadTsconfigPaths(root)
+  // Resolved once per compile rather than per module: the hooks are the same
+  // for the whole graph, and loading them is a cached pointer read.
+  //
+  // `markdownConfig === false` is the config compile itself — the pointer this
+  // reads is produced by compiling the config, so running project plugins there
+  // would be circular. Skipping it also means a plugin can never transform the
+  // file that declares it.
+  const buildTransform =
+    markdownConfig === false
+      ? null
+      : await projectBuildTransform(root, pluginEnvironmentFor(platform, resolvedBundleTarget))
   const entryKey = sourcefile
 
   await visitModule({
@@ -409,6 +424,7 @@ export async function compileBundleWithMetadata({
     reactCompiler,
     markdownConfig,
     tsconfigPaths,
+    buildTransform,
   })
 
   const linked = linkModules(modules, externals, {
@@ -932,6 +948,7 @@ async function visitModule(context) {
     reactCompiler,
     markdownConfig,
     tsconfigPaths,
+    buildTransform,
   } = context
 
   if (byKey.has(key)) return byKey.get(key)
@@ -1063,7 +1080,7 @@ async function visitModule(context) {
     ) {
       assertSupportedModuleKind(resolved, specifier, filePath || sourcefile)
       assertImportCaseMatches(resolved, specifier, baseDir, filePath || sourcefile)
-      const depSource = await readSourceFile(resolved)
+      const depSource = await readSourceFile(resolved, buildTransform)
       const dep = await visitModule({
         key: moduleGraphKey(resolved),
         filePath: resolved,
@@ -1092,6 +1109,7 @@ async function visitModule(context) {
         reactCompiler,
         markdownConfig,
         tsconfigPaths,
+        buildTransform,
       })
       module.deps.set(specifier, dep)
       continue
@@ -3320,20 +3338,117 @@ function isContainerAtRule(prelude) {
   ].some((prefix) => normalized.startsWith(prefix))
 }
 
-async function readSourceFile(file) {
+async function readSourceFile(file, transform = null) {
   const stats = statSync(file)
-  const cacheKey = path.resolve(file)
+  // The plugin identity is part of the key, not merely consulted: the same file
+  // at the same mtime compiles to different text once a plugin rewrites it, and
+  // a cache that answered from the path alone would serve the untransformed
+  // source for the rest of the process.
+  const cacheKey = transform ? `${transform.identity}\0${path.resolve(file)}` : path.resolve(file)
   const cached = compilerCache.sources.get(cacheKey)
   if (cached && cached.mtimeMs === stats.mtimeMs && cached.size === stats.size) {
     return cached.source
   }
-  const source = await readFile(file, 'utf8')
+  let source = await readFile(file, 'utf8')
+  if (transform) source = await transform.apply(source, file)
   setBoundedCacheEntry(compilerCache.sources, cacheKey, {
     mtimeMs: stats.mtimeMs,
     size: stats.size,
     source,
   })
   return source
+}
+
+/**
+ * The `environment` a build hook is told it is transforming for.
+ *
+ * The same five values the Rust bundler reports, derived from the same two
+ * facts — where the code will run, and which React graph it belongs to — so a
+ * plugin sees one vocabulary whichever compiler called it. Before both
+ * compilers ran hooks, `'client'` was the only value that ever occurred, and a
+ * plugin that guarded on `environment` was guarding on a constant.
+ *
+ * @param {'browser'|'node'|'neutral'|string} platform
+ * @param {string} bundleTarget
+ */
+function pluginEnvironmentFor(platform, bundleTarget) {
+  if (bundleTarget === 'edge') return 'edge'
+  // The server-components graph runs on the server; `react-server` is a
+  // resolution condition, not a different host.
+  if (bundleTarget === 'react-server') return 'server'
+  return platform === 'browser' ? 'client' : 'server'
+}
+
+/**
+ * The project's `build.onTransform` hooks, ready to run against a module.
+ *
+ * Returns `null` when the project has no build plugins, which is the common
+ * case and costs one cached pointer read.
+ *
+ * Why this exists at all: a plugin transform used to be applied by the Rust
+ * bundler and by nothing else. The browser bundle was rewritten; every server
+ * render — `dev`, `start`, pre-rendering, and each deployed function — read the
+ * same file through this compiler, which never called a hook. A rewritten value
+ * that reached markup therefore made the two documents disagree, React threw
+ * away the server tree and re-rendered (#418), and the only symptom was a
+ * flicker. Both graphs now run the same hooks over the same source.
+ *
+ * Loaded from the pointer module the CLI writes for its config, so no project
+ * config is compiled here and there is no way for this to recurse into itself:
+ * a project whose config has not been rendered yet simply has no plugins to
+ * run. `identity` is the pointer's own fingerprint, which changes whenever the
+ * config or any plugin behind it does — that is what makes it safe as a cache
+ * key.
+ *
+ * @param {string} projectRoot
+ * @param {'client'|'server'|'edge'|'worker'|'shared'} environment
+ */
+async function projectBuildTransform(projectRoot, environment) {
+  const root = path.resolve(projectRoot)
+  const pointer = path.join(root, '.ruvyxa', 'cache', 'config', 'runtime-config.mjs')
+  let pointerSource
+  try {
+    pointerSource = await readFile(pointer, 'utf8')
+  } catch {
+    return null
+  }
+
+  const fingerprint = createHash('sha256').update(pointerSource).digest('hex').slice(0, 32)
+  const cacheKey = `${root}\0${environment}`
+  const cached = compilerCache.pluginTransforms.get(cacheKey)
+  if (cached?.fingerprint === fingerprint) return cached.transform
+
+  let plugins = []
+  try {
+    const url = `${pathToFileURL(pointer).href}?v=${fingerprint}`
+    const loaded = await import(url)
+    plugins = Array.isArray(loaded.plugins) ? loaded.plugins : []
+  } catch {
+    // A pointer written by an older CLI has no `plugins` export, and a config
+    // that cannot be imported is already reported by the host that renders it.
+    plugins = []
+  }
+
+  let transform = null
+  if (plugins.length > 0) {
+    const registry = await createPluginRegistry({ root, plugins, environment: 'production' })
+    if (registry.buildTransform.length > 0) {
+      const identity = `${fingerprint}:${environment}`
+      transform = {
+        identity,
+        async apply(code, file) {
+          const result = await dispatchBuildTransform(registry, {
+            code,
+            id: file,
+            environment,
+          })
+          return result ? result.code : code
+        },
+      }
+    }
+  }
+  setBoundedCacheEntry(compilerCache.pluginTransforms, cacheKey, { fingerprint, transform })
+  return transform
 }
 
 /**

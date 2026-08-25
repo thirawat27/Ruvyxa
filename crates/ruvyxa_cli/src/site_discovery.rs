@@ -31,14 +31,15 @@ pub struct SiteConfigOptions {
     /// Absolute origin of the deployed site, e.g. `https://ruvyxa.dev`.
     pub url: Option<String>,
     /// Shared title consumed by content-derived artifacts.
-    #[serde(rename = "title")]
-    pub _title: Option<String>,
+    ///
+    /// Read by the client-rendered shell, which has no render to compose a
+    /// title of its own and shipped the literal `Loading...` to every crawler
+    /// until this was wired up.
+    pub title: Option<String>,
     /// Shared description consumed by content-derived artifacts.
-    #[serde(rename = "description")]
-    pub _description: Option<String>,
+    pub description: Option<String>,
     /// BCP 47 language consumed by feeds and content tokenization.
-    #[serde(rename = "language")]
-    pub _language: Option<String>,
+    pub language: Option<String>,
     /// Sitemap generation switch or production options. @default true
     #[serde(default)]
     pub sitemap: SitemapSetting,

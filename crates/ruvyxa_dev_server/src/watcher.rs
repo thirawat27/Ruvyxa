@@ -351,6 +351,36 @@ fn hmr_update_kind(update: &HmrUpdate, paths: &[String]) -> &'static str {
     }
 }
 
+/// An HMR issues message for a failure that no file change produced.
+///
+/// A client bundle is built when the browser asks for it, not when a file is
+/// saved, so a bundling failure had no watcher event to travel on. It was
+/// answered with a 500 on the script URL — which a browser reports as a script
+/// that failed to load and nothing more — while the document around it stayed a
+/// perfectly ordinary 200. The page then sat there server-rendered and inert,
+/// and the only trace of the real error was a line in the terminal.
+///
+/// Sent over the channel the overlay already listens on, with `fullReload`
+/// false: reloading would re-request the same failing bundle and do it again.
+pub(crate) fn hmr_issue_payload(code: &str, message: &str, route: &str) -> String {
+    let sequence = NEXT_HMR_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    serde_json::json!({
+        "protocol": "ruvyxa.hmr",
+        "protocolVersion": 1,
+        "sequence": sequence,
+        "traceId": trace::edit_id(std::slice::from_ref(&route.to_string())),
+        "traceAck": false,
+        "type": "issues",
+        "kind": "issues",
+        "modules": [],
+        "paths": [],
+        "affectedRoutes": [route],
+        "fullReload": false,
+        "issues": [{ "code": code, "message": message }],
+    })
+    .to_string()
+}
+
 fn hmr_payload(
     update: &HmrUpdate,
     paths: &[String],

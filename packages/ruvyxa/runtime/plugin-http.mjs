@@ -236,6 +236,64 @@ function registryShapeDiagnostics(registry) {
 }
 
 /** Summary of what the registry declared, used by `ruvyxa` tooling output. */
+/**
+ * Run every `build.onTransform` hook over one module's source.
+ *
+ * Lives here, beside the HTTP dispatch, for the reason stated at the top of
+ * this file: a registry that only one transport can reach is a feature only
+ * that transport has. Build transforms were reachable from the NDJSON host
+ * alone, which the Rust bundler speaks and the JavaScript compiler does not —
+ * so a plugin rewrote the browser bundle while every server render read the
+ * original file, and the two documents disagreed on any value that reached
+ * markup. Both hosts now call this.
+ *
+ * `environment` is what the caller is compiling for, so a plugin can rewrite
+ * one side deliberately (`if (environment !== 'client') return`) instead of
+ * having that decided for it.
+ *
+ * Returns `{ code, map? }` when a hook changed the source, or `null`.
+ */
+export async function dispatchBuildTransform(registry, { code, id, environment }) {
+  if (registry.buildTransform.length === 0) return null
+  let current = String(code ?? '')
+  let map
+  let changed = false
+  const base = buildHookContext(registry, environment)
+  for (const entry of registry.buildTransform) {
+    const context = Object.freeze({ ...base, code: current, id: String(id ?? '') })
+    const result = normalizeCodeResult(entry.plugin, 'build.onTransform', await entry.hook(context))
+    if (!result) continue
+    current = result.code
+    if (result.map !== undefined) map = result.map
+    changed = true
+  }
+  return changed ? { code: current, ...(map === undefined ? {} : { map }) } : null
+}
+
+/** The `{ root, environment }` every build hook is given. */
+export function buildHookContext(registry, environment) {
+  const allowed = new Set(['client', 'server', 'edge', 'worker', 'shared'])
+  return {
+    root: registry.root,
+    environment: allowed.has(environment) ? environment : 'client',
+  }
+}
+
+/** Accept a hook's `string`, `{ code, map }`, or nothing; reject anything else. */
+export function normalizeCodeResult(plugin, socket, result) {
+  if (result === null || result === undefined) return null
+  if (typeof result === 'string') return { code: result }
+  if (result && typeof result === 'object' && typeof result.code === 'string') {
+    return {
+      code: result.code,
+      ...(result.map === undefined || result.map === null
+        ? {}
+        : { map: typeof result.map === 'string' ? result.map : JSON.stringify(result.map) }),
+    }
+  }
+  throw unsupportedReturn(plugin, socket)
+}
+
 export function describeRegistry(registry) {
   return {
     plugins: registry.plugins,

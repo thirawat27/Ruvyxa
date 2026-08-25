@@ -1,0 +1,99 @@
+{
+  "$comment": [
+    "Which `environment` a `build.onTransform` hook is told it is running for.",
+    "",
+    "Two compilers read every module. The Rust bundler builds the browser bundle;",
+    "`runtime/compiler.mjs` builds every server render — `dev`, `start`,",
+    "pre-rendering, and each deployed function. For a long time only the first",
+    "called plugin hooks, so a plugin rewrote the browser bundle while the server",
+    "read the original file. Any rewritten value that reached markup made the two",
+    "documents disagree, React discarded the server tree and re-rendered (#418),",
+    "and the only symptom was a flash of the wrong content — never an error.",
+    "",
+    "Both now call the hooks, which only helps while both name the lanes the same",
+    "way: a plugin that writes `if (environment !== 'client') return` is choosing",
+    "one side, and it can only choose correctly if the two compilers agree on what",
+    "the sides are called.",
+    "",
+    "Replayed by crates/ruvyxa_cli/src/plugins.rs (`plugin_environment`, the Rust",
+    "bundler's mapping) and by tests/packages/ruvyxa/plugin-transform-lane.test.mjs",
+    "(`pluginEnvironmentFor`, the JavaScript compiler's). A lane renamed on one",
+    "side and not the other fails there rather than in somebody's hydration."
+  ],
+  "environments": {
+    "$comment": [
+      "`bundleTarget` and `platform` are what each compiler already knows about a",
+      "compile; `expect` is the `environment` string the hook receives. The Rust",
+      "column is keyed by its `BundleTarget` alone because the target implies the",
+      "platform there."
+    ],
+    "cases": [
+      {
+        "bundleTarget": "client",
+        "platform": "browser",
+        "rustTarget": "Client",
+        "expect": "client",
+        "why": "The browser bundle. The only value that ever occurred before the server compiler ran hooks."
+      },
+      {
+        "bundleTarget": "ssr",
+        "platform": "node",
+        "rustTarget": "Ssr",
+        "expect": "server",
+        "why": "An ordinary server render: dev, start, pre-render, and the deployed function all compile this way."
+      },
+      {
+        "bundleTarget": "edge",
+        "platform": "neutral",
+        "rustTarget": "Edge",
+        "expect": "edge",
+        "why": "A Web-standards runtime with no Node API. A plugin that injects a Node import has to be able to tell."
+      },
+      {
+        "bundleTarget": "react-server",
+        "platform": "node",
+        "rustTarget": "ReactServer",
+        "expect": "server",
+        "why": "The server-components graph runs on the server. `react-server` is a resolution condition, not another host."
+      }
+    ]
+  },
+  "divergence": {
+    "$comment": [
+      "When a transform makes the two documents disagree. `ruvyxa build` reports",
+      "exactly this pairing — it asks the plugin whether it really produces",
+      "different text for the two lanes, and asks the route graph whether anything",
+      "that both renders and hydrates reaches the module."
+    ],
+    "cases": [
+      {
+        "clientOnly": false,
+        "routeRenders": true,
+        "routeHydrates": true,
+        "expect": "agree",
+        "why": "An unguarded hook rewrites both compiles identically. This is the default and it is safe."
+      },
+      {
+        "clientOnly": true,
+        "routeRenders": true,
+        "routeHydrates": true,
+        "expect": "diverge",
+        "why": "The document is built from one text and hydrated against another."
+      },
+      {
+        "clientOnly": true,
+        "routeRenders": false,
+        "routeHydrates": true,
+        "expect": "agree",
+        "why": "A 'use client' route has no server document to disagree with. The demo plugin pairs the two this way."
+      },
+      {
+        "clientOnly": true,
+        "routeRenders": true,
+        "routeHydrates": false,
+        "expect": "agree",
+        "why": "A route that ships no bundle never hydrates, so nothing compares the two."
+      }
+    ]
+  }
+}

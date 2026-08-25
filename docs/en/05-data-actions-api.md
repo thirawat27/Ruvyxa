@@ -36,6 +36,27 @@ the complete process cache. Call `cacheStats()` to obtain `{ size, maxEntries }`
 it when the producer reads cookies, headers, or draft mode — a shared producer that reads request
 state fails closed rather than leaking one visitor's data to another.
 
+### `scope('deployment')` means the process, not the deployment
+
+The default scope shares a value with every request handled by **the same process**. It does not
+share it with the deployment, and the difference is invisible until you are running more than one
+instance:
+
+| Where you run                                 | What one cached value costs                                                                                 |
+| --------------------------------------------- | ----------------------------------------------------------------------------------------------------------- |
+| `ruvyxa start` on one machine                 | Computed once **per render worker**. The server is a pool of processes sized to the host, not a single one. |
+| Two instances behind a load balancer          | The pool above, times two.                                                                                  |
+| Serverless (Lambda, Cloud Functions, Workers) | Computed once per warm container, again after every cold start, and separately in each concurrent one.      |
+
+The name says how long a value may be considered valid, not how many machines can see it. This is
+the same boundary `invalidateCache()` and `revalidateTag()` act on: they clear the cache of the
+process that calls them, so a value cached elsewhere stays until its own TTL expires.
+
+That makes `cache()` right for what it is — an in-process memoizer that absorbs repeated work inside
+one server — and wrong as the only copy of anything. Put a value that must be identical everywhere
+in a store that is shared on purpose (Redis, KV, your database) and use `cache()` in front of the
+read.
+
 ### Invalidate by tag instead of by key
 
 A key names one entry. A tag labels a group of them, so unrelated keys that go stale together can be

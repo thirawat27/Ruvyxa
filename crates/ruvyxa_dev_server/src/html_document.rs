@@ -660,6 +660,49 @@ pub(crate) fn hmr_client_script() -> &'static str {
       body: JSON.stringify({ traceId: message.traceId }),
     }).catch(() => {});
   };
+  const ISSUE_OVERLAY_ID = '__ruvyxa-issues';
+  /**
+   * Paint reported issues over the page.
+   *
+   * A build failure that happens while the page is already open has nowhere
+   * else to appear: the document was server-rendered and answered 200, and a
+   * client bundle that failed comes back as a script the browser reports as
+   * "failed to load" and nothing more. The page then looks finished and does
+   * nothing, and the real error is a line in a terminal the reader may not be
+   * looking at. Cleared on the next successful update, so a fixed error takes
+   * the overlay away with it.
+   */
+  const showIssues = (issues) => {
+    document.getElementById(ISSUE_OVERLAY_ID)?.remove();
+    if (!Array.isArray(issues) || issues.length === 0) return;
+    const overlay = document.createElement('div');
+    overlay.id = ISSUE_OVERLAY_ID;
+    overlay.setAttribute('role', 'alert');
+    overlay.style.cssText = 'position:fixed;inset:auto 16px 16px 16px;z-index:2147483647;' +
+      'max-height:60vh;overflow:auto;padding:16px 20px;border-radius:12px;' +
+      'background:#1b0f16;color:#ffd9e2;border:1px solid #ff5c8a;' +
+      'font:13px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace;' +
+      'box-shadow:0 12px 40px rgba(0,0,0,.45);white-space:pre-wrap;';
+    const title = document.createElement('strong');
+    title.textContent = issues.length === 1 ? 'Ruvyxa build issue' : `Ruvyxa build issues (${issues.length})`;
+    title.style.cssText = 'display:block;margin-bottom:8px;color:#ff9ab5;';
+    overlay.append(title);
+    for (const issue of issues) {
+      const item = document.createElement('div');
+      item.style.cssText = 'margin-top:8px;';
+      // textContent, never innerHTML: the message carries compiler output,
+      // which routinely contains the author's own markup.
+      item.textContent = [issue?.code, issue?.message].filter(Boolean).join(': ');
+      overlay.append(item);
+    }
+    const dismiss = document.createElement('button');
+    dismiss.textContent = 'Dismiss';
+    dismiss.style.cssText = 'margin-top:12px;padding:4px 10px;border-radius:6px;cursor:pointer;' +
+      'background:transparent;color:#ff9ab5;border:1px solid #ff5c8a;font:inherit;';
+    dismiss.addEventListener('click', () => overlay.remove());
+    overlay.append(dismiss);
+    (document.body ?? document.documentElement).append(overlay);
+  };
   const applyCss = async (sequence) => {
     let applied = false;
     for (const link of document.querySelectorAll('link[rel="stylesheet"][href]')) {
@@ -696,9 +739,13 @@ pub(crate) fn hmr_client_script() -> &'static str {
     acknowledgeTrace(message);
     if (message.type === 'issues') {
       console.error('[ruvyxa] HMR issues', message.issues ?? []);
+      showIssues(message.issues ?? []);
       if (message.fullReload) reload();
       return;
     }
+    // Any update that is not an issue means the build recovered, so whatever
+    // the last failure painted stops being true.
+    showIssues([]);
     if (message.type === 'partial' && message.kind === 'css') {
       try { if (await applyCss(message.sequence)) return; } catch {}
       reload(); return;

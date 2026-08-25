@@ -141,9 +141,24 @@ export interface CacheBuilder {
   ttl(value: string): CacheBuilder
   /** Set stale-while-revalidate window (serves stale data while refreshing in background). */
   swr(value: string): CacheBuilder
-  /** Attach invalidation tags. Tags are deployment-local and bounded. */
+  /** Attach invalidation tags. Tags are process-local and bounded. */
   tags(...values: string[]): CacheBuilder
-  /** Keep the value only for this request instead of sharing it across requests. */
+  /**
+   * How widely a value is shared.
+   *
+   * `'request'` keeps it for the current request; use it when the producer
+   * reads cookies, headers, or draft mode, so one visitor's data cannot be
+   * served to another.
+   *
+   * `'deployment'` — the default — shares it with every request handled by the
+   * same process. Not with the deployment, and not even with the server: a
+   * Ruvyxa server is a pool of render workers sized to the host, so one machine
+   * already holds several copies, and a second instance, a second serverless
+   * container, and every cold start each add their own. The name says how long
+   * a value may be considered valid, not how many processes can see it. Put
+   * anything that must be identical everywhere in a real store and cache the
+   * read.
+   */
   scope(value: 'deployment' | 'request'): CacheBuilder
   /** Retrieve or compute a value. Producer errors are isolated and don't crash the server. */
   get<T>(producer: () => T | Promise<T>): Promise<T>

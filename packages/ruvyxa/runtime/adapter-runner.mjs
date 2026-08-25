@@ -696,12 +696,6 @@ async function materializeFunction(buildDir, destination, handlerSource, target)
   const manifestPath = path.join(buildDir, 'manifest.json')
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
 
-  // How to *serve* the build is a build-time question, answered by the adapter
-  // before this directory exists. The function routes with the manifest and has
-  // no use for the deploy section, and on an edge runtime the whole registry is
-  // inlined into one worker — so it is dropped rather than shipped.
-  delete manifest[DEPLOY_MANIFEST_KEY]
-
   // A function artifact is a complete deployment unit. Replacing it prevents
   // removed or renamed route bundles from surviving incremental builds.
   await rm(destination, { recursive: true, force: true })
@@ -755,24 +749,36 @@ async function materializeFunction(buildDir, destination, handlerSource, target)
     manifest.notFoundDocument = await readFile(notFoundDocument, 'utf8')
   }
 
-  // Write the route manifest so the handler can do request routing.
-  //
-  // The `.mjs` copy is what handlers import. A platform bundler (Netlify's
-  // zip-it-and-ship-it, Vercel's NFT tracer, wrangler) rewrites the function
-  // into a single file and only carries along what it can resolve statically:
-  // a sibling `manifest.json` read through `readFileSync(import.meta.dirname)`
-  // is invisible to it and disappears from the deployed bundle, which crashed
-  // Netlify with `ENOENT /var/task/manifest.json`. A static import is part of
-  // the module graph on every platform. `manifest.json` is still written for
-  // inspection and for hosts that ship the directory verbatim.
-  await writeFile(
-    path.join(destination, 'manifest.json'),
-    JSON.stringify(manifest, null, 2),
-    'utf8',
-  )
+  await writeRuntimeManifest(destination, manifest)
+}
+
+/**
+ * Write the route manifest a deployed function routes with.
+ *
+ * The only place this repository writes a manifest into a runtime directory, so
+ * that what a runtime copy must *not* contain is decided once rather than
+ * remembered at each writer. Today that is the `deploy` section: how to serve a
+ * build is a build-time question the adapter has already answered, the running
+ * function has no use for it, and on an edge runtime the whole registry is
+ * inlined into a single worker. A second writer that forgot would ship it, and
+ * nothing about the result would look wrong.
+ *
+ * Two files, one content. The `.mjs` copy is what handlers import: a platform
+ * bundler (Netlify's zip-it-and-ship-it, Vercel's NFT tracer, wrangler) rewrites
+ * the function into a single file and only carries along what it can resolve
+ * statically, so a sibling `manifest.json` read through
+ * `readFileSync(import.meta.dirname)` is invisible to it and disappears from
+ * the deployed bundle — which crashed Netlify with
+ * `ENOENT /var/task/manifest.json`. A static import is part of the module graph
+ * on every platform. `manifest.json` is still written for inspection and for
+ * hosts that ship the directory verbatim.
+ */
+async function writeRuntimeManifest(destination, manifest) {
+  const { [DEPLOY_MANIFEST_KEY]: _buildTimeOnly, ...runtime } = manifest
+  await writeFile(path.join(destination, 'manifest.json'), JSON.stringify(runtime, null, 2), 'utf8')
   await writeFile(
     path.join(destination, 'manifest.mjs'),
-    `export default ${JSON.stringify(manifest)}\n`,
+    `export default ${JSON.stringify(runtime)}\n`,
     'utf8',
   )
 }

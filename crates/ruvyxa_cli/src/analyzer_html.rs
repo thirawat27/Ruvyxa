@@ -181,6 +181,7 @@ mod tests {
             api_routes: 0,
             client_modules: 0,
             server_modules: 0,
+            inert_hydration_routes: Vec::new(),
             diagnostics: Vec::new(),
         };
         let bundle = BundleAnalysis {
