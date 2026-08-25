@@ -592,6 +592,16 @@ const server = createServer(async (req, res) => {
       if (!res.headersSent) {
         res.statusCode = 413;
         res.setHeader('content-type', 'text/plain; charset=utf-8');
+        // The point of the limit is not to read the rest, so the rest is still
+        // in flight on this socket when the answer goes out. Reusing it would
+        // read those bytes as the beginning of the next request, which is why
+        // a client that pools connections — every browser, and \`fetch\` itself —
+        // saw a later, unrelated request die with ECONNRESET rather than
+        // anything to do with the upload it made. Retiring the connection is
+        // what RFC 9110 asks of a server that answers before the body is read;
+        // the alternative, draining megabytes to keep it warm, is the cost the
+        // limit exists to avoid.
+        res.setHeader('connection', 'close');
       }
       res.end('Request body is too large');
       return;
