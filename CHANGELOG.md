@@ -1,5 +1,303 @@
 # Changelog
 
+## v1.1.1 (2026-08-25)
+
+A release about the half of the framework nothing was asking questions of. Every adapter had unit
+tests over the files it emitted; four of the eleven had never had one of those deployments _started_
+and asked anything. Extending the deployment smoke from four lanes to all eleven, and then pointing
+it at the feature fixture instead of the small one, is what found most of what follows — and every
+one of those defects shipped in v1.1.0 with a green CI.
+
+### A pre-rendered page lost every security header on four platforms
+
+`DEFAULT_SECURITY_HEADERS` — seven of them, including `X-Frame-Options: DENY` — is attached by
+`createHandler` and by the standalone server. Both of those are **the function**. But every one of
+these platforms answers a pre-rendered document and every public file **from its own edge, without
+invoking the function at all**: Vercel's `handle: filesystem`, Netlify's publish directory,
+Amplify's `Static` route target, Firebase Hosting's `public`.
+
+So a page that is frame-denied under `ruvyxa start` was framable the moment it was pre-rendered and
+deployed, on `vercel`, `netlify`, `aws`, and `firebase` at once. Every check stayed green while it
+was true, because the status was 200 and the markup was right.
+
+`cloudflare` and `static` were never affected: both write a `_headers` file through
+`headersFileContents()`, which is where the pattern already existed. The other four had no such
+mechanism, and each needed a different one:
+
+- **vercel** — a `{ src: '/(.*)', headers, continue: true }` route, first, ahead of
+  `handle: filesystem`. `continue` attaches headers without changing where the response comes from.
+- **netlify** — a `{ for: '/*', values }` rule, first. Its header rules stopped being
+  `{ for, cacheControl }` and became `{ for, values }`, feeding all three outputs it writes.
+- **firebase** — a `{ source: '**' }` entry, first in `hosting.headers`.
+- **aws** — **`customHttp.yml`**, because an Amplify route target carries `cacheControl` and nothing
+  else. Written at project scope with `skipIfExists`, so a project that already keeps its own
+  Amplify header rules there keeps them.
+
+The smoke lane for each of the four parses the asset headers **out of the config that adapter
+emitted**, in the order that platform applies them, rather than restating the expected value — which
+would have proved only that the check and the script agree.
+
+### A deployed build never streamed
+
+A route with `Suspense` boundaries at 300ms and 1200ms sent its first byte at **1224ms** on a
+deployed build, and at 735ms under `ruvyxa start`. The page's own documentation promised the shell
+arrives before either section renders. On every deployment it did not: the whole document was
+buffered to a string first.
+
+The buffering was deliberate — it is how a deployed function survives a `<Suspense>` child that
+rejects _after_ the shell has gone out, which used to answer 500 in production while the browser
+logged only `Uncaught Error: Connection closed`. What actually blocked streaming was three
+whole-document string transforms that ran after the render: the asset injection, the `lang`
+attribute, and the `[locale]` rewrite.
+
+Those were split so the two ends can be placed separately, and the document is now assembled around
+a stream: the shell is accumulated until it carries a `</head>` or a `<body`, everything after that
+passes through, and the tail is placed before the closing `</body>` React writes last. The tail is
+awaited rather than passed as a value, because a server-components payload is complete only when the
+Flight render is — long after the first bytes have left, and the browser needs it before hydration
+rather than before the first paint.
+
+`renderServerComponentsStream` already existed and was used only by the native host; the generated
+route registry uses it too now. The plain path uses `renderToReadableStream` directly, whose promise
+rejects exactly when the _shell_ failed — so the tolerate-after-shell policy the buffered renderer
+implemented by hand comes for free.
+
+**Streaming is per-request and opt-in, and only the plain SSR path asks for it.** Pre-rendering and
+the ISR write need the finished string; so does the `requestScoped` check that guards them, whose
+answer at return time would be a lie when a `Suspense` child reads cookies after the shell has gone
+out; and the `[locale]` rewrite needs the whole `<html>` tag. Nothing that is stored streams.
+
+First byte on that route is now **32ms**.
+
+### `HEAD` on a route was refused, and no `405` said what to use instead
+
+A `route.ts` exporting only `GET` answered `HEAD` with `405`. RFC 9110 §9.3.2 makes `HEAD` identical
+to `GET` without the content, so a resource that serves one serves the other — and `HEAD` is what an
+uptime monitor, a link checker, and a CDN revalidation send first. And no `405` from any host
+carried an `Allow` header, which RFC 9110 §15.5.6 says it MUST: the caller learned its method was
+wrong and never which one to use, and a CORS preflight had nothing to read.
+
+Both were true in all three hosts that dispatch API routes, because each had its own copy of
+`mod[method]` followed by a bare `405`. They agreed with each other and were wrong the same way,
+which is what a rule copied three times does. `runtime/api-methods.mjs` is now the one place, and
+its test greps the three hosts for a re-introduced copy.
+
+### A plugin that adds a header made every `204` and `304` a `500`
+
+The response hook every page of the documentation shows rebuilds the response —
+`new Response(response.body, { status, headers })` — because `Response.headers` is immutable. That
+throws for a status the fetch specification forbids a body on, unless the body is exactly `null`.
+
+The native host encoded "no body" as an **empty string** when it handed a response to the plugin
+runner, and an empty string is not `null`. So a project with any `http.onResponse` registration
+answered 500 for every 204, 205, and 304 it produced. Both example plugins in the demo use exactly
+that shape.
+
+The predicate now lives in `runtime/plugin-http.mjs` rather than beside its caller, so a test can
+reach it — the caller's module speaks NDJSON over stdio and importing it starts a plugin runner.
+
+### A request with a body became a `500` wherever a response hook was registered
+
+A hook is handed a clone of the request, so that reading the body cannot take it from the route
+handler that needs it next. But a `Request` whose body has already been consumed cannot be cloned at
+all — `clone()` throws `TypeError: unusable` — and by the time the _response_ hooks run, the handler
+has usually consumed it. The route ran, produced its answer, and the response stage threw it away.
+
+A used body is gone either way, so the fallback hands the hook the same URL, method, and headers
+with no body rather than failing.
+
+### An oversized request body poisoned the next request on the connection
+
+The point of `security.apiLimit` is not to read the rest of the body, so the rest is still in flight
+on the socket when the refusal goes out. Reusing that connection reads those bytes as the beginning
+of the next request — so a client that pools connections, which is every browser and `fetch` itself,
+saw a _later, unrelated_ request die with `ECONNRESET`. The connection is retired now, which is what
+RFC 9110 asks of a server that answers before the body is read.
+
+### `import.meta.env` was `{}` in a deployed server render
+
+A build reads `.env` and `.env.local` itself and hands the values to the processes that need them;
+it does not put them in its own environment. Substituting from `std::env` alone therefore produced
+`Object.freeze({})` for every project that keeps its public values in a file — which is all of them.
+The host now records the project environment it loaded and the compiler substitutes from that.
+
+`import.meta.env` also had no TypeScript type despite being documented.
+`packages/ruvyxa/types/env.d.ts` declares it, referenced from all three type entry points — a new
+ambient file reachable from only one of them is absent exactly where the reader is.
+
+### Cloudflare gained ISR and PPR
+
+The blocker was never architectural: `readPrerendered` and `writePrerendered` are adapter
+capabilities, not filesystem calls. The blocker was that `readPrerendered` was **synchronous** and a
+Workers KV read returns a promise. The handler awaits it now — awaiting a non-promise costs a
+microtask and leaves every filesystem adapter unchanged — and
+`cloudflare({ isr: { kvBinding: 'RUVYXA_ISR' } })` wires KV with a freshness stamp and a retention
+multiple, so a stale document survives long enough to be served while it refreshes.
+
+**The capability follows the option.** With no binding the adapter declares no `isr` or `ppr`,
+because a Worker that re-renders every request while reporting `x-ruvyxa-isr: HIT` is worse than a
+build that stops.
+
+### `export const runtime = 'edge'`, and a Vercel function that can act on it
+
+A page or `route.ts` may declare `runtime`. It is parsed from the route's own file — never from a
+dependency, which cannot move the route that uses it — and `validate_app` then walks the route's
+graph plus its layout chain and refuses any import of a Node built-in a V8 isolate lacks, with
+**`RUV1013`** naming the module and the specifier. An unrecognised value is **`RUV1012`**, never a
+silent fall back to Node.
+
+The declaration is an **API-surface constraint the build enforces**, not a promise about which
+datacentre answers the request: a Node host answering an edge route is always correct, because every
+API an edge route may use exists in Node too.
+
+`vercel({ splitEdgeRoutes: true })` acts on it, emitting a second function whose registry is
+compiled for the edge and which carries only those routes. Eligibility is refused by name
+(**`RUV2203`**) rather than silently downgraded: a route declaring `edge` that renders server
+components, or uses ISR or PPR, is rejected, because server actions, RSC, and Flight are answered
+through single paths owned by one function. The Node function deliberately keeps every route,
+including the edge ones — it is the catch-all, and a pattern is not the router.
+
+Two additive extensions made it possible, and both default to today's behaviour, so the other ten
+adapters are untouched: a `function` artifact may name its own bundle `target`, and may name the
+`routes` it answers.
+
+### A non-ASCII identifier before a `/` blanked the rest of the line
+
+The source scanner walks bytes, and JavaScript identifiers are Unicode. A non-ASCII character
+standing where a token ends is the _tail_ of one, so `café / 2` is a division — but the walk read
+the `/` as opening a regular expression and blanked everything to the next `/` on that line. An
+`import` there stopped being a dependency edge; in the minifier a `process.env.NODE_ENV` guard
+stopped being folded, which ships development-only code to the browser. A minified dependency is one
+long line, so the newline that stops a runaway literal never arrives.
+
+Three more shapes of the same class went with it:
+
+- **A regex inside a template interpolation, containing a quote.** An interpolation is code, so it
+  can hold a regex, and a regex can hold a quote. Without tracking that, the `'` in
+  `` `'${value.replace(/'/g, "''")}'` `` opened a string that ran to the next quote and every
+  literal and comment after it in the file was read inside out. `js-yaml` ships exactly this line.
+- **A string line continuation.** A backslash at the end of a line inside a string continues it; the
+  walk ended the string there and read the following text as code, **inventing** import edges and
+  private-environment reads that the file does not contain.
+- **A decorator on the same line as the member it decorates.** The rule required `@` to start its
+  own line, so `class Svc { @log run() {} }` was reported as decorator-free, the stripper returned
+  the source untouched, and the `@` reached the emitted bundle where it is a syntax error. That is
+  the shape a formatter picks for a short member and the shape every minified dependency has.
+
+A leading `#!` shebang is stripped rather than parsed.
+
+Both scanners are held to `tests/fixtures/source-scanner-conformance.json`, now 15 cases.
+
+### `export { source as from }` dropped the export
+
+`from` is a keyword only where a specifier follows it, and it is also an ordinary binding name:
+`export { source as from }` renames a binding _to_ `from`. Entering the re-export branch on the
+keyword and bailing out of it on the missing specifier meant the declaration branch was never
+reached, and the export was dropped **with no diagnostic** — the importer saw `undefined`. The
+specifier decides now, on both sides.
+
+Top-level `await` in the client graph builds rather than failing with a message that named nothing.
+
+### A relative specifier that climbs a directory was never resolved
+
+`../` was not stripped when a linked bundle resolved a specifier by path, so an import that climbs
+out of its directory reported `RUV1612` — cold-fail, warm-pass, which is the worst shape a cache bug
+takes. `date-fns` is one of the packages that does this. The `RUV1612` message also asserted the
+wrong cause; it names the unresolved specifier now.
+
+Linked bundles are syntax-validated as part of the build rather than at the moment something tries
+to run them.
+
+### The two compilers disagreed about which dialect a file is
+
+`.ts` is not JSX — `<T>value` is a type assertion there — and a `.js` file may contain JSX. Each
+compiler had its own answer and the two differed in both directions, so a file that built in one
+lane failed in the other. `tests/fixtures/module-kind-conformance.json` now carries a
+`parserDialect` section that both replay.
+
+### A non-ASCII identifier was truncated in the browser lane
+
+Nine places used `char::is_alphanumeric()` as a JavaScript identifier test. It is not one: a Thai or
+Devanagari name is cut at its first combining mark, so the client bundle declared one name and
+referenced another and hydration died. All nine go through the Unicode identifier tables now.
+
+### Diagnostics for gaps that used to be silent
+
+- **A plugin that rewrites a module the server renders unchanged.** `build.onTransform` runs in the
+  browser compile only; the server render reads the same file through the other compiler, which has
+  no plugin host to ask. A rewritten value therefore appears in one half of a document and not the
+  other. Reported at the first moment both halves are known.
+- **A route that server-renders and cannot hydrate.** Named rather than left as a page whose buttons
+  do nothing.
+- **A capability no deployment can serve.** `realtime@1` and `presence@1` need a process that stays
+  alive, so `ruvyxa build` refuses every serverless adapter with `RUV3201` and `test:parity` reports
+  it — but both arrive after the application has been written around the transport. `ruvyxa dev` now
+  prints the capability and its path on startup, gated on `watch`, because `ruvyxa start` genuinely
+  does serve them.
+- **A virtual module id from a resolve hook.** `'\0virtual:x'` and `'virtual:x'` were each joined
+  onto the project root and handed to the filesystem, surfacing as
+  `strings passed to WinAPI cannot contain NULs` and `The system cannot find the file specified`,
+  naming no plugin. Both fail with a diagnostic naming the plugin, the specifier, and the path shape
+  to return instead. The contract is now in the plugin documentation, which never stated it.
+- **A server-components route whose `error.tsx` only runs on the server.** On such a route the
+  browser bundle contains client components and nothing else, so a special file without
+  `'use client'` cannot be in it. The author saw their error page when the failure happened during
+  the server render and the framework's built-in message when it happened in the browser — two
+  different error pages for one route, decided by where the error occurred. Named now.
+
+An API handler may return data instead of a `Response`, which is sent as `Response.json(value)`.
+That convenience existed and was undocumented, so a handler that returned the wrong thing answered
+`200` and looked deliberate; the documentation now says so, and the two cases that stop the request
+with `RUV1504` — returning nothing, and returning something JSON cannot serialise — say which
+handler and why.
+
+### A native binary from another release could load this release's JavaScript
+
+The two halves are not independent: the Rust CLI resolves `runtime/*.mjs` **by path** out of the
+installed `ruvyxa` package, and the contracts between them hold only within one version.
+`optionalDependencies` carried `workspace:^`, which publishes as a caret range and matches a later
+minor — so the combination was reachable from the registry, and neither side could tell. The binary
+now refuses a version that does not match the package running it, and says why.
+
+`.github/workflows/*.yml` is parsed by a test rather than matched as text. Every assertion in it
+exists because the property was broken once and nothing noticed: a release published five native
+packages and then failed, a commit on `main` was cancelled and shipped inside a tag with no verdict,
+and the whole supply chain hung off mutable action tags.
+
+### How a deployment is proven
+
+The deployment smoke used to build and launch **four** of the eleven adapters. It now builds and
+launches **all eleven**, in four transport shapes, because what the adapters do not share is exactly
+what had never run: the request translation each one hand-writes, and the static half its platform
+answers without ever calling the function.
+
+- `node`, `bun`, `deno`, `railway`, `render` emit a **program** and are spawned.
+- `aws` emits a program **behind a CDN**, so it is spawned on an inner port with the platform's
+  static half in front of it.
+- `cloudflare` and `netlify` emit a **fetch module**.
+- `vercel` and `firebase` emit a **Node request handler**, called with the real `(req, res)`.
+- `static` emits **no server at all** — the deployment is the publish directory, and it is the only
+  lane that can check `_headers` and the `404.html` convention, which is the only way a project's
+  own not-found page is reachable with nothing running to read a manifest.
+
+`railway` and `render` emit the node adapter's server verbatim and still get their own lanes,
+because "the same as node" is a claim two adapters can drift out of quietly.
+
+The same harness also deploys **`examples/demo`** — 31 routes, two response-hook plugins, all five
+render strategies, a streamed document, and a server action — and asks it eighteen questions that
+the four-route fixture has no way to reach. The plugin defects above lived in precisely that gap.
+
+`scripts/load-probe.mjs` measures cold start, per-route throughput and latency percentiles, and
+resident memory across repeated rounds. Measured rather than gated, because every number is a
+property of the machine; the one thing it fails on is a non-200, because a request that errors under
+concurrency and succeeds alone is a defect whatever the hardware.
+
+### Also
+
+- A deploy manifest is generated and embedded in the route manifest, so an adapter reads one file.
+- Marker package validation, and cycle detection reworked around the linked-bundle checks.
+- `dev` server discovery improvements.
+
 ## v1.1.0 (2026-08-24)
 
 ### Breaking: an import whose case does not match the file is refused
