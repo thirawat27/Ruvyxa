@@ -15,8 +15,6 @@ dist/
 packages/ruvyxa/native-bin/
 packages/create-ruvyxa/template/
 packages/@ruvyxa/cli-*/bin/
-stress-lab/
-stress-lab-2/
 # Project-scope deploy artifacts written by `ruvyxa build --adapter <platform>`
 # when a fixture app is built for a hosting platform. Scoped to the two fixtures
 # rather than global, so a hand-authored netlify.toml or wrangler.jsonc anywhere
@@ -49,7 +47,9 @@ examples/deploy-smoke/.amplify-hosting/
 examples/deploy-smoke/_headers
 examples/deploy-smoke/_redirects
 
-# The pruned copy `scripts/edge-fixture.mjs` writes so an edge target can be
-# built from an app whose routes it can all serve. Generated per run, never
-# hand-edited, and rebuilt from the fixture beside it.
+# The pruned copies `scripts/edge-fixture.mjs` writes so a target can be built
+# from an app whose routes it can all serve: `.edge` drops the ISR route for
+# cloudflare, `.static` drops everything a publish directory cannot answer.
+# Generated per run, never hand-edited, and rebuilt from the fixture beside them.
 examples/*/.edge/
+examples/*/.static/
