@@ -1782,8 +1782,14 @@ fn try_rewrite_export_statement(line: &str, deps: &DepIndex<'_>) -> Option<Rewri
     // ordinary `export const` down this branch, which returns `None` on every
     // path that is not a resolvable re-export and so never falls through to the
     // declaration branch below. See `code_from_keyword`.
-    if code_from_keyword(line).is_some() {
-        let (before_from, specifier) = split_from_specifier(line)?;
+    // `split_from_specifier` decides, rather than the keyword search alone.
+    // `from` is a keyword only where a specifier follows it, and it is also an
+    // ordinary binding name: `export { source as from }` renames a binding *to*
+    // `from`. Entering this branch on the keyword and bailing out of it on the
+    // missing specifier meant the declaration branch below was never reached,
+    // and the export was dropped with no diagnostic — the importer saw
+    // `undefined`.
+    if let Some((before_from, specifier)) = split_from_specifier(line) {
         let dep_path = deps.resolve(&specifier)?;
         let dep_id = module_id(dep_path);
 
@@ -1890,7 +1896,9 @@ fn try_rewrite_export_statement(line: &str, deps: &DepIndex<'_>) -> Option<Rewri
     // Unreachable with a `from` today, because the branch above claims those
     // first; asked of the code anyway so the two questions cannot answer
     // differently if that order ever changes.
-    if line.starts_with("export {") && code_from_keyword(line).is_none() {
+    // The specifier decides here too: a bare list may legally alias a binding
+    // to `from`, which the keyword search alone reads as a re-export.
+    if line.starts_with("export {") && split_from_specifier(line).is_none() {
         let clause = line.strip_prefix("export ")?.trim().trim_end_matches(';');
         let names = parse_named_bindings(clause);
         let assignments: Vec<String> = names
@@ -2109,6 +2117,14 @@ fn split_from_specifier(line: &str) -> Option<(String, String)> {
 
     // Extract quoted specifier.
     let specifier = extract_quoted_string(after)?;
+    // `from` is a keyword only where a specifier follows it. It is also an
+    // ordinary binding name: `export { source as from }` renames a binding *to*
+    // `from`, and reading that as a re-export claimed a line that names no
+    // module — the declaration branch below was never reached, and the export
+    // was dropped with no diagnostic.
+    if before.trim_end().ends_with(" as") || before.trim_end().ends_with(',') {
+        return None;
+    }
     Some((before, specifier))
 }
 
@@ -3809,6 +3825,35 @@ export default function Layout({ children }) {
                 "the declaration was never published:\n{linked}"
             );
         }
+    }
+
+    /// `from` is also a perfectly ordinary binding name.
+    ///
+    /// Masking settled the case where `from` sits inside a string. It cannot
+    /// settle this one: `export { source as from }` renames a binding *to*
+    /// `from`, so the keyword search finds real code and the re-export branch
+    /// claims a line that names no module. The JavaScript linker dropped the
+    /// export silently and the importer saw `undefined`.
+    #[test]
+    fn an_export_aliased_to_from_is_not_a_re_export() {
+        let linked = link_and_parse(
+            "const source = 1
+export { source as from }
+",
+        );
+        assert!(
+            !linked.contains(
+                "
+export "
+            ),
+            "an export survived the link:
+{linked}"
+        );
+        assert!(
+            linked.contains("__exports.from = source;"),
+            "the alias was never published:
+{linked}"
+        );
     }
 
     /// A real re-export still resolves, so the fix above narrowed nothing.

@@ -54,6 +54,55 @@ async function linkAndRun({ dependency, entry }) {
   }
 }
 
+describe('module shapes the linker has to carry', () => {
+  /**
+   * `await` in a module's own body, not inside one of its functions.
+   *
+   * Every module is emitted as an immediately-invoked function, and `await` is
+   * illegal in a synchronous one — so an ESM-only package that initialises
+   * itself at import time, or a route that awaits a dynamic import, produced a
+   * bundle that would not parse. The wrapper is made `async` for exactly those
+   * modules and awaited at the bundle's own top level, which may await.
+   */
+  it('carries top-level await in a dependency', async () => {
+    const { module } = await linkAndRun({
+      dependency: 'export const hit = await Promise.resolve("awaited")\n',
+      entry: "import { hit } from './dep.js'\nexport const value = hit\n",
+    })
+    assert.equal(module.value, 'awaited')
+  })
+
+  it('carries top-level await in the entry itself', async () => {
+    const { module } = await linkAndRun({
+      dependency: 'export const hit = "dynamic"\n',
+      entry: "const m = await import('./dep.js')\nexport const value = m.hit\n",
+    })
+    assert.equal(module.value, 'dynamic')
+  })
+
+  it('leaves a module that only awaits inside a function synchronous', async () => {
+    const { code } = await linkAndRun({
+      dependency: 'export async function later() { return await Promise.resolve(1) }\n',
+      entry: "import { later } from './dep.js'\nexport const value = typeof later\n",
+    })
+    assert.ok(!code.includes('await (async () => {'), 'the common case must keep the bytes it had')
+  })
+
+  /**
+   * `from` is a keyword only where a specifier follows it, and it is also an
+   * ordinary binding name. Both linkers claimed this line as a re-export: the
+   * JavaScript one dropped the export silently, and the Rust one left the
+   * `export` in place and failed the build with RUV1612.
+   */
+  it('publishes an export aliased to `from`', async () => {
+    const { module } = await linkAndRun({
+      dependency: 'const source = 1\nexport { source as from }\n',
+      entry: "import { from } from './dep.js'\nexport const value = String(from)\n",
+    })
+    assert.equal(module.value, '1')
+  })
+})
+
 describe('default import interop', () => {
   it('hands over a deliberate `undefined` instead of the exports object', async () => {
     const { module } = await linkAndRun({

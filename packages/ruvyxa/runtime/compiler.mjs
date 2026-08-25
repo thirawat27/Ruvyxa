@@ -1661,8 +1661,11 @@ function linkModules(
     // A module in a cycle publishes its exports object before its body runs, so
     // a module further into the cycle has something to hold. An acyclic module
     // keeps the original shape, so its bytes do not change.
+    // A module that awaits in its own body needs an async wrapper, and the
+    // bundle's top level — where the call sits — is allowed to await it.
+    const awaits = module.cycleGroup === null && hasTopLevelAwait(rewritten.code)
     if (module.cycleGroup === null) {
-      push(`const ${module.id} = (() => {`)
+      push(`const ${module.id} = ${awaits ? 'await (async () => {' : '(() => {'}`)
       push(`  const __exports = {};`)
     } else {
       // Every namespace in the group is declared before the first body runs:
@@ -2393,9 +2396,14 @@ function rewriteExport(line, module, exported, reExportAll) {
     return line.replace(/^export\s+/, '')
   }
 
-  if (line.includes(' from ')) {
-    const match = line.match(/^export\s+(.+?)\s+from\s+["'](.+?)["'];?$/)
-    if (!match) return ''
+  // The re-export form, recognised by matching it rather than by looking for
+  // the word `from` anywhere in the line. `export { source as from }` renames a
+  // binding *to* `from`, which is a perfectly ordinary identifier: the substring
+  // test claimed it, the pattern below then failed, and the export was dropped
+  // with no diagnostic — the importing module simply saw `undefined`.
+  const reExport = line.match(/^export\s+(.+?)\s+from\s+["'](.+?)["'];?$/)
+  if (reExport) {
+    const match = reExport
     const [, clause, specifier] = match
     const source = module.deps.get(specifier)
     if (!source) return ''
@@ -2496,6 +2504,44 @@ function rewriteImportClause(clause, sourceRef, cyclic = false) {
  * `module.exports = undefined` outright, and reading any property off that
  * throws before the interop can decide anything.
  */
+/**
+ * Whether a module's own body awaits — as opposed to awaiting inside one of its
+ * functions.
+ *
+ * Every module is emitted as an immediately-invoked function, and `await` is
+ * illegal in a synchronous one. A dependency that uses top-level await (an
+ * ESM-only package initialising a WASM module, a route that awaits a dynamic
+ * import) therefore produced a bundle that would not parse — a hard build
+ * failure with the module named, but a failure all the same.
+ *
+ * The wrapper is made `async` only for the modules that need it, and awaited at
+ * the call site, which is the bundle's own top level and may await. A module
+ * that does not use the construct keeps the bytes it had.
+ *
+ * Depth-counted rather than pattern-matched: `await` inside a function body is
+ * ordinary and must not count. The one shape this over-reports is a
+ * brace-less async arrow (`async () => await x`), where the token sits at depth
+ * zero inside a function; the cost of being wrong that way is a wrapper that
+ * awaits a promise it did not need to, which changes nothing an application can
+ * observe.
+ */
+function hasTopLevelAwait(code) {
+  const masked = maskNonCode(code)
+  let depth = 0
+  for (let index = 0; index < masked.length; index++) {
+    const character = masked[index]
+    if (character === '{' || character === '(' || character === '[') depth += 1
+    else if (character === '}' || character === ')' || character === ']') depth -= 1
+    else if (depth === 0 && character === 'a' && masked.startsWith('await', index)) {
+      const before = masked[index - 1]
+      const after = masked[index + 5]
+      const boundary = (value) => value === undefined || !/[\w$]/.test(value)
+      if (boundary(before) && boundary(after)) return true
+    }
+  }
+  return false
+}
+
 function defaultImportExpression(sourceRef) {
   return (
     `${sourceRef} == null ? ${sourceRef} : ` +
