@@ -1092,6 +1092,7 @@ fn discover_and_validate_routes(
     if show_summary {
         print_build_phase(spinner, "validated", "ok".to_string(), validation_duration);
         report_inert_hydration(&validation.inert_hydration_routes);
+        report_server_only_error_pages(&args.root, &manifest.app_dir.clone(), &manifest);
     }
     if args.server_only {
         ensure_server_only_supported(target, &manifest)?;
@@ -1475,6 +1476,63 @@ fn report_plugin_transform_divergence(
     );
 }
 
+/// Name the server-components routes whose `error.tsx` only runs on the server.
+///
+/// On such a route the browser bundle contains client components and nothing
+/// else, so a special file without `'use client'` cannot be in it. The server
+/// still renders it, which is what makes the gap quiet: the author sees their
+/// error page whenever the failure happens during the server render, and the
+/// framework's built-in message whenever it happens in the browser — reading
+/// the payload, or during a soft navigation, where no server render is involved
+/// at all. Two different error pages for one route, decided by where the error
+/// occurred.
+///
+/// A hint, not a failure. Rendering it on the server alone is a working
+/// arrangement, and a project may prefer it.
+fn report_server_only_error_pages(root: &Path, app_dir: &Path, manifest: &RouteManifest) {
+    let mut routes = Vec::new();
+    for route in &manifest.routes {
+        if !route.render.server_components {
+            continue;
+        }
+        let Some(directory) = route.file.parent() else {
+            continue;
+        };
+        let Some(error_page) = resolve_route_specials(app_dir, directory).error else {
+            continue;
+        };
+        let Ok(source) = fs::read_to_string(&error_page) else {
+            continue;
+        };
+        if ruvyxa_bundler::reference_manifest::has_module_directive(&source, "use client") {
+            continue;
+        }
+        routes.push((route.path.clone(), error_page));
+    }
+    let Some(((path, error_page), rest)) = routes.split_first() else {
+        return;
+    };
+    let name = error_page
+        .strip_prefix(root)
+        .unwrap_or(error_page)
+        .display()
+        .to_string()
+        .replace('\\', "/");
+    let more = match rest.len() {
+        0 => String::new(),
+        count => format!(" and {count} more"),
+    };
+    println!(
+        "  {} {}",
+        warn_text("hint"),
+        dim(format!(
+            "{name} has no `'use client'`, so {path}{more} renders it on the server and the \
+             framework's built-in message in the browser. Add the directive to use one error \
+             page for both."
+        ))
+    );
+}
+
 /// Name the routes that ship a browser bundle with nothing in it to hydrate.
 ///
 /// A server-components route whose graph never crosses a `'use client'`
@@ -1491,15 +1549,15 @@ fn report_inert_hydration(routes: &[String]) {
     let Some((first, rest)) = routes.split_first() else {
         return;
     };
-    let more = match rest.len() {
-        0 => String::new(),
-        count => format!(" and {count} more"),
+    let (more, verb) = match rest.len() {
+        0 => (String::new(), "ships"),
+        count => (format!(" and {count} more"), "ship"),
     };
     println!(
         "  {} {} {}",
         warn_text("hint"),
         dim(format!(
-            "{first}{more} ship a client bundle with nothing to hydrate."
+            "{first}{more} {verb} a client bundle with nothing to hydrate."
         )),
         dim(
             "Add `export const hydrate = false` to serve them without JavaScript (navigation to them becomes a full page load)."

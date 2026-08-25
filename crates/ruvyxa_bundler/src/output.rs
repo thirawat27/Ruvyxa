@@ -796,7 +796,7 @@ fn route_tree_function(
         let error_ref = error_name.unwrap_or("null");
         let not_found_ref = not_found_name.unwrap_or("null");
         lines.push(format!(
-            "  tree = React.createElement(__ruvyxaBoundary, {{ errorFallback: {error_ref}, notFound: {not_found_ref}, defaultErrorFallback: false }}, tree);"
+            "  tree = React.createElement(__ruvyxaBoundary, {{ errorFallback: {error_ref}, notFound: {not_found_ref} }}, tree);"
         ));
     }
     if let Some(loading) = loading_name {
@@ -1063,7 +1063,7 @@ mod tests {
         );
         assert!(
             source.contains(
-                "React.createElement(__ruvyxaBoundary, { errorFallback: RouteError, notFound: RouteNotFound, defaultErrorFallback: false }, tree)"
+                "React.createElement(__ruvyxaBoundary, { errorFallback: RouteError, notFound: RouteNotFound }, tree)"
             ),
             "{source}"
         );

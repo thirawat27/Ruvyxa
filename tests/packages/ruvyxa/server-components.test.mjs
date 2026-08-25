@@ -264,6 +264,39 @@ describe('the browser entry', () => {
   it('leaves a document served without a payload alone', () => {
     assert.match(source, /if \(__ruvyxaPayload !== null\)/)
   })
+
+  /**
+   * The server is allowed to ship a document whose payload carries an error.
+   *
+   * A server component that throws inside a `<Suspense>` does not stop the
+   * render: the shell is already streamed, so the document goes out with the
+   * fallback in place. `React.use` then rethrows that error in the browser, and
+   * with nothing above it to catch it React unmounted the whole document — a
+   * blank page and one uncaught line, after the server had sent something
+   * perfectly readable.
+   */
+  it('reads the payload inside a boundary, so a failed one cannot blank the page', () => {
+    assert.match(source, /__ruvyxaBoundary/, 'the root must be wrapped')
+    assert.match(source, /defaultErrorFallback: true/, 'with no error.tsx, the built-in message')
+    assert.ok(source.includes('class __ruvyxaBoundary'), 'the class has to be in scope')
+  })
+
+  it('uses the project error page when it can run in a browser', () => {
+    const withError = rscClientEntrySource({
+      references: [{ id: clientModuleId('app/counter.tsx'), file: counterFile }],
+      routePath: '/',
+      requestPathLiteral: '"/"',
+      paramsLiteral: '{}',
+      errorFile: counterFile,
+    })
+    assert.match(withError, /import __ruvyxaRouteError from/)
+    assert.match(withError, /errorFallback: __ruvyxaRouteError/)
+    assert.match(
+      withError,
+      /defaultErrorFallback: false/,
+      "the project's page replaces the built-in one rather than sitting behind it",
+    )
+  })
 })
 
 describe('streaming the document', () => {

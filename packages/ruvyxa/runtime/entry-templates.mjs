@@ -860,7 +860,6 @@ export function routeTreeFunction({
   errorName = null,
   loadingName = null,
   notFoundName = null,
-  serverComponents = false,
   levels = [],
   provider = true,
 }) {
@@ -869,9 +868,9 @@ export function routeTreeFunction({
   ]
   // Boundary first (inner) so a synchronous throw is caught before it reaches
   // the Suspense; Suspense second (outer) so async loading still shows.
-  if (needsRouteBoundary({ errorName, notFoundName, serverComponents })) {
+  if (needsRouteBoundary({ errorName, notFoundName })) {
     lines.push(
-      `  tree = React.createElement(${ROUTE_BOUNDARY_LOCAL}, { errorFallback: ${errorName ?? 'null'}, notFound: ${notFoundName ?? 'null'}, defaultErrorFallback: ${serverComponents && !errorName ? 'true' : 'false'} }, tree)`,
+      `  tree = React.createElement(${ROUTE_BOUNDARY_LOCAL}, { errorFallback: ${errorName ?? 'null'}, notFound: ${notFoundName ?? 'null'} }, tree)`,
     )
   }
   if (loadingName) {
@@ -910,25 +909,8 @@ export function routeTreeFunction({
  *
  * `loading.tsx` alone needs only `React.Suspense`, which is always available.
  */
-export function needsRouteBoundary({
-  errorName = null,
-  notFoundName = null,
-  serverComponents = false,
-} = {}) {
-  // A server-components route always gets one, even with no `error.tsx`.
-  //
-  // Its server half is allowed to tolerate a component that throws inside a
-  // `<Suspense>`: the shell has already been streamed, React has already
-  // written the switch to the fallback into both the markup and the payload,
-  // and discarding a mostly-correct document helps nobody. The browser then
-  // reads that payload, finds the error, and — with no boundary anywhere above
-  // it — unmounts the entire tree. The page went blank with one uncaught
-  // `An error occurred in the Server Components render` and no other trace,
-  // while the server had sent a document that was almost entirely fine.
-  //
-  // Tolerating on one side and having nowhere to put the error on the other is
-  // the actual defect. A boundary is the somewhere.
-  return Boolean(errorName || notFoundName || serverComponents)
+export function needsRouteBoundary({ errorName = null, notFoundName = null } = {}) {
+  return Boolean(errorName || notFoundName)
 }
 
 /**
@@ -1063,11 +1045,10 @@ export function clientEntrySource({
   errorName = null,
   loadingName = null,
   notFoundName = null,
-  serverComponents = false,
   metaNames = [],
   levels = [],
 }) {
-  const boundary = needsRouteBoundary({ errorName, notFoundName, serverComponents })
+  const boundary = needsRouteBoundary({ errorName, notFoundName })
     ? `\n${routeBoundaryPrelude()}\n`
     : ''
   const meta = metaNames.length > 0 ? `\n${routeMetaPrelude({ lang: false })}\n` : ''
@@ -1086,7 +1067,7 @@ ${imports.join('\n')}
 
 ${routeContextPrelude()}
 ${boundary}${slotResolver}${meta}
-${routeTreeFunction({ name: '__ruvyxaTree', pageName, layoutNames, routePath, errorName, loadingName, notFoundName, serverComponents, metaNames, levels })}
+${routeTreeFunction({ name: '__ruvyxaTree', pageName, layoutNames, routePath, errorName, loadingName, notFoundName, metaNames, levels })}
 ${routeRegistration({ name: '__ruvyxaTree', routePath })}
 ${interceptRegistry}
 ${shell}
@@ -1139,11 +1120,10 @@ export function nodeSsrEntrySource({
   errorName = null,
   loadingName = null,
   notFoundName = null,
-  serverComponents = false,
   metaNames = [],
   levels = [],
 }) {
-  const boundary = needsRouteBoundary({ errorName, notFoundName, serverComponents })
+  const boundary = needsRouteBoundary({ errorName, notFoundName })
     ? `\n${routeBoundaryPrelude()}\n`
     : ''
   const metaPrelude = metaNames.length > 0 ? `\n${routeMetaPrelude()}\n` : ''
@@ -1172,7 +1152,7 @@ ${imports.join('\n')}
 
 ${routeContextPrelude()}
 ${boundary}${metaPrelude}
-${routeTreeFunction({ name: '__ruvyxaTree', pageName, layoutNames, routePath, errorName, loadingName, notFoundName, serverComponents, metaNames, levels })}
+${routeTreeFunction({ name: '__ruvyxaTree', pageName, layoutNames, routePath, errorName, loadingName, notFoundName, metaNames, levels })}
 ${recovery}
 export async function render(ctx) {
   const html = await __ruvyxaRenderDocument(ctx)
@@ -1418,18 +1398,45 @@ export function flight(ctx, manifest, options) {
  * @param {string} options.requestPathLiteral JS literal for the fallback path.
  * @param {string} options.paramsLiteral JS literal for the fallback params.
  */
-export function rscClientEntrySource({ references, routePath, requestPathLiteral, paramsLiteral }) {
+export function rscClientEntrySource({
+  references,
+  routePath,
+  requestPathLiteral,
+  paramsLiteral,
+  errorFile = null,
+  notFoundFile = null,
+}) {
   // By absolute path rather than by alias: this entry is compiled by two
   // bundlers — this package's during `ruvyxa dev`, the Rust one during
   // `ruvyxa build` — and only the first knows the alias. Both bundle an
   // absolute path into a browser target.
   const runtimePath = clientReferenceRuntimePath()
   const registry = clientRegistrySource(references, runtimePath)
+  // A route's own `error.tsx` and `not-found.tsx`, when they can run here.
+  //
+  // The caller passes these only for a module that declares `'use client'`. On
+  // a server-components route everything else stays on the server, and
+  // importing a server component into the browser bundle would drag its whole
+  // graph across the boundary — a database client, a secret, an
+  // `import 'server-only'`. With neither, the boundary falls back to its
+  // built-in message, which is still better than unmounting the document.
+  const specialImports = []
+  if (errorFile) {
+    specialImports.push(`import __ruvyxaRouteError from ${JSON.stringify(toImportPath(errorFile))}`)
+  }
+  if (notFoundFile) {
+    specialImports.push(
+      `import __ruvyxaRouteNotFound from ${JSON.stringify(toImportPath(notFoundFile))}`,
+    )
+  }
+  const errorRef = errorFile ? '__ruvyxaRouteError' : 'null'
+  const notFoundRef = notFoundFile ? '__ruvyxaRouteNotFound' : 'null'
   // First, and the only import here whose *position* matters: importing it
   // installs the globals `react-server-dom-webpack/client.browser` reads while
   // its own module body runs.
   return `import ${JSON.stringify(clientReferenceInstallPath())}
 ${registry.imports.join('\n')}
+${specialImports.join('\n')}
 import { payloadStream as __ruvyxaPayloadStream, readInlinePayload as __ruvyxaReadPayload } from ${JSON.stringify(runtimePath)}
 import React from "react"
 import { hydrateRoot } from "react-dom/client"
@@ -1496,7 +1503,7 @@ function ${RSC_ROOT_LOCAL}({ payload, path, params }) {
 function ${RSC_TREE_LOCAL}(payload, ctx) {
   return React.createElement(
     ${ROUTE_BOUNDARY_LOCAL},
-    { errorFallback: null, notFound: null, defaultErrorFallback: true },
+    { errorFallback: ${errorRef}, notFound: ${notFoundRef}, defaultErrorFallback: ${errorFile ? 'false' : 'true'} },
     React.createElement(${RSC_ROOT_LOCAL}, {
       payload,
       path: ctx.path,

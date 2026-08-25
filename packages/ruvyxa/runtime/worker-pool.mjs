@@ -21,7 +21,7 @@
  */
 import { availableParallelism } from 'node:os'
 import { createHash, randomUUID } from 'node:crypto'
-import { existsSync } from 'node:fs'
+import { existsSync, readFileSync } from 'node:fs'
 import { mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import path from 'node:path'
@@ -2063,6 +2063,38 @@ async function bundleRscSsrRegistry(projectRoot, appDir, references) {
 }
 
 /** Compile the browser bundle for a server-components route. */
+/**
+ * The specials a server-components route may hand to the browser.
+ *
+ * `error.tsx` and `not-found.tsx` render on both sides of a server-components
+ * route: the server composes them into the document, and the client boundary
+ * needs them for an error raised while reading the payload or during a soft
+ * navigation. Only a module that declares `'use client'` can be in the browser
+ * bundle at all — everything else on such a route is server code, and importing
+ * it here would pull its whole graph across the boundary.
+ *
+ * A file without the directive is not an error: the server still uses it, and
+ * the client boundary shows its built-in message instead. `ruvyxa build`
+ * reports the pair so the difference is not discovered in production.
+ */
+function browserSpecials(specials) {
+  const usable = { errorFile: null, notFoundFile: null }
+  for (const [kind, key] of [
+    ['error', 'errorFile'],
+    ['notFound', 'notFoundFile'],
+  ]) {
+    const file = specials?.[kind]
+    if (!file) continue
+    try {
+      if (hasModuleDirective(readFileSync(file, 'utf8'), 'use client')) usable[key] = file
+    } catch {
+      // An unreadable special is the compiler's problem to report, not this
+      // function's; the boundary degrades to its default.
+    }
+  }
+  return usable
+}
+
 async function bundleRscClientModule(
   projectRoot,
   appDir,
@@ -2070,6 +2102,7 @@ async function bundleRscClientModule(
   routePath,
   requestPath,
   paramsJson,
+  specials = { errorFile: null, notFoundFile: null },
 ) {
   const cacheDir = path.join(projectRoot, '.ruvyxa', 'cache', 'client')
   await ensureDir(cacheDir)
@@ -2080,6 +2113,7 @@ async function bundleRscClientModule(
     routePath,
     requestPathLiteral: JSON.stringify(requestPath),
     paramsLiteral: paramsJson,
+    ...specials,
   })
   const hash = createHash('sha256')
     .update(moduleCode)
@@ -2583,6 +2617,11 @@ async function handleServerComponentsEntry(request) {
       // fallbacks for a document served without one.
       requestPathLiteral: JSON.stringify(routePath),
       paramsLiteral: '{}',
+      // The same specials the dev path hands over. Omitted here, a built route
+      // fell back to the boundary's built-in message while `ruvyxa dev` showed
+      // the project's own `error.tsx` — the difference appearing only in
+      // production, which is the shape this repository keeps paying for.
+      ...browserSpecials(specials),
     }),
     // Every `'use server'` module the browser graph reaches, with the source
     // that must stand in for it there. The Rust bundler compiles that graph and
@@ -2643,6 +2682,7 @@ async function handleServerComponentsClient(request) {
     routePath || requestPath,
     requestPath,
     JSON.stringify(params || {}),
+    browserSpecials(specials),
   )
   const script = await readFile(client.outfile, 'utf8')
   return {
