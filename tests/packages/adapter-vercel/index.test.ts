@@ -9,6 +9,7 @@ import { pathToFileURL } from 'node:url'
 import { repoRoot } from '../../repo-root.ts'
 import { staticAssetPattern } from '../../../packages/@ruvyxa/core/dist/utils.js'
 import { nonPublishableStrategies } from '../../../packages/@ruvyxa/core/dist/deploy-manifest.js'
+import type { BuildContext } from '../../../packages/@ruvyxa/core/dist/index.js'
 import { vercel } from '../../../packages/@ruvyxa/adapter-vercel/dist/index.js'
 
 const workspaceRoot = repoRoot
@@ -432,5 +433,159 @@ describe('vercel', () => {
     )
     assert.deepEqual(Object.keys(vcConfig).sort(), ['entrypoint', 'runtime'])
     assert.equal(vcConfig.runtime, 'edge')
+  })
+})
+
+describe('vercel per-route edge split', () => {
+  /** A deploy manifest with one edge route beside ordinary Node ones. */
+  const mixedManifest = {
+    routes: [
+      {
+        id: 'app/page',
+        path: '/',
+        kind: 'page',
+        serve: 'static',
+        strategy: 'ssg',
+        runtime: 'node',
+        serverComponents: false,
+      },
+      {
+        id: 'app/edge/page',
+        path: '/edge',
+        kind: 'page',
+        serve: 'function',
+        strategy: 'ssr',
+        runtime: 'edge',
+        serverComponents: false,
+      },
+      {
+        id: 'app/shop/[id]/page',
+        path: '/shop/[id]',
+        kind: 'page',
+        serve: 'function',
+        strategy: 'ssr',
+        runtime: 'edge',
+        serverComponents: false,
+      },
+      {
+        id: 'app/dash/page',
+        path: '/dash',
+        kind: 'page',
+        serve: 'function',
+        strategy: 'ssr',
+        runtime: 'node',
+        serverComponents: false,
+      },
+    ],
+  } as unknown as BuildContext['deployManifest']
+
+  const ctx = (deployManifest: BuildContext['deployManifest']): BuildContext => ({
+    root: '.',
+    outDir: '.ruvyxa',
+    deployManifest,
+  })
+
+  it('emits one function until asked for two', async () => {
+    const output = await vercel({ projectOutput: false }).build(ctx(mixedManifest))
+    const functions = output.artifacts?.filter((artifact) => artifact.kind === 'function') ?? []
+    assert.equal(functions.length, 1, 'the split is opt-in')
+  })
+
+  it('gives the edge routes their own function, with their own runtime and routes', async () => {
+    const output = await vercel({ splitEdgeRoutes: true, projectOutput: false }).build(
+      ctx(mixedManifest),
+    )
+    const edgeFunction = output.artifacts?.find(
+      (artifact) => artifact.kind === 'function' && artifact.path.includes('__ruvyxa_edge'),
+    )
+    assert.ok(edgeFunction, 'an edge function is emitted')
+    assert.equal(edgeFunction?.target, 'edge')
+    assert.deepEqual(edgeFunction?.routes, ['app/edge/page', 'app/shop/[id]/page'])
+
+    const vcConfig = output.artifacts?.find((artifact) =>
+      artifact.path.includes('__ruvyxa_edge.func/.vc-config.json'),
+    )
+    assert.deepEqual(JSON.parse(String(vcConfig?.contents)), {
+      runtime: 'edge',
+      entrypoint: 'index.mjs',
+    })
+  })
+
+  it('routes edge paths to it, ahead of the catch-all', async () => {
+    const output = await vercel({ splitEdgeRoutes: true, projectOutput: false }).build(
+      ctx(mixedManifest),
+    )
+    const config = JSON.parse(
+      String(output.artifacts?.find((a) => a.path.endsWith('output/config.json'))?.contents),
+    )
+    const routes: { src?: string; dest?: string }[] = config.routes
+    const edgeAt = routes.findIndex((route) => route.dest === '/__ruvyxa_edge')
+    const catchAllAt = routes.findIndex((route) => route.src === '/(.*)')
+    assert.ok(edgeAt >= 0 && edgeAt < catchAllAt, 'an edge rule must precede the catch-all')
+    // A dynamic segment becomes a segment matcher, not a literal.
+    assert.ok(routes.some((route) => route.src === '^/shop/[^/]+$'))
+    assert.ok(routes.some((route) => route.src === '^/edge$'))
+  })
+
+  it('refuses an edge route that needs what one function owns', async () => {
+    const withRsc = {
+      routes: [
+        {
+          id: 'app/rsc/page',
+          path: '/rsc',
+          kind: 'page',
+          serve: 'function',
+          strategy: 'ssr',
+          runtime: 'edge',
+          serverComponents: true,
+        },
+      ],
+    } as unknown as BuildContext['deployManifest']
+    await assert.rejects(
+      async () => vercel({ splitEdgeRoutes: true }).build(ctx(withRsc)),
+      /RUV2203.*renders server components/s,
+    )
+
+    const withIsr = {
+      routes: [
+        {
+          id: 'app/feed/page',
+          path: '/feed',
+          kind: 'page',
+          serve: 'function',
+          strategy: 'isr',
+          runtime: 'edge',
+          serverComponents: false,
+        },
+      ],
+    } as unknown as BuildContext['deployManifest']
+    await assert.rejects(
+      async () => vercel({ splitEdgeRoutes: true }).build(ctx(withIsr)),
+      /RUV2203.*writable document store/s,
+    )
+  })
+
+  it('ignores an edge declaration on a route served from a file', async () => {
+    // Nothing to place: a CDN answers it before any function runs.
+    const staticEdge = {
+      routes: [
+        {
+          id: 'app/page',
+          path: '/',
+          kind: 'page',
+          serve: 'static',
+          strategy: 'ssg',
+          runtime: 'edge',
+          serverComponents: false,
+        },
+      ],
+    } as unknown as BuildContext['deployManifest']
+    const output = await vercel({ splitEdgeRoutes: true, projectOutput: false }).build(
+      ctx(staticEdge),
+    )
+    assert.equal(
+      output.artifacts?.some((artifact) => artifact.path.includes('__ruvyxa_edge')),
+      false,
+    )
   })
 })

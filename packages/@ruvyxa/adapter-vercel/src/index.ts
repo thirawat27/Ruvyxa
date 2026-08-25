@@ -1,4 +1,4 @@
-import type { Adapter, AdapterOutput, BuildContext } from '@ruvyxa/core'
+import type { Adapter, AdapterOutput, BuildContext, DeployRoute } from '@ruvyxa/core'
 import {
   clientBuildOutput,
   nonPublishableStrategies,
@@ -18,6 +18,25 @@ export interface VercelAdapterOptions {
    * @default false
    */
   edge?: boolean
+  /**
+   * Put the routes that declared `export const runtime = 'edge'` in their own
+   * Edge Function, beside the Node one that answers everything else.
+   *
+   * Off by default, and deliberately so: one function is simpler, and a route
+   * on Node is always correct — every API an edge route may use exists there
+   * too. Turn this on when a route's latency genuinely wants a point of
+   * presence rather than a region.
+   *
+   * A route is eligible when it needs nothing the framework keeps in one place.
+   * Server components and server actions are answered through
+   * `/__ruvyxa/rsc`, `/__ruvyxa/flight`, and `/__ruvyxa/action` — single paths
+   * owned by one function — and ISR and PPR need a writable store this edge
+   * function has none of. A route that declares `edge` and needs any of them is
+   * refused by name rather than silently left on Node, because being quietly
+   * ignored is how a latency decision stops being true without anyone noticing.
+   * @default false
+   */
+  splitEdgeRoutes?: boolean
   /** Custom functions output directory. Defaults to `${outDir}/functions`. */
   functionsDir?: string
   /**
@@ -265,6 +284,47 @@ function vercelImagesConfig(runtimePolicy: Readonly<Record<string, unknown>>): o
   }
 }
 
+/** The Build Output `src` pattern that matches one route path. */
+function routeSourcePattern(routePath: string): string {
+  const body = routePath
+    .split('/')
+    .filter(Boolean)
+    .map((segment) => {
+      // An optional catch-all also matches the parent path itself, so it is the
+      // one shape whose slash is part of the group rather than before it.
+      if (segment.startsWith('[[...') && segment.endsWith(']]')) return '(?:/.*)?'
+      if (segment.startsWith('[...') && segment.endsWith(']')) return '/.+'
+      if (segment.startsWith('[') && segment.endsWith(']')) return '/[^/]+'
+      return `/${segment.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`
+    })
+    .join('')
+  return `^${body === '' ? '/' : body}$`
+}
+
+/** The routes an Edge Function may answer, and why each of the rest may not. */
+function partitionEdgeRoutes(ctx: BuildContext): { edge: DeployRoute[]; refused: string[] } {
+  const routes = ctx.deployManifest?.routes ?? []
+  const edge: DeployRoute[] = []
+  const refused: string[] = []
+  for (const route of routes) {
+    if (route.runtime !== 'edge') continue
+    // A route served from a file never reaches a function at all, so which
+    // function would have answered it is not a question.
+    if (route.serve !== 'function') continue
+    const reasons: string[] = []
+    if (route.serverComponents) reasons.push('renders server components')
+    if (route.strategy === 'isr' || route.strategy === 'ppr') {
+      reasons.push(`uses ${route.strategy}, which needs a writable document store`)
+    }
+    if (reasons.length > 0) {
+      refused.push(`${route.path} (${reasons.join('; ')})`)
+      continue
+    }
+    edge.push(route)
+  }
+  return { edge, refused }
+}
+
 /**
  * Create a Vercel deployment adapter for Ruvyxa.
  *
@@ -327,6 +387,74 @@ export function vercel(options: VercelAdapterOptions = {}): Adapter {
       const images = vercelImagesConfig(runtimePolicy)
       const STATIC_ASSET_PATTERN = staticAssetPattern()
 
+      // Routes that asked for a point of presence, and got one.
+      //
+      // Only when the project turned it on, and never in whole-app edge mode,
+      // where there is one function and it is already the edge one.
+      const split = options.splitEdgeRoutes === true && !edge
+      const partition = split ? partitionEdgeRoutes(ctx) : { edge: [], refused: [] }
+      if (partition.refused.length > 0) {
+        throw new Error(
+          `[RUV2203] vercelAdapter: these routes declare \`runtime = 'edge'\` but cannot be ` +
+            `answered by an Edge Function — ${partition.refused.join(', ')}. Remove the ` +
+            `declaration to keep them on Node, or drop \`splitEdgeRoutes\`.`,
+        )
+      }
+      const edgeRoutes = partition.edge
+      const edgeFunctionPath = '__ruvyxa_edge'
+      // Ahead of the catch-all, so an edge path reaches its own function; every
+      // other path falls through to the Node one exactly as before.
+      const edgeConfigRoutes = edgeRoutes.map((route) => ({
+        src: routeSourcePattern(route.path),
+        dest: `/${edgeFunctionPath}`,
+      }))
+
+      // The Node function keeps every route, including the ones the edge
+      // function answers. That is deliberate rather than an oversight: it is
+      // the catch-all, and `routeSourcePattern` is a pattern rather than the
+      // router — `/edge/` with a trailing slash does not match `^/edge$`, and a
+      // rewrite can land on a path the pattern never saw. Carrying the route in
+      // both means such a request renders the right page from the wrong
+      // runtime, instead of 404ing from the right one. The cost is that the
+      // route's modules are compiled twice.
+
+      /** The second function, when there is one. `base` is the scope's prefix. */
+      const edgeFunctionArtifacts = (
+        base: string,
+        scope?: 'project',
+      ): NonNullable<AdapterOutput['artifacts']> =>
+        edgeRoutes.length === 0
+          ? []
+          : [
+              {
+                kind: 'function',
+                path: `${base}/functions/${edgeFunctionPath}.func`,
+                ...(scope ? { scope } : {}),
+                handlerSource: vercelEdgeHandlerSource(runtimePolicy),
+                // Its own runtime and its own slice of the routes: the registry
+                // this function compiles resolves `worker`/`edge-light`
+                // conditions, and the manifest it routes with names only these
+                // routes, so it can never be asked for one it does not carry.
+                target: 'edge',
+                routes: edgeRoutes.map((route) => route.id),
+              },
+              {
+                kind: 'file',
+                path: `${base}/functions/${edgeFunctionPath}.func/.vc-config.json`,
+                ...(scope ? { scope } : {}),
+                contents:
+                  JSON.stringify(
+                    {
+                      runtime: 'edge',
+                      entrypoint: 'index.mjs',
+                      ...(options.regions === undefined ? {} : { regions: options.regions }),
+                    },
+                    null,
+                    2,
+                  ) + '\n',
+              },
+            ]
+
       // Build Output API v3 config with dynamic routing
       const buildOutputConfig = JSON.stringify(
         {
@@ -361,6 +489,8 @@ export function vercel(options: VercelAdapterOptions = {}): Adapter {
               src: STATIC_ASSET_PATTERN,
               status: 404,
             },
+            // Edge-declared routes first, then everything else.
+            ...edgeConfigRoutes,
             // All unmatched requests go to the serverless function
             { src: '/(.*)', dest: '/__ruvyxa_handler' },
           ],
@@ -423,6 +553,7 @@ export function vercel(options: VercelAdapterOptions = {}): Adapter {
                 scope: 'project',
                 contents: vcConfig + '\n',
               },
+              ...edgeFunctionArtifacts('.vercel/output', 'project'),
               {
                 kind: 'file',
                 path: '.vercel/output/config.json',
@@ -464,6 +595,7 @@ export function vercel(options: VercelAdapterOptions = {}): Adapter {
             path: 'deploy/vercel/.vercel/output/functions/__ruvyxa_handler.func/.vc-config.json',
             contents: vcConfig + '\n',
           },
+          ...edgeFunctionArtifacts('deploy/vercel/.vercel/output'),
           // Build Output API config
           {
             kind: 'file',

@@ -149,6 +149,51 @@ Give these hosts private environment values through their own secret mechanism. 
 deploy directory as a generic static site: the generated provider config is what routes dynamic
 traffic to its runtime.
 
+### ISR and PPR on Cloudflare
+
+A Worker has no filesystem, so a revalidated document needs Workers KV. Name the binding and the
+adapter gains both strategies; leave it out and it declares it supports neither, so a project using
+one is refused at build time with `RUV2202` rather than deployed to a Worker that re-renders every
+request while reporting a cache hit.
+
+```ts
+import { cloudflare } from '@ruvyxa/adapter-cloudflare'
+import { config } from 'ruvyxa/config'
+
+export default config({ adapter: cloudflare({ isr: { kvBinding: 'RUVYXA_ISR' } }) })
+```
+
+Create the namespace once with `wrangler kv namespace create RUVYXA_ISR` and paste the id it prints
+into the generated `wrangler.jsonc`. The id is account-specific, so the generated file carries a
+placeholder rather than a real one.
+
+### Per-route Edge Functions on Vercel
+
+A route that declares `export const runtime = 'edge'` runs on Node like any other unless the adapter
+is asked to place it, because a Node host answers an edge route correctly — the declaration narrows
+what the route may do rather than changing what can answer it. Turn on `splitEdgeRoutes` when a
+route's latency wants a point of presence rather than a region:
+
+```ts
+export default config({ adapter: vercel({ splitEdgeRoutes: true }) })
+```
+
+The build then emits a second function, `__ruvyxa_edge.func`, whose `.vc-config.json` names the edge
+runtime and whose compiled registry carries only those routes. The Build Output config sends their
+paths to it ahead of the catch-all; everything else reaches the Node function as before.
+
+A route is eligible when it needs nothing the framework keeps in one place. Server components and
+server actions are answered through `/__ruvyxa/rsc`, `/__ruvyxa/flight`, and `/__ruvyxa/action` —
+single paths owned by one function — and ISR and PPR need a writable store the edge function has
+none of. A route declaring `edge` that needs any of them is refused by name with `RUV2203`, rather
+than left on Node without a word: being quietly ignored is how a latency decision stops being true
+without anyone noticing.
+
+The Node function still carries every route, the edge ones included. It is the catch-all, and a path
+pattern is not the router — `/edge/` with a trailing slash does not match `^/edge$`. Carrying both
+means such a request renders the right page from the wrong runtime instead of 404ing from the right
+one.
+
 ## Railway and Render
 
 `railway()` writes root `railway.json` by default; `render()` writes root `render.yaml` by default.

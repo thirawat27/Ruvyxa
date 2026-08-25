@@ -122,9 +122,15 @@ const DEFAULT_ACTION_RATE_WINDOW_SECONDS = 60
  *   at all, `security.headers: false` had no effect, and `trustedProxyIps` was
  *   unused, while `ruvyxa start` enforced all three.
  * @property {string} [notFoundDocument] - Pre-rendered `app/not-found.tsx`, returned with 404 for an unmatched URL.
- * @property {(path: string, revalidate?: number) => string|{html: string, stale: boolean}|null} [readPrerendered]
- *   Synchronous read of a pre-rendered HTML file. ISR-capable adapters return
- *   freshness explicitly; a legacy string result is treated as stale.
+ * @property {(path: string, revalidate?: number) => string|{html: string, stale: boolean}|null|Promise<string|{html: string, stale: boolean}|null>} [readPrerendered]
+ *   Read of a pre-rendered document. ISR-capable adapters return freshness
+ *   explicitly; a legacy string result is treated as stale.
+ *
+ *   May be async. It was synchronous, and that alone is why the Cloudflare
+ *   adapter could not do ISR: a Workers KV read returns a promise, so the
+ *   only store an edge deployment has could not be consulted here. Awaiting a
+ *   value that is not a promise costs a microtask and keeps every filesystem
+ *   adapter exactly as it was.
  * @property {(path: string, html: string, revalidate?: number) => void|Promise<void>} [writePrerendered]
  *   Write pre-rendered HTML to ISR cache with a TTL.
  * @property {string[]} [supportedStrategies]
@@ -1034,7 +1040,7 @@ export function createHandler(options) {
    * same lookup, so they share one path rather than two identical ones.
    */
   async function servePrerendered(route, request, pathname, params, forced, forcedClaim) {
-    const cached = forced ? null : normalizeCacheEntry(readPrerendered?.(pathname))
+    const cached = forced ? null : normalizeCacheEntry(await readPrerendered?.(pathname))
     if (cached) return prerenderedResponse(cached.html)
 
     const rendered = await renderPage(route, pathname, params, request)
@@ -1053,7 +1059,9 @@ export function createHandler(options) {
     forcedClaim,
   ) {
     const revalidate = route.render.revalidate ?? 60
-    const cached = forced ? null : normalizeCacheEntry(readPrerendered?.(pathname, revalidate))
+    const cached = forced
+      ? null
+      : normalizeCacheEntry(await readPrerendered?.(pathname, revalidate))
     if (cached) {
       if (cached.stale) await refreshStaleEntry(route, pathname, params, runtimeContext)
       return prerenderedResponse(cached.html, {

@@ -147,6 +147,50 @@ SSR/API behavior ของคุณไม่ได้
 directory เป็น generic static site: provider config ที่สร้างคือสิ่งที่ route dynamic traffic ไป
 runtime
 
+### ISR และ PPR บน Cloudflare
+
+Worker ไม่มี filesystem เอกสารที่ revalidate แล้วจึงต้องเก็บใน Workers KV ระบุชื่อ binding แล้ว
+adapter จะได้ทั้งสอง strategy ถ้าไม่ระบุ มันจะประกาศว่าไม่รองรับทั้งคู่
+โปรเจกต์ที่ใช้อย่างใดอย่างหนึ่ง จึงถูกปฏิเสธตั้งแต่ build ด้วย `RUV2202` แทนที่จะถูก deploy ไปเป็น
+Worker ที่เรนเดอร์ใหม่ทุก request แล้วรายงานว่า cache hit
+
+```ts
+import { cloudflare } from '@ruvyxa/adapter-cloudflare'
+import { config } from 'ruvyxa/config'
+
+export default config({ adapter: cloudflare({ isr: { kvBinding: 'RUVYXA_ISR' } }) })
+```
+
+สร้าง namespace ครั้งเดียวด้วย `wrangler kv namespace create RUVYXA_ISR` แล้วเอา id ที่ได้ไปใส่ใน
+`wrangler.jsonc` ที่ระบบสร้างให้ id ผูกกับบัญชี ไฟล์ที่ generate จึงใส่ placeholder ไว้แทนของจริง
+
+### Edge Function ต่อ route บน Vercel
+
+route ที่ประกาศ `export const runtime = 'edge'` จะรันบน Node เหมือน route อื่นถ้าไม่ได้สั่งให้
+adapter ไปวาง เพราะ Node ตอบ edge route ได้ถูกต้อง — การประกาศเป็นการ*จำกัด*สิ่งที่ route ทำได้
+ไม่ใช่การเปลี่ยนว่าใครตอบได้ เปิด `splitEdgeRoutes` เมื่อ latency ของ route นั้นต้องการ point of
+presence จริงๆ ไม่ใช่แค่ region:
+
+```ts
+export default config({ adapter: vercel({ splitEdgeRoutes: true }) })
+```
+
+ตัว build จะสร้างฟังก์ชันที่สอง `__ruvyxa_edge.func` ซึ่ง `.vc-config.json` ระบุ edge runtime และ
+registry ที่คอมไพล์ไว้มีเฉพาะ route เหล่านั้น ส่วน Build Output config จะส่ง path ของมัน
+ไปที่ฟังก์ชันนี้ก่อน catch-all ที่เหลือยังไปที่ฟังก์ชัน Node เหมือนเดิม
+
+route จะผ่านเกณฑ์เมื่อไม่ต้องพึ่งสิ่งที่เฟรมเวิร์กเก็บไว้ที่เดียว server component และ server action
+ตอบผ่าน `/__ruvyxa/rsc`, `/__ruvyxa/flight` และ `/__ruvyxa/action` ซึ่งเป็น path
+เดี่ยวที่ฟังก์ชันเดียวเป็นเจ้าของ ส่วน ISR และ PPR ต้องการที่เก็บที่เขียนได้ซึ่งฟังก์ชัน edge ไม่มี
+route ที่ประกาศ `edge` แล้วต้องใช้อย่างใดอย่างหนึ่งจะถูกปฏิเสธพร้อมระบุชื่อด้วย `RUV2203`
+แทนที่จะถูกทิ้งไว้บน Node เงียบๆ — เพราะการถูกเมินเงียบๆ คือวิธีที่การตัดสินใจเรื่อง latency
+เลิกเป็นจริงโดยไม่มีใครรู้
+
+ฟังก์ชัน Node ยังคงถือทุก route รวมถึงตัวที่เป็น edge ด้วย เพราะมันคือ catch-all และ pattern ของ
+path ไม่ใช่ตัว router — `/edge/` ที่มี trailing slash ไม่แมตช์ `^/edge$`
+การถือไว้ทั้งสองที่แปลว่าคำขอแบบนั้น จะได้หน้าที่ถูกต้องจาก runtime ที่ผิด ดีกว่าได้ 404 จาก runtime
+ที่ถูก
+
 ## Railway และ Render
 
 `railway()` เขียน root `railway.json` โดยปริยาย; `render()` เขียน root `render.yaml` โดยปริยาย

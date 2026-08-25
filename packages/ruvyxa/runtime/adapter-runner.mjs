@@ -608,14 +608,32 @@ async function materializeArtifacts(output, buildDir) {
           `RUV2200 function artifact ${artifact.path} must include handlerSource string.`,
         )
       }
-      const functionKey = `${output.target ?? ''}\n${artifact.handlerSource}`
+      // A function may name its own runtime and its own slice of the routes,
+      // which is what lets one deployment answer some paths from an edge
+      // runtime and the rest from Node. Both default to the output's own
+      // answer, so an adapter that says nothing gets exactly what it got
+      // before. Both belong to the identity: two functions differing only in
+      // which routes they carry are not the same directory.
+      const functionTarget = artifact.target ?? output.target
+      const functionRoutes = Array.isArray(artifact.routes) ? [...artifact.routes].sort() : null
+      const functionKey = [
+        functionTarget ?? '',
+        functionRoutes ? functionRoutes.join(',') : '*',
+        artifact.handlerSource,
+      ].join('\n')
       const alreadyBuilt = materializedFunctions.get(functionKey)
       if (alreadyBuilt) {
         await rm(destination, { recursive: true, force: true })
         await mkdir(path.dirname(destination), { recursive: true })
         await cp(alreadyBuilt, destination, { recursive: true })
       } else {
-        await materializeFunction(buildDir, destination, artifact.handlerSource, output.target)
+        await materializeFunction(
+          buildDir,
+          destination,
+          artifact.handlerSource,
+          functionTarget,
+          functionRoutes,
+        )
         materializedFunctions.set(functionKey, destination)
       }
       artifacts.push(
@@ -692,9 +710,30 @@ function artifactDestination(buildDir, artifactPath) {
   return destination
 }
 
-async function materializeFunction(buildDir, destination, handlerSource, target) {
+async function materializeFunction(buildDir, destination, handlerSource, target, routeIds = null) {
   const manifestPath = path.join(buildDir, 'manifest.json')
   const manifest = JSON.parse(await readFile(manifestPath, 'utf8'))
+
+  // A function that serves only part of the application carries only that part.
+  // The registry it compiles and the manifest it routes with are narrowed in
+  // one place, so the two can never disagree about which routes it owns — a
+  // function whose manifest claims a route its registry has no entry for
+  // answers that path with a lookup failure at request time and nothing at
+  // build time. An unfiltered function, which is every adapter that says
+  // nothing, keeps the whole manifest.
+  if (Array.isArray(routeIds)) {
+    const wanted = new Set(routeIds)
+    const all = Array.isArray(manifest.routes) ? manifest.routes : []
+    const kept = all.filter((route) => wanted.has(route?.id))
+    if (kept.length !== wanted.size) {
+      const missing = [...wanted].filter((id) => !kept.some((route) => route?.id === id))
+      throw new Error(
+        `RUV2200 function ${path.basename(destination)} asked for route ids the manifest ` +
+          `does not have: ${missing.join(', ')}.`,
+      )
+    }
+    manifest.routes = kept
+  }
 
   // A function artifact is a complete deployment unit. Replacing it prevents
   // removed or renamed route bundles from surviving incremental builds.

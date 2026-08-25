@@ -83,5 +83,16 @@
   "unsupportedDiagnostics": {
     "route": "RUV2202",
     "runtimeFeature": "RUV2204"
-  }
+  },
+  "$conditionalSupportNote": [
+    "`supports` above is what each adapter declares with no options — which is",
+    "what the capability test constructs, and what a project gets by default.",
+    "One capability is conditional:",
+    "",
+    "  cloudflare — `isr` and `ppr` require `isr.kvBinding`. A Worker has no",
+    "  filesystem, so a revalidated document needs Workers KV. The capability",
+    "  follows the option rather than being assumed: a Worker that re-renders",
+    "  every request while reporting `x-ruvyxa-isr: HIT` is worse than a build",
+    "  that stops with RUV2202."
+  ]
 }

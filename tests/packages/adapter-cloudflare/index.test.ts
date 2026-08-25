@@ -273,3 +273,68 @@ describe('cloudflare', () => {
     }
   })
 })
+
+describe('cloudflare ISR', () => {
+  /** The generated Worker source, as the adapter would write it. */
+  async function workerSource(options: Parameters<typeof cloudflare>[0] = {}) {
+    const output = await cloudflare(options).build({ root: '.', outDir: '.ruvyxa' })
+    const worker = output.artifacts?.find(
+      (artifact) => artifact.path === 'deploy/cloudflare/worker',
+    )
+    return String((worker as { handlerSource?: string })?.handlerSource ?? '')
+  }
+
+  async function wranglerConfig(options: Parameters<typeof cloudflare>[0] = {}) {
+    const output = await cloudflare(options).build({ root: '.', outDir: '.ruvyxa' })
+    const file = output.artifacts?.find(
+      (artifact) => artifact.path === 'deploy/cloudflare/wrangler.jsonc',
+    )
+    return JSON.parse(String((file as { contents?: string })?.contents ?? '{}'))
+  }
+
+  it('does not claim ISR without somewhere to store a document', async () => {
+    // A Worker has no filesystem. Claiming the capability anyway would deploy
+    // one that re-renders every request and reports a cache hit, which is worse
+    // than the build stopping.
+    assert.deepEqual(cloudflare({}).supports, ['ssr', 'ssg', 'csr', 'api'])
+    const source = await workerSource()
+    assert.match(source, /isrStore = null/)
+    assert.ok(!source.includes('env.'), 'no binding is read when none was named')
+    assert.equal(Object.hasOwn(await wranglerConfig(), 'kv_namespaces'), false)
+  })
+
+  it('gains ISR and PPR when a KV binding is named', async () => {
+    const options = { isr: { kvBinding: 'RUVYXA_ISR' } }
+    assert.deepEqual(cloudflare(options).supports, ['ssr', 'ssg', 'csr', 'api', 'isr', 'ppr'])
+
+    const source = await workerSource(options)
+    assert.match(source, /isrStore = env\.RUVYXA_ISR/)
+    assert.match(source, /getWithMetadata/)
+    assert.match(source, /isrStore\.put\(/)
+    // Freshness is decided from the stored stamp, not from KV's own expiry:
+    // ISR serves a stale document while it refreshes behind the response, so
+    // the entry has to outlive the moment it goes stale.
+    assert.match(source, /storedAt/)
+    assert.match(source, /expirationTtl/)
+    assert.match(source, /"isr","ppr"/)
+  })
+
+  it('declares the namespace in wrangler config, with the id left to the project', async () => {
+    const config = await wranglerConfig({ isr: { kvBinding: 'RUVYXA_ISR' } })
+    assert.deepEqual(config.kv_namespaces?.[0]?.binding, 'RUVYXA_ISR')
+    // A namespace id belongs to one account; a generated file must not carry a
+    // real one, and must say how to get it.
+    assert.match(String(config.kv_namespaces?.[0]?.id), /wrangler kv namespace create RUVYXA_ISR/)
+  })
+
+  it('refuses a binding name that would not parse as one', async () => {
+    for (const kvBinding of ['', ' ', '2FAST', 'has-dash', 'has space']) {
+      assert.throws(
+        () => cloudflare({ isr: { kvBinding } }),
+        /RUV2001/,
+        `${JSON.stringify(kvBinding)} must be refused`,
+      )
+    }
+    assert.doesNotThrow(() => cloudflare({ isr: { kvBinding: '_ok$Binding9' } }))
+  })
+})

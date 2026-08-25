@@ -957,6 +957,24 @@ export interface AdapterArtifact {
    */
   handlerSource?: string
   /**
+   * Bundle target for a `function` artifact, when it differs from the output's.
+   *
+   * `edge` resolves the `worker`/`edge-light` export conditions rather than
+   * `node`, which is what makes a registry runnable in a V8 isolate. Left unset
+   * the function is compiled for the output's own target, which is what every
+   * single-function adapter wants.
+   */
+  target?: 'edge' | 'serverless' | 'node' | 'static'
+  /**
+   * Route ids this `function` artifact answers, when it answers only some.
+   *
+   * Both the compiled registry and the manifest the function routes with are
+   * narrowed to these, so a deployment can put some paths on one runtime and
+   * the rest on another. Left unset the function carries every route — which
+   * is what it has always done.
+   */
+  routes?: string[]
+  /**
    * Where the artifact is materialized. Project-scope paths are restricted to
    * an allowlist of hosting-platform locations (for example `.vercel/output`
    * or `netlify.toml`) so adapters cannot write arbitrary project files.

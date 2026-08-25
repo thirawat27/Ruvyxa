@@ -34,6 +34,25 @@ export interface CloudflareAdapterOptions {
    * `wrangler`. Raise it deliberately after checking Cloudflare's changelog.
    */
   compatibilityDate?: string
+  /**
+   * Workers KV namespace binding that stores revalidated documents, which is
+   * what lets this adapter serve ISR and PPR.
+   *
+   * Off by default, and the capability follows it: with no binding the adapter
+   * declares it does not support `isr` or `ppr`, so a project using either is
+   * refused at build time with `RUV2202` rather than deployed to a Worker that
+   * would re-render every request and call it a cache.
+   *
+   * Create the namespace once (`wrangler kv namespace create RUVYXA_ISR`), then
+   * name the binding here. The generated `wrangler.jsonc` declares it, but the
+   * namespace id is the project's to fill in — it is account-specific and must
+   * not be baked into a generated file.
+   *
+   * ```ts
+   * cloudflareAdapter({ isr: { kvBinding: 'RUVYXA_ISR' } })
+   * ```
+   */
+  isr?: { kvBinding: string }
 }
 
 /**
@@ -60,6 +79,36 @@ const DEFAULT_COMPATIBILITY_DATE = '2025-09-01'
 const COMPATIBILITY_FLAGS = ['nodejs_compat']
 
 /**
+ * The `kv_namespaces` stanza a wrangler config carries when ISR is configured.
+ *
+ * `id` is left as a placeholder on purpose: a namespace id belongs to one
+ * Cloudflare account, so baking a real one into a generated file would either
+ * leak it or hand every reader a namespace that is not theirs. `wrangler kv
+ * namespace create <binding>` prints the id to paste in.
+ */
+function kvNamespaces(kvBinding: string | null) {
+  if (!kvBinding) return {}
+  return {
+    kv_namespaces: [
+      { binding: kvBinding, id: '<run: wrangler kv namespace create ' + kvBinding + '>' },
+    ],
+  }
+}
+
+/**
+ * The strategies a Worker can answer, which is decided by whether the project
+ * gave this adapter somewhere to store a revalidated document.
+ *
+ * Declared rather than guessed. Claiming ISR with no store would deploy a
+ * Worker that re-renders every request and reports `x-ruvyxa-isr: HIT`, which
+ * is worse than refusing the build.
+ */
+function workerStrategies(kvBinding: string | null): Adapter['supports'] {
+  const base: Adapter['supports'] = ['ssr', 'ssg', 'csr', 'api']
+  return kvBinding ? [...base, 'isr', 'ppr'] : base
+}
+
+/**
  * Worker fetch handler source code.
  *
  * This is the platform-specific entry that wraps the generic Ruvyxa serverless
@@ -69,7 +118,7 @@ const COMPATIBILITY_FLAGS = ['nodejs_compat']
  * Static assets (client bundles, pre-rendered pages for SSG/CSR) are served
  * by Cloudflare's `assets` binding; the Worker only handles dynamic routes.
  */
-function workerHandlerSource(runtimePolicy: unknown): string {
+function workerHandlerSource(runtimePolicy: unknown, kvBinding: string | null): string {
   return `import { createHandler } from './serverless-handler.mjs';
 import { applyPluginHttp, loadActionModule, loadRouteModule } from './route-modules.mjs';
 // A JS module, not a JSON import: import attributes for JSON are not uniformly
@@ -77,6 +126,28 @@ import { applyPluginHttp, loadActionModule, loadRouteModule } from './route-modu
 import manifest from './manifest.mjs';
 
 const runtimePolicy = ${JSON.stringify(runtimePolicy ?? {})};
+
+/**
+ * The KV namespace revalidated documents are stored in, once a request has
+ * handed the bindings over. Null when the project configured no namespace, in
+ * which case the adapter also declared it does not support ISR or PPR, so
+ * nothing reaches the reader.
+ */
+let isrStore = null;
+
+/**
+ * How much longer than its revalidation window a document is kept.
+ *
+ * ISR answers from a stale copy while it refreshes behind the response, so the
+ * entry has to outlive the moment it goes stale — dropping it on the TTL would
+ * make every refresh a blocking render.
+ */
+const STALE_RETENTION_FACTOR = 10;
+
+/** A document's key. Prefixed so the namespace can hold other things safely. */
+function isrKey(pathname) {
+  return \`isr:\${pathname}\`;
+}
 
 async function optimizeImage(request, { src, width, quality }) {
   if (width > (runtimePolicy.image?.maxWidth ?? 3840)) {
@@ -105,20 +176,43 @@ const handler = createHandler({
   importAction: loadActionModule,
   pluginHttp: applyPluginHttp,
   security: runtimePolicy.security,
-  readPrerendered: (pathname) => {
-    // In Workers, pre-rendered pages are served as static assets.
-    // ISR revalidation requires KV or Durable Objects (not yet supported).
-    return null;
+  readPrerendered: async (pathname, revalidate = 60) => {
+    // A Worker has no filesystem, so the store is KV and the read is async —
+    // which is the whole reason this returned \`null\` before \`readPrerendered\`
+    // was allowed to be asynchronous.
+    if (!isrStore) return null;
+    const entry = await isrStore.getWithMetadata(isrKey(pathname), { type: 'text' });
+    if (entry == null || entry.value == null) return null;
+    const storedAt = Number(entry.metadata && entry.metadata.storedAt);
+    // An entry with no usable stamp is stale rather than fresh: serving it is
+    // still correct, and it schedules the refresh that replaces it.
+    const fresh = Number.isFinite(storedAt) && Date.now() - storedAt < revalidate * 1000;
+    return { html: entry.value, stale: !fresh };
+  },
+  writePrerendered: async (pathname, html, revalidate = 60) => {
+    if (!isrStore) return;
+    await isrStore.put(isrKey(pathname), html, {
+      metadata: { storedAt: Date.now() },
+      // Kept well past the revalidation window on purpose. Serving a stale
+      // document while refreshing behind it is what ISR *is*, so expiring the
+      // entry the moment it goes stale would turn every refresh into a blocking
+      // render — the opposite of the strategy. KV's own floor is 60 seconds.
+      expirationTtl: Math.max(60, Math.round(revalidate * STALE_RETENTION_FACTOR)),
+    });
   },
   // The project's own not-found page, pre-rendered by the build and carried
   // inline in the manifest: an unmatched URL is answered with the page the
   // application actually wrote, on every host.
   notFoundDocument: manifest.notFoundDocument,
-  supportedStrategies: ['ssr', 'ssg', 'csr', 'api'],
+  supportedStrategies: ${JSON.stringify(workerStrategies(kvBinding))},
 });
 
 export default {
   async fetch(request, env, ctx) {
+    // Bindings arrive with the request while the handler is built once at
+    // module scope, so the store is captured here and read by the closures
+    // above. An isolate serves many requests; this assignment is idempotent.
+    isrStore = ${kvBinding ? `env.${kvBinding} ?? null` : 'null'};
     // The runtime context carries waitUntil, which the shared handler uses to
     // finish background work after the response is returned.
     return handler(request, ctx);
@@ -131,9 +225,14 @@ export default {
  * Create a Cloudflare Workers deployment adapter for Ruvyxa.
  *
  * Produces a Worker fetch handler and static assets for deployment via
- * `wrangler`. Supports SSR, API routes, SSG, and CSR. ISR and PPR are
- * rejected with RUV2210 because they require persistent storage (KV/DO)
- * which is not yet integrated.
+ * `wrangler`. SSR, API routes, SSG, and CSR always work.
+ *
+ * ISR and PPR need somewhere to keep a revalidated document, and a Worker has
+ * no filesystem — so they are available exactly when the project names a
+ * Workers KV binding through `isr.kvBinding`, and refused with `RUV2202` when
+ * it does not. The capability is declared from the option rather than assumed,
+ * because a Worker that re-renders every request while reporting a cache hit is
+ * worse than a build that stops.
  *
  * @example
  * ```ts
@@ -156,10 +255,25 @@ export function cloudflare(options: CloudflareAdapterOptions = {}): Adapter {
     throw new Error(`[RUV2001] cloudflareAdapter: "workerEntry" must not be an empty string`)
   }
 
+  const kvBinding = options.isr?.kvBinding ?? null
+  if (options.isr !== undefined && (typeof kvBinding !== 'string' || kvBinding.trim() === '')) {
+    throw new Error(
+      `[RUV2001] cloudflareAdapter: "isr.kvBinding" must be a non-empty string naming a Workers KV binding`,
+    )
+  }
+  // A binding is a JavaScript identifier on `env`, so a name that is not one
+  // would emit a Worker that does not parse — caught here rather than by
+  // `wrangler` after the build has already claimed success.
+  if (kvBinding !== null && !/^[A-Za-z_$][\w$]*$/.test(kvBinding)) {
+    throw new Error(
+      `[RUV2001] cloudflareAdapter: "isr.kvBinding" must be a valid identifier, got ${JSON.stringify(kvBinding)}`,
+    )
+  }
+
   return {
     name: 'cloudflare',
     target: 'edge',
-    supports: ['ssr', 'ssg', 'csr', 'api'],
+    supports: workerStrategies(kvBinding),
     build(ctx: BuildContext): AdapterOutput {
       validateBuildContext(ctx, 'cloudflareAdapter')
 
@@ -176,6 +290,7 @@ export function cloudflare(options: CloudflareAdapterOptions = {}): Adapter {
           compatibility_date: compatDate,
           compatibility_flags: COMPATIBILITY_FLAGS,
           assets: { directory: './assets' },
+          ...kvNamespaces(kvBinding),
         },
         null,
         2,
@@ -188,6 +303,7 @@ export function cloudflare(options: CloudflareAdapterOptions = {}): Adapter {
           compatibility_date: compatDate,
           compatibility_flags: COMPATIBILITY_FLAGS,
           assets: { directory: `${relativeOutDir}/deploy/cloudflare/assets` },
+          ...kvNamespaces(kvBinding),
         },
         null,
         2,
@@ -211,7 +327,7 @@ export function cloudflare(options: CloudflareAdapterOptions = {}): Adapter {
           {
             kind: 'function',
             path: 'deploy/cloudflare/worker',
-            handlerSource: workerHandlerSource(runtimePolicy),
+            handlerSource: workerHandlerSource(runtimePolicy, kvBinding),
           },
           // Wrangler config pointing at the Worker + assets
           {
