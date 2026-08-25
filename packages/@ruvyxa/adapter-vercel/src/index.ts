@@ -1,5 +1,6 @@
 import type { Adapter, AdapterOutput, BuildContext, DeployRoute } from '@ruvyxa/core'
 import {
+  DEFAULT_SECURITY_HEADERS,
   clientBuildOutput,
   nonPublishableStrategies,
   runtimeBuildPolicy,
@@ -461,6 +462,22 @@ export function vercel(options: VercelAdapterOptions = {}): Adapter {
           version: 3,
           ...(images === undefined ? {} : { images }),
           routes: [
+            {
+              // The security defaults, on everything — including the responses
+              // the function never sees.
+              //
+              // `handle: filesystem` below answers a pre-rendered document and
+              // every public file from Vercel's own edge, so `createHandler`,
+              // which is where these headers are set, is never invoked for
+              // them. A page that is framed-denied under `ruvyxa start` was
+              // framable the moment it was pre-rendered and deployed, and every
+              // other check stayed green: the markup was right and the status
+              // was 200. `continue: true` attaches the headers and lets routing
+              // carry on, so this changes what is served and not where from.
+              src: '/(.*)',
+              headers: DEFAULT_SECURITY_HEADERS,
+              continue: true,
+            },
             {
               // Hashed client bundles are served under /__ruvyxa/client/
               src: '^/__ruvyxa/client/(.*)$',

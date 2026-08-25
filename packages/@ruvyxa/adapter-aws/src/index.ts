@@ -4,6 +4,7 @@ import type { Adapter, AdapterOutput, BuildContext } from '@ruvyxa/core'
 import {
   CLIENT_BUNDLE_PREFIX,
   clientBuildOutput,
+  DEFAULT_SECURITY_HEADERS,
   IMMUTABLE_CACHE_CONTROL,
   nonPublishableStrategies,
   PUBLIC_ASSET_CACHE_CONTROL,
@@ -61,6 +62,23 @@ export function aws(options: AwsAdapterOptions = {}): Adapter {
         null,
         2,
       )
+      // Amplify Hosting's custom-header file.
+      //
+      // The deploy manifest's route targets carry `cacheControl` and nothing
+      // else, so it has no place to put the security defaults — and a `Static`
+      // target is answered by the CDN, which never invokes the compute
+      // resource where the standalone server sets them. That left a deployed
+      // pre-rendered page without a single one of them while the identical page
+      // from `ruvyxa start` carried all seven. `customHttp.yml` is the
+      // mechanism Amplify documents for this, read from the app root.
+      const customHttp =
+        'customHeaders:\n' +
+        `  - pattern: '**'\n` +
+        '    headers:\n' +
+        Object.entries(DEFAULT_SECURITY_HEADERS)
+          .map(([key, value]) => `      - key: '${key}'\n        value: '${value}'\n`)
+          .join('')
+
       const serverSource = standaloneServerSource({
         isrCache: 'tmp',
         runtimePolicy: runtimeBuildPolicy(ctx),
@@ -96,6 +114,16 @@ export function aws(options: AwsAdapterOptions = {}): Adapter {
                 scope: 'project',
                 contents: manifest + '\n',
               },
+              {
+                kind: 'file',
+                path: 'customHttp.yml',
+                scope: 'project',
+                // Amplify reads one `customHttp.yml` per app and a project may
+                // already have written its own rules into it. Overwriting that
+                // every build would trade one silent header loss for another.
+                skipIfExists: true,
+                contents: customHttp,
+              },
             ]
 
       return {
@@ -128,6 +156,11 @@ export function aws(options: AwsAdapterOptions = {}): Adapter {
             kind: 'file',
             path: `${deployRoot}/deploy-manifest.json`,
             contents: manifest + '\n',
+          },
+          {
+            kind: 'file',
+            path: 'deploy/aws/customHttp.yml',
+            contents: customHttp,
           },
           {
             kind: 'file',

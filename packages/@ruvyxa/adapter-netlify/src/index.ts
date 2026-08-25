@@ -4,6 +4,7 @@ import type { Adapter, AdapterArtifact, AdapterOutput, BuildContext } from '@ruv
 import {
   CLIENT_BUNDLE_PREFIX,
   clientBuildOutput,
+  DEFAULT_SECURITY_HEADERS,
   IMMUTABLE_CACHE_CONTROL,
   nonPublishableStrategies,
   projectRelativeOutDir,
@@ -219,11 +220,21 @@ export function netlify(options: NetlifyAdapterOptions = {}): Adapter {
       // `public/` assets are not hashed and otherwise inherit Netlify's
       // revalidate-every-request default, so they get the same lifetime the
       // Rust server sends for the same files.
-      const headerRules: Array<{ for: string; cacheControl: string }> = [
-        { for: `${CLIENT_BUNDLE_PREFIX}*`, cacheControl: IMMUTABLE_CACHE_CONTROL },
+      //
+      // The `/*` rule carries the security defaults, and it is first because
+      // Netlify publishes pre-rendered documents and public files itself: the
+      // function — where `createHandler` sets these headers — is never invoked
+      // for them. Without it a deployed SSG page lost every header the same
+      // page carries under `ruvyxa start`, including `X-Frame-Options`.
+      const headerRules: Array<{ for: string; values: Record<string, string> }> = [
+        { for: '/*', values: { ...DEFAULT_SECURITY_HEADERS } },
+        {
+          for: `${CLIENT_BUNDLE_PREFIX}*`,
+          values: { 'Cache-Control': IMMUTABLE_CACHE_CONTROL },
+        },
         ...publicAssetGlobs().map((glob) => ({
           for: glob,
-          cacheControl: PUBLIC_ASSET_CACHE_CONTROL,
+          values: { 'Cache-Control': PUBLIC_ASSET_CACHE_CONTROL },
         })),
       ]
 
@@ -231,7 +242,9 @@ export function netlify(options: NetlifyAdapterOptions = {}): Adapter {
         .map(
           (rule) =>
             `[[headers]]\n  for = "${rule.for}"\n  [headers.values]\n` +
-            `    Cache-Control = "${rule.cacheControl}"\n`,
+            Object.entries(rule.values)
+              .map(([name, value]) => `    ${name} = "${value}"\n`)
+              .join(''),
         )
         .join('')
 
@@ -250,10 +263,7 @@ export function netlify(options: NetlifyAdapterOptions = {}): Adapter {
       // Frameworks API deploy configuration (.netlify/v1/config.json)
       const frameworksApiConfig = JSON.stringify(
         {
-          headers: headerRules.map((rule) => ({
-            for: rule.for,
-            values: { 'Cache-Control': rule.cacheControl },
-          })),
+          headers: headerRules.map((rule) => ({ for: rule.for, values: rule.values })),
         },
         null,
         2,

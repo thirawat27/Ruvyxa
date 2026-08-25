@@ -7,7 +7,10 @@ import path from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import { repoRoot } from '../../repo-root.ts'
-import { staticAssetPattern } from '../../../packages/@ruvyxa/core/dist/utils.js'
+import {
+  DEFAULT_SECURITY_HEADERS,
+  staticAssetPattern,
+} from '../../../packages/@ruvyxa/core/dist/utils.js'
 import { nonPublishableStrategies } from '../../../packages/@ruvyxa/core/dist/deploy-manifest.js'
 import type { BuildContext } from '../../../packages/@ruvyxa/core/dist/index.js'
 import { vercel } from '../../../packages/@ruvyxa/adapter-vercel/dist/index.js'
@@ -70,7 +73,16 @@ describe('vercel', () => {
       configArtifact && 'contents' in configArtifact ? String(configArtifact.contents) : '{}',
     )
     assert.equal(config.version, 3)
+    // First, and on everything: `handle: filesystem` below answers a
+    // pre-rendered document and every public file from Vercel's own edge, so
+    // `createHandler` — the only other place these are set — is never invoked
+    // for them, and a deployed SSG page carried none of them.
     assert.deepEqual(config.routes[0], {
+      src: '/(.*)',
+      headers: DEFAULT_SECURITY_HEADERS,
+      continue: true,
+    })
+    assert.deepEqual(config.routes[1], {
       src: '^/__ruvyxa/client/(.*)$',
       headers: { 'cache-control': 'public, max-age=31536000, immutable' },
       continue: true,
@@ -78,18 +90,18 @@ describe('vercel', () => {
     // Public assets carry a revalidating cache header instead of Vercel's
     // `max-age=0`, and `/__ruvyxa/` is excluded so the immutable header set by
     // routes[0] is not overwritten with the shorter lifetime.
-    assert.deepEqual(config.routes[1], {
+    assert.deepEqual(config.routes[2], {
       src: staticAssetPattern(),
       headers: { 'cache-control': 'public, max-age=3600, must-revalidate' },
       continue: true,
     })
     assert.doesNotMatch('/__ruvyxa/client/app.js', new RegExp(staticAssetPattern()))
     assert.match('/logo.png', new RegExp(staticAssetPattern()))
-    assert.deepEqual(config.routes[2], { handle: 'filesystem' })
+    assert.deepEqual(config.routes[3], { handle: 'filesystem' })
     // A filesystem miss on an asset path is a 404, never a page render: this
     // is what kept `/logo.png` returning a 200 HTML document from `/[lang]`.
-    assert.deepEqual(config.routes[3], { src: staticAssetPattern(), status: 404 })
-    assert.deepEqual(config.routes[4], { src: '/(.*)', dest: '/__ruvyxa_handler' })
+    assert.deepEqual(config.routes[4], { src: staticAssetPattern(), status: 404 })
+    assert.deepEqual(config.routes[5], { src: '/(.*)', dest: '/__ruvyxa_handler' })
 
     // ISR and PPR pages must stay out of the publish directory, or
     // `handle: filesystem` answers them before the function can revalidate.
@@ -520,7 +532,9 @@ describe('vercel per-route edge split', () => {
     )
     const routes: { src?: string; dest?: string }[] = config.routes
     const edgeAt = routes.findIndex((route) => route.dest === '/__ruvyxa_edge')
-    const catchAllAt = routes.findIndex((route) => route.src === '/(.*)')
+    // Found by destination, not by pattern: the security-header rule is also
+    // `/(.*)`, and matching on the pattern found that one instead.
+    const catchAllAt = routes.findIndex((route) => route.dest === '/__ruvyxa_handler')
     assert.ok(edgeAt >= 0 && edgeAt < catchAllAt, 'an edge rule must precede the catch-all')
     // A dynamic segment becomes a segment matcher, not a literal.
     assert.ok(routes.some((route) => route.src === '^/shop/[^/]+$'))

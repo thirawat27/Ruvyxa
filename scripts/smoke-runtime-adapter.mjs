@@ -1,5 +1,12 @@
 import { spawn } from 'node:child_process'
-import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs'
+import {
+  createReadStream,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  statSync,
+  writeFileSync,
+} from 'node:fs'
 import { createServer, request as httpRequest } from 'node:http'
 import path from 'node:path'
 import { Readable } from 'node:stream'
@@ -7,16 +14,62 @@ import { pipeline } from 'node:stream/promises'
 import { pathToFileURL } from 'node:url'
 import { gunzipSync } from 'node:zlib'
 
-const RUNTIMES = ['node', 'bun', 'deno', 'edge']
-const [runtime, deploymentDirectory, portArg, assetsArg] = process.argv.slice(2)
+/**
+ * Every transport an adapter can emit, named by the lane that drives it.
+ *
+ * `node`/`bun`/`deno` and `aws` emit a **program**, so they are spawned. `edge`
+ * and `netlify` emit a **fetch module**, so a server is put in front of them.
+ * `vercel` and `firebase` emit a **Node request handler**, so the same server
+ * calls them with `(req, res)` — which is a third shape, and the one that
+ * carries the most platform-specific glue: Vercel's is plain `(req, res, ctx)`
+ * and Firebase's is Express-shaped inside `onRequest`.
+ *
+ * They are separate lanes rather than one "serverless" lane because the glue is
+ * exactly what has never been exercised. The four serverless adapters share
+ * `createHandler`, which node/bun/deno already prove; what they do not share is
+ * how a request reaches it and how a response leaves.
+ */
+const RUNTIMES = [
+  'node',
+  'bun',
+  'deno',
+  'edge',
+  'aws',
+  'railway',
+  'render',
+  'vercel',
+  'netlify',
+  'firebase',
+]
+const SPAWNED = new Set(['node', 'bun', 'deno', 'aws', 'railway', 'render'])
+/**
+ * Spawned lanes whose program is Node rather than a runtime of the same name.
+ *
+ * `railway` and `render` emit the same standalone server and the same directory
+ * layout as `node`. They are separate lanes anyway, because "the same layout" is
+ * a claim about two adapters that can drift apart quietly — and when it breaks,
+ * a failure that names the adapter is the whole point.
+ */
+const NODE_PROGRAM = new Set(['aws', 'railway', 'render'])
+const FETCH_MODULE = new Set(['edge', 'netlify'])
+const NODE_HANDLER = new Set(['vercel', 'firebase'])
+const [runtime, deploymentDirectory, portArg, assetsArg, platformConfigArg] = process.argv.slice(2)
 if (!RUNTIMES.includes(runtime) || !deploymentDirectory || !portArg) {
   console.error(
-    'usage: node scripts/smoke-runtime-adapter.mjs <node|bun|deno|edge> <deployment-dir> <port> [assets-dir]',
+    `usage: node scripts/smoke-runtime-adapter.mjs <${RUNTIMES.join('|')}> <deployment-dir> <port>` +
+      ' [publish-dir] [platform-config]',
   )
   console.error(
     '  edge takes the worker directory; assets default to <deployment-dir>/../assets, which is',
   )
   console.error('  where the cloudflare adapter puts the files its platform serves.')
+  console.error(
+    '  the four serverless lanes take the emitted function directory, the directory their',
+  )
+  console.error(
+    '  platform publishes as static, and the config file that platform reads its asset headers',
+  )
+  console.error('  from — so the header assertion lands on the artifact, not on this script.')
   process.exit(2)
 }
 
@@ -37,20 +90,94 @@ let output = ''
 let child = null
 let server = null
 
-if (runtime === 'edge') await startEdgeWorker()
-else startRuntimeProcess()
+/**
+ * Runtimes whose program is reached through a CDN rather than directly.
+ *
+ * Amplify's compute resource is only ever asked for what the `Static` route
+ * targets did not answer, and its bundle carries no copy of the published files
+ * — asking it for `/smoke.svg` is a 404 there and on Amplify alike. So this
+ * lane spawns the program on an inner port and puts the platform's half in
+ * front of it, which is also what makes the header assertion mean something:
+ * the policy on a published file comes from `deploy-manifest.json` and
+ * `customHttp.yml`, not from the server.
+ */
+const PROXIED = new Set(['aws'])
+const innerPort = PROXIED.has(runtime) ? port + 1_000 : port
+
+if (FETCH_MODULE.has(runtime)) await startFetchModule()
+else if (NODE_HANDLER.has(runtime)) await startNodeHandler()
+else {
+  startRuntimeProcess()
+  if (PROXIED.has(runtime)) await startStaticFront()
+}
 
 /** Spawn the emitted standalone server, which is a program on these runtimes. */
 function startRuntimeProcess() {
-  const entry = path.join('server', 'index.mjs')
+  // Amplify's compute bundle is the same standalone server, emitted at the root
+  // of the compute directory rather than under `server/` — its `server.js`
+  // entrypoint is one line that imports `./index.mjs`. So the aws lane differs
+  // from the node lane in the path and in nothing else, which is the claim.
+  const entry = runtime === 'aws' ? 'index.mjs' : path.join('server', 'index.mjs')
+  const executable = NODE_PROGRAM.has(runtime) ? 'node' : runtime
   const args = runtime === 'deno' ? ['run', '-A', '--no-prompt', entry] : [entry]
-  child = spawn(runtimeExecutable(runtime), args, {
+  child = spawn(runtimeExecutable(executable), args, {
     cwd: path.resolve(deploymentDirectory),
-    env: { ...process.env, HOST: '127.0.0.1', PORT: String(port) },
+    env: { ...process.env, HOST: '127.0.0.1', PORT: String(innerPort) },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   child.stdout.on('data', (chunk) => (output += chunk))
   child.stderr.on('data', (chunk) => (output += chunk))
+}
+
+/** Serve the published files, then hand everything else to the spawned server. */
+async function startStaticFront() {
+  const assetsDir = publishDirectory()
+  server = createServer(async (request, response) => {
+    try {
+      const url = new URL(request.url, base)
+      const file =
+        request.method === 'GET' || request.method === 'HEAD'
+          ? staticFile(assetsDir, url.pathname)
+          : null
+      if (file) {
+        response.statusCode = 200
+        response.setHeader('content-type', assetContentType(file))
+        for (const [name, value] of assetHeaders(url.pathname)) response.setHeader(name, value)
+        createReadStream(file).pipe(response)
+        return
+      }
+      await forwardToInnerServer(request, response, url)
+    } catch (error) {
+      output += `${error?.stack ?? error}\n`
+      if (!response.headersSent) response.statusCode = 502
+      response.end('compute unreachable')
+    }
+  })
+  await new Promise((resolve) => server.listen(port, '127.0.0.1', resolve))
+}
+
+/** Pass a request through unchanged, including the headers the checks read. */
+function forwardToInnerServer(request, response, url) {
+  return new Promise((resolve, reject) => {
+    const call = httpRequest(
+      {
+        host: '127.0.0.1',
+        port: innerPort,
+        path: url.pathname + url.search,
+        method: request.method,
+        headers: request.headers,
+      },
+      (inner) => {
+        response.statusCode = inner.statusCode
+        for (const [name, value] of Object.entries(inner.headers)) response.setHeader(name, value)
+        inner.pipe(response)
+        inner.on('end', resolve)
+        inner.on('error', reject)
+      },
+    )
+    call.on('error', reject)
+    request.pipe(call)
+  })
 }
 
 /**
@@ -67,13 +194,18 @@ function startRuntimeProcess() {
  * Static first, then the worker, because that is the order the platform routes
  * in and the reason a worker never sees a request for a hashed bundle.
  */
-async function startEdgeWorker() {
+async function startFetchModule() {
   const workerDir = path.resolve(deploymentDirectory)
-  const assetsDir = path.resolve(assetsArg ?? path.join(workerDir, '..', 'assets'))
+  const assetsDir = publishDirectory()
   const module = await import(pathToFileURL(path.join(workerDir, 'index.mjs')).href)
-  const worker = module.default
+  // Cloudflare exports `{ fetch }`; a Netlify Functions v2 entry is the bare
+  // async function, and its `config` export is read by the platform rather than
+  // called. Both are the same contract once named: a `Request` in, a `Response`
+  // out, and nothing else from the host.
+  const worker =
+    typeof module.default === 'function' ? { fetch: module.default } : (module.default ?? {})
   if (typeof worker?.fetch !== 'function') {
-    throw new Error(`${workerDir}/index.mjs does not export a { fetch } worker`)
+    throw new Error(`${workerDir}/index.mjs exports neither { fetch } nor a request function`)
   }
 
   server = createServer(async (request, response) => {
@@ -98,6 +230,113 @@ async function startEdgeWorker() {
     }
   })
   await new Promise((resolve) => server.listen(port, '127.0.0.1', resolve))
+}
+
+/**
+ * The directory this platform publishes as static, served before the function.
+ *
+ * Every one of these platforms answers a published file from its own network
+ * and never invokes the function for it — the Vercel `handle: filesystem` step,
+ * Netlify's publish directory, Amplify's `Static` route target, Firebase
+ * Hosting's `public`. Serving it here in the same order is what makes
+ * `/smoke.svg` and a hashed browser bundle resolve the way they will in
+ * production instead of falling through to a 404 from the handler.
+ */
+function publishDirectory() {
+  if (assetsArg) return path.resolve(assetsArg)
+  return path.resolve(path.join(deploymentDirectory, '..', 'assets'))
+}
+
+/**
+ * Put a real HTTP server in front of an emitted **Node request handler**.
+ *
+ * Vercel's Node function and Firebase's `onRequest` are both `(req, res)` — the
+ * shape a Node server already speaks — so this lane calls them with the real
+ * objects rather than a translation of them. That is the point: everything
+ * between the socket and `createHandler` is adapter-written glue that no unit
+ * test runs, and it is where a streamed body, a repeated `set-cookie`, or a
+ * null-body status goes wrong.
+ *
+ * Firebase's handler is Express-shaped inside `onRequest`, so the two
+ * properties it reads that Node does not provide — `req.rawBody` and
+ * `res.status()` — are added here, exactly as Cloud Functions adds them.
+ */
+async function startNodeHandler() {
+  const functionDir = path.resolve(deploymentDirectory)
+  const assetsDir = publishDirectory()
+  if (runtime === 'firebase') installFirebaseFunctionsStub(functionDir)
+  const module = await import(pathToFileURL(path.join(functionDir, 'index.mjs')).href)
+  const handler =
+    runtime === 'firebase'
+      ? Object.values(module).find((value) => typeof value === 'function')
+      : module.default
+  if (typeof handler !== 'function') {
+    throw new Error(`${functionDir}/index.mjs exports no request handler`)
+  }
+
+  server = createServer(async (request, response) => {
+    try {
+      const url = new URL(request.url, base)
+      const file =
+        request.method === 'GET' || request.method === 'HEAD'
+          ? staticFile(assetsDir, url.pathname)
+          : null
+      if (file) {
+        response.statusCode = 200
+        response.setHeader('content-type', assetContentType(file))
+        for (const [name, value] of assetHeaders(url.pathname)) response.setHeader(name, value)
+        createReadStream(file).pipe(response)
+        return
+      }
+      if (runtime === 'firebase') {
+        request.originalUrl = request.url
+        const chunks = []
+        for await (const chunk of request) chunks.push(chunk)
+        request.rawBody = chunks.length > 0 ? Buffer.concat(chunks) : undefined
+        response.status = (code) => {
+          response.statusCode = code
+          return response
+        }
+      }
+      await handler(request, response, {})
+    } catch (error) {
+      output += `${error?.stack ?? error}\n`
+      if (!response.headersSent) response.statusCode = 500
+      response.end('function threw')
+    }
+  })
+  await new Promise((resolve) => server.listen(port, '127.0.0.1', resolve))
+}
+
+/**
+ * A stand-in for the one import the Firebase entry makes.
+ *
+ * `onRequest(options, handler)` registers the handler with the Functions
+ * runtime and returns it; on the platform that runtime is what listens. Nothing
+ * here can supply the platform, and nothing in the artifact depends on it —
+ * what is under test is the `(req, res)` body of the handler, which the real
+ * `onRequest` also just hands back. Written into the emitted function's own
+ * `node_modules`, which is a gitignored build directory the platform installs
+ * into anyway.
+ */
+function installFirebaseFunctionsStub(functionDir) {
+  const root = path.join(functionDir, 'node_modules', 'firebase-functions')
+  mkdirSync(path.join(root, 'v2'), { recursive: true })
+  writeFileSync(
+    path.join(root, 'package.json'),
+    // An explicit `exports` map, because ESM has no extension search: without it
+    // `firebase-functions/v2/https` resolves to a path with no file at it.
+    JSON.stringify({
+      name: 'firebase-functions',
+      version: '0.0.0-smoke',
+      type: 'module',
+      exports: { './v2/https': './v2/https.js' },
+    }),
+  )
+  writeFileSync(
+    path.join(root, 'v2', 'https.js'),
+    'export const onRequest = (_options, handler) => handler\n',
+  )
 }
 
 /** Turn a Node request into a `Request`, call the worker, and write the answer back. */
@@ -157,10 +396,8 @@ function assetHeaders(pathname) {
 let headerRules = null
 
 function parseHeaderRules() {
-  const file = path.join(
-    path.resolve(assetsArg ?? path.join(deploymentDirectory, '..', 'assets')),
-    '_headers',
-  )
+  if (runtime !== 'edge') return parsePlatformHeaderRules()
+  const file = path.join(publishDirectory(), '_headers')
   if (!existsSync(file)) return []
   const rules = []
   for (const line of readFileSync(file, 'utf8').split('\n')) {
@@ -183,6 +420,94 @@ function parseHeaderRules() {
       ])
   }
   return rules
+}
+
+/**
+ * The cache policy a platform attaches to a published file, read from the file
+ * that platform reads it from.
+ *
+ * Restating the expected header here would prove only that this script agrees
+ * with itself. An adapter's whole static story is a config the platform
+ * interprets — `.vercel/output/config.json`, `.netlify/v1/config.json`,
+ * Amplify's `deploy-manifest.json`, `firebase.json` — so the rules are parsed
+ * out of the emitted artifact and applied in that platform's own order.
+ */
+function parsePlatformHeaderRules() {
+  const file = platformConfigArg ? path.resolve(platformConfigArg) : null
+  if (!file || !existsSync(file)) return []
+  const config = JSON.parse(readFileSync(file, 'utf8'))
+  if (runtime === 'vercel') {
+    // The `continue: true` rules only: the ones that attach headers and let
+    // routing carry on to `handle: filesystem`.
+    return (config.routes ?? [])
+      .filter((route) => route.headers && route.continue)
+      .map((route) => ({
+        pattern: new RegExp(route.src),
+        headers: Object.entries(route.headers).map(([name, value]) => [name.toLowerCase(), value]),
+      }))
+  }
+  if (runtime === 'netlify') {
+    return (config.headers ?? []).map((rule) => ({
+      pattern: globToRegExp(rule.for),
+      headers: Object.entries(rule.values).map(([name, value]) => [name.toLowerCase(), value]),
+    }))
+  }
+  if (runtime === 'firebase') {
+    return (config.hosting?.headers ?? []).map((rule) => ({
+      pattern: globToRegExp(rule.source),
+      headers: rule.headers.map((entry) => [entry.key.toLowerCase(), entry.value]),
+    }))
+  }
+  // Amplify names the cache policy on the route itself rather than in a header
+  // block, and only a `Static` target carries one. Everything else it attaches
+  // comes from `customHttp.yml`, which is a separate file beside the app — so
+  // both are read, in the order Amplify applies them.
+  return [
+    ...parseAmplifyCustomHttp(path.join(path.dirname(file), '..', 'customHttp.yml')),
+    ...(config.routes ?? [])
+      .filter((route) => route.target?.kind === 'Static' && route.target.cacheControl)
+      .map((route) => ({
+        pattern: globToRegExp(route.path),
+        headers: [['cache-control', route.target.cacheControl]],
+      })),
+  ]
+}
+
+/**
+ * The `customHeaders` blocks of an Amplify `customHttp.yml`.
+ *
+ * A purpose-built reader for the exact shape the adapter emits rather than a
+ * YAML dependency: this asserts the file the adapter wrote, and a file it did
+ * not write would simply match nothing here and fail the check that needs it.
+ */
+function parseAmplifyCustomHttp(file) {
+  if (!existsSync(file)) return []
+  const rules = []
+  let key = null
+  for (const line of readFileSync(file, 'utf8').split('\n')) {
+    const pattern = line.match(/^\s*-\s*pattern:\s*'?([^'\n]+?)'?\s*$/)
+    if (pattern) {
+      rules.push({ pattern: globToRegExp(pattern[1]), headers: [] })
+      continue
+    }
+    const named = line.match(/^\s*-\s*key:\s*'?([^'\n]+?)'?\s*$/)
+    if (named) {
+      key = named[1].toLowerCase()
+      continue
+    }
+    const value = line.match(/^\s*value:\s*'?([^'\n]*?)'?\s*$/)
+    if (value && key && rules.length > 0) {
+      rules.at(-1).headers.push([key, value[1]])
+      key = null
+    }
+  }
+  return rules
+}
+
+/** `*` and `**` match any run of characters; everything else is literal. */
+function globToRegExp(pattern) {
+  const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace(/\*+/g, '.*')
+  return new RegExp(`^${escaped}$`)
 }
 
 /** The published file a path names, if the asset directory has one. */
@@ -546,8 +871,15 @@ try {
   // edge target the platform's asset network answers a static route and
   // compresses on its own, and the shared handler encodes nothing at all, so
   // there is no claim here to check rather than a check being skipped for
-  // convenience.
-  if (runtime === 'edge') {
+  // convenience. The same is true of every serverless function: the platform's
+  // CDN negotiates in front of it, and the function returns identity bytes on
+  // purpose. `aws` joins them for a different reason — its compute bundle *is*
+  // the standalone server and does negotiate, but the document this check asks
+  // for is a `Static` route Amplify answers from its own edge, so what the
+  // check would measure is the CDN stand-in rather than the artifact. The
+  // negotiating code is the same `standaloneServerSource` the node, bun, and
+  // deno lanes hold to the claim directly.
+  if (!SPAWNED.has(runtime) || PROXIED.has(runtime)) {
     console.log(`[skip] ${runtime} · content negotiation — the platform owns it on this target`)
   } else {
     await checkCompression()
@@ -560,14 +892,14 @@ try {
   await stopServing()
 }
 
-// Explicit, and only on the `edge` transport. The other three run the artifact
-// as a child process, so killing it drains everything it held. This one imports
-// the worker into *this* process, and a worker is a module its platform never
-// asks to let a process exit — Cloudflare has no process to exit. Waiting for
-// the loop to drain would be asking the artifact for a property nothing about
-// it promises, and it hung there with every check already reported. A thrown
-// check still exits non-zero, above this line.
-if (runtime === 'edge') process.exit(0)
+// Explicit, and only where the artifact was imported rather than spawned. A
+// spawned server drains everything it held when it is killed. An imported one
+// is a module its platform never asks to let a process exit — Cloudflare has no
+// process to exit, and a serverless function is invoked, not run — so waiting
+// for the loop to drain would be asking the artifact for a property nothing
+// about it promises. It hung there once with every check already reported. A
+// thrown check still exits non-zero, above this line.
+if (!SPAWNED.has(runtime)) process.exit(0)
 
 /** Stop whichever transport was started, without leaving the port held. */
 async function stopServing() {
@@ -577,7 +909,8 @@ async function stopServing() {
     // finished its checks and then hung with nothing left to do.
     server.closeAllConnections()
     await new Promise((resolve) => server.close(resolve))
-    return
+    // A proxied lane has both: the front server and the program behind it.
+    if (!child) return
   }
   child.kill()
   await Promise.race([
@@ -597,6 +930,10 @@ async function waitUntilServing() {
     try {
       const response = await fetch(`${base}/api/health`)
       await response.arrayBuffer()
+      // A proxied lane's front server is listening before the program behind it
+      // is, and it answers 502 until then. Accepting that as "serving" started
+      // the checks against a compute resource that was still booting.
+      if (response.status === 502) throw new Error('the compute resource is not up yet')
       return
     } catch (error) {
       lastError = error

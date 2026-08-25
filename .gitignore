@@ -15,7 +15,8 @@ dist/
 packages/ruvyxa/native-bin/
 packages/create-ruvyxa/template/
 packages/@ruvyxa/cli-*/bin/
-
+stress-lab/
+stress-lab-2/
 # Project-scope deploy artifacts written by `ruvyxa build --adapter <platform>`
 # when a fixture app is built for a hosting platform. Scoped to the two fixtures
 # rather than global, so a hand-authored netlify.toml or wrangler.jsonc anywhere

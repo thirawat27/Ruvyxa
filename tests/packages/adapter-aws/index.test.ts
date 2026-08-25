@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict'
 import { describe, it } from 'node:test'
 
+import { DEFAULT_SECURITY_HEADERS } from '../../../packages/@ruvyxa/core/dist/utils.js'
 import { aws } from '../../../packages/@ruvyxa/adapter-aws/dist/index.js'
 
 describe('aws', () => {
@@ -34,6 +35,7 @@ describe('aws', () => {
           path: 'deploy/aws/.amplify-hosting/deploy-manifest.json',
           scope: undefined,
         },
+        { kind: 'file', path: 'deploy/aws/customHttp.yml', scope: undefined },
         { kind: 'file', path: 'deploy/aws/README.md', scope: undefined },
         { kind: 'static-site', path: '.amplify-hosting/static', scope: 'project' },
         {
@@ -51,8 +53,24 @@ describe('aws', () => {
           path: '.amplify-hosting/deploy-manifest.json',
           scope: 'project',
         },
+        { kind: 'file', path: 'customHttp.yml', scope: 'project' },
       ],
     )
+
+    // Amplify's route targets carry `cacheControl` and nothing else, so the
+    // security defaults have no place in the deploy manifest — and a `Static`
+    // target is answered by the CDN, which never invokes the compute resource
+    // where the standalone server sets them. `customHttp.yml` is the mechanism
+    // Amplify documents for it, and without the file a deployed pre-rendered
+    // page carried none of the seven.
+    const customHttp = output.artifacts?.find((artifact) => artifact.path === 'customHttp.yml')
+    // A project may already have written its own Amplify rules into this file.
+    assert.equal(customHttp && 'skipIfExists' in customHttp ? customHttp.skipIfExists : false, true)
+    const yaml = String(customHttp && 'contents' in customHttp ? customHttp.contents : '')
+    assert.match(yaml, /^customHeaders:\n {2}- pattern: '\*\*'\n {4}headers:\n/)
+    for (const [key, value] of Object.entries(DEFAULT_SECURITY_HEADERS)) {
+      assert.ok(yaml.includes(`      - key: '${key}'\n        value: '${value}'\n`), key)
+    }
 
     const manifestArtifact = output.artifacts?.find(
       (artifact) => artifact.path === '.amplify-hosting/deploy-manifest.json',

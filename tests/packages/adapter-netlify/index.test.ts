@@ -6,6 +6,7 @@ import os from 'node:os'
 import path from 'node:path'
 
 import type { AdapterArtifact } from '../../../packages/@ruvyxa/core/dist/types.js'
+import { DEFAULT_SECURITY_HEADERS } from '../../../packages/@ruvyxa/core/dist/utils.js'
 import { nonPublishableStrategies } from '../../../packages/@ruvyxa/core/dist/deploy-manifest.js'
 import { netlify } from '../../../packages/@ruvyxa/adapter-netlify/dist/index.js'
 import {
@@ -60,7 +61,14 @@ describe('netlify', () => {
         ? String(frameworksConfigArtifact.contents)
         : '{}',
     )
+    // First, and on everything: Netlify publishes pre-rendered documents and
+    // public files itself, so the function — where `createHandler` sets these —
+    // is never invoked for them, and a deployed SSG page carried none of them.
     assert.deepEqual(frameworksConfig.headers[0], {
+      for: '/*',
+      values: DEFAULT_SECURITY_HEADERS,
+    })
+    assert.deepEqual(frameworksConfig.headers[1], {
       for: '/__ruvyxa/client/*',
       values: { 'Cache-Control': 'public, max-age=31536000, immutable' },
     })
@@ -68,7 +76,7 @@ describe('netlify', () => {
     // than inheriting Netlify's per-request default. The rules deliberately
     // skip js/css: on hosts whose `*` crosses path separators they would also
     // match the hashed bundles and downgrade their immutable header.
-    const assetRules = frameworksConfig.headers.slice(1)
+    const assetRules = frameworksConfig.headers.slice(2)
     assert.ok(assetRules.length > 0)
     assert.ok(
       assetRules.every(

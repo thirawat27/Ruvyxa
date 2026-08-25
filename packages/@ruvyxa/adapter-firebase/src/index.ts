@@ -2,6 +2,7 @@ import type { Adapter, AdapterArtifact, AdapterOutput, BuildContext } from '@ruv
 import {
   CLIENT_BUNDLE_PREFIX,
   clientBuildOutput,
+  DEFAULT_SECURITY_HEADERS,
   IMMUTABLE_CACHE_CONTROL,
   nonPublishableStrategies,
   projectRelativeOutDir,
@@ -85,6 +86,20 @@ export function firebase(options: FirebaseAdapterOptions = {}): Adapter {
               public: hostingPublic,
               ignore: ['firebase.json', '**/.*', '**/node_modules/**'],
               headers: [
+                {
+                  // The security defaults, on everything Hosting answers.
+                  //
+                  // A pre-rendered document and every public file are served
+                  // from `public` without the rewrite ever reaching the
+                  // function, and the function is where `createHandler` sets
+                  // these. So a deployed SSG page carried none of them while
+                  // the same page under `ruvyxa start` carried all seven.
+                  source: '**',
+                  headers: Object.entries(DEFAULT_SECURITY_HEADERS).map(([key, value]) => ({
+                    key,
+                    value,
+                  })),
+                },
                 {
                   source: `${CLIENT_BUNDLE_PREFIX}**`,
                   headers: [{ key: 'Cache-Control', value: IMMUTABLE_CACHE_CONTROL }],

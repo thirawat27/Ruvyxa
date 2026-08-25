@@ -189,3 +189,56 @@ jobs:
           FIXTURE=$(node scripts/edge-fixture.mjs examples/deploy-smoke --drop cached)
           cargo run -p ruvyxa_cli -- build --root "$FIXTURE" --adapter cloudflare
           node scripts/smoke-runtime-adapter.mjs edge "$FIXTURE/.ruvyxa/deploy/cloudflare/worker" 4393
+      # railway and render emit the same standalone server and the same layout
+      # as the node adapter. That is a claim about three adapters that can drift
+      # apart quietly, so each is launched under its own name: when it breaks,
+      # the failure says which one.
+      - name: Build and launch the Railway artifact
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          cargo run -p ruvyxa_cli -- build --root examples/deploy-smoke --adapter railway
+          node scripts/smoke-runtime-adapter.mjs railway examples/deploy-smoke/.ruvyxa/deploy/railway 4398
+      - name: Build and launch the Render artifact
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          cargo run -p ruvyxa_cli -- build --root examples/deploy-smoke --adapter render
+          node scripts/smoke-runtime-adapter.mjs render examples/deploy-smoke/.ruvyxa/deploy/render 4399
+      # The four serverless adapters, each launched the way its platform
+      # invokes it.
+      #
+      # They share `createHandler`, which the node lane already proves. What
+      # they do not share is the glue on either side of it — the request
+      # translation each adapter hand-writes, and the static half its platform
+      # answers without ever calling the function. That second half is where a
+      # deployed pre-rendered page turned out to carry none of the security
+      # headers the same page carries under `ruvyxa start`, on all four at once.
+      #
+      # Each build is followed immediately by its smoke: a build rewrites
+      # .ruvyxa/deploy, so netlify's publish directory does not survive the
+      # next adapter's build.
+      - name: Build and launch the Vercel function
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          cargo run -p ruvyxa_cli -- build --root examples/deploy-smoke --adapter vercel
+          node scripts/smoke-runtime-adapter.mjs vercel examples/deploy-smoke/.vercel/output/functions/__ruvyxa_handler.func 4394 examples/deploy-smoke/.vercel/output/static examples/deploy-smoke/.vercel/output/config.json
+      - name: Build and launch the Netlify function
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          cargo run -p ruvyxa_cli -- build --root examples/deploy-smoke --adapter netlify
+          node scripts/smoke-runtime-adapter.mjs netlify examples/deploy-smoke/.netlify/v1/functions/ruvyxa-handler 4395 examples/deploy-smoke/.ruvyxa/deploy/netlify/publish examples/deploy-smoke/.netlify/v1/config.json
+      - name: Build and launch the AWS Amplify compute bundle
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          cargo run -p ruvyxa_cli -- build --root examples/deploy-smoke --adapter aws
+          node scripts/smoke-runtime-adapter.mjs aws examples/deploy-smoke/.amplify-hosting/compute/default 4396 examples/deploy-smoke/.amplify-hosting/static examples/deploy-smoke/.amplify-hosting/deploy-manifest.json
+      - name: Build and launch the Firebase function
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          cargo run -p ruvyxa_cli -- build --root examples/deploy-smoke --adapter firebase
+          node scripts/smoke-runtime-adapter.mjs firebase examples/deploy-smoke/.ruvyxa/deploy/firebase/functions 4397 examples/deploy-smoke/.ruvyxa/deploy/firebase/public examples/deploy-smoke/.ruvyxa/deploy/firebase/firebase.json

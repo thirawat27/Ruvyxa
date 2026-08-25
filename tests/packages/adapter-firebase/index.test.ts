@@ -5,6 +5,7 @@ import { mkdtemp, rm } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
+import { DEFAULT_SECURITY_HEADERS } from '../../../packages/@ruvyxa/core/dist/utils.js'
 import { firebase } from '../../../packages/@ruvyxa/adapter-firebase/dist/index.js'
 import {
   deployFunction,
@@ -76,7 +77,19 @@ describe('firebase', () => {
       },
     ])
     assert.equal(config.functions[0].runtime, 'nodejs24')
-    assert.equal(config.hosting.headers[0].headers[0].value, 'public, max-age=31536000, immutable')
+    // First, and on everything Hosting answers: a pre-rendered document and
+    // every public file are served from `public` without the rewrite reaching
+    // the function, which is the only other place these are set.
+    assert.equal(config.hosting.headers[0].source, '**')
+    assert.deepEqual(
+      Object.fromEntries(
+        config.hosting.headers[0].headers.map(
+          (entry: { key: string; value: string }) => [entry.key, entry.value] as const,
+        ),
+      ),
+      DEFAULT_SECURITY_HEADERS,
+    )
+    assert.equal(config.hosting.headers[1].headers[0].value, 'public, max-age=31536000, immutable')
 
     const handler = output.artifacts?.find((artifact) => artifact.kind === 'function')
     const source = String(handler && 'handlerSource' in handler ? handler.handlerSource : '')
