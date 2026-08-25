@@ -40,6 +40,7 @@ const RUNTIMES = [
   'vercel',
   'netlify',
   'firebase',
+  'static',
 ]
 const SPAWNED = new Set(['node', 'bun', 'deno', 'aws', 'railway', 'render'])
 /**
@@ -77,14 +78,21 @@ const port = Number(portArg)
 const base = `http://127.0.0.1:${port}`
 
 /**
- * The route strategies this deployment can serve.
+ * The route strategies this deployment can serve — `adapter.supports`, verbatim.
  *
- * An edge target has no ISR — `adapter.supports` says so and the build refuses
- * such a route — so the fixture it is built from has none either, and the check
- * for it has nothing to ask. Skipped checks are printed rather than dropped: a
- * suite that quietly shrinks reads as one that passed.
+ * An edge target has no ISR, and a static publish directory has no server at
+ * all, so the build refuses those routes with `RUV2202` and the fixture each is
+ * built from has none of them. The checks that ask for one therefore have
+ * nothing to ask. Skipped checks are printed rather than dropped: a suite that
+ * quietly shrinks reads as one that passed.
  */
-const capabilities = runtime === 'edge' ? new Set(['ssr', 'ssg', 'csr', 'api']) : null
+const CAPABILITIES_BY_RUNTIME = {
+  edge: ['ssr', 'ssg', 'csr', 'api'],
+  static: ['ssg', 'csr'],
+}
+const capabilities = CAPABILITIES_BY_RUNTIME[runtime]
+  ? new Set(CAPABILITIES_BY_RUNTIME[runtime])
+  : null
 
 let output = ''
 let child = null
@@ -104,7 +112,8 @@ let server = null
 const PROXIED = new Set(['aws'])
 const innerPort = PROXIED.has(runtime) ? port + 1_000 : port
 
-if (FETCH_MODULE.has(runtime)) await startFetchModule()
+if (runtime === 'static') await startStaticSite()
+else if (FETCH_MODULE.has(runtime)) await startFetchModule()
 else if (NODE_HANDLER.has(runtime)) await startNodeHandler()
 else {
   startRuntimeProcess()
@@ -228,6 +237,46 @@ async function startFetchModule() {
       response.statusCode = 500
       response.end('worker threw')
     }
+  })
+  await new Promise((resolve) => server.listen(port, '127.0.0.1', resolve))
+}
+
+/**
+ * Serve the publish directory and nothing else, the way a static host does.
+ *
+ * The `static` target emits no server of any kind, so there is no artifact here
+ * to spawn or import — the deployment *is* the directory, and every claim it
+ * makes is a file in it. Two of those claims have no other lane that can check
+ * them: `_headers`, which is the only mechanism this target has for a cache or
+ * a security policy, and `404.html`, which is the only way the project's own
+ * not-found page can be reached when nothing is running to read a manifest.
+ *
+ * A miss falls through to `404.html` with a 404 status because that is what
+ * Netlify, Cloudflare Pages, GitHub Pages, and an S3 website all do with it. A
+ * host that ignores the convention would show its own page — which is exactly
+ * the difference this lane exists to keep visible.
+ */
+async function startStaticSite() {
+  const publishDir = publishDirectory()
+  const notFound = path.join(publishDir, '404.html')
+  server = createServer((request, response) => {
+    const url = new URL(request.url, base)
+    const file = staticFile(publishDir, url.pathname)
+    if (file) {
+      response.statusCode = 200
+      response.setHeader('content-type', assetContentType(file))
+      for (const [name, value] of assetHeaders(url.pathname)) response.setHeader(name, value)
+      createReadStream(file).pipe(response)
+      return
+    }
+    response.statusCode = 404
+    if (!existsSync(notFound)) {
+      response.end('Not Found')
+      return
+    }
+    response.setHeader('content-type', 'text/html; charset=utf-8')
+    for (const [name, value] of assetHeaders(url.pathname)) response.setHeader(name, value)
+    createReadStream(notFound).pipe(response)
   })
   await new Promise((resolve) => server.listen(port, '127.0.0.1', resolve))
 }
@@ -386,8 +435,19 @@ async function answerWithWorker(worker, request, response, url) {
 function assetHeaders(pathname) {
   headerRules ??= parseHeaderRules()
   const matched = new Map()
+  // `firstMatch` rules stop at the first one that matches; the rest merge, later
+  // winning. Both semantics are real and the difference is not cosmetic: an
+  // Amplify deploy manifest is a **routing table**, where the first matching
+  // route handles the request, while a `_headers` file and the Vercel, Netlify,
+  // and Firebase header blocks are lists that accumulate. Merging the manifest
+  // like the others made `/__ruvyxa/client/<hash>.js` match `/*.*` after
+  // `/__ruvyxa/client/*` and reported the immutable bundle as revalidating
+  // hourly — a defect in this file, read as a defect in the adapter.
+  let routed = false
   for (const rule of headerRules) {
+    if (rule.firstMatch && routed) continue
     if (!rule.pattern.test(pathname)) continue
+    if (rule.firstMatch) routed = true
     for (const [name, value] of rule.headers) matched.set(name, value)
   }
   return matched
@@ -396,7 +456,10 @@ function assetHeaders(pathname) {
 let headerRules = null
 
 function parseHeaderRules() {
-  if (runtime !== 'edge') return parsePlatformHeaderRules()
+  // `edge` and `static` are the two targets whose adapter writes a `_headers`
+  // file; every other platform is configured through a JSON or YAML file of its
+  // own shape.
+  if (runtime !== 'edge' && runtime !== 'static') return parsePlatformHeaderRules()
   const file = path.join(publishDirectory(), '_headers')
   if (!existsSync(file)) return []
   const rules = []
@@ -468,6 +531,7 @@ function parsePlatformHeaderRules() {
       .filter((route) => route.target?.kind === 'Static' && route.target.cacheControl)
       .map((route) => ({
         pattern: globToRegExp(route.path),
+        firstMatch: true,
         headers: [['cache-control', route.target.cacheControl]],
       })),
   ]
@@ -547,6 +611,7 @@ function assetContentType(file) {
 const checks = [
   {
     name: 'GET /api/health reaches the generated route registry',
+    requires: 'api',
     path: '/api/health',
     assert: (response, body) => {
       if (response.status !== 200) return `status ${response.status}`
@@ -597,9 +662,41 @@ const checks = [
     },
   },
   {
-    name: 'an unknown path is a 404 rather than a crash',
+    // The status *and* the body. A host has a 404 page of its own and will show
+    // it perfectly happily, so a status-only assertion passes whether or not the
+    // application's `not-found.tsx` ever reached the deployment. Each target
+    // carries it a different way — a function reads `notFoundDocument` out of
+    // the manifest, a static publish directory has only the `404.html`
+    // convention — and neither is exercised by anything else here.
+    name: 'an unknown path is the project’s own 404',
     path: '/definitely-not-a-route',
-    assert: (response) => (response.status === 404 ? null : `status ${response.status}`),
+    assert: (response, body) => {
+      if (response.status !== 404) return `status ${response.status}`
+      if (!body.includes('SMOKE-NOT-FOUND-MARKER')) {
+        return `the host's own 404 was served, not the project's: ${body.slice(0, 120)}`
+      }
+      return null
+    },
+  },
+  {
+    // The one asset rule no other check reads, and the one a mistake is silent
+    // in: a glob that crosses path separators matches a hashed bundle too and
+    // quietly replaces `immutable` with the one-hour public-asset lifetime.
+    // Every visitor then re-fetches every bundle on every navigation. Asked of
+    // every lane, because each sets it somewhere different — a platform config
+    // file on the CDN targets, `serveStatic` in the standalone server.
+    name: 'a hashed client bundle is immutable',
+    path: '/',
+    assert: async (response, body) => {
+      const bundle = body.match(/src="(\/__ruvyxa\/client\/[^"]+)"/)
+      if (!bundle) return 'the document names no browser bundle'
+      const asset = await fetch(base + bundle[1])
+      await asset.arrayBuffer()
+      if (asset.status !== 200) return `${bundle[1]} answered ${asset.status}`
+      const cache = asset.headers.get('cache-control')
+      if (cache !== 'public, max-age=31536000, immutable') return `cache-control ${cache}`
+      return null
+    },
   },
   {
     // A dynamic server-components route is rendered by the emitted function on
@@ -609,6 +706,7 @@ const checks = [
     // block the browser hydrates from. Every adapter refused this shape with
     // RUV2213 until the route registry learned to render through that pipeline.
     name: 'GET /rsc renders a dynamic server-components route',
+    requires: 'ssr',
     path: '/rsc',
     assert: (response, body) => {
       if (response.status !== 200) return `status ${response.status}`
@@ -860,7 +958,7 @@ try {
     }
     const response = await fetch(base + check.path)
     const body = await response.text()
-    const failure = check.assert(response, body)
+    const failure = await check.assert(response, body)
     if (failure) throw new Error(`${runtime}: ${check.name} — ${failure}\n${output}`)
     console.log(`[ok] ${runtime} · ${check.name}`)
     ran += 1
@@ -885,9 +983,17 @@ try {
     await checkCompression()
     ran += 2
   }
-  await checkRscPayload()
-  await checkServerFunction()
-  console.log(`[ok] ${runtime} deployment artifact passed ${ran + 2} checks`)
+  // Both are the server-components endpoint, which a target with no server
+  // does not have. `adapter.supports` says so, and the fixture that target is
+  // built from has no such route to ask about.
+  if (capabilities && !capabilities.has('ssr')) {
+    console.log(`[skip] ${runtime} · /__ruvyxa/rsc — this target has no ssr`)
+  } else {
+    await checkRscPayload()
+    await checkServerFunction()
+    ran += 2
+  }
+  console.log(`[ok] ${runtime} deployment artifact passed ${ran} checks`)
 } finally {
   await stopServing()
 }
@@ -928,12 +1034,16 @@ async function waitUntilServing() {
       throw new Error(`server exited with ${child.exitCode}: ${output}`)
     }
     try {
-      const response = await fetch(`${base}/api/health`)
+      // `/` rather than the API route: a static publish directory has no API,
+      // and every target has a pre-rendered index.
+      //
+      // A proxied lane is polled on its **inner** port, past the static front.
+      // The front is listening before the program behind it is, and `/` is a
+      // published file it answers 200 for on its own — so polling through it
+      // reported "serving" while the compute resource was still booting, and
+      // every check that needed it failed with a 502.
+      const response = await fetch(`http://127.0.0.1:${innerPort}/`)
       await response.arrayBuffer()
-      // A proxied lane's front server is listening before the program behind it
-      // is, and it answers 502 until then. Accepting that as "serving" started
-      // the checks against a compute resource that was still booting.
-      if (response.status === 502) throw new Error('the compute resource is not up yet')
       return
     } catch (error) {
       lastError = error

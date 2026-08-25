@@ -242,3 +242,18 @@ jobs:
         run: |
           cargo run -p ruvyxa_cli -- build --root examples/deploy-smoke --adapter firebase
           node scripts/smoke-runtime-adapter.mjs firebase examples/deploy-smoke/.ruvyxa/deploy/firebase/functions 4397 examples/deploy-smoke/.ruvyxa/deploy/firebase/public examples/deploy-smoke/.ruvyxa/deploy/firebase/firebase.json
+      # The static target emits no server at all, so the deployment is the
+      # publish directory and every claim it makes is a file in it. Two of those
+      # have no other lane that can check them: `_headers`, its only mechanism
+      # for a cache or security policy, and `404.html`, the only way the
+      # project's own not-found page is reachable with nothing running to read a
+      # manifest. Its fixture drops everything a publish directory cannot answer
+      # — add an API, ISR, or SSR route to deploy-smoke and this build fails with
+      # RUV2202 naming it rather than skipping quietly.
+      - name: Build and serve the static publish directory
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          FIXTURE=$(node scripts/edge-fixture.mjs examples/deploy-smoke --out .static --drop api/health --drop cached --drop rsc)
+          cargo run -p ruvyxa_cli -- build --root "$FIXTURE" --adapter static
+          node scripts/smoke-runtime-adapter.mjs static "$FIXTURE/.ruvyxa/static" 4400 "$FIXTURE/.ruvyxa/static"

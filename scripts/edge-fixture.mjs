@@ -22,7 +22,7 @@
  * loud failure is better anyway: add another ISR route and the cloudflare build
  * fails with `RUV2202` naming it, which is a message, not a silent omission.
  *
- * usage: node scripts/edge-fixture.mjs <source-root> [--drop <route-dir>]...
+ * usage: node scripts/edge-fixture.mjs <source-root> [--out <dir>] [--drop <route-dir>]...
  * prints: the fixture root, for the caller to build and smoke.
  */
 import { cp, rm, writeFile } from 'node:fs/promises'
@@ -32,8 +32,21 @@ import path from 'node:path'
 const argv = process.argv.slice(2)
 const source = path.resolve(argv[0] ?? '')
 const drops = argv.flatMap((value, index) => (argv[index - 1] === '--drop' ? [value] : []))
-if (!argv[0] || !existsSync(source)) {
-  console.error('usage: node scripts/edge-fixture.mjs <source-root> [--drop <route-dir>]...')
+// Named so two fixtures of the same app can exist at once: CI builds the edge
+// one and the static one from `examples/deploy-smoke` in the same job, and a
+// shared directory would mean each adapter smoked whichever ran last.
+// Read by index rather than `argv[indexOf('--out') + 1]`: with the flag absent
+// `indexOf` is -1 and that expression is `argv[0]`, the source root — so an
+// invocation with no `--out` wrote the fixture to
+// `examples/deploy-smoke/examples/deploy-smoke`, outside the gitignore rule and
+// invisible until `prettier --check` walked into it.
+const outIndex = argv.indexOf('--out')
+const outName = outIndex === -1 ? undefined : argv[outIndex + 1]
+if (!argv[0] || !existsSync(source) || (outIndex !== -1 && !outName?.startsWith('.'))) {
+  console.error(
+    'usage: node scripts/edge-fixture.mjs <source-root> [--out <dir>] [--drop <route-dir>]...',
+  )
+  console.error('  --out names a dot-directory inside the source app; it defaults to .edge')
   process.exit(2)
 }
 
@@ -51,7 +64,7 @@ if (!argv[0] || !existsSync(source)) {
  * gitignored for both fixtures, and the parent's `tsconfig.json` includes only
  * `app`, so neither `tsc` nor knip sees the copy.
  */
-const root = path.join(source, '.edge')
+const root = path.join(source, outName ?? '.edge')
 await rm(root, { recursive: true, force: true })
 
 for (const entry of ['app', 'public', 'ruvyxa.config.ts', 'package.json']) {
