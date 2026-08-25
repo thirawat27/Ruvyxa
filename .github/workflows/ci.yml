@@ -189,6 +189,19 @@ jobs:
           FIXTURE=$(node scripts/edge-fixture.mjs examples/deploy-smoke --drop cached)
           cargo run -p ruvyxa_cli -- build --root "$FIXTURE" --adapter cloudflare
           node scripts/smoke-runtime-adapter.mjs edge "$FIXTURE/.ruvyxa/deploy/cloudflare/worker" 4393
+      # The same emitted server, asked what the *application* carries.
+      #
+      # Every lane above deploys `examples/deploy-smoke` — four routes, no
+      # plugins — so the whole plugin lane, three of the five render strategies,
+      # and a streamed document were deployed by nobody and asked by nothing. A
+      # response hook that turned every 204 into a 500 lived in that gap, and so
+      # did a deployed build that buffered every render instead of streaming it.
+      - name: Deploy and probe the feature fixture
+        timeout-minutes: 20
+        shell: bash
+        run: |
+          cargo run -p ruvyxa_cli -- build --root examples/demo --adapter node
+          node scripts/smoke-runtime-adapter.mjs node examples/demo/.ruvyxa/deploy/node 4401 --app demo
       # railway and render emit the same standalone server and the same layout
       # as the node adapter. That is a claim about three adapters that can drift
       # apart quietly, so each is launched under its own name: when it breaks,

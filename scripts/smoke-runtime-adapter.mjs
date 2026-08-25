@@ -54,8 +54,26 @@ const SPAWNED = new Set(['node', 'bun', 'deno', 'aws', 'railway', 'render'])
 const NODE_PROGRAM = new Set(['aws', 'railway', 'render'])
 const FETCH_MODULE = new Set(['edge', 'netlify'])
 const NODE_HANDLER = new Set(['vercel', 'firebase'])
-const [runtime, deploymentDirectory, portArg, assetsArg, platformConfigArg] = process.argv.slice(2)
-if (!RUNTIMES.includes(runtime) || !deploymentDirectory || !portArg) {
+/**
+ * Which application's expectations to hold the deployment to.
+ *
+ * The transports below are the same whatever is deployed; what a check *asks
+ * for* is not. `deploy-smoke` is four routes chosen for the emitted server's own
+ * decisions, and it is the only fixture every adapter can build. `demo` is the
+ * broad feature fixture — 31 routes with plugins, every render strategy, and a
+ * streamed document — and nothing had ever deployed it and asked it anything,
+ * which is why the plugin lane could answer 500 for every 204 in a deployed
+ * build with every check still green.
+ */
+const APPS = ['deploy-smoke', 'demo']
+const appIndex = process.argv.indexOf('--app')
+const app = appIndex === -1 ? 'deploy-smoke' : process.argv[appIndex + 1]
+const positional = process.argv.slice(2).filter((value, index, all) => {
+  const previous = all[index - 1]
+  return value !== '--app' && previous !== '--app'
+})
+const [runtime, deploymentDirectory, portArg, assetsArg, platformConfigArg] = positional
+if (!RUNTIMES.includes(runtime) || !deploymentDirectory || !portArg || !APPS.includes(app)) {
   console.error(
     `usage: node scripts/smoke-runtime-adapter.mjs <${RUNTIMES.join('|')}> <deployment-dir> <port>` +
       ' [publish-dir] [platform-config]',
@@ -71,6 +89,9 @@ if (!RUNTIMES.includes(runtime) || !deploymentDirectory || !portArg) {
     '  platform publishes as static, and the config file that platform reads its asset headers',
   )
   console.error('  from — so the header assertion lands on the artifact, not on this script.')
+  console.error(
+    `  --app <${APPS.join('|')}> selects whose expectations to check; default deploy-smoke.`,
+  )
   process.exit(2)
 }
 
@@ -97,6 +118,38 @@ const capabilities = CAPABILITIES_BY_RUNTIME[runtime]
 let output = ''
 let child = null
 let server = null
+
+/**
+ * Published files still being read, so exit can wait for them.
+ *
+ * A `ReadStream` closes its descriptor *after* the response it fed has ended,
+ * on the libuv threadpool. `process.exit` while one of those completions is in
+ * flight aborts the process on Windows — `Assertion failed:
+ * !(handle->flags & UV_HANDLE_CLOSING), file src/win/async.c` — with every
+ * check already reported green, which is exactly the shape that reads as a
+ * flaky runner rather than as this script.
+ */
+const openFileStreams = new Set()
+
+/** Send a published file, and remember it until its descriptor is closed. */
+function sendFile(response, file) {
+  const stream = createReadStream(file)
+  openFileStreams.add(stream)
+  const settle = () => openFileStreams.delete(stream)
+  stream.once('close', settle)
+  stream.once('error', settle)
+  stream.pipe(response)
+}
+
+/** Wait for those descriptors, bounded — nothing here should take a second. */
+async function settleFileStreams() {
+  const deadline = Date.now() + 1_000
+  while (openFileStreams.size > 0 && Date.now() < deadline) {
+    await new Promise((resolve) => setImmediate(resolve))
+  }
+  for (const stream of openFileStreams) stream.destroy()
+  openFileStreams.clear()
+}
 
 /**
  * Runtimes whose program is reached through a CDN rather than directly.
@@ -152,7 +205,7 @@ async function startStaticFront() {
         response.statusCode = 200
         response.setHeader('content-type', assetContentType(file))
         for (const [name, value] of assetHeaders(url.pathname)) response.setHeader(name, value)
-        createReadStream(file).pipe(response)
+        sendFile(response, file)
         return
       }
       await forwardToInnerServer(request, response, url)
@@ -228,7 +281,7 @@ async function startFetchModule() {
         response.statusCode = 200
         response.setHeader('content-type', assetContentType(file))
         for (const [name, value] of assetHeaders(url.pathname)) response.setHeader(name, value)
-        createReadStream(file).pipe(response)
+        sendFile(response, file)
         return
       }
       await answerWithWorker(worker, request, response, url)
@@ -266,7 +319,7 @@ async function startStaticSite() {
       response.statusCode = 200
       response.setHeader('content-type', assetContentType(file))
       for (const [name, value] of assetHeaders(url.pathname)) response.setHeader(name, value)
-      createReadStream(file).pipe(response)
+      sendFile(response, file)
       return
     }
     response.statusCode = 404
@@ -276,7 +329,7 @@ async function startStaticSite() {
     }
     response.setHeader('content-type', 'text/html; charset=utf-8')
     for (const [name, value] of assetHeaders(url.pathname)) response.setHeader(name, value)
-    createReadStream(notFound).pipe(response)
+    sendFile(response, notFound)
   })
   await new Promise((resolve) => server.listen(port, '127.0.0.1', resolve))
 }
@@ -334,7 +387,7 @@ async function startNodeHandler() {
         response.statusCode = 200
         response.setHeader('content-type', assetContentType(file))
         for (const [name, value] of assetHeaders(url.pathname)) response.setHeader(name, value)
-        createReadStream(file).pipe(response)
+        sendFile(response, file)
         return
       }
       if (runtime === 'firebase') {
@@ -753,6 +806,127 @@ const checks = [
 ]
 
 /**
+ * What `examples/demo` adds, which is everything the small fixture has no way
+ * to reach.
+ *
+ * `deploy-smoke` is four routes and no plugins, so the whole plugin lane, every
+ * render strategy but two, and a streamed document were deployed by nobody and
+ * asked by nothing. A response hook that turned every 204 into a 500 lived in
+ * that gap; so did a deployed build that never streamed. These checks are
+ * chosen for what a deployment carries *from the application* rather than from
+ * the framework.
+ */
+const DEMO_CHECKS = [
+  {
+    // Both demo plugins are `http.onResponse` registrations that rebuild the
+    // response to add a header — the pattern the documentation shows and the
+    // one that used to make a null-body status a 500. Nothing had ever run a
+    // plugin inside a deployed function.
+    name: 'a plugin response hook runs in the deployed function',
+    path: '/plugin-lab',
+    assert: (response) => {
+      if (response.status !== 200) return `status ${response.status}`
+      if (response.headers.get('x-demo-plugin-response') !== 'active') {
+        return `x-demo-plugin-response ${response.headers.get('x-demo-plugin-response')}`
+      }
+      if (response.headers.get('x-demo-plugin-route') !== '/plugin-lab') {
+        return `x-demo-plugin-route ${response.headers.get('x-demo-plugin-route')}`
+      }
+      return null
+    },
+  },
+  {
+    // The other half of a `match` list, and the half a hook that ran on
+    // everything would pass silently.
+    name: 'a plugin hook stays off the routes it does not match',
+    path: '/about',
+    assert: (response) => {
+      if (response.status !== 200) return `status ${response.status}`
+      const header = response.headers.get('x-demo-plugin-response')
+      if (header !== null) return `x-demo-plugin-response leaked as ${header}`
+      return null
+    },
+  },
+  ...[
+    ['/static-page', 'static'],
+    ['/ssg-blog', 'ssg'],
+    ['/isr-page', 'isr'],
+    ['/csr-page', 'csr'],
+    ['/ppr-page', 'ppr'],
+  ].map(([path, mode]) => ({
+    // One page per render strategy, each answered by a different branch of the
+    // handler, and each carrying a header only a plugin could have added — so
+    // this asserts the strategy *and* that the plugin lane runs on all of them.
+    name: `${path} renders as ${mode} with its plugin badge`,
+    path,
+    assert: (response) => {
+      if (response.status !== 200) return `status ${response.status}`
+      const badge = response.headers.get('x-demo-render-mode')
+      if (badge !== mode) return `x-demo-render-mode ${badge}`
+      return null
+    },
+  })),
+  {
+    name: 'a dynamic segment reaches the page as a parameter',
+    path: '/showcase/hello',
+    assert: (response, body) =>
+      response.status === 200 && body.includes('hello') ? null : `status ${response.status}`,
+  },
+  {
+    name: 'a catch-all route answers a path of any depth',
+    path: '/catchall/a/b/c/d',
+    assert: (response) => (response.status === 200 ? null : `status ${response.status}`),
+  },
+  {
+    name: 'a build-time static parameter is served',
+    path: '/ssg-blog/first-post',
+    assert: (response) => (response.status === 200 ? null : `status ${response.status}`),
+  },
+  {
+    name: 'an unknown path is the project’s own 404',
+    path: '/definitely-not-a-route',
+    assert: (response, body) => {
+      if (response.status !== 404) return `status ${response.status}`
+      if (!/not found/i.test(body)) return `body ${body.slice(0, 120)}`
+      return null
+    },
+  },
+  {
+    name: 'a served page carries the security defaults',
+    path: '/',
+    assert: (response) => {
+      if (response.headers.get('x-content-type-options') !== 'nosniff') return 'no nosniff'
+      if (response.headers.get('x-frame-options') !== 'DENY') return 'no frame-options'
+      return null
+    },
+  },
+  {
+    name: 'a hashed client bundle is immutable',
+    path: '/',
+    assert: async (response, body) => {
+      const bundle = body.match(/src="(\/__ruvyxa\/client\/[^"]+)"/)
+      if (!bundle) return 'the document names no browser bundle'
+      const asset = await fetch(base + bundle[1])
+      await asset.arrayBuffer()
+      if (asset.status !== 200) return `${bundle[1]} answered ${asset.status}`
+      const cache = asset.headers.get('cache-control')
+      if (cache !== 'public, max-age=31536000, immutable') return `cache-control ${cache}`
+      return null
+    },
+  },
+]
+
+/**
+ * Something only the home page of *this* fixture puts in its markup.
+ *
+ * The compression check reads the decompressed bytes back, so it needs a string
+ * it can recognise; the two fixtures share no markup, and asserting a
+ * deploy-smoke marker against the demo made a passing gzip look like a broken
+ * one.
+ */
+const HOME_MARKER = app === 'demo' ? '<h1>' : 'data-smoke="page"'
+
+/**
  * Compression, checked over a raw request rather than through `fetch`.
  *
  * `fetch` decodes the body and removes `content-encoding` before anything here
@@ -776,7 +950,7 @@ async function checkCompression() {
     throw new Error(`${runtime}: a compressed response kept its identity content-length\n${output}`)
   }
   const decoded = gunzipSync(compressed.body).toString('utf8')
-  if (!decoded.includes('data-smoke="page"')) {
+  if (!decoded.includes(HOME_MARKER)) {
     throw new Error(`${runtime}: gunzipped body ${decoded.slice(0, 120)}\n${output}`)
   }
   if (compressed.body.length >= decoded.length) {
@@ -794,7 +968,7 @@ async function checkCompression() {
         `${identity.headers['content-encoding']}\n${output}`,
     )
   }
-  if (!identity.body.toString('utf8').includes('data-smoke="page"')) {
+  if (!identity.body.toString('utf8').includes(HOME_MARKER)) {
     throw new Error(`${runtime}: identity body ${identity.body.toString('utf8').slice(0, 120)}`)
   }
   console.log(`[ok] ${runtime} · GET / stays identity for a client that refuses gzip`)
@@ -948,10 +1122,129 @@ function rawPost(pathname, headers, body) {
   })
 }
 
+/**
+ * Every asset every page names, fetched.
+ *
+ * A document that references a stylesheet or a bundle the deployment did not
+ * carry still renders, still answers 200, and still looks right in a status
+ * table — it is just unstyled and inert. Asking one page proves nothing about
+ * the other thirty, because what each references depends on which components it
+ * pulled in.
+ */
+async function checkEveryPageAsset(paths) {
+  const seen = new Map()
+  for (const pathname of paths) {
+    const document = await rawGet(pathname, {})
+    if (document.status !== 200) {
+      throw new Error(`${runtime}: ${pathname} answered ${document.status}\n${output}`)
+    }
+    const html = document.body.toString('utf8')
+    for (const match of html.matchAll(/(?:src|href)="(\/[^"]+)"/g)) {
+      const asset = match[1]
+      if (!asset.startsWith('/__ruvyxa/') && !/\.(?:js|mjs|css|svg|png|webp|woff2?)$/.test(asset)) {
+        continue
+      }
+      if (!seen.has(asset)) seen.set(asset, (await rawGet(asset, {})).status)
+    }
+  }
+  const broken = [...seen].filter(([, status]) => status !== 200)
+  if (broken.length > 0) {
+    throw new Error(
+      `${runtime}: ${broken.length} referenced asset(s) do not resolve: ${broken
+        .map(([asset, status]) => `${status} ${asset}`)
+        .join(', ')}\n${output}`,
+    )
+  }
+  console.log(
+    `[ok] ${runtime} · every asset named by ${paths.length} pages resolves (${seen.size} unique)`,
+  )
+}
+
+/**
+ * The shell leaves before the slow half of the page has rendered.
+ *
+ * Asserted as *chunks over time* rather than as bytes, because the finished
+ * document is byte-identical either way — which is exactly how a deployed build
+ * that buffered every render passed every other check here while its first byte
+ * arrived a second and a quarter late.
+ */
+function checkStreaming(pathname) {
+  return new Promise((resolve, reject) => {
+    const started = Date.now()
+    const arrivals = []
+    const call = httpRequest(
+      { host: '127.0.0.1', port, path: pathname, headers: { 'accept-encoding': 'identity' } },
+      (response) => {
+        response.on('data', () => arrivals.push(Date.now() - started))
+        response.on('end', () => {
+          if (arrivals.length < 2) {
+            reject(
+              new Error(
+                `${runtime}: ${pathname} arrived in one chunk after ${arrivals[0]}ms — the document was buffered\n${output}`,
+              ),
+            )
+            return
+          }
+          const first = arrivals[0]
+          const last = arrivals.at(-1)
+          if (last - first < 100) {
+            reject(
+              new Error(
+                `${runtime}: ${pathname} arrived all at once (${first}ms → ${last}ms); the slow boundary should be ~900ms behind the shell`,
+              ),
+            )
+            return
+          }
+          console.log(
+            `[ok] ${runtime} · ${pathname} streams — shell at ${first}ms, last chunk at ${last}ms`,
+          )
+          resolve()
+        })
+        response.on('error', reject)
+      },
+    )
+    call.on('error', reject)
+    call.end()
+  })
+}
+
+/** A server action, over HTTP, in the shape the browser sends it. */
+async function checkServerAction() {
+  const called = await rawPost(
+    '/__ruvyxa/action?path=/todos&name=createTodo',
+    { 'content-type': 'application/json', origin: base },
+    JSON.stringify({ input: { title: 'from-smoke' } }),
+  )
+  if (called.status !== 200) {
+    throw new Error(
+      `${runtime}: server action answered ${called.status}: ${called.body.toString('utf8').slice(0, 200)}\n${output}`,
+    )
+  }
+  const answer = called.body.toString('utf8')
+  if (!answer.includes('from-smoke')) {
+    throw new Error(`${runtime}: server action returned ${answer.slice(0, 200)}`)
+  }
+  if (!answer.includes('todos')) {
+    throw new Error(`${runtime}: server action reported no invalidation: ${answer.slice(0, 200)}`)
+  }
+
+  // The header a cross-origin page cannot set without a preflight. Without this
+  // the endpoint is a write primitive for any site the visitor also has open.
+  const unguarded = await rawPost(
+    '/__ruvyxa/action?path=/todos&name=createTodo',
+    { 'content-type': 'application/json' },
+    JSON.stringify({ input: { title: 'from-nowhere' } }),
+  )
+  if (unguarded.status !== 403) {
+    throw new Error(`${runtime}: an action with no Origin answered ${unguarded.status}`)
+  }
+  console.log(`[ok] ${runtime} · a server action runs and refuses a cross-origin caller`)
+}
+
 try {
   await waitUntilServing()
   let ran = 0
-  for (const check of checks) {
+  for (const check of app === 'demo' ? DEMO_CHECKS : checks) {
     if (check.requires && capabilities && !capabilities.has(check.requires)) {
       console.log(`[skip] ${runtime} · ${check.name} — this target has no ${check.requires}`)
       continue
@@ -986,7 +1279,24 @@ try {
   // Both are the server-components endpoint, which a target with no server
   // does not have. `adapter.supports` says so, and the fixture that target is
   // built from has no such route to ask about.
-  if (capabilities && !capabilities.has('ssr')) {
+  if (app === 'demo') {
+    // The broad fixture has no /rsc route of its own, and its value is in what
+    // the application carries rather than in the framework endpoints the small
+    // fixture already covers on every adapter.
+    await checkEveryPageAsset([
+      '/',
+      '/plugin-lab',
+      '/server-components',
+      '/streaming',
+      '/gallery',
+      '/todos',
+      '/csr-page',
+      '/ppr-page',
+    ])
+    await checkStreaming('/streaming')
+    await checkServerAction()
+    ran += 3
+  } else if (capabilities && !capabilities.has('ssr')) {
     console.log(`[skip] ${runtime} · /__ruvyxa/rsc — this target has no ssr`)
   } else {
     await checkRscPayload()
@@ -998,17 +1308,43 @@ try {
   await stopServing()
 }
 
-// Explicit, and only where the artifact was imported rather than spawned. A
-// spawned server drains everything it held when it is killed. An imported one
-// is a module its platform never asks to let a process exit — Cloudflare has no
-// process to exit, and a serverless function is invoked, not run — so waiting
-// for the loop to drain would be asking the artifact for a property nothing
-// about it promises. It hung there once with every check already reported. A
-// thrown check still exits non-zero, above this line.
-if (!SPAWNED.has(runtime)) process.exit(0)
+// Let the loop drain, and force an exit only if it will not.
+//
+// An imported artifact is a module its platform never asks to let a process
+// exit — Cloudflare has no process to exit, and a serverless function is
+// invoked rather than run — so this used to call `process.exit(0)`
+// unconditionally. That is what made the Windows runner abort with
+// `Assertion failed: !(handle->flags & UV_HANDLE_CLOSING), file
+// src/win/async.c` *after* printing every check green: exiting while a libuv
+// threadpool completion is in flight aborts rather than exits, and a suite that
+// passed then died at 127 reads as a flaky runner.
+//
+// So the handles this script owns are closed first and the process is allowed
+// to end on its own. The timer is the guard for the case that argument was
+// written for, and it is `unref`d — it cannot keep the loop alive itself, and
+// only fires if something else already has. A thrown check still exits non-zero
+// above this line.
+if (!SPAWNED.has(runtime)) {
+  keepAliveAgents().forEach((agent) => agent.destroy())
+  setTimeout(() => process.exit(0), 2_000).unref()
+}
+
+/**
+ * Every pooled HTTP client this script opened, including the one it did not.
+ *
+ * `fetch` keeps its sockets in a global dispatcher with a keep-alive timeout,
+ * which holds the loop open for seconds after the last check. Node exposes no
+ * public handle on it; the well-known symbol is how it is reached, and the
+ * optional chaining is what keeps this correct on a runtime that has no undici.
+ */
+function keepAliveAgents() {
+  const dispatcher = globalThis[Symbol.for('undici.globalDispatcher.1')]
+  return [dispatcher].filter((agent) => typeof agent?.destroy === 'function')
+}
 
 /** Stop whichever transport was started, without leaving the port held. */
 async function stopServing() {
+  await settleFileStreams()
   if (server) {
     // `closeAllConnections` before `close`, because `fetch` keeps its sockets
     // alive and `close` waits for every one of them. Without it the script
