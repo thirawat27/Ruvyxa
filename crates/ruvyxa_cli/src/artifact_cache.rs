@@ -43,6 +43,10 @@ const WORKER_RUNTIME_FILES: &[&str] = &[
     // them out of a hashed file would otherwise have taken them out of cache
     // identity: the rule could change while every hash above stayed equal.
     "origin-policy.mjs",
+    // Which exported function answers a method, and what a 405 has to say. A
+    // route that starts answering HEAD renders differently from one that
+    // refused it, so prerendered output built against the old rule is stale.
+    "api-methods.mjs",
     "compiler.mjs",
     // The identity a `'use client'` module carries into the server-components
     // graph. A change to it changes which reference a rendered payload names,

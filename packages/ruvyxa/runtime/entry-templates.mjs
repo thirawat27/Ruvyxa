@@ -123,7 +123,29 @@ if (__ruvyxaBootstrap.csr === true) globalThis.__RUVYXA_CSR__ = true`
  * to send in its place — so that still throws.
  */
 export function documentStreamPrelude() {
-  return `async function __ruvyxaRenderDocumentHtml(tree) {
+  return `/**
+ * The same render, handed back as a stream instead of a string.
+ *
+ * \`renderToReadableStream\` resolves as soon as the *shell* is ready and
+ * rejects when the shell itself failed — which is exactly the distinction the
+ * buffered renderer below draws by hand, so the tolerant policy comes for free
+ * here: a \`<Suspense>\` child that rejects later has already had React write
+ * the switch to its error boundary into the stream.
+ *
+ * \`null\` for a runtime with no streaming renderer, so the caller falls back.
+ */
+async function __ruvyxaRenderDocumentStreamOnly(tree) {
+  if (typeof ReactDomServer.renderToReadableStream !== "function") return null
+  return await ReactDomServer.renderToReadableStream(tree, {
+    onError(error) {
+      if (globalThis.process?.env?.RUVYXA_DEBUG) {
+        console.error("[ruvyxa] streaming render error", error)
+      }
+    },
+  })
+}
+
+async function __ruvyxaRenderDocumentHtml(tree) {
   if (typeof ReactDomServer.renderToReadableStream !== "function") {
     // The synchronous legacy renderer, and the last resort: it throws on any
     // component that awaits, so it is only ever right for a runtime that ships
@@ -244,30 +266,152 @@ function __ruvyxaHydrationSrc(assets) {
  * one the application wrote. A head is inserted before the body it already has
  * instead.
  */
-function __ruvyxaInjectDocumentAssets(html, head, tail) {
-  // Twin of \`document_head_defaults\`: without a viewport declaration a phone
-  // lays the page out at 980px and scales it down, so every breakpoint in the
-  // application is evaluated against a width no device has. A document that
-  // declares its own keeps it.
+/**
+ * Twin of \`document_head_defaults\`: without a viewport declaration a phone
+ * lays the page out at 980px and scales it down, so every breakpoint in the
+ * application is evaluated against a width no device has. A document that
+ * declares its own keeps it.
+ */
+function __ruvyxaDocumentHead(source, head) {
   const viewport =
-    /name=["']viewport["']/i.test(html)
+    /name=["']viewport["']/i.test(source)
       ? ""
       : '<meta name="viewport" content="width=device-width, initial-scale=1">'
-  head = viewport + head
-  if (head === "" && tail === "") return html
-  const lower = html.toLowerCase()
+  return viewport + head
+}
+
+/**
+ * Place the head fragment, or report that this text has neither end to place it
+ * against. Split out of the whole-document function so the streaming path can
+ * apply it to the shell — the same placement, on the bytes that carry it.
+ */
+function __ruvyxaInjectHead(prefix, head) {
+  const lower = prefix.toLowerCase()
   const headEnd = lower.indexOf("</head>")
+  if (headEnd !== -1) return prefix.slice(0, headEnd) + head + prefix.slice(headEnd)
   const bodyStart = lower.indexOf("<body")
-  if (headEnd !== -1) {
-    html = html.slice(0, headEnd) + head + html.slice(headEnd)
-  } else if (bodyStart !== -1) {
-    html = html.slice(0, bodyStart) + "<head>" + head + "</head>" + html.slice(bodyStart)
-  } else {
+  if (bodyStart !== -1) {
+    return prefix.slice(0, bodyStart) + "<head>" + head + "</head>" + prefix.slice(bodyStart)
+  }
+  return null
+}
+
+/** Place the tail fragment: before the closing body, or after everything. */
+function __ruvyxaInjectTail(suffix, tail) {
+  const bodyEnd = suffix.toLowerCase().lastIndexOf("</body>")
+  if (bodyEnd === -1) return suffix + tail
+  return suffix.slice(0, bodyEnd) + tail + suffix.slice(bodyEnd)
+}
+
+function __ruvyxaInjectDocumentAssets(html, head, tail) {
+  head = __ruvyxaDocumentHead(html, head)
+  if (head === "" && tail === "") return html
+  const withHead = __ruvyxaInjectHead(html, head)
+  if (withHead === null) {
     return "<!doctype html><html><head>" + head + "</head><body>" + html + tail + "</body></html>"
   }
-  const bodyEnd = html.toLowerCase().lastIndexOf("</body>")
-  if (bodyEnd === -1) return html + tail
-  return html.slice(0, bodyEnd) + tail + html.slice(bodyEnd)
+  return __ruvyxaInjectTail(withHead, tail)
+}
+
+/** The doctype and \`lang\` every host puts on a finished document. */
+function __ruvyxaFinishDocument(html, head, tail, lang) {
+  const withAssets = __ruvyxaInjectDocumentAssets(html, head, tail)
+  const document = withAssets.trimStart().toLowerCase().startsWith("<!doctype")
+    ? withAssets
+    : "<!doctype html>" + withAssets
+  return __ruvyxaApplyLang(document, lang)
+}
+
+/**
+ * The same document as {@link __ruvyxaFinishDocument}, sent while React is
+ * still producing it.
+ *
+ * Every host but the deployed one already streamed: \`ruvyxa dev\` and
+ * \`ruvyxa start\` hand the shell to the socket as React writes it and append
+ * the payload as a trailer. A deployed function buffered the whole render to a
+ * string first, so a route with two \`Suspense\` boundaries at 300ms and 1200ms
+ * sent its first byte at 1224ms instead of immediately — the page's own
+ * documentation promised the opposite, and every check passed while it was
+ * untrue, because the bytes are identical once they arrive.
+ *
+ * Two ends, buffered, and nothing in between:
+ *
+ * - The shell is accumulated until it carries a \`</head>\` or a \`<body\`, which
+ *   is what the head fragment is placed against. React's first flush is the
+ *   shell, so this is one chunk in practice and bounded by the shell either way.
+ * - Everything from the last \`</body>\` seen so far is held back, so the tail
+ *   can precede the closing one React writes last. Held rather than appended
+ *   after \`</html>\`: the tail carries the bootstrap block and the hydration
+ *   script, and where they sit decides what the parser has when it runs them.
+ *   Holding one *chunk* was not enough — a \`</body>\` split across a chunk
+ *   boundary is invisible to both halves, and the tail landed after \`</html>\`.
+ *
+ * \`tail\` is awaited at the end rather than passed as a value, because a
+ * server-components payload is only complete when the render is — which is
+ * after the caller has been sending bytes for a while. The browser needs it
+ * before hydration, not before the first paint.
+ */
+function __ruvyxaDocumentStream(stream, head, tail, lang) {
+  const decoder = new TextDecoder()
+  const encoder = new TextEncoder()
+  const CLOSE = "</body>"
+  let shell = ""
+  let opened = false
+  let held = ""
+
+  /** Send everything that cannot still turn out to precede the closing body. */
+  function drain(controller) {
+    const index = held.toLowerCase().lastIndexOf(CLOSE)
+    if (index !== -1) {
+      if (index > 0) controller.enqueue(encoder.encode(held.slice(0, index)))
+      held = held.slice(index)
+      return
+    }
+    // No closing body yet: only a token split across this boundary could still
+    // need what is kept, and that is at most one character short of the token.
+    if (held.length <= CLOSE.length - 1) return
+    const cut = held.length - (CLOSE.length - 1)
+    controller.enqueue(encoder.encode(held.slice(0, cut)))
+    held = held.slice(cut)
+  }
+
+  return stream.pipeThrough(
+    new TransformStream({
+      transform(chunk, controller) {
+        const text = decoder.decode(chunk, { stream: true })
+        if (!opened) {
+          shell += text
+          const lower = shell.toLowerCase()
+          if (lower.indexOf("</head>") === -1 && lower.indexOf("<body") === -1) return
+          opened = true
+          const combined = __ruvyxaDocumentHead(shell, head)
+          const withHead = __ruvyxaInjectHead(shell, combined) ?? shell
+          const document = withHead.trimStart().toLowerCase().startsWith("<!doctype")
+            ? withHead
+            : "<!doctype html>" + withHead
+          held = __ruvyxaApplyLang(document, lang)
+          shell = ""
+          drain(controller)
+          return
+        }
+        held += text
+        drain(controller)
+      },
+      async flush(controller) {
+        const rest = decoder.decode()
+        const resolved = await tail
+        if (!opened) {
+          // Neither end appeared in the whole render: a fragment. Only the
+          // whole-document placement can synthesise a page around it.
+          controller.enqueue(
+            encoder.encode(__ruvyxaFinishDocument(shell + rest, head, resolved, lang)),
+          )
+          return
+        }
+        controller.enqueue(encoder.encode(__ruvyxaInjectTail(held + rest, resolved)))
+      },
+    }),
+  )
 }
 
 /**

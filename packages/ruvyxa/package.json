@@ -17,6 +17,7 @@
     "native-bin",
     "runtime/action-runtime.mjs",
     "runtime/adapter-runner.mjs",
+    "runtime/api-methods.mjs",
     "runtime/api-renderer.mjs",
     "runtime/cache-budget.mjs",
     "runtime/client-references.mjs",

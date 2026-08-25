@@ -61,6 +61,7 @@ import { cache as serverCache } from '@ruvyxa/core/server'
 // way (`{1,128}` for the length check, a literal `128` for the channel cap),
 // which is the state a rule is in just before it drifts.
 import { actionRealtimeEvent } from './action-runtime.mjs'
+import { methodNotAllowed, selectRouteHandler } from './api-methods.mjs'
 import {
   clientEntrySource,
   metaSourceImports,
@@ -1158,24 +1159,25 @@ async function handleApi(request) {
   await ensureInstrumentation(resolvedRoot)
   const { outfile, version, inputsVersion, inputs } = await bundleApiModule(resolvedRoot, routeFile)
   const mod = await importModule(outfile, version)
-  const handler = mod[method.toUpperCase()]
+  const upperMethod = String(method ?? 'GET').toUpperCase()
+  const selected = selectRouteHandler(mod, upperMethod)
   const dependencyMetadata = dependencyResponseMetadata(
     inputsVersion,
     inputs,
     request.knownInputsVersion,
   )
 
-  if (typeof handler !== 'function') {
+  if (!selected) {
+    const refusal = methodNotAllowed(mod, upperMethod)
     return {
       ok: true,
-      status: 405,
-      headers: { 'content-type': 'text/plain; charset=utf-8' },
-      body: `Method ${method.toUpperCase()} is not allowed`,
+      status: refusal.status,
+      headers: { allow: refusal.allow, 'content-type': 'text/plain; charset=utf-8' },
+      body: refusal.body,
       ...dependencyMetadata,
     }
   }
-
-  const upperMethod = method.toUpperCase()
+  const handler = selected.handler
   const requestInit = {
     method: upperMethod,
     // headerPairs preserves duplicate values; retain the object fallback for
@@ -1208,7 +1210,7 @@ async function handleApi(request) {
   const headerPairsResult = responseHeaderPairs(response)
   const headers = Object.fromEntries(headerPairsResult)
 
-  if (streamResponse) {
+  if (streamResponse && !selected.omitBody) {
     return {
       ok: true,
       status: response.status,
@@ -1220,7 +1222,10 @@ async function handleApi(request) {
     }
   }
 
-  const body = await response.text()
+  // A `HEAD` answered by the route's `GET` keeps every header and drops the
+  // content. The Rust host strips it again at the socket; doing it here as well
+  // costs nothing and means the rule lives in one place across all three hosts.
+  const body = selected.omitBody ? '' : await response.text()
 
   return {
     ok: true,

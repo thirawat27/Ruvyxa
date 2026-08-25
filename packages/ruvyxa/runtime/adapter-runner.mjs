@@ -1087,7 +1087,7 @@ async function materializeRouteModules(manifest, destination, target, buildDir) 
     // route ships neither the renderer nor the second React it links.
     if (routes.some((route) => route?.render?.serverComponents === true)) {
       imports.push(
-        `import { callRouteServerFunction as __ruvyxaCallServerFunction, renderServerComponents as __ruvyxaRenderServerComponents, runRouteFormAction as __ruvyxaRunFormAction } from ${JSON.stringify(RSC_RENDERER_SPECIFIER)}`,
+        `import { callRouteServerFunction as __ruvyxaCallServerFunction, renderServerComponents as __ruvyxaRenderServerComponents, renderServerComponentsStream as __ruvyxaRenderServerComponentsStream, runRouteFormAction as __ruvyxaRunFormAction } from ${JSON.stringify(RSC_RENDERER_SPECIFIER)}`,
       )
     }
   }
@@ -1471,6 +1471,32 @@ function pageRouteDefinition(
     : null`
           : ''
       }
+  // Only when the caller asked, and it asks only where nothing is stored — see
+  // the same guard on the non-server-components render. The payload is a
+  // *promise* here: it is complete when the Flight render is, which is long
+  // after the first bytes have gone out, and the browser needs it before
+  // hydration rather than before the first paint.
+  if (ctx?.stream === true) {
+    const streamed = await __ruvyxaRenderServerComponentsStream({
+      serverModule: ${serverAlias},
+      references: ${JSON.stringify(serverComponents.references)},
+      ctx,
+      routePath: ${JSON.stringify(routePath)},${
+        serverComponents.actionSpecifier ? `\n      formState: posted?.formState ?? null,` : ''
+      }
+    })
+    const streamHead = __ruvyxaDocumentAssets(${assetsLiteral}, ctx, null).head
+    const streamTail = streamed.payload.then((payload) => {
+      for (const failure of streamed.failures) {
+        // Reported, never thrown: the response left before this was known, and
+        // the only thing left to do with it is put it in the log.
+        console.error("[ruvyxa] server component failed after the shell was sent", failure)
+      }
+      return __ruvyxaDocumentAssets(${assetsLiteral}, ctx, payload).tail
+    })
+    return __ruvyxaDocumentStream(streamed.stream, streamHead, streamTail, null)
+  }
+
   const rendered = await __ruvyxaRenderServerComponents({
     serverModule: ${serverAlias},
     references: ${JSON.stringify(serverComponents.references)},
@@ -1485,8 +1511,7 @@ function pageRouteDefinition(
     tolerateStreamErrors: true,
   })
   const assets = __ruvyxaDocumentAssets(${assetsLiteral}, ctx, rendered.payload)
-  const withAssets = __ruvyxaInjectDocumentAssets(rendered.html, assets.head, assets.tail)
-  return withAssets.trimStart().toLowerCase().startsWith("<!doctype") ? withAssets : "<!doctype html>" + withAssets
+  return __ruvyxaFinishDocument(rendered.html, assets.head, assets.tail, null)
 }
 
 /**
@@ -1555,12 +1580,20 @@ async function ${actionName}({ reference, body }) {
 
 async function ${renderName}(ctx) {
   const tree = ${treeName}(ctx)
+  const assets = __ruvyxaDocumentAssets(${assetsLiteral}, ctx, null)
+  const lang = __ruvyxaResolveMeta([${metaNames.join(', ')}], ctx).lang
+
+  // Only when the caller asked, and it asks only where nothing is stored: a
+  // pre-render, an ISR entry, and the \`requestScoped\` check that guards them
+  // all need the finished string, and a document still being written has no
+  // finished anything.
+  if (ctx?.stream === true) {
+    const stream = await __ruvyxaRenderDocumentStreamOnly(tree)
+    if (stream !== null) return __ruvyxaDocumentStream(stream, assets.head, assets.tail, lang)
+  }
 
   const html = await __ruvyxaRenderDocumentHtml(tree)
-  const assets = __ruvyxaDocumentAssets(${assetsLiteral}, ctx, null)
-  const withAssets = __ruvyxaInjectDocumentAssets(html, assets.head, assets.tail)
-  const document = withAssets.trimStart().toLowerCase().startsWith("<!doctype") ? withAssets : "<!doctype html>" + withAssets
-  return __ruvyxaApplyLang(document, __ruvyxaResolveMeta([${metaNames.join(', ')}], ctx).lang)
+  return __ruvyxaFinishDocument(html, assets.head, assets.tail, lang)
 }${cachedFlight}`
   return { imports, definition, renderName, payloadName: null, moduleName, flightName }
 }

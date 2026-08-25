@@ -9,6 +9,7 @@ import {
   serverPlatform,
   toImportPath,
 } from './compiler.mjs'
+import { methodNotAllowed, selectRouteHandler } from './api-methods.mjs'
 
 const [
   projectRootArg,
@@ -30,19 +31,20 @@ const routeFile = path.resolve(routeFileArg)
 try {
   const bundleFile = await bundleApiModule(projectRoot, routeFile)
   const mod = await import(pathToFileURL(bundleFile).href + `?t=${Date.now()}`)
-  const handler = mod[method.toUpperCase()]
+  const upperMethod = String(method ?? 'GET').toUpperCase()
+  const selected = selectRouteHandler(mod, upperMethod)
 
-  if (typeof handler !== 'function') {
+  if (!selected) {
+    const refusal = methodNotAllowed(mod, upperMethod)
     await writeResponse({
       ok: true,
-      status: 405,
-      headers: { 'content-type': 'text/plain; charset=utf-8' },
-      body: `Method ${method.toUpperCase()} is not allowed`,
+      status: refusal.status,
+      headers: { allow: refusal.allow, 'content-type': 'text/plain; charset=utf-8' },
+      body: refusal.body,
     })
     process.exit(0)
   }
-
-  const upperMethod = method.toUpperCase()
+  const handler = selected.handler
   const requestInit = { method: upperMethod, headers: JSON.parse(headersJson) }
   if (bodyArg != null && upperMethod !== 'GET' && upperMethod !== 'HEAD') {
     requestInit.body = bodyArg
@@ -52,8 +54,10 @@ try {
     request,
     params: JSON.parse(paramsJson),
   })
-  const response = normalizeResponse(result, `${method} ${requestPath}`)
-  const body = await response.text()
+  const response = normalizeResponse(result, `${upperMethod} ${requestPath}`)
+  // A `HEAD` answered by the route's `GET` keeps every header and drops the
+  // content.
+  const body = selected.omitBody ? '' : await response.text()
   const headerPairs = responseHeaderPairs(response)
   const headers = Object.fromEntries(headerPairs)
 

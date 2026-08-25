@@ -26,6 +26,7 @@
  */
 
 import { runAction, validateActionPayload, validateActionRequest } from './action-runtime.mjs'
+import { methodNotAllowed, selectRouteHandler } from './api-methods.mjs'
 import {
   collectRevalidations,
   requestContext,
@@ -165,6 +166,9 @@ export const HANDLER_RUNTIME_FILES = Object.freeze([
   'action-runtime.mjs',
   // `action-runtime.mjs` imports this for its two cross-site checks.
   'origin-policy.mjs',
+  // Which export answers a method, and what a 405 has to say. Shared with the
+  // two native hosts so the three cannot disagree about it.
+  'api-methods.mjs',
   'flight.mjs',
 ])
 
@@ -561,12 +565,13 @@ export function createHandler(options) {
   async function handleApi(route, request, params) {
     const mod = await importApi(route.id)
     const method = request.method.toUpperCase()
-    const handler = mod[method]
+    const selected = selectRouteHandler(mod, method)
 
-    if (typeof handler !== 'function') {
-      return new Response(`Method ${method} is not allowed`, {
-        status: 405,
-        headers: { 'content-type': 'text/plain; charset=utf-8' },
+    if (!selected) {
+      const refusal = methodNotAllowed(mod, method)
+      return new Response(refusal.body, {
+        status: refusal.status,
+        headers: { allow: refusal.allow, 'content-type': 'text/plain; charset=utf-8' },
       })
     }
 
@@ -576,9 +581,14 @@ export function createHandler(options) {
       url: new URL(request.url).pathname,
       params: params ?? {},
     })
-    const result = await runWithRequestContext(context, () => handler({ request, params }))
+    const result = await runWithRequestContext(context, () => selected.handler({ request, params }))
     recordRevalidations(collectRevalidations(context))
-    return normalizeResponse(result, `${request.method} ${new URL(request.url).pathname}`)
+    const response = normalizeResponse(result, `${method} ${new URL(request.url).pathname}`)
+    // A `HEAD` answered by the route's `GET` keeps every header and drops the
+    // content. There is no transport under a serverless function to do it: the
+    // `Response` goes to the platform as it is.
+    if (!selected.omitBody) return response
+    return new Response(null, { status: response.status, headers: response.headers })
   }
 
   /**
@@ -1167,8 +1177,9 @@ export function createHandler(options) {
       return rendered
     }
 
-    // SSR (default): full server render, nothing stored.
-    const rendered = await renderPage(route, pathname, params, request)
+    // SSR (default): full server render, nothing stored — the one strategy
+    // whose document may leave while React is still writing it.
+    const rendered = await renderPage(route, pathname, params, request, null, mayStream(route))
     if (forced && rendered.status >= 200 && rendered.status < 400) {
       acknowledgeForcedRevalidation(pathname, forcedClaim)
     }
@@ -1209,7 +1220,23 @@ export function createHandler(options) {
     }
   }
 
-  async function renderPage(route, pathname, params, request, formData = null) {
+  /**
+   * Whether this route's document may leave before it is finished.
+   *
+   * Three things need the whole string and none of them can have it from a
+   * stream: the ISR and pre-render writes, the `requestScoped` check that
+   * decides whether a write is even allowed — a `Suspense` child that reads
+   * cookies does so long after the shell has gone out, so the answer at return
+   * time would be a lie — and `localizeHtmlDocument`, which rewrites the
+   * `<html>` tag of a `[locale]` route. So only the plain SSR path streams, and
+   * only when i18n has nothing to say about this route.
+   */
+  function mayStream(route) {
+    if (!i18n) return true
+    return route.path.split('/')[1] !== `[${i18n.localeParam}]`
+  }
+
+  async function renderPage(route, pathname, params, request, formData = null, stream = false) {
     const mod = await importPage(route.id)
     const context = requestContext({
       headerPairs: [...(request?.headers ?? [])],
@@ -1218,8 +1245,18 @@ export function createHandler(options) {
       params: params ?? {},
     })
     const rendered = await runWithRequestContext(context, () =>
-      mod.render({ path: pathname, params: params ?? {}, formData }),
+      mod.render({ path: pathname, params: params ?? {}, formData, stream }),
     )
+    if (typeof rendered !== 'string') {
+      // A streamed document. Nothing downstream stores it — `mayStream` is what
+      // guarantees that — so there is no `.text()` here to undo the streaming.
+      const response = new Response(rendered, {
+        status: 200,
+        headers: { 'content-type': 'text/html; charset=utf-8' },
+      })
+      response.requestScoped = true
+      return response
+    }
     // Only for a submission. An ordinary page render calling `revalidatePath()`
     // is not a thing this host has ever applied, and starting to would change
     // every route's behaviour; a server function called by the form it was
