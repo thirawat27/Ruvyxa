@@ -8,7 +8,10 @@
 
 <p align="center">
   Action-driven realtime updates using Ruvyxa's native Axum WebSocket transport. No Socket.IO or<br/>
-  application-owned WebSocket server is required.
+  application-owned WebSocket server is required.<br/><br/>
+  <strong>Requires a long-lived Node or Bun process.</strong> There is no serverless deployment of<br/>
+  this package: static, edge, Vercel, Netlify, Cloudflare, Firebase, and AWS Amplify builds are<br/>
+  refused with <code>RUV3201</code> rather than deploying a socket that never connects.
 </p>
 
 <p align="center">

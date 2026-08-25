@@ -48,6 +48,25 @@ Resolve/load/transform hooks receive an environment of `client`, `server`, `edge
 not rely on module-level middleware state across workers: config explicitly states workers do not
 share it.
 
+### `onResolve` answers with a path, not with a virtual id
+
+A resolve hook returns a **file path**. The file itself may be virtual — an `onLoad` hook supplies
+its contents, and nothing has to exist on disk — but the value still has to name a location, because
+everything downstream treats it as one. The two spellings the rest of the ecosystem uses for a
+virtual module are not paths and are refused by name:
+
+```ts
+build.onResolve(({ id, root }) =>
+  id === 'stress-virtual' ? `${root}/virtual-stress-virtual.ts` : undefined,
+)
+```
+
+`'�stress-virtual'` and `'virtual:stress-virtual'` were each joined onto the project root and handed
+to the filesystem, so they surfaced as a raw OS error —
+`strings passed to WinAPI cannot contain NULs` and `The system cannot find the file specified` —
+naming no plugin. Both now fail with a diagnostic that names the plugin, the specifier, and the path
+shape to return instead.
+
 ### `onTransform` rewrites the browser bundle, not the server render
 
 A build compiles each module twice, and only one of the two runs your hook. The browser bundle is

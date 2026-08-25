@@ -161,6 +161,13 @@ export function GET() {
 }
 ```
 
+A handler may also return data instead of a `Response`. Anything that is not a `Response` is sent as
+`Response.json(value)`, so `return { ok: true }` and `return Response.json({ ok: true })` produce
+the same reply — including for a bare string, which is JSON-encoded and answered as
+`application/json`. Two cases stop the request with `RUV1504` instead: returning nothing, and
+returning a value JSON cannot serialise. Return a `Response` when the status, the headers, or the
+content type matter.
+
 Route handlers must validate untrusted bodies before using them. API payload limits are governed by
 `security.apiLimit`; action payloads use `security.actionLimit`.
 

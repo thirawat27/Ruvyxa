@@ -67,6 +67,12 @@ application/infrastructure responsibilities.
 
 ## Realtime and adapters
 
+> **Decide hosting before you build on this.** Both realtime plugins need a process that stays alive
+> to own the WebSocket, so they are served by `ruvyxa dev` and `ruvyxa start` and by no serverless
+> build at all. `ruvyxa dev` prints a line naming the capability and its path, `ruvyxa build`
+> refuses the unsupported adapters with `RUV3201`, and `ruvyxa test:parity` reports the gap — but
+> replacing the transport afterwards is an application rewrite, not a configuration change.
+
 `@ruvyxa/realtime/plugin` exports `realtime()`, which claims native realtime capability. It rejects
 builds that are not long-lived Node/Bun output and explicitly rejects deno, aws, cloudflare,
 firebase, netlify, static, and vercel adapters with `RUV3201`. `@ruvyxa/realtime/client` exports

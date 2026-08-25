@@ -74,7 +74,7 @@ pub use dynamic_image::DynamicImageConfig;
 mod cli_output;
 use cli_output::{
     accent, dim, enabled_text, info, link, middleware_summary, note, number, ok, paint, path_text,
-    print_field, print_header,
+    print_field, print_header, warn_text,
 };
 
 mod port_binding;
@@ -1226,6 +1226,44 @@ fn presence_runtime(plugin_runtime: Option<&Arc<PluginHost>>) -> Result<Option<P
     }))
 }
 
+/// Capabilities this host serves that no deployed build can.
+///
+/// `ruvyxa build` refuses them with `RUV3201` and `ruvyxa test:parity` reports
+/// them, but both arrive after the application has been written around the
+/// transport — and replacing a transport is not a small change. Only `dev`
+/// says it: `ruvyxa start` is the long-lived host that *does* serve these, so
+/// the same line there would be false.
+fn native_only_capability_notes(
+    config: &ServerConfig,
+    realtime: Option<&RealtimeRuntime>,
+    presence: Option<&PresenceRuntime>,
+) -> Vec<String> {
+    if !config.watch {
+        return Vec::new();
+    }
+    let mut notes = Vec::new();
+    if let Some(realtime) = realtime {
+        notes.push(format!("realtime@1 {}", realtime.path));
+    }
+    if let Some(presence) = presence {
+        notes.push(format!("presence@1 {}", presence.path));
+    }
+    notes
+}
+
+fn print_native_only_capabilities(notes: &[String]) {
+    if notes.is_empty() {
+        return;
+    }
+    for note in notes {
+        println!("{} {note} is served by this process only.", warn_text("!"));
+        println!(
+            "  a serverless build is refused with RUV3201; a self-hosted build must stay long-lived"
+        );
+    }
+    println!();
+}
+
 /// Reject a project that points both websocket transports at one path.
 ///
 /// Registering the same path twice panics inside axum's router, so this has to
@@ -1349,6 +1387,7 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
     let realtime = realtime_runtime(plugin_runtime.as_ref())?;
     let presence = presence_runtime(plugin_runtime.as_ref())?;
     assert_transport_paths_distinct(realtime.as_ref(), presence.as_ref())?;
+    let native_only = native_only_capability_notes(&config, realtime.as_ref(), presence.as_ref());
     let state = AppState {
         config: config.clone(),
         reload_tx,
@@ -1411,6 +1450,7 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
         }
     }
     print_server_ready(&config, &manifest, bound_address, startup_started.elapsed());
+    print_native_only_capabilities(&native_only);
     let server_result = serve_until_shutdown(listeners, app).await;
 
     worker_pool.shutdown().await;

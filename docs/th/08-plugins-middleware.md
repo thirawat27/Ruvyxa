@@ -47,6 +47,24 @@ transformation คืน code, `{ code, map }`, null หรือไม่คื
 plugin report diagnostic และเพิ่ม document-head entry ได้ อย่าพึ่งพา module-level middleware state
 ข้าม worker: config ระบุชัดว่า worker ไม่ share state นี้
 
+### `onResolve` ต้องคืน path ไม่ใช่ virtual id
+
+resolve hook คืนค่าเป็น **file path** ตัวไฟล์จะเป็น virtual ก็ได้ — `onLoad` hook เป็นคนให้เนื้อหา
+และไม่ต้องมีไฟล์จริงบนดิสก์ — แต่ค่าที่คืนยังต้องระบุตำแหน่ง
+เพราะทุกอย่างถัดจากนั้นปฏิบัติกับมันเป็น path สองรูปแบบที่ ecosystem อื่นใช้เรียก virtual module
+ไม่ใช่ path และจะถูกปฏิเสธพร้อมระบุชื่อ:
+
+```ts
+build.onResolve(({ id, root }) =>
+  id === 'stress-virtual' ? `${root}/virtual-stress-virtual.ts` : undefined,
+)
+```
+
+`'�stress-virtual'` และ `'virtual:stress-virtual'` เคยถูก join เข้ากับ project root แล้วส่งให้
+filesystem จึงโผล่มาเป็น OS error ดิบ ๆ — `strings passed to WinAPI cannot contain NULs` และ
+`The system cannot find the file specified` — โดยไม่บอกว่าปลั๊กอินตัวไหน ตอนนี้ทั้งคู่ล้มเหลวพร้อม
+diagnostic ที่ระบุชื่อปลั๊กอิน specifier และรูปแบบ path ที่ควรคืนแทน
+
 ### `onTransform` แก้บันเดิลฝั่งเบราว์เซอร์ ไม่ได้แก้การเรนเดอร์ฝั่งเซิร์ฟเวอร์
 
 build จะคอมไพล์แต่ละโมดูลสองครั้ง และมีแค่ครั้งเดียวที่เรียก hook ของคุณ

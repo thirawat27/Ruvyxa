@@ -65,6 +65,13 @@ framework ไม่มี database server, migration engine หรือ backup 
 
 ## Realtime และ adapter
 
+> **ตัดสินใจเรื่อง hosting ก่อนจะสร้างงานบนสิ่งนี้** ปลั๊กอิน realtime
+> ทั้งสองตัวต้องการโปรเซสที่อยู่ยาว เพื่อถือ WebSocket ไว้ จึงถูกให้บริการโดย `ruvyxa dev` และ
+> `ruvyxa start` เท่านั้น และไม่มี serverless build ตัวไหนให้บริการได้เลย `ruvyxa dev`
+> จะพิมพ์บรรทัดระบุ capability กับ path ของมัน, `ruvyxa build` ปฏิเสธ adapter ที่ไม่รองรับด้วย
+> `RUV3201` และ `ruvyxa test:parity` รายงานช่องว่างนี้ — แต่การเปลี่ยน transport
+> ทีหลังคือการเขียนแอปใหม่ ไม่ใช่การแก้ config
+
 `@ruvyxa/realtime/plugin` export `realtime()` ซึ่ง claim native realtime capability มันปฏิเสธ build
 ที่ไม่ใช่ long-lived Node/Bun output และปฏิเสธ adapter deno, aws, cloudflare, firebase, netlify,
 static และ vercel ด้วย `RUV3201` `@ruvyxa/realtime/client` export `createRealtimeClient`; จำกัด

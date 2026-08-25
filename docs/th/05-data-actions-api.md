@@ -156,6 +156,12 @@ export function GET() {
 }
 ```
 
+handler จะคืนค่าข้อมูลแทน `Response` ก็ได้ ค่าที่ไม่ใช่ `Response` จะถูกส่งเป็น
+`Response.json(value)` ดังนั้น `return { ok: true }` กับ `return Response.json({ ok: true })`
+ให้ผลเหมือนกัน — รวมถึง string เปล่า ๆ ที่จะถูก encode เป็น JSON และตอบด้วย `application/json`
+มีสองกรณีที่หยุด request ด้วย `RUV1504` แทน คือไม่คืนค่าอะไรเลย และคืนค่าที่ JSON serialise ไม่ได้
+ให้คืน `Response` เมื่อ status, header หรือ content type มีความสำคัญ
+
 route handler ต้อง validate body ที่ไม่น่าเชื่อถือก่อนใช้ API payload limit อยู่ที่
 `security.apiLimit`; action payload ใช้ `security.actionLimit`
 

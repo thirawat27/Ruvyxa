@@ -19,6 +19,25 @@
  */
 
 /**
+ * Whether the fetch specification says this status carries no body.
+ *
+ * `new Response(body, { status })` throws for any of them unless the body is
+ * exactly `null`, and a zero-length body is not null. Every response hook the
+ * documentation shows rebuilds the response as
+ * `new Response(response.body, { status, headers })` — so a host that encoded
+ * "no body" as an empty string handed the plugin a Response it could not
+ * rebuild, and a project with any response hook answered 500 for every 204,
+ * 205, and 304 it produced.
+ *
+ * Lives here rather than beside its caller in `plugin-runtime.mjs` so a test
+ * can reach it: that module awaits at its top level and speaks NDJSON over
+ * stdio, so importing it starts a plugin runner.
+ */
+export function isNullBodyStatus(status) {
+  return status === 101 || status === 103 || status === 204 || status === 205 || status === 304
+}
+
+/**
  * Framework endpoints a plugin-declared route or native transport must not
  * claim.
  *
