@@ -178,6 +178,21 @@ props. `Suspense` works in both graphs, so `loading.tsx` behaves as it does on a
 
 `error.tsx` and `not-found.tsx` are class-based boundaries, which the server graph cannot run. On a
 server-components route they must be `'use client'` modules — the same rule React itself imposes.
+`ruvyxa build` reports a route whose `error.tsx` lacks the directive, because the server still
+renders it: without the warning you would see your own error page whenever the failure happened
+during the server render, and a different one whenever it happened in the browser.
+
+A server component that throws inside `<Suspense>` does not abort the response. The shell has
+already been streamed by then, so the document goes out with the fallback in place and the reader
+gets a page. The error travels in the payload as well, and the browser raises it while reading —
+which is why the route is always wrapped in a boundary, whether or not you wrote `error.tsx`. With
+one, yours renders. Without, a plain message with a retry button does. Neither is a blank page,
+which is what an unhandled one produces: React unmounts the document and leaves a single console
+line behind.
+
+To keep the rest of the page and lose only the part that failed, put an error boundary _inside_ the
+`<Suspense>` that owns it. `<Suspense>` handles promises, not errors, so nothing else can contain
+one to that subtree.
 
 `@ruvyxa/react` is safe to import from a server component. `Link`, the routing hooks, `Script`,
 `RuvyxaErrorBoundary`, and `useRuvyxaLoader` declare `'use client'` themselves, so a root layout can

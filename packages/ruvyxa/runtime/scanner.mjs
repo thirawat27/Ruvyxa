@@ -280,6 +280,9 @@ function templateLiteral(source, start, end) {
 function interpolationEnd(source, start, end) {
   let index = start
   let depth = 1
+  // Tracked for the same reason the outer scan tracks it: `/` is a regex only
+  // where a value is expected, and the answer depends on the token before it.
+  let previousSignificant = -1
   while (index < end) {
     if (isCommentStart(source, index, end)) {
       index = skipComment(source, index, end)
@@ -287,17 +290,33 @@ function interpolationEnd(source, start, end) {
     }
     const character = source[index]
     if (character === '`') {
+      previousSignificant = index
       index = templateLiteral(source, index, end).after
     } else if (character === '"' || character === "'") {
+      previousSignificant = index
       index = skipString(source, index, end)
+    } else if (character === '/' && regexCanStart(source, previousSignificant)) {
+      // An interpolation is code, so it can hold a regex — and a regex can hold
+      // a quote. Without this branch the `'` in
+      // `` `'${value.replace(/'/g, "''")}'` `` opened a string that ran to the
+      // next quote, and every comment and literal after it in the file was read
+      // inside out: comment text survived as code and code was masked away. A
+      // linker reading that mask copied `export { … }` through verbatim into a
+      // module wrapper, and the bundle did not parse. `js-yaml` ships exactly
+      // this line.
+      previousSignificant = index
+      index = skipRegexLiteral(source, index, end)
     } else if (character === '{') {
       depth += 1
+      previousSignificant = index
       index += 1
     } else if (character === '}') {
       depth -= 1
       if (depth === 0) return index
+      previousSignificant = index
       index += 1
     } else {
+      if (!/\s/.test(character)) previousSignificant = index
       index += 1
     }
   }

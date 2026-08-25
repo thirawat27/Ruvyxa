@@ -683,15 +683,25 @@ fn write_shared_module_bindings(out: &mut String, shared_modules: &BTreeSet<Path
     out.push_str("var __ruvyxa_shared_modules__ = globalThis.__RUVYXA_SHARED_MODULES__;\n");
     for path in shared_modules {
         let id = module_id(path);
-        out.push_str("var ");
+        // Presence, not truthiness. A module is allowed to export a falsy
+        // value: lodash's `_WeakMap.js` is `module.exports = getNative(root,
+        // "WeakMap")`, which is `undefined` wherever that native check fails.
+        // Asking `if (!binding)` called that "not loaded" — the chunk had run,
+        // the key was there, and the value was exactly what the module meant to
+        // export. The route bundle threw while loading, so a page that rendered
+        // correctly on the server went blank in the browser and blamed a loader
+        // problem that did not exist.
+        out.push_str("if (!__ruvyxa_shared_modules__ || !(\"");
         out.push_str(&id);
-        out.push_str(" = __ruvyxa_shared_modules__ && __ruvyxa_shared_modules__[\"");
+        out.push_str(
+            "\" in __ruvyxa_shared_modules__)) throw new Error(\"RUV1602 shared route module was not loaded: ",
+        );
         out.push_str(&id);
-        out.push_str("\"];\nif (!");
+        out.push_str("\");\nvar ");
         out.push_str(&id);
-        out.push_str(") throw new Error(\"RUV1602 shared route module was not loaded: ");
+        out.push_str(" = __ruvyxa_shared_modules__[\"");
         out.push_str(&id);
-        out.push_str("\");\n");
+        out.push_str("\"];\n");
     }
     out.push('\n');
 }

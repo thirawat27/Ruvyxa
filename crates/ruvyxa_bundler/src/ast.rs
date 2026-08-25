@@ -795,16 +795,36 @@ fn template_literal(bytes: &[u8], start: usize) -> (usize, Vec<(usize, usize)>) 
 fn interpolation_end(bytes: &[u8], start: usize) -> usize {
     let mut index = start;
     let mut depth = 1usize;
+    // Tracked for the same reason the outer scans track it: `/` opens a regex
+    // only where a value is expected, and that depends on the token before it.
+    let mut previous_significant: Option<usize> = None;
     while index < bytes.len() {
         if is_comment_start(bytes, index) {
             index = skip_comment(bytes, index);
             continue;
         }
+        // An interpolation is code, so it can hold a regex — and a regex can
+        // hold a quote. Without this the `'` in
+        // `` `'${value.replace(/'/g, "''")}'` `` opened a string that ran to
+        // the next quote, and every literal and comment after it in the file
+        // was read inside out. `js-yaml` ships exactly this line.
+        if bytes[index] == b'/' && regex_can_start(bytes, previous_significant) {
+            previous_significant = Some(index);
+            index = skip_regex_literal(bytes, index);
+            continue;
+        }
         match bytes[index] {
-            b'`' => index = template_literal(bytes, index).0,
-            b'\'' | b'"' => index = skip_string(bytes, index),
+            b'`' => {
+                previous_significant = Some(index);
+                index = template_literal(bytes, index).0;
+            }
+            b'\'' | b'"' => {
+                previous_significant = Some(index);
+                index = skip_string(bytes, index);
+            }
             b'{' => {
                 depth += 1;
+                previous_significant = Some(index);
                 index += 1;
             }
             b'}' => {
@@ -812,9 +832,15 @@ fn interpolation_end(bytes: &[u8], start: usize) -> usize {
                 if depth == 0 {
                     return index;
                 }
+                previous_significant = Some(index);
                 index += 1;
             }
-            _ => index += 1,
+            byte => {
+                if !byte.is_ascii_whitespace() {
+                    previous_significant = Some(index);
+                }
+                index += 1;
+            }
         }
     }
     bytes.len()
@@ -985,6 +1011,50 @@ pub(crate) fn skip_non_code(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The Rust half of the source-scanner contract.
+    ///
+    /// The JavaScript half is `tests/packages/ruvyxa/source-scanner.test.mjs`,
+    /// driving `runtime/scanner.mjs` over the same table. Both walk bytes
+    /// rather than parse, so a construct one of them does not know
+    /// desynchronizes it — and every reader downstream believes the answer.
+    #[test]
+    fn masking_matches_the_shared_conformance_table() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/source-scanner-conformance.json");
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        let fixture: serde_json::Value =
+            serde_json::from_str(&source).expect("the scanner fixture parses");
+        let cases = fixture["cases"].as_array().expect("cases");
+        assert!(!cases.is_empty(), "the fixture must carry cases");
+
+        for case in cases {
+            let name = case["name"].as_str().unwrap_or_default();
+            let why = case["why"].as_str().unwrap_or_default();
+            let input = case["source"].as_str().expect("source");
+            let masked = masked_code(input);
+            assert_eq!(
+                masked.len(),
+                input.len(),
+                "{name}: a mask is the same length as its source, so offsets stay usable"
+            );
+            for fragment in case["code"].as_array().into_iter().flatten() {
+                let fragment = fragment.as_str().expect("code fragment");
+                assert!(
+                    masked.contains(fragment),
+                    "{name}: `{fragment}` must survive the mask — {why}"
+                );
+            }
+            for fragment in case["text"].as_array().into_iter().flatten() {
+                let fragment = fragment.as_str().expect("text fragment");
+                assert!(
+                    !masked.contains(fragment),
+                    "{name}: `{fragment}` is text and must be masked away — {why}"
+                );
+            }
+        }
+    }
 
     /// The keyword's own position must not be treated as the byte before it.
     /// A module that opens directly with the export — no import, no directive,

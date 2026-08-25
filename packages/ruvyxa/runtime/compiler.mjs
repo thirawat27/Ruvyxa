@@ -1757,7 +1757,7 @@ function writeExternalImports(push, externals, externalUrls) {
     // module's names — a re-exporting shim gave consumers a namespace with only
     // `default` on it, and every `__ext0.useState` came back undefined. The
     // registry holds the module's own exports object, so a named read and a
-    // `default ?? namespace` read both find what they are looking for.
+    // a default import and a namespace read both find what they look for.
     push(`import ${JSON.stringify(sharedUrl)};`)
     push(
       `const ${alias} = (globalThis.${VENDOR_REGISTRY_GLOBAL} ?? {})[${JSON.stringify(specifier)}];`,
@@ -1769,7 +1769,7 @@ function writeExternalImports(push, externals, externalUrls) {
   // The rewritten specifier when one is in play: with `externalUrls` the map is
   // keyed by the URL the import names, not by `react`.
   const reactAlias = externals.get('react') ?? externals.get(externalUrls?.react)
-  if (reactAlias) push(`const React = ${reactAlias}.default ?? ${reactAlias};`)
+  if (reactAlias) push(`const React = ${defaultImportExpression(reactAlias)};`)
   if (externals.size > 0) push('')
 }
 
@@ -2466,11 +2466,41 @@ function rewriteImportClause(clause, sourceRef, cyclic = false) {
   if (cleaned.includes(',')) {
     const [defaultName, rest] = cleaned.split(/,(.+)/)
     return [
-      bind(defaultName.trim(), `${sourceRef}.default ?? ${sourceRef}`),
+      bind(defaultName.trim(), defaultImportExpression(sourceRef)),
       rewriteImportClause(rest.trim(), sourceRef, cyclic),
     ].join(' ')
   }
-  return bind(cleaned, `${sourceRef}.default ?? ${sourceRef}`)
+  return bind(cleaned, defaultImportExpression(sourceRef))
+}
+
+/**
+ * The expression a default import reads.
+ *
+ * `X.default ?? X` looks equivalent and is not. A CommonJS module that assigns
+ * `module.exports = undefined` — which lodash's `_WeakMap.js` does on any
+ * runtime where its native-function check fails — records `default: undefined`,
+ * and `??` then falls through to the exports *object*. The importer receives a
+ * truthy object where the module said `undefined`, so the guard written for
+ * exactly that case (`WeakMap && new WeakMap()`) passes and the `new` throws
+ * `Object is not a constructor`. Node happened to satisfy the native check and
+ * Bun did not, so a deployment built from identical sources started on one
+ * runtime and died on the other.
+ *
+ * Asking whether the property exists is closer to the question, but not the
+ * whole of it: a `'use client'` module is replaced by a `Proxy` whose `get`
+ * mints a client reference for any name, and `in` on that target answers
+ * `false` while `.default` answers correctly. Reading the value first and
+ * falling back to the property check keeps all three straight — a live default,
+ * a deliberate `undefined`, and a module with only named exports. The leading
+ * null check covers the fourth: a CommonJS module may assign
+ * `module.exports = undefined` outright, and reading any property off that
+ * throws before the interop can decide anything.
+ */
+function defaultImportExpression(sourceRef) {
+  return (
+    `${sourceRef} == null ? ${sourceRef} : ` +
+    `(${sourceRef}.default !== undefined || "default" in ${sourceRef} ? ${sourceRef}.default : ${sourceRef})`
+  )
 }
 
 function rewriteDynamicImports(line, module) {
@@ -3051,10 +3081,11 @@ function compileJsonModuleSource(source, file) {
   }
 
   const lines = [`module.exports = JSON.parse(${JSON.stringify(JSON.stringify(value))});`]
-  // Node hands a default import the whole document. The linker reads
-  // `<module>.default ?? <module>`, so attach the self-reference — but never
-  // when the document has its own `default` key, because overwriting it would
-  // change data the application can read through `require()`.
+  // Node hands a default import the whole document, and the linker reads the
+  // module's `default` property when it has one — so attach a self-reference
+  // to make a default import the whole document. Never when the document has
+  // its own `default` key: overwriting it would change data the application
+  // can read through `require()`.
   if (value !== null && typeof value === 'object' && !Object.hasOwn(value, 'default')) {
     lines.push(
       `Object.defineProperty(module.exports, 'default', { value: module.exports, configurable: true });`,

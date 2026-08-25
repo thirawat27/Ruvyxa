@@ -178,7 +178,20 @@ route อื่น ๆ
 
 `error.tsx` และ `not-found.tsx` เป็น boundary ที่สร้างจาก class ซึ่ง server graph รันไม่ได้ บน route
 ที่ใช้ server components ทั้งสองไฟล์ต้องเป็น module `'use client'` — เป็นกฎเดียวกับที่ React
-กำหนดเอง
+กำหนดเอง `ruvyxa build` จะรายงาน route ที่ `error.tsx` ไม่มี directive นี้
+เพราะฝั่งเซิร์ฟเวอร์ยังเรนเดอร์มันได้อยู่: ถ้าไม่มีคำเตือน คุณจะเห็นหน้า error ของตัวเองเมื่อ error
+เกิดตอน server render และเห็นอีกหน้าหนึ่งเมื่อ error เกิดในเบราว์เซอร์
+
+server component ที่ throw ข้างใน `<Suspense>` จะไม่ทำให้ response ล้ม เพราะตอนนั้น shell
+ถูกสตรีมออกไปแล้ว เอกสารจึงออกไปพร้อม fallback และผู้อ่านได้หน้าเว็บ แต่ error เดินทางไปกับ payload
+ด้วย และเบราว์เซอร์จะเจอมัน ตอนอ่าน — นี่คือเหตุผลที่ route จะถูกห่อด้วย boundary เสมอ
+ไม่ว่าคุณจะเขียน `error.tsx` หรือไม่ ถ้าเขียน หน้าของคุณจะถูกใช้ ถ้าไม่เขียน
+จะได้ข้อความธรรมดาพร้อมปุ่มลองใหม่ ทั้งสองอย่างไม่ใช่หน้าขาว ซึ่งคือสิ่งที่ error
+ที่ไม่มีใครรับจะทำให้เกิด — React จะ unmount ทั้งเอกสารแล้วเหลือไว้แค่บรรทัดเดียวใน console
+
+ถ้าอยากให้ส่วนที่เหลือของหน้ายังอยู่และเสียแค่ส่วนที่พัง ให้วาง error boundary ไว้ **ข้างใน**
+`<Suspense>` ตัวที่เป็นเจ้าของ เพราะ `<Suspense>` รับ promise ไม่ได้รับ error
+จึงไม่มีอะไรอื่นจำกัดขอบเขตของมันได้
 
 `@ruvyxa/react` import จาก server component ได้อย่างปลอดภัย เพราะ `Link`, routing hook ต่าง ๆ,
 `Script`, `RuvyxaErrorBoundary` และ `useRuvyxaLoader` ประกาศ `'use client'` ไว้ในตัวเองแล้ว ดังนั้น

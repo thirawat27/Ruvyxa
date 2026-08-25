@@ -1,0 +1,80 @@
+{
+  "$comment": [
+    "Where code stops and text begins.",
+    "",
+    "Two scanners answer this, and everything else believes them:",
+    "crates/ruvyxa_bundler/src/ast.rs for the Rust half (imports, the boundary",
+    "check, the linker's rewrites) and packages/ruvyxa/runtime/scanner.mjs for the",
+    "JavaScript half (the same jobs on the dev and deploy paths). Neither parses;",
+    "both walk bytes. That is a deliberate trade and it has one failure mode: a",
+    "construct the walk does not know desynchronizes it, and from that point on",
+    "the file is read inside out — comment text survives as code and code is",
+    "masked away. Nothing downstream can notice, because both halves stay",
+    "internally consistent.",
+    "",
+    "Each case below is a shape that has actually broken one of them. Replayed by",
+    "the `mod tests` in ast.rs and by tests/packages/ruvyxa/source-scanner.test.mjs.",
+    "",
+    "`code` is a substring that must survive the mask; `text` is one that must",
+    "not. Both are checked, because a scanner that blanks everything would pass a",
+    "test that only looked for the absence of text."
+  ],
+  "cases": [
+    {
+      "name": "regex holding a quote inside a template interpolation",
+      "source": "var a = `'${s.replace(/'/g, \"''\")}'`;\nexport { a };\n",
+      "code": ["export { a }"],
+      "text": [],
+      "why": "The interpolation is code and may hold a regex; the regex may hold a quote. Reading that quote as a string opener ran to the next quote in the file and inverted everything after it — js-yaml ships this exact line, and the bundle it produced did not parse."
+    },
+    {
+      "name": "regex holding a quote at statement level",
+      "source": "var a = s.replace(/'/g, \"''\");\nexport { a };\n",
+      "code": ["export { a }"],
+      "text": [],
+      "why": "The same literal outside a template. The outer walk already knew this one; the interpolation walk did not."
+    },
+    {
+      "name": "division is not a regex",
+      "source": "var ratio = width / height;\nvar b = 'kept';\nexport { ratio };\n",
+      "code": ["export { ratio }", "width / height"],
+      "text": ["kept"],
+      "why": "A `/` after a value is division. Treating it as a regex would swallow the rest of the line and then some."
+    },
+    {
+      "name": "backtick inside a string inside an interpolation",
+      "source": "var a = `${obj[\"`\"]}`;\nexport { a };\n",
+      "code": ["export { a }"],
+      "text": [],
+      "why": "A backtick that is string content must not end the template."
+    },
+    {
+      "name": "brace inside a string inside an interpolation",
+      "source": "var a = `${obj[\"}\"]}`;\nexport { a };\n",
+      "code": ["export { a }"],
+      "text": [],
+      "why": "A `}` that is string content must not close the interpolation."
+    },
+    {
+      "name": "comment inside an interpolation",
+      "source": "var a = `${/* } */ value}`;\nexport { a };\n",
+      "code": ["export { a }"],
+      "text": [],
+      "why": "A brace inside a comment inside an interpolation closes nothing."
+    },
+    {
+      "name": "apostrophe in prose keeps its blast radius to one line",
+      "source": "// React's own docs\nvar a = 1;\nexport { a };\n",
+      "code": ["export { a }"],
+      "text": [],
+      "why": "An unmatched quote is an apostrophe, not a delimiter. Running to the next quote anywhere in the file is what desynchronizes a scan."
+    },
+    {
+      "name": "nested template literals",
+      "source": "var a = `outer ${`inner ${x}`} end`;\nexport { a };\n",
+      "code": ["export { a }"],
+      "text": ["outer ", " end"],
+      "why": "Template text is not code at either depth, and the inner template must not end the outer one."
+    }
+  ]
+}

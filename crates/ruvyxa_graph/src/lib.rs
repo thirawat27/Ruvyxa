@@ -3086,6 +3086,51 @@ export default function Page() { return MARKER }
             vec!["/ssr"],
             "only the route that renders on the server and hydrates can disagree with itself"
         );
+
+        // The shared table, replayed against those three routes. It named the
+        // rule and nothing checked it, which is the state a fixture exists to
+        // avoid.
+        //
+        // The rule has two halves and they live apart on purpose. Whether the
+        // plugin really produces different text for the two lanes is answered
+        // by asking the plugin (`transform_differs_by_environment` in the CLI);
+        // whether anything that renders on the server *and* hydrates can reach
+        // the module is this function's half. A build warns only when both say
+        // yes, which is what the `expect` column describes.
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/plugin-transform-lane-conformance.json");
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        let fixture: serde_json::Value =
+            serde_json::from_str(&source).expect("the lane fixture parses");
+        let cases = fixture["divergence"]["cases"]
+            .as_array()
+            .expect("divergence cases");
+        assert!(!cases.is_empty(), "the fixture must carry cases");
+
+        for case in cases {
+            let renders = case["routeRenders"].as_bool().expect("routeRenders");
+            let hydrates = case["routeHydrates"].as_bool().expect("routeHydrates");
+            let client_only = case["clientOnly"].as_bool().expect("clientOnly");
+            let why = case["why"].as_str().unwrap_or_default();
+            let route = match (renders, hydrates) {
+                (true, true) => "/ssr",
+                (false, true) => "/csr",
+                (true, false) => "/static",
+                (false, false) => continue,
+            };
+
+            assert_eq!(
+                at_risk.iter().any(|(found, _)| found == route),
+                renders && hydrates,
+                "{route}: the graph half is reachability alone — {why}"
+            );
+            assert_eq!(
+                case["expect"].as_str().expect("expect") == "diverge",
+                client_only && renders && hydrates,
+                "{route}: a build warns only when both halves say yes — {why}"
+            );
+        }
     }
 
     /// The common case has to stay free: a build with no plugin transforms must

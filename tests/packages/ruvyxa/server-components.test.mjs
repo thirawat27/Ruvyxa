@@ -281,6 +281,25 @@ describe('the browser entry', () => {
     assert.ok(source.includes('class __ruvyxaBoundary'), 'the class has to be in scope')
   })
 
+  it('carries not-found.tsx too, so notFound() has a browser half', () => {
+    // `notFound()` can be raised during a soft navigation, where no server
+    // render happens at all. The server-side recovery cannot answer that one.
+    const withSpecials = rscClientEntrySource({
+      references: [],
+      routePath: '/',
+      requestPathLiteral: '"/"',
+      paramsLiteral: '{}',
+      notFoundFile: counterFile,
+    })
+    assert.match(withSpecials, /import __ruvyxaRouteNotFound from/)
+    assert.match(withSpecials, /notFound: __ruvyxaRouteNotFound/)
+    assert.match(
+      withSpecials,
+      /defaultErrorFallback: true/,
+      'a not-found page is not an error page; the built-in message still covers errors',
+    )
+  })
+
   it('uses the project error page when it can run in a browser', () => {
     const withError = rscClientEntrySource({
       references: [{ id: clientModuleId('app/counter.tsx'), file: counterFile }],
