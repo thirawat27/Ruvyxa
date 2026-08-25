@@ -86,7 +86,7 @@
       "source": [
         "function __ruvyxaTree(ctx) {",
         "  let tree = React.createElement(Page, { params: ctx.params ?? {}, requestPath: ctx.path })",
-        "  tree = React.createElement(__ruvyxaBoundary, { errorFallback: ErrorPage, notFound: NotFoundPage }, tree)",
+        "  tree = React.createElement(__ruvyxaBoundary, { errorFallback: ErrorPage, notFound: NotFoundPage, defaultErrorFallback: false }, tree)",
         "  tree = React.createElement(React.Suspense, { fallback: React.createElement(LoadingPage, null) }, tree)",
         "  for (const Layout of [Layout0, Layout1].reverse()) {",
         "    tree = React.createElement(Layout, null, tree)",
@@ -111,7 +111,7 @@
       "source": [
         "function __ruvyxaTree(ctx) {",
         "  let tree = React.createElement(Page, { params: ctx.params ?? {}, requestPath: ctx.path })",
-        "  tree = React.createElement(__ruvyxaBoundary, { errorFallback: ErrorPage, notFound: null }, tree)",
+        "  tree = React.createElement(__ruvyxaBoundary, { errorFallback: ErrorPage, notFound: null, defaultErrorFallback: false }, tree)",
         "  for (const Layout of [].reverse()) {",
         "    tree = React.createElement(Layout, null, tree)",
         "  }",

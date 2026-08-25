@@ -590,6 +590,24 @@ export function routeBoundaryPrelude() {
           retry: this.retry,
         })
       }
+      // Rethrowing from the outermost boundary reaches the React root, which
+      // responds by unmounting the document — a blank page and one console
+      // line. A project that has not written \`error.tsx\` has still not asked
+      // for that. Render something instead: it names what happened, it can be
+      // replaced by adding \`error.tsx\`, and it leaves the rest of the document
+      // standing.
+      if (this.props.defaultErrorFallback) {
+        return React.createElement(
+          "div",
+          { role: "alert", "data-ruvyxa-error": "route" },
+          React.createElement("p", null, "This page could not be rendered."),
+          React.createElement(
+            "button",
+            { type: "button", onClick: this.retry },
+            "Try again",
+          ),
+        )
+      }
       throw error
     }
     return this.props.children
@@ -842,6 +860,7 @@ export function routeTreeFunction({
   errorName = null,
   loadingName = null,
   notFoundName = null,
+  serverComponents = false,
   levels = [],
   provider = true,
 }) {
@@ -850,9 +869,9 @@ export function routeTreeFunction({
   ]
   // Boundary first (inner) so a synchronous throw is caught before it reaches
   // the Suspense; Suspense second (outer) so async loading still shows.
-  if (errorName || notFoundName) {
+  if (needsRouteBoundary({ errorName, notFoundName, serverComponents })) {
     lines.push(
-      `  tree = React.createElement(${ROUTE_BOUNDARY_LOCAL}, { errorFallback: ${errorName ?? 'null'}, notFound: ${notFoundName ?? 'null'} }, tree)`,
+      `  tree = React.createElement(${ROUTE_BOUNDARY_LOCAL}, { errorFallback: ${errorName ?? 'null'}, notFound: ${notFoundName ?? 'null'}, defaultErrorFallback: ${serverComponents && !errorName ? 'true' : 'false'} }, tree)`,
     )
   }
   if (loadingName) {
@@ -891,8 +910,25 @@ export function routeTreeFunction({
  *
  * `loading.tsx` alone needs only `React.Suspense`, which is always available.
  */
-export function needsRouteBoundary({ errorName = null, notFoundName = null } = {}) {
-  return Boolean(errorName || notFoundName)
+export function needsRouteBoundary({
+  errorName = null,
+  notFoundName = null,
+  serverComponents = false,
+} = {}) {
+  // A server-components route always gets one, even with no `error.tsx`.
+  //
+  // Its server half is allowed to tolerate a component that throws inside a
+  // `<Suspense>`: the shell has already been streamed, React has already
+  // written the switch to the fallback into both the markup and the payload,
+  // and discarding a mostly-correct document helps nobody. The browser then
+  // reads that payload, finds the error, and — with no boundary anywhere above
+  // it — unmounts the entire tree. The page went blank with one uncaught
+  // `An error occurred in the Server Components render` and no other trace,
+  // while the server had sent a document that was almost entirely fine.
+  //
+  // Tolerating on one side and having nowhere to put the error on the other is
+  // the actual defect. A boundary is the somewhere.
+  return Boolean(errorName || notFoundName || serverComponents)
 }
 
 /**
@@ -1027,10 +1063,11 @@ export function clientEntrySource({
   errorName = null,
   loadingName = null,
   notFoundName = null,
+  serverComponents = false,
   metaNames = [],
   levels = [],
 }) {
-  const boundary = needsRouteBoundary({ errorName, notFoundName })
+  const boundary = needsRouteBoundary({ errorName, notFoundName, serverComponents })
     ? `\n${routeBoundaryPrelude()}\n`
     : ''
   const meta = metaNames.length > 0 ? `\n${routeMetaPrelude({ lang: false })}\n` : ''
@@ -1049,7 +1086,7 @@ ${imports.join('\n')}
 
 ${routeContextPrelude()}
 ${boundary}${slotResolver}${meta}
-${routeTreeFunction({ name: '__ruvyxaTree', pageName, layoutNames, routePath, errorName, loadingName, notFoundName, metaNames, levels })}
+${routeTreeFunction({ name: '__ruvyxaTree', pageName, layoutNames, routePath, errorName, loadingName, notFoundName, serverComponents, metaNames, levels })}
 ${routeRegistration({ name: '__ruvyxaTree', routePath })}
 ${interceptRegistry}
 ${shell}
@@ -1102,10 +1139,11 @@ export function nodeSsrEntrySource({
   errorName = null,
   loadingName = null,
   notFoundName = null,
+  serverComponents = false,
   metaNames = [],
   levels = [],
 }) {
-  const boundary = needsRouteBoundary({ errorName, notFoundName })
+  const boundary = needsRouteBoundary({ errorName, notFoundName, serverComponents })
     ? `\n${routeBoundaryPrelude()}\n`
     : ''
   const metaPrelude = metaNames.length > 0 ? `\n${routeMetaPrelude()}\n` : ''
@@ -1134,7 +1172,7 @@ ${imports.join('\n')}
 
 ${routeContextPrelude()}
 ${boundary}${metaPrelude}
-${routeTreeFunction({ name: '__ruvyxaTree', pageName, layoutNames, routePath, errorName, loadingName, notFoundName, metaNames, levels })}
+${routeTreeFunction({ name: '__ruvyxaTree', pageName, layoutNames, routePath, errorName, loadingName, notFoundName, serverComponents, metaNames, levels })}
 ${recovery}
 export async function render(ctx) {
   const html = await __ruvyxaRenderDocument(ctx)
@@ -1402,6 +1440,8 @@ ${registry.statements.join('\n')}
 
 ${routeContextPrelude()}
 
+${routeBoundaryPrelude()}
+
 ${clientBootstrapPrelude()}
 
 // One decode per payload. React's decoder consumes the stream it is given, so
@@ -1442,12 +1482,27 @@ function ${RSC_ROOT_LOCAL}({ payload, path, params }) {
   )
 }
 
+// The payload is read inside a boundary, because the server is allowed to send
+// one that failed.
+//
+// A server component that throws inside a \`<Suspense>\` does not stop the
+// render: the shell has already been streamed, React has already written the
+// switch to the fallback into both the markup and the payload, and the server
+// ships the document rather than discarding a page that is almost entirely
+// right. \`React.use\` then rethrows that error here — and with nothing above it
+// to catch it, React unmounted the whole document. The page went blank with a
+// single uncaught \`An error occurred in the Server Components render\`, after
+// the server had sent something perfectly readable.
 function ${RSC_TREE_LOCAL}(payload, ctx) {
-  return React.createElement(${RSC_ROOT_LOCAL}, {
-    payload,
-    path: ctx.path,
-    params: ctx.params,
-  })
+  return React.createElement(
+    ${ROUTE_BOUNDARY_LOCAL},
+    { errorFallback: null, notFound: null, defaultErrorFallback: true },
+    React.createElement(${RSC_ROOT_LOCAL}, {
+      payload,
+      path: ctx.path,
+      params: ctx.params,
+    }),
+  )
 }
 
 ;(globalThis.${RSC_ROUTE_REGISTRY_GLOBAL} ||= {})[${JSON.stringify(routePath)}] = ${RSC_TREE_LOCAL};

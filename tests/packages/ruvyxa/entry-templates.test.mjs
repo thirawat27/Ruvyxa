@@ -207,7 +207,7 @@ describe('entry-templates special files', () => {
     })
     assert.match(
       tree,
-      /React\.createElement\(__ruvyxaBoundary, \{ errorFallback: RouteError, notFound: RouteNotFound \}, tree\)/,
+      /React\.createElement\(__ruvyxaBoundary, \{ errorFallback: RouteError, notFound: RouteNotFound, defaultErrorFallback: false \}, tree\)/,
     )
     assert.match(
       tree,

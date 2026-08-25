@@ -402,6 +402,17 @@ const ROUTE_BOUNDARY_PRELUDE: &str = r#"class __ruvyxaBoundary extends React.Com
           retry: this.retry,
         });
       }
+      // Rethrowing from the outermost boundary reaches the React root, which
+      // responds by unmounting the document. A project that has not written
+      // error.tsx has still not asked for a blank page.
+      if (this.props.defaultErrorFallback) {
+        return React.createElement(
+          "div",
+          { role: "alert", "data-ruvyxa-error": "route" },
+          React.createElement("p", null, "This page could not be rendered."),
+          React.createElement("button", { type: "button", onClick: this.retry }, "Try again"),
+        );
+      }
       throw error;
     }
     return this.props.children;
@@ -785,7 +796,7 @@ fn route_tree_function(
         let error_ref = error_name.unwrap_or("null");
         let not_found_ref = not_found_name.unwrap_or("null");
         lines.push(format!(
-            "  tree = React.createElement(__ruvyxaBoundary, {{ errorFallback: {error_ref}, notFound: {not_found_ref} }}, tree);"
+            "  tree = React.createElement(__ruvyxaBoundary, {{ errorFallback: {error_ref}, notFound: {not_found_ref}, defaultErrorFallback: false }}, tree);"
         ));
     }
     if let Some(loading) = loading_name {
@@ -1052,7 +1063,7 @@ mod tests {
         );
         assert!(
             source.contains(
-                "React.createElement(__ruvyxaBoundary, { errorFallback: RouteError, notFound: RouteNotFound }, tree)"
+                "React.createElement(__ruvyxaBoundary, { errorFallback: RouteError, notFound: RouteNotFound, defaultErrorFallback: false }, tree)"
             ),
             "{source}"
         );
