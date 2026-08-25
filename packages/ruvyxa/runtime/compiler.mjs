@@ -4085,6 +4085,83 @@ const TRANSFORM_LANG_BY_EXTENSION = {
   '.cts': 'ts',
 }
 
+/**
+ * Blank a leading `#!` line, keeping the line itself.
+ *
+ * A shebang is legal at the top of a module and Node removes it when it loads
+ * one directly — but a bundled module is wrapped in a function, where `#!` is a
+ * syntax error. Packages that double as executables ship one on their entry
+ * file, so importing such a package failed the build with a parse error that
+ * named a character rather than a cause.
+ *
+ * The line is emptied rather than deleted so every line below keeps its number.
+ */
+function stripShebang(source) {
+  const start = source.charCodeAt(0) === 0xfeff ? 1 : 0
+  if (source.charCodeAt(start) !== 0x23 || source.charCodeAt(start + 1) !== 0x21) return source
+  const lineEnd = source.indexOf('\n', start)
+  const prefix = source.slice(0, start)
+  return lineEnd === -1 ? prefix : prefix + source.slice(lineEnd)
+}
+
+/**
+ * Remove decorators, keeping every line number.
+ *
+ * Ruvyxa accepts decorators and strips them — the emitted bundle is plain
+ * JavaScript, which has no such syntax. The Rust compiler has always done this
+ * (`strip_decorators_with_plan`); this graph did not, so a decorated class
+ * compiled for the browser and threw `Invalid or unexpected token` on every
+ * server render of the same route. One rule, two compilers, and only one of
+ * them was applying it.
+ *
+ * Blank lines replace the ones a decorator occupied, so diagnostics and source
+ * maps still address the line the author wrote.
+ */
+function stripDecorators(source) {
+  if (!source.includes('@')) return source
+  const masked = maskNonCode(source)
+  let out = ''
+  let index = 0
+  while (index < source.length) {
+    if (masked[index] !== '@' || !decoratorCanStart(masked, index)) {
+      out += source[index]
+      index += 1
+      continue
+    }
+    const end = skipDecorator(masked, index)
+    // Only the newlines it spanned, so nothing below it moves.
+    out += masked.slice(index, end).replace(/[^\n]/g, '')
+    index = end
+  }
+  return out
+}
+
+/** Whether an `@` begins a decorator rather than sitting inside a larger token. */
+function decoratorCanStart(masked, at) {
+  for (let index = at - 1; index >= 0; index -= 1) {
+    const character = masked[index]
+    if (/\s/.test(character)) continue
+    return /[{};)\]\w$]/.test(character)
+  }
+  // Nothing before it in the file: a decorator on the first declaration.
+  return true
+}
+
+/** The index just past a decorator that begins at `at`. */
+function skipDecorator(masked, at) {
+  let index = at + 1
+  while (index < masked.length && /[\w$.]/.test(masked[index])) index += 1
+  if (masked[index] !== '(') return index
+  let depth = 1
+  index += 1
+  while (index < masked.length && depth > 0) {
+    if (masked[index] === '(') depth += 1
+    else if (masked[index] === ')') depth -= 1
+    index += 1
+  }
+  return index
+}
+
 function transformModuleSource(module) {
   // Resolve lazily so tools that copy compiler.mjs for path-isolation checks do
   // not need the package dependency beside the copied file until compilation.
@@ -4114,7 +4191,8 @@ function transformModuleSource(module) {
   const reactCompiled = module.reactCompiler
     ? compilerSupport.transformWithReactCompiler(module.source, filename)
     : null
-  const result = transformSync(filename, reactCompiled?.code ?? module.source, {
+  const source = stripShebang(stripDecorators(reactCompiled?.code ?? module.source))
+  const result = transformSync(filename, source, {
     lang,
     sourceType: 'module',
     sourcemap: true,

@@ -76,5 +76,58 @@
       "text": ["outer ", " end"],
       "why": "Template text is not code at either depth, and the inner template must not end the outer one."
     }
-  ]
+  ],
+  "erasedSyntax": {
+    "$comment": [
+      "Syntax both compilers must remove before the code is linked.",
+      "",
+      "The emitted bundle is plain JavaScript wrapped in a function. Anything the",
+      "language does not allow there has to be gone by then, and both compilers",
+      "have to agree on what 'gone' means — the Rust one builds the browser bundle,",
+      "and runtime/compiler.mjs builds every server render.",
+      "",
+      "Replayed by the `mod decorator_placement_tests` in",
+      "crates/ruvyxa_bundler/src/compiler.rs and by",
+      "tests/packages/ruvyxa/erased-syntax.test.mjs."
+    ],
+    "decorators": {
+      "$comment": [
+        "`@` is not an operator in JavaScript, so a code-position one begins a",
+        "decorator. Requiring it to start its own line left the inline form — what",
+        "a formatter picks for a short member, and what every minified dependency",
+        "has — in the output, where it is a syntax error. The JavaScript compiler",
+        "stripped none at all, so a decorated class worked in the browser and threw",
+        "on every server render of the same route."
+      ],
+      "stripped": [
+        "class Svc {\n  @log\n  run() { return 1 }\n}\n",
+        "class Svc { @log run() { return 1 } }\n",
+        "class Svc {\n  @log()\n  run() { return 1 }\n}\n",
+        "class Svc { @log({ a: 1 }) run() { return 1 } }\n",
+        "@tag\nclass Svc { run() { return 1 } }\n"
+      ],
+      "untouched": [
+        "const email = \"a@b.test\"\n",
+        "// reach me @someone\n",
+        "const pattern = /@handle/\n",
+        "const doc = `mention @user here`\n"
+      ]
+    },
+    "shebang": {
+      "$comment": [
+        "Legal at the top of a module, and Node removes it when it loads one",
+        "directly — but a bundled module is wrapped in a function, where `#!` is a",
+        "syntax error. Packages that double as executables ship one on their entry",
+        "file. The line is emptied rather than deleted so nothing below it moves."
+      ],
+      "stripped": [
+        "#!/usr/bin/env node\nexport const hit = 1\n",
+        "﻿#!/usr/bin/env node\nexport const hit = 1\n"
+      ],
+      "untouched": [
+        "const url = \"https://a.test/#!/route\"\n",
+        "// #!/usr/bin/env node\nexport const hit = 1\n"
+      ]
+    }
+  }
 }

@@ -192,6 +192,20 @@ fn compile_json_module(source: &str, path: &Path) -> Result<String> {
 ///
 /// Without this the file reaches the JavaScript transform and Oxc reports a
 /// syntax error inside a dependency the application never wrote.
+/// The source as the linker receives it, after the pipeline's re-printing.
+///
+/// Exposed for the syntax-conformance test, which links dependency sources
+/// straight from the shared table: without this it would be linking a form the
+/// pipeline never produces, and would report failures the build does not have.
+#[cfg(test)]
+pub(crate) fn prepared_for_linking(source: &str) -> String {
+    // The same two erasures `transform_with_plan` performs, in the same order:
+    // a decorator and a shebang are both gone before the linker sees a module.
+    let source = strip_decorators(source);
+    let source = strip_shebang(&source);
+    expand_multi_statement_esm(&source).unwrap_or(source)
+}
+
 /// Re-print JavaScript whose ESM statements share a line, one statement per line.
 ///
 /// Returns `None` when nothing needs changing, so a well-formed dependency is
@@ -523,6 +537,7 @@ pub(crate) fn transform_with_plan(
         Some(plan) => strip_decorators_with_plan(source, plan),
         None => strip_decorators(source),
     };
+    let source = strip_shebang(&source);
     let allocator = Allocator::default();
     let source_type = SourceType::mjs().with_typescript(true).with_jsx(has_jsx);
     let parsed = Parser::new(&allocator, &source, source_type).parse();
@@ -758,7 +773,7 @@ fn strip_decorators_with_plan(source: &str, ast: &ModuleAst) -> String {
     let mut i = 0;
 
     while i < len {
-        if bytes[i] == b'@' && starts_line(bytes, i) && ast.is_code_offset(i) {
+        if bytes[i] == b'@' && begins_decorator(bytes, i) && ast.is_code_offset(i) {
             let end = skip_decorator(bytes, i, ast);
             // Emit the newlines the decorator spanned and nothing else. A
             // decorator on its own line leaves the line blank; a multi-line
@@ -779,12 +794,52 @@ fn strip_decorators_with_plan(source: &str, ast: &ModuleAst) -> String {
 }
 
 /// True when only blanks separate `at` from the start of its line.
-fn starts_line(bytes: &[u8], at: usize) -> bool {
-    bytes[..at]
+/// Blank a leading `#!` line, keeping the line itself.
+///
+/// A shebang is legal at the top of a module and Node removes it when it loads
+/// one directly — but a bundled module is wrapped in a function, where `#!` is
+/// a syntax error. Packages that double as executables ship one on their entry
+/// file, so importing such a package failed the build with a parse error that
+/// named a character rather than a cause.
+///
+/// The line is emptied rather than deleted, so every line below keeps its
+/// number and diagnostics still address the line the author wrote.
+fn strip_shebang(source: &str) -> String {
+    let start = source
+        .strip_prefix('\u{feff}')
+        .map_or(0, |_| '\u{feff}'.len_utf8());
+    if !source[start..].starts_with("#!") {
+        return source.to_string();
+    }
+    match source[start..].find('\n') {
+        Some(offset) => format!("{}{}", &source[..start], &source[start + offset..]),
+        None => source[..start].to_string(),
+    }
+}
+
+/// Whether an `@` in a code position begins a decorator.
+///
+/// `@` is not an operator in JavaScript, so a code-position one is a decorator
+/// either way — what matters is only that it is not part of a larger token.
+/// Requiring it to start its own line was the earlier rule, and it left
+/// `class Svc { @log run() {} }` untouched: the shape a formatter picks for a
+/// short member, and the shape every minified dependency has. That decorator
+/// then reached the emitted bundle, which is plain JavaScript and has no such
+/// syntax.
+fn begins_decorator(bytes: &[u8], at: usize) -> bool {
+    let Some(previous) = bytes[..at]
         .iter()
         .rev()
-        .take_while(|byte| **byte != b'\n')
-        .all(|byte| matches!(byte, b' ' | b'\t' | b'\r'))
+        .find(|byte| !matches!(byte, b' ' | b'\t' | b'\r' | b'\n'))
+    else {
+        // Nothing before it in the file: a decorator on the first declaration.
+        return true;
+    };
+    // A decorator follows the start of a class body, the end of a previous
+    // member, another decorator, or the keyword before an exported class.
+    matches!(previous, b'{' | b'}' | b';' | b')' | b']')
+        || previous.is_ascii_alphanumeric()
+        || matches!(previous, b'_' | b'$')
 }
 
 /// Return the index just past a decorator that begins at `at`.
@@ -1507,6 +1562,123 @@ mod tests {
                 transform(&linked, false).is_ok(),
                 "linked output does not parse for {source:?}\n{linked}"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod decorator_placement_tests {
+    use super::*;
+
+    /// A decorator is stripped wherever it is written, not only at the start of
+    /// a line.
+    ///
+    /// Ruvyxa accepts decorators and removes them; the emitted bundle is plain
+    /// JavaScript, which has no such syntax. Stripping only the line-leading
+    /// form left `class Svc { @log run() {} }` — the shape a formatter produces
+    /// for a short member, and the shape a minified dependency always has —
+    /// intact in the output, where it is a syntax error.
+    fn erased_syntax_fixture() -> serde_json::Value {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/source-scanner-conformance.json");
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        serde_json::from_str::<serde_json::Value>(&source).expect("the fixture parses")
+            ["erasedSyntax"]
+            .clone()
+    }
+
+    /// A shebang is legal at the top of a module and illegal inside the wrapper
+    /// every module is emitted into. Replayed against the shared table.
+    #[test]
+    fn shebangs_match_the_shared_conformance_table() {
+        let fixture = erased_syntax_fixture();
+        for source in fixture["shebang"]["stripped"].as_array().expect("stripped") {
+            let source = source.as_str().expect("source");
+            let stripped = strip_shebang(source);
+            assert!(
+                !stripped.contains("#!"),
+                "a shebang survived:
+{stripped}"
+            );
+            assert_eq!(
+                stripped.lines().count(),
+                source.lines().count(),
+                "the line must be emptied, not removed:
+{stripped}"
+            );
+        }
+        for source in fixture["shebang"]["untouched"]
+            .as_array()
+            .expect("untouched")
+        {
+            let source = source.as_str().expect("source");
+            assert_eq!(strip_shebang(source), source, "text was rewritten");
+        }
+    }
+
+    /// The decorator half of the same table.
+    #[test]
+    fn decorators_match_the_shared_conformance_table() {
+        let fixture = erased_syntax_fixture();
+        for source in fixture["decorators"]["stripped"]
+            .as_array()
+            .expect("stripped")
+        {
+            let source = source.as_str().expect("source");
+            let stripped = strip_decorators_with_plan(source, &ast::parse_module(source));
+            assert!(
+                !stripped.contains('@'),
+                "a decorator survived stripping:
+{stripped}"
+            );
+        }
+        for source in fixture["decorators"]["untouched"]
+            .as_array()
+            .expect("untouched")
+        {
+            let source = source.as_str().expect("source");
+            assert_eq!(
+                strip_decorators_with_plan(source, &ast::parse_module(source)),
+                source,
+                "text was rewritten"
+            );
+        }
+    }
+
+    #[test]
+    fn decorators_are_stripped_wherever_they_appear() {
+        for source in [
+            "class Svc {\n  @log\n  run() { return 1 }\n}\n",
+            "class Svc { @log run() { return 1 } }\n",
+            "class Svc {\n  @log()\n  run() { return 1 }\n}\n",
+            "class Svc { @log({ a: 1 }) run() { return 1 } }\n",
+            "@tag\nclass Svc { run() { return 1 } }\n",
+        ] {
+            let stripped = strip_decorators_with_plan(source, &ast::parse_module(source));
+            assert!(
+                !stripped.contains('@'),
+                "a decorator survived stripping:\n{stripped}"
+            );
+            assert_eq!(
+                stripped.lines().count(),
+                source.lines().count(),
+                "line numbers must survive so diagnostics and source maps still line up:\n{stripped}"
+            );
+        }
+    }
+
+    /// An `@` that is not a decorator is left alone.
+    #[test]
+    fn an_at_sign_in_text_is_not_a_decorator() {
+        for source in [
+            "const email = \"a@b.test\"\n",
+            "// reach me @someone\n",
+            "const pattern = /@handle/\n",
+            "const doc = `mention @user here`\n",
+        ] {
+            let stripped = strip_decorators_with_plan(source, &ast::parse_module(source));
+            assert_eq!(stripped, source, "text was rewritten: {stripped}");
         }
     }
 }

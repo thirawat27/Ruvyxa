@@ -1,0 +1,430 @@
+{
+  "$comment": [
+    "Source shapes the linker has to carry, and what each one must evaluate to.",
+    "",
+    "Ruvyxa's linker is its own — no esbuild, no Rollup — and it rewrites ESM one",
+    "statement at a time rather than parsing to an AST and printing it back. That",
+    "is a deliberate trade, and its failure mode is narrow and quiet: a construct",
+    "the rewriter does not recognise is copied through, and the bundle either",
+    "fails to parse or, worse, parses and means something else.",
+    "",
+    "Every entry below is a shape that reached this file because it broke",
+    "something, or because it is one step away from a shape that did. Four were",
+    "found by running this table for the first time:",
+    "",
+    "  - `export { source as from }` was read as a re-export and dropped silently",
+    "  - top-level await produced a bundle that would not parse",
+    "  - a decorator written inline survived into the output",
+    "  - a leading `#!` line did the same",
+    "",
+    "`expect` is what the linked bundle must *evaluate to*, not what it must look",
+    "like. Half of the defects this table exists for produced output that compiled",
+    "cleanly and computed the wrong answer, and only running it catches those.",
+    "",
+    "Replayed by tests/packages/ruvyxa/module-syntax.test.mjs, which compiles and",
+    "runs each case, and by the `mod syntax_conformance_tests` in",
+    "crates/ruvyxa_bundler/src/linker.rs, which links each dependency and checks",
+    "that nothing was left behind. Adding a case is one entry here."
+  ],
+  "cases": [
+    {
+      "name": "regex with a slash inside a character class",
+      "dependency": "export const hit = \"a/b\".replace(/[/]/g, \"-\")\n",
+      "entry": "import { hit } from './dep.js'\nexport const value = hit\n",
+      "expect": "a-b",
+      "why": "The `/` inside the class does not end the literal. Reading it as the end leaves `]/g` as code."
+    },
+    {
+      "name": "regex containing a backtick",
+      "dependency": "export const hit = \"a`b\".replace(/[`]/g, \"-\")\n",
+      "entry": "import { hit } from './dep.js'\nexport const value = hit\n",
+      "expect": "a-b",
+      "why": "A backtick inside a regex must not open a template literal."
+    },
+    {
+      "name": "regex containing a quote",
+      "dependency": "export const pattern = /it's/\n",
+      "entry": "import { pattern } from './dep.js'\nexport const value = String(pattern.test(\"it's\"))\n",
+      "expect": "true",
+      "why": "The quote is regex content. Reading it as a string opener ran to the next quote in the file."
+    },
+    {
+      "name": "regex with an escaped slash",
+      "dependency": "export const hit = \"a/b\".replace(/\\//, \"-\")\n",
+      "entry": "import { hit } from './dep.js'\nexport const value = hit\n",
+      "expect": "a-b",
+      "why": "An escaped delimiter does not end the literal."
+    },
+    {
+      "name": "division after a closing paren is not a regex",
+      "dependency": "export const hit = (10) / 2 + 1\n",
+      "entry": "import { hit } from './dep.js'\nexport const value = String(hit)\n",
+      "expect": "6",
+      "why": "A `/` after a value is division. Treating it as a regex swallows the rest of the line."
+    },
+    {
+      "name": "division after an identifier ending in a keyword",
+      "dependency": "const inreturn = 10\nexport const hit = inreturn / 2\n",
+      "entry": "import { hit } from './dep.js'\nexport const value = String(hit)\n",
+      "expect": "5",
+      "why": "`return` is a keyword; `inreturn` is not. A prefix match would call this a regex position."
+    },
+    {
+      "name": "regex directly after return",
+      "dependency": "export function test(v) { return /^a/.test(v) }\n",
+      "entry": "import { test } from './dep.js'\nexport const value = String(test('abc'))\n",
+      "expect": "true",
+      "why": "A `/` after a keyword is a regex, which is the other half of the previous case."
+    },
+    {
+      "name": "nested template literals with interpolation",
+      "dependency": "const inner = \"x\"\nexport const hit = `a${`b${inner}c`}d`\n",
+      "entry": "import { hit } from './dep.js'\nexport const value = hit\n",
+      "expect": "abxcd",
+      "why": "The inner template must not end the outer one."
+    },
+    {
+      "name": "escaped backtick inside a template literal",
+      "dependency": "export const hit = `a\\`b`\n",
+      "entry": "import { hit } from './dep.js'\nexport const value = String(hit.length)\n",
+      "expect": "3",
+      "why": "An escaped delimiter does not end the literal."
+    },
+    {
+      "name": "template literal spanning lines with an export inside",
+      "dependency": "export const hit = `line one\nexport const decoy = 2\nline three`\n",
+      "entry": "import { hit } from './dep.js'\nexport const value = String(hit.split('\\n').length)\n",
+      "expect": "3",
+      "why": "A statement-shaped line inside template text is text. A line-based rewriter has to be told."
+    },
+    {
+      "name": "top-level await in a dependency",
+      "dependency": "export const hit = await Promise.resolve(\"awaited\")\n",
+      "entry": "import { hit } from './dep.js'\nexport const value = hit\n",
+      "expect": "awaited",
+      "why": "Every module is wrapped in a function, and `await` is illegal in a synchronous one."
+    },
+    {
+      "name": "top-level await in the entry",
+      "dependency": "export const hit = \"dynamic\"\n",
+      "entry": "const m = await import('./dep.js')\nexport const value = m.hit\n",
+      "expect": "dynamic",
+      "why": "Awaiting a dynamic import at the top of a route is ordinary and hit the same wrapper."
+    },
+    {
+      "name": "for await at the top level",
+      "dependency": "export async function* steps() { yield 5 }\n",
+      "entry": "import { steps } from './dep.js'\nlet total = 0\nfor await (const n of steps()) total += n\nexport const value = String(total)\n",
+      "expect": "5",
+      "why": "The same wrapper problem, reached through a different keyword."
+    },
+    {
+      "name": "generator export",
+      "dependency": "export function* steps() { yield 1; yield 2 }\n",
+      "entry": "import { steps } from './dep.js'\nexport const value = [...steps()].join(',')\n",
+      "expect": "1,2",
+      "why": "The `*` binds to the keyword, so a prefix list written as `export function ` misses it."
+    },
+    {
+      "name": "export aliased to `from`",
+      "dependency": "const source = 1\nexport { source as from }\n",
+      "entry": "import { from } from './dep.js'\nexport const value = String(from)\n",
+      "expect": "1",
+      "why": "`from` is a keyword only where a specifier follows it, and an ordinary binding name otherwise."
+    },
+    {
+      "name": "multi-line export list",
+      "dependency": "const a = 1\nconst b = 2\nexport {\n  a,\n  b,\n}\n",
+      "entry": "import { a, b } from './dep.js'\nexport const value = String(a + b)\n",
+      "expect": "3",
+      "why": "A clause wrapped across lines is one statement; rewriting only its first line leaves tokens behind."
+    },
+    {
+      "name": "multi-line import list",
+      "dependency": "export const a = 1\nexport const b = 2\n",
+      "entry": "import {\n  a,\n  b,\n} from './dep.js'\nexport const value = String(a + b)\n",
+      "expect": "3",
+      "why": "The import half of the same problem."
+    },
+    {
+      "name": "re-export from another module",
+      "dependency": "export const hit = \"through\"\n",
+      "entry": "export { hit as value } from './dep.js'\n",
+      "expect": "through",
+      "why": "The form the `from` guard must still recognise."
+    },
+    {
+      "name": "namespace import",
+      "dependency": "export const hit = \"ns\"\n",
+      "entry": "import * as all from './dep.js'\nexport const value = all.hit\n",
+      "expect": "ns",
+      "why": "A namespace binding is the module object, not its default."
+    },
+    {
+      "name": "destructured export with a default value",
+      "dependency": "const source = { a: 1 }\nexport const { a, b = 9 } = source\n",
+      "entry": "import { a, b } from './dep.js'\nexport const value = String(a + b)\n",
+      "expect": "10",
+      "why": "A destructuring declaration binds several names and matches no single-name pattern."
+    },
+    {
+      "name": "array destructured export",
+      "dependency": "export const [first, second] = [1, 2]\n",
+      "entry": "import { first, second } from './dep.js'\nexport const value = String(first + second)\n",
+      "expect": "3",
+      "why": "The array form of the same declaration."
+    },
+    {
+      "name": "export default arrow spanning lines",
+      "dependency": "export default (\n  value\n) => value * 2\n",
+      "entry": "import twice from './dep.js'\nexport const value = String(twice(4))\n",
+      "expect": "8",
+      "why": "A default export whose expression continues past its first line."
+    },
+    {
+      "name": "export default class with a name",
+      "dependency": "export default class Named { run() { return \"classy\" } }\n",
+      "entry": "import Named from './dep.js'\nexport const value = new Named().run()\n",
+      "expect": "classy",
+      "why": "The declaration form of a default export, which keeps its binding."
+    },
+    {
+      "name": "export default an object literal spanning lines",
+      "dependency": "export default {\n  a: 1,\n  b: 2,\n}\n",
+      "entry": "import shape from './dep.js'\nexport const value = String(shape.a + shape.b)\n",
+      "expect": "3",
+      "why": "The expression form, wrapped."
+    },
+    {
+      "name": "two statements sharing one line",
+      "dependency": "export const a = 1; export const b = 2\n",
+      "entry": "import { a, b } from './dep.js'\nexport const value = String(a + b)\n",
+      "expect": "3",
+      "why": "A line-based rewriter sees one line and has to find both statements in it."
+    },
+    {
+      "name": "object property named import",
+      "dependency": "export const hit = { import: \"kept\", export: \"also\" }.import\n",
+      "entry": "import { hit } from './dep.js'\nexport const value = hit\n",
+      "expect": "kept",
+      "why": "A reserved word is a valid property name and is not a statement."
+    },
+    {
+      "name": "string containing an export statement",
+      "dependency": "export const hit = \"export const fake = 1\"\n",
+      "entry": "import { hit } from './dep.js'\nexport const value = hit.slice(0, 6)\n",
+      "expect": "export",
+      "why": "Statement-shaped text inside a string is text."
+    },
+    {
+      "name": "labelled statement",
+      "dependency": "export function run() { outer: for (const x of [1]) { break outer } return \"looped\" }\n",
+      "entry": "import { run } from './dep.js'\nexport const value = run()\n",
+      "expect": "looped",
+      "why": "`name:` is a label, not an object key or a type annotation."
+    },
+    {
+      "name": "class with a private field",
+      "dependency": "export class Box { #v = 7; read() { return this.#v } }\n",
+      "entry": "import { Box } from './dep.js'\nexport const value = String(new Box().read())\n",
+      "expect": "7",
+      "why": "`#` starts a private name here and a shebang at the top of a file; both reach the same scanner."
+    },
+    {
+      "name": "class static block",
+      "dependency": "export class Reg { static seen = 0; static { Reg.seen = 3 } }\n",
+      "entry": "import { Reg } from './dep.js'\nexport const value = String(Reg.seen)\n",
+      "expect": "3",
+      "why": "A brace block that is neither a function body nor an object literal."
+    },
+    {
+      "name": "shebang at the top of a module",
+      "dependency": "#!/usr/bin/env node\nexport const hit = \"shebang\"\n",
+      "entry": "import { hit } from './dep.js'\nexport const value = hit\n",
+      "expect": "shebang",
+      "why": "Legal at the top of a module, illegal inside the wrapper every module is emitted into."
+    },
+    {
+      "name": "BOM at the start of a module",
+      "dependency": "\ufeffexport const hit = \"bom\"\n",
+      "entry": "import { hit } from './dep.js'\nexport const value = hit\n",
+      "expect": "bom",
+      "why": "A byte-order mark before the first statement must not hide it."
+    },
+    {
+      "name": "CRLF line endings",
+      "dependency": "export const a = 1\r\nexport const b = 2\r\n",
+      "entry": "import { a, b } from './dep.js'\nexport const value = String(a + b)\n",
+      "expect": "3",
+      "why": "A carriage return is trailing whitespace, not part of the statement."
+    },
+    {
+      "name": "unicode identifier export",
+      "dependency": "export const café = \"unicode\"\n",
+      "entry": "import { café } from './dep.js'\nexport const value = café\n",
+      "expect": "unicode",
+      "why": "An ASCII-only identifier pattern truncated the name and published a binding nothing declared."
+    },
+    {
+      "name": "comment containing an apostrophe",
+      "dependency": "// don't stop here\nexport const hit = 'ok'\n",
+      "entry": "import { hit } from './dep.js'\nexport const value = hit\n",
+      "expect": "ok",
+      "why": "An unmatched quote in prose is not a delimiter."
+    },
+    {
+      "name": "block comment containing a template and a regex",
+      "dependency": "/* `${x}` and /y/g */\nexport const hit = \"ok\"\n",
+      "entry": "import { hit } from './dep.js'\nexport const value = hit\n",
+      "expect": "ok",
+      "why": "Neither construct starts inside a comment."
+    },
+    {
+      "name": "comment ending in a backslash",
+      "dependency": "// trailing backslash \\\nexport const hit = \"after-comment\"\n",
+      "entry": "import { hit } from './dep.js'\nexport const value = hit\n",
+      "expect": "after-comment",
+      "why": "A line comment ends at the newline; a backslash does not continue it."
+    },
+    {
+      "name": "escaped quote inside a string",
+      "dependency": "export const first = \"he said \\\"hi\\\"\"\nexport const second = \"after\"\n",
+      "entry": "import { second } from './dep.js'\nexport const value = second\n",
+      "expect": "after",
+      "why": "An escaped quote does not close the string."
+    },
+    {
+      "name": "line continuation inside a string",
+      "dependency": "export const hit = \"one\\\ntwo\"\n",
+      "entry": "import { hit } from './dep.js'\nexport const value = hit\n",
+      "expect": "onetwo",
+      "why": "A backslash before a newline continues the string onto the next line."
+    },
+    {
+      "name": "import.meta is available",
+      "dependency": "export const hit = typeof import.meta.url\n",
+      "entry": "import { hit } from './dep.js'\nexport const value = hit\n",
+      "expect": "string",
+      "why": "`import.meta` is not an import statement, and a bundled module still needs one."
+    },
+    {
+      "name": "optional chaining call on an imported function",
+      "dependency": "export const maybe = () => \"called\"\n",
+      "entry": "import { maybe } from './dep.js'\nexport const value = maybe?.() ?? 'missing'\n",
+      "expect": "called",
+      "why": "A rewritten binding has to stay callable through the optional form."
+    },
+    {
+      "name": "dynamic import of a sibling",
+      "dependency": "export const hit = \"dynamic\"\n",
+      "entry": "const m = await import('./dep.js')\nexport const value = m.hit\n",
+      "expect": "dynamic",
+      "why": "A dynamic specifier resolves to a bundled module rather than a network request."
+    },
+    {
+      "name": "type-only import is erased",
+      "dependency": "export type Shape = { a: number }\nexport const hit = \"kept\"\n",
+      "entry": "import type { Shape } from './dep.ts'\nimport { hit } from './dep.ts'\nconst s: Shape = { a: 1 }\nexport const value = hit + s.a\n",
+      "expect": "kept1",
+      "why": "A type-only import names no runtime binding and must not become one."
+    },
+    {
+      "name": "inline type modifier in a named import",
+      "dependency": "export type Shape = { a: number }\nexport const hit = \"kept\"\n",
+      "entry": "import { type Shape, hit } from './dep.ts'\nconst s: Shape = { a: 2 }\nexport const value = hit + s.a\n",
+      "expect": "kept2",
+      "why": "One clause carrying both a type and a value."
+    },
+    {
+      "name": "export type is erased",
+      "dependency": "type Local = string\nexport type { Local }\nexport const hit = \"ok\"\n",
+      "entry": "import { hit } from './dep.ts'\nexport const value = hit\n",
+      "expect": "ok",
+      "why": "`export type` publishes nothing at runtime and must not emit an assignment."
+    },
+    {
+      "name": "satisfies operator",
+      "dependency": "export const hit = { a: 1 } satisfies Record<string, number>\n",
+      "entry": "import { hit } from './dep.ts'\nexport const value = String(hit.a)\n",
+      "expect": "1",
+      "why": "A type-level operator in the middle of a value declaration."
+    },
+    {
+      "name": "const type parameter on a generic arrow",
+      "dependency": "export const identity = <const T,>(value: T): T => value\n",
+      "entry": "import { identity } from './dep.ts'\nexport const value = identity('generic')\n",
+      "expect": "generic",
+      "why": "Angle brackets that are not JSX and not a comparison."
+    },
+    {
+      "name": "generic type argument at a call site",
+      "dependency": "export function pick<T>(list: T[]): T { return list[0] }\n",
+      "entry": "import { pick } from './dep.ts'\nexport const value = pick<string>(['first', 'second'])\n",
+      "expect": "first",
+      "why": "The same ambiguity read from the calling side."
+    },
+    {
+      "name": "enum export",
+      "dependency": "export enum Level { Low = 1, High = 2 }\n",
+      "entry": "import { Level } from './dep.ts'\nexport const value = String(Level.High)\n",
+      "expect": "2",
+      "why": "An enum is a runtime value with a declaration form the rewriter has to recognise."
+    },
+    {
+      "name": "const enum export",
+      "dependency": "export const enum Flag { On = 3 }\n",
+      "entry": "import { Flag } from './dep.ts'\nexport const value = String(Flag.On)\n",
+      "expect": "3",
+      "why": "`export const enum` reads as `export const` up to the keyword after it."
+    },
+    {
+      "name": "namespace export",
+      "dependency": "export namespace Tools { export const name = \"ns\" }\n",
+      "entry": "import { Tools } from './dep.ts'\nexport const value = Tools.name\n",
+      "expect": "ns",
+      "why": "A namespace body holds exports of its own that are not module exports."
+    },
+    {
+      "name": "abstract class and its implementation",
+      "dependency": "export abstract class Base { abstract go(): string }\nexport class Impl extends Base { go() { return \"went\" } }\n",
+      "entry": "import { Impl } from './dep.ts'\nexport const value = new Impl().go()\n",
+      "expect": "went",
+      "why": "`export abstract class` is a declaration prefix of its own."
+    },
+    {
+      "name": "constructor parameter property",
+      "dependency": "export class Holder { constructor(public readonly name: string) {} }\n",
+      "entry": "import { Holder } from './dep.ts'\nexport const value = new Holder('held').name\n",
+      "expect": "held",
+      "why": "A modifier in a parameter list that becomes a field assignment."
+    },
+    {
+      "name": "decorator on a class method",
+      "dependency": "function log(_t: unknown, _k: string, d: PropertyDescriptor) { return d }\nexport class Svc { @log run() { return \"ran\" } }\n",
+      "entry": "import { Svc } from './dep.ts'\nexport const value = new Svc().run()\n",
+      "expect": "ran",
+      "why": "Written inline, which is what a formatter produces for a short member and what minified code always has."
+    },
+    {
+      "name": "non-null assertion",
+      "dependency": "export const maybe: string | null = \"present\"\n",
+      "entry": "import { maybe } from './dep.ts'\nexport const value = maybe!.toUpperCase()\n",
+      "expect": "PRESENT",
+      "why": "A `!` that is a type assertion rather than negation."
+    },
+    {
+      "name": "as const assertion",
+      "dependency": "export const list = [\"a\", \"b\"] as const\n",
+      "entry": "import { list } from './dep.ts'\nexport const value = list.join('')\n",
+      "expect": "ab",
+      "why": "A type assertion after a value, on the same line as the declaration."
+    },
+    {
+      "name": "template literal type",
+      "dependency": "type Path = `/${string}`\nexport const hit: Path = \"/root\"\n",
+      "entry": "import { hit } from './dep.ts'\nexport const value = hit\n",
+      "expect": "/root",
+      "why": "A template literal in type position, which is erased rather than evaluated."
+    }
+  ]
+}

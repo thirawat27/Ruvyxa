@@ -238,7 +238,14 @@ fn scan_code(source: &str, start: usize, end: usize, ast: &mut ModuleAst) {
             continue;
         }
 
-        if bytes[index] == b'@' && is_line_prefix_whitespace(bytes, index) {
+        // `@` is not an operator in JavaScript, so a code-position one begins a
+        // decorator. The earlier rule required it to start its own line, which
+        // reported `class Svc { @log run() {} }` as decorator-free — so the
+        // stripper returned the source untouched and the `@` reached the
+        // emitted bundle, where it is a syntax error. That is the shape a
+        // formatter picks for a short member and the shape every minified
+        // dependency has.
+        if bytes[index] == b'@' && decorator_can_start(bytes, index) {
             ast.has_decorators = true;
             previous_significant = Some(index);
             index += 1;
@@ -873,12 +880,22 @@ fn skip_string(bytes: &[u8], start: usize) -> usize {
     start + 1
 }
 
-fn is_line_prefix_whitespace(bytes: &[u8], index: usize) -> bool {
-    bytes[..index]
+/// Whether an `@` at this position begins a decorator rather than sitting
+/// inside a larger token.
+///
+/// Kept level with `begins_decorator` in `crate::compiler`, which strips what
+/// this reports.
+fn decorator_can_start(bytes: &[u8], at: usize) -> bool {
+    let Some(previous) = bytes[..at]
         .iter()
         .rev()
-        .take_while(|byte| **byte != b'\n')
-        .all(|byte| byte.is_ascii_whitespace())
+        .find(|byte| !matches!(byte, b' ' | b'\t' | b'\r' | b'\n'))
+    else {
+        return true;
+    };
+    matches!(previous, b'{' | b'}' | b';' | b')' | b']')
+        || previous.is_ascii_alphanumeric()
+        || matches!(previous, b'_' | b'$')
 }
 
 fn looks_like_jsx_at(bytes: &[u8], index: usize) -> bool {

@@ -226,6 +226,11 @@ fn write_module_segment(
     )?;
     let bound = top_level_bound_names(&body);
     let owns_module = bound.contains("module");
+    // A cycle member publishes its exports object before its body runs and is
+    // invoked in place, so there is no call expression to await. A module that
+    // both awaits and closes a cycle is left to fail loudly rather than be
+    // linked into something subtly wrong.
+    let awaits = !in_cycle && has_top_level_await(&body);
     let exports_expression = if owns_module {
         "__exports"
     } else {
@@ -245,6 +250,14 @@ fn write_module_segment(
         text.push_str("  var __exports = ");
         text.push_str(&id);
         text.push_str(";\n");
+    } else if awaits {
+        // A module that awaits in its own body needs an async wrapper, and the
+        // bundle's own top level — where this call sits — may await it.
+        text.push_str("var ");
+        text.push_str(&id);
+        text.push_str(" = await (async function() {\n");
+        text.push_str("  \"use strict\";\n");
+        text.push_str("  var __exports = {};\n");
     } else {
         text.push_str("var ");
         text.push_str(&id);
@@ -621,6 +634,51 @@ pub(crate) fn link_shared_route_modules(
 /// answers for declarations and imported names alike. Depth is counted over
 /// [`crate::ast::masked_code`], so a brace inside a string or a comment cannot
 /// close a block early and make an inner declaration look top-level.
+/// Whether a module's own body awaits — as opposed to awaiting inside one of
+/// its functions.
+///
+/// Every module is emitted as an immediately-invoked function, and `await` is
+/// illegal in a synchronous one. A dependency that uses top-level await (an
+/// ESM-only package initialising itself at import time, a route awaiting a
+/// dynamic import) therefore produced a bundle that would not parse.
+///
+/// Depth-counted rather than pattern-matched: `await` inside a function body is
+/// ordinary and must not count. The one shape this over-reports is a
+/// brace-less async arrow (`async () => await x`), where the token sits at
+/// depth zero inside a function; the cost of being wrong that way is a wrapper
+/// that awaits a promise it did not need to, which changes nothing an
+/// application can observe.
+///
+/// Kept level with `hasTopLevelAwait` in
+/// `packages/ruvyxa/runtime/compiler.mjs`.
+fn has_top_level_await(body: &str) -> bool {
+    let masked = crate::ast::masked_code(body);
+    let bytes = masked.as_bytes();
+    let mut depth = 0i32;
+    let mut index = 0;
+    while index < bytes.len() {
+        match bytes[index] {
+            b'{' | b'(' | b'[' => depth += 1,
+            b'}' | b')' | b']' => depth -= 1,
+            b'a' if depth == 0 && masked[index..].starts_with("await") => {
+                let before = index.checked_sub(1).map(|at| bytes[at]);
+                let after = bytes.get(index + 5).copied();
+                let boundary = |byte: Option<u8>| {
+                    byte.is_none_or(|byte| {
+                        !byte.is_ascii_alphanumeric() && !matches!(byte, b'_' | b'$')
+                    })
+                };
+                if boundary(before) && boundary(after) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        index += 1;
+    }
+    false
+}
+
 fn top_level_bound_names(body: &str) -> BTreeSet<String> {
     const KEYWORDS: [&str; 5] = ["var ", "let ", "const ", "function ", "class "];
     let masked = crate::ast::masked_code(body);
@@ -639,6 +697,14 @@ fn top_level_bound_names(body: &str) -> BTreeSet<String> {
         }
         let previous = index.checked_sub(1).map(|at| bytes[at]);
         if previous.is_some_and(is_linker_identifier_byte) {
+            continue;
+        }
+        // The walk is over bytes and the slice is over a `str`, so a position
+        // inside a multi-byte character has to be skipped rather than sliced:
+        // `&masked[index..]` panics there, and a module declaring `const café`
+        // aborted the build with a Rust backtrace instead of any diagnostic.
+        // A continuation byte cannot begin a keyword, so nothing is lost.
+        if !masked.is_char_boundary(index) {
             continue;
         }
         let rest = &masked[index..];
@@ -3722,6 +3788,60 @@ export default function Layout({ children }) {
         crate::compiler::transform(&linked, false)
             .unwrap_or_else(|error| panic!("linked output does not parse: {error}\n---\n{linked}"));
         linked
+    }
+
+    /// Every dependency shape in the shared syntax table links and parses.
+    ///
+    /// `tests/packages/ruvyxa/module-syntax.test.mjs` runs the same table
+    /// through the JavaScript linker and checks what each case evaluates to.
+    /// This half cannot execute the result, so it asks the question this linker
+    /// can answer: does the rewrite leave anything behind?
+    ///
+    /// That is not a lesser question. Two of the four defects the table found on
+    /// its first run were exactly this — an `export` copied through verbatim,
+    /// and a decorator the stripper skipped — and both showed up here as output
+    /// that would not parse.
+    ///
+    /// TypeScript-only shapes are skipped: they arrive at this linker already
+    /// transformed, so replaying their source here would test the wrong stage.
+    #[test]
+    fn dependency_shapes_in_the_shared_table_link_and_parse() {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/module-syntax-conformance.json");
+        let source = std::fs::read_to_string(&path)
+            .unwrap_or_else(|error| panic!("read {}: {error}", path.display()));
+        let fixture: serde_json::Value =
+            serde_json::from_str(&source).expect("the syntax fixture parses");
+        let cases = fixture["cases"].as_array().expect("cases");
+        assert!(!cases.is_empty(), "the fixture must carry cases");
+
+        let mut checked = 0;
+        for case in cases {
+            let entry = case["entry"].as_str().expect("entry");
+            if entry.contains("./dep.ts") {
+                continue;
+            }
+            let dependency = case["dependency"].as_str().expect("dependency");
+            let name = case["name"].as_str().unwrap_or_default();
+            let why = case["why"].as_str().unwrap_or_default();
+            // Through the same preparation the pipeline does. A module whose
+            // ESM statements share a line, or whose clause spans several, is
+            // re-printed one statement per line before it reaches the linker;
+            // linking the raw source instead would test a stage that never runs
+            // on its own.
+            let prepared = crate::compiler::prepared_for_linking(dependency);
+            let linked = link_and_parse(&prepared);
+            assert!(
+                !linked.contains(
+                    "
+export "
+                ),
+                "{name}: an export survived the link — {why}
+{linked}"
+            );
+            checked += 1;
+        }
+        assert!(checked > 20, "most of the table should reach this linker");
     }
 
     /// A cycle links, and the emitted form is the one that can run.
