@@ -697,14 +697,65 @@ fn skip_comment(bytes: &[u8], start: usize) -> usize {
 /// tracks strings, templates, and comments. Exposing it invited a second
 /// scanner that shared this one decision and re-derived every other one.
 fn regex_can_start(bytes: &[u8], previous_significant: Option<usize>) -> bool {
-    let Some(index) = previous_significant else {
+    let Some(index) = previous_significant.and_then(|at| last_token_byte(bytes, at)) else {
         return true;
     };
     match bytes[index] {
         b')' | b']' | b'}' | b'\'' | b'"' | b'`' => false,
         byte if is_ident_continue_byte(byte) => previous_token_is_keyword(bytes, index),
+        // JavaScript identifiers are Unicode and this walk is ASCII, so a
+        // non-ASCII character standing where a token ends is the tail of one:
+        // `café / 2` is a division. Reading it as a regular expression blanked
+        // everything up to the next `/` on that line out of every scan built on
+        // this walk — an `import` there stopped being a dependency edge, and in
+        // the minifier a `process.env.NODE_ENV` guard stopped being folded,
+        // which ships development-only code to the browser. A minified
+        // dependency is one long line, so the newline that stops a runaway
+        // literal never arrives.
+        byte if !byte.is_ascii() => false,
         _ => true,
     }
+}
+
+/// Step back from `index` over whitespace of any width.
+///
+/// Callers record significance with `is_ascii_whitespace`, which lets a
+/// non-breaking space or a `U+2028` — both legal JavaScript whitespace, and
+/// both things a paste leaves in real source — stand in as the previous token.
+/// The JavaScript scanner asks `\s`, which covers them, so this is also what
+/// keeps the two walks answering alike.
+fn last_token_byte(bytes: &[u8], mut index: usize) -> Option<usize> {
+    loop {
+        if bytes[index].is_ascii() {
+            if !bytes[index].is_ascii_whitespace() {
+                return Some(index);
+            }
+            index = index.checked_sub(1)?;
+            continue;
+        }
+        let start = char_start(bytes, index);
+        let character = std::str::from_utf8(bytes.get(start..=index)?)
+            .ok()
+            .and_then(|text| text.chars().next())?;
+        // `U+FEFF` is whitespace to `\s` but not to `char::is_whitespace`, and
+        // `U+0085` is the reverse. Both spellings are needed for the two lanes
+        // to classify the same byte the same way.
+        if !(character == '\u{feff}' || (character.is_whitespace() && character != '\u{85}')) {
+            return Some(index);
+        }
+        index = start.checked_sub(1)?;
+    }
+}
+
+/// Walk back to the first byte of the character whose encoding covers `index`.
+///
+/// The scans advance a byte at a time, so `previous_significant` routinely
+/// names a continuation byte rather than the start of its character.
+fn char_start(bytes: &[u8], mut index: usize) -> usize {
+    while index > 0 && bytes[index] & 0b1100_0000 == 0b1000_0000 {
+        index -= 1;
+    }
+    index
 }
 
 fn previous_token_is_keyword(bytes: &[u8], end: usize) -> bool {
@@ -864,6 +915,16 @@ fn interpolation_end(bytes: &[u8], start: usize) -> usize {
 /// graph and to the boundary check. Resuming just past the opening quote keeps
 /// a stray apostrophe's blast radius to its own line.
 ///
+/// A backslash escapes whatever follows it, a line terminator included: `\` at
+/// the end of a line continues the literal onto the next one. Refusing that
+/// still ended the scan at the newline, so a string written across lines was
+/// rejected as a delimiter and its *text* was walked as code — which invented
+/// facts rather than losing them. A continued line holding the word `import`
+/// became a dependency edge on a module that does not exist, and one holding
+/// `process.env.SECRET` became a private env read, so the boundary check
+/// refused a build over prose. Only an *unescaped* newline ends the search,
+/// which is what keeps a stray apostrophe bounded.
+///
 /// Returns the index just past the closing quote, or just past the opening one
 /// when the line ends first.
 fn skip_string(bytes: &[u8], start: usize) -> usize {
@@ -872,7 +933,15 @@ fn skip_string(bytes: &[u8], start: usize) -> usize {
     while index < bytes.len() {
         match bytes[index] {
             b'\n' => break,
-            b'\\' if index + 1 < bytes.len() && bytes[index + 1] != b'\n' => index += 2,
+            // `\r\n` is one line terminator, not two, so a continuation in a
+            // CRLF file spans three bytes.
+            b'\\' if index + 1 < bytes.len() => {
+                index += if bytes[index + 1] == b'\r' && bytes.get(index + 2) == Some(&b'\n') {
+                    3
+                } else {
+                    2
+                };
+            }
             byte if byte == quote => return index + 1,
             _ => index += 1,
         }
@@ -918,6 +987,30 @@ fn skip_identifier(bytes: &[u8], mut index: usize) -> usize {
         index += 1;
     }
     index
+}
+
+/// Whether `character` may continue a JavaScript identifier.
+///
+/// Not `char::is_alphanumeric`, which is what the linker and the minifier used
+/// to ask. That predicate is false for the combining marks Thai, Devanagari,
+/// Arabic, Hebrew, and Vietnamese are written with, so a name captured with it
+/// stopped at the first one: `หน่วย` came back as `หน`. The declaration kept
+/// its full name and every reference to it was rewritten to the truncated one,
+/// so the browser bundle threw `ReferenceError: หน is not defined` — while the
+/// server graph, which reads names from [`scan_code`] rather than from a
+/// predicate, rendered the same page correctly. The page arrived looking right
+/// and only hydration was dead, which is the two-graph split in its most
+/// expensive form.
+///
+/// `oxc` answers this to the letter of ECMAScript §12.7, `ZWNJ` and `ZWJ`
+/// included, and is already a dependency of this crate.
+pub(crate) fn is_identifier_continue_char(character: char) -> bool {
+    oxc::syntax::identifier::is_identifier_part(character)
+}
+
+/// Whether `value` is a complete JavaScript identifier.
+pub(crate) fn is_identifier_name(value: &str) -> bool {
+    oxc::syntax::identifier::is_identifier_name(value)
 }
 
 fn is_ident_start_byte(byte: u8) -> bool {

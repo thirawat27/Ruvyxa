@@ -459,7 +459,7 @@ fn compile_module(
     reject_unsupported_module_kind(ext, &module.path)?;
 
     let transform_plan = ast::parse_module(&source);
-    let has_jsx = matches!(ext, "tsx" | "jsx") || transform_plan.has_jsx;
+    let has_jsx = jsx_is_enabled(ext, transform_plan.has_jsx);
     let jsx_runtime = input.options.jsx_runtime;
     let es_target = input.options.es_target;
 
@@ -604,6 +604,40 @@ pub(crate) fn transform_with_plan(
 /// widen what a browser bundle may read.
 ///
 /// Twin of `substitutePublicEnv` in `packages/ruvyxa/runtime/compiler.mjs`.
+/// Whether the parser is given JSX for a module with this extension.
+///
+/// TypeScript settles this by extension rather than by contents, because the two
+/// readings are mutually exclusive: in a `.ts` file `<T>(x)` is a generic
+/// parameter list and `<string>v` a type assertion, while the same bytes in a
+/// `.tsx` file open an element. Letting the scan's guess switch JSX on for a
+/// `.ts` file made both of those ordinary forms fail to parse, and the
+/// diagnostic pointed at the author's code rather than at the guess — while
+/// `runtime/compiler.mjs`, which picks the dialect from the extension alone,
+/// compiled the same file. That is the divergence this shape exists to close.
+///
+/// A `.js` file keeps the guess: JSX in one is common in the ecosystem, and a
+/// comparison such as `a<b` still parses under it, because JSX can only begin
+/// where a value is expected.
+///
+/// Case is folded with the ASCII rule and no other: an upper-case extension is
+/// a real thing on a case-insensitive filesystem, and `to_lowercase` would ask
+/// the host's locale, which is what the repository bans it for.
+///
+/// Held level with the JavaScript graph by the `parserDialect` section of
+/// `tests/fixtures/module-kind-conformance.json`.
+pub(crate) fn jsx_is_enabled(extension: &str, source_looks_like_jsx: bool) -> bool {
+    match extension
+        .trim_start_matches('.')
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "tsx" | "jsx" => true,
+        "ts" | "mts" | "cts" => false,
+
+        _ => source_looks_like_jsx,
+    }
+}
+
 fn substitute_public_env(code: &str) -> String {
     const MARKER: &str = "import.meta.env";
     if !code.contains(MARKER) {
@@ -1350,6 +1384,37 @@ mod tests {
     /// agree — the arrangement `tests/fixtures/` exists to replace. An
     /// extension accepted here and refused there is a build that passes on the
     /// client and fails at prerender.
+    /// The dialect half of the same table.
+    ///
+    /// This graph used to decide JSX from its own scan, which turned ordinary
+    /// TypeScript — a generic arrow, an angle-bracket assertion — into a parse
+    /// error that the Node graph did not produce for the same file.
+    #[test]
+    fn parser_dialect_matches_the_shared_conformance_table() {
+        let fixture: serde_json::Value = serde_json::from_str(include_str!(
+            "../../../tests/fixtures/module-kind-conformance.json"
+        ))
+        .unwrap();
+
+        let cases = fixture["parserDialect"]
+            .as_array()
+            .expect("parserDialect cases");
+        assert!(!cases.is_empty(), "the table must carry cases");
+
+        for case in cases {
+            let extension = case["extension"].as_str().expect("extension");
+            let source = case["source"].as_str().expect("source");
+            let expected = case["jsx"].as_bool().expect("jsx");
+            let why = case["why"].as_str().unwrap_or_default();
+            let scanned = ast::parse_module(source).has_jsx;
+            assert_eq!(
+                jsx_is_enabled(extension, scanned),
+                expected,
+                "{extension}: {why}"
+            );
+        }
+    }
+
     #[test]
     fn compilable_module_kinds_match_the_shared_conformance_table() {
         let fixture: serde_json::Value = serde_json::from_str(include_str!(

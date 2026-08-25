@@ -692,9 +692,9 @@ fn collect_opaque_modules_in(source: &str, opaque: &mut BTreeSet<String>) {
     for (module_id, rest) in module_id_references(source) {
         // A `.member` read names exactly one export; anything else (a bare
         // reference, an index, a call) can reach all of them.
-        let reaches_one_member = rest.strip_prefix('.').is_some_and(|after| {
-            after.starts_with(|c: char| c.is_alphanumeric() || c == '_' || c == '$')
-        });
+        let reaches_one_member = rest
+            .strip_prefix('.')
+            .is_some_and(|after| after.starts_with(crate::ast::is_identifier_continue_char));
         if !reaches_one_member {
             opaque.insert(module_id);
         }
@@ -746,7 +746,7 @@ fn collect_used_members_in(source: &str, members: &mut BTreeSet<String>) {
             // Extract the member name (valid JS identifier chars).
             let member: String = after_dot
                 .chars()
-                .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
+                .take_while(|c| crate::ast::is_identifier_continue_char(*c))
                 .collect();
 
             if !member.is_empty() {
@@ -788,11 +788,7 @@ fn split_export_assignments(line: &str) -> Option<Vec<(String, String)>> {
         let after = rest.strip_prefix("__exports.")?;
         let eq_idx = after.find(" = ")?;
         let name = &after[..eq_idx];
-        if name.is_empty()
-            || !name
-                .chars()
-                .all(|c| c.is_alphanumeric() || c == '_' || c == '$')
-        {
+        if !crate::ast::is_identifier_name(name) {
             return None;
         }
 

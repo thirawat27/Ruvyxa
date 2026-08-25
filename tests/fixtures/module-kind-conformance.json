@@ -20,5 +20,80 @@
   ],
   "acceptedCasing": [".TS", ".Tsx", ".JSON", ".MJS"],
   "rejected": [".node", ".wasm", ".txt", ".yaml", ".html", ".vue"],
-  "extensionlessIsAccepted": true
+  "extensionlessIsAccepted": true,
+  "parserDialectNote": "Which dialect the parser is given, once an extension is known to be compilable. TypeScript settles this by extension and never by contents, because the two readings are mutually exclusive: in a `.ts` file `<T>(x)` is a generic parameter list and `<string>v` a type assertion, while the same bytes in a `.tsx` file open an element. The Rust graph used to switch JSX on whenever its scan saw something element-shaped, which made both of those ordinary TypeScript forms fail to parse with a diagnostic pointing at the author's code — while the Node graph, which reads the extension alone, compiled the same file. The `.js` family is the one case where the extension decides nothing, so the source is asked: JSX in a `.js` file is common in the ecosystem, and a comparison such as `a<b` parses correctly under JSX anyway, because an element can only begin where a value is expected.",
+  "parserDialect": [
+    {
+      "extension": ".ts",
+      "source": "export const f = <T>(x: T): T => x;\n",
+      "jsx": false,
+      "why": "A generic arrow. Under JSX this is an unclosed `<T>` element and the module does not parse."
+    },
+    {
+      "extension": ".ts",
+      "source": "const v: unknown = 'a';\nexport const s = <string>v;\n",
+      "jsx": false,
+      "why": "An angle-bracket type assertion — legal in `.ts`, and an element in `.tsx`."
+    },
+    {
+      "extension": ".TS",
+      "source": "export const f = <T>(x: T): T => x;\n",
+      "jsx": false,
+      "why": "Extensions fold with the ASCII rule, so an upper-case name off a case-insensitive filesystem gets the same dialect."
+    },
+    {
+      "extension": ".mts",
+      "source": "export const f = <T>(x: T): T => x;\n",
+      "jsx": false,
+      "why": "`.mts` and `.cts` are TypeScript under a different module system, not a different dialect."
+    },
+    {
+      "extension": ".cts",
+      "source": "const v: unknown = 'a';\nexport const s = <string>v;\n",
+      "jsx": false,
+      "why": "The same rule from the CommonJS side."
+    },
+    {
+      "extension": ".tsx",
+      "source": "export const e = <div>hi</div>;\n",
+      "jsx": true,
+      "why": "The extension is the whole reason `.tsx` exists."
+    },
+    {
+      "extension": ".jsx",
+      "source": "export const e = <div>hi</div>;\n",
+      "jsx": true,
+      "why": "Same, without the types."
+    },
+    {
+      "extension": ".js",
+      "source": "export const e = <div>hi</div>;\n",
+      "jsx": true,
+      "why": "JSX in a `.js` file is common in the ecosystem and the Rust graph already accepted it. Refusing it in the Node graph compiled a package for the browser and then failed the same package at prerender."
+    },
+    {
+      "extension": ".mjs",
+      "source": "export const e = <div>hi</div>;\n",
+      "jsx": true,
+      "why": "The `.js` family is decided by the source, whichever module system it names."
+    },
+    {
+      "extension": ".js",
+      "source": "export const r = a < b;\n",
+      "jsx": false,
+      "why": "A spaced comparison has nothing element-shaped in it."
+    },
+    {
+      "extension": ".js",
+      "source": "export const r = a<b ? 1 : 0;\n",
+      "jsx": true,
+      "why": "Minified code writes comparisons this way, so the scan reads it as an element. Accepted deliberately: JSX can only begin where a value is expected, so the parser still reads this as a comparison. Pinned so the leniency is a decision rather than a surprise."
+    },
+    {
+      "extension": ".js",
+      "source": "export const note = '<div>not markup</div>';\n",
+      "jsx": false,
+      "why": "The question is asked of the mask, so an element inside a string is text."
+    }
+  ]
 }

@@ -22,7 +22,9 @@ import { fileURLToPath } from 'node:url'
 const workspaceRoot = path.resolve(fileURLToPath(new URL('../../..', import.meta.url)))
 const compilerPath = path.join(workspaceRoot, 'packages/ruvyxa/runtime/compiler.mjs')
 
-const { assertSupportedModuleKind } = await import(`file://${compilerPath.replaceAll('\\', '/')}`)
+const { assertSupportedModuleKind, transformLangFor } = await import(
+  `file://${compilerPath.replaceAll('\\', '/')}`
+)
 
 const contract = JSON.parse(
   readFileSync(path.join(workspaceRoot, 'tests/fixtures/module-kind-conformance.json'), 'utf8'),
@@ -59,5 +61,30 @@ describe('compilable module kinds', () => {
   it('accepts an extensionless package entry point', () => {
     assert.equal(contract.extensionlessIsAccepted, true)
     assert.doesNotThrow(() => check(''))
+  })
+})
+
+describe('parser dialect', () => {
+  it('picks the same dialect the Rust graph picks', () => {
+    assert.ok(contract.parserDialect.length > 0, 'the table must carry cases')
+    for (const testCase of contract.parserDialect) {
+      const lang = transformLangFor(testCase.extension, testCase.source)
+      assert.equal(
+        lang === 'tsx' || lang === 'jsx',
+        testCase.jsx,
+        `${testCase.extension} resolved to ${lang} — ${testCase.why}`,
+      )
+    }
+  })
+
+  it('keeps TypeScript-only syntax out of a JSX parse', () => {
+    // The pair that made this table necessary: both are ordinary `.ts`, and
+    // both stop parsing the moment JSX is switched on.
+    for (const source of [
+      'export const f = <T>(x: T): T => x;\n',
+      "const v: unknown = 'a';\nexport const s = <string>v;\n",
+    ]) {
+      assert.equal(transformLangFor('.ts', source), 'ts')
+    }
   })
 })

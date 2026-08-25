@@ -616,7 +616,7 @@ pub(crate) fn run_adapter_runner(
         .arg(runner)
         .arg(root)
         .arg(staging_dir)
-        .env("RUVYXA_RUNTIME", runtime.command());
+        .envs(adapter_runner_env(root, runtime)?);
     if let Some(adapter_name) = adapter_name {
         command.arg(adapter_name);
     }
@@ -660,6 +660,28 @@ pub(crate) fn run_adapter_runner(
         .map(Option::unwrap_or_default)
 }
 
+/// The environment every `adapter-runner.mjs` child runs with.
+///
+/// The project's own environment belongs here for the same reason the prerender
+/// worker gets it: this child compiles the server modules a deployment will
+/// run, and `runtime/compiler.mjs` substitutes `import.meta.env` from its own
+/// `process.env`. Without the forward the browser bundle — built in Rust, which
+/// reads the loaded `.env` — carried the real `RUVYXA_PUBLIC_*` values while
+/// the deployed server render compiled them to `Object.freeze({})`.
+///
+/// The failure was silent in the way that costs most: `dev`, `start`, and the
+/// browser half of a deployed build were all correct, so it appeared only in a
+/// deployed server render — as the fallback on first paint, replaced by the
+/// real value once hydration ran.
+fn adapter_runner_env(
+    root: &Path,
+    runtime: JavaScriptRuntime,
+) -> anyhow::Result<BTreeMap<String, String>> {
+    let mut env = ruvyxa_dev_server::project_env(root)?;
+    env.insert("RUVYXA_RUNTIME".to_string(), runtime.command().to_string());
+    Ok(env)
+}
+
 pub(crate) fn inspect_adapter(
     root: &Path,
     out_dir: &Path,
@@ -677,7 +699,7 @@ pub(crate) fn inspect_adapter(
         .arg(runner)
         .arg(root)
         .arg(out_dir)
-        .env("RUVYXA_RUNTIME", runtime.command())
+        .envs(adapter_runner_env(root, runtime)?)
         .env("RUVYXA_ADAPTER_RUNNER_MODE", "inspect");
     if let Some(adapter_name) = adapter_name {
         command.arg(adapter_name);
@@ -863,5 +885,43 @@ pub(crate) fn diagnostic_stream(value: &str) -> String {
         "(empty)".to_string()
     } else {
         value.to_string()
+    }
+}
+
+#[cfg(test)]
+mod adapter_env_tests {
+    use super::*;
+
+    /// The adapter runner compiles what a deployment serves, so it needs the
+    /// project's `.env` — the Rust half reads that file directly and bakes the
+    /// real `RUVYXA_PUBLIC_*` values into the browser bundle, and a child
+    /// without them compiles the server half to an empty object instead. The
+    /// two halves of one page then disagree, and only a deployed render shows
+    /// it.
+    #[test]
+    fn the_adapter_runner_inherits_the_project_environment() {
+        let temp = tempfile::tempdir().unwrap();
+        fs::write(
+            temp.path().join(".env"),
+            "RUVYXA_PUBLIC_SHOP=from-dot-env\nSHOP_SECRET=private\n",
+        )
+        .unwrap();
+
+        let env = adapter_runner_env(temp.path(), JavaScriptRuntime::Node).unwrap();
+
+        assert_eq!(
+            env.get("RUVYXA_PUBLIC_SHOP").map(String::as_str),
+            Some("from-dot-env"),
+            "the value the browser bundle bakes must reach the server compile too"
+        );
+        assert_eq!(
+            env.get("RUVYXA_RUNTIME").map(String::as_str),
+            Some("node"),
+            "the runtime marker the runner reads must survive the merge"
+        );
+        // Loading the file is the project's decision, not this function's: the
+        // boundary check is what keeps a private name out of a client bundle,
+        // and it can only do that if the name is actually present here.
+        assert_eq!(env.get("SHOP_SECRET").map(String::as_str), Some("private"));
     }
 }

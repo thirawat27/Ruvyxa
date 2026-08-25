@@ -715,7 +715,7 @@ fn top_level_bound_names(body: &str) -> BTreeSet<String> {
         let name: String = after
             .trim_start()
             .chars()
-            .take_while(|character| character.is_alphanumeric() || matches!(character, '_' | '$'))
+            .take_while(|character| crate::ast::is_identifier_continue_char(*character))
             .collect();
         if !name.is_empty() {
             names.insert(name);
@@ -1040,12 +1040,31 @@ fn reject_surviving_esm(body: &str, module_path: &str) -> Result<()> {
                 continue;
             }
         }
+        // Say which of the two causes this is, rather than asserting the rarer
+        // one. The message used to claim the module "could not be parsed for
+        // re-printing" in every case; when the real reason was an unresolved
+        // specifier that sent a whole investigation at the dependency's syntax,
+        // which was fine, instead of at the resolver, which was not.
+        let line_start = body[..offset].rfind('\n').map_or(0, |at| at + 1);
+        let line_end = body[offset..]
+            .find('\n')
+            .map_or(body.len(), |at| offset + at);
+        let hint = match split_from_specifier(body[line_start..line_end].trim()) {
+            Some((_, specifier)) => format!(
+                "Its specifier `{specifier}` did not resolve to a module in this bundle, \
+                 so the statement was left as it was written. Check that the file it names \
+                 exists and is reachable from the entry, or add the package to \
+                 `build.external`."
+            ),
+            None => "Modules whose statements share a line are normally re-printed one \
+                     statement per line before linking, so this one may have failed to \
+                     parse for re-printing. Check it for syntax this build does not \
+                     support, or add the package to `build.external`."
+                .to_string(),
+        };
         return Err(BundleError::Compiler(format!(
             "RUV1612 {module_path} still contains a top-level `{keyword}` after linking, \
-             so the bundle would not parse in a browser. Modules whose statements share \
-             a line are normally re-printed one statement per line before linking, which \
-             means this module could not be parsed for re-printing. Check it for syntax \
-             this build does not support, or add the package to `build.external`."
+             so the bundle would not parse in a browser. {hint}"
         )));
     }
     Ok(())
@@ -2122,10 +2141,7 @@ fn rewrite_import_clause(clause: &str, dep_id: &str, cyclic: bool) -> Result<Str
 }
 
 fn is_identifier(value: &str) -> bool {
-    !value.is_empty()
-        && value
-            .chars()
-            .all(|character| character.is_alphanumeric() || matches!(character, '_' | '$'))
+    crate::ast::is_identifier_name(value)
 }
 
 /// Parse `{ a, b as c, d }` into a vec of (original, alias) pairs.
@@ -2320,12 +2336,24 @@ impl<'a> DepIndex<'a> {
         } else {
             specifier
         };
-        let direct_suffix = normalized.strip_prefix("./").unwrap_or(normalized);
-        let spec_file = normalized.rsplit('/').next().unwrap_or(normalized);
-        let spec_dir = normalized
-            .rsplit_once('/')
-            .map(|(dir, _)| dir)
-            .unwrap_or("");
+        // Drop every leading `./` and `../` before matching. A dependency path
+        // is absolute and holds no `..`, so a specifier that climbs out of its
+        // own directory matched nothing at all: `../locale/en-US.js` failed to
+        // resolve while `./en-US.js` beside it worked. The re-export branch
+        // returns `None` when this does, which leaves the statement in the
+        // bundle for `RUV1612` to blame on the dependency's syntax. What the
+        // climb means has already been decided — these are this module's own
+        // resolved dependencies — so only the tail is still in question.
+        let mut relative = normalized;
+        while let Some(rest) = relative
+            .strip_prefix("./")
+            .or_else(|| relative.strip_prefix("../"))
+        {
+            relative = rest;
+        }
+        let direct_suffix = relative;
+        let spec_file = relative.rsplit('/').next().unwrap_or(relative);
+        let spec_dir = relative.rsplit_once('/').map(|(dir, _)| dir).unwrap_or("");
 
         let at = self.entries.iter().position(|entry| {
             // Direct path match. The suffix must start at a path-segment
@@ -2411,7 +2439,7 @@ fn extract_declaration_name(decl: &str) -> Option<String> {
 
     let name: String = rest
         .chars()
-        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
+        .take_while(|c| crate::ast::is_identifier_continue_char(*c))
         .collect();
 
     if name.is_empty() { None } else { Some(name) }
@@ -2566,7 +2594,7 @@ fn extract_var_declaration_name(decl: &str) -> Option<String> {
     let name: String = rest
         .trim()
         .chars()
-        .take_while(|c| c.is_alphanumeric() || *c == '_' || *c == '$')
+        .take_while(|c| crate::ast::is_identifier_continue_char(*c))
         .collect();
 
     if name.is_empty() { None } else { Some(name) }
@@ -3216,6 +3244,79 @@ export const q = readFile;
         let (before, spec) = split_from_specifier("import { a } from './foo'").unwrap();
         assert_eq!(before, "import { a }");
         assert_eq!(spec, "./foo");
+    }
+
+    /// A declared name survives its own combining marks.
+    ///
+    /// `char::is_alphanumeric` is false for a Thai tone mark, a Devanagari
+    /// matra, an Arabic harakat, and a Vietnamese diacritic, so every name here
+    /// was captured only as far as its first one — `หน่วย` became `หน`. The
+    /// declaration kept its real name while references to it were rewritten to
+    /// the truncated one, so the browser threw `ReferenceError: หน is not
+    /// defined` and hydration died on a page that had rendered correctly.
+    /// Nothing in the build said a word.
+    #[test]
+    fn a_declared_name_is_not_cut_at_a_combining_mark() {
+        let names = top_level_bound_names(
+            "const \u{e2b}\u{e19}\u{e48}\u{e27}\u{e22} = 1;\n\
+             let \u{939}\u{93f}\u{928}\u{94d}\u{926}\u{940} = 2;\n\
+             function ti\u{1ebf}ng() {}\n\
+             class \u{639}\u{64e}\u{631}\u{628}\u{64a} {}\n\
+             var plain = 3;\n",
+        );
+
+        assert!(
+            names.contains("\u{e2b}\u{e19}\u{e48}\u{e27}\u{e22}"),
+            "Thai: {names:?}"
+        );
+        assert!(
+            names.contains("\u{939}\u{93f}\u{928}\u{94d}\u{926}\u{940}"),
+            "Devanagari: {names:?}"
+        );
+        assert!(names.contains("ti\u{1ebf}ng"), "Vietnamese: {names:?}");
+        assert!(
+            names.contains("\u{639}\u{64e}\u{631}\u{628}\u{64a}"),
+            "Arabic: {names:?}"
+        );
+        assert!(names.contains("plain"), "ASCII still works: {names:?}");
+        // The truncations this guards against must not appear as names of
+        // their own — that is what made the failure look like a missing export.
+        assert!(
+            !names.contains("\u{e2b}\u{e19}"),
+            "truncated Thai present: {names:?}"
+        );
+        assert!(
+            !names.contains("ti"),
+            "truncated Vietnamese present: {names:?}"
+        );
+    }
+
+    /// A specifier that climbs out of its own directory still names a dep.
+    ///
+    /// `./foo.js` resolved because the leading `./` was stripped before the
+    /// suffix match; `../locale/en-US.js` was compared verbatim, and no real
+    /// path contains `..`, so it matched nothing. The re-export branch then
+    /// returned `None`, the statement survived the link, and `RUV1612` blamed
+    /// the dependency for syntax the build "does not support" — the actual
+    /// cause being that its neighbour was never found. `date-fns` ships
+    /// exactly this line, and so does most of npm.
+    #[test]
+    fn a_specifier_that_climbs_a_directory_resolves() {
+        let deps = vec![
+            PathBuf::from("/project/node_modules/date-fns/locale/en-US.js"),
+            PathBuf::from("/project/node_modules/date-fns/_lib/other.js"),
+        ];
+        let index = DepIndex::without_aliases(&deps);
+
+        assert_eq!(index.resolve("../locale/en-US.js"), Some(&deps[0]));
+        assert_eq!(index.resolve("../locale/en-US"), Some(&deps[0]));
+        assert_eq!(index.resolve("./other.js"), Some(&deps[1]));
+        // Two levels up, and a specifier naming nothing in the list.
+        assert_eq!(
+            index.resolve("../../date-fns/locale/en-US.js"),
+            Some(&deps[0])
+        );
+        assert_eq!(index.resolve("../locale/fr.js"), None);
     }
 
     fn link_unresolved_import(target: BundleTarget, source: &str) -> String {

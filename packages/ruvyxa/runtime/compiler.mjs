@@ -23,7 +23,13 @@ import {
   PACKAGE_EXPORT_TARGETS,
   resolveExportsEntry,
 } from './package-exports.mjs'
-import { createCodeIndex, directivePrologueEnd, findInCode, maskNonCode } from './scanner.mjs'
+import {
+  containsJsx,
+  createCodeIndex,
+  directivePrologueEnd,
+  findInCode,
+  maskNonCode,
+} from './scanner.mjs'
 /**
  * File extensions probed when a specifier names no file directly, in priority
  * order — one list for project files and package files alike, mirroring
@@ -4076,13 +4082,40 @@ export function runtimeHelperImports(code) {
   return found
 }
 
-/** Which oxc parser dialect an extension asks for. Anything unlisted is plain JS. */
+/**
+ * Which oxc parser dialect an extension asks for.
+ *
+ * TypeScript settles this by extension rather than by contents, because the two
+ * readings are mutually exclusive: in a `.ts` file `<T>(x)` is a generic
+ * parameter list and `<string>v` a type assertion, while the same bytes in a
+ * `.tsx` file open an element. An extension not listed here is the `.js` family,
+ * where nothing in the name decides and the source is asked instead — JSX in a
+ * `.js` file is common in the ecosystem, and the Rust graph already accepted it,
+ * so refusing it here compiled a package for the browser and then failed the
+ * same package at prerender.
+ *
+ * Held level with `crates/ruvyxa_bundler/src/compiler.rs` by the `parserDialect`
+ * section of `tests/fixtures/module-kind-conformance.json`.
+ */
 const TRANSFORM_LANG_BY_EXTENSION = {
   '.tsx': 'tsx',
   '.jsx': 'jsx',
   '.ts': 'ts',
   '.mts': 'ts',
   '.cts': 'ts',
+}
+
+/**
+ * The oxc dialect for one module, from its extension and — only when the
+ * extension does not decide — its source.
+ *
+ * Replayed against the Rust graph by the `parserDialect` section of
+ * `tests/fixtures/module-kind-conformance.json`.
+ */
+export function transformLangFor(extension, source) {
+  const named = TRANSFORM_LANG_BY_EXTENSION[String(extension).toLowerCase()]
+  if (named) return named
+  return containsJsx(source) ? 'jsx' : 'js'
 }
 
 /**
@@ -4167,7 +4200,7 @@ function transformModuleSource(module) {
   // not need the package dependency beside the copied file until compilation.
   const filename = String(module.filePath || module.key || 'ruvyxa:module.ts')
   const extension = path.extname(filename).toLowerCase()
-  const lang = TRANSFORM_LANG_BY_EXTENSION[extension] ?? 'js'
+  const lang = transformLangFor(extension, module.source)
   const esTarget = resolveEsTarget()
   const transformKey = createHash('sha256')
     .update(lang)

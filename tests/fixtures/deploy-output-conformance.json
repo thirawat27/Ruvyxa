@@ -2,10 +2,10 @@
   "$comment": [
     "Shared deployment-output conformance table.",
     "",
-    "`ruvyxa build` writes `deploy-manifest.json`: the provider-agnostic",
-    "description of what the build produced and how it must be served. Eleven",
-    "adapters, the standalone server, and the Rust host all have to agree on two",
-    "questions that this file answers once:",
+    "`ruvyxa build` writes a `deploy` section into `manifest.json`: the",
+    "provider-agnostic description of what the build produced and how it must be",
+    "served. Eleven adapters, the standalone server, and the Rust host all have to",
+    "agree on two questions that this section answers once:",
     "",
     "  1. Which routes may a CDN answer from a file, and which must reach the",
     "     function. Getting this wrong is silent: publishing an ISR page as a",
@@ -127,11 +127,43 @@
       "page for exactly as long as the project asked."
     ],
     "cases": [
-      { "strategy": "isr", "revalidate": 60, "expect": "s-maxage=60, stale-while-revalidate" },
-      { "strategy": "ssg", "revalidate": null, "expect": "public, max-age=0, must-revalidate" },
-      { "strategy": "csr", "revalidate": null, "expect": "public, max-age=0, must-revalidate" },
-      { "strategy": "ssr", "revalidate": null, "expect": "no-store" },
-      { "strategy": "ppr", "revalidate": null, "expect": "no-store" }
+      {
+        "strategy": "isr",
+        "revalidate": 60,
+        "expect": "s-maxage=60, stale-while-revalidate"
+      },
+      {
+        "strategy": "ssg",
+        "revalidate": null,
+        "expect": "public, max-age=0, must-revalidate"
+      },
+      {
+        "strategy": "csr",
+        "revalidate": null,
+        "expect": "public, max-age=0, must-revalidate"
+      },
+      {
+        "strategy": "ssr",
+        "revalidate": null,
+        "expect": "no-store"
+      },
+      {
+        "strategy": "ppr",
+        "revalidate": null,
+        "expect": "no-store"
+      },
+      {
+        "strategy": "isr",
+        "revalidate": 0,
+        "expect": "s-maxage=0, stale-while-revalidate",
+        "why": "`0` means revalidate on every request and is a value, not an absence. `revalidate || 60` reads it as missing and pins the page for a minute, which is the difference between a live page and a stale one."
+      },
+      {
+        "strategy": "isr",
+        "revalidate": null,
+        "expect": "s-maxage=60, stale-while-revalidate",
+        "why": "An ISR route that never named a window falls back to the shared default, and both lanes have to pick the same number."
+      }
     ]
   }
 }

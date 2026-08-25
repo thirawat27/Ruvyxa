@@ -5,8 +5,9 @@
  * adapters, and no adapter is allowed to need a different build. What makes
  * that work is that every adapter answers the same two questions the same way —
  * *which URLs may be served from a file* and *what cache-control does each
- * class of emitted file carry* — and before `deploy-manifest.json` existed each
- * one answered them for itself by re-deriving the rules from route metadata.
+ * class of emitted file carry* — and before this shared description existed
+ * each one answered them for itself by re-deriving the rules from route
+ * metadata.
  *
  * That is how `excludeStrategies: ['isr', 'ppr']` came to be hand-written in
  * six places: publishing an ISR page as a plain file makes the host answer it
@@ -93,7 +94,7 @@ export interface DeployNotFound {
   document: string
 }
 
-/** `deploy-manifest.json`, as written by `ruvyxa build`. */
+/** The `deploy` section of the build's `manifest.json`. */
 export interface DeployManifest {
   version: number
   framework: 'ruvyxa'

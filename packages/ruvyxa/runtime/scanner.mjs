@@ -72,6 +72,39 @@ export function findInCode(source, marker) {
 }
 
 /**
+ * Whether `source` contains something that opens a JSX element.
+ *
+ * The port of `looks_like_jsx_at` in `crates/ruvyxa_bundler/src/ast.rs`: a `<`
+ * in code position followed by `>`, `/`, or a letter. Asked of the mask rather
+ * than the raw text, so a `<` inside a string, a comment, or a regular
+ * expression is not an element.
+ *
+ * This only decides the dialect for the `.js` family, where JSX is common in
+ * the ecosystem and nothing in the extension says either way. A `.ts` file is
+ * never JSX and a `.tsx` file always is — see the `parserDialect` section of
+ * `tests/fixtures/module-kind-conformance.json`, which holds this graph and the
+ * Rust one to the same answers.
+ *
+ * A comparison such as `a<b` reads as JSX here and is still parsed correctly,
+ * because JSX can only begin where a value is expected.
+ */
+export function containsJsx(source) {
+  // Asked before the transform cache is consulted, so it runs on every module
+  // of the `.js` family on every compile — including the ones that hit. The
+  // Rust side gets this fact free from the scan it already runs; here it costs
+  // its own walk, so the cheap disqualifier comes first and the walk only
+  // happens for a source that could answer yes.
+  if (!source.includes('<')) return false
+  const index = createCodeIndex(source)
+  for (let at = source.indexOf('<'); at >= 0; at = source.indexOf('<', at + 1)) {
+    if (!index.isCode(at)) continue
+    const next = source[at + 1]
+    if (next === '>' || next === '/' || (next !== undefined && /[A-Za-z]/.test(next))) return true
+  }
+  return false
+}
+
+/**
  * Blank everything that is not code, preserving offsets and line structure.
  *
  * The JavaScript mirror of `ast::masked_code` in
@@ -339,7 +372,14 @@ function skipString(source, start, end) {
   while (index < end) {
     const character = source[index]
     if (character === '\n') break
-    if (character === '\\' && index + 1 < end && source[index + 1] !== '\n') index += 2
+    // A backslash escapes what follows, a line terminator included: `\` at the
+    // end of a line continues the literal onto the next one, and `\r\n` is one
+    // terminator rather than two. Refusing that walked the string's *text* as
+    // code, which invents facts — a continued line holding `import` became an
+    // edge on a module that does not exist. Only an unescaped newline ends the
+    // search, which is what keeps a stray apostrophe bounded.
+    if (character === '\\' && index + 1 < end)
+      index += source[index + 1] === '\r' && source[index + 2] === '\n' ? 3 : 2
     else if (character === quote) return index + 1
     else index += 1
   }
@@ -358,6 +398,14 @@ function regexCanStart(source, previousSignificant) {
   const character = source[previousSignificant]
   if (')]}\'"`'.includes(character)) return false
   if (isIdentContinue(character)) return previousTokenIsKeyword(source, previousSignificant)
+  // JavaScript identifiers are Unicode and this walk is ASCII, so a non-ASCII
+  // character standing where a token ends is the tail of one: `café / 2` is a
+  // division. Reading it as a regular expression blanked everything up to the
+  // next `/` on that line out of every scan built on this walk, and a minified
+  // dependency is one long line, so the newline that stops a runaway literal
+  // never arrives. Whitespace never reaches here — the walks test `\s`, which
+  // covers the non-ASCII kinds — so what is left is identifier text.
+  if (character > '\x7f') return false
   return true
 }
 

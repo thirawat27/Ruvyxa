@@ -75,6 +75,55 @@
       "code": ["export { a }"],
       "text": ["outer ", " end"],
       "why": "Template text is not code at either depth, and the inner template must not end the outer one."
+    },
+    {
+      "name": "division after a non-ASCII identifier",
+      "source": "var café=10;var half=café/2;var note=\"a/b\";export{half};\n",
+      "code": ["export{half}", "var note="],
+      "text": ["a/b"],
+      "why": "JavaScript identifiers are Unicode and both walks are ASCII, so the `/` after one was read as a regular expression opener. Everything to the next `/` — here the one inside `\"a/b\"` — was blanked, which drops an import on that line and stops the minifier folding a `process.env.NODE_ENV` guard past it. A minified dependency is one long line, so the newline that stops a runaway literal never comes."
+    },
+    {
+      "name": "division after a Thai identifier",
+      "source": "var ค่า=10;var q=ค่า/2;var note=\"a/b\";export{q};\n",
+      "code": ["export{q}", "var note="],
+      "text": ["a/b"],
+      "why": "The same rule outside Latin-1. A scanner that special-cased accented Latin letters would still read this one inside out."
+    },
+    {
+      "name": "a regular expression after a keyword separated by a non-breaking space",
+      "source": "function f(s){return /x'y/.test(s);}var keep='kept';export{f};\n",
+      "code": ["export{f}", "var keep="],
+      "text": ["kept"],
+      "why": "A non-breaking space is JavaScript whitespace, so the token before the `/` is still `return` and a regex is what follows. The Rust walk recorded the space itself as the previous token because it only skips ASCII whitespace; the JavaScript walk tests `\\s`, which does not. Both now step back over whitespace of any width, or the fix for the case above would have turned this one into a division and let the `'` inside the literal open a string."
+    },
+    {
+      "name": "a regular expression whose body is non-ASCII",
+      "source": "var re=/é/;var note=\"a/b\";export{re};\n",
+      "code": ["export{re}", "var note="],
+      "text": ["a/b"],
+      "why": "The rule is about the token before the slash, not the bytes inside the literal. Treating every non-ASCII neighbour as a value would have stopped this being a regex at all."
+    },
+    {
+      "name": "a string continued onto the next line",
+      "source": "var help = \"run \\\nimport x from 'ghost'\";\nexport { help };\n",
+      "code": ["export { help }"],
+      "text": ["import x from", "ghost"],
+      "why": "A backslash at the end of a line continues the literal, so this is one string spanning two lines. Ending the scan at the newline rejected the quote as a delimiter and walked the string's text as code, which invents facts instead of losing them: this exact source produced a dependency edge on a module named `ghost`, and the same shape around `process.env.SECRET` produced a private env read that made the boundary check refuse a build over prose."
+    },
+    {
+      "name": "a string continued across a CRLF line ending",
+      "source": "var help = \"run \\\r\nimport x from 'ghost'\";\r\nexport { help };\r\n",
+      "code": ["export { help }"],
+      "text": ["import x from", "ghost"],
+      "why": "`\\r\\n` is one line terminator, not two. Consuming only the `\\r` leaves the scan on the newline, so a continuation works on a checkout with Unix endings and fails on the same file with Windows ones."
+    },
+    {
+      "name": "an unmatched apostrophe above a continued line stays bounded",
+      "source": "var t = 1; // don't end a line with C:\\\nvar b = 2;\nexport { t, b };\n",
+      "code": ["export { t, b }"],
+      "text": [],
+      "why": "Allowing a continuation must not reopen the failure the one-line bound exists to stop. Only an *unescaped* newline ends the search, so an apostrophe in prose still gives up rather than running to the next quote in the file."
     }
   ],
   "erasedSyntax": {

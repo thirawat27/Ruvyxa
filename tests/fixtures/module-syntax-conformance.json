@@ -246,7 +246,7 @@
     },
     {
       "name": "BOM at the start of a module",
-      "dependency": "\ufeffexport const hit = \"bom\"\n",
+      "dependency": "export const hit = \"bom\"\n",
       "entry": "import { hit } from './dep.js'\nexport const value = hit\n",
       "expect": "bom",
       "why": "A byte-order mark before the first statement must not hide it."
@@ -425,6 +425,55 @@
       "entry": "import { hit } from './dep.ts'\nexport const value = hit\n",
       "expect": "/root",
       "why": "A template literal in type position, which is erased rather than evaluated."
+    },
+    {
+      "name": "a non-ASCII identifier declared at top level",
+      "dependency": "const café = 'brewed'\nexport const hit = café\n",
+      "entry": "import { hit } from './dep.js'\nexport const value = hit\n",
+      "expect": "brewed",
+      "why": "The linker collects top-level bound names by walking bytes and slicing at each position. A position inside a multi-byte character is not a slice boundary, so this aborted the build with a Rust panic rather than any diagnostic."
+    },
+    {
+      "name": "a non-ASCII identifier exported under an ASCII alias",
+      "dependency": "const ค่า = 'thai'\nexport { ค่า as hit }\n",
+      "entry": "import { hit } from './dep.js'\nexport const value = hit\n",
+      "expect": "thai",
+      "why": "The export clause has to carry a local name the ASCII identifier scan cannot spell. Dropping it makes the binding undefined at the import site with nothing reported."
+    },
+    {
+      "name": "division whose left operand ends in a non-ASCII character",
+      "dependency": "const π = 2;const q = 10 / π;const half = q / π;const note = 'a/b';export const hit = String(half) + note\n",
+      "entry": "import { hit } from './dep.js'\nexport const value = hit\n",
+      "expect": "2.5a/b",
+      "why": "A `/` after a Unicode identifier is a division. Both scanners read it as a regular-expression opener and blanked everything to the next `/` — on one line, which is what a minified dependency is, that swallows real code."
+    },
+    {
+      "name": "a non-ASCII character inside a string next to a division",
+      "dependency": "const label = 'café';const half = 10 / 2;export const hit = label + half\n",
+      "entry": "import { hit } from './dep.js'\nexport const value = hit\n",
+      "expect": "café5",
+      "why": "The same bytes as the case above, in text rather than in code. The classification must come from the token before the slash, not from anywhere on the line."
+    },
+    {
+      "name": "a string literal continued onto the next line",
+      "dependency": "const help = \"run \\\nimport x from 'ghost'\"\nexport const hit = help\n",
+      "entry": "import { hit } from './dep.js'\nexport const value = hit\n",
+      "expect": "run import x from 'ghost'",
+      "why": "A backslash at the end of a line continues the literal, so this is one string and its text is not code. Walking it as code turned the words inside into a dependency edge on a module named `ghost`."
+    },
+    {
+      "name": "a generic arrow function in a TypeScript module",
+      "dependency": "export const identity = <T>(value: T): T => value\nexport const hit = identity('generic')\n",
+      "entry": "import { hit } from './dep.ts'\nexport const value = hit\n",
+      "expect": "generic",
+      "why": "`<T>` is a type parameter in a `.ts` file and an element in a `.tsx` one. The client graph switched JSX on from its own scan, so this ordinary TypeScript stopped parsing there while the server graph compiled it."
+    },
+    {
+      "name": "an angle-bracket type assertion in a TypeScript module",
+      "dependency": "const raw: unknown = 'asserted'\nexport const hit = <string>raw\n",
+      "entry": "import { hit } from './dep.ts'\nexport const value = hit\n",
+      "expect": "asserted",
+      "why": "The other form the `.tsx` reading destroys. TypeScript settles both by extension and never by contents."
     }
   ]
 }
