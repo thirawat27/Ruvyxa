@@ -11,6 +11,10 @@ dist/
 .npm-pack/
 .npm-smoke/
 .test-build/
+# One output root per test suite. `scripts/test-package.mjs` gives each suite
+# its own, because every suite's tsc emitted the shared helpers under
+# `tests/` to the same paths and `pnpm -r test` runs suites concurrently.
+.test-build-*/
 .pnpm-store/
 packages/ruvyxa/native-bin/
 packages/create-ruvyxa/template/

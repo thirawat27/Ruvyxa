@@ -2,11 +2,13 @@ import { existsSync } from 'node:fs'
 import path from 'node:path'
 
 /**
- * Test sources are compiled to `.test-build/<suite>/` before they run, so a
- * path built from `import.meta.dirname` sits one directory deeper than the
- * checked-in file it came from. Walking up to the workspace marker keeps
- * repository lookups identical whether a test runs from source or from the
- * compiled output.
+ * Test sources are compiled to `.test-build-<suite>/` before they run, so a
+ * path built from `import.meta.dirname` points into the build output rather
+ * than at the checked-in file it came from. Walking up to the workspace marker
+ * keeps repository lookups identical whether a test runs from source or from
+ * the compiled output — and, unlike counting `..` segments, it survives the
+ * output root being renamed, which is what happened when each suite had to
+ * stop sharing one.
  */
 function findRepoRoot(): string {
   let current = import.meta.dirname
