@@ -325,7 +325,7 @@ pub fn bundle_shared_route_modules(
         .into_iter()
         .filter(|module| !module.is_external && module.path != *entry_label)
         .collect::<Vec<_>>();
-    emit_shared_route_modules(shared_modules, input)
+    emit_shared_route_modules(shared_modules, input, diagnostics)
 }
 
 /// Emit a shared-route registry directly from routes prepared in the same
@@ -386,12 +386,13 @@ pub fn bundle_shared_prepared_route_modules(
     input.options = options;
     let mut diagnostics = Vec::new();
     boundary::check(&shared_modules, &input, &mut diagnostics)?;
-    emit_shared_route_modules(shared_modules, input)
+    emit_shared_route_modules(shared_modules, input, diagnostics)
 }
 
 fn emit_shared_route_modules(
     shared_modules: Vec<compiler::CompiledModule>,
     input: BundleInput,
+    diagnostics: Vec<ruvyxa_diagnostics::Diagnostic>,
 ) -> Result<SharedRouteBundleOutput> {
     let linked = linker::link_shared_route_modules(&shared_modules, &input)?;
     let code = if input.options.minify {
@@ -405,6 +406,7 @@ fn emit_shared_route_modules(
             .into_iter()
             .map(|module| module.path)
             .collect(),
+        diagnostics: diagnostics.iter().map(ToString::to_string).collect(),
     })
 }
 

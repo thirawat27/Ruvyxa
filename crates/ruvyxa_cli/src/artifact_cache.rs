@@ -308,6 +308,7 @@ pub(crate) fn load_shared_route_artifact(
         .then_some(ruvyxa_bundler::SharedRouteBundleOutput {
             code: artifact.code,
             modules: artifact.modules,
+            diagnostics: artifact.diagnostics,
         })
 }
 
@@ -336,6 +337,7 @@ pub(crate) fn store_shared_route_artifact(
         files,
         code: output.code.clone(),
         modules: output.modules.clone(),
+        diagnostics: output.diagnostics.clone(),
     };
     let Ok(source) = serde_json::to_vec(&artifact) else {
         return;
@@ -590,6 +592,65 @@ mod tests {
         assert_eq!(
             shared.file_stem().unwrap().to_string_lossy(),
             versioned_key(&expected)
+        );
+    }
+
+    /// A warning must be a function of the code, never of the cache.
+    ///
+    /// Non-fatal boundary diagnostics were reported beside the bundler call, so
+    /// an artifact-cache hit returned the bundle and said nothing: `RUV1008` --
+    /// a private `process.env` read reachable from browser code -- printed on
+    /// the first build of a project and on no build after it. Whether a
+    /// developer saw it depended on whether `.ruvyxa/cache` happened to be warm.
+    ///
+    /// They now ride on the bundle, so this asserts the only property that
+    /// makes the reporter's job possible: what was stored is what comes back.
+    #[test]
+    fn a_cached_bundle_still_carries_the_warnings_its_build_produced() {
+        let temp = tempfile::tempdir().unwrap();
+        let cache_dir = temp.path().join("bundler");
+        let entry = temp.path().join("page.tsx");
+        fs::write(
+            &entry,
+            "export default () => null
+",
+        )
+        .unwrap();
+
+        let fingerprints = ArtifactFingerprintCache::default();
+        let diagnostics = vec![
+            "RUV1008 Private environment variable used in client bundle".to_string(),
+            "RUV1008 second one, so a list is not flattened to its first".to_string(),
+        ];
+        let bundle = ClientBundle {
+            path: "/blog".to_string(),
+            entry: entry.clone(),
+            file_name: "blog.js".to_string(),
+            script: "/__ruvyxa/client/blog.js".to_string(),
+            source_map_file: None,
+            source_map: None,
+            output_bytes: 1,
+            estimated_gz_bytes: 1,
+            duration_ms: 0,
+            module_count: 1,
+            cache_hits: 0,
+            tree_shaken_modules: 0,
+            artifact_cache_hit: false,
+            module_paths: BTreeSet::from([entry.clone()]),
+            dependency_paths: BTreeSet::from([entry.clone()]),
+            chunk_manifest: None,
+            chunks: Vec::new(),
+            diagnostics: diagnostics.clone(),
+        };
+
+        store_client_artifact(&cache_dir, "dep", "/blog", "base", &bundle, &fingerprints);
+        let restored = load_client_artifact(&cache_dir, "dep", "/blog", "base", &fingerprints)
+            .expect("the artifact just written must load");
+
+        assert!(restored.artifact_cache_hit, "this is the cache-hit path");
+        assert_eq!(
+            restored.diagnostics, diagnostics,
+            "a cache hit must be able to reprint every warning the build found"
         );
     }
 }

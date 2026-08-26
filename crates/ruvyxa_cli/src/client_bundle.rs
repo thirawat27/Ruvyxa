@@ -45,6 +45,23 @@ pub(crate) struct ClientBundle {
     pub(crate) dependency_paths: BTreeSet<PathBuf>,
     pub(crate) chunk_manifest: Option<serde_json::Value>,
     pub(crate) chunks: Vec<ruvyxa_bundler::OutputChunk>,
+    /// Non-fatal boundary diagnostics this bundle's modules produced.
+    ///
+    /// Carried on the bundle rather than reported where the bundler ran,
+    /// because the bundler does not run on an artifact-cache hit. It used to be
+    /// reported there, so a `RUV1008` — a private `process.env` read reachable
+    /// from browser code — printed on the first build of a project and on no
+    /// build after it. The warning became a function of cache state instead of
+    /// the code, which is the one thing a warning must never be.
+    ///
+    /// Rendered rather than structured: `Diagnostic::code` is a `&'static str`,
+    /// which cannot be deserialized from a cache file, and the only thing this
+    /// field is for is printing the same warning again.
+    ///
+    /// Deliberately not `#[serde(default)]`: an artifact written before this
+    /// field existed must fail to parse and be rebuilt, because loading it as
+    /// "no diagnostics" is exactly the silence this exists to remove.
+    pub(crate) diagnostics: Vec<String>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -70,6 +87,10 @@ pub(crate) struct CachedSharedRouteArtifact {
     pub(crate) files: BTreeMap<PathBuf, String>,
     pub(crate) code: String,
     pub(crate) modules: Vec<PathBuf>,
+    /// Not `#[serde(default)]`, for the same reason as `ClientBundle`: an
+    /// artifact written before this field existed must be rebuilt rather than
+    /// load as "this shared chunk produced no warnings".
+    pub(crate) diagnostics: Vec<String>,
 }
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -446,6 +467,9 @@ impl ClientBundlePass<'_> {
             &shared_variant,
             &self.artifact_fingerprints,
         ) {
+            // Same rule as a cached route bundle: a warning belongs to the code,
+            // so it is reprinted whether or not the bundler ran this time.
+            report_shared_chunk_diagnostics(&output);
             return Ok(output);
         }
         // Every route having a prepared bundle means the shared chunk can be
@@ -482,7 +506,20 @@ impl ClientBundlePass<'_> {
             &output,
             &self.artifact_fingerprints,
         );
+        report_shared_chunk_diagnostics(&output);
         Ok(output)
+    }
+}
+
+/// Print a shared chunk's non-fatal diagnostics, however the chunk was obtained.
+///
+/// The bundler used to collect these into a local `Vec` and drop it, so a module
+/// that reaches the browser only through the shared chunk — one imported by two
+/// or more routes — warned about nothing, while the same module inside a single
+/// route's bundle warned normally.
+fn report_shared_chunk_diagnostics(output: &ruvyxa_bundler::SharedRouteBundleOutput) {
+    for diagnostic in &output.diagnostics {
+        tracing::warn!("{diagnostic}");
     }
 }
 
@@ -966,6 +1003,10 @@ pub(crate) fn bundle_client_route(
         cache_variant,
         artifact_fingerprints,
     ) {
+        // A cached bundle reports what the bundler found when it produced it.
+        // Skipping this is what made a boundary warning appear once and never
+        // again.
+        report_bundle_diagnostics(&bundle);
         return Ok(bundle);
     }
     let output = if let Some(prepared) = prepared {
@@ -986,10 +1027,13 @@ pub(crate) fn bundle_client_route(
     }
     .map_err(|e| anyhow::anyhow!("Ruvyxa Bundler error for {}: {e}", route.path))?;
 
-    // Report non-fatal diagnostics.
-    for diagnostic in &output.diagnostics {
-        tracing::warn!("{diagnostic}");
-    }
+    // Reported below, from the finished bundle, so the cache-hit path above
+    // reports the same set rather than nothing.
+    let diagnostics = output
+        .diagnostics
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
 
     // Prepending to the bundle moves every line the map describes, so the map
     // moves with it. Without this the shared-chunk import shifted the whole
@@ -1056,6 +1100,7 @@ pub(crate) fn bundle_client_route(
             .map(serde_json::to_value)
             .transpose()?,
         chunks: output.chunks,
+        diagnostics,
     };
     store_client_artifact(
         cache_dir,
@@ -1065,7 +1110,19 @@ pub(crate) fn bundle_client_route(
         &bundle,
         artifact_fingerprints,
     );
+    report_bundle_diagnostics(&bundle);
     Ok(bundle)
+}
+
+/// Print a bundle's non-fatal diagnostics, however the bundle was obtained.
+///
+/// One reporter for both paths. While it lived inline beside the bundler call,
+/// a cache hit returned early and said nothing, so `RUV1008` was printed on a
+/// cold build and on no warm one — the finding this function exists to close.
+fn report_bundle_diagnostics(bundle: &ClientBundle) {
+    for diagnostic in &bundle.diagnostics {
+        tracing::warn!("{diagnostic}");
+    }
 }
 
 pub(crate) fn client_bundle_input(

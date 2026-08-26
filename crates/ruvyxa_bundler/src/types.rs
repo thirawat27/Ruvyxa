@@ -276,6 +276,17 @@ pub struct BundleOutput {
 pub struct SharedRouteBundleOutput {
     pub code: String,
     pub modules: Vec<PathBuf>,
+    /// Non-fatal boundary diagnostics the shared modules produced, rendered.
+    ///
+    /// Both callers used to collect these into a local `Vec` and drop it on the
+    /// next line, so a module that reached the browser only through the shared
+    /// chunk — one imported by two or more routes — produced no warning at all,
+    /// while the same module in a single route's bundle produced one.
+    ///
+    /// Rendered rather than structured for the same reason as `ClientBundle`:
+    /// `Diagnostic::code` is a `&'static str` and cannot come back out of the
+    /// artifact cache, and reprinting the warning is all this is for.
+    pub diagnostics: Vec<String>,
 }
 
 /// A JSON-serializable chunk manifest for use in preload link injection.
