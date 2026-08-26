@@ -1659,8 +1659,11 @@ pub(crate) async fn collect_server_component_entries(
                 .unwrap_or_else(|| "unknown error".to_string());
             pool.shutdown().await;
             anyhow::bail!(
-                "Server-components client entry failed for {}: {code} {message}",
-                route.path
+                "Server-components client entry failed for {}: {}",
+                route.path,
+                // The worker's message usually already opens with its own code,
+                // and joining by hand printed both: `RUV1700 RUV1863 …`.
+                ruvyxa_diagnostics::label_with_code(&code, &message)
             );
         }
         let source = response.entry_source.ok_or_else(|| {

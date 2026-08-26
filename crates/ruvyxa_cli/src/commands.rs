@@ -981,14 +981,10 @@ pub(crate) fn capability_parity(
             },
             id,
             spaces(width, display_width(id)),
-            label("native"),
-            render_mark(native),
-            label("deploy"),
-            if artifact {
-                render_mark(true)
-            } else {
-                warn_text("none")
-            },
+            label("ruvyxa start"),
+            serves_mark(native),
+            label("deployed"),
+            serves_mark(artifact),
             label(detail),
         );
         if !artifact {
@@ -997,8 +993,12 @@ pub(crate) fn capability_parity(
             // realtime needs a socket upgrade no build output can perform — and
             // a project that uses it in development still deploys correctly
             // without it.
+            //
+            // The columns above already say *which* host serves it, so this
+            // line says what the reader will actually observe instead of
+            // repeating them, and that the check is not about to fail over it.
             println!(
-                "    {} {id} is served only by `ruvyxa start`; a deployed build will not answer {detail}",
+                "    {} a deployed build answers 404 at {detail} — a known limit of {id}, not a parity failure",
                 label("note"),
             );
         }
@@ -1118,6 +1118,33 @@ fn render_mark(ok: bool) -> String {
     } else {
         alert_text("fail")
     }
+}
+
+/// Whether one host serves a capability, in one vocabulary for both columns.
+///
+/// Separate from `render_mark` because it answers a different question. That
+/// one reports a *result* — a route rendered, or it did not — so `ok`/`fail`
+/// is right there. This one reports what a host is *able* to do, where a `fail`
+/// would read as a broken check rather than a described limit.
+///
+/// The line used to read `native ok  deploy none`, which mixed three
+/// vocabularies across two columns that ask the same question of two hosts:
+/// `ok` never said what was being measured, `none` reads as a count, and
+/// `native` is the framework's word for the host rather than the user's. Both
+/// columns are now named by what the reader would type or ship, and both answer
+/// yes or no. Padded to a fixed width so the detail column does not jitter
+/// between the two answers.
+fn serves_mark(serves: bool) -> String {
+    let word = if serves { "yes" } else { "no" };
+    format!(
+        "{}{}",
+        if serves {
+            ok_text(word)
+        } else {
+            warn_text(word)
+        },
+        spaces(3, display_width(word)),
+    )
 }
 
 /// Renders one side of a parity smoke test, recording a failure rather than

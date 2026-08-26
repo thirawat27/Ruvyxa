@@ -443,16 +443,33 @@ mod path_tests {
     /// `{message}` itself. Six were fixed and nine were not, which is what a
     /// list-shaped sweep does to a class — so the rule is asserted over the
     /// source rather than left to whoever reads the next one.
+    ///
+    /// **And then the assertion missed three.** Its first version listed two
+    /// literal strings, `format!("{code}: {message}")` and its `{explanation}`
+    /// twin — the exact spellings that had just been fixed. Three sites spelled
+    /// the same mistake with a space instead of a colon, inside `anyhow::bail!`
+    /// rather than `format!`, and shipped: `RUV1700 RUV1863` came out of a
+    /// server-components build months later. A gate written from the examples
+    /// you already fixed only proves you fixed them.
+    ///
+    /// So it matches the *shape* now — a code placeholder immediately followed
+    /// by a message placeholder, whatever separates them and whatever macro
+    /// surrounds them — rather than a list of spellings.
     #[test]
     fn no_crate_formats_a_code_beside_a_message_by_hand() {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
             .join("../..")
             .canonicalize()
             .expect("workspace root");
-        let shapes = [
-            "format!(\"{code}: {message}\")",
-            "format!(\"{code}: {explanation}\")",
-        ];
+        // Every name a call site has used for the two halves. The pair is what
+        // matters: `{code}` alone is fine, and so is `{message}` alone.
+        const CODES: [&str; 2] = ["{code}", "{diagnostic_code}"];
+        const MESSAGES: [&str; 4] = ["{message}", "{explanation}", "{detail}", "{error}"];
+        // What a call site may legitimately put between them. A longer run of
+        // text means the code is being used as a word in a sentence rather than
+        // pasted onto the front of a message.
+        const SEPARATORS: [&str; 3] = [" ", ": ", " - "];
+
         let mut offenders = Vec::new();
         for crate_name in ["ruvyxa_cli", "ruvyxa_dev_server", "ruvyxa_middleware"] {
             let directory = root.join("crates").join(crate_name).join("src");
@@ -467,16 +484,30 @@ mod path_tests {
                 let Ok(source) = std::fs::read_to_string(&path) else {
                     continue;
                 };
-                for shape in shapes {
-                    if source.contains(shape) {
-                        offenders.push(format!("{} contains {shape}", path.display()));
+                // Comment lines are dropped first. A comment explaining the
+                // rule names the shape it forbids, and a gate that fires on
+                // the prose describing it is a gate people route around.
+                let source = source
+                    .lines()
+                    .filter(|line| !line.trim_start().starts_with("//"))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                for code in CODES {
+                    for separator in SEPARATORS {
+                        for message in MESSAGES {
+                            let shape = format!("{code}{separator}{message}");
+                            if source.contains(shape.as_str()) {
+                                offenders.push(format!("{} contains `{shape}`", path.display()));
+                            }
+                        }
                     }
                 }
             }
         }
         assert!(
             offenders.is_empty(),
-            "join through label_with_code instead:
+            "a worker's message usually already opens with its own code, so pasting one in \
+             front prints both. Join through label_with_code instead:
   {}",
             offenders.join(
                 "

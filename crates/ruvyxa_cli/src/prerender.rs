@@ -584,10 +584,15 @@ pub(crate) async fn render_prerender_job(
                     let message = result
                         .message
                         .unwrap_or_else(|| "unknown error".to_string());
-                    let code = result.code.unwrap_or_default();
+                    // `unwrap_or_default()` here was an empty string, and the
+                    // hand-written `{code} {message}` then printed a leading
+                    // space; when the worker *did* report a code its message
+                    // already opened with it and both were printed.
+                    let code = result.code.unwrap_or_else(|| "RUV1205".to_string());
                     anyhow::bail!(
-                        "Pre-rendering failed for {}: {code} {message}",
-                        job.render_path
+                        "Pre-rendering failed for {}: {}",
+                        job.render_path,
+                        ruvyxa_diagnostics::label_with_code(&code, &message)
                     );
                 }
                 let dependency_hash = result
@@ -775,8 +780,11 @@ pub(crate) async fn prerender_not_found_document(
                 let message = result
                     .message
                     .unwrap_or_else(|| "unknown error".to_string());
-                let code = result.code.unwrap_or_default();
-                anyhow::bail!("Pre-rendering not-found.tsx failed: {code} {message}");
+                let code = result.code.unwrap_or_else(|| "RUV1205".to_string());
+                anyhow::bail!(
+                    "Pre-rendering not-found.tsx failed: {}",
+                    ruvyxa_diagnostics::label_with_code(&code, &message)
+                );
             }
             let html = result.html.ok_or_else(|| {
                 anyhow::anyhow!("Pre-rendering not-found.tsx completed without HTML")
