@@ -16,21 +16,21 @@ handler การเรียกที่ระดับ module scope หรื�
 `… was called outside a request` แทนที่จะคืนค่าว่าง path ที่ import
 จึงเป็นคำอธิบายที่ชัดที่สุดว่าโค้ดนั้นตั้งใจให้รันที่ไหน
 
-| Export                                          | จาก                           | Signature / วัตถุประสงค์                                                                        |
-| ----------------------------------------------- | ----------------------------- | ----------------------------------------------------------------------------------------------- |
-| `config`                                        | `ruvyxa/config` หรือ `ruvyxa` | `<T extends RuvyxaConfig>(config: T) => T`; typed config identity helper                        |
-| `loader`                                        | ทั้งสอง                       | `(handler: LoaderHandler<T>) => Loader<T>`; handler รับ `params`, `request`, `cache`            |
-| `action`                                        | ทั้งสอง                       | Builder: `.input(schema)`, `.realtime(channels?)`, `.handler(fn)`                               |
-| `cache`                                         | ทั้งสอง                       | `(key) => CacheBuilder`; `.ttl`, `.swr`, `.tags(...keys)`, `.scope(...)` และ `.get(...)`        |
-| `invalidateCache`, `cacheStats`                 | ทั้งสอง                       | ลบ cache entry แบบ exact/prefix/all; รายงาน `{ size, maxEntries }`                              |
-| `revalidateTag`                                 | `ruvyxa/server`               | `(tag: string) => void`; ลบทุก cache entry ที่มี tag นั้นแบบตรงตัว                              |
-| `json`, `redirect`, `notFound`                  | ทั้งสอง                       | Response helper; redirect อนุญาตเฉพาะ status 3xx                                                |
-| `cookies`, `headers`, `draftMode`               | `ruvyxa/server`               | อ่าน request ที่กำลังให้บริการ เรียกตัวใดตัวหนึ่งแล้วจะกัน render นี้ออกจาก cache ที่ใช้ร่วมกัน |
-| `params`                                        | `ruvyxa/server`               | route parameter ของหน้าที่กำลัง render อ่านได้จากใต้ component ที่รับ props มาแล้ว              |
-| `revalidatePath`                                | `ruvyxa/server`               | `(path: string) => void`; คิว URL จริงหนึ่งอันให้ render ใหม่ในคำขอถัดไป                        |
-| `FlightContext`, `FlightHandler`, `FlightValue` | `ruvyxa/server`               | type สำหรับ route export `flight` แบบ public และ payload ที่มันคืน                              |
-| `definePlugin`, `withResponseHeader`            | `ruvyxa/plugin` หรือ `ruvyxa` | plugin definition และ response-header helper                                                    |
-| `standaloneServerSource`                        | `ruvyxa`                      | source generator สำหรับ standalone server artifact                                              |
+| Export                                          | จาก                           | Signature / วัตถุประสงค์                                                                                                                                                             |
+| ----------------------------------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `config`                                        | `ruvyxa/config` หรือ `ruvyxa` | `<T extends RuvyxaConfig>(config: T) => T`; typed config identity helper                                                                                                             |
+| `loader`                                        | ทั้งสอง                       | `(handler: LoaderHandler<T>) => Loader<T>`; handler รับ `params`, `request`, `cache`                                                                                                 |
+| `action`                                        | ทั้งสอง                       | Builder: `.input(schema)`, `.realtime(channels?)`, `.handler(fn)`                                                                                                                    |
+| `cache`                                         | ทั้งสอง                       | `(key) => CacheBuilder`; `.ttl`, `.swr`, `.tags(...keys)`, `.scope(...)` และ `.get(...)`                                                                                             |
+| `invalidateCache`, `cacheStats`                 | ทั้งสอง                       | ลบ cache entry แบบ exact/prefix/all; รายงาน `{ size, maxEntries }`                                                                                                                   |
+| `revalidateTag`                                 | `ruvyxa/server`               | `(tag: string) => void`; ลบทุก cache entry ที่มี tag นั้นแบบตรงตัว                                                                                                                   |
+| `json`, `redirect`, `status`                    | ทั้งสอง                       | Response helper · `redirect` อนุญาตเฉพาะ 3xx · `status(code, message?)` สร้าง response ได้ทุก 200–599 และปฏิเสธ body บน 204/205/304 · `notFound()` ที่ throw เป็นของ `@ruvyxa/react` |
+| `cookies`, `headers`, `draftMode`               | `ruvyxa/server`               | อ่าน request ที่กำลังให้บริการ เรียกตัวใดตัวหนึ่งแล้วจะกัน render นี้ออกจาก cache ที่ใช้ร่วมกัน                                                                                      |
+| `params`                                        | `ruvyxa/server`               | route parameter ของหน้าที่กำลัง render อ่านได้จากใต้ component ที่รับ props มาแล้ว                                                                                                   |
+| `revalidatePath`                                | `ruvyxa/server`               | `(path: string) => void`; คิว URL จริงหนึ่งอันให้ render ใหม่ในคำขอถัดไป                                                                                                             |
+| `FlightContext`, `FlightHandler`, `FlightValue` | `ruvyxa/server`               | type สำหรับ route export `flight` แบบ public และ payload ที่มันคืน                                                                                                                   |
+| `definePlugin`, `withResponseHeader`            | `ruvyxa/plugin` หรือ `ruvyxa` | plugin definition และ response-header helper                                                                                                                                         |
+| `standaloneServerSource`                        | `ruvyxa`                      | source generator สำหรับ standalone server artifact                                                                                                                                   |
 
 "ทั้งสอง" หมายถึงชื่อนั้น re-export ทั้งจาก `ruvyxa` และ `ruvyxa/server` ในโมดูลที่รันฝั่ง server
 อย่างเดียว ควรเลือก `ruvyxa/server` เพื่อให้ตัว import เองบอกขอบเขตไว้

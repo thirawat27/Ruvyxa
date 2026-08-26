@@ -46,9 +46,12 @@ adapters bundle route dependencies into the function, so the failure appears und
 
 ## Common questions
 
-**Why does a route 404 after calling `notFound`?** `@ruvyxa/react` throws a tagged signal and the
-nearest route boundary renders `not-found.tsx`. `ruvyxa/server` instead returns a 404 response.
-Import the version appropriate to page rendering or an HTTP handler.
+**Which not-found helper do I want?** `notFound()` from `@ruvyxa/react` throws a tagged signal and
+the nearest route boundary renders `not-found.tsx` — that is the one for a page, and the one that
+matches Next.js. `status(404, message?)` from `ruvyxa/server` returns a `Response` for an `app/api/`
+handler or a loader to return. Before they were named apart both were `notFound`, so a page that
+imported the server half rendered a `Response` object and an API route that imported the browser
+half threw instead of answering.
 
 **Why is an environment value missing in the browser?** Only `RUVYXA_PUBLIC_*` is intentionally
 available client-side. Move secrets or server-only computation out of client code rather than

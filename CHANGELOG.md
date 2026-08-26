@@ -1,5 +1,63 @@
 # Changelog
 
+## Unreleased
+
+### Breaking: `notFound` from `ruvyxa/server` is replaced by `status(code, message?)`
+
+Two public exports were called `notFound`, and they did opposite things:
+
+| Import                          | Behaviour                                           |
+| ------------------------------- | --------------------------------------------------- |
+| `notFound` from `ruvyxa/server` | **returned** a 404 `Response`                       |
+| `notFound` from `@ruvyxa/react` | **threw** a tagged signal to render `not-found.tsx` |
+
+Neither failed at the import, which is where a name collision does its damage. A page that took the
+server half rendered a `Response` object where React expected an element; an `app/api/` handler that
+took the browser half threw instead of answering. Both type-check at their own call site, so nothing
+caught it — the documentation carried a "do not confuse it with" note and a troubleshooting entry
+instead, which is the state a name is in just before somebody loses an afternoon to it.
+
+The **throwing** one keeps the name: it matches Next.js, and it is the one a page wants.
+
+The server half is not merely renamed. It was the only status with a helper at all — every 401, 403,
+409, and 422 was being written out as `new Response(message, { status })` by hand — so the 404-only
+helper became a general one, which is also how it ends up shorter than the name it replaced:
+
+```ts
+// app/api/post/route.ts
+import { json, status } from 'ruvyxa/server'
+
+export function GET() {
+  if (!user) return status(403, 'Forbidden')
+  if (!post) return status(404)
+  return json(post)
+}
+```
+
+```tsx
+// app/blog/[slug]/page.tsx — unchanged
+import { notFound } from '@ruvyxa/react'
+if (!post) notFound()
+```
+
+`status` validates what `Response` would have rejected later and with a worse message: a code
+outside 200–599 throws naming the helper, and a body on 204, 205, or 304 is refused rather than
+producing the platform's `Response with null body status cannot have body`.
+
+**Migration:** `notFound()` → `status(404)`, and `notFound(message)` → `status(404, message)`,
+wherever it came from `ruvyxa`, `ruvyxa/server`, or `@ruvyxa/core`. Imports from `@ruvyxa/react` do
+not change. No alias is kept — one would leave the collision in place, which is the whole defect.
+Note that `status(404)` with no message now has an **empty body** where `notFound()` defaulted to
+the text `Not found`; pass the message explicitly to keep it.
+
+The rule is now a test rather than a paragraph: `tests/packages/core/entry-point-collisions.test.ts`
+loads every built entry point of the server half and the browser half and fails on any name
+reachable from both. It is verified to fail when the old `notFound` is restored.
+
+> `redirect` is the same shape waiting to happen — `ruvyxa/server`'s returns a `Response` while
+> Next.js's `redirect` throws. Ruvyxa exports no browser-side `redirect` today, so there is no
+> collision to fix; the new gate will fail the day one is added under that name.
+
 ## v1.1.1 (2026-08-25)
 
 A release about the half of the framework nothing was asking questions of. Every adapter had unit

@@ -84,7 +84,7 @@ export {
   invalidateCache,
   json,
   loader,
-  notFound,
   redirect,
+  status,
 } from './server.js'
 export type { FlightContext, FlightHandler, FlightValue } from './server.js'

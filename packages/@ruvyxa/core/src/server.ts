@@ -589,8 +589,62 @@ export function redirect(location: string, status = 302): Response {
   })
 }
 
-export function notFound(message = 'Not found'): Response {
-  return new Response(message, { status: 404 })
+/**
+ * Statuses HTTP forbids a body on, of the ones a `Response` can carry.
+ *
+ * `new Response('x', { status: 204 })` throws `Response with null body status
+ * cannot have body`, so the message has to be refused before it gets there.
+ *
+ * `isNullBodyStatus` in `packages/ruvyxa/runtime/plugin-http.mjs` lists 101 and
+ * 103 as well, and they are deliberately absent here rather than copied across
+ * for symmetry: that function classifies a status read off the wire, where an
+ * upgrade or early-hints response exists, while this one builds a `Response`,
+ * whose constructor rejects anything below 200 outright. Listing them would be
+ * branches that can never run.
+ */
+const NULL_BODY_STATUSES = new Set([204, 205, 304])
+
+/**
+ * A `Response` carrying `code`, for a handler that returns one.
+ *
+ * ```ts
+ * if (!post) return status(404)
+ * if (!user) return status(403, 'Forbidden')
+ * return json(post)
+ * ```
+ *
+ * **This replaced a `notFound()` that only ever produced 404.** Two things were
+ * wrong with that. It collided with `notFound()` from `@ruvyxa/react`, which
+ * *throws* a tagged signal for the route boundary to turn into `not-found.tsx`
+ * — so a page that imported the server half rendered a `Response` object where
+ * React expected an element, and an API route that imported the browser half
+ * threw instead of answering, neither failing at the import. And it was the
+ * only status with a helper at all: every 401, 403, 409, and 422 was written
+ * out as `new Response(message, { status })` by hand.
+ *
+ * The throwing `notFound()` in `@ruvyxa/react` keeps its name; it is the one
+ * that matches Next.js and the one a page wants.
+ */
+export function status(code: number, message?: string): Response {
+  if (!Number.isInteger(code) || code < 200 || code > 599) {
+    throw new TypeError(`status() code must be an integer from 200 to 599, got ${code}`)
+  }
+  if (NULL_BODY_STATUSES.has(code)) {
+    if (message !== undefined) {
+      throw new TypeError(
+        `status() cannot attach a body to ${code}, which HTTP defines as bodiless`,
+      )
+    }
+    return new Response(null, { status: code })
+  }
+  // No body unless one is given: an empty 404 is what a `Response` produces on
+  // its own, and inventing a reason phrase here would mean a hand-maintained
+  // table of them going stale in the background.
+  if (message === undefined) return new Response(null, { status: code })
+  return new Response(message, {
+    status: code,
+    headers: { 'content-type': 'text/plain; charset=utf-8' },
+  })
 }
 
 export function json(data: unknown, init?: ResponseInit): Response {

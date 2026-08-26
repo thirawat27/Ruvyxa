@@ -7,7 +7,7 @@ import {
   cacheStats,
   invalidateCache,
   loader,
-  notFound,
+  status,
   redirect,
   revalidateTag,
 } from '../../../packages/@ruvyxa/core/dist/server.js'
@@ -61,14 +61,39 @@ describe('server API', () => {
     assert.throws(() => redirect('/login', 200), /redirect\(\) status must be 3xx/)
   })
 
-  it('creates not-found responses with default and custom messages', async () => {
-    const fallback = notFound()
-    assert.equal(fallback.status, 404)
-    assert.equal(await fallback.text(), 'Not found')
+  it('builds a response for any status, with or without a body', async () => {
+    const bare = status(404)
+    assert.equal(bare.status, 404)
+    assert.equal(await bare.text(), '')
 
-    const custom = notFound('Post missing')
+    const custom = status(404, 'Post missing')
     assert.equal(custom.status, 404)
     assert.equal(await custom.text(), 'Post missing')
+    assert.equal(custom.headers.get('content-type'), 'text/plain; charset=utf-8')
+
+    // The point of replacing the 404-only helper: every other status was being
+    // written out as `new Response(message, { status })` by hand.
+    const forbidden = status(403, 'Forbidden')
+    assert.equal(forbidden.status, 403)
+    assert.equal(await forbidden.text(), 'Forbidden')
+  })
+
+  it('refuses a status outside the response range', () => {
+    assert.throws(() => status(99), /must be an integer from 200 to 599/)
+    assert.throws(() => status(600), /must be an integer from 200 to 599/)
+    assert.throws(() => status(404.5), /must be an integer from 200 to 599/)
+  })
+
+  it('refuses a body on a status HTTP defines as bodiless', async () => {
+    // `new Response('x', { status: 204 })` throws inside the platform with a
+    // message that names neither the helper nor the caller.
+    assert.throws(() => status(204, 'ignored'), /cannot attach a body to 204/)
+    // 101 and 103 are absent on purpose: `Response` rejects them itself.
+    for (const code of [204, 205, 304]) {
+      const response = status(code)
+      assert.equal(response.status, code)
+      assert.equal(response.body, null)
+    }
   })
 })
 

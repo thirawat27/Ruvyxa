@@ -152,7 +152,9 @@ An action accepts at most 16 realtime channels. Channel names use 1–128 letter
 Put a `route.ts` in the target folder and export an upper-case method function. The demo's
 `app/api/echo/route.ts` exports `POST({ request })`, reads JSON, and returns `Response.json`. Use
 the standards-based response helpers when useful: `json(data, init)`, `redirect(location, status)`,
-and `notFound(message)` from `ruvyxa/server`.
+and `status(code, message?)` from `ruvyxa/server` — `status(404)`, `status(403, 'Forbidden')`. It
+takes the code so every status has a helper, and it is not called `notFound` because `@ruvyxa/react`
+exports a `notFound()` that throws to render `not-found.tsx` instead.
 
 ```ts
 // app/api/health/route.ts

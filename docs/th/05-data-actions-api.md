@@ -146,8 +146,10 @@ action รับ realtime channel ได้สูงสุด 16 ช่อง �
 
 วาง `route.ts` ใน folder เป้าหมาย และ export HTTP method function ตัวพิมพ์ใหญ่
 `app/api/echo/route.ts` ใน demo export `POST({ request })`, อ่าน JSON และคืน `Response.json` ใช้
-response helper มาตรฐานได้: `json(data, init)`, `redirect(location, status)` และ `notFound(message)`
-จาก `ruvyxa/server`
+response helper มาตรฐานได้: `json(data, init)`, `redirect(location, status)` และ
+`status(code, message?)` จาก `ruvyxa/server` เช่น `status(404)` หรือ `status(403, 'Forbidden')`
+มันรับ code เข้ามา ทุก status จึงมี helper และที่ไม่ได้ชื่อ `notFound` เพราะ `@ruvyxa/react` มี
+`notFound()` ที่ throw เพื่อ render `not-found.tsx` แทน
 
 ```ts
 // app/api/health/route.ts

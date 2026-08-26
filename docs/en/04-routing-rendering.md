@@ -435,8 +435,9 @@ export const meta = ({ params }: { params: Record<string, string> }) => ({
 
 `error.tsx` receives `{ error, reset, retry }`; `loading.tsx` and `not-found.tsx` are plain
 components. To select the nearest `not-found.tsx`, import `notFound` from `@ruvyxa/react` and call
-it (it throws a tagged signal). Do not confuse it with `notFound` from `ruvyxa/server`, which
-creates an HTTP `Response` with status 404.
+it (it throws a tagged signal). The server half is `status(404, message?)` from `ruvyxa/server`,
+which returns a `Response` for a handler to return. Both were called `notFound` once, and telling
+them apart is now the import rather than a paragraph.
 
 ### `template.tsx`
 

@@ -46,9 +46,11 @@ dependency ของ route เข้า function ปัญหาจึงเห�
 
 ## คำถามที่พบบ่อย
 
-**ทำไม route 404 หลังเรียก `notFound`?** `@ruvyxa/react` throw tagged signal และ route boundary
-ที่ใกล้ที่สุด render `not-found.tsx` ส่วน `ruvyxa/server` คืน 404 response ให้ import version
-ที่เหมาะกับ page rendering หรือ HTTP handler
+**ควรใช้ not-found helper ตัวไหน?** `notFound()` จาก `@ruvyxa/react` throw tagged signal แล้ว route
+boundary ที่ใกล้ที่สุด render `not-found.tsx` — ตัวนี้สำหรับ page และตรงกับ Next.js ส่วน
+`status(404, message?)` จาก `ruvyxa/server` คืน `Response` ให้ handler ใต้ `app/api/` หรือ loader
+ส่งกลับ ก่อนแยกชื่อกันทั้งคู่ชื่อ `notFound` เหมือนกัน page ที่ import ฝั่ง server จึงได้ `Response`
+object มา render และ API route ที่ import ฝั่ง browser ก็ throw แทนที่จะตอบ
 
 **ทำไม environment value หายจาก browser?** มีเพียง `RUVYXA_PUBLIC_*` ที่ตั้งใจให้ client ใช้ ย้าย
 secret หรือ server-only computation ออกจาก client code แทนการเปลี่ยน prefix
