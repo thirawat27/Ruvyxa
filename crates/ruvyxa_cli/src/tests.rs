@@ -427,6 +427,49 @@ fn plugin_cli_exposes_only_create_without_a_template_selector() {
     );
 }
 
+/// The adapter runs last and can be checked first.
+///
+/// `--adapter herkou` used to spend a whole build — compile, bundle,
+/// pre-render — before reporting a name that its own spelling had already
+/// settled. The CLI cannot answer it alone, and deliberately so: any npm
+/// package may be an adapter, so anything shaped like a package name is
+/// accepted and resolution is left to the runner.
+///
+/// What makes the early check possible is the property asserted here:
+/// inspection resolves the adapter **without reading build output**, which does
+/// not exist yet when the build starts. A change that made inspection depend on
+/// the output directory would move the failure back to the end of the build,
+/// silently.
+#[test]
+fn an_adapter_resolves_before_a_build_has_produced_anything() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    fs::write(
+        root.join("ruvyxa.config.mjs"),
+        "export default {}
+",
+    )
+    .unwrap();
+    let never_built = root.join(".ruvyxa");
+    assert!(!never_built.exists(), "the point is that this is absent");
+
+    let error = inspect_adapter(root, &never_built, JavaScriptRuntime::Node, Some("herkou"))
+        .expect_err("an adapter that is not installed cannot be inspected");
+    let message = error.to_string();
+    assert!(message.contains("RUV2203"), "{message}");
+    assert!(
+        message.contains("herkou"),
+        "the rejected name must be quoted back: {message}"
+    );
+
+    // And a real one inspects from the same starting point, so the check costs
+    // a correct build nothing but the resolution it was going to do anyway.
+    let inspection = inspect_adapter(root, &never_built, JavaScriptRuntime::Node, Some("node"))
+        .expect("a built-in adapter resolves with no build output")
+        .expect("inspection describes it");
+    assert_eq!(inspection.name, "node");
+}
+
 #[test]
 fn adapter_runner_materializes_declared_artifacts_in_staging() {
     let temp = tempfile::tempdir().unwrap();
@@ -1048,6 +1091,62 @@ fn sanitized_markdown_config_enables_the_native_content_bridge() {
 
     assert!(enabled.markdown_enabled());
     assert!(!disabled.markdown_enabled());
+}
+
+/// The two mistakes every project makes once must name themselves.
+///
+/// Both used to reach route discovery, which sees only that a directory is
+/// absent and answers RUV1001 — *"Create app/page.tsx … or set appDir in
+/// ruvyxa.config.ts"* — with a build-output path in its `File:` line. For
+/// `start` before `build` that is advice to edit a `page.tsx` that already
+/// exists; for a mistyped `--root` it is advice to create a file inside a
+/// directory that is not there. A diagnostic that cannot be followed is worse
+/// than none, because the reader believes it.
+#[test]
+fn a_missing_build_is_reported_as_a_missing_build() {
+    let temp = tempfile::tempdir().unwrap();
+    let args = ServerArgs {
+        root: temp.path().to_path_buf(),
+        host: None,
+        port: None,
+        runtime: None,
+    };
+    let config: ProjectConfig = serde_json::from_value(json!({})).unwrap();
+
+    let error = ensure_build_output_exists(&args, &config)
+        .expect_err("a project that has never been built must not be served");
+    let message = error.to_string();
+    assert!(message.contains("RUV1015"), "{message}");
+    assert!(
+        message.contains("ruvyxa build"),
+        "the fix must name the command that produces what is missing: {message}"
+    );
+    assert!(
+        !message.contains("RUV1001") && !message.contains("appDir"),
+        "must not send the reader to create a page or edit appDir: {message}"
+    );
+
+    // And it stops complaining once the build output is there.
+    std::fs::create_dir_all(temp.path().join(".ruvyxa/server/app")).unwrap();
+    ensure_build_output_exists(&args, &config).expect("a built project is servable");
+}
+
+#[test]
+fn a_missing_project_root_is_reported_as_a_missing_root() {
+    let temp = tempfile::tempdir().unwrap();
+    let missing = temp.path().join("no-such-project");
+
+    let error = load_project_config(&missing).expect_err("there is no project to load");
+    let message = error.to_string();
+    assert!(message.contains("RUV1014"), "{message}");
+    assert!(
+        message.contains("--root"),
+        "the fix must name the flag that is wrong: {message}"
+    );
+    assert!(
+        !message.contains("page.tsx"),
+        "a directory that does not exist cannot be fixed by creating a file in it: {message}"
+    );
 }
 
 #[test]

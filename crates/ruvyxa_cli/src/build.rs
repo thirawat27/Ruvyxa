@@ -344,6 +344,47 @@ fn write_discovery_stage(
 ///
 /// Returns the artifact list to record in `build.json`, or `None` when neither
 /// the config, the CLI flag, nor platform detection selected an adapter.
+/// Resolve the selected adapter before the build starts.
+///
+/// The adapter runs last, so an adapter that cannot be resolved used to be
+/// reported after compiling, bundling, and pre-rendering the whole project —
+/// `--adapter herkou` spent an entire build to answer a question its own
+/// spelling had already settled.
+///
+/// The CLI cannot answer it from the name alone, and deliberately so: any npm
+/// package may be an adapter, so `main.rs` accepts anything shaped like a
+/// package name and leaves resolution to the runner. That is the right trade,
+/// and it does not require waiting until the end — `inspect` mode loads the
+/// adapter and reports `RUV2203` for one that is missing, and it does so
+/// without reading the build output, which does not exist yet at this point.
+///
+/// Nothing is done with the inspection: this is a precondition, and the
+/// adapter stage inspects again for the values it needs after the output is
+/// committed.
+/// Only a *named* adapter is checked. An auto-detected one comes from the
+/// hosting platform's own environment and is always one of the built-in names,
+/// so it cannot be a typo — and detection has not run this early anyway.
+fn ensure_selected_adapter_resolves(
+    args: &BuildArgs,
+    config: &ProjectConfig,
+    out_dir: &Path,
+) -> anyhow::Result<()> {
+    if args.adapter.is_none() && config.adapter.is_none() {
+        return Ok(());
+    }
+    // The same pair `run_adapter_stage` passes: a `--adapter` name, or `None`
+    // when the choice lives in `ruvyxa.config.ts` and the runner reads it
+    // itself. `config.adapter` is a whole JSON value, not a name, because it
+    // may carry adapter options alongside the name.
+    inspect_adapter(
+        &args.root,
+        out_dir,
+        config.javascript_runtime(),
+        args.adapter.as_deref(),
+    )
+    .map(|_| ())
+}
+
 fn run_adapter_stage(
     args: &BuildArgs,
     config: &ProjectConfig,
@@ -654,6 +695,9 @@ pub(crate) async fn build_with_cache_override(
     let build_cache_directory = cache_directory
         .map(Path::to_path_buf)
         .unwrap_or_else(|| build_cache_dir(&args.root, &config.cache));
+    // Before any phase runs: the adapter is the last thing a build uses and the
+    // first thing it can check.
+    ensure_selected_adapter_resolves(&args, &config, &out_dir)?;
 
     if show_summary {
         print_build_header(&args, target, &app_dir, &out_dir);

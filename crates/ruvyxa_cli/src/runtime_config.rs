@@ -257,6 +257,42 @@ fn route_types_observer(root: PathBuf) -> ruvyxa_dev_server::RouteManifestObserv
     })
 }
 
+/// Refuse to serve a build that is not there, before anything tries to read it.
+///
+/// `start` and `preview` serve what `build` writes. When there is none, the
+/// thing that is missing is the build — not the app directory it would have
+/// produced. Without this the server went on to route discovery, which saw only
+/// that `.ruvyxa/server/app` was absent and answered RUV1001: *"Create
+/// app/page.tsx … or set appDir in ruvyxa.config.ts"*, naming a build-output
+/// path in its `File:` line. Both instructions are wrong for the one mistake
+/// every project makes at least once — running `start` before `build` — and
+/// they send the reader to edit a `page.tsx` that is already there.
+///
+/// Deliberately not inside `production_server_config`: that function maps
+/// configuration to a `ServerConfig` and is also called by `test:parity`, which
+/// has just built. A mapper that reads the filesystem is a mapper that cannot
+/// be tested without one.
+pub(crate) fn ensure_build_output_exists(
+    args: &ServerArgs,
+    config: &ProjectConfig,
+) -> anyhow::Result<()> {
+    let out_dir = args.root.join(config.out_dir());
+    if out_dir.join("server").join(config.app_dir()).exists() {
+        return Ok(());
+    }
+    let diagnostic = ruvyxa_diagnostics::Diagnostic::new("RUV1015", "Build output was not found")
+        .explain(format!(
+            "`ruvyxa start` and `ruvyxa preview` serve what `ruvyxa build` writes, and `{}` does not contain a compiled app.",
+            out_dir.display()
+        ))
+        .at_file(&out_dir)
+        .suggest(format!(
+            "Run `ruvyxa build --root {}` first. Use `ruvyxa dev` to serve the project from source instead.",
+            args.root.display()
+        ));
+    Err(ruvyxa_diagnostics::RuvyxaError::from(diagnostic).into())
+}
+
 pub(crate) fn production_server_config(
     args: &ServerArgs,
     config: &ProjectConfig,
@@ -325,6 +361,22 @@ pub(crate) fn production_server_config(
 }
 
 pub(crate) fn load_project_config(root: &Path) -> anyhow::Result<ProjectConfig> {
+    // Checked here, before anything reads the project, because every later
+    // failure describes a *consequence* of the root being wrong. A `--root`
+    // pointing at nothing used to reach route discovery, which saw only that
+    // `<root>/app` was absent and answered RUV1001 "Create app/page.tsx" —
+    // advice that cannot be followed, in a directory that does not exist.
+    if !root.exists() {
+        let diagnostic =
+            ruvyxa_diagnostics::Diagnostic::new("RUV1014", "Project root was not found")
+                .explain(format!(
+                    "`{}` does not exist, so there is no project to read.",
+                    root.display()
+                ))
+                .at_file(root)
+                .suggest("Check the --root path, or run the command from inside the project.");
+        return Err(ruvyxa_diagnostics::RuvyxaError::from(diagnostic).into());
+    }
     let runtime_override = runtime_override()?;
     let invoker_runtime = invoker_runtime();
     let bootstrap_runtime = runtime_override
@@ -346,10 +398,7 @@ pub(crate) fn load_project_config(root: &Path) -> anyhow::Result<ProjectConfig> 
             "config load failed: {}",
             ruvyxa_diagnostics::label_with_code(
                 &result.code.unwrap_or_else(|| "RUV1600".to_string()),
-                &result
-                    .message
-                    .or(result.stack)
-                    .unwrap_or_else(|| "unknown config error".to_string()),
+                &config_failure_detail(result.message, result.stack, &result.stderr),
             )
         )
     }
@@ -369,10 +418,7 @@ pub(crate) fn load_project_config(root: &Path) -> anyhow::Result<ProjectConfig> 
                 "config load failed: {}",
                 ruvyxa_diagnostics::label_with_code(
                     &result.code.unwrap_or_else(|| "RUV1600".to_string()),
-                    &result
-                        .message
-                        .or(result.stack)
-                        .unwrap_or_else(|| "unknown config error".to_string()),
+                    &config_failure_detail(result.message, result.stack, &result.stderr),
                 )
             )
         }
@@ -651,10 +697,7 @@ pub(crate) fn run_adapter_runner(
             "adapter build hook failed: {}",
             ruvyxa_diagnostics::label_with_code(
                 &result.code.unwrap_or_else(|| "RUV2200".to_string()),
-                &result
-                    .message
-                    .or(result.stack)
-                    .unwrap_or_else(|| "unknown adapter error".to_string()),
+                &config_failure_detail(result.message, result.stack, &stderr),
             )
         );
     }
@@ -733,14 +776,23 @@ pub(crate) fn inspect_adapter(
         )
     })?;
     if !result.ok {
+        // Not `worker_failure_message`: that one sends the reader to
+        // `RUST_LOG=debug`, which is right for a worker whose stderr is logged
+        // as it arrives and wrong here. This process's output is *captured*, so
+        // the detail is already in hand and pointing at a log level would send
+        // someone to look at nothing. The previous stand-in, `unknown adapter
+        // error`, threw away a `stderr` that was one variable away.
+        let detail = result.message.or(result.stack).unwrap_or_else(|| {
+            format!(
+                "the adapter runner failed without sending a message. Its stderr was:\n{}",
+                diagnostic_stream(&stderr)
+            )
+        });
         anyhow::bail!(
             "adapter inspection failed: {}",
             ruvyxa_diagnostics::label_with_code(
                 &result.code.unwrap_or_else(|| "RUV2200".to_string()),
-                &result
-                    .message
-                    .or(result.stack)
-                    .unwrap_or_else(|| "unknown adapter error".to_string()),
+                &detail,
             )
         );
     }
@@ -793,6 +845,19 @@ impl From<CliRuntime> for JavaScriptRuntime {
     }
 }
 
+/// Quote a rejected value back without letting it take over the message.
+///
+/// An environment variable is whatever the shell put in it, so its length is
+/// not this crate's to assume.
+fn truncate_for_message(value: &str) -> String {
+    const LIMIT: usize = 60;
+    if value.chars().count() <= LIMIT {
+        return value.to_string();
+    }
+    let kept = value.chars().take(LIMIT).collect::<String>();
+    format!("{kept}…")
+}
+
 pub(crate) fn runtime_override() -> anyhow::Result<Option<JavaScriptRuntime>> {
     if let Some(runtime) = CLI_RUNTIME_OVERRIDE.get() {
         return Ok(Some(*runtime));
@@ -804,7 +869,26 @@ pub(crate) fn runtime_override() -> anyhow::Result<Option<JavaScriptRuntime>> {
         "node" => Ok(Some(JavaScriptRuntime::Node)),
         "bun" => Ok(Some(JavaScriptRuntime::Bun)),
         "deno" => Ok(Some(JavaScriptRuntime::Deno)),
-        _ => anyhow::bail!("RUVYXA_RUNTIME must be 'node', 'bun', or 'deno'"),
+        // The rejected value is quoted back. This variable is usually set by a
+        // CI job or a Dockerfile rather than typed at a prompt, and a message
+        // that only restates the rule leaves the reader grepping their pipeline
+        // for what it actually contains — a trailing newline from a shell
+        // substitution, or a name meant for a different tool.
+        _ => {
+            let diagnostic = ruvyxa_diagnostics::Diagnostic::new(
+                "RUV1016",
+                "Unsupported JavaScript runtime",
+            )
+            .explain(format!(
+                "RUVYXA_RUNTIME is set to `{}`, which is not a runtime Ruvyxa can start.",
+                truncate_for_message(value.trim())
+            ))
+            .suggest(
+                "Set RUVYXA_RUNTIME to `node`, `bun`, or `deno`, or unset it to use the project's \
+                 configured runtime. `--runtime` overrides it for a single command.",
+            );
+            Err(ruvyxa_diagnostics::RuvyxaError::from(diagnostic).into())
+        }
     }
 }
 
@@ -848,13 +932,33 @@ pub(crate) fn parse_config_renderer_output(
 ) -> anyhow::Result<ConfigRendererOutput> {
     let stdout = String::from_utf8_lossy(stdout);
     let stderr = String::from_utf8_lossy(stderr);
-    serde_json::from_str(&stdout).with_context(|| {
+    let mut parsed: ConfigRendererOutput = serde_json::from_str(&stdout).with_context(|| {
         format!(
             "config renderer returned invalid output for {}\nstatus: {}\nstdout:\n{}\nstderr:\n{}",
             root.display(),
             status,
             diagnostic_stream(&stdout),
             diagnostic_stream(&stderr),
+        )
+    })?;
+    // Kept for the `ok: false` path, which is otherwise left with nothing to
+    // say when the renderer reports a failure and sends no message with it.
+    parsed.stderr = stderr.into_owned();
+    Ok(parsed)
+}
+
+/// The detail to print when a spawned helper reports failure.
+///
+/// Its `message` first, then its `stack`, and its captured stderr last. Four
+/// call sites used to end that chain with an invented literal — `unknown config
+/// error` and `unknown adapter error` — while the output that would have
+/// explained it sat in a local variable one line away. A message the reader can
+/// do nothing with is the failure this replaces, not the missing text itself.
+fn config_failure_detail(message: Option<String>, stack: Option<String>, stderr: &str) -> String {
+    message.or(stack).unwrap_or_else(|| {
+        format!(
+            "it reported a failure without sending a message. Its stderr was:\n{}",
+            diagnostic_stream(stderr)
         )
     })
 }

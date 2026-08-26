@@ -254,6 +254,15 @@ pub(crate) struct ConfigRendererOutput {
     /// What the rendered result depends on, so the next run can decide whether
     /// it may reuse this one instead of starting a JavaScript runtime again.
     pub(crate) cache_key: Option<ConfigCacheKey>,
+    /// What the renderer wrote to stderr, kept for the failure path.
+    ///
+    /// The process's output is captured rather than inherited, so on
+    /// `ok: false` with no `message` this is the only remaining description of
+    /// what went wrong. It used to be dropped and replaced with the literal
+    /// `unknown config error`. Not part of the renderer's JSON — set by
+    /// `parse_config_renderer_output` after parsing.
+    #[serde(skip)]
+    pub(crate) stderr: String,
 }
 
 /// The inputs one config render observed.

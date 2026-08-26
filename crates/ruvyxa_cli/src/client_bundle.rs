@@ -1711,9 +1711,7 @@ pub(crate) async fn collect_server_component_entries(
             })?;
         if !response.ok {
             let code = response.code.unwrap_or_else(|| "RUV1300".to_string());
-            let message = response
-                .message
-                .unwrap_or_else(|| "unknown error".to_string());
+            let message = ruvyxa_diagnostics::worker_failure_message(response.message);
             pool.shutdown().await;
             anyhow::bail!(
                 "Server-components client entry failed for {}: {}",

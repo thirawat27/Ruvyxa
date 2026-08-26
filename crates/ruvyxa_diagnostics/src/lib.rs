@@ -283,6 +283,28 @@ pub fn label_with_code(code: &str, message: &str) -> String {
     format!("{code} {message}")
 }
 
+/// The message a worker sent with its failure, or a truthful stand-in.
+///
+/// A worker that answers `ok: false` and no `message` has broken its own half
+/// of the protocol. Four call sites filled that gap with the literal `unknown
+/// error`, which reads as though the framework knows the cause and will not say
+/// — the reader has nowhere to go from it, and no reason to suspect the
+/// omission is upstream.
+///
+/// This says what actually happened and names the one place the detail can
+/// still be. A worker's diagnostics go to its stderr, because stdout carries
+/// the NDJSON response protocol; `ruvyxa` logs those lines at the severity the
+/// worker tagged them with, and the default `RUST_LOG` filter is `warn`, so
+/// anything it tagged `debug` or `info` was collected and then hidden.
+#[must_use]
+pub fn worker_failure_message(message: Option<String>) -> String {
+    message.unwrap_or_else(|| {
+        "the worker reported a failure without sending a message; \
+         re-run with RUST_LOG=debug to see the output it wrote to stderr"
+            .to_string()
+    })
+}
+
 /// Whether this text opens with `RUV` and four digits, as a whole token.
 fn starts_with_diagnostic_code(message: &str) -> bool {
     let Some(rest) = message.strip_prefix("RUV") else {
@@ -331,7 +353,10 @@ pub fn normalized_canonical_path(path: &std::path::Path) -> std::path::PathBuf {
 
 #[cfg(test)]
 mod path_tests {
-    use super::{Diagnostic, diagnostics_to_sarif, label_with_code, normalized_canonical_path};
+    use super::{
+        Diagnostic, diagnostics_to_sarif, label_with_code, normalized_canonical_path,
+        worker_failure_message,
+    };
 
     #[test]
     fn normalized_canonical_path_has_no_verbatim_prefix() {
@@ -591,6 +616,96 @@ mod path_tests {
             offenders.is_empty(),
             "a worker's message usually already opens with its own code, so pasting one in \
              front prints both. Join through label_with_code instead:
+  {}",
+            offenders.join(
+                "
+  "
+            )
+        );
+    }
+
+    /// "unknown error" told the reader nothing and implied the framework knew
+    /// more than it was saying. The replacement has to name the real situation
+    /// and point somewhere, so this asserts both halves rather than just that
+    /// the string changed.
+    #[test]
+    fn a_worker_that_sends_no_message_says_so_and_says_where_to_look() {
+        let absent = worker_failure_message(None);
+        assert!(
+            absent.contains("without sending a message"),
+            "the reader must learn the omission is upstream: {absent}"
+        );
+        assert!(
+            absent.contains("RUST_LOG=debug"),
+            "a message with nowhere to go is the defect being fixed: {absent}"
+        );
+        assert!(!absent.contains("unknown error"), "{absent}");
+
+        // A worker that did send one is passed through untouched.
+        assert_eq!(
+            worker_failure_message(Some("RUV1863 react-server-dom-webpack".to_string())),
+            "RUV1863 react-server-dom-webpack"
+        );
+    }
+
+    /// The fallback was four copies of one literal across two files, so the
+    /// class is closed by scanning rather than by having fixed the four.
+    #[test]
+    fn no_crate_invents_its_own_unknown_error_text() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("workspace root");
+        // Skipped for the same reason as the join gate above: this crate defines
+        // the replacement, and its own test names the literal it forbids. The
+        // exemption is checked rather than assumed.
+        let owner = env!("CARGO_PKG_NAME");
+        let owner_source =
+            std::fs::read_to_string(root.join("crates").join(owner).join("src").join("lib.rs"))
+                .expect("the crate that owns worker_failure_message");
+        assert!(
+            owner_source.contains("pub fn worker_failure_message"),
+            "{owner} no longer defines worker_failure_message; move this exemption"
+        );
+
+        let mut offenders = Vec::new();
+        for entry in std::fs::read_dir(root.join("crates")).expect("crates directory") {
+            let Ok(entry) = entry else { continue };
+            if entry.file_name().to_str() == Some(owner) {
+                continue;
+            }
+            let Ok(files) = std::fs::read_dir(entry.path().join("src")) else {
+                continue;
+            };
+            for file in files.flatten() {
+                let path = file.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                let Ok(source) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                // Any invented `"unknown … error"` stand-in, not the one
+                // spelling that was fixed. The first version of this gate
+                // matched the literal `"unknown error"` and sat one file away
+                // from `"unknown adapter error"`, which is the same defect
+                // wearing one extra word.
+                if source
+                    .lines()
+                    .filter(|line| !line.trim_start().starts_with("//"))
+                    .any(|line| {
+                        line.contains("\"unknown")
+                            && line.contains("error")
+                            && line.contains("unwrap_or")
+                    })
+                {
+                    offenders.push(path.display().to_string());
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "use worker_failure_message instead:
   {}",
             offenders.join(
                 "

@@ -10,6 +10,7 @@ use std::sync::Arc;
 
 use oxc::allocator::Allocator;
 use oxc::codegen::Codegen;
+use oxc::diagnostics::OxcDiagnostic;
 use oxc::parser::Parser;
 use oxc::semantic::SemanticBuilder;
 use oxc::span::SourceType;
@@ -524,6 +525,48 @@ pub fn transform_with_options(
 /// lets decorator stripping reuse that walk instead of running a second one, and
 /// lets it gate on `has_decorators`, which is the precise answer rather than the
 /// line-scan approximation.
+/// Render a parser's own diagnostics as something the author can act on.
+///
+/// This used to report `Oxc could not parse TypeScript/JSX: 1 syntax
+/// diagnostic(s)` — it counted the diagnostics and then dropped them. A syntax
+/// error is the most frequent mistake anyone makes, and the build answered it
+/// with a number, the name of a parser the reader did not choose, and nothing
+/// about *what* or *where*.
+///
+/// The information was already there, and the passes above go out of their way
+/// to keep it usable: `strip_decorators_with_plan` emits the newlines a
+/// decorator spanned and `strip_shebang` empties the line instead of deleting
+/// it, both so that "every later line keeps its original number, which is what
+/// source maps and Oxc's diagnostics are read against".
+///
+/// **The line is reported and the column is not.** That is the exact guarantee
+/// those passes make: a decorator that occupied part of a line is replaced by
+/// fewer bytes on that line, so offsets within it shift while line numbering
+/// does not. A column that is quietly wrong is worse than no column.
+fn describe_parse_diagnostics(source: &str, diagnostics: &[OxcDiagnostic]) -> String {
+    let first = &diagnostics[0];
+    let location = parse_diagnostic_line(first, source)
+        .map_or_else(String::new, |line| format!(" (line {line})"));
+    let mut message = format!("{}{}", first.message, location);
+    if diagnostics.len() > 1 {
+        message.push_str(&format!(
+            " — and {} more syntax error(s) in this file",
+            diagnostics.len() - 1
+        ));
+    }
+    message
+}
+
+/// The 1-based line a diagnostic points at, when it points anywhere.
+fn parse_diagnostic_line(diagnostic: &OxcDiagnostic, source: &str) -> Option<usize> {
+    let offset = usize::try_from(diagnostic.labels.first()?.offset()).ok()?;
+    // `get` rather than indexing: an offset that is not a character boundary
+    // returns `None` and the message simply carries no line, which is the
+    // failure mode this whole function exists to avoid inventing.
+    let prefix = source.get(..offset)?;
+    Some(prefix.bytes().filter(|byte| *byte == b'\n').count() + 1)
+}
+
 pub(crate) fn transform_with_plan(
     source: &str,
     has_jsx: bool,
@@ -542,10 +585,7 @@ pub(crate) fn transform_with_plan(
     let source_type = SourceType::mjs().with_typescript(true).with_jsx(has_jsx);
     let parsed = Parser::new(&allocator, &source, source_type).parse();
     if !parsed.diagnostics.is_empty() {
-        return Err(format!(
-            "Oxc could not parse TypeScript/JSX: {} syntax diagnostic(s)",
-            parsed.diagnostics.len()
-        ));
+        return Err(describe_parse_diagnostics(&source, &parsed.diagnostics));
     }
 
     let mut program = parsed.program;
@@ -915,6 +955,52 @@ fn skip_decorator(bytes: &[u8], at: usize, ast: &ModuleAst) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A syntax error is the most frequent mistake anyone makes, and the build
+    /// used to answer it with `Oxc could not parse TypeScript/JSX: 1 syntax
+    /// diagnostic(s)` — a count of the diagnostics, with the diagnostics
+    /// discarded. What the parser actually said, and where, was already in hand.
+    #[test]
+    fn a_syntax_error_reports_what_the_parser_said_and_which_line() {
+        let source = "export default function Page() {\n  const value = ;\n  return null\n}\n";
+        let error =
+            transform_with_plan(source, false, JsxRuntime::Automatic, EsTarget::Es2022, None)
+                .expect_err("this does not parse");
+
+        assert!(
+            !error.contains("diagnostic(s)"),
+            "a count is not a diagnostic: {error}"
+        );
+        assert!(
+            !error.contains("Oxc"),
+            "the reader did not choose the parser: {error}"
+        );
+        assert!(
+            error.to_lowercase().contains("unexpected"),
+            "the parser's own message must survive: {error}"
+        );
+        assert!(
+            error.contains("(line 2)"),
+            "the offending line is the one thing the reader needs: {error}"
+        );
+    }
+
+    /// The line numbers the message reports are only trustworthy because
+    /// `strip_decorators_with_plan` and `strip_shebang` blank what they remove
+    /// instead of deleting it. This is that guarantee, asserted rather than
+    /// assumed: the error sits below both, and must still name its real line.
+    #[test]
+    fn a_line_number_survives_the_passes_that_run_before_the_parser() {
+        let source = "#!/usr/bin/env node\n@decorator\nclass Widget {}\nconst broken = ;\n";
+        let error =
+            transform_with_plan(source, false, JsxRuntime::Automatic, EsTarget::Es2022, None)
+                .expect_err("this does not parse");
+
+        assert!(
+            error.contains("(line 4)"),
+            "a shebang and a decorator above the error must not shift its line: {error}"
+        );
+    }
 
     /// Both compilers accept the same set of `build.target` values.
     ///

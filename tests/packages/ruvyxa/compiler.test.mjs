@@ -3370,6 +3370,40 @@ export const marker = 'reached'
     })
   })
 
+  // The schema already holds every legal key for a section, so a typo can be
+  // answered rather than merely refused. `unknown config field: appDirr` told
+  // the reader what they had just typed and left them to diff it against the
+  // documentation by eye.
+  it('answers a mistyped config key with the one it meant', async () => {
+    await withFixture(async ({ root }) => {
+      await writeFile(path.join(root, 'ruvyxa.config.ts'), `export default { appDirr: 'app' }`)
+      const typo = await runJsonResult(configRenderer, [root], {})
+      assert.equal(typo.exitCode, 1)
+      assert.match(typo.parsed.message, /unknown config field: appDirr/)
+      assert.match(typo.parsed.message, /Did you mean `appDir`\?/)
+
+      // A nested section suggests from that section, not from the root.
+      await writeFile(
+        path.join(root, 'ruvyxa.config.ts'),
+        `export default { build: { minifi: true } }`,
+      )
+      const nested = await runJsonResult(configRenderer, [root], {})
+      assert.match(nested.parsed.message, /Did you mean `minify`\?/)
+    })
+  })
+
+  // Guessing is worse than listing when nothing is close: a suggestion the
+  // reader did not mean sends them to change a line that was never the problem.
+  it('lists the section instead of guessing when nothing is close', async () => {
+    await withFixture(async ({ root }) => {
+      await writeFile(path.join(root, 'ruvyxa.config.ts'), `export default { bananas: true }`)
+      const unrelated = await runJsonResult(configRenderer, [root], {})
+      assert.equal(unrelated.exitCode, 1)
+      assert.doesNotMatch(unrelated.parsed.message, /Did you mean/)
+      assert.match(unrelated.parsed.message, /Known config fields: .*appDir/)
+    })
+  })
+
   it('rejects unknown config fields instead of silently ignoring them', async () => {
     await withFixture(async ({ root }) => {
       await writeFile(

@@ -581,9 +581,7 @@ pub(crate) async fn render_prerender_job(
                         anyhow::anyhow!("Pre-rendering failed for {}: {error}", job.render_path)
                     })?;
                 if !result.ok {
-                    let message = result
-                        .message
-                        .unwrap_or_else(|| "unknown error".to_string());
+                    let message = ruvyxa_diagnostics::worker_failure_message(result.message);
                     // `unwrap_or_default()` here was an empty string, and the
                     // hand-written `{code} {message}` then printed a leading
                     // space; when the worker *did* report a code its message
@@ -777,9 +775,7 @@ pub(crate) async fn prerender_not_found_document(
                 .await
                 .map_err(|error| anyhow::anyhow!("Pre-rendering not-found.tsx failed: {error}"))?;
             if !result.ok {
-                let message = result
-                    .message
-                    .unwrap_or_else(|| "unknown error".to_string());
+                let message = ruvyxa_diagnostics::worker_failure_message(result.message);
                 let code = result.code.unwrap_or_else(|| "RUV1205".to_string());
                 anyhow::bail!(
                     "Pre-rendering not-found.tsx failed: {}",
@@ -897,9 +893,7 @@ pub(crate) async fn resolve_static_params(
         // syntax. An absent code was the empty string here, so the message
         // opened with a stray space.
         let code = result.code.unwrap_or_else(|| "RUV1205".to_string());
-        let message = result
-            .message
-            .unwrap_or_else(|| "unknown error".to_string());
+        let message = ruvyxa_diagnostics::worker_failure_message(result.message);
         anyhow::bail!(
             "getStaticParams failed for {}: {}",
             route.path,

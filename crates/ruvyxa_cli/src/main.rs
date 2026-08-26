@@ -474,6 +474,7 @@ async fn main() -> anyhow::Result<()> {
         Command::Check(args) => check(args).await.context("check failed")?,
         Command::Start(args) | Command::Preview(args) => {
             let config = load_project_config(&args.root)?;
+            ensure_build_output_exists(&args, &config)?;
             serve(production_server_config(&args, &config)?)
                 .await
                 .context("production server failed")?;

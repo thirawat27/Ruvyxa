@@ -784,10 +784,55 @@ function assertKnownKeys(value, schemaPath, field = schemaPath) {
   const allowed = new Set(allowedKeys)
   const unknown = Object.keys(value).filter((key) => !allowed.has(key))
   if (unknown.length > 0) {
+    const listed = unknown.join(', ')
+    // The schema already holds every legal key for this section, so a typo can
+    // be answered rather than merely refused. `unknown config field: appDirr`
+    // told the reader what they had already typed and left them to diff it
+    // against the documentation by eye.
+    const suggestion = nearestConfigKey(unknown[0], allowedKeys)
+    const hint = suggestion
+      ? ` Did you mean \`${suggestion}\`?`
+      : ` Known ${field} fields: ${allowedKeys.join(', ')}.`
     throw new Error(
-      `RUV1602 unknown ${field} field${unknown.length === 1 ? '' : 's'}: ${unknown.join(', ')}`,
+      `RUV1602 unknown ${field} field${unknown.length === 1 ? '' : 's'}: ${listed}.${hint}`,
     )
   }
+}
+
+/**
+ * The legal key closest to `typed`, or `undefined` when nothing is close.
+ *
+ * The threshold scales with length so a short key cannot match an unrelated
+ * short key: `ppr` and `jsx` are three edits apart on a three-letter word and
+ * suggesting one for the other would be worse than saying nothing. Above that
+ * the caller lists the whole section, which is short by construction.
+ */
+function nearestConfigKey(typed, allowedKeys) {
+  const budget = Math.max(1, Math.floor(typed.length / 3))
+  let best
+  let bestDistance = Infinity
+  for (const candidate of allowedKeys) {
+    const distance = editDistance(typed.toLowerCase(), candidate.toLowerCase())
+    if (distance < bestDistance) {
+      bestDistance = distance
+      best = candidate
+    }
+  }
+  return bestDistance <= budget ? best : undefined
+}
+
+/** Levenshtein distance, two rows at a time. */
+function editDistance(left, right) {
+  let previous = Array.from({ length: right.length + 1 }, (_, index) => index)
+  for (let i = 1; i <= left.length; i += 1) {
+    const current = [i]
+    for (let j = 1; j <= right.length; j += 1) {
+      const substitution = previous[j - 1] + (left[i - 1] === right[j - 1] ? 0 : 1)
+      current[j] = Math.min(substitution, previous[j] + 1, current[j - 1] + 1)
+    }
+    previous = current
+  }
+  return previous[right.length]
 }
 
 function objectValue(source, value) {
