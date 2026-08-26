@@ -892,13 +892,18 @@ pub(crate) async fn resolve_static_params(
         .await
         .map_err(|error| anyhow::anyhow!("getStaticParams failed for {}: {error}", route.path))?;
     if !result.ok {
+        // Spelled with positional `{}` rather than `{code} {message}`, which is
+        // why the shape-matching gate never saw it: same defect, different
+        // syntax. An absent code was the empty string here, so the message
+        // opened with a stray space.
+        let code = result.code.unwrap_or_else(|| "RUV1205".to_string());
+        let message = result
+            .message
+            .unwrap_or_else(|| "unknown error".to_string());
         anyhow::bail!(
-            "getStaticParams failed for {}: {} {}",
+            "getStaticParams failed for {}: {}",
             route.path,
-            result.code.unwrap_or_default(),
-            result
-                .message
-                .unwrap_or_else(|| "unknown error".to_string())
+            ruvyxa_diagnostics::label_with_code(&code, &message)
         );
     }
     let params_list = result.params.unwrap_or_default();

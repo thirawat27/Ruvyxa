@@ -471,8 +471,42 @@ mod path_tests {
         const SEPARATORS: [&str; 3] = [" ", ": ", " - "];
 
         let mut offenders = Vec::new();
-        for crate_name in ["ruvyxa_cli", "ruvyxa_dev_server", "ruvyxa_middleware"] {
-            let directory = root.join("crates").join(crate_name).join("src");
+        // Every crate, discovered rather than listed. The first version named
+        // the three crates that happened to hold the fifteen known sites, which
+        // is the same mistake as listing the two known spellings: a rule that
+        // only covers where the bug has already been found does not stop the
+        // next one, and a new crate would join uncovered and silent.
+        let mut crate_directories = std::fs::read_dir(root.join("crates"))
+            .expect("crates directory")
+            .flatten()
+            .map(|entry| entry.path())
+            .filter(|path| path.is_dir())
+            .collect::<Vec<_>>();
+        crate_directories.sort();
+        assert!(
+            crate_directories.len() >= 2,
+            "expected to discover the workspace crates, found {}",
+            crate_directories.len()
+        );
+
+        // `label_with_code` *is* the join, so the crate defining it is the one
+        // place the shape is allowed. The exemption is checked rather than
+        // assumed: if the helper moves, this fails instead of quietly
+        // un-covering whichever crate it moved to.
+        let owner = env!("CARGO_PKG_NAME");
+        let owner_source =
+            std::fs::read_to_string(root.join("crates").join(owner).join("src").join("lib.rs"))
+                .expect("the crate that owns label_with_code");
+        assert!(
+            owner_source.contains("pub fn label_with_code"),
+            "{owner} no longer defines label_with_code; move this exemption to whichever crate does"
+        );
+
+        for crate_directory in crate_directories {
+            if crate_directory.file_name().and_then(|name| name.to_str()) == Some(owner) {
+                continue;
+            }
+            let directory = crate_directory.join("src");
             let Ok(entries) = std::fs::read_dir(&directory) else {
                 continue;
             };
@@ -487,9 +521,19 @@ mod path_tests {
                 // Comment lines are dropped first. A comment explaining the
                 // rule names the shape it forbids, and a gate that fires on
                 // the prose describing it is a gate people route around.
+                //
+                // Blanked rather than dropped, so an offender's reported line
+                // number still points at the real file. Filtering them out
+                // shifted every index below the first comment.
                 let source = source
                     .lines()
-                    .filter(|line| !line.trim_start().starts_with("//"))
+                    .map(|line| {
+                        if line.trim_start().starts_with("//") {
+                            ""
+                        } else {
+                            line
+                        }
+                    })
                     .collect::<Vec<_>>()
                     .join("\n");
                 for code in CODES {
@@ -500,6 +544,45 @@ mod path_tests {
                                 offenders.push(format!("{} contains `{shape}`", path.display()));
                             }
                         }
+                    }
+                }
+
+                // The shape check above reads the format string, so it is blind
+                // to a positional join: `"{} {}", result.code…, result.message…`
+                // is the same defect spelled differently, and one such site
+                // survived the shape check and shipped.
+                //
+                // This watches the *origin* instead. Pulling a worker's `code`
+                // out of its response is only ever a prelude to labelling a
+                // message with it, so an extraction with no `label_with_code`
+                // anywhere near it is either the bug or a join about to become
+                // one.
+                let lines = source.lines().collect::<Vec<_>>();
+                for (index, line) in lines.iter().enumerate() {
+                    if !line.contains(".code.unwrap_or") {
+                        continue;
+                    }
+                    // Symmetric: `label_with_code(&result.code.unwrap_or(…), …)`
+                    // puts the call on the line *above* the extraction, so a
+                    // forward-only window flagged every correct site.
+                    let window_start = index.saturating_sub(6);
+                    let window_end = lines.len().min(index + 16);
+                    // Two consumers are correct, and both had to be listed
+                    // before this stopped reporting working code. A structured
+                    // `Diagnostic` keeps the code in its own field and the
+                    // worker's message in `explanation`, so nothing is spliced
+                    // and nothing doubles; `label_with_code` is the string
+                    // join. Anything else is building the message by hand.
+                    const CONSUMERS: [&str; 2] = ["label_with_code", "Diagnostic::new("];
+                    let consumed = lines[window_start..window_end]
+                        .iter()
+                        .any(|candidate| CONSUMERS.iter().any(|name| candidate.contains(name)));
+                    if !consumed {
+                        offenders.push(format!(
+                            "{}:{} takes a worker's code without joining through label_with_code",
+                            path.display(),
+                            index + 1,
+                        ));
                     }
                 }
             }
