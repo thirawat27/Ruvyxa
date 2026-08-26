@@ -1,6 +1,18 @@
 # Changelog
 
-## Unreleased
+## v1.1.2 (2026-08-26)
+
+A release about answers that were wrong and looked right. A read that fails says something the
+caller cannot reconstruct, and three places turned that failure into a default value that was also a
+legitimate answer — so a route's Flight export was recorded as absent on every build run from
+outside the project directory, a damaged route manifest was rewritten with no routes in it, and an
+unreadable route file was reported to the browser as a route with no payload. Each one left a green
+build behind it. The shape has a gate now.
+
+The rest is the same question asked of things that were never checked: whether a warning is still
+true after the adapters it describes changed, whether a diagnostic carries enough to act on, whether
+a cached artifact still reports what the build that produced it reported, and what a static analyser
+makes of code nobody had pointed one at.
 
 ### Breaking: `notFound` from `ruvyxa/server` is replaced by `status(code, message?)`
 
@@ -57,6 +69,205 @@ reachable from both. It is verified to fail when the old `notFound` is restored.
 > `redirect` is the same shape waiting to happen — `ruvyxa/server`'s returns a `Response` while
 > Next.js's `redirect` throws. Ruvyxa exports no browser-side `redirect` today, so there is no
 > collision to fix; the new gate will fail the day one is added under that name.
+
+### A route's `flight` export was recorded as absent on every `--root` build
+
+`ClientBundle::entry` is the route file as the published manifest carries it — project-relative,
+because an absolute build-machine path in `entry` would make two machines emit different bytes. The
+build then read that path to record whether the route exports `flight(context)` and whether it
+declares `'use cache'`, and read it with `fs::read_to_string` — which resolves against the process
+working directory, not the project.
+
+So `ruvyxa build --root <somewhere-else>` read nothing at all, and `unwrap_or_default()` turned that
+into `""`. An empty source exports no `flight` and declares no `'use cache'`, which are perfectly
+ordinary answers, so nothing downstream could tell the two apart. Every route in the shipped
+`route-manifest.json` said `flight: false`; the browser router stopped requesting payloads for
+routes that do produce them and fell back to a full document load, and `RUV1842` — the guard that
+refuses `'use cache'` on a route with no Flight producer — could not fire at all.
+
+Running `ruvyxa build` from inside the project directory was correct, which is how it stayed
+invisible: that is how it is run by hand, and `--root` is how CI, monorepos, and every scripted
+build run it. No fixture in the repository exported `flight`, so nothing looked either. There is one
+now, and it builds through a project root that is deliberately not the test's working directory.
+
+The same read sat behind `/__ruvyxa/flight` and the development route table. An unreadable route
+file was answered there as `501 This route does not expose a Flight payload` — the wrong cause,
+named confidently, with nothing logged. Both callers now share one reader, `route_module_facts`,
+which reports the failure instead of defaulting: the endpoint answers 500 and logs the path, and the
+route table leaves the route out rather than advertising it as having no payload.
+
+### A damaged route manifest was replaced by one naming no routes
+
+`write_style_asset` reads `client/route-manifest.json` to add the stylesheet URL and writes the
+whole document back. It parsed that file with a default of `{"routes": []}` — so a manifest that
+failed to parse was not merely mis-read, it was **overwritten** with one naming no routes at all.
+That file is what every host reads to find a route's scripts: the Rust server, the generated
+standalone server, and each adapter's function bundle.
+
+The build still succeeded. The first symptom was a deployed site whose client router knew no routes
+and answered every navigation with a full document load.
+
+No corruption is needed to reach it: a build interrupted mid-write leaves a partial file, and so do
+two builds sharing one output directory. The parse failure is now reported, and names the file to
+delete and rebuild.
+
+### `check:silent-defaults` — a failed read may no longer become a value
+
+The two defects above are one shape, and it had shipped three times: a read whose failure is turned
+into a default that is **also a legitimate answer**, so nothing downstream can distinguish them.
+That is not a lost log line; it is a wrong result that looks right.
+
+`scripts/check-silent-defaults.mjs` fails the build on `unwrap_or_default()` and
+`unwrap_or_else(|_| …)` applied to a read or a decode — `read_to_string`, `fs::read`, `from_str`,
+`from_slice`, `from_utf8`, `.parse()` — outside an allowlist that carries the reason for each
+accepted site, and fails just as loudly when an allowlist entry stops matching anything. `.ok()` and
+`.ok()?` are deliberately not flagged: they hand the caller `None`, which is an honest "no answer"
+it can branch on, and is what a cache lookup wants.
+
+It runs in `pnpm release:validate` and on its own as `pnpm check:silent-defaults`.
+
+### `.env` is a build input, and the compile cache now knows it
+
+`import.meta.env` is substituted into every module the compiler emits, as a frozen literal — that
+substitution is what makes a `RUVYXA_PUBLIC_*` value readable in a browser at all. So the value is
+_in_ the browser bundle, and the caches that hold that bundle were keyed on the configuration alone.
+
+Editing `.env` and rebuilding produced a build whose pre-rendered HTML carried the new value —
+`prerender_context_hash` has always keyed on the environment — and whose browser bundle still
+carried the old one, served from the compile cache. One build, two answers for the same variable in
+the same page, and the browser's is the one that wins the moment hydration runs.
+
+`config_dependency_hash` is now `build_dependency_hash`, named for the build rather than the config
+because the environment is the half that was missing, and it folds the project environment in
+alongside the configuration. The whole environment goes in, not only the public names: over-keying
+costs a rebuild that reproduces identical bytes, while under-keying serves a bundle built from an
+environment the project no longer has. A project with no readable `.env` folds in an empty map.
+
+The two halves are joined by a NUL rather than a space, so an environment value containing the
+separator cannot be rearranged into another project's hash.
+
+### On-demand image optimization is adapter-conditional, and now says so
+
+`image.onDemand` is served at `/__ruvyxa/image` by the Axum host, which resizes through the Rust
+image pipeline. No build output carries that pipeline — but an adapter may supply its own, and two
+do: `@ruvyxa/adapter-vercel` and `@ruvyxa/adapter-cloudflare` each hand `createHandler` an
+`optimizeImage` that forwards to their platform's optimizer.
+
+The capability contract had no way to express "depends on the adapter", so it recorded the
+unconditional answer and every consumer repeated it: `ruvyxa build` warned a working Vercel
+deployment that its responsive images answered 404, `ruvyxa test:parity` agreed, and the guide said
+the same in both languages — while the deployment matrix two chapters away already said
+"adapter-dependent".
+
+`tests/fixtures/adapter-contract.json` carries `onDemandImages` per adapter now, and it is the only
+place the answer is written: `ruvyxa build`'s warning reads it, `ruvyxa test:parity` resolves the
+project's configured adapter against it, and `scripts/sync-adapters.mjs` renders it as a column of
+the adapter matrix in both language guides. A test holds the table to the adapter sources that
+actually decide it, so an adapter that gains or loses an optimizer fails the build rather than
+drifting.
+
+The warning stays silent when the adapter cannot be named — an inline `adapter: vercelAdapter({…})`
+is an object rather than a name, and a third-party package is not in the table at all. A wrong
+answer errs in one direction here: saying nothing costs one full-size download, while telling a
+working deployment it is broken sends the reader to turn off a feature that works.
+
+`image.quality` also reaches deployed builds now. It decides what a request without a `q` parameter
+is encoded at, and the deployed handler had a hardcoded `82` and read no project value, because the
+build published `onDemand` and `maxWidth` into the runtime policy and not the quality beside them.
+`tests/fixtures/dynamic-image-conformance.json` holds the endpoint's bounds and defaults across both
+hosts.
+
+### Diagnostics carry their code, their message, and the line they came from
+
+A parser failure reported a **count**. "3 parse errors" is a number a reader can do nothing with,
+and it arrived after a full build rather than at the file that could not be parsed.
+`describe_parse_diagnostics` extracts Oxc's own messages now, and `parse_diagnostic_line` maps each
+diagnostic's byte offset to a 1-based line, so the report names what is wrong and where.
+
+Codes and messages were being joined by hand at every site that emitted one, and the spellings had
+drifted apart: one path printed a code twice (`RUV1700 RUV1863`), another defaulted a missing code
+to the empty string and printed a message with a leading space. `label_with_code()` in
+`ruvyxa_diagnostics` owns that formatting now, and a test walks every crate to fail a hand-written
+positional join — discovering the crates rather than naming three of them, and blanking comment
+lines rather than dropping them so the reported line numbers stay true.
+
+The capability parity table reads in one vocabulary across both columns, and its columns are named
+`ruvyxa start` and `deployed` rather than `native` and `deploy`, which is what the commands are
+called.
+
+A missing deploy adapter is also resolved before the build starts rather than after it: a name that
+cannot be resolved fails immediately instead of after every route has been compiled.
+
+### Boundary warnings no longer vanish on a cache hit
+
+A non-fatal boundary diagnostic — `RUV1008`, a private `process.env` read reachable from browser
+code — was reported where the bundler ran, and the bundler does not run on an artifact-cache hit. So
+the warning printed on the first build of a project and on no build after it. A warning that is a
+function of cache state rather than of the code is the one thing a warning must never be.
+
+Diagnostics are carried on `ClientBundle` and stored with the cached artifact, so a cache hit
+restores them. They are stored as rendered strings, because `Diagnostic::code` is a `&'static str`
+and cannot be deserialized from a cache file.
+
+### The prerender cache sees plugin head entries, and the worker file list is checked
+
+A plugin that contributes `<head>` content changed what a pre-rendered page contains and nothing in
+the prerender context hash changed with it, so an edited plugin head served the previous page from
+cache. The plugin head content hash is part of that context now, and document head composition is
+one `prerender_head` function shared by pre-rendered pages, the not-found page, and the deployment
+manifest, rather than three inline constructions that could disagree.
+`tests/fixtures/document-head-conformance.json` holds pre-rendered and runtime-rendered documents to
+the same head.
+
+`WORKER_RUNTIME_FILES` is a hand-maintained list of the runtime modules a worker bundle must carry,
+and nothing checked it against the imports the worker actually has. Two tests do now: one walks the
+worker's import closure through the bundler's own AST parser and fails on a file the list omits, and
+one fails on a list entry naming a file that does not exist.
+
+### CodeQL, and what it found
+
+A CodeQL workflow analyses Rust, JavaScript/TypeScript, and the workflow files themselves, on every
+push to `main`, on tags, on pull requests, and weekly — the schedule so a newly published query
+reaches the repository without waiting for someone to open a pull request. It runs the
+`security-extended` pack, and the toolchain and action versions are pinned so a scan is
+reproducible.
+
+Three findings in shipped code were real and are fixed:
+
+- **A matched file's name was built into generated source.** `import.meta.glob` embeds each matched
+  specifier into the module it returns, encoded with `JSON.stringify` — which is a JSON escaper. It
+  escapes the quote and the backslash and is right about the rest, except for U+2028 and U+2029: it
+  emits both literally, and a JavaScript string literal has only accepted them since ES2019, so on
+  an older parser they end the literal and everything after the file name is code. A globbed
+  directory is writable by any dependency that can put a file in it. A specifier carrying a control
+  character or either separator is now refused, naming the path, rather than escaped — a file name
+  that cannot be written into source verbatim is one nobody meant to import, and rewriting it
+  silently would leave a module whose key does not match the file on disk.
+- **Two path normalizations backtracked.** `projectRelativeOutDir` and the font `publicPath`
+  normalizer each stripped separators with a regular expression the engine retries from every start
+  position, so a value with many `/` costs time quadratic in its length. Both are configuration
+  rather than request input, so neither was reachable from outside; both are single-pass scans now.
+- **Three test assertions could not see an upper-case tag.** Assertions that a `<script>` was
+  neutralized were case-sensitive, so they would have passed against an escaper that stopped
+  lowercasing.
+
+The remainder are recorded on the alerts with the reason: fixture nonces inside `#[cfg(test)]`,
+containment assertions that are correct while unanchored, a backslash escaped on the line above the
+one flagged, and the first-`*` substitution that a TypeScript `paths` mapping specifies.
+
+Separately, a bare specifier the browser graph cannot resolve is now reported at the end of a build
+rather than only stubbed. The stub throws at the first interaction with `RUV1611`, and the build it
+came from was green — which on a hosting platform, where the install differs from the one on the
+developer's machine, is the whole distance between a working site and a blank one. Every importer of
+each missing package is named.
+
+### Concurrent test suites truncated a shared helper
+
+`pnpm -r test` runs suites in parallel and each one invoked `tsc` into the same `.test-build/`
+directory, so two compilations could truncate a shared helper mid-write. The failure surfaced on CI
+as `SyntaxError: does not provide an export named …`, which describes neither the cause nor the
+file. Each suite compiles into its own `.test-build-<suite>/` now, passed to `tsc` on the command
+line so no package has to restate it.
 
 ## v1.1.1 (2026-08-25)
 
