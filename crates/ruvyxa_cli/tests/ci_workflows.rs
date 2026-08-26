@@ -273,3 +273,64 @@ fn ci_never_cancels_a_run_on_main_or_a_tag() {
         "cancel-in-progress must exempt main and tags, found {expression:?}"
     );
 }
+
+/// CodeQL analyzes both halves of the framework, not whichever one is cheaper.
+///
+/// The compiler and server are Rust and the runtime and public API are
+/// TypeScript, and a taint path that starts in one usually ends in the other.
+/// Dropping a language from the matrix costs nothing visible — the workflow
+/// still goes green, the security tab still has results, and the half nobody
+/// analyzed is the half nobody notices.
+///
+/// `actions` is here for the same reason `ci_workflows.rs` exists: a workflow
+/// is code, and it is the code that holds the credentials.
+#[test]
+fn codeql_analyzes_every_language_this_repository_is_written_in() {
+    let workflows = workflows();
+    let codeql = &workflows["codeql.yml"];
+    let analyzed = codeql["jobs"]["analyze"]["strategy"]["matrix"]["include"]
+        .as_sequence()
+        .expect("codeql.yml declares a matrix of languages")
+        .iter()
+        .filter_map(|entry| entry.get("language").and_then(Value::as_str))
+        .collect::<Vec<_>>();
+
+    for language in ["rust", "javascript-typescript", "actions"] {
+        assert!(
+            analyzed.contains(&language),
+            "codeql.yml must analyze {language}, found {analyzed:?}"
+        );
+    }
+}
+
+/// No job may acquire a grant that can change the repository.
+///
+/// Two writes are legitimate and both are narrow: `security-events` on the
+/// CodeQL job, which is the only way an analysis reaches the security tab, and
+/// `id-token` on the publish jobs, which mints a short-lived OIDC token for npm
+/// provenance and can alter nothing here. Anything else — `contents`,
+/// `pull-requests`, `packages` — would let a workflow added to *inspect* the
+/// repository modify it, which is the shape a compromised action needs.
+#[test]
+fn no_job_may_write_anything_that_changes_the_repository() {
+    for (file, document) in workflows() {
+        for (name, job) in jobs_of(&document) {
+            let Some(permissions) = job.get("permissions").and_then(Value::as_mapping) else {
+                continue;
+            };
+            for (key, value) in permissions {
+                let (Some(key), Some(value)) = (key.as_str(), value.as_str()) else {
+                    continue;
+                };
+                if value != "write" {
+                    continue;
+                }
+                let allowed = matches!(
+                    (file.as_str(), key),
+                    ("codeql.yml", "security-events") | (_, "id-token")
+                );
+                assert!(allowed, "{file} · {name} asks for {key}: write");
+            }
+        }
+    }
+}

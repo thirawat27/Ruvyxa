@@ -1,0 +1,97 @@
+name: CodeQL
+
+# Static analysis over both halves of the framework and over the workflows that
+# ship it.
+#
+# The repository already gates style, types, and behaviour: `cargo clippy -D
+# warnings`, `oxlint`, and a test suite in two languages. None of those look for
+# a *vulnerability* — a taint path from an HTTP request into a filesystem read,
+# a command line, or a rendered document — and this framework is made of exactly
+# those paths: a bundler that opens files a request names, a server that renders
+# what a route hands it, and eleven adapters that write config into somebody
+# else's project.
+#
+# `actions` is analyzed too, because a workflow is code with credentials.
+# `crates/ruvyxa_cli/tests/ci_workflows.rs` asserts the properties this
+# repository already lost once; CodeQL knows the general classes.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*.*.*']
+  pull_request:
+  schedule:
+    # Weekly, so a newly published query reaches this repository without waiting
+    # for someone to open a pull request. Off the hour: a cron every scheduled
+    # workflow on GitHub shares is a cron every one of them queues behind.
+    - cron: '41 4 * * 2'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: codeql-${{ github.workflow }}-${{ github.ref }}
+  # Same rule as ci.yml, for the same reason: a branch may cancel its own
+  # earlier run, `main` and a release tag may not. A cancelled run on a tag
+  # leaves the commit that shipped with no verdict.
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' && !startsWith(github.ref, 'refs/tags/') }}
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  analyze:
+    name: Analyze ${{ matrix.language }}
+    runs-on: ubuntu-latest
+    # Rust extraction walks the whole workspace and is by far the long pole;
+    # the other two finish in single-digit minutes.
+    timeout-minutes: 60
+    permissions:
+      # The only elevated grant in this repository's workflows, and the reason
+      # is that an analysis nobody can read is an analysis nobody acts on: this
+      # is what uploads the SARIF to the security tab.
+      security-events: write
+      contents: read
+      actions: read
+    strategy:
+      # One language failing must not hide the others' findings.
+      fail-fast: false
+      matrix:
+        include:
+          - language: rust
+            build-mode: none
+          - language: javascript-typescript
+            build-mode: none
+          - language: actions
+            build-mode: none
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      # CodeQL's Rust extractor reads the crate graph through cargo, so the
+      # toolchain has to be the one the workspace declares rather than whatever
+      # the runner image happens to ship — the same pin ci.yml uses, for the
+      # same reason it pins there.
+      - uses: dtolnay/rust-toolchain@4360b52568e2003a75bf9bc1d59f33a8e3fc893c # stable
+        if: matrix.language == 'rust'
+        with:
+          toolchain: 1.98.0
+      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2
+        if: matrix.language == 'rust'
+
+      - uses: github/codeql-action/init@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          # `security-extended` over the default pack. The default set is tuned
+          # for a low false-positive rate in application code; this is a
+          # framework, and a query that fires once a year on a path an
+          # application inherits is worth reading.
+          queries: security-extended
+
+      - uses: github/codeql-action/analyze@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
+        with:
+          category: /language:${{ matrix.language }}

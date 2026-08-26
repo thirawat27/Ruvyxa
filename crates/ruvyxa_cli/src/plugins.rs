@@ -246,14 +246,15 @@ impl TypeScriptPluginBridge {
             return Ok(result.result);
         }
 
-        Err(ruvyxa_bundler::BundleError::Compiler(format!(
-            "{} {}",
-            result.code.unwrap_or_else(|| "RUV1700".to_string()),
-            result
-                .message
-                .or(result.stack)
-                .unwrap_or_else(|| "TypeScript plugin hook failed".to_string())
-        )))
+        Err(ruvyxa_bundler::BundleError::Compiler(
+            ruvyxa_diagnostics::label_with_code(
+                &result.code.unwrap_or_else(|| "RUV1700".to_string()),
+                &result
+                    .message
+                    .or(result.stack)
+                    .unwrap_or_else(|| "TypeScript plugin hook failed".to_string()),
+            ),
+        ))
     }
 }
 
@@ -432,12 +433,14 @@ impl TypeScriptPluginBuildSession {
             .map_err(|error| anyhow::anyhow!("TypeScript plugin {label} hook failed: {error}"))?;
         if !result.ok {
             anyhow::bail!(
-                "{} {}",
-                result.code.unwrap_or_else(|| "RUV1700".to_string()),
-                result
-                    .message
-                    .or(result.stack)
-                    .unwrap_or_else(|| format!("TypeScript plugin {label} hook failed"))
+                "{}",
+                ruvyxa_diagnostics::label_with_code(
+                    &result.code.unwrap_or_else(|| "RUV1700".to_string()),
+                    &result
+                        .message
+                        .or(result.stack)
+                        .unwrap_or_else(|| format!("TypeScript plugin {label} hook failed")),
+                )
             );
         }
         Ok(())

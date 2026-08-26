@@ -343,12 +343,14 @@ pub(crate) fn load_project_config(root: &Path) -> anyhow::Result<ProjectConfig> 
     let mut result = run_config_renderer(root, &renderer, bootstrap_runtime)?;
     if !result.ok {
         anyhow::bail!(
-            "config load failed: {} {}",
-            result.code.unwrap_or_else(|| "RUV1600".to_string()),
-            result
-                .message
-                .or(result.stack)
-                .unwrap_or_else(|| "unknown config error".to_string())
+            "config load failed: {}",
+            ruvyxa_diagnostics::label_with_code(
+                &result.code.unwrap_or_else(|| "RUV1600".to_string()),
+                &result
+                    .message
+                    .or(result.stack)
+                    .unwrap_or_else(|| "unknown config error".to_string()),
+            )
         )
     }
 
@@ -364,12 +366,14 @@ pub(crate) fn load_project_config(root: &Path) -> anyhow::Result<ProjectConfig> 
         result = run_config_renderer(root, &renderer, selected_runtime)?;
         if !result.ok {
             anyhow::bail!(
-                "config load failed: {} {}",
-                result.code.unwrap_or_else(|| "RUV1600".to_string()),
-                result
-                    .message
-                    .or(result.stack)
-                    .unwrap_or_else(|| "unknown config error".to_string())
+                "config load failed: {}",
+                ruvyxa_diagnostics::label_with_code(
+                    &result.code.unwrap_or_else(|| "RUV1600".to_string()),
+                    &result
+                        .message
+                        .or(result.stack)
+                        .unwrap_or_else(|| "unknown config error".to_string()),
+                )
             )
         }
         config = result.config.take().unwrap_or_default();
@@ -644,12 +648,14 @@ pub(crate) fn run_adapter_runner(
     })?;
     if !result.ok {
         anyhow::bail!(
-            "adapter build hook failed: {} {}",
-            result.code.unwrap_or_else(|| "RUV2200".to_string()),
-            result
-                .message
-                .or(result.stack)
-                .unwrap_or_else(|| "unknown adapter error".to_string())
+            "adapter build hook failed: {}",
+            ruvyxa_diagnostics::label_with_code(
+                &result.code.unwrap_or_else(|| "RUV2200".to_string()),
+                &result
+                    .message
+                    .or(result.stack)
+                    .unwrap_or_else(|| "unknown adapter error".to_string()),
+            )
         );
     }
     result
@@ -728,12 +734,14 @@ pub(crate) fn inspect_adapter(
     })?;
     if !result.ok {
         anyhow::bail!(
-            "adapter inspection failed: {} {}",
-            result.code.unwrap_or_else(|| "RUV2200".to_string()),
-            result
-                .message
-                .or(result.stack)
-                .unwrap_or_else(|| "unknown adapter error".to_string())
+            "adapter inspection failed: {}",
+            ruvyxa_diagnostics::label_with_code(
+                &result.code.unwrap_or_else(|| "RUV2200".to_string()),
+                &result
+                    .message
+                    .or(result.stack)
+                    .unwrap_or_else(|| "unknown adapter error".to_string()),
+            )
         );
     }
     result

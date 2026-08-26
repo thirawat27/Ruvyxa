@@ -799,6 +799,13 @@ pub(crate) async fn build_with_cache_override(
         &config.config_dependency_hash,
     );
 
+    // A package the browser graph asked for and could not find.
+    //
+    // Reported here rather than where it is decided, because the linker is five
+    // levels below any signature this holds and the answer is the same for
+    // every route: the build is over, and this is what it could not resolve.
+    report_unresolved_client_imports();
+
     // The project's compiled CSS, written as a client asset rather than inlined
     // into each document.
     //
@@ -1439,6 +1446,56 @@ pub(crate) fn styled_render_symbol(strategy: RenderStrategy) -> String {
 /// and the route graph is asked whether anything that both renders and hydrates
 /// reaches the module. A client-only transform behind a `'use client'` route,
 /// which is what the demo pairs it with, satisfies neither.
+/// Name the packages a browser bundle could not resolve.
+///
+/// The linker replaces such an import with a binding that throws `RUV1611` when
+/// it is touched, which keeps the rest of the page alive and names the package
+/// in the browser console. That is the right *runtime* answer and it was the
+/// only one: the build emitted the stub and said nothing, so a deployment
+/// shipped a document whose first interaction threw, from a build that was
+/// green.
+///
+/// A warning rather than a failure. A package reached only by a code path the
+/// browser never runs is a working arrangement, and refusing it would break
+/// projects that are correct today — but nothing about that arrangement should
+/// be silent.
+///
+/// **Reported on a build that linked, which is every cold one.** A warm build
+/// reuses the emitted bundle without running the linker, so the collector has
+/// nothing to drain and this says nothing — the stub is still in the bytes it
+/// reused. That covers the case this exists for, because an install on a
+/// hosting platform is cold and is exactly where a package that resolves on the
+/// developer's machine stops resolving. Making a warm build repeat it means
+/// carrying the answer in the artifact cache, which is a larger change than a
+/// warning is worth; `ruvyxa clean` or any change to the route's graph brings
+/// it back.
+fn report_unresolved_client_imports() {
+    let unresolved = ruvyxa_bundler::linker::take_unresolved_client_imports();
+    for (specifier, importers) in &unresolved {
+        let importers = importers
+            .iter()
+            .map(|path| {
+                std::path::Path::new(path)
+                    .file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| path.clone())
+            })
+            .collect::<Vec<_>>()
+            .join(", ");
+        warn!(package = %specifier, "a browser bundle could not resolve a package");
+        println!(
+            "  {} {}",
+            warn_text("warn"),
+            dim(format!(
+                "{specifier} could not be resolved from node_modules, so the browser bundle carries \
+                 a binding that throws RUV1611 the first time it is used ({importers} imports it). \
+                 Add {specifier} to this project's dependencies: a package reached through another \
+                 package's node_modules resolves on one machine and not on the next."
+            ))
+        );
+    }
+}
+
 fn report_plugin_transform_divergence(
     plugin_session: &TypeScriptPluginBuildSession,
     manifest: &RouteManifest,

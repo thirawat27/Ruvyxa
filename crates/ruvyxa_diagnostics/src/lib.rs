@@ -261,6 +261,43 @@ const WINDOWS_VERBATIM_UNC_PREFIX: &str = "\\\\?\\UNC\\";
 /// substitution and was refused as `RUV1820`, naming an import the project is
 /// right to have.
 ///
+/// Join a diagnostic code and a message without repeating a code the message
+/// already carries.
+///
+/// A worker reports `{ code, message }`, and the message is usually the error a
+/// hook threw — whose own class already prefixes its code, because that is what
+/// makes the code visible in a browser console and in a raw stack. Prepending
+/// the reported code as well produced two of them, the outer one naming nothing
+/// but which worker relayed it:
+///
+/// - `RUV1700 RUV3201 native collaboration requires a long-lived Node/Bun build`
+/// - `RUV2200 RUV2202 adapter static supports ssg, csr; unsupported routes: …`
+///
+/// The inner code wins, because it is the one that names the decision and the
+/// one a reader can search for.
+#[must_use]
+pub fn label_with_code(code: &str, message: &str) -> String {
+    if starts_with_diagnostic_code(message) {
+        return message.to_string();
+    }
+    format!("{code} {message}")
+}
+
+/// Whether this text opens with `RUV` and four digits, as a whole token.
+fn starts_with_diagnostic_code(message: &str) -> bool {
+    let Some(rest) = message.strip_prefix("RUV") else {
+        return false;
+    };
+    let digits = rest.as_bytes();
+    if digits.len() < 4 || !digits[..4].iter().all(u8::is_ascii_digit) {
+        return false;
+    }
+    // A whole token: `RUV1700` and `RUV1700 …` both count, `RUV17005` does not,
+    // so a five-digit code added later cannot be read as a four-digit one with a
+    // stray character after it.
+    matches!(rest[4..].chars().next(), None | Some(' ') | Some(':'))
+}
+
 /// A no-op on other platforms and on any Windows path without the prefix.
 #[must_use]
 pub fn without_verbatim_prefix(path: &std::path::Path) -> std::path::PathBuf {
@@ -294,7 +331,7 @@ pub fn normalized_canonical_path(path: &std::path::Path) -> std::path::PathBuf {
 
 #[cfg(test)]
 mod path_tests {
-    use super::{Diagnostic, diagnostics_to_sarif, normalized_canonical_path};
+    use super::{Diagnostic, diagnostics_to_sarif, label_with_code, normalized_canonical_path};
 
     #[test]
     fn normalized_canonical_path_has_no_verbatim_prefix() {
@@ -360,6 +397,51 @@ mod path_tests {
             no_help["runs"][0]["tool"]["driver"]["rules"][0]
                 .get("help")
                 .is_none()
+        );
+    }
+
+    #[test]
+    fn a_message_that_already_names_a_code_does_not_get_a_second_one() {
+        // Both observed in real output: the outer code names only which worker
+        // relayed the failure, and the reader has to search for the inner one.
+        assert_eq!(
+            label_with_code(
+                "RUV1700",
+                "RUV3201 native collaboration requires a long-lived build"
+            ),
+            "RUV3201 native collaboration requires a long-lived build"
+        );
+        assert_eq!(
+            label_with_code("RUV2200", "RUV2202 adapter static supports ssg, csr"),
+            "RUV2202 adapter static supports ssg, csr"
+        );
+    }
+
+    #[test]
+    fn a_message_that_names_no_code_still_gets_one() {
+        assert_eq!(
+            label_with_code("RUV1700", "the hook threw"),
+            "RUV1700 the hook threw"
+        );
+        // Not a code: the prefix has to be a whole token, so a longer number or
+        // a word that merely starts with the letters is left alone.
+        assert_eq!(
+            label_with_code("RUV1700", "RUV17005 x"),
+            "RUV1700 RUV17005 x"
+        );
+        assert_eq!(
+            label_with_code("RUV1700", "RUVYXA_LOCALE is unset"),
+            "RUV1700 RUVYXA_LOCALE is unset"
+        );
+        assert_eq!(label_with_code("RUV1700", "RUV17"), "RUV1700 RUV17");
+    }
+
+    #[test]
+    fn a_code_alone_is_a_code() {
+        assert_eq!(label_with_code("RUV1700", "RUV3201"), "RUV3201");
+        assert_eq!(
+            label_with_code("RUV1700", "RUV3201: detail"),
+            "RUV3201: detail"
         );
     }
 }

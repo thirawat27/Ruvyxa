@@ -1702,12 +1702,58 @@ fn collect_external_imports(modules: &[&CompiledModule], target: BundleTarget) -
     out
 }
 
+/// Bare specifiers this process stubbed for a browser bundle, and who imported
+/// them.
+///
+/// The stub keeps the page alive and names the package when the missing value
+/// is touched — but it did so *only* at runtime, and the build that emitted it
+/// said nothing at all. A deployment therefore shipped a document whose first
+/// interaction threw `RUV1611`, and the build it came from was green: on a
+/// hosting platform, where the install differs from the one on the developer's
+/// machine, that is the whole distance between a working site and a blank one.
+///
+/// Recorded rather than returned, because the decision is made five call levels
+/// below a signature the CLI holds, and threading a channel through every
+/// linker entry point to carry a warning would be a worse trade than a
+/// collector the host drains. Same shape as `PUBLIC_ENV` in `compiler`.
+///
+/// Keyed by specifier, so it stays bounded by the number of distinct missing
+/// packages no matter how long the process lives.
+static UNRESOLVED_CLIENT_IMPORTS: std::sync::OnceLock<
+    std::sync::Mutex<BTreeMap<String, BTreeSet<String>>>,
+> = std::sync::OnceLock::new();
+
+fn unresolved_client_imports() -> &'static std::sync::Mutex<BTreeMap<String, BTreeSet<String>>> {
+    UNRESOLVED_CLIENT_IMPORTS.get_or_init(|| std::sync::Mutex::new(BTreeMap::new()))
+}
+
+/// Take what this build stubbed, leaving the collector empty for the next one.
+///
+/// Drained rather than read, so a warning is reported once per build and a
+/// long-lived dev server does not repeat what it already said.
+#[must_use]
+pub fn take_unresolved_client_imports() -> BTreeMap<String, BTreeSet<String>> {
+    let Ok(mut recorded) = unresolved_client_imports().lock() else {
+        return BTreeMap::new();
+    };
+    std::mem::take(&mut recorded)
+}
+
 /// Emit throwing bindings for bare specifiers a browser bundle cannot resolve.
 fn unresolved_import_stubs(
     unresolved: &BTreeMap<String, (BTreeSet<String>, BTreeSet<String>)>,
 ) -> Vec<String> {
     if unresolved.is_empty() {
         return Vec::new();
+    }
+
+    if let Ok(mut recorded) = unresolved_client_imports().lock() {
+        for (specifier, (_, importers)) in unresolved {
+            recorded
+                .entry(specifier.clone())
+                .or_default()
+                .extend(importers.iter().cloned());
+        }
     }
 
     let mut out = vec![UNRESOLVED_IMPORT_HELPER.to_string()];
@@ -3374,6 +3420,35 @@ export const q = readFile;
         assert!(
             output.contains("/app/page.tsx"),
             "the stub must name the importer: {output}"
+        );
+    }
+
+    /// The stub is the *runtime* answer; the build has to give one too.
+    ///
+    /// Emitting a throwing binding and saying nothing meant a green build could
+    /// ship a document whose first interaction threw `RUV1611` — which is what
+    /// a hosting platform produces when a package resolves through another
+    /// package's `node_modules` on the developer's machine and not on theirs.
+    #[test]
+    fn client_link_records_what_it_stubbed_for_the_build_to_report() {
+        let _ = take_unresolved_client_imports();
+        link_unresolved_import(
+            BundleTarget::Client,
+            "import React from \"react\";
+export default function Page() {}",
+        );
+
+        let recorded = take_unresolved_client_imports();
+        let importers = recorded
+            .get("react")
+            .expect("the stubbed specifier must be recorded");
+        assert!(
+            importers.iter().any(|path| path.contains("page.tsx")),
+            "the record must name the importer: {importers:?}"
+        );
+        assert!(
+            take_unresolved_client_imports().is_empty(),
+            "taking must drain, so one build does not repeat the previous one"
         );
     }
 
