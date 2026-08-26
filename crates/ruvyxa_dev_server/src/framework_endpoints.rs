@@ -267,7 +267,8 @@ struct RouteModuleFacts {
 /// `false` is a legitimate answer — most routes export no `flight` — so a
 /// defaulted read made an unreadable file indistinguishable from a route that
 /// genuinely has neither, and both callers then reported the wrong thing with
-/// nothing logged. `a_route_source_read_is_never_defaulted` holds that.
+/// nothing logged. `scripts/check-silent-defaults.mjs` holds that for the whole
+/// workspace, so this file carries no copy of the rule.
 async fn route_module_facts(file: &std::path::Path) -> std::io::Result<RouteModuleFacts> {
     let source = tokio::fs::read_to_string(file).await?;
     let module = ruvyxa_bundler::ast::parse_module(&source);
@@ -1276,63 +1277,6 @@ fn debug_traces_enabled(config: &ServerConfig) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// A route source that cannot be read must not read as a route without a
-    /// `flight` export.
-    ///
-    /// `has_named_runtime_export` answers `false` for an empty source, and that
-    /// is a legitimate answer — most routes export no `flight`. So
-    /// `read_to_string(..).unwrap_or_default()` on a route file collapsed two
-    /// different facts into one: the Flight endpoint answered `501 this route
-    /// does not expose a Flight payload` for an I/O failure and logged nothing,
-    /// and the dev route table advertised `flight: false`, which tells the
-    /// browser router to stop asking for payloads the route does produce.
-    ///
-    /// Asserted over the source because behaviour cannot reach it: both call
-    /// sites need a live `AppState`, and the failure is a file becoming
-    /// unreadable between route discovery and the request — a race no unit test
-    /// can stage through the public path. The first assertion below is what
-    /// makes the rest necessary, so it is asserted rather than assumed.
-    ///
-    /// The scan stops at this test module and looks ahead rather than matching
-    /// one line: the shape that shipped was spelled across three lines, and a
-    /// scan that reads its own assertions finds itself.
-    #[test]
-    fn a_route_source_read_is_never_defaulted() {
-        let empty = "";
-        let module = ruvyxa_bundler::ast::parse_module(empty);
-        assert!(
-            !ruvyxa_bundler::ast::has_named_runtime_export(empty, &module, "flight"),
-            "an empty source reports no flight export, so a defaulted read is \
-             indistinguishable from a route that genuinely has none"
-        );
-
-        let whole = include_str!("framework_endpoints.rs");
-        // Split on the test module specifically. This file carries an earlier
-        // `#[cfg(test)]` on a single item, and stopping there left the scan
-        // covering the first few lines and finding nothing to check.
-        let production = whole
-            .split_once("\n#[cfg(test)]\nmod tests {")
-            .map_or(whole, |(before, _)| before);
-        let lines: Vec<&str> = production.lines().collect();
-        for (index, line) in lines.iter().enumerate() {
-            if !line.contains("read_to_string") {
-                continue;
-            }
-            // The call and its terminator, however the formatter broke them up.
-            let statement = lines[index..lines.len().min(index + 4)].join(" ");
-            assert!(
-                !statement.contains("unwrap_or_default"),
-                "framework_endpoints.rs:{} defaults a source read; an unreadable \
-                 route file would be reported as a missing export again",
-                index + 1
-            );
-        }
-        assert!(
-            production.matches("read_to_string").count() >= 2,
-            "this guard covers the route-source reads; it stopped finding them"
-        );
-    }
 
     /// The `/__ruvyxa/rsc` gate is one rule with two implementations.
     ///

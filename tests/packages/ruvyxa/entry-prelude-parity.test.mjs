@@ -388,7 +388,9 @@ for (const [host, preludes] of Object.entries(HOSTS)) {
         // attribute and `<` would open a tag; `>` inside a quoted value is
         // inert, which is why it is left alone.
         const html = applyLang('<html lang="en"></html>', '"><script>alert(1)</script>')
-        assert.doesNotMatch(html, /<script>/)
+        // A browser reads `<SCRIPT>` as the same tag, so the assertion that
+        // one was neutralized has to be case-insensitive too.
+        assert.doesNotMatch(html, /<script>/i)
         assert.equal(html, '<html lang="&quot;>&lt;script>alert(1)&lt;/script>"></html>')
       })
 

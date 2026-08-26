@@ -250,7 +250,10 @@ describe('html lang rewriting', () => {
     const output = __ruvyxaApplyLang(html, '"><script>alert(1)</script>')
     // The quote that would close the attribute and the tag opener that would
     // start a script are both neutralized; `>` inside a quoted value is inert.
-    assert.doesNotMatch(output, /<script>/)
+    // Case-insensitive: this asserts a tag was neutralized, and `<SCRIPT>` is
+    // the same tag to a browser. A case-sensitive assertion would pass on an
+    // escaper that stopped lowercasing.
+    assert.doesNotMatch(output, /<script>/i)
     assert.match(output, /lang="&quot;>&lt;script>/)
   })
 

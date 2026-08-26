@@ -205,7 +205,17 @@ export function runtimeBuildPolicy(ctx: BuildContext): Readonly<Record<string, u
  * out-of-tree directory), the normalized value is returned unchanged.
  */
 export function projectRelativeOutDir(ctx: BuildContext): string {
-  const normalize = (value: string) => value.replace(/\\/g, '/').replace(/\/+$/, '')
+  // Written as a scan rather than `/\/+$/`, which the engine retries from every
+  // start position: a path ending in many separators costs time quadratic in
+  // its length. `outDir` is configuration rather than request input, so this was
+  // never reachable from outside — but the linear form is the same three lines
+  // and removes the question.
+  const normalize = (value: string) => {
+    const slashed = value.replaceAll('\\', '/')
+    let end = slashed.length
+    while (end > 0 && slashed[end - 1] === '/') end -= 1
+    return slashed.slice(0, end)
+  }
   const root = normalize(ctx.root)
   const outDir = normalize(ctx.outDir)
   if (root !== '' && outDir.startsWith(`${root}/`)) {

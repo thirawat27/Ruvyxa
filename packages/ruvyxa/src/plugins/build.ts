@@ -307,7 +307,15 @@ function fontFileName(url: string): string {
 }
 
 function normalizeFontPublicPath(value: string): string {
-  const trimmed = `/${String(value).replace(/(?:^\/+)|(?:\/+$)/g, '')}`
+  // Scanned rather than stripped with `/(?:^\/+)|(?:\/+$)/g`, whose trailing
+  // alternative the engine retries from every start position and so costs time
+  // quadratic in the number of separators. Same result, one pass from each end.
+  const raw = String(value)
+  let start = 0
+  while (start < raw.length && raw[start] === '/') start += 1
+  let end = raw.length
+  while (end > start && raw[end - 1] === '/') end -= 1
+  const trimmed = `/${raw.slice(start, end)}`
   if (trimmed === '/' || /[?#]/.test(trimmed)) {
     throw new TypeError('fonts: publicPath must be a directory path such as "/fonts"')
   }

@@ -226,14 +226,15 @@ cargo run -p ruvyxa_cli -- test:parity --root examples/demo
 
 The rest of the scripts, and when each is worth running:
 
-| Command                    | When                                                                                                               |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------------ |
-| `pnpm check:cargo-lock`    | after any `Cargo.toml` edit — the lockfile has to describe the manifests                                           |
-| `pnpm check:oxc-lockstep`  | after touching `oxc` or `oxc-transform` — the Rust bundler and the Node runtime must be on one version             |
-| `pnpm check:source-refs`   | after moving or renaming a test, fixture, or script — comments naming it are gates, and a stale one points nowhere |
-| `pnpm verify:reproducible` | after a change to emitted bytes, ordering, or hashing — two builds of one input must agree                         |
-| `pnpm test:full-flow`      | before a release; scaffolds, builds, and runs a project end to end (PowerShell)                                    |
-| `pnpm publish:dry-run`     | before a release, to see what would actually be published                                                          |
+| Command                      | When                                                                                                               |
+| ---------------------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `pnpm check:cargo-lock`      | after any `Cargo.toml` edit — the lockfile has to describe the manifests                                           |
+| `pnpm check:oxc-lockstep`    | after touching `oxc` or `oxc-transform` — the Rust bundler and the Node runtime must be on one version             |
+| `pnpm check:source-refs`     | after moving or renaming a test, fixture, or script — comments naming it are gates, and a stale one points nowhere |
+| `pnpm check:silent-defaults` | after adding a read or a decode — a failure turned into a default is a wrong answer that looks right               |
+| `pnpm verify:reproducible`   | after a change to emitted bytes, ordering, or hashing — two builds of one input must agree                         |
+| `pnpm test:full-flow`        | before a release; scaffolds, builds, and runs a project end to end (PowerShell)                                    |
+| `pnpm publish:dry-run`       | before a release, to see what would actually be published                                                          |
 
 `pnpm release:bump` writes every manifest with `JSON.stringify`, which Prettier disagrees with — run
 `pnpm format` after it or `pnpm format:check` fails on twenty-four `package.json` files.
@@ -347,6 +348,19 @@ before believing it.
   missing from the list and a plugin transport on either panicked the router at startup.
   `every_registered_route_is_reserved` parses the chain now. When a doc comment says "must stay in
   sync with X", the test has to read X.
+- A failed read is not a value. Turning one into a default throws the message away _and_ invents an
+  answer, and when the invented answer is also a legitimate one nothing downstream can tell them
+  apart. `client_bundle.rs` read a route's source to record whether it exports `flight` and
+  defaulted to `""`; `""` exports no `flight`, so every `ruvyxa build --root <elsewhere>` wrote
+  `flight: false` for every route into the shipped manifest and the browser router stopped
+  requesting payloads routes did produce. The same read behind `/__ruvyxa/flight` reported an
+  unreadable file as `501 this route does not expose a Flight payload`. `write_style_asset` parsed
+  `route-manifest.json` with a default of `{"routes": []}` and then wrote the document back, so a
+  partial file — which an interrupted build leaves — was silently replaced by a manifest naming no
+  routes at all. `.ok()` is fine: it hands the caller `None`, which is an honest "no answer".
+  `unwrap_or_default()` and `unwrap_or_else(|_| …)` fabricate, and
+  `scripts/check-silent-defaults.mjs` fails on them outside an allowlist that carries the reason for
+  each accepted site.
 - An empty cache slot is a question the cache cannot answer, not a "no". `RuntimeCache`'s generation
   counter exists so a collection that started before a watcher event cannot install its result, and
   `invalidate_styles_for_paths` skipped the bump when the slot was empty — which is exactly the

@@ -31,7 +31,7 @@ export async function expandImportMetaGlob(source, importerDir, projectRoot, tsc
     const files = await collectFiles(watchRoot, absolutePattern)
     const entries = files.map((file, matchIndex) => {
       matches.add(file)
-      const specifier = relativeSpecifier(importerDir, file)
+      const specifier = embeddableSpecifier(relativeSpecifier(importerDir, file), file)
       if (!call.eager) {
         return `${JSON.stringify(specifier)}: () => import(${JSON.stringify(specifier)})`
       }
@@ -199,6 +199,51 @@ function staticPrefix(pattern) {
 function relativeSpecifier(directory, file) {
   const relative = slash(path.relative(directory, file))
   return relative.startsWith('.') ? relative : `./${relative}`
+}
+
+/**
+ * Whether a code point may not be carried into generated source.
+ *
+ * C0 and C1 control characters, and the two line separators the JSON grammar
+ * leaves unescaped: `JSON.stringify` emits U+2028 and U+2029 literally, and a
+ * JavaScript string literal has only accepted them since ES2019 — so on any
+ * older parser they end the literal and everything after the file name is code.
+ *
+ * A scan rather than a character-class regex. Matching control characters is
+ * exactly what this has to do, and exactly what `no-control-regex` forbids;
+ * comparing code points states the rule without a suppressed lint.
+ */
+function isUnembeddable(codePoint) {
+  return (
+    codePoint < 0x20 ||
+    (codePoint >= 0x7f && codePoint <= 0x9f) ||
+    codePoint === 0x2028 ||
+    codePoint === 0x2029
+  )
+}
+
+/**
+ * A matched file's specifier, or a build failure naming the file.
+ *
+ * This value is concatenated into the module this expander returns, so the file
+ * name of anything a glob matches is an input to code construction — and a
+ * globbed directory is writable by any dependency, generator, or archive that
+ * can put a file there. `JSON.stringify` escapes the quote and the backslash
+ * and is the right encoder for the rest, but it is a JSON escaper: the two
+ * separators above are exactly where the two grammars disagree.
+ *
+ * Refused rather than escaped. A file name that cannot be written into source
+ * verbatim is one nobody meant to import, and answering with the path is what
+ * lets it be found and renamed; silently rewriting it would leave a module
+ * whose key does not match the file on disk.
+ */
+function embeddableSpecifier(specifier, file) {
+  if ([...specifier].some((character) => isUnembeddable(character.codePointAt(0)))) {
+    throw globError(
+      `${JSON.stringify(file)} cannot be embedded in generated source: its name contains a control or line-separator character. Rename the file.`,
+    )
+  }
+  return specifier
 }
 
 function skipWhitespace(source, start) {

@@ -67,7 +67,9 @@ function hmrClientSource() {
     htmlDocumentRs,
   )
   assert.ok(match, 'hmr_client_script() not found in html_document.rs')
-  const body = /^<script>([\s\S]*)<\/script>$/.exec(match[1].trim())
+  // Case-insensitive so a change in how the tag is emitted fails on the
+  // assertion below rather than on a silent non-match here.
+  const body = /^<script>([\s\S]*)<\/script>$/i.exec(match[1].trim())
   assert.ok(body, 'expected hmr_client_script() to emit exactly one <script> element')
   return body[1]
 }

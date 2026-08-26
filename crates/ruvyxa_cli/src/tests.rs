@@ -3774,3 +3774,40 @@ fn a_flight_export_is_recorded_when_the_build_runs_from_another_directory() {
         "the shipped manifest must tell the browser router this route has a payload: {client_manifest}"
     );
 }
+
+/// A route manifest that cannot be parsed must not be replaced by an empty one.
+///
+/// `write_style_asset` reads `route-manifest.json` to add the stylesheet URL,
+/// then writes the whole document back. Parsing it with a default of
+/// `{"routes": []}` meant an unparseable manifest was silently *overwritten*
+/// with one naming no routes at all -- and that file is what every host reads to
+/// find a route's scripts: the Rust server, the generated standalone server, and
+/// each adapter's function bundle. The build still succeeded, so the first
+/// symptom was a deployed site whose client router knew no routes and answered
+/// every navigation with a full document load.
+///
+/// It is reachable without any corruption on disk: a build interrupted mid-write
+/// and two builds sharing one output directory both leave a partial file, and
+/// this repository has already had to isolate concurrent build outputs once.
+#[test]
+fn an_unparseable_route_manifest_fails_the_build_instead_of_emptying_itself() {
+    let temp = tempfile::tempdir().unwrap();
+    let client_dir = temp.path().join("client");
+    std::fs::create_dir_all(&client_dir).unwrap();
+    let manifest_path = client_dir.join("route-manifest.json");
+    let truncated = r#"{"routes":[{"path":"/","src":"/__ruvyxa/client/entry.js"}"#;
+    std::fs::write(&manifest_path, truncated).unwrap();
+
+    let error = write_style_asset(&client_dir, "body{color:red}")
+        .expect_err("an unreadable manifest is a build failure, not an empty route table");
+    assert!(
+        error.to_string().contains("route-manifest.json"),
+        "the failure has to name the file a reader must repair: {error}"
+    );
+
+    assert_eq!(
+        std::fs::read_to_string(&manifest_path).unwrap(),
+        truncated,
+        "the damaged manifest must be left for inspection, never replaced with an empty one"
+    );
+}

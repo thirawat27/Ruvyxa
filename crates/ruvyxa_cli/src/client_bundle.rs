@@ -1500,10 +1500,28 @@ pub(crate) fn write_style_asset(client_dir: &Path, css: &str) -> std::io::Result
     let url = format!("/__ruvyxa/client/{file_name}");
     let manifest_path = client_dir.join("route-manifest.json");
     if manifest_path.exists() {
+        // Reported, never defaulted. This reads the manifest and then writes the
+        // whole document back, so parsing a damaged file as
+        // `{"routes": []}` did not merely lose the error — it *replaced* the
+        // manifest with one naming no routes, and this file is what every host
+        // reads to find a route's scripts. The build still succeeded, so the
+        // first symptom was a deployed site whose client router knew no routes
+        // and answered every navigation with a full document load.
+        //
+        // A partial file needs no corruption to appear: a build interrupted
+        // mid-write leaves one, and so do two builds sharing an output
+        // directory.
         let mut manifest: serde_json::Value = serde_json::from_slice(&fs::read(&manifest_path)?)
-            .unwrap_or_else(
-                |_| serde_json::json!({ "routes": serde_json::Value::Array(Vec::new()) }),
-            );
+            .map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "{} is not valid JSON ({error}); delete it and rebuild rather than \
+                         publishing a manifest that names no routes",
+                        manifest_path.display()
+                    ),
+                )
+            })?;
         manifest["styles"] = serde_json::json!([url.clone()]);
         fs::write(&manifest_path, serde_json::to_vec(&manifest)?)?;
     }

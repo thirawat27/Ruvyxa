@@ -715,6 +715,44 @@ describe('runtime compiler', () => {
     )
   })
 
+  // A matched file's own name is embedded in generated source. A name carrying a
+  // line separator survives `JSON.stringify` unescaped -- it is legal inside a
+  // JavaScript string literal only from ES2019 -- and a name carrying a control
+  // character produces source no reader can review. Neither belongs in a module
+  // this compiler then hands to a parser, and a globbed directory is reachable
+  // by any dependency that can write a file into it.
+  it('refuses to build code from a file name it cannot embed safely', async (t) => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-glob-name-'))
+    t.after(() => rm(root, { recursive: true, force: true }))
+    const directory = path.join(root, 'routes')
+    await mkdir(directory, { recursive: true })
+
+    // Written through the same API the expander reads with, so the test fails
+    // on a platform that refuses the name rather than asserting against one.
+    let hostile
+    try {
+      hostile = `page\u2028evil.ts`
+      await writeFile(path.join(directory, hostile), 'export const value = 1\n')
+    } catch {
+      t.skip('this file system rejects the name outright, which is the same protection')
+      return
+    }
+
+    await assert.rejects(
+      expandImportMetaGlob(
+        "export const all = import.meta.glob('./routes/*.ts')\n",
+        root,
+        root,
+        {},
+      ),
+      // `[\s\S]`, not `.`: the message quotes the offending path, so the very
+      // separator under test sits inside it — and `.` does not match a line
+      // terminator, so the assertion missed a rejection that had happened.
+      /RUV1810[\s\S]*cannot be embedded/,
+      'a name that cannot be embedded must fail the build, not be written into generated source',
+    )
+  })
+
   it('expands import.meta.glob inside a template interpolation without touching template text', async (t) => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-glob-template-'))
     t.after(() => rm(root, { recursive: true, force: true }))
