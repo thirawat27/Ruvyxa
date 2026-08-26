@@ -934,7 +934,7 @@ pub(crate) fn default_javascript_runtime() -> JavaScriptRuntime {
 fn build_dependency_hash(root: &Path, config_hash: &str) -> String {
     let environment = ruvyxa_dev_server::project_env(root).unwrap_or_default();
     crate::artifact_cache::content_hash(&format!(
-        "{config_hash} {}",
+        "{config_hash}\0{}",
         serde_json::to_string(&environment).unwrap_or_default()
     ))
 }
