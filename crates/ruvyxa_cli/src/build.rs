@@ -918,6 +918,18 @@ pub(crate) async fn build_with_cache_override(
         );
     }
 
+    // Composed once and reused by everything that writes a document: the
+    // pre-rendered pages, the not-found page, and the deployment manifest the
+    // function bundle bakes its own copy from. Three readers of one value, so a
+    // head contribution cannot reach some documents and not others.
+    let document_head = prerender_head(
+        &config,
+        &assets_dir,
+        style_asset.as_deref(),
+        &style_collection.css,
+        CsrShell::from_site(&config.site),
+    );
+
     // ─── SSG / ISR / PPR pre-rendering at build time ──────────────────────────
     // Every prerendered artifact is an HTML page, and a server-only build has
     // no page routes by the compatibility rule above, so this stage has no work
@@ -934,18 +946,7 @@ pub(crate) async fn build_with_cache_override(
             &manifest,
             &prerender_dir,
             &client_dir,
-            PrerenderHead {
-                // Read from the staged assets directory, which is what a
-                // deployed server publishes — not from the project's `public/`,
-                // which still holds an original the build converted away.
-                asset_links: ruvyxa_dev_server::public_asset_links(&assets_dir).into(),
-                styles: ruvyxa_dev_server::style_head_tag(
-                    style_asset.as_deref(),
-                    &style_collection.css,
-                )
-                .into(),
-                shell: CsrShell::from_site(&config.site),
-            },
+            document_head.clone(),
             &config.build,
             RuvyxaBuildCache {
                 dependency_hash: &config.config_dependency_hash,
@@ -984,15 +985,10 @@ pub(crate) async fn build_with_cache_override(
         &app_dir,
         &prerender_dir,
         &PrerenderHead {
-            asset_links: ruvyxa_dev_server::public_asset_links(&assets_dir).into(),
-            styles: ruvyxa_dev_server::style_head_tag(
-                style_asset.as_deref(),
-                &style_collection.css,
-            )
-            .into(),
             // Unused on this path: the not-found document is rendered, so it
             // composes its own head.
             shell: CsrShell::default(),
+            ..document_head.clone()
         },
         NotFoundPrerender {
             build: &config.build,
@@ -1092,6 +1088,10 @@ pub(crate) async fn build_with_cache_override(
             not_found_document: not_found_document.as_deref(),
             client_assets: emitted_client_assets(&client_dir),
             base_path: String::new(),
+            document_head: crate::deploy_manifest::DocumentHeadDefaults {
+                asset_links: &document_head.asset_links,
+                plugin_head: &document_head.plugin_head,
+            },
             adapter: args
                 .adapter
                 .as_deref()
@@ -1144,6 +1144,37 @@ struct ValidatedRoutes {
     manifest: RouteManifest,
     discovery_duration: Duration,
     validation_duration: Duration,
+}
+
+/// The `<head>` every page this build bakes carries beyond its own metadata.
+///
+/// One composer for both documents a build writes -- the pre-rendered pages and
+/// the not-found page -- because the two were assembled separately and a head
+/// contribution added to one was simply absent from the other. What goes in is
+/// fixed by what the live pipeline injects: a pre-rendered page is served from
+/// disk with no renderer left to add anything, so whatever `dev` and `start`
+/// compose has to be baked in here or the two documents differ in production
+/// only. `prerender_html_includes_the_document_head_the_live_renderer_composes`
+/// holds that correspondence.
+pub(crate) fn prerender_head(
+    config: &ProjectConfig,
+    assets_dir: &Path,
+    style_asset: Option<&str>,
+    css: &str,
+    shell: CsrShell,
+) -> PrerenderHead {
+    PrerenderHead {
+        // Read from the staged assets directory, which is what a deployed
+        // server publishes — not from the project's `public/`, which still
+        // holds an original the build converted away.
+        asset_links: ruvyxa_dev_server::public_asset_links(assets_dir).into(),
+        plugin_head: ruvyxa_dev_server::render_plugin_head(
+            &crate::client_bundle::collect_plugin_head(&config.plugins),
+        )
+        .into(),
+        styles: ruvyxa_dev_server::style_head_tag(style_asset, css).into(),
+        shell,
+    }
 }
 
 /// Discover the project's routes and refuse the build if they do not validate.

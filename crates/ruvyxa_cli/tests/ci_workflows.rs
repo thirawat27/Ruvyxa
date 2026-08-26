@@ -334,3 +334,45 @@ fn no_job_may_write_anything_that_changes_the_repository() {
         }
     }
 }
+
+/// `cargo test` runs before `pnpm -r build`, so no Rust test may need `dist/`.
+///
+/// The workspace packages resolve through their `exports`, which point at
+/// `dist/`, and `require.resolve` fails when that file is absent. A Rust test
+/// that resolves one therefore passes on any developer machine — where a
+/// previous build left `dist/` behind — and fails on a cold checkout, which is
+/// the only place it matters. `an_adapter_resolves_before_a_build_has_produced
+/// _anything` was written against `@ruvyxa/adapter-node` and did exactly that;
+/// it now fabricates its own adapter package inside the temp project.
+///
+/// The ordering is what makes that a rule rather than a preference. Building
+/// packages first would loosen it, and this gate is here so that becomes a
+/// decision instead of an accident that quietly re-enables the trap.
+#[test]
+fn no_workflow_builds_packages_before_it_tests_rust() {
+    for (file, document) in workflows() {
+        for (name, job) in jobs_of(&document) {
+            let Some(steps) = job.get("steps").and_then(Value::as_sequence) else {
+                continue;
+            };
+            let position_of = |needle: &str| {
+                steps.iter().position(|step| {
+                    step.get("run")
+                        .and_then(Value::as_str)
+                        .is_some_and(|run| run.contains(needle))
+                })
+            };
+            let (Some(tests_rust), Some(builds_packages)) =
+                (position_of("cargo test"), position_of("pnpm -r build"))
+            else {
+                continue;
+            };
+            assert!(
+                tests_rust < builds_packages,
+                "{file} · {name} builds packages at step {builds_packages} and tests Rust at \
+                 step {tests_rust}. Rust tests here are written to need no `dist/`; if that is \
+                 no longer wanted, change them and delete this gate on purpose."
+            );
+        }
+    }
+}

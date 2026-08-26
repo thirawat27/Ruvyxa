@@ -1,0 +1,128 @@
+{
+  "$comment": [
+    "The framework's document-head defaults, and when the document's own",
+    "declaration stands them down.",
+    "",
+    "Two writers compose the head of a rendered page, and which one runs is",
+    "decided by where the page is served from rather than by anything the",
+    "project wrote:",
+    "  - crates/ruvyxa_dev_server/src/static_assets.rs  (`dev`, `start`, and",
+    "    every page a build pre-renders)",
+    "  - packages/ruvyxa/runtime/entry-templates.mjs    (a request-time render",
+    "    inside a deployed function bundle)",
+    "",
+    "The second one only had the viewport half. A deployed build therefore",
+    "served its pre-rendered pages with an icon link and every request-time",
+    "render without one, so the browser fell back to `/favicon.ico` — which the",
+    "`ruvyxa.png` convention every scaffolded project ships does not answer.",
+    "One 404 per page load, on the deployments only, for the routes that are",
+    "hardest to notice are missing it.",
+    "",
+    "Every implementation replays this file:",
+    "  - crates/ruvyxa_dev_server/src/static_assets.rs        (Rust test)",
+    "  - tests/packages/ruvyxa/document-head-parity.test.mjs  (JavaScript test)",
+    "",
+    "`assetLinks` is what the build resolved from the project's public files;",
+    "the deployed writer is handed the same string through the deploy manifest",
+    "rather than deriving it again, so only the stand-down rule below is",
+    "written twice and this is what holds the two copies equal."
+  ],
+  "schemaVersion": 1,
+  "viewportMeta": "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">",
+  "$standDownNote": [
+    "Both quote styles, for all four spellings. A document that declares any",
+    "icon keeps its own set whole rather than being merged with the framework's",
+    "— a project shipping `ruvyxa.png` beside its own mark used to get both",
+    "links, and the framework's was the one the browser answered.",
+    "",
+    "The quote styles were not equal before this file existed: the native",
+    "writer matched `rel='icon'` but not `rel='shortcut icon'`, so a document",
+    "using single quotes for the longer spelling was given a second icon."
+  ],
+  "cases": [
+    {
+      "name": "a document that declares neither gets both",
+      "document": "<html><head><title>Home</title></head><body></body></html>",
+      "assetLinks": "<link rel=\"icon\" type=\"image/png\" href=\"/ruvyxa.png\">",
+      "expect": "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><link rel=\"icon\" type=\"image/png\" href=\"/ruvyxa.png\">"
+    },
+    {
+      "name": "a project that publishes no icon gets only the viewport",
+      "document": "<html><head></head><body></body></html>",
+      "assetLinks": "",
+      "expect": "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+    },
+    {
+      "name": "the document's own viewport stands the default down",
+      "document": "<html><head><meta name=\"viewport\" content=\"width=1024\"></head></html>",
+      "assetLinks": "",
+      "expect": ""
+    },
+    {
+      "name": "a single-quoted viewport is the same declaration",
+      "document": "<html><head><meta name='viewport' content='width=1024'></head></html>",
+      "assetLinks": "",
+      "expect": ""
+    },
+    {
+      "name": "an upper-case attribute is the same declaration",
+      "document": "<html><head><META NAME=\"VIEWPORT\" CONTENT=\"width=1024\"></head></html>",
+      "assetLinks": "",
+      "expect": ""
+    },
+    {
+      "name": "rel=icon stands the icon link down",
+      "document": "<html><head><link rel=\"icon\" href=\"/mine.svg\"></head></html>",
+      "assetLinks": "<link rel=\"icon\" type=\"image/png\" href=\"/ruvyxa.png\">",
+      "expect": "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+    },
+    {
+      "name": "single-quoted rel=icon stands it down",
+      "document": "<html><head><link rel='icon' href='/mine.svg'></head></html>",
+      "assetLinks": "<link rel=\"icon\" type=\"image/png\" href=\"/ruvyxa.png\">",
+      "expect": "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+    },
+    {
+      "name": "rel=shortcut icon stands it down",
+      "document": "<html><head><link rel=\"shortcut icon\" href=\"/mine.ico\"></head></html>",
+      "assetLinks": "<link rel=\"icon\" type=\"image/png\" href=\"/ruvyxa.png\">",
+      "expect": "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+    },
+    {
+      "name": "single-quoted rel=shortcut icon stands it down",
+      "document": "<html><head><link rel='shortcut icon' href='/mine.ico'></head></html>",
+      "assetLinks": "<link rel=\"icon\" type=\"image/png\" href=\"/ruvyxa.png\">",
+      "expect": "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+    },
+    {
+      "name": "rel=apple-touch-icon stands it down",
+      "document": "<html><head><link rel=\"apple-touch-icon\" href=\"/touch.png\"></head></html>",
+      "assetLinks": "<link rel=\"icon\" type=\"image/png\" href=\"/ruvyxa.png\">",
+      "expect": "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+    },
+    {
+      "name": "single-quoted rel=apple-touch-icon stands it down",
+      "document": "<html><head><link rel='apple-touch-icon' href='/touch.png'></head></html>",
+      "assetLinks": "<link rel=\"icon\" type=\"image/png\" href=\"/ruvyxa.png\">",
+      "expect": "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+    },
+    {
+      "name": "an upper-case rel is the same declaration",
+      "document": "<html><head><LINK REL=\"ICON\" HREF=\"/mine.svg\"></head></html>",
+      "assetLinks": "<link rel=\"icon\" type=\"image/png\" href=\"/ruvyxa.png\">",
+      "expect": "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">"
+    },
+    {
+      "name": "a document declaring both keeps both of its own",
+      "document": "<html><head><meta name=\"viewport\" content=\"width=1024\"><link rel=\"icon\" href=\"/mine.svg\"></head></html>",
+      "assetLinks": "<link rel=\"icon\" type=\"image/png\" href=\"/ruvyxa.png\">",
+      "expect": ""
+    },
+    {
+      "name": "a rel this rule does not cover is not an icon declaration",
+      "document": "<html><head><link rel=\"stylesheet\" href=\"/a.css\"></head></html>",
+      "assetLinks": "<link rel=\"icon\" type=\"image/png\" href=\"/ruvyxa.png\">",
+      "expect": "<meta name=\"viewport\" content=\"width=device-width, initial-scale=1\"><link rel=\"icon\" type=\"image/png\" href=\"/ruvyxa.png\">"
+    }
+  ]
+}

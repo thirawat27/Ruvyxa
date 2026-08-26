@@ -179,11 +179,29 @@ async function __ruvyxaRenderDocumentHtml(tree) {
 }`
 }
 
-export function documentAssetsPrelude(styleHead = '') {
+export function documentAssetsPrelude(styleHead = '', documentHead = {}) {
   return `const __RUVYXA_BOOTSTRAP_ID = ${JSON.stringify(BOOTSTRAP_ELEMENT_ID)}
 const __RUVYXA_RSC_ID = ${JSON.stringify(RSC_PAYLOAD_ELEMENT_ID)}
 /** The stylesheet the build emitted, linked by every document this renders. */
 const __RUVYXA_STYLE_HEAD = ${JSON.stringify(styleHead)}
+/**
+ * The icon link the build derived from what the project publishes.
+ *
+ * Resolved by \`public_asset_links\` during the build and carried in the deploy
+ * manifest, because a deployed function has no \`public/\` to look in. Without
+ * it every request-time render on a deployed build shipped a document with no
+ * icon, the browser fell back to \`/favicon.ico\`, and a project that publishes
+ * its icon under any other name answered that with a 404 on every page load —
+ * while \`dev\`, \`start\`, and every pre-rendered page beside it were correct.
+ */
+const __RUVYXA_ASSET_LINKS = ${JSON.stringify(documentHead?.assetLinks ?? '')}
+/**
+ * What the project's plugins declared for every document's head.
+ *
+ * Rendered by \`render_plugin_head\` during the build for the same reason: the
+ * entries live in \`ruvyxa.config.ts\`, which a deployed function never loads.
+ */
+const __RUVYXA_PLUGIN_HEAD = ${JSON.stringify(documentHead?.pluginHead ?? '')}
 
 /** Twin of \`safe_json_for_script\`: make JSON safe as raw text inside a script. */
 function __ruvyxaSafeJson(json) {
@@ -274,10 +292,19 @@ function __ruvyxaHydrationSrc(assets) {
  */
 function __ruvyxaDocumentHead(source, head) {
   const viewport =
-    /name=["']viewport["']/i.test(source)
+    /name=("viewport"|'viewport')/i.test(source)
       ? ""
       : '<meta name="viewport" content="width=device-width, initial-scale=1">'
-  return viewport + head
+  // The document wins, and wins whole: a page that declares any icon keeps its
+  // own set rather than being merged with the framework's, which would leave it
+  // with two and the framework's answered. Matching quote pairs, both styles,
+  // three spellings — replayed against the native writer by
+  // tests/fixtures/document-head-conformance.json.
+  const icons =
+    /rel=("(icon|shortcut icon|apple-touch-icon)"|'(icon|shortcut icon|apple-touch-icon)')/i.test(source)
+      ? ""
+      : __RUVYXA_ASSET_LINKS
+  return viewport + icons + __RUVYXA_PLUGIN_HEAD + head
 }
 
 /**

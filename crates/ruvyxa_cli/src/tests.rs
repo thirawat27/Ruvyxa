@@ -462,12 +462,51 @@ fn an_adapter_resolves_before_a_build_has_produced_anything() {
         "the rejected name must be quoted back: {message}"
     );
 
-    // And a real one inspects from the same starting point, so the check costs
-    // a correct build nothing but the resolution it was going to do anyway.
-    let inspection = inspect_adapter(root, &never_built, JavaScriptRuntime::Node, Some("node"))
-        .expect("a built-in adapter resolves with no build output")
+    // And a resolvable one inspects from the same starting point, so the check
+    // costs a correct build nothing but the resolution it was going to do
+    // anyway.
+    //
+    // The adapter is fabricated here rather than named -- `node`, say -- on
+    // purpose. `@ruvyxa/adapter-node` resolves through its `exports`, which
+    // points at `dist/index.js`, and `require.resolve` fails when that file is
+    // absent. CI runs `cargo test` before `pnpm -r build`, so every workspace
+    // adapter is uncompiled at this moment and a built-in name would fail with
+    // the very RUV2203 this test is meant to distinguish from success. It
+    // passed locally only because a previous build had left `dist/` behind.
+    let adapter_package = root.join("node_modules").join("ruvyxa-adapter-fixture");
+    fs::create_dir_all(&adapter_package).unwrap();
+    fs::write(
+        adapter_package.join("package.json"),
+        r#"{"name":"ruvyxa-adapter-fixture","version":"0.0.0","type":"module","main":"index.mjs"}"#,
+    )
+    .unwrap();
+    fs::write(
+        adapter_package.join("index.mjs"),
+        "export default () => ({
+  name: 'fixture',
+  target: 'node',
+  supports: ['ssr'],
+  build: () => ({ name: 'fixture', target: 'node' }),
+})
+",
+    )
+    .unwrap();
+
+    let inspection = inspect_adapter(root, &never_built, JavaScriptRuntime::Node, Some("fixture"))
+        .expect("a resolvable adapter inspects with no build output")
         .expect("inspection describes it");
-    assert_eq!(inspection.name, "node");
+    assert_eq!(inspection.name, "fixture");
+    // `.ruvyxa` does exist by now, but only because the config loader compiles
+    // its bundle to the fixed `.ruvyxa/cache/` — the same directory that
+    // happens to be the default `outDir`. What must stay absent is build
+    // output: `loadBuildInfo` and `loadDeployManifest` both have to come back
+    // empty-handed and let the inspection through.
+    for produced_by_a_build in ["build.json", "manifest.json"] {
+        assert!(
+            !never_built.join(produced_by_a_build).exists(),
+            "inspection ran without {produced_by_a_build}, and must not invent one"
+        );
+    }
 }
 
 #[test]
@@ -2020,12 +2059,19 @@ fn prerender_deferred_hydration_loads_bundle_only_through_loader() {
 /// `/favicon.ico`, and a project that publishes an icon under another name has
 /// no such file. Every production page load logged a 404 that `ruvyxa dev`,
 /// which renders through the pipeline that injects these, never showed.
+///
+/// A plugin's declared head is the same shape and was missing for the same
+/// reason. `render_page_ssg` composes `defaults + plugin head + stylesheet`;
+/// this composed `defaults + stylesheet`, so `fonts`, an analytics snippet, or
+/// a site-verification tag rendered under `ruvyxa dev` and appeared in no baked
+/// page at all — and static is what most pages are.
 #[test]
 fn prerender_html_includes_the_document_head_the_live_renderer_composes() {
     let html = inject_prerender_head(
         "<!doctype html><html><head><title>Docs</title></head><body><main>Guide</main></body></html>",
         &PrerenderHead {
             asset_links: Arc::from(r#"<link rel="icon" type="image/png" href="/ruvyxa.png">"#),
+            plugin_head: Arc::from(r#"<link rel="stylesheet" href="/fonts/fonts.css">"#),
             // The finished tag, which is what a build now hands over: it links
             // the stylesheet it emitted rather than inlining the rule text, so
             // a baked page and a request-time render reference one file.
@@ -2036,12 +2082,66 @@ fn prerender_html_includes_the_document_head_the_live_renderer_composes() {
 
     assert!(html.contains(r#"<link rel="stylesheet" href="/__ruvyxa/client/styles.abc.css">"#));
     assert!(html.contains(r#"<link rel="icon" type="image/png" href="/ruvyxa.png">"#));
+    assert!(html.contains(r#"<link rel="stylesheet" href="/fonts/fonts.css">"#));
     assert!(
         html.contains(r#"<meta name="viewport" content="width=device-width, initial-scale=1">"#)
     );
     assert!(html.find("stylesheet").unwrap() < html.find("</head>").unwrap());
     assert!(html.find(r#"rel="icon""#).unwrap() < html.find("</head>").unwrap());
+    assert!(html.find("/fonts/fonts.css").unwrap() < html.find("</head>").unwrap());
     assert!(html.contains("<main>Guide</main>"));
+}
+
+/// The head a build composes is read from the project's own configuration.
+///
+/// The test above holds the composition; this one holds the wiring, which is
+/// the half that was actually missing. `config.plugins[].head` was parsed,
+/// carried through config load, and read by exactly the two server hosts —
+/// never by the build — so every field in it existed and none of it reached a
+/// file. Going through `prerender_head` from a real loaded config is what makes
+/// that reachable-but-unread state fail here instead of in production.
+#[test]
+fn a_plugin_head_declaration_reaches_the_pages_a_build_bakes() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    std::fs::create_dir_all(root.join("app")).unwrap();
+    std::fs::write(
+        root.join("ruvyxa.config.ts"),
+        r#"
+import { config } from "ruvyxa/config"
+import { definePlugin } from "ruvyxa/plugin"
+
+export default config({
+  plugins: [definePlugin({
+name: "analytics",
+head: [{ tag: "script", attrs: { src: "https://example.test/a.js", defer: true } }],
+  })],
+})
+"#,
+    )
+    .unwrap();
+
+    let config = load_project_config(root).unwrap();
+    let head =
+        crate::build::prerender_head(&config, &root.join("assets"), None, "", CsrShell::default());
+
+    let rendered = inject_prerender_head(
+        "<!doctype html><html><head><title>Docs</title></head><body><main>Guide</main></body></html>",
+        &head,
+    );
+    assert!(
+        rendered.contains(r#"src="https://example.test/a.js""#),
+        "a rendered page must carry the plugin's tag: {rendered}"
+    );
+    assert!(rendered.find("example.test").unwrap() < rendered.find("</head>").unwrap());
+
+    // And the shell, which is a separate template rather than an injection into
+    // a rendered document, so the two can be missing it independently.
+    let shell = csr_shell_html("/", &BTreeMap::new(), &head);
+    assert!(
+        shell.contains(r#"src="https://example.test/a.js""#),
+        "a client-rendered shell must carry it too: {shell}"
+    );
 }
 
 #[test]

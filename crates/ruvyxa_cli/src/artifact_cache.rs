@@ -178,6 +178,10 @@ pub(crate) fn prerender_context_hash(
         // every pre-rendered document, so publishing or removing the file one
         // names changes what a cached page would serve.
         "assetLinks": content_hash(&head.asset_links),
+        // Same reason: a plugin's head entries are written into every baked
+        // page, so adding, removing, or editing one has to invalidate the
+        // pages that were baked without it.
+        "pluginHead": content_hash(&head.plugin_head),
         "clientAssets": client_assets,
         "jsx": build.jsx_runtime.as_deref().unwrap_or("automatic"),
         // `build.target` decides what the transform emits, so a change to it
@@ -565,6 +569,90 @@ pub(crate) fn write_client_cache_file(path: PathBuf, source: Vec<u8>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The runtime directory the worker list names, for walking its imports.
+    fn runtime_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("../../packages/ruvyxa/runtime")
+    }
+
+    /// Every sibling `.mjs` the worker reaches, starting from its entry.
+    ///
+    /// The walk goes through `ruvyxa_bundler::ast`, which is the one scanner
+    /// this repository has: a second hand-rolled one would answer differently
+    /// about a specifier inside a comment or a template literal, and would then
+    /// be wrong in the direction that makes this test pass while the list is
+    /// short.
+    fn worker_import_closure() -> BTreeSet<String> {
+        let directory = runtime_dir();
+        let mut seen = BTreeSet::new();
+        let mut pending = vec!["worker-pool.mjs".to_string()];
+        while let Some(name) = pending.pop() {
+            if !seen.insert(name.clone()) {
+                continue;
+            }
+            let Ok(source) = fs::read_to_string(directory.join(&name)) else {
+                continue;
+            };
+            for specifier in ruvyxa_bundler::ast::parse_module(&source).import_specifiers() {
+                let Some(sibling) = specifier.strip_prefix("./") else {
+                    continue;
+                };
+                if sibling.ends_with(".mjs") {
+                    pending.push(sibling.to_string());
+                }
+            }
+        }
+        seen
+    }
+
+    /// Everything the prerender worker runs is part of what its output depends
+    /// on.
+    ///
+    /// A missing entry does not fail: it serves a prerendered page built by a
+    /// worker that no longer exists, which is the definition of a stale
+    /// artifact and looks exactly like a correct warm build. The list is
+    /// allowed to be wider than the closure — `server_component_context_hash`
+    /// says why, and over-hashing only costs a rebuild that reproduces the same
+    /// bytes — but it may never be narrower, and nothing checked that until an
+    /// import added to a worker-reachable module would have made it so.
+    #[test]
+    fn the_worker_runtime_list_covers_everything_the_worker_imports() {
+        let listed: BTreeSet<String> = WORKER_RUNTIME_FILES
+            .iter()
+            .map(|name| (*name).to_string())
+            .collect();
+        let reached = worker_import_closure();
+        assert!(
+            reached.len() > 1,
+            "the walk found nothing to walk — the runtime directory moved"
+        );
+
+        let unhashed: Vec<&String> = reached.difference(&listed).collect();
+        assert!(
+            unhashed.is_empty(),
+            "the worker imports {unhashed:?}, and a change to one of those would not invalidate \
+             a single prerendered page. Add them to WORKER_RUNTIME_FILES."
+        );
+    }
+
+    /// A name in the list has to be a file the list can hash.
+    ///
+    /// `runtime_script_hash` answers an unreadable name with an empty string
+    /// rather than an error, so a typo — or a module that was renamed with the
+    /// list left behind — contributes a constant to every cache key it appears
+    /// in. It goes on invalidating nothing, for as long as nobody looks.
+    #[test]
+    fn every_worker_runtime_entry_names_a_file_that_exists() {
+        let directory = runtime_dir();
+        for name in WORKER_RUNTIME_FILES {
+            assert!(
+                directory.join(name).is_file(),
+                "WORKER_RUNTIME_FILES names {name}, which is not in {}. Its hash is the empty \
+                 string, and it has been invalidating nothing.",
+                directory.display()
+            );
+        }
+    }
 
     /// A Ruvyxa upgrade must invalidate build artifacts. Keys that hashed only
     /// project inputs kept serving chunks emitted by the previous compiler —

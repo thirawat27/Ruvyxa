@@ -136,6 +136,25 @@ pub(crate) struct DeployManifestInput<'a> {
     pub(crate) client_assets: Vec<String>,
     pub(crate) base_path: String,
     pub(crate) adapter: Option<&'a str>,
+    /// The head fragments a deployed request-time render has to add for
+    /// itself, computed here and carried rather than recomputed.
+    ///
+    /// A deployed function renders pages the build never baked, and it has no
+    /// `public/` to stat and no plugin host to ask — so whatever the build knew
+    /// has to travel with the deployment or the document goes without it.
+    /// Passing the finished strings keeps `public_asset_links` and
+    /// `render_plugin_head` as the only implementations of either rule; the
+    /// deployment holds bytes, not a second copy of the logic.
+    pub(crate) document_head: DocumentHeadDefaults<'a>,
+}
+
+/// Head fragments the build resolved that a deployed render cannot re-derive.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct DocumentHeadDefaults<'a> {
+    /// The icon link derived from what the build published, or empty.
+    pub(crate) asset_links: &'a str,
+    /// Every plugin's declared head, rendered.
+    pub(crate) plugin_head: &'a str,
 }
 
 /// Build the deployment manifest.
@@ -246,6 +265,14 @@ pub(crate) fn deploy_manifest(input: &DeployManifestInput<'_>) -> serde_json::Va
                 "headers": { "cache-control": ASSET_CACHE_CONTROL },
             },
         ],
+        // Read by `documentAssetsPrelude`, which bakes them into the function
+        // bundle's document writer. Only a request-time render needs them: a
+        // pre-rendered page already carries both, injected before it was
+        // written to disk.
+        "documentHead": {
+            "assetLinks": input.document_head.asset_links,
+            "pluginHead": input.document_head.plugin_head,
+        },
         "assetClasses": {
             "client": CLIENT_CACHE_CONTROL,
             "asset": ASSET_CACHE_CONTROL,
@@ -403,6 +430,7 @@ mod tests {
             not_found_document: None,
             client_assets: vec!["b.js".to_string(), "a.js".to_string()],
             base_path: String::new(),
+            document_head: DocumentHeadDefaults::default(),
             adapter: None,
         };
         let first = build_id(&input);
@@ -421,6 +449,7 @@ mod tests {
             not_found_document: None,
             client_assets: vec!["a.js".to_string(), "c.js".to_string()],
             base_path: String::new(),
+            document_head: DocumentHeadDefaults::default(),
             adapter: None,
         });
         assert_ne!(first, changed, "a changed output must change the build id");

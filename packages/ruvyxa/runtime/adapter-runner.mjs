@@ -859,6 +859,32 @@ async function styleHeadTag(buildDir) {
   }
 }
 
+/**
+ * The head fragments a request-time render on a deployed build has to add.
+ *
+ * The build resolved both — the icon link from what it published, the plugin
+ * entries from `ruvyxa.config.ts` — and recorded them in the deploy manifest,
+ * because a deployed function has neither a `public/` directory to stat nor a
+ * config to load. Read from the same `manifest.json` every adapter already
+ * reads rather than recomputed here: `public_asset_links` and
+ * `render_plugin_head` stay the only implementations of either rule.
+ *
+ * An older build has no such section, and the empty pair is exactly what this
+ * path did before it existed.
+ */
+async function documentHeadDefaults(buildDir) {
+  try {
+    const manifest = JSON.parse(await readFile(path.join(buildDir, 'manifest.json'), 'utf8'))
+    const head = manifest?.[DEPLOY_MANIFEST_KEY]?.documentHead
+    return {
+      assetLinks: typeof head?.assetLinks === 'string' ? head.assetLinks : '',
+      pluginHead: typeof head?.pluginHead === 'string' ? head.pluginHead : '',
+    }
+  } catch {
+    return { assetLinks: '', pluginHead: '' }
+  }
+}
+
 async function loadClientAssets(buildDir) {
   let manifest
   try {
@@ -1078,7 +1104,9 @@ async function materializeRouteModules(manifest, destination, target, buildDir) 
     // deployment has them: `client_hydration_script` and
     // `inject_prerender_client_assets` are both Rust, and this registry is the
     // renderer once the build is over.
-    definitions.push(documentAssetsPrelude(await styleHeadTag(buildDir)))
+    definitions.push(
+      documentAssetsPrelude(await styleHeadTag(buildDir), await documentHeadDefaults(buildDir)),
+    )
     // The shared streaming-render policy: a suspended child that rejects
     // must not take the whole document down, which is what every other
     // Ruvyxa host already did.

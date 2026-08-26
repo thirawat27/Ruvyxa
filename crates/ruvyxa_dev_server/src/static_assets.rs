@@ -906,14 +906,27 @@ pub fn document_head_defaults(document: &str, asset_links: &str) -> String {
     }
     // `asset_links` is the icon link and nothing else today; a document that
     // declares any icon keeps its own set whole rather than being merged with.
-    if !lower.contains("rel=\"icon\"")
-        && !lower.contains("rel='icon'")
-        && !lower.contains("rel=\"shortcut icon\"")
-        && !lower.contains("rel=\"apple-touch-icon\"")
-    {
+    if !declares_own_icon(&lower) {
         head.push_str(asset_links);
     }
     head
+}
+
+/// Whether a document already says what its icon is.
+///
+/// Both quote styles for each spelling. They were not symmetric before:
+/// `rel='icon'` was recognised and `rel='shortcut icon'` was not, so a document
+/// using single quotes for the longer spelling was given a second icon link
+/// and the browser answered the framework's. The deployed writer in
+/// `entry-templates.mjs` applies the same rule, and
+/// `tests/fixtures/document-head-conformance.json` is what holds the two equal.
+fn declares_own_icon(lowercased: &str) -> bool {
+    ["icon", "shortcut icon", "apple-touch-icon"]
+        .iter()
+        .any(|rel| {
+            lowercased.contains(&format!("rel=\"{rel}\""))
+                || lowercased.contains(&format!("rel='{rel}'"))
+        })
 }
 
 /// The head fragment that gives a document its project stylesheet.
@@ -1184,6 +1197,51 @@ mod tests {
             let expected = case["safe"].as_bool().expect("case verdict");
             let why = case["why"].as_str().unwrap_or("");
             assert_eq!(is_safe_relative_path(path), expected, "{path:?} — {why}");
+        }
+    }
+
+    /// Replay the shared cross-language document-head table.
+    ///
+    /// A deployed function bundle composes its own head, in JavaScript, because
+    /// by then this crate is not running: `entry-templates.mjs` writes the
+    /// document for every route rendered at request time. That writer had the
+    /// viewport half of this function and not the icon half, so a deployed
+    /// build's pre-rendered pages carried an icon link and its request-time
+    /// renders did not — visible only in production, and only as a
+    /// `/favicon.ico` 404 in a log nobody reads.
+    ///
+    /// `tests/packages/ruvyxa/document-head-parity.test.mjs` drives the same
+    /// file through the generated JavaScript writer.
+    #[test]
+    fn composes_the_shared_cross_language_document_head_defaults() {
+        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/document-head-conformance.json");
+        let fixture: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&fixture_path)
+                .unwrap_or_else(|error| panic!("read {}: {error}", fixture_path.display())),
+        )
+        .expect("conformance fixture is valid JSON");
+
+        assert_eq!(
+            fixture["viewportMeta"].as_str(),
+            Some(DEFAULT_VIEWPORT_META),
+            "the fixture and the constant must be the same declaration"
+        );
+
+        let cases = fixture["cases"].as_array().expect("fixture declares cases");
+        assert!(!cases.is_empty(), "an empty table gates nothing");
+        for case in cases {
+            let name = case["name"].as_str().unwrap_or("<unnamed>");
+            let document = case["document"].as_str().expect("case declares a document");
+            let asset_links = case["assetLinks"]
+                .as_str()
+                .expect("case declares assetLinks");
+            let expected = case["expect"].as_str().expect("case declares expect");
+            assert_eq!(
+                document_head_defaults(document, asset_links),
+                expected,
+                "{name}"
+            );
         }
     }
 
