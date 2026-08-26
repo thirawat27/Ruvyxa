@@ -567,9 +567,10 @@ BuildPluginConfig    { name, head: Vec<PluginHeadEntry> }
 `--runtime` CLI flag → `RUVYXA_RUNTIME` → `config.runtime` → invoker hint → automatic detection. The
 CLI flag persists process-wide so all config, plugin, and render processes agree. The `--adapter`
 CLI flag parses the 11 built-in names (node, bun, deno, static, vercel, netlify, cloudflare,
-railway, render, firebase, aws) or a valid npm package name. Platform auto-detection reads six
-environment variables (`VERCEL`, `NETLIFY`, `CF_PAGES`, `RAILWAY_PROJECT_ID`, `RENDER`,
-`AWS_APP_ID`).
+railway, render, firebase, aws) or a valid npm package name. Platform auto-detection reads eight
+environment variables (`VERCEL`, `NETLIFY`, `CF_PAGES`, `WORKERS_CI`, `RAILWAY_PROJECT_ID`,
+`RENDER`, `AWS_APP_ID`, `DENO_DEPLOY`). Cloudflare is named twice because Pages and Workers Builds
+are separate products that set separate variables.
 
 ### Build Pipeline
 

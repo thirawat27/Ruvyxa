@@ -287,6 +287,70 @@ describe('vercel', () => {
     assert.match(source, /onDemand === true \? optimizeImage/)
   })
 
+  it('snaps an on-demand image width to a size Vercel will accept', async () => {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-vercel-image-'))
+    try {
+      const output = await vercel({ projectOutput: false }).build({
+        root,
+        outDir: '.ruvyxa',
+        buildInfo: { runtime: { image: { onDemand: true } } },
+      })
+      const artifact = output.artifacts?.find((item) => item.kind === 'function')
+      assert.ok(artifact?.handlerSource)
+      await writeFile(path.join(root, 'index.mjs'), artifact.handlerSource)
+      await writeFile(path.join(root, 'manifest.mjs'), 'export default { routes: [] }\n')
+      await writeFile(
+        path.join(root, 'route-modules.mjs'),
+        'export async function loadRouteModule() { return null }\n' +
+          'export async function loadActionModule() { return null }\n' +
+          'export const applyPluginHttp = undefined\n',
+      )
+      for (const runtimeFile of handlerRuntimeFiles) {
+        await copyFile(
+          path.join(workspaceRoot, 'packages/ruvyxa/runtime', runtimeFile),
+          path.join(root, runtimeFile),
+        )
+      }
+      const { default: handler } = await import(
+        pathToFileURL(path.join(root, 'index.mjs')).href + `?t=${Date.now()}`
+      )
+      // `<Image>` puts the author's own `width` into the srcset unsnapped, so a
+      // width that is not one of the declared sizes reaches this function.
+      // Vercel answers 400 for a `w` its `images.sizes` never listed, so the
+      // redirect has to name the nearest size that was declared — otherwise an
+      // image that renders under `ruvyxa start` is broken the moment it deploys.
+      const request = Readable.from([])
+      Object.assign(request, {
+        url: '/__ruvyxa/image?src=%2Flogo.png&w=500&q=75',
+        method: 'GET',
+        headers: { host: 'localhost' },
+      })
+      const headers = new Map<string, unknown>()
+      const response = Object.assign(
+        new Writable({
+          write(_chunk: Buffer, _encoding: string, callback: () => void) {
+            callback()
+          },
+        }),
+        {
+          statusCode: 0,
+          setHeader(name: string, value: unknown) {
+            headers.set(name, value)
+          },
+        },
+      )
+      await handler(request, response)
+
+      assert.equal(response.statusCode, 307)
+      const location = new URL(String(headers.get('location')))
+      assert.equal(location.pathname, '/_vercel/image')
+      assert.equal(location.searchParams.get('url'), '/logo.png')
+      assert.equal(location.searchParams.get('w'), '640')
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
   it('forwards streamed requests, repeated Set-Cookie headers, and binary responses', async () => {
     const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-vercel-handler-'))
     try {

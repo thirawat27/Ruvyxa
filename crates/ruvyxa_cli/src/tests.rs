@@ -63,6 +63,16 @@ fn platform_detection_reads_hosting_environment() {
         detect_platform_adapter(env(&[("CF_PAGES", "1")])),
         Some(("cloudflare".to_string(), "CF_PAGES".to_string()))
     );
+    // Workers Builds is not Pages, and sets its own variable: a build there saw
+    // no platform at all and fell back to whatever the project had configured.
+    assert_eq!(
+        detect_platform_adapter(env(&[("WORKERS_CI", "1")])),
+        Some(("cloudflare".to_string(), "WORKERS_CI".to_string()))
+    );
+    assert_eq!(
+        detect_platform_adapter(env(&[("DENO_DEPLOY", "true")])),
+        Some(("deno".to_string(), "DENO_DEPLOY".to_string()))
+    );
     assert_eq!(
         detect_platform_adapter(env(&[("RAILWAY_PROJECT_ID", "project-id")])),
         Some(("railway".to_string(), "RAILWAY_PROJECT_ID".to_string()))

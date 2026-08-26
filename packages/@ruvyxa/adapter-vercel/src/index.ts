@@ -77,7 +77,7 @@ export interface VercelAdapterOptions {
  * serverless function (Node.js runtime). Reads the route manifest and handles
  * SSR/API/ISR/PPR requests.
  */
-function vercelHandlerSource(runtimePolicy: unknown): string {
+function vercelHandlerSource(runtimePolicy: unknown, imageSizes: readonly number[]): string {
   return `import { createHandler, prerenderRelativePath } from './serverless-handler.mjs';
 import { applyPluginHttp, loadActionModule, loadRouteModule } from './route-modules.mjs';
 // Imported, not read from disk: a platform that re-bundles the function only
@@ -91,18 +91,7 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 
 const runtimePolicy = ${JSON.stringify(runtimePolicy ?? {})};
-
-function optimizeImage(request, { src, width, quality }) {
-  if (width > (runtimePolicy.image?.maxWidth ?? 3840)) {
-    return new Response('Image width exceeds configured maximum', { status: 400 });
-  }
-  const destination = new URL('/_vercel/image', request.url);
-  destination.searchParams.set('url', src);
-  destination.searchParams.set('w', String(width));
-  destination.searchParams.set('q', String(quality));
-  return Response.redirect(destination, 307);
-}
-
+${vercelImageSizesSource(imageSizes)}
 const prerenderDir = path.join(import.meta.dirname, 'prerender');
 // The function bundle directory is read-only at runtime; only the platform
 // tmp directory accepts writes. ISR revalidations land there and are read
@@ -226,22 +215,13 @@ export default async function(req, res, context) {
 }
 
 /** Vercel Edge entry point: Request -> Response with no Node.js imports. */
-function vercelEdgeHandlerSource(runtimePolicy: unknown): string {
+function vercelEdgeHandlerSource(runtimePolicy: unknown, imageSizes: readonly number[]): string {
   return `import { createHandler } from './serverless-handler.mjs';
 import { applyPluginHttp, loadActionModule, loadRouteModule } from './route-modules.mjs';
 import manifest from './manifest.mjs';
 
 const runtimePolicy = ${JSON.stringify(runtimePolicy ?? {})};
-function optimizeImage(request, { src, width, quality }) {
-  if (width > (runtimePolicy.image?.maxWidth ?? 3840)) {
-    return new Response('Image width exceeds configured maximum', { status: 400 });
-  }
-  const destination = new URL('/_vercel/image', request.url);
-  destination.searchParams.set('url', src);
-  destination.searchParams.set('w', String(width));
-  destination.searchParams.set('q', String(quality));
-  return Response.redirect(destination, 307);
-}
+${vercelImageSizesSource(imageSizes)}
 const handler = createHandler({
   routes: manifest.routes,
   importPage: loadRouteModule,
@@ -266,11 +246,17 @@ export default function(request, context) {
 `
 }
 
-function vercelImagesConfig(runtimePolicy: Readonly<Record<string, unknown>>): object | undefined {
+/**
+ * The widths this deployment declares to Vercel, ascending.
+ *
+ * Empty when the project did not turn on-demand optimization on, which is also
+ * what makes `images` absent from `config.json` and `/_vercel/image` a 404.
+ */
+function vercelImageSizes(runtimePolicy: Readonly<Record<string, unknown>>): number[] {
   const image = runtimePolicy.image
-  if (!image || typeof image !== 'object' || Array.isArray(image)) return undefined
+  if (!image || typeof image !== 'object' || Array.isArray(image)) return []
   const policy = image as Readonly<Record<string, unknown>>
-  if (policy.onDemand !== true) return undefined
+  if (policy.onDemand !== true) return []
   const maxWidth = typeof policy.maxWidth === 'number' ? policy.maxWidth : 3840
   const configured = Array.isArray(policy.sizes) ? policy.sizes : []
   const sizes = configured
@@ -278,13 +264,51 @@ function vercelImagesConfig(runtimePolicy: Readonly<Record<string, unknown>>): o
     .filter((size, index, values) => values.indexOf(size) === index)
     .sort((left, right) => left - right)
   if (sizes.length === 0) sizes.push(640, 750, 828, 1080, 1200, 1920, 2048, 3840)
+  const bounded = sizes.filter((size) => size <= maxWidth)
+  // `sizes` is required and every accepted `w` has to appear in it, so an empty
+  // array would declare an optimizer that rejects every request it is given. A
+  // `maxWidth` below the smallest default lands here, and the width it names is
+  // the one width that is certainly allowed.
+  return bounded.length > 0 ? bounded : [maxWidth]
+}
+
+function vercelImagesConfig(runtimePolicy: Readonly<Record<string, unknown>>): object | undefined {
+  const sizes = vercelImageSizes(runtimePolicy)
+  if (sizes.length === 0) return undefined
   return {
-    sizes: sizes.filter((size) => size <= maxWidth),
+    sizes,
     domains: [],
     minimumCacheTTL: 86400,
     formats: ['image/avif', 'image/webp'],
     localPatterns: [{ pathname: '^/(?!__ruvyxa/).*$' }],
   }
+}
+
+/**
+ * The `optimizeImage` both entry points carry, written once.
+ *
+ * Vercel answers `400` for any `?w=` its `images.sizes` did not declare, and
+ * `<Image>` puts the author's own `width` into the `srcset` without snapping it
+ * — so forwarding the requested width verbatim broke exactly the images that
+ * render correctly under `ruvyxa start`. The request is widened to the nearest
+ * declared size instead, which is the size Vercel would have served anyway.
+ */
+function vercelImageSizesSource(imageSizes: readonly number[]): string {
+  return `const imageSizes = ${JSON.stringify(imageSizes)};
+
+function optimizeImage(request, { src, width, quality }) {
+  if (width > (runtimePolicy.image?.maxWidth ?? 3840)) {
+    return new Response('Image width exceeds configured maximum', { status: 400 });
+  }
+  const allowedWidth =
+    imageSizes.find((size) => size >= width) ?? imageSizes[imageSizes.length - 1] ?? width;
+  const destination = new URL('/_vercel/image', request.url);
+  destination.searchParams.set('url', src);
+  destination.searchParams.set('w', String(allowedWidth));
+  destination.searchParams.set('q', String(quality));
+  return Response.redirect(destination, 307);
+}
+`
 }
 
 /** The Build Output `src` pattern that matches one route path. */
@@ -388,6 +412,7 @@ export function vercel(options: VercelAdapterOptions = {}): Adapter {
       const edge = options.edge === true
       const runtimePolicy = runtimeBuildPolicy(ctx)
       const images = vercelImagesConfig(runtimePolicy)
+      const imageSizes = vercelImageSizes(runtimePolicy)
       const STATIC_ASSET_PATTERN = staticAssetPattern()
 
       // Routes that asked for a point of presence, and got one.
@@ -433,7 +458,7 @@ export function vercel(options: VercelAdapterOptions = {}): Adapter {
                 kind: 'function',
                 path: `${base}/functions/${edgeFunctionPath}.func`,
                 ...(scope ? { scope } : {}),
-                handlerSource: vercelEdgeHandlerSource(runtimePolicy),
+                handlerSource: vercelEdgeHandlerSource(runtimePolicy, imageSizes),
                 // Its own runtime and its own slice of the routes: the registry
                 // this function compiles resolves `worker`/`edge-light`
                 // conditions, and the manifest it routes with names only these
@@ -563,8 +588,8 @@ export function vercel(options: VercelAdapterOptions = {}): Adapter {
                 path: '.vercel/output/functions/__ruvyxa_handler.func',
                 scope: 'project',
                 handlerSource: edge
-                  ? vercelEdgeHandlerSource(runtimePolicy)
-                  : vercelHandlerSource(runtimePolicy),
+                  ? vercelEdgeHandlerSource(runtimePolicy, imageSizes)
+                  : vercelHandlerSource(runtimePolicy, imageSizes),
               },
               {
                 kind: 'file',
@@ -605,8 +630,8 @@ export function vercel(options: VercelAdapterOptions = {}): Adapter {
             kind: 'function',
             path: 'deploy/vercel/.vercel/output/functions/__ruvyxa_handler.func',
             handlerSource: edge
-              ? vercelEdgeHandlerSource(runtimePolicy)
-              : vercelHandlerSource(runtimePolicy),
+              ? vercelEdgeHandlerSource(runtimePolicy, imageSizes)
+              : vercelHandlerSource(runtimePolicy, imageSizes),
           },
           // Function config
           {

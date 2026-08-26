@@ -307,13 +307,17 @@ const KNOWN_ADAPTER_NAMES: [&str; 11] = [
 /// Hosting platforms that identify themselves through build-environment
 /// variables. When no adapter is configured, the matching adapter is selected
 /// automatically so a fresh project deploys with zero configuration.
-const PLATFORM_ADAPTER_ENV: [(&str, &str); 6] = [
+const PLATFORM_ADAPTER_ENV: [(&str, &str); 8] = [
     ("VERCEL", "vercel"),
     ("NETLIFY", "netlify"),
     ("CF_PAGES", "cloudflare"),
+    // Workers Builds is a different product from Pages and sets its own
+    // variable; a build there detected no platform at all.
+    ("WORKERS_CI", "cloudflare"),
     ("RAILWAY_PROJECT_ID", "railway"),
     ("RENDER", "render"),
     ("AWS_APP_ID", "aws"),
+    ("DENO_DEPLOY", "deno"),
 ];
 
 fn parse_adapter_name(value: &str) -> Result<String, String> {
