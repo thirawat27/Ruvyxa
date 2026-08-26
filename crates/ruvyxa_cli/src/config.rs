@@ -80,8 +80,23 @@ pub(crate) struct ProjectConfig {
     pub(crate) adapter: Option<serde_json::Value>,
     #[serde(rename = "adapterOptions")]
     pub(crate) adapter_options: Option<serde_json::Value>,
+    /// Identity of every build input that is not a project source file.
+    ///
+    /// The config's own dependency hash — its file, its transitive imports,
+    /// the package manifests — folded together with the project environment,
+    /// and it is named for the build rather than for the config because the
+    /// second half is the half that was missing.
+    ///
+    /// `.env` decides emitted bytes exactly as directly as the config does:
+    /// `import.meta.env` is substituted into every compiled module as a frozen
+    /// literal, so a `RUVYXA_PUBLIC_*` value is *in* the browser bundle. Keyed
+    /// on the config alone, editing one and rebuilding produced a build whose
+    /// pre-rendered HTML carried the new value — `prerender_context_hash` has
+    /// always keyed on the environment — and whose browser bundle carried the
+    /// old one, from the compile cache. One build, two answers for the same
+    /// variable, and the browser's is the one that survives hydration.
     #[serde(skip)]
-    pub(crate) config_dependency_hash: String,
+    pub(crate) build_dependency_hash: String,
     #[serde(skip)]
     pub(crate) javascript_runtime_override: Option<JavaScriptRuntime>,
 }

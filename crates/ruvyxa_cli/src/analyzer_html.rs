@@ -62,7 +62,7 @@ pub(crate) fn analyze_client_bundle(
         &build,
         &config.plugins,
         RuvyxaBuildCache {
-            dependency_hash: &config.config_dependency_hash,
+            dependency_hash: &config.build_dependency_hash,
             directory: &build_cache_dir(root, &config.cache),
         },
         &plugin_session,

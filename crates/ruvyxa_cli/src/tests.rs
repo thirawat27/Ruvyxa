@@ -2211,7 +2211,7 @@ register({ build }) {
         &config.build,
         &config.plugins,
         RuvyxaBuildCache {
-            dependency_hash: &config.config_dependency_hash,
+            dependency_hash: &config.build_dependency_hash,
             directory: &build_cache_dir(root, &config.cache),
         },
     )
@@ -2233,6 +2233,79 @@ register({ build }) {
             .unwrap()
             .iter()
             .any(|source| source.as_str() == Some("plugin-original.tsx"))
+    );
+}
+
+/// `.env` is a build input, so editing one has to invalidate compiled bytes.
+///
+/// `import.meta.env` is substituted into every module the compiler emits, as a
+/// frozen literal — that substitution is what makes a `RUVYXA_PUBLIC_*` value
+/// readable in a browser at all. So the value is *in* the browser bundle, and
+/// the caches that hold that bundle are keyed on this hash: the module compile
+/// cache and its namespace, the artifact graph, the client route artifacts,
+/// the shared chunk artifacts.
+///
+/// Keyed on the config alone, none of them noticed. Editing `.env` and
+/// rebuilding produced a build whose pre-rendered HTML carried the new value —
+/// `prerender_context_hash` has always keyed on the environment — and whose
+/// browser bundle still carried the old one. One build, two answers for the
+/// same variable in the same page, and the browser's is the one that wins the
+/// moment hydration runs.
+///
+/// Asserted on the hash rather than on emitted bytes: `set_public_env` is a
+/// `OnceLock`, so a single test process substitutes one environment for its
+/// whole life. The hash is the mechanism that forces the recompile, and the
+/// end-to-end behaviour was checked by building `examples/demo` twice.
+#[test]
+fn an_env_change_invalidates_the_bytes_it_is_compiled_into() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    std::fs::create_dir_all(root.join("app")).unwrap();
+    std::fs::write(
+        root.join("ruvyxa.config.mjs"),
+        "export default {}
+",
+    )
+    .unwrap();
+
+    let hash_with = |contents: &str| {
+        std::fs::write(root.join(".env"), contents).unwrap();
+        load_project_config(root).unwrap().build_dependency_hash
+    };
+
+    let first = hash_with(
+        "RUVYXA_PUBLIC_API_URL=https://staging.example.test
+",
+    );
+    let again = hash_with(
+        "RUVYXA_PUBLIC_API_URL=https://staging.example.test
+",
+    );
+    assert_eq!(
+        first, again,
+        "an unchanged environment must not force a rebuild"
+    );
+
+    let changed = hash_with(
+        "RUVYXA_PUBLIC_API_URL=https://api.example.test
+",
+    );
+    assert_ne!(
+        first, changed,
+        "the compiled bytes carry this value, so the caches that hold them must miss"
+    );
+
+    // The config file never changed across any of those, which is the whole
+    // point: the config-load cache answers from its stored output, and the
+    // environment has to be read again on that path rather than folded in
+    // once and remembered.
+    let removed = {
+        std::fs::remove_file(root.join(".env")).unwrap();
+        load_project_config(root).unwrap().build_dependency_hash
+    };
+    assert_ne!(
+        changed, removed,
+        "removing a variable changes the emitted literal too"
     );
 }
 
@@ -2291,7 +2364,7 @@ return {{ code: code.replace("Before", "{replacement}") }}
         &first_config.build,
         &first_config.plugins,
         RuvyxaBuildCache {
-            dependency_hash: &first_config.config_dependency_hash,
+            dependency_hash: &first_config.build_dependency_hash,
             directory: &cache_dir,
         },
     )
@@ -2302,8 +2375,8 @@ return {{ code: code.replace("Before", "{replacement}") }}
     write_plugin("SecondRun");
     let second_config = load_project_config(root).unwrap();
     assert_ne!(
-        first_config.config_dependency_hash,
-        second_config.config_dependency_hash
+        first_config.build_dependency_hash,
+        second_config.build_dependency_hash
     );
     let second_manifest = emit_client_bundles(
         root,
@@ -2313,7 +2386,7 @@ return {{ code: code.replace("Before", "{replacement}") }}
         &second_config.build,
         &second_config.plugins,
         RuvyxaBuildCache {
-            dependency_hash: &second_config.config_dependency_hash,
+            dependency_hash: &second_config.build_dependency_hash,
             directory: &cache_dir,
         },
     )
@@ -2374,7 +2447,7 @@ export default config({
         &config.build,
         &config.plugins,
         RuvyxaBuildCache {
-            dependency_hash: &config.config_dependency_hash,
+            dependency_hash: &config.build_dependency_hash,
             directory: &build_cache_dir(root, &config.cache),
         },
         &session,

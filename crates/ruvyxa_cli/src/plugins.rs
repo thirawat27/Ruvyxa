@@ -628,7 +628,7 @@ pub(crate) fn plugin_environment(target: ruvyxa_bundler::BundleTarget) -> &'stat
 }
 
 pub(crate) fn bundle_context_for_build(
-    config_dependency_hash: &str,
+    build_dependency_hash: &str,
     cache_dir: &Path,
     plugin_session: &TypeScriptPluginBuildSession,
     server_references: &[ruvyxa_dev_server::ServerReferenceSource],
@@ -640,7 +640,7 @@ pub(crate) fn bundle_context_for_build(
     let compile_cache = ruvyxa_bundler::cache::CompileCache::at_dir_with_namespace(
         cache_dir,
         true,
-        config_dependency_hash,
+        build_dependency_hash,
     );
     // Ordered before any project plugin: a `'use server'` module is not the
     // file on disk as far as a browser bundle is concerned, so a plugin that
@@ -659,7 +659,7 @@ pub(crate) fn bundle_context_for_build(
             compile_cache,
             ruvyxa_bundler::resolver::ResolveGraphCache::for_build(),
             cache_dir,
-            config_dependency_hash,
+            build_dependency_hash,
             artifact_graph_enabled,
         ));
     }
@@ -670,7 +670,7 @@ pub(crate) fn bundle_context_for_build(
         ruvyxa_bundler::incremental::IncrementalGraphCache::disabled(),
         ruvyxa_bundler::hooks::BuildHookPipeline::new(hosts),
         cache_dir,
-        config_dependency_hash,
+        build_dependency_hash,
         artifact_graph_enabled,
     ))
 }

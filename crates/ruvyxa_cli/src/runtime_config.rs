@@ -384,7 +384,7 @@ pub(crate) fn load_project_config(root: &Path) -> anyhow::Result<ProjectConfig> 
         .unwrap_or_else(default_javascript_runtime);
     let Some(renderer) = find_runtime_script(root, "config-renderer.mjs") else {
         let mut config = ProjectConfig {
-            config_dependency_hash: "no-config".to_string(),
+            build_dependency_hash: build_dependency_hash(root, "no-config"),
             ..ProjectConfig::default()
         };
         config.javascript_runtime_override = Some(bootstrap_runtime);
@@ -431,8 +431,8 @@ pub(crate) fn load_project_config(root: &Path) -> anyhow::Result<ProjectConfig> 
             None
         }
     });
-    let dependency_hash = required_config_dependency_hash(&result)?;
-    config.config_dependency_hash = dependency_hash;
+    config.build_dependency_hash =
+        build_dependency_hash(root, &required_config_dependency_hash(&result)?);
     config.validate_paths()?;
     Ok(config)
 }
@@ -911,6 +911,32 @@ pub(crate) fn invoker_runtime() -> Option<JavaScriptRuntime> {
 
 pub(crate) fn default_javascript_runtime() -> JavaScriptRuntime {
     JavaScriptRuntime::detect()
+}
+
+/// Fold the project environment into a config's dependency hash.
+///
+/// Everything downstream keys on the result: the module compile cache and its
+/// namespace, the artifact graph, the client route artifacts, the shared chunk
+/// artifacts. All of them hold compiled bytes, and compiled bytes contain the
+/// environment — `substitute_public_env` writes `RUVYXA_PUBLIC_*` values into
+/// the code as a literal, which is what makes them readable in a browser at
+/// all.
+///
+/// The whole environment goes in, not only the public names. Over-keying costs
+/// a rebuild that reproduces identical bytes; under-keying serves a bundle
+/// built from an environment the project no longer has, which is what this
+/// fixes. The prerender key has taken the same view of `projectEnv` since it
+/// existed, and the two are now consistent rather than one covering what the
+/// other missed.
+///
+/// A project with no readable `.env` folds in an empty map and lands on the
+/// hash it had before this existed.
+fn build_dependency_hash(root: &Path, config_hash: &str) -> String {
+    let environment = ruvyxa_dev_server::project_env(root).unwrap_or_default();
+    crate::artifact_cache::content_hash(&format!(
+        "{config_hash} {}",
+        serde_json::to_string(&environment).unwrap_or_default()
+    ))
 }
 
 pub(crate) fn required_config_dependency_hash(

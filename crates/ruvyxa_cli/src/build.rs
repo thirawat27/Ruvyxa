@@ -479,7 +479,7 @@ fn spawn_server_component_entry_collection(
     let runtime = config.javascript_runtime();
     let worker_env = build_worker_env(&args.root, &config.build, runtime);
     let cache_directory = build_cache_directory.to_path_buf();
-    let dependency_hash = config.config_dependency_hash.clone();
+    let dependency_hash = config.build_dependency_hash.clone();
     Some(tokio::spawn(async move {
         // The context hash needs the same environment the worker will be
         // started with; a failure to assemble it is reported by the collection
@@ -801,7 +801,7 @@ pub(crate) async fn build_with_cache_override(
                     &config.build,
                     &config.plugins,
                     RuvyxaBuildCache {
-                        dependency_hash: &config.config_dependency_hash,
+                        dependency_hash: &config.build_dependency_hash,
                         directory: &build_cache_directory,
                     },
                     &plugin_session,
@@ -880,7 +880,7 @@ pub(crate) async fn build_with_cache_override(
         &plugin_session,
         &manifest,
         &build_cache_directory,
-        &config.config_dependency_hash,
+        &config.build_dependency_hash,
     );
 
     // A package the browser graph asked for and could not find.
@@ -949,7 +949,7 @@ pub(crate) async fn build_with_cache_override(
             document_head.clone(),
             &config.build,
             RuvyxaBuildCache {
-                dependency_hash: &config.config_dependency_hash,
+                dependency_hash: &config.build_dependency_hash,
                 directory: &build_cache_directory,
             },
             config.javascript_runtime(),
@@ -993,7 +993,7 @@ pub(crate) async fn build_with_cache_override(
         NotFoundPrerender {
             build: &config.build,
             cache: RuvyxaBuildCache {
-                dependency_hash: &config.config_dependency_hash,
+                dependency_hash: &config.build_dependency_hash,
                 directory: &build_cache_directory,
             },
             runtime: config.javascript_runtime(),
