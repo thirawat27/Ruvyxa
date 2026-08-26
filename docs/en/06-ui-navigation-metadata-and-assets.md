@@ -119,13 +119,19 @@ prebuilt variants that an author-provided `srcSet` can reference. `image.onDeman
 responsive URLs through same-origin runtime transformations at `/__ruvyxa/image` and has a default
 maximum width of 3840 when configured as an object.
 
-> **`image.onDemand` is served by `ruvyxa dev` and `ruvyxa start` only.** The transform runs through
-> the native image pipeline, and nothing a build emits carries it — every deployed artifact answers
-> `/__ruvyxa/image` with a 404. The failure is quiet by construction: a browser that cannot fetch a
-> `srcSet` candidate falls back to `src`, so the page renders and the only cost is a phone
-> downloading a full-size image. `ruvyxa build` warns when the option is on, and
-> `ruvyxa test:parity` reports it as `images@1`. Use `image.variantWidths` to pre-build the sizes a
-> deployment needs.
+> **Which deployments serve `image.onDemand` depends on the adapter.** The transform runs through
+> the native image pipeline, which `ruvyxa dev` and `ruvyxa start` have and no build output carries.
+> An adapter can supply its own instead: the Vercel and Cloudflare adapters forward the request to
+> their platform optimizer, so `/__ruvyxa/image` answers there. Every other adapter answers 404. The
+> per-adapter answer is the last column of the matrix in
+> [Platform adapter guide](20-platform-adapter-guide.md). The failure is quiet by construction: a
+> browser that cannot fetch a `srcSet` candidate falls back to `src`, so the page renders and the
+> only cost is a phone downloading a full-size image. `ruvyxa build` warns when the option is on and
+> the adapter cannot serve it, and `ruvyxa test:parity` reports it as `images@1`. Use
+> `image.variantWidths` to pre-build the sizes a deployment needs.
+>
+> `image.quality` decides what a request without a `q` parameter is encoded at, on every host that
+> serves the endpoint.
 
 <!-- prettier-ignore -->
 ```tsx

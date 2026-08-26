@@ -117,12 +117,18 @@ export default function Product() {
 `srcSet` ที่กำหนดเอง ส่วน `image.onDemand` สร้าง responsive URL อัตโนมัติผ่าน same-origin runtime
 transformation ที่ `/__ruvyxa/image` และมี maximum width ปริยาย 3840 เมื่อกำหนดเป็น object
 
-> **`image.onDemand` ให้บริการโดย `ruvyxa dev` และ `ruvyxa start` เท่านั้น** การแปลงรูปทำผ่าน native
-> image pipeline ซึ่งไม่มีอยู่ในสิ่งที่ build ปล่อยออกมา ทุก deployed artifact ตอบ `/__ruvyxa/image`
-> ด้วย 404 และความล้มเหลวนี้เงียบโดยธรรมชาติ เพราะเบราว์เซอร์ที่โหลด `srcSet` ไม่ได้จะ fallback
-> ไปที่ `src` หน้าจึงยังขึ้นปกติ ต้นทุนที่เสียคือมือถือโหลดรูปขนาดเต็ม `ruvyxa build`
-> จะเตือนเมื่อเปิดตัวเลือกนี้ และ `ruvyxa test:parity` รายงานเป็น `images@1` ให้ใช้
-> `image.variantWidths` สร้างขนาดที่ deployment ต้องใช้ไว้ล่วงหน้าแทน
+> **deployment ใดให้บริการ `image.onDemand` ได้ ขึ้นกับ adapter** การแปลงรูปทำผ่าน native image
+> pipeline ซึ่ง `ruvyxa dev` และ `ruvyxa start` มี แต่ไม่มีอยู่ในสิ่งที่ build ปล่อยออกมา ทั้งนี้
+> adapter สามารถจัดหา optimizer ของตัวเองแทนได้ — adapter ของ Vercel และ Cloudflare ส่งต่อคำขอไปยัง
+> platform optimizer ของแพลตฟอร์ม `/__ruvyxa/image` จึงตอบได้บนสองตัวนี้ ส่วน adapter อื่นตอบ 404
+> คำตอบรายตัวอยู่ในคอลัมน์สุดท้ายของตารางใน [คู่มือ platform adapter](20-platform-adapter-guide.md)
+> ความล้มเหลวนี้เงียบโดยธรรมชาติ เพราะเบราว์เซอร์ที่โหลด `srcSet` ไม่ได้จะ fallback ไปที่ `src`
+> หน้าจึงยังขึ้นปกติ ต้นทุนที่เสียคือมือถือโหลดรูปขนาดเต็ม `ruvyxa build`
+> จะเตือนเมื่อเปิดตัวเลือกนี้และ adapter ให้บริการไม่ได้ และ `ruvyxa test:parity` รายงานเป็น
+> `images@1` ให้ใช้ `image.variantWidths` สร้างขนาดที่ deployment ต้องใช้ไว้ล่วงหน้าแทน
+>
+> `image.quality` เป็นตัวกำหนดคุณภาพของคำขอที่ไม่ระบุพารามิเตอร์ `q` บนทุก host ที่ให้บริการ
+> endpoint นี้
 
 <!-- prettier-ignore -->
 ```tsx

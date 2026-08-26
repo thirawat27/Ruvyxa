@@ -248,6 +248,35 @@ async fn build_route_manifest_body(state: &Arc<AppState>) -> String {
     serde_json::json!({ "routes": routes }).to_string()
 }
 
+/// What a route's own source says about how the browser should talk to it.
+///
+/// Both facts come from one read and one parse because both callers need the
+/// read and one of them needed both facts; asking twice re-parsed the module to
+/// answer a second question about bytes already in hand.
+struct RouteModuleFacts {
+    /// `export function flight(context)` — the route produces a payload the
+    /// client router can fetch instead of a document.
+    flight: bool,
+    /// The `'use cache'` module directive.
+    uses_cache: bool,
+}
+
+/// Read a route's source and answer both questions about it.
+///
+/// The error is deliberately not folded into `Ok(RouteModuleFacts::default())`.
+/// `false` is a legitimate answer — most routes export no `flight` — so a
+/// defaulted read made an unreadable file indistinguishable from a route that
+/// genuinely has neither, and both callers then reported the wrong thing with
+/// nothing logged. `a_route_source_read_is_never_defaulted` holds that.
+async fn route_module_facts(file: &std::path::Path) -> std::io::Result<RouteModuleFacts> {
+    let source = tokio::fs::read_to_string(file).await?;
+    let module = ruvyxa_bundler::ast::parse_module(&source);
+    Ok(RouteModuleFacts {
+        flight: ruvyxa_bundler::ast::has_named_runtime_export(&source, &module, "flight"),
+        uses_cache: ruvyxa_bundler::reference_manifest::has_module_directive(&source, "use cache"),
+    })
+}
+
 /// One route's line in the dev route table, or `None` when its bundle could not
 /// be produced — a route the browser cannot navigate to is left out rather than
 /// advertised.
@@ -260,16 +289,24 @@ async fn route_manifest_entry(
     // the stamp, so the version this manifest advertises is the one the browser
     // reads back out of the bundle.
     let artifact = client_artifact_version(&bundle.document.html);
-    let source = tokio::fs::read_to_string(&route.file)
-        .await
-        .unwrap_or_default();
-    let module = ruvyxa_bundler::ast::parse_module(&source);
+    // A route whose source cannot be read is left out, exactly as one whose
+    // bundle could not be produced is. Defaulting to an empty source instead
+    // advertised the route with `flight: false` and `cache: false`, so the
+    // browser router stopped asking for payloads a route does in fact produce
+    // and nothing recorded why.
+    let facts = match route_module_facts(&route.file).await {
+        Ok(facts) => facts,
+        Err(error) => {
+            error!(%error, file = %route.file.display(), "route source read failed");
+            return None;
+        }
+    };
     let mut entry = serde_json::json!({
         "path": route.path,
         "src": format!("/__ruvyxa/client?path={}", url_encode_component(&route.path)),
         "artifactVersion": artifact,
-        "flight": ruvyxa_bundler::ast::has_named_runtime_export(&source, &module, "flight"),
-        "cache": ruvyxa_bundler::reference_manifest::has_module_directive(&source, "use cache"),
+        "flight": facts.flight,
+        "cache": facts.uses_cache,
     });
     // Held to the same shape the build writes, in `write_client_route_manifest`:
     // present only when true.
@@ -294,33 +331,38 @@ async fn prebuilt_route_manifest(config: &ServerConfig) -> Option<String> {
         .ok()
 }
 
-/// Serve the same public Flight contract in dev/start that deployment adapters expose.
-pub(crate) async fn flight_endpoint(
-    State(state): State<Arc<AppState>>,
-    Query(query): Query<FlightQuery>,
-    headers: HeaderMap,
-) -> Response {
+/// Everything a Flight request must satisfy before any route is looked up, or
+/// the response that refuses it.
+///
+/// Split out as one section rather than piecemeal: these four checks read the
+/// request and nothing else, they all answer with a status and a sentence, and
+/// keeping them beside the routing and rendering they gate is what pushed
+/// `flight_endpoint` past the workspace cognitive-complexity gate. Returns the
+/// canonical request path, which is the only thing the rest of the endpoint
+/// needs from them.
+fn validate_flight_request(
+    headers: &HeaderMap,
+    query: &FlightQuery,
+) -> Result<String, (StatusCode, &'static str)> {
+    // A Flight payload is cacheable and shared; private request state must not
+    // be able to vary it.
     if headers.contains_key(header::AUTHORIZATION) || headers.contains_key(header::COOKIE) {
-        return with_security_headers(
-            (
-                StatusCode::FORBIDDEN,
-                "Flight requests must not include private request state",
-            )
-                .into_response(),
-        );
+        return Err((
+            StatusCode::FORBIDDEN,
+            "Flight requests must not include private request state",
+        ));
     }
+    // A header a cross-origin form cannot set, which is what makes this a
+    // navigation endpoint rather than a public data endpoint.
     if headers
         .get("x-ruvyxa-flight")
         .and_then(|value| value.to_str().ok())
         != Some("1")
     {
-        return with_security_headers(
-            (
-                StatusCode::BAD_REQUEST,
-                "Flight requests require the Ruvyxa navigation header",
-            )
-                .into_response(),
-        );
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Flight requests require the Ruvyxa navigation header",
+        ));
     }
     if query.artifact.len() != 16
         || !query
@@ -328,25 +370,28 @@ pub(crate) async fn flight_endpoint(
             .bytes()
             .all(|byte| byte.is_ascii_hexdigit() && !byte.is_ascii_uppercase())
     {
-        return with_security_headers(
-            (
-                StatusCode::BAD_REQUEST,
-                "Flight request has an invalid artifact",
-            )
-                .into_response(),
-        );
+        return Err((
+            StatusCode::BAD_REQUEST,
+            "Flight request has an invalid artifact",
+        ));
     }
-    let request_path = match canonical_request_path(&query.path) {
+    canonical_request_path(&query.path).map_err(|_| {
+        (
+            StatusCode::BAD_REQUEST,
+            "Flight request has an invalid route",
+        )
+    })
+}
+
+/// Serve the same public Flight contract in dev/start that deployment adapters expose.
+pub(crate) async fn flight_endpoint(
+    State(state): State<Arc<AppState>>,
+    Query(query): Query<FlightQuery>,
+    headers: HeaderMap,
+) -> Response {
+    let request_path = match validate_flight_request(&headers, &query) {
         Ok(path) => path,
-        Err(_) => {
-            return with_security_headers(
-                (
-                    StatusCode::BAD_REQUEST,
-                    "Flight request has an invalid route",
-                )
-                    .into_response(),
-            );
-        }
+        Err(rejection) => return with_security_headers(rejection.into_response()),
     };
     let (manifest, router) = match state.runtime_cache.router(&state.config).await {
         Ok(snapshot) => snapshot,
@@ -361,11 +406,18 @@ pub(crate) async fn flight_endpoint(
     if route_match.route.kind != RouteKind::Page {
         return with_security_headers(StatusCode::NOT_FOUND.into_response());
     }
-    let source = tokio::fs::read_to_string(&route_match.route.file)
-        .await
-        .unwrap_or_default();
-    let module = ruvyxa_bundler::ast::parse_module(&source);
-    if !ruvyxa_bundler::ast::has_named_runtime_export(&source, &module, "flight") {
+    // 501 here means "this route exports no `flight`", which an empty source
+    // also produces — so defaulting the read reported a missing export as the
+    // cause of an I/O failure, told the browser to stop asking, and logged
+    // nothing. A read that fails is a server fault and is answered as one.
+    let facts = match route_module_facts(&route_match.route.file).await {
+        Ok(facts) => facts,
+        Err(error) => {
+            error!(%error, file = %route_match.route.file.display(), "Flight route source read failed");
+            return with_security_headers(StatusCode::INTERNAL_SERVER_ERROR.into_response());
+        }
+    };
+    if !facts.flight {
         return with_security_headers(
             (
                 StatusCode::NOT_IMPLEMENTED,
@@ -399,34 +451,49 @@ pub(crate) async fn flight_endpoint(
             artifact_version: &current_artifact,
         })
         .await;
-    match response {
-        Ok(response) if response.ok => {
-            let Some(payload) = response.flight else {
-                return with_security_headers(StatusCode::INTERNAL_SERVER_ERROR.into_response());
-            };
-            let mut response = payload.into_response();
-            response.headers_mut().insert(
-                header::CONTENT_TYPE,
-                HeaderValue::from_static("application/vnd.ruvyxa.flight+json; charset=utf-8"),
-            );
-            response.headers_mut().insert(
-                header::CACHE_CONTROL,
-                HeaderValue::from_static("private, no-store"),
-            );
-            response
-                .headers_mut()
-                .insert(header::VARY, HeaderValue::from_static("x-ruvyxa-flight"));
-            with_security_headers(response)
-        }
+    flight_render_response(response, &request_path)
+}
+
+/// Turn the worker's answer into the response the browser router reads.
+///
+/// The three ways a render ends — a payload, a render the worker refused, and a
+/// worker that failed — are one decision, and separating them from the request
+/// checks and the route lookup above is what keeps `flight_endpoint` inside the
+/// workspace cognitive-complexity gate. Every failure is reported to the log and
+/// answered as a bare 500: the detail belongs to the operator, not the page.
+fn flight_render_response(
+    response: ruvyxa_diagnostics::Result<crate::worker_protocol::WorkerResponse>,
+    request_path: &str,
+) -> Response {
+    let payload = match response {
+        Ok(response) if response.ok => response.flight,
         Ok(response) => {
             error!(code = ?response.code, message = ?response.message, path = %request_path, "Flight render failed");
-            with_security_headers(StatusCode::INTERNAL_SERVER_ERROR.into_response())
+            return with_security_headers(StatusCode::INTERNAL_SERVER_ERROR.into_response());
         }
         Err(error) => {
             error!(%error, path = %request_path, "Flight worker failed");
-            with_security_headers(StatusCode::INTERNAL_SERVER_ERROR.into_response())
+            return with_security_headers(StatusCode::INTERNAL_SERVER_ERROR.into_response());
         }
-    }
+    };
+    // `ok` without a payload is the worker contradicting itself; there is
+    // nothing to send and nothing the browser could do with a 200.
+    let Some(payload) = payload else {
+        error!(path = %request_path, "Flight render reported success with no payload");
+        return with_security_headers(StatusCode::INTERNAL_SERVER_ERROR.into_response());
+    };
+    let mut response = payload.into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/vnd.ruvyxa.flight+json; charset=utf-8"),
+    );
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static("private, no-store"),
+    );
+    headers.insert(header::VARY, HeaderValue::from_static("x-ruvyxa-flight"));
+    with_security_headers(response)
 }
 
 /// Header that keeps `/__ruvyxa/rsc` out of reach of a cross-origin page.
@@ -840,10 +907,9 @@ pub(crate) async fn dynamic_image_endpoint(
     Query(query): Query<DynamicImageQuery>,
     headers: HeaderMap,
 ) -> Response {
-    if query
-        .quality
-        .is_some_and(|quality| !(1..=100).contains(&quality))
-    {
+    if query.quality.is_some_and(|quality| {
+        !(dynamic_image::MIN_QUALITY..=dynamic_image::MAX_QUALITY).contains(&quality)
+    }) {
         return with_security_headers(
             (
                 StatusCode::BAD_REQUEST,
@@ -1210,6 +1276,63 @@ fn debug_traces_enabled(config: &ServerConfig) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A route source that cannot be read must not read as a route without a
+    /// `flight` export.
+    ///
+    /// `has_named_runtime_export` answers `false` for an empty source, and that
+    /// is a legitimate answer — most routes export no `flight`. So
+    /// `read_to_string(..).unwrap_or_default()` on a route file collapsed two
+    /// different facts into one: the Flight endpoint answered `501 this route
+    /// does not expose a Flight payload` for an I/O failure and logged nothing,
+    /// and the dev route table advertised `flight: false`, which tells the
+    /// browser router to stop asking for payloads the route does produce.
+    ///
+    /// Asserted over the source because behaviour cannot reach it: both call
+    /// sites need a live `AppState`, and the failure is a file becoming
+    /// unreadable between route discovery and the request — a race no unit test
+    /// can stage through the public path. The first assertion below is what
+    /// makes the rest necessary, so it is asserted rather than assumed.
+    ///
+    /// The scan stops at this test module and looks ahead rather than matching
+    /// one line: the shape that shipped was spelled across three lines, and a
+    /// scan that reads its own assertions finds itself.
+    #[test]
+    fn a_route_source_read_is_never_defaulted() {
+        let empty = "";
+        let module = ruvyxa_bundler::ast::parse_module(empty);
+        assert!(
+            !ruvyxa_bundler::ast::has_named_runtime_export(empty, &module, "flight"),
+            "an empty source reports no flight export, so a defaulted read is \
+             indistinguishable from a route that genuinely has none"
+        );
+
+        let whole = include_str!("framework_endpoints.rs");
+        // Split on the test module specifically. This file carries an earlier
+        // `#[cfg(test)]` on a single item, and stopping there left the scan
+        // covering the first few lines and finding nothing to check.
+        let production = whole
+            .split_once("\n#[cfg(test)]\nmod tests {")
+            .map_or(whole, |(before, _)| before);
+        let lines: Vec<&str> = production.lines().collect();
+        for (index, line) in lines.iter().enumerate() {
+            if !line.contains("read_to_string") {
+                continue;
+            }
+            // The call and its terminator, however the formatter broke them up.
+            let statement = lines[index..lines.len().min(index + 4)].join(" ");
+            assert!(
+                !statement.contains("unwrap_or_default"),
+                "framework_endpoints.rs:{} defaults a source read; an unreadable \
+                 route file would be reported as a missing export again",
+                index + 1
+            );
+        }
+        assert!(
+            production.matches("read_to_string").count() >= 2,
+            "this guard covers the route-source reads; it stopped finding them"
+        );
+    }
 
     /// The `/__ruvyxa/rsc` gate is one rule with two implementations.
     ///

@@ -259,7 +259,7 @@ pub(crate) fn emit_client_bundles_with_session(
     let bundled = pass.bundle_page_routes(client_dir)?;
     let shared_route_chunks = bundled.shared_chunks;
 
-    let written = write_route_bundles(client_dir, bundled.bundles, build)?;
+    let written = write_route_bundles(root, client_dir, bundled.bundles, build)?;
     let mut routes = written.routes;
 
     finalize_route_entries(
@@ -578,7 +578,19 @@ fn client_page_routes(
 
 /// Write every route bundle, its source map, and its chunks, collecting the
 /// manifest entry each one contributes.
+///
+/// `root` is here to read a route's own source. `ClientBundle::entry` is the
+/// route file as the manifest carries it — project-relative, because that is
+/// what the published `entry` field has to be for two machines to build the
+/// same bytes — so reading it resolves against the process working directory,
+/// not the project. Every `ruvyxa build --root <elsewhere>` therefore read
+/// nothing, and `unwrap_or_default()` turned that into "this route exports no
+/// `flight` and declares no `'use cache'`" for *every* route: the shipped route
+/// manifest said `flight: false` throughout, the browser router never asked for
+/// a payload any route produced, and RUV1842 could not fire. Building from
+/// inside the project directory worked, which is how it stayed invisible.
 fn write_route_bundles(
+    root: &Path,
     client_dir: &Path,
     bundles: Vec<(usize, ClientBundle)>,
     build: &BuildConfigOptions,
@@ -627,7 +639,21 @@ fn write_route_bundles(
             "treeShaken": build.tree_shaking.unwrap_or(true),
             "chunkStrategy": build.split_strategy.as_deref().unwrap_or("route")
         });
-        let source = fs::read_to_string(&bundle.entry).unwrap_or_default();
+        // Propagated, never defaulted. An empty source is a legal answer here —
+        // it means "this route exports no `flight`" — so `unwrap_or_default()`
+        // made an unreadable entry indistinguishable from one that genuinely
+        // has none. Two things then happened silently: the RUV1842 guard below
+        // stopped firing, because a file that declares `'use cache'` reads as
+        // declaring nothing; and `flight: false` was written into the shipped
+        // route manifest, so the browser router stopped requesting payloads for
+        // a route that produces them and fell back to full document loads.
+        let entry_file = canonical_route_file(root, &bundle.entry);
+        let source = fs::read_to_string(&entry_file).with_context(|| {
+            format!(
+                "Failed to read route entry {} while recording its Flight capability",
+                entry_file.display()
+            )
+        })?;
         let module = ruvyxa_bundler::ast::parse_module(&source);
         let has_flight = ruvyxa_bundler::ast::has_named_runtime_export(&source, &module, "flight");
         let uses_cache =

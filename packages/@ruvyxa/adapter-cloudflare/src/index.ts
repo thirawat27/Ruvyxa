@@ -171,6 +171,7 @@ const handler = createHandler({
   middleware: runtimePolicy.middleware,
   i18n: manifest.i18n,
   optimizeImage: runtimePolicy.image?.onDemand === true ? optimizeImage : undefined,
+  imageQuality: runtimePolicy.image?.quality,
   importPage: loadRouteModule,
   importApi: loadRouteModule,
   importAction: loadActionModule,

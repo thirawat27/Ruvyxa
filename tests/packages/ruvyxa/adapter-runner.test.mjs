@@ -18,7 +18,15 @@ describe('adapter runner', () => {
     assert.equal(contract.contract, 'ruvyxa.adapter')
     assert.equal(contract.schemaVersion, 1)
 
-    for (const expected of contract.adapters) {
+    for (const entry of contract.adapters) {
+      // `onDemandImages` is a property of the handler source the adapter
+      // generates, not of the adapter object, so inspection cannot see it and
+      // must not be asked to. It is held to the adapter sources by
+      // `records onDemandImages for exactly the adapters that pass an optimizer`
+      // in serverless-shared-tables.test.mjs. Everything else stays an exact
+      // comparison, so a field inspection gains or loses still fails here.
+      const { onDemandImages, ...expected } = entry
+      assert.equal(typeof onDemandImages, 'boolean', `${entry.name} declares onDemandImages`)
       const root = await mkdtemp(path.join(os.tmpdir(), `ruvyxa-${expected.name}-inspect-`))
       const outputDir = path.join(root, '.ruvyxa-staging')
       try {

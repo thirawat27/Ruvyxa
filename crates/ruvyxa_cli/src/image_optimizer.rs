@@ -699,6 +699,37 @@ mod tests {
     use super::*;
     use ruvyxa_dev_server::image_decode;
 
+    /// The project default is what an absent `q` resolves to on every host.
+    ///
+    /// `image.quality` decides the native host's `default_quality`
+    /// (`runtime_config.rs`) and is published as `runtime.image.quality` for the
+    /// deployed handler to read, so this one number reaches three
+    /// implementations. `tests/fixtures/dynamic-image-conformance.json` holds
+    /// them together; the other two replays are in
+    /// `crates/ruvyxa_dev_server/src/dynamic_image.rs` and
+    /// `tests/packages/ruvyxa/serverless-shared-tables.test.mjs`.
+    ///
+    /// Without this, a change here would leave the two fallbacks answering the
+    /// old value and only a project that never sets `image.quality` would see
+    /// the difference — which is every project that takes the default.
+    #[test]
+    fn the_default_quality_matches_the_shared_image_table() {
+        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/dynamic-image-conformance.json");
+        let fixture: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(&fixture_path)
+                .unwrap_or_else(|error| panic!("read {}: {error}", fixture_path.display())),
+        )
+        .expect("conformance fixture is valid JSON");
+
+        assert_eq!(
+            u64::from(ImageOptimizationOptions::default().quality),
+            fixture["defaultQuality"]
+                .as_u64()
+                .expect("fixture declares defaultQuality"),
+        );
+    }
+
     /// Tests need real encoded files on disk, because the optimizer sniffs and
     /// decodes them; a pixel buffer would not exercise the path under test.
     fn write_png(path: &Path, width: u32, height: u32, color: png::ColorType, sample: &[u8]) {

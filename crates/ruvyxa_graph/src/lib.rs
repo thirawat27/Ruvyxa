@@ -2419,9 +2419,7 @@ mod tests {
             &code_without_strings_and_comments(source),
             "runtime",
         )
-        .map_or(Some(RuntimeTarget::Node), |raw| {
-            runtime_target_from_value(&raw)
-        })
+        .map_or(Some(RuntimeTarget::Node), runtime_target_from_value)
     }
 
     fn edge_fixture() -> serde_json::Value {
@@ -3783,7 +3781,7 @@ export default function Page() { return Counter }
         )
         .unwrap();
 
-        let manifest = discover_routes(DiscoverOptions::new(&temp.path().join("app"))).unwrap();
+        let manifest = discover_routes(DiscoverOptions::new(temp.path().join("app"))).unwrap();
         assert!(
             manifest.routes[0].render.server_components,
             "the fixture must opt into server components"

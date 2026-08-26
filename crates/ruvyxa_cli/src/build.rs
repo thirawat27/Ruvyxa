@@ -401,6 +401,13 @@ fn run_adapter_stage(
         .adapter
         .as_deref()
         .or_else(|| detected_adapter.as_ref().map(|(name, _)| name.as_str()));
+    // The runner resolves `config.adapter` itself, so it is not passed to it —
+    // but a report about the adapter has to know the name the project declared,
+    // and this is the chain the deploy manifest already resolves it with. An
+    // object-form `adapter:` stays unnamed here, which is what keeps the report
+    // below quiet rather than guessing.
+    let reported_adapter =
+        named_adapter.or_else(|| config.adapter.as_ref().and_then(serde_json::Value::as_str));
     let artifacts = run_adapter_runner(
         &args.root,
         out_dir,
@@ -411,32 +418,82 @@ fn run_adapter_stage(
         let detail = adapter_phase_detail(args, detected_adapter, artifacts.len());
         print_build_phase(spinner, "adapter", detail, phase_started.elapsed());
     }
-    report_native_only_image_optimization(config, named_adapter);
+    report_native_only_image_optimization(config, reported_adapter);
     Ok(Some(serde_json::to_value(artifacts)?))
+}
+
+/// The adapters whose generated handler serves `/__ruvyxa/image`.
+///
+/// `tests/fixtures/adapter-contract.json` is the table, compiled in rather than
+/// restated, because this was three restatements and every one of them was
+/// wrong. `image.onDemand` was recorded as an unconditional two-host gap — the
+/// Axum host resizes through the Rust image pipeline, no build artifact carries
+/// it — and then `@ruvyxa/adapter-vercel` and `@ruvyxa/adapter-cloudflare` began
+/// passing `createHandler` an `optimizeImage` that forwards to the platform's
+/// own optimizer. The capability became adapter-conditional and nothing could
+/// say so, so `ruvyxa build` told a Vercel project its working images answered
+/// 404, `ruvyxa test:parity` agreed, and the guide said so in both languages
+/// while the deployment matrix two chapters away said "adapter-dependent".
+///
+/// `records onDemandImages for exactly the adapters that pass an optimizer` in
+/// `tests/packages/ruvyxa/serverless-shared-tables.test.mjs` holds the table to
+/// the adapter sources that decide it.
+///
+/// `None` is "the table has no entry", which is a third-party adapter package —
+/// deliberately not folded into `false`. Only an entry that says `false` is a
+/// statement that the endpoint answers 404 there, and only that may be reported.
+pub(crate) fn adapter_on_demand_images(adapter: &str) -> Option<bool> {
+    const CONTRACT: &str = include_str!("../../../tests/fixtures/adapter-contract.json");
+    let contract: serde_json::Value = serde_json::from_str(CONTRACT).ok()?;
+    contract
+        .get("adapters")?
+        .as_array()?
+        .iter()
+        .find(|candidate| candidate["name"].as_str() == Some(adapter))?
+        .get("onDemandImages")?
+        .as_bool()
 }
 
 /// Say that on-demand image optimization does not survive into this artifact.
 ///
 /// `image.onDemand` is served at `/__ruvyxa/image` by the Axum host, which
-/// resizes through the Rust image pipeline. Nothing a build emits carries that
-/// pipeline: `createHandler` takes an `optimizeImage` option and no adapter
-/// passes one, so the endpoint answers 404 in every deployment.
+/// resizes through the Rust image pipeline. A build emits no such pipeline, so
+/// unless the adapter hands `createHandler` an optimizer of its own — see
+/// [`adapter_serves_on_demand_images`] — the endpoint answers 404 in the
+/// deployment. A project that turns the option on then gets working responsive
+/// images under `ruvyxa dev` and `ruvyxa start`, and on the deployed site every
+/// `srcSet` entry 404s. The browser falls back to `src`, so the page still
+/// renders and the only symptom is a phone downloading a full-size image, which
+/// is why nothing surfaced it.
 ///
-/// That is recorded as intended in `tests/fixtures/framework-endpoint-conformance.json`
-/// — but it was recorded only *there*. A project that turns the option on gets
-/// working responsive images under `ruvyxa dev` and `ruvyxa start`, and on the
-/// deployed site every `srcSet` entry 404s. The browser falls back to `src`, so
-/// the page still renders and the only symptom is a phone downloading a
-/// full-size image, which is why nothing surfaced it.
+/// Silent when the adapter cannot be named — an inline `adapter:
+/// vercelAdapter({…})` is an object, not a name, and a third-party package is
+/// not in the table at all. A wrong answer errs in one direction here: telling a
+/// working deployment it is broken sends the reader to disable a feature that
+/// works, while saying nothing costs one full-size download.
 ///
 /// Reported rather than refused, exactly like `RUV2205`: a deployment without
 /// the endpoint is still a valid deployment, and a project may enable the
 /// option for development on purpose.
+/// Whether the report below has something true to say.
+///
+/// Separated from the printing so it can be asserted: the report is a warning
+/// nobody's build fails on, so a condition that silently drifts back to "always"
+/// is exactly the kind of thing that shipped here for two adapters.
+pub(crate) fn should_report_native_only_images(
+    config: &ProjectConfig,
+    adapter: Option<&str>,
+) -> bool {
+    config.images.on_demand.enabled() && adapter.and_then(adapter_on_demand_images) == Some(false)
+}
+
 fn report_native_only_image_optimization(config: &ProjectConfig, adapter: Option<&str>) {
-    if !config.images.on_demand.enabled() {
+    if !should_report_native_only_images(config, adapter) {
         return;
     }
-    let adapter = adapter.unwrap_or("the configured adapter");
+    let Some(adapter) = adapter else {
+        return;
+    };
     warn!(
         adapter,
         "on-demand image optimization is not served by a build artifact"
@@ -445,11 +502,12 @@ fn report_native_only_image_optimization(config: &ProjectConfig, adapter: Option
         "  {} {}",
         warn_text("warn"),
         dim(format!(
-            "image.onDemand is enabled, and /__ruvyxa/image is served by `ruvyxa dev` and \
-             `ruvyxa start` only — the {adapter} artifact carries no image pipeline and \
-             answers 404 there. A page keeps rendering because the browser falls back to \
-             `src`, so the cost is a full-size download rather than an error. Pre-build the \
-             sizes with image.variantWidths, or serve the project with `ruvyxa start`."
+            "image.onDemand is enabled, and the {adapter} artifact carries no image pipeline, \
+             so /__ruvyxa/image answers 404 there. A page keeps rendering because the browser \
+             falls back to `src`, so the cost is a full-size download rather than an error. \
+             Pre-build the sizes with image.variantWidths, deploy through an adapter that \
+             forwards to a platform optimizer (vercel, cloudflare), or serve the project with \
+             `ruvyxa start`."
         ))
     );
 }
@@ -604,6 +662,13 @@ impl BuildReport<'_> {
                 "image": {
                     "onDemand": config.images.on_demand.enabled(),
                     "maxWidth": config.images.on_demand.max_width(),
+                    // The quality an absent `q` resolves to. The native host has
+                    // always answered that with `image.quality`; this block
+                    // carried `onDemand` and `maxWidth` and not the value beside
+                    // them, so an adapter that can optimize had nothing to read
+                    // and fell back to the handler's own constant. Same URL, two
+                    // different re-encodes, decided by where it was deployed.
+                    "quality": config.images.quality,
                     "sizes": config.images.variant_widths
                 }
             },

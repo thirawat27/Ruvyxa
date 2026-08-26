@@ -30,27 +30,38 @@ for (const adapter of contract.adapters) {
   ) {
     fail(`adapter ${adapter.name} has an invalid capability list`)
   }
+  // Required rather than defaulted, so a new adapter has to decide. Absent, it
+  // would read as `false` — which is the answer that was wrong for two years of
+  // adapters that do serve `/__ruvyxa/image`, and nothing would have asked.
+  if (typeof adapter.onDemandImages !== 'boolean') {
+    fail(`adapter ${adapter.name} must declare onDemandImages as a boolean`)
+  }
 }
 
 const documents = [
   {
     file: 'docs/en/20-platform-adapter-guide.md',
-    headers: ['Adapter', 'Target', 'Runtime', 'Supported routes'],
+    headers: ['Adapter', 'Target', 'Runtime', 'Supported routes', 'On-demand images'],
+    yes: 'yes',
+    no: 'no',
   },
   {
     file: 'docs/th/20-platform-adapter-guide.md',
-    headers: ['Adapter', 'Target', 'Runtime', 'Route ที่รองรับ'],
+    headers: ['Adapter', 'Target', 'Runtime', 'Route ที่รองรับ', 'On-demand image'],
+    yes: 'ได้',
+    no: 'ไม่ได้',
   },
 ]
 
 for (const document of documents) {
   const file = path.join(root, document.file)
   const source = await readFile(file, 'utf8')
-  const rows = contract.adapters.map(({ name, target, runtime, supports }) => [
+  const rows = contract.adapters.map(({ name, target, runtime, supports, onDemandImages }) => [
     displayName(name),
     target,
     runtime,
     supports.map((item) => item.toUpperCase()).join(', '),
+    onDemandImages ? document.yes : document.no,
   ])
   const block = [START, '', markdownTable(document.headers, rows), '', END].join('\n')
   const updated = replaceBlock(source, block, document.file)

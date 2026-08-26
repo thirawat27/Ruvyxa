@@ -1,0 +1,61 @@
+{
+  "$comment": [
+    "Shared numeric contract for the on-demand image endpoint, `/__ruvyxa/image`.",
+    "",
+    "Two request hosts answer that path and neither can import the other's",
+    "constants:",
+    "  - crates/ruvyxa_dev_server/src/dynamic_image.rs   (`dev`, `start`, `preview`)",
+    "  - packages/ruvyxa/runtime/serverless-handler.mjs  (every deployed build,",
+    "                                                     through the optimizer an",
+    "                                                     adapter supplies)",
+    "",
+    "They had disagreed about `defaultQuality`. The native host answers an absent",
+    "`q` with the project's own `image.quality`; the deployed handler answered it",
+    "with a hardcoded 82 and read no project value at all, because `ruvyxa build`",
+    "published `onDemand` and `maxWidth` into the runtime policy and not the",
+    "quality beside them. A project setting `image.quality: 60` therefore got 60",
+    "under `ruvyxa dev` and 82 from Vercel or Cloudflare for the same URL — two",
+    "different images from one configuration, and nothing about a re-encoded photo",
+    "fails a build or shows up in a log.",
+    "",
+    "The width and quality bounds are here for the same reason even though they",
+    "agree today: they are the rest of what a caller can send, both hosts encode",
+    "them separately, and a bound that drifts turns a working URL into a 400 on",
+    "one deployment target only.",
+    "",
+    "Every implementation replays this file:",
+    "  - crates/ruvyxa_dev_server/src/dynamic_image.rs            (Rust host)",
+    "  - tests/packages/ruvyxa/serverless-shared-tables.test.mjs  (deployed handler,",
+    "                                                              plus the two",
+    "                                                              sources that carry",
+    "                                                              the value to it)",
+    "",
+    "Change a bound here first; a port that drifts then fails in the language that",
+    "drifted rather than on one deployment target after release."
+  ],
+
+  "$qualityNote": [
+    "`defaultQuality` is one value with three declaration sites, which is why it",
+    "drifted. `ImageOptimizationOptions::default().quality` in",
+    "crates/ruvyxa_cli/src/image_optimizer.rs is the project default and the only",
+    "one a configuration replaces; `DynamicImageConfig::default().default_quality`",
+    "is the native host's fallback when no project config has been loaded; and",
+    "`DEFAULT_IMAGE_QUALITY` in the serverless handler is the deployed fallback for",
+    "a manifest built before the runtime policy carried the value. All three must",
+    "name the same number, or the fallback silently re-encodes at a quality the",
+    "project did not ask for."
+  ],
+
+  "$widthNote": [
+    "`width.max` is the ceiling no host exceeds regardless of configuration. A",
+    "project's `image.onDemand.maxWidth` narrows it further and is validated into",
+    "`width.min ..= width.max` by RUV1602; the native host takes the smaller of the",
+    "two, and each adapter enforces the configured maximum itself before calling",
+    "its platform optimizer."
+  ],
+
+  "defaultQuality": 82,
+  "defaultMaxWidth": 3840,
+  "quality": { "min": 1, "max": 100 },
+  "width": { "min": 16, "max": 8192 }
+}

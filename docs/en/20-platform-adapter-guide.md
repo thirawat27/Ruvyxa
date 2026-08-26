@@ -37,19 +37,19 @@ This table is generated from the adapter release contract; `pnpm release:validat
 
 <!-- adapter-matrix:start -->
 
-| Adapter    | Target     | Runtime | Supported routes             |
-| ---------- | ---------- | ------- | ---------------------------- |
-| AWS        | serverless | node    | SSR, SSG, CSR, ISR, PPR, API |
-| Bun        | node       | bun     | SSR, SSG, CSR, ISR, PPR, API |
-| Cloudflare | edge       | edge    | SSR, SSG, CSR, API           |
-| Deno       | node       | deno    | SSR, SSG, CSR, ISR, PPR, API |
-| Firebase   | serverless | node    | SSR, SSG, CSR, ISR, PPR, API |
-| Netlify    | serverless | node    | SSR, SSG, CSR, ISR, PPR, API |
-| Node       | node       | node    | SSR, SSG, CSR, ISR, PPR, API |
-| Railway    | node       | node    | SSR, SSG, CSR, ISR, PPR, API |
-| Render     | node       | node    | SSR, SSG, CSR, ISR, PPR, API |
-| Static     | static     | static  | SSG, CSR                     |
-| Vercel     | serverless | node    | SSR, SSG, CSR, ISR, PPR, API |
+| Adapter    | Target     | Runtime | Supported routes             | On-demand images |
+| ---------- | ---------- | ------- | ---------------------------- | ---------------- |
+| AWS        | serverless | node    | SSR, SSG, CSR, ISR, PPR, API | no               |
+| Bun        | node       | bun     | SSR, SSG, CSR, ISR, PPR, API | no               |
+| Cloudflare | edge       | edge    | SSR, SSG, CSR, API           | yes              |
+| Deno       | node       | deno    | SSR, SSG, CSR, ISR, PPR, API | no               |
+| Firebase   | serverless | node    | SSR, SSG, CSR, ISR, PPR, API | no               |
+| Netlify    | serverless | node    | SSR, SSG, CSR, ISR, PPR, API | no               |
+| Node       | node       | node    | SSR, SSG, CSR, ISR, PPR, API | no               |
+| Railway    | node       | node    | SSR, SSG, CSR, ISR, PPR, API | no               |
+| Render     | node       | node    | SSR, SSG, CSR, ISR, PPR, API | no               |
+| Static     | static     | static  | SSG, CSR                     | no               |
+| Vercel     | serverless | node    | SSR, SSG, CSR, ISR, PPR, API | yes              |
 
 <!-- adapter-matrix:end -->
 

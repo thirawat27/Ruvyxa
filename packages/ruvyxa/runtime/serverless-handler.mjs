@@ -89,6 +89,26 @@ const DEFAULT_ACTION_RATE_MAX = 600
 const DEFAULT_ACTION_RATE_WINDOW_SECONDS = 60
 
 /**
+ * The bounds a caller of `/__ruvyxa/image` is held to, and the quality an
+ * absent `q` resolves to.
+ *
+ * The native host encodes the same four numbers in
+ * `crates/ruvyxa_dev_server/src/dynamic_image.rs` and neither side can import
+ * the other's, so `tests/fixtures/dynamic-image-conformance.json` holds them
+ * together.
+ *
+ * `DEFAULT_IMAGE_QUALITY` is a fallback, not the answer: a project's own
+ * `image.quality` arrives as the `imageQuality` option and wins. It is reached
+ * by a manifest built before the runtime policy carried the value, so it has to
+ * name the number that policy would have carried.
+ */
+const DEFAULT_IMAGE_QUALITY = 82
+const MIN_IMAGE_QUALITY = 1
+const MAX_IMAGE_QUALITY = 100
+const MIN_IMAGE_WIDTH = 16
+const MAX_IMAGE_WIDTH = 8192
+
+/**
  * @typedef {Object} RouteEntry
  * @property {string} id
  * @property {string} path
@@ -146,6 +166,13 @@ const DEFAULT_ACTION_RATE_WINDOW_SECONDS = 60
  *   timing, logging, and custom-header behavior without Node.js polyfills.
  * @property {{locales: string[], defaultLocale: string, localeParam: string, detectLocale: boolean, cookie: string}} [i18n]
  * @property {(request: Request, input: {src: string, width: number, quality: number}) => Promise<Response>} [optimizeImage]
+ * @property {number} [imageQuality]
+ *   The project's `image.quality`, published by `ruvyxa build` as
+ *   `runtime.image.quality`. Decides what an image request without a `q`
+ *   parameter is encoded at, exactly as it does under `ruvyxa dev` and
+ *   `ruvyxa start`. Falls back to `DEFAULT_IMAGE_QUALITY` when a manifest
+ *   predates the field; an out-of-range value is clamped rather than refused,
+ *   because a configuration mistake must not turn every image into a 400.
  */
 
 /**
@@ -233,6 +260,7 @@ export function createHandler(options) {
     middleware,
     i18n,
     optimizeImage,
+    imageQuality,
     notFoundDocument,
   } = options
   // An explicit `securityHeaders` option still wins, so a caller constructing
@@ -250,6 +278,9 @@ export function createHandler(options) {
     window:
       positiveInteger(security?.actionRateLimit?.window) ?? DEFAULT_ACTION_RATE_WINDOW_SECONDS,
   }
+  const defaultImageQuality = Number.isInteger(imageQuality)
+    ? Math.min(MAX_IMAGE_QUALITY, Math.max(MIN_IMAGE_QUALITY, imageQuality))
+    : DEFAULT_IMAGE_QUALITY
   const trustedProxies = parseTrustedProxies(security?.trustedProxyIps)
   const actionBuckets = new Map()
   const actionNonces = new Map()
@@ -468,7 +499,11 @@ export function createHandler(options) {
     // The request boundary above already decoded and normalized the path using
     // the same segment rules as the Rust development server.
     if (pathname === '/__ruvyxa/image') {
-      return handleDynamicImage(request, runtimeContext.optimizeImage ?? optimizeImage)
+      return handleDynamicImage(
+        request,
+        runtimeContext.optimizeImage ?? optimizeImage,
+        defaultImageQuality,
+      )
     }
 
     if (pathname === ACTION_PATH) {
@@ -1304,7 +1339,7 @@ export function createHandler(options) {
   }
 }
 
-async function handleDynamicImage(request, optimizer) {
+async function handleDynamicImage(request, optimizer, defaultQuality = DEFAULT_IMAGE_QUALITY) {
   if (typeof optimizer !== 'function') return new Response('Not Found', { status: 404 })
   if (!['GET', 'HEAD'].includes(request.method)) {
     return new Response('Method Not Allowed', { status: 405, headers: { allow: 'GET, HEAD' } })
@@ -1312,18 +1347,23 @@ async function handleDynamicImage(request, optimizer) {
   const url = new URL(request.url)
   const src = url.searchParams.get('src')
   const width = Number(url.searchParams.get('w'))
-  const quality = Number(url.searchParams.get('q') ?? 82)
+  const requestedQuality = url.searchParams.get('q')
+  // An absent `q` takes the project's configured quality, the same value
+  // `dynamic_image.rs` reaches for. A present one is still validated, so an
+  // empty or non-numeric `q` is a 400 rather than a silent fall back to the
+  // default — the caller asked for something and got something else.
+  const quality = requestedQuality === null ? defaultQuality : Number(requestedQuality)
   if (
     typeof src !== 'string' ||
     !src.startsWith('/') ||
     src.startsWith('//') ||
     src.includes('\\') ||
     !Number.isInteger(width) ||
-    width < 16 ||
-    width > 8192 ||
+    width < MIN_IMAGE_WIDTH ||
+    width > MAX_IMAGE_WIDTH ||
     !Number.isInteger(quality) ||
-    quality < 1 ||
-    quality > 100
+    quality < MIN_IMAGE_QUALITY ||
+    quality > MAX_IMAGE_QUALITY
   ) {
     return new Response('Invalid image request', {
       status: 400,

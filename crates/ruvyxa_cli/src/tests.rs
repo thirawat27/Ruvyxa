@@ -3641,3 +3641,136 @@ fn a_client_plan_key_follows_every_option_that_shapes_it() {
         );
     }
 }
+
+/// The build only warns about on-demand images when it has something true to say.
+///
+/// `image.onDemand` was recorded as an unconditional gap between the two hosts,
+/// and then two adapters started forwarding the request to their platform's own
+/// optimizer. The capability became adapter-conditional and the report could not
+/// say so, so `ruvyxa build` told a working Vercel deployment that its images
+/// answered 404, `ruvyxa test:parity` agreed, and both language guides said the
+/// same while the deployment matrix two chapters away already said
+/// "adapter-dependent".
+///
+/// Asserted on the decision rather than on the contract, because the reader and
+/// the contract are the same file: comparing them passes whatever the file says,
+/// which is what the first draft of this test did. `tests/packages/ruvyxa/
+/// serverless-shared-tables.test.mjs` holds the table to the adapter sources
+/// that actually decide it, and `scripts/sync-adapters.mjs` fails when either
+/// language guide drifts from it.
+#[test]
+fn the_on_demand_image_report_follows_the_adapter() {
+    let quiet = ProjectConfig::default();
+    assert!(!quiet.images.on_demand.enabled());
+    assert!(
+        !crate::build::should_report_native_only_images(&quiet, Some("node")),
+        "a project that never enabled the option has nothing to be warned about"
+    );
+
+    let mut enabled = ProjectConfig::default();
+    enabled.images.on_demand = crate::image_optimizer::OnDemandImageOptions::Enabled(true);
+
+    assert!(
+        crate::build::should_report_native_only_images(&enabled, Some("node")),
+        "the node artifact carries no image pipeline, so /__ruvyxa/image answers 404 there"
+    );
+    for adapter in ["vercel", "cloudflare"] {
+        assert!(
+            !crate::build::should_report_native_only_images(&enabled, Some(adapter)),
+            "{adapter} forwards to its platform optimizer, so warning tells the reader to \
+             disable a feature that works"
+        );
+    }
+
+    // Neither an object-form `adapter:` nor a third-party package gives a name
+    // the table knows, and a wrong answer errs in one direction: saying nothing
+    // costs one full-size download, while claiming a working deployment is
+    // broken sends the reader to turn the feature off.
+    assert!(!crate::build::should_report_native_only_images(
+        &enabled, None
+    ));
+    assert!(!crate::build::should_report_native_only_images(
+        &enabled,
+        Some("@acme/ruvyxa-adapter-unknown")
+    ));
+}
+
+/// A route's `flight` export has to survive a build that runs from elsewhere.
+///
+/// `ClientBundle::entry` is the route file as the published manifest carries
+/// it — project-relative, because a machine-specific path in `entry` would make
+/// two machines emit different bytes. Reading it therefore resolves against the
+/// process working directory, and every `ruvyxa build --root <elsewhere>` read
+/// nothing at all. `unwrap_or_default()` turned that into "no `flight` export,
+/// no `'use cache'`" for *every* route: the shipped route manifest said
+/// `flight: false` throughout, so the browser router never asked for a payload
+/// any route produced and fell back to a document load, and RUV1842 could not
+/// fire. A build run from inside the project directory was correct, which is how
+/// it stayed invisible — and no fixture in this repository exported `flight`,
+/// so nothing looked.
+///
+/// The temporary root here is never the test process's working directory, which
+/// is what makes this the failing case rather than the passing one.
+#[test]
+fn a_flight_export_is_recorded_when_the_build_runs_from_another_directory() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path();
+    let app = root.join("app");
+    let client_dir = root.join(".ruvyxa").join("client");
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::create_dir_all(&client_dir).unwrap();
+    std::fs::write(root.join("ruvyxa.config.mjs"), "export default {}\n").unwrap();
+    std::fs::write(
+        app.join("page.tsx"),
+        "export function flight() {\n  return { ok: true }\n}\n\
+         export default function Page() {\n  return <main>hello</main>\n}\n",
+    )
+    .unwrap();
+
+    assert_ne!(
+        ruvyxa_diagnostics::normalized_canonical_path(root),
+        ruvyxa_diagnostics::normalized_canonical_path(
+            &std::env::current_dir().expect("a working directory")
+        ),
+        "this test only bites while the project root is not the working directory"
+    );
+
+    let config = load_project_config(root).unwrap();
+    let mut manifest = discover_routes(DiscoverOptions::new(&app)).unwrap();
+
+    // `ruvyxa build --root <dir>` discovers through a relative app directory, so
+    // every `RouteEntry::file` it produces is project-relative — and that is the
+    // path the writer has to resolve. Discovering through an absolute temporary
+    // directory produces absolute files, which read correctly against any
+    // working directory and so cannot fail. Rewriting them to the shape the CLI
+    // actually builds is what makes this the failing case.
+    let canonical_root = ruvyxa_diagnostics::normalized_canonical_path(root);
+    for route in &mut manifest.routes {
+        let relative = ruvyxa_diagnostics::normalized_canonical_path(&route.file);
+        route.file = relative
+            .strip_prefix(&canonical_root)
+            .expect("a discovered route lives under the project root")
+            .to_path_buf();
+        assert!(route.file.is_relative());
+    }
+
+    let client_manifest = emit_client_bundles(
+        root,
+        &app,
+        &manifest,
+        &client_dir,
+        &config.build,
+        &config.plugins,
+        RuvyxaBuildCache {
+            dependency_hash: &config.build_dependency_hash,
+            directory: &build_cache_dir(root, &config.cache),
+        },
+    )
+    .unwrap();
+
+    assert_eq!(
+        client_manifest["routes"][0]["flight"],
+        serde_json::Value::Bool(true),
+        "the shipped manifest must tell the browser router this route has a payload: {client_manifest}"
+    );
+}

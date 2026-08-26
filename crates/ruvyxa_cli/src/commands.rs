@@ -971,7 +971,19 @@ pub(crate) fn capability_parity(
         };
 
         let native = entry["nativeHost"].as_bool() != Some(false);
-        let artifact = entry["buildArtifact"].as_bool() != Some(false);
+        // `buildArtifact` answers for the generic artifact: what `createHandler`
+        // serves with nothing supplied. One capability is adapter-conditional —
+        // `images@1` is served wherever the adapter hands the handler a platform
+        // optimizer — and reading the generic answer alone told a Vercel project
+        // that its working responsive images answered 404.
+        let artifact = entry["buildArtifact"].as_bool() != Some(false)
+            || (*id == "images@1"
+                && config
+                    .adapter
+                    .as_ref()
+                    .and_then(serde_json::Value::as_str)
+                    .and_then(crate::build::adapter_on_demand_images)
+                    == Some(true));
         println!(
             "  {} {}{}  {} {}  {} {}  {}",
             if artifact {
@@ -1001,6 +1013,14 @@ pub(crate) fn capability_parity(
                 "    {} a deployed build answers 404 at {detail} — a known limit of {id}, not a parity failure",
                 label("note"),
             );
+            if *id == "images@1" {
+                // Actionable, because unlike realtime this one is a choice: the
+                // capability follows the adapter, and the reader can change it.
+                println!(
+                    "    {} the vercel and cloudflare adapters forward this to their platform optimizer",
+                    label("note"),
+                );
+            }
         }
     }
 

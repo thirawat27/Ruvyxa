@@ -36,19 +36,19 @@ drift
 
 <!-- adapter-matrix:start -->
 
-| Adapter    | Target     | Runtime | Route ที่รองรับ              |
-| ---------- | ---------- | ------- | ---------------------------- |
-| AWS        | serverless | node    | SSR, SSG, CSR, ISR, PPR, API |
-| Bun        | node       | bun     | SSR, SSG, CSR, ISR, PPR, API |
-| Cloudflare | edge       | edge    | SSR, SSG, CSR, API           |
-| Deno       | node       | deno    | SSR, SSG, CSR, ISR, PPR, API |
-| Firebase   | serverless | node    | SSR, SSG, CSR, ISR, PPR, API |
-| Netlify    | serverless | node    | SSR, SSG, CSR, ISR, PPR, API |
-| Node       | node       | node    | SSR, SSG, CSR, ISR, PPR, API |
-| Railway    | node       | node    | SSR, SSG, CSR, ISR, PPR, API |
-| Render     | node       | node    | SSR, SSG, CSR, ISR, PPR, API |
-| Static     | static     | static  | SSG, CSR                     |
-| Vercel     | serverless | node    | SSR, SSG, CSR, ISR, PPR, API |
+| Adapter    | Target     | Runtime | Route ที่รองรับ              | On-demand image |
+| ---------- | ---------- | ------- | ---------------------------- | --------------- |
+| AWS        | serverless | node    | SSR, SSG, CSR, ISR, PPR, API | ไม่ได้          |
+| Bun        | node       | bun     | SSR, SSG, CSR, ISR, PPR, API | ไม่ได้          |
+| Cloudflare | edge       | edge    | SSR, SSG, CSR, API           | ได้             |
+| Deno       | node       | deno    | SSR, SSG, CSR, ISR, PPR, API | ไม่ได้          |
+| Firebase   | serverless | node    | SSR, SSG, CSR, ISR, PPR, API | ไม่ได้          |
+| Netlify    | serverless | node    | SSR, SSG, CSR, ISR, PPR, API | ไม่ได้          |
+| Node       | node       | node    | SSR, SSG, CSR, ISR, PPR, API | ไม่ได้          |
+| Railway    | node       | node    | SSR, SSG, CSR, ISR, PPR, API | ไม่ได้          |
+| Render     | node       | node    | SSR, SSG, CSR, ISR, PPR, API | ไม่ได้          |
+| Static     | static     | static  | SSG, CSR                     | ไม่ได้          |
+| Vercel     | serverless | node    | SSR, SSG, CSR, ISR, PPR, API | ได้             |
 
 <!-- adapter-matrix:end -->
 

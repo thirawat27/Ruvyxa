@@ -11,6 +11,31 @@ const MAX_SOURCE_PIXELS: u64 = 50_000_000;
 const MAX_CACHE_ENTRIES: usize = 128;
 const MAX_CACHE_BYTES: usize = 64 * 1024 * 1024;
 
+/// The bounds a caller of `/__ruvyxa/image` is held to.
+///
+/// Named rather than written inline because the deployed handler encodes the
+/// same four numbers in JavaScript and cannot import them, so
+/// `tests/fixtures/dynamic-image-conformance.json` holds the two together and a
+/// test needs something to compare the fixture against. The quality pair also
+/// had two readers inside this crate — the endpoint rejected outside it and
+/// `optimize` clamped to it — written as two separate literal ranges.
+pub(crate) const MIN_WIDTH: u32 = 16;
+/// Widest transform any host performs, whatever `max_width` a project sets.
+pub(crate) const MAX_WIDTH: u32 = 8192;
+pub(crate) const MIN_QUALITY: u8 = 1;
+pub(crate) const MAX_QUALITY: u8 = 100;
+
+/// The fallback answers for a host that has loaded no project configuration.
+///
+/// `default_quality` is replaced by `image.quality` and `max_width` by
+/// `image.onDemand.maxWidth` as soon as a config is read (`runtime_config.rs`),
+/// so these are reached only by a bare `DynamicImageConfig`. They still have to
+/// match `ImageOptimizationOptions::default()` in the CLI and
+/// `DEFAULT_IMAGE_QUALITY` in the serverless handler: a fallback that differs
+/// re-encodes at a quality nobody configured, and says nothing while it does.
+pub(crate) const DEFAULT_MAX_WIDTH: u32 = 3840;
+pub(crate) const DEFAULT_QUALITY: u8 = 82;
+
 #[derive(Debug, Clone)]
 pub struct DynamicImageConfig {
     pub enabled: bool,
@@ -22,8 +47,8 @@ impl Default for DynamicImageConfig {
     fn default() -> Self {
         Self {
             enabled: false,
-            max_width: 3840,
-            default_quality: 82,
+            max_width: DEFAULT_MAX_WIDTH,
+            default_quality: DEFAULT_QUALITY,
         }
     }
 }
@@ -128,7 +153,7 @@ pub(crate) async fn optimize(
     if !config.enabled {
         return Err(DynamicImageError::NotFound);
     }
-    if width < 16 || width > config.max_width.min(8192) {
+    if width < MIN_WIDTH || width > config.max_width.min(MAX_WIDTH) {
         return Err(DynamicImageError::InvalidRequest("invalid image width"));
     }
     let relative = src
@@ -162,7 +187,9 @@ pub(crate) async fn optimize(
     let source = tokio::fs::read(&file)
         .await
         .map_err(DynamicImageError::Io)?;
-    let quality = quality.unwrap_or(config.default_quality).clamp(1, 100);
+    let quality = quality
+        .unwrap_or(config.default_quality)
+        .clamp(MIN_QUALITY, MAX_QUALITY);
     let mut hasher = blake3::Hasher::new();
     hasher.update(&source);
     hasher.update(&width.to_le_bytes());
@@ -223,6 +250,74 @@ pub(crate) async fn optimize(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Replay the shared `/__ruvyxa/image` bounds table.
+    ///
+    /// The deployed handler answers the same path from its own copy of these
+    /// numbers and cannot import them, so
+    /// `tests/fixtures/dynamic-image-conformance.json` holds the two together.
+    /// `tests/packages/ruvyxa/serverless-shared-tables.test.mjs` drives the same
+    /// file through `createHandler`. A bound changed in one language and not the
+    /// other fails here rather than on one deployment target after release.
+    ///
+    /// Asserted through `optimize` rather than against the constants alone: a
+    /// constant nothing reads is not a bound, and the width check is the one
+    /// place a project's `max_width` and the absolute ceiling meet.
+    #[tokio::test]
+    async fn honours_the_shared_dynamic_image_bounds() {
+        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/dynamic-image-conformance.json");
+        let fixture: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&fixture_path)
+                .unwrap_or_else(|error| panic!("read {}: {error}", fixture_path.display())),
+        )
+        .expect("conformance fixture is valid JSON");
+
+        let number = |pointer: &str| -> u64 {
+            fixture
+                .pointer(pointer)
+                .and_then(serde_json::Value::as_u64)
+                .unwrap_or_else(|| panic!("fixture declares {pointer}"))
+        };
+
+        let defaults = DynamicImageConfig::default();
+        assert_eq!(
+            u64::from(defaults.default_quality),
+            number("/defaultQuality")
+        );
+        assert_eq!(u64::from(defaults.max_width), number("/defaultMaxWidth"));
+        assert_eq!(u64::from(MIN_QUALITY), number("/quality/min"));
+        assert_eq!(u64::from(MAX_QUALITY), number("/quality/max"));
+
+        // The ceiling is only observable when the project's own maximum is not
+        // the narrower of the two, so the config opens all the way up to it.
+        let min_width = u32::try_from(number("/width/min")).expect("width fits u32");
+        let max_width = u32::try_from(number("/width/max")).expect("width fits u32");
+        let config = DynamicImageConfig {
+            enabled: true,
+            max_width,
+            ..Default::default()
+        };
+        let temp = tempfile::tempdir().unwrap();
+        let cache = DynamicImageCache::default();
+        // `true` where the width itself was refused. Every other outcome means
+        // the bound accepted it and the request failed later for having no file
+        // behind it, which is what proves the width passed.
+        let mut width_rejected = Vec::new();
+        for width in [min_width - 1, min_width, max_width, max_width + 1] {
+            let outcome = optimize(temp.path(), &config, &cache, "/a.png", width, None).await;
+            width_rejected.push(matches!(
+                outcome,
+                Err(DynamicImageError::InvalidRequest("invalid image width"))
+            ));
+        }
+        assert_eq!(
+            width_rejected,
+            vec![true, false, false, true],
+            "widths {:?} against the shared bounds",
+            [min_width - 1, min_width, max_width, max_width + 1]
+        );
+    }
 
     #[tokio::test]
     async fn rejects_external_and_traversing_sources_before_io() {

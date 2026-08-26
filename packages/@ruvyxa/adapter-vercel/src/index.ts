@@ -120,6 +120,7 @@ const handler = createHandler({
   middleware: runtimePolicy.middleware,
   i18n: manifest.i18n,
   optimizeImage: runtimePolicy.image?.onDemand === true ? optimizeImage : undefined,
+  imageQuality: runtimePolicy.image?.quality,
   importPage: loadRouteModule,
   importApi: loadRouteModule,
   importAction: loadActionModule,
@@ -251,6 +252,7 @@ const handler = createHandler({
   middleware: runtimePolicy.middleware,
   i18n: manifest.i18n,
   optimizeImage: runtimePolicy.image?.onDemand === true ? optimizeImage : undefined,
+  imageQuality: runtimePolicy.image?.quality,
   // The project's own not-found page, pre-rendered by the build and carried
   // inline in the manifest: an unmatched URL is answered with the page the
   // application actually wrote, on every host.
