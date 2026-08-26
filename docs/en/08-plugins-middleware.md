@@ -177,6 +177,27 @@ loader per request would put a file read or a database query on the production r
 `sitemap` and `llmsTxt` are build-time only for the same class of reason — their entries come from
 the route manifest, which does not exist while the development server is running.
 
+### Set `locale` on `searchIndex` and `contentEngine`
+
+Both build an inverted index, and both steps that produce it are locale-sensitive: `Intl.Segmenter`
+decides where one word ends and the next begins, and case folding decides which term a document is
+filed under. So the locale is part of the build's input, and leaving it unset does not mean
+"locale-independent" — it means "whatever locale this machine is configured for".
+
+Ruvyxa will not read that. With no `locale`, `searchIndex` builds for `en` and reports `RUV2207`;
+`contentEngine` falls back to `site.language` first and reports `RUV2207` only if that is unset too.
+The warning is there because `en` segments on whitespace and punctuation, which is wrong for Thai,
+Japanese, and Chinese — wrong the same way on every machine, but still wrong.
+
+```ts
+searchIndex({ locale: 'th', documents })
+```
+
+```ts
+// Or once, for the whole project — content.engine.locale defaults to it.
+export default config({ site: { language: 'th' } })
+```
+
 ## Guarding route handlers
 
 Server actions reject cross-site requests in both hosts. A handler under `app/api/` does not: it is

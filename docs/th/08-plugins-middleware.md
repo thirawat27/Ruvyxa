@@ -176,6 +176,27 @@ PWA plugin ใช้ `/manifest.webmanifest`, `/sw.js` และ `/pwa-register.
 response path ของ production `sitemap` และ `llmsTxt` เป็น build-time อย่างเดียว
 ด้วยเหตุผลประเภทเดียวกัน — entry ของมันมาจาก route manifest ซึ่งยังไม่มีตอน development server ทำงาน
 
+### ตั้ง `locale` ให้ `searchIndex` และ `contentEngine`
+
+ทั้งสองตัวสร้าง inverted index และทั้งสองขั้นตอนที่ใช้สร้างมันขึ้นกับ locale: `Intl.Segmenter`
+เป็นตัวตัดสินว่าคำหนึ่งจบตรงไหนและคำถัดไปเริ่มตรงไหน ส่วนการแปลงตัวพิมพ์เป็นตัวตัดสินว่า
+เอกสารจะถูกเก็บไว้ใต้ term ไหน locale จึงเป็นส่วนหนึ่งของ input ของ build และการไม่ตั้งค่ามัน
+ไม่ได้แปลว่า "ไม่ขึ้นกับ locale" — แต่แปลว่า "ขึ้นกับ locale ที่เครื่องนี้ตั้งไว้"
+
+Ruvyxa จะไม่อ่านค่านั้น ถ้าไม่ตั้ง `locale` ตัว `searchIndex` จะ build ด้วย `en` แล้วรายงาน
+`RUV2207` ส่วน `contentEngine` จะถอยไปใช้ `site.language` ก่อน แล้วรายงาน `RUV2207`
+ก็ต่อเมื่อค่านั้นก็ไม่ได้ตั้งไว้ ที่ต้องเตือนเพราะ `en` ตัดคำด้วยช่องว่างและเครื่องหมายวรรคตอน
+ซึ่งผิดสำหรับภาษาไทย ญี่ปุ่น และจีน — ผิดเหมือนกันทุกเครื่อง แต่ก็ยังผิดอยู่ดี
+
+```ts
+searchIndex({ locale: 'th', documents })
+```
+
+```ts
+// หรือตั้งครั้งเดียวทั้งโปรเจกต์ — content.engine.locale จะใช้ค่านี้เป็นค่าตั้งต้น
+export default config({ site: { language: 'th' } })
+```
+
 ## การป้องกัน route handler
 
 Server action ปฏิเสธ request ข้าม origin อยู่แล้วทั้งสอง host แต่ handler ใต้ `app/api/`

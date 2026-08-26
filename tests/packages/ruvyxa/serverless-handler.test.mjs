@@ -12,7 +12,7 @@ const { createHandler, prerenderRelativePath } = await import(
   `file://${handlerModule.replaceAll('\\', '/')}`
 )
 const { revalidatePath } = await import(`file://${coreServerModule.replaceAll('\\', '/')}`)
-const { actionReferenceId } = await import(
+const { actionReferenceId, runAction } = await import(
   `file://${path.join(workspaceRoot, 'packages/ruvyxa/runtime/action-runtime.mjs').replaceAll('\\', '/')}`
 )
 const revalidationConformance = JSON.parse(
@@ -1234,5 +1234,95 @@ describe('server functions on a deployed server-components route', () => {
       }),
     )
     assert.equal(seen.at(-1), null)
+  })
+})
+
+describe('internal framework headers stay inside the framework', () => {
+  // `x-ruvyxa-realtime-event` is a transport between `worker-pool.mjs` and the
+  // Rust host, which reads it off the worker's response and strips it before
+  // anything reaches the network. `runAction` used to attach it for both
+  // hosts, and this one has no reader downstream: a function's response is
+  // what the browser receives. So every action on a realtime-declaring route
+  // published its channel list, its name, and every key it passed to
+  // `invalidate()` -- application-chosen strings such as `user:42:cart` -- to
+  // whoever called it. Both native hosts stripped it and this one did not,
+  // which is the two-request-hosts shape `AGENTS.md` warns about.
+  const INTERNAL_RESPONSE_HEADERS = ['x-ruvyxa-realtime-event']
+
+  function realtimeAction() {
+    const submit = async (_input, { invalidate }) => {
+      invalidate('user:42:cart')
+      return { ok: true }
+    }
+    submit.ruvyxa = { kind: 'action', realtime: { channels: ['orders'] } }
+    return submit
+  }
+
+  async function invokeRealtimeAction() {
+    const fixture = JSON.parse(
+      readFileSync(path.join(workspaceRoot, 'tests/fixtures/action-contract.json'), 'utf8'),
+    )
+    const handler = createHandler({
+      routes: [{ ...pageRoute(fixture.routeId, '/target'), actionReferenceId: fixture.expected }],
+      importPage: async () => ({}),
+      importApi: async () => ({}),
+      importAction: async () => ({ submit: realtimeAction() }),
+    })
+    return handler(
+      new Request(
+        `http://localhost/__ruvyxa/action?path=/target&name=submit&id=${encodeURIComponent(fixture.expected)}`,
+        {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            host: 'localhost',
+            origin: 'http://localhost',
+            'sec-fetch-site': 'same-origin',
+            'x-ruvyxa-action-nonce': '0f1e2d3c4b5a6978',
+          },
+          body: '{}',
+        },
+      ),
+    )
+  }
+
+  it('answers a realtime-declaring action without leaking its event', async () => {
+    const response = await invokeRealtimeAction()
+    assert.equal(response.status, 200)
+    for (const name of INTERNAL_RESPONSE_HEADERS) {
+      assert.equal(response.headers.get(name), null, `${name} must not reach the client`)
+    }
+  })
+
+  it('publishes no x-ruvyxa header a browser was not meant to read', async () => {
+    const response = await invokeRealtimeAction()
+    // Broader than the list above on purpose: the defect was a header nobody
+    // thought about on this host, so the assertion is over the whole namespace
+    // rather than over the one name that went wrong. `x-ruvyxa-isr` is the
+    // single member a client is meant to see -- it reports cache status.
+    const published = [...response.headers.keys()].filter(
+      (name) => name.startsWith('x-ruvyxa-') && name !== 'x-ruvyxa-isr',
+    )
+    assert.deepEqual(published, [])
+  })
+
+  it('still hands the event to a host that has somewhere to put it', async () => {
+    const { response, realtimeEvent } = await runAction({
+      module: { submit: realtimeAction() },
+      actionName: 'submit',
+      payload: '{}',
+      contentType: 'application/json',
+      requestPath: '/target',
+      headerPairs: [['host', 'localhost']],
+    })
+    assert.equal(response.headers.get('x-ruvyxa-realtime-event'), null)
+    assert.deepEqual(realtimeEvent, {
+      version: 1,
+      type: 'action',
+      channels: ['orders'],
+      action: 'submit',
+      path: '/target',
+      invalidated: ['user:42:cart'],
+    })
   })
 })

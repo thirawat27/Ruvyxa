@@ -147,6 +147,12 @@
       "nativeHost": true,
       "buildArtifact": false,
       "note": "Same constraint as realtime@1."
+    },
+    {
+      "id": "images@1",
+      "nativeHost": true,
+      "buildArtifact": false,
+      "note": "config.image.onDemand. /__ruvyxa/image resizes through the Rust image pipeline, which only the Axum host has: createHandler takes an optimizeImage option and no adapter passes one, so a build artifact answers 404 there. Recorded here as well as in the endpoint row above, because the endpoint row says what the host does and this says what a project that enabled the option gets -- and the failure is silent, since a browser falls back to `src` and only pays a full-size download."
     }
   ]
 }

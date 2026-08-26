@@ -2640,6 +2640,10 @@ export const marker = 'reached'
                 siteUrl: "https://example.com",
                 title: "Fixture content",
                 description: "Fixture articles",
+                // Named so this fixture models a correct project and its
+                // diagnostics assertion below stays about plugin loading.
+                // Unset, it reports RUV2207 -- covered on its own below.
+                locale: "en",
               }),
               openApi({
                 info: { title: "Fixture API", version: "1.0.0" },
@@ -2699,6 +2703,39 @@ export const marker = 'reached'
         JSON.parse(Buffer.from(specResult.result.response.bodyBase64, 'base64')).info.title,
         'Fixture API',
       )
+    })
+  })
+
+  // A search index is a build artifact, and both steps that build it are
+  // locale-sensitive: `Intl.Segmenter` decides where words begin and case
+  // folding decides which term a document is filed under. Passing `undefined`
+  // to either does not mean "locale-independent" -- it means "this host's
+  // locale", which is `th-TH` on the machine this framework is developed on and
+  // `en-US` on GitHub's runners. `scripts/verify-reproducible.mjs` builds twice
+  // on one host, so nothing else could see it. The fallback is a constant now;
+  // this asserts the warning that says so reaches the user through the same
+  // path the Rust host reads plugin diagnostics from.
+  it('warns through the plugin host when no locale names the index language', async () => {
+    await withFixture(async ({ root }) => {
+      await writeFile(
+        path.join(root, 'ruvyxa.config.ts'),
+        `export default {
+          site: {
+            url: "https://example.com",
+            title: "Example content",
+            description: "News from Example.",
+          },
+          content: true,
+        }`,
+      )
+
+      const described = await runJson(pluginRuntime, [root, 'describe'], {})
+      assert.deepEqual(
+        described.result.diagnostics.map(({ plugin, level, code }) => ({ plugin, level, code })),
+        [{ plugin: 'ruvyxa:content-engine', level: 'warning', code: 'RUV2207' }],
+      )
+      // A warning, not an error: the build still produces a usable index.
+      assert.match(described.result.diagnostics[0].message, /is not set/)
     })
   })
 

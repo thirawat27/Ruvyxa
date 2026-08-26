@@ -504,7 +504,7 @@ async fn render_page_streamed(
             .unwrap_or_else(|| "Server-components render failed".to_string());
         return Err(
             Diagnostic::new("RUV1500", "Server-components render failed")
-                .explain(format!("{code}: {message}"))
+                .explain(ruvyxa_diagnostics::label_with_code(&code, &message))
                 .at_file(&route.file)
                 .into(),
         );
@@ -728,7 +728,7 @@ async fn render_page_ssg(
             .message
             .unwrap_or_else(|| "SSG render failed".to_string());
         return Err(Diagnostic::new("RUV1500", "SSG render failed")
-            .explain(format!("{code}: {message}"))
+            .explain(ruvyxa_diagnostics::label_with_code(&code, &message))
             .at_file(&route.file)
             .into());
     }
@@ -1265,7 +1265,7 @@ async fn render_page_ppr(
             .message
             .unwrap_or_else(|| "PPR render failed".to_string());
         return Err(Diagnostic::new("RUV1550", "PPR render failed")
-            .explain(format!("{code}: {message}"))
+            .explain(ruvyxa_diagnostics::label_with_code(&code, &message))
             .at_file(&route.file)
             .into());
     }
@@ -1440,7 +1440,7 @@ async fn render_page_pooled(
             message
         };
         return Err(Diagnostic::new("RUV1100", "React SSR failed")
-            .explain(format!("{code}: {explanation}"))
+            .explain(ruvyxa_diagnostics::label_with_code(&code, &explanation))
             .at_file(&route.file)
             .suggest("Check the page component, its imports, and whether React dependencies are installed.")
             .into());
@@ -1582,7 +1582,7 @@ pub(crate) async fn render_api_pooled(
             message
         };
         return Err(Diagnostic::new("RUV1200", "API route execution failed")
-            .explain(format!("{code}: {explanation}"))
+            .explain(ruvyxa_diagnostics::label_with_code(&code, &explanation))
             .at_file(&route.file)
             .suggest("Check the route handler export and its imports.")
             .into());
@@ -1724,7 +1724,7 @@ pub(crate) async fn render_client_bundle_pooled(
         };
         return Err(
             Diagnostic::new("RUV1300", "Client hydration bundling failed")
-                .explain(format!("{code}: {explanation}"))
+                .explain(ruvyxa_diagnostics::label_with_code(&code, &explanation))
                 .suggest(
                     "Check the page component, its browser-safe imports, and React dependencies.",
                 )
@@ -2085,7 +2085,7 @@ fn render_react_page(
     };
 
     Err(Diagnostic::new("RUV1100", "React SSR failed")
-        .explain(format!("{code}: {explanation}"))
+        .explain(ruvyxa_diagnostics::label_with_code(&code, &explanation))
         .at_file(&route.file)
         .suggest(
             "Check the page component, its imports, and whether React dependencies are installed.",
@@ -2268,7 +2268,7 @@ fn render_api(
         };
 
         return Err(Diagnostic::new("RUV1200", "API route execution failed")
-            .explain(format!("{code}: {explanation}"))
+            .explain(ruvyxa_diagnostics::label_with_code(&code, &explanation))
             .at_file(&route.file)
             .suggest("Check the route handler export and its imports.")
             .into());

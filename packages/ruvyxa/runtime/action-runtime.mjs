@@ -245,9 +245,22 @@ export function encodeRealtimeEvent(event) {
  * module-loading strategy: the worker compiles and imports on demand, while a
  * function bundle resolves from a compiled registry.
  *
- * Returns `{response, revalidate}` — `revalidate` is the list of paths the
- * action passed to `revalidatePath()`, which each host applies to its own
- * cache.
+ * Returns `{response, revalidate, realtimeEvent}`:
+ *
+ * - `revalidate` is the list of paths the action passed to `revalidatePath()`,
+ *   which each host applies to its own cache.
+ * - `realtimeEvent` is the event a successful action publishes, or `null`.
+ *
+ * **`realtimeEvent` is returned rather than attached to `response`.** It used
+ * to leave here as an `x-ruvyxa-realtime-event` header, which is the shape
+ * `worker-pool.mjs` needs because its response is serialized across a process
+ * boundary to the Rust host, which reads that header and strips it before the
+ * response reaches the network. A deployed build has no such reader: the
+ * function's response goes straight to the browser, so every server action on
+ * a realtime-declaring route published its channel list, its action name, and
+ * every key it passed to `invalidate()` to the client. Making the event part
+ * of the return value leaves the header where its one consumer is and gives a
+ * host with no realtime transport nothing to forget to remove.
  */
 export async function runAction({
   module,
@@ -262,6 +275,7 @@ export async function runAction({
     return {
       response: Response.json({ error: `Action ${actionName} was not found` }, { status: 404 }),
       revalidate: [],
+      realtimeEvent: null,
     }
   }
 
@@ -284,7 +298,9 @@ export async function runAction({
   )
 
   // An action must not be able to forge the framework's own realtime header,
-  // so any incoming value is dropped before the authentic one is attached.
+  // so any value it set is dropped. Nothing puts an authentic one back: the
+  // event travels in the return value now, and a host that transports it as a
+  // header attaches it itself.
   const produced = normalizeActionResult(result, invalidated)
   const headers = new Headers(produced.headers)
   headers.delete('x-ruvyxa-realtime-event')
@@ -294,15 +310,12 @@ export async function runAction({
     headers,
   })
 
-  const event =
+  const realtimeEvent =
     response.status >= 200 && response.status < 400
       ? actionRealtimeEvent(action, actionName, requestPath, invalidated)
       : null
-  if (event) {
-    response.headers.set('x-ruvyxa-realtime-event', encodeRealtimeEvent(event))
-  }
 
-  return { response, revalidate: collectRevalidations(context) }
+  return { response, revalidate: collectRevalidations(context), realtimeEvent }
 }
 
 function textResponse(status, message) {

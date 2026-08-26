@@ -893,6 +893,14 @@ pub(crate) fn capability_parity(
         used.push(("actions", action_routes.join(", ")));
     }
 
+    // Config-declared rather than plugin-declared, and the only capability in
+    // this table that is. A plugin announces itself through `describe`; this one
+    // is a boolean in `ruvyxa.config.ts`, and the endpoint it turns on exists
+    // only on the Axum host.
+    if config.images.on_demand.enabled() {
+        used.push(("images@1", "/__ruvyxa/image".to_string()));
+    }
+
     match describe_project_plugins(root, config) {
         Ok(Some(description)) => {
             let http = &description["http"];

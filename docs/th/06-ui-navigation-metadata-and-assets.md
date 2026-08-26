@@ -117,6 +117,13 @@ export default function Product() {
 `srcSet` ที่กำหนดเอง ส่วน `image.onDemand` สร้าง responsive URL อัตโนมัติผ่าน same-origin runtime
 transformation ที่ `/__ruvyxa/image` และมี maximum width ปริยาย 3840 เมื่อกำหนดเป็น object
 
+> **`image.onDemand` ให้บริการโดย `ruvyxa dev` และ `ruvyxa start` เท่านั้น** การแปลงรูปทำผ่าน native
+> image pipeline ซึ่งไม่มีอยู่ในสิ่งที่ build ปล่อยออกมา ทุก deployed artifact ตอบ `/__ruvyxa/image`
+> ด้วย 404 และความล้มเหลวนี้เงียบโดยธรรมชาติ เพราะเบราว์เซอร์ที่โหลด `srcSet` ไม่ได้จะ fallback
+> ไปที่ `src` หน้าจึงยังขึ้นปกติ ต้นทุนที่เสียคือมือถือโหลดรูปขนาดเต็ม `ruvyxa build`
+> จะเตือนเมื่อเปิดตัวเลือกนี้ และ `ruvyxa test:parity` รายงานเป็น `images@1` ให้ใช้
+> `image.variantWidths` สร้างขนาดที่ deployment ต้องใช้ไว้ล่วงหน้าแทน
+
 <!-- prettier-ignore -->
 ```tsx
 import { Image } from '@ruvyxa/react'

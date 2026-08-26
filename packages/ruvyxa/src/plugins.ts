@@ -52,7 +52,7 @@ export type {
   RobotsRule,
   SitemapOptions,
 } from './plugins/seo.js'
-export { searchIndex } from './plugins/search.js'
+export { DEFAULT_INDEX_LOCALE, searchIndex } from './plugins/search.js'
 export type { SearchDocument, SearchIndexOptions } from './plugins/search.js'
 export { contentEngine, contentEngineFromConfig } from './plugins/content-engine.js'
 export type {

@@ -60,7 +60,13 @@ import { cache as serverCache } from '@ruvyxa/core/server'
 // mirrored. The copy that used to live here spelled the same limits a different
 // way (`{1,128}` for the length check, a literal `128` for the channel cap),
 // which is the state a rule is in just before it drifts.
-import { actionRealtimeEvent } from './action-runtime.mjs'
+// `encodeRealtimeEvent` comes with it for the same reason. This host is the
+// only one that transports the event as `x-ruvyxa-realtime-event`, because the
+// only reader of that header is the Rust host on the other side of this
+// process boundary, which strips it before the response reaches the network. A
+// deployed build has no such reader, so `runAction` returns the event instead
+// of attaching it — see the note there.
+import { actionRealtimeEvent, encodeRealtimeEvent } from './action-runtime.mjs'
 import { methodNotAllowed, selectRouteHandler } from './api-methods.mjs'
 import {
   clientEntrySource,
@@ -1334,10 +1340,7 @@ async function handleAction(request) {
       ? actionRealtimeEvent(action, actionName, requestPath, invalidated)
       : null
   if (realtimeEvent) {
-    response.headers.set(
-      'x-ruvyxa-realtime-event',
-      Buffer.from(JSON.stringify(realtimeEvent)).toString('base64url'),
-    )
+    response.headers.set('x-ruvyxa-realtime-event', encodeRealtimeEvent(realtimeEvent))
   }
   const body = await response.text()
   const headerPairsResult = responseHeaderPairs(response)

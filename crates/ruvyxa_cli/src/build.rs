@@ -370,7 +370,47 @@ fn run_adapter_stage(
         let detail = adapter_phase_detail(args, detected_adapter, artifacts.len());
         print_build_phase(spinner, "adapter", detail, phase_started.elapsed());
     }
+    report_native_only_image_optimization(config, named_adapter);
     Ok(Some(serde_json::to_value(artifacts)?))
+}
+
+/// Say that on-demand image optimization does not survive into this artifact.
+///
+/// `image.onDemand` is served at `/__ruvyxa/image` by the Axum host, which
+/// resizes through the Rust image pipeline. Nothing a build emits carries that
+/// pipeline: `createHandler` takes an `optimizeImage` option and no adapter
+/// passes one, so the endpoint answers 404 in every deployment.
+///
+/// That is recorded as intended in `tests/fixtures/framework-endpoint-conformance.json`
+/// — but it was recorded only *there*. A project that turns the option on gets
+/// working responsive images under `ruvyxa dev` and `ruvyxa start`, and on the
+/// deployed site every `srcSet` entry 404s. The browser falls back to `src`, so
+/// the page still renders and the only symptom is a phone downloading a
+/// full-size image, which is why nothing surfaced it.
+///
+/// Reported rather than refused, exactly like `RUV2205`: a deployment without
+/// the endpoint is still a valid deployment, and a project may enable the
+/// option for development on purpose.
+fn report_native_only_image_optimization(config: &ProjectConfig, adapter: Option<&str>) {
+    if !config.images.on_demand.enabled() {
+        return;
+    }
+    let adapter = adapter.unwrap_or("the configured adapter");
+    warn!(
+        adapter,
+        "on-demand image optimization is not served by a build artifact"
+    );
+    println!(
+        "  {} {}",
+        warn_text("warn"),
+        dim(format!(
+            "image.onDemand is enabled, and /__ruvyxa/image is served by `ruvyxa dev` and \
+             `ruvyxa start` only — the {adapter} artifact carries no image pipeline and \
+             answers 404 there. A page keeps rendering because the browser falls back to \
+             `src`, so the cost is a full-size download rather than an error. Pre-build the \
+             sizes with image.variantWidths, or serve the project with `ruvyxa start`."
+        ))
+    );
 }
 
 pub(crate) async fn build_with_output(args: BuildArgs, show_summary: bool) -> anyhow::Result<()> {

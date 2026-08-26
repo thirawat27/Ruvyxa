@@ -18,11 +18,76 @@ export interface SearchIndexOptions {
   documents: SearchDocument[] | (() => SearchDocument[] | Promise<SearchDocument[]>)
   /** @default "/search-index.json" */
   path?: string
-  /** BCP 47 locale used for word segmentation, including languages such as Thai. */
+  /**
+   * BCP 47 locale used for word segmentation and case folding, including
+   * languages such as Thai.
+   *
+   * Set this. When it is absent the index is built for
+   * {@link DEFAULT_INDEX_LOCALE} and the plugin reports `RUV2207`, because the
+   * alternative -- letting ICU pick -- makes the emitted bytes a function of
+   * the machine that ran the build. See {@link resolveIndexLocale}.
+   */
   locale?: string
   stopWords?: string[]
   /** Ignore shorter terms. @default 2 */
   minTermLength?: number
+}
+
+/**
+ * Locale the index is built for when a project does not name one.
+ *
+ * A search index is a build artifact, so it has to come out of the same source
+ * identically on every machine -- the same property `localeCompare` and
+ * host-locale case folding are banned outright for. Both of the ingredients
+ * here are locale-sensitive: `Intl.Segmenter` decides where words begin, and
+ * case folding decides which term a document is filed under. Passing
+ * `undefined` to either does *not* mean "locale-independent"; it means "ask
+ * ICU for this host's default", which is `th-TH` on the machine this framework
+ * is developed on, `en-US` on GitHub's runners, and `tr-TR` on a Turkish
+ * contributor's laptop -- where `Istanbul` folds to `ıstanbul` and lands under
+ * a different key than it does anywhere else.
+ *
+ * So the fallback is a constant rather than the host's answer. `en` segments
+ * on whitespace and punctuation, which is wrong for Thai and Japanese but
+ * wrong *the same way everywhere*, and `RUV2207` says so out loud instead of
+ * letting a project discover it when CI and a laptop disagree.
+ */
+export const DEFAULT_INDEX_LOCALE = 'en'
+
+/**
+ * Resolve a configured locale to a concrete one, or throw if it is malformed.
+ *
+ * Every locale-sensitive call in this file goes through the value this
+ * returns, and both `segmentWords` and `createSearchIndexBody` take a required
+ * `string`, so `undefined` cannot reach `Intl` by being forgotten at a call
+ * site -- which is how it reached three of them before.
+ */
+export function resolveIndexLocale(locale: string | undefined, plugin: string): string {
+  if (locale === undefined) return DEFAULT_INDEX_LOCALE
+  try {
+    Intl.Segmenter.supportedLocalesOf(locale)
+  } catch {
+    throw new TypeError(`${plugin}: locale must be a valid BCP 47 locale`)
+  }
+  return locale
+}
+
+/** The `RUV2207` a plugin reports when it had to fall back, or `undefined`. */
+export function unsetLocaleDiagnostic(
+  locale: string | undefined,
+  option: string,
+): { level: 'warning'; code: string; message: string } | undefined {
+  if (locale !== undefined) return undefined
+  return {
+    level: 'warning',
+    code: 'RUV2207',
+    message:
+      `${option} is not set, so the search index is built for ` +
+      `"${DEFAULT_INDEX_LOCALE}". Word segmentation and case folding both ` +
+      `depend on it, and a build must not read the host's locale: two ` +
+      `machines would emit different bytes from the same source. Set it to ` +
+      `the language the content is written in.`,
+  }
 }
 
 /** Generates a compact static inverted index with locale-aware tokenization. */
@@ -35,19 +100,22 @@ export function searchIndex(options: SearchIndexOptions): RuvyxaPlugin {
   if (!Number.isInteger(minTermLength) || minTermLength < 1 || minTermLength > 64) {
     throw new TypeError('searchIndex: minTermLength must be an integer from 1 to 64')
   }
+  const locale = resolveIndexLocale(options.locale, 'searchIndex')
+  const diagnostic = unsetLocaleDiagnostic(options.locale, 'searchIndex: locale')
   const stopWords = new Set(
-    // The locale here is the project's own config value, not the host's ICU
-    // default, so this folds identically on every machine that builds it.
-    // Search terms should fold the way the project's language does.
+    // `locale` is resolved above and is always a concrete string, so this folds
+    // the same way on every machine. Passing `options.locale` straight through
+    // would reach ICU as `undefined` and fold by the build host's locale.
     // oxlint-disable-next-line eslint/no-restricted-properties
-    (options.stopWords ?? []).map((word) => word.toLocaleLowerCase(options.locale)),
+    (options.stopWords ?? []).map((word) => word.toLocaleLowerCase(locale)),
   )
 
   const indexBody = (documents: SearchDocument[]) =>
-    createSearchIndexBody(documents, options.locale, stopWords, minTermLength)
+    createSearchIndexBody(documents, locale, stopWords, minTermLength)
 
   return definePlugin({
     name: 'ruvyxa:search-index',
+    ...(diagnostic ? { diagnostics: diagnostic } : {}),
     register({ environment, http, build }) {
       // Same rule as `feed`: a static list answers from either environment, a
       // loader runs per request only in development, where there is no built
@@ -86,7 +154,7 @@ async function resolveSearchDocuments(options: SearchIndexOptions): Promise<Sear
 
 export function createSearchIndexBody(
   input: SearchDocument[],
-  locale: string | undefined,
+  locale: string,
   stopWords: ReadonlySet<string>,
   minTermLength: number,
 ): string {
@@ -95,9 +163,9 @@ export function createSearchIndexBody(
   for (const document of documents) {
     const content = [document.title, document.text, ...(document.tags ?? [])].join(' ')
     for (const term of segmentWords(content, locale)) {
-      // The locale here is the project's own config value, not the host's ICU
-      // default, so this folds identically on every machine that builds it.
-      // Search terms should fold the way the project's language does.
+      // `locale` is a required parameter rather than `string | undefined` on
+      // purpose: this is the fold that decides which key a document is filed
+      // under, and `undefined` here would ask the build host's ICU instead.
       // oxlint-disable-next-line eslint/no-restricted-properties
       const normalized = term.toLocaleLowerCase(locale)
       if (normalized.length < minTermLength || stopWords.has(normalized)) continue
@@ -138,7 +206,14 @@ function normalizeSearchDocuments(documents: SearchDocument[]): SearchDocument[]
     .sort((left, right) => compareStable(left.id, right.id))
 }
 
-export function segmentWords(value: string, locale: string | undefined): string[] {
+/**
+ * Split text into word-like segments for the given locale.
+ *
+ * `locale` is required. `new Intl.Segmenter(undefined)` resolves to the host's
+ * default locale, which made the emitted index a function of the machine that
+ * built it -- the defect this signature exists to prevent from coming back.
+ */
+export function segmentWords(value: string, locale: string): string[] {
   const Segmenter = Intl.Segmenter
   if (Segmenter) {
     return [...new Segmenter(locale, { granularity: 'word' }).segment(value)]

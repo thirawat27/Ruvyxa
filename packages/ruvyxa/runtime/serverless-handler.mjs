@@ -923,6 +923,14 @@ export function createHandler(options) {
         return textResponse(404, 'Route action file was not found')
       }
 
+      // `realtimeEvent` is deliberately dropped. `realtime@1` is a native-host
+      // capability that no build artifact carries -- `ruvyxa build` warns
+      // RUV2205 about exactly that -- so this host has nowhere to publish the
+      // event to and no reader downstream to strip it. It used to arrive as an
+      // `x-ruvyxa-realtime-event` header on the response, and since the
+      // function's response is what the browser receives, every action on a
+      // realtime-declaring route published its channel list and every key it
+      // passed to `invalidate()` to the client.
       const { response, revalidate } = await runAction({
         module,
         actionName,

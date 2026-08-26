@@ -654,14 +654,15 @@ async fn call_worker(
     if output.ok {
         return Ok(output.result.unwrap_or(serde_json::Value::Null));
     }
-    Err(CallFailure::Hook(RuvyxaError::Message(format!(
-        "{} {}",
-        output.code.unwrap_or_else(|| "RUV1700".to_string()),
-        output
-            .message
-            .or(output.stack)
-            .unwrap_or_else(|| "TypeScript plugin hook failed".to_string())
-    ))))
+    Err(CallFailure::Hook(RuvyxaError::Message(
+        ruvyxa_diagnostics::label_with_code(
+            &output.code.unwrap_or_else(|| "RUV1700".to_string()),
+            &output
+                .message
+                .or(output.stack)
+                .unwrap_or_else(|| "TypeScript plugin hook failed".to_string()),
+        ),
+    )))
 }
 
 fn decode_runtime_output(line: &str) -> std::result::Result<RuntimeOutput, CallFailure> {

@@ -6,7 +6,12 @@ import { definePlugin } from '@ruvyxa/core/plugin'
 import type { RuvyxaPlugin } from '@ruvyxa/core/plugin'
 
 import { matchSource } from './http.js'
-import { createSearchIndexBody, segmentWords } from './search.js'
+import {
+  createSearchIndexBody,
+  resolveIndexLocale,
+  segmentWords,
+  unsetLocaleDiagnostic,
+} from './search.js'
 import { createRssFeed } from './seo.js'
 import {
   compareStable,
@@ -58,7 +63,15 @@ export interface ContentEngineOptions {
   appDir?: string
   /** Exact route paths or trailing-`*` patterns omitted from every artifact. */
   exclude?: string[]
-  /** BCP 47 locale used for search tokenization and reading-time estimates. */
+  /**
+   * BCP 47 locale used for search tokenization and reading-time estimates.
+   *
+   * Falls back to `site.language`, then to the search plugin's
+   * `DEFAULT_INDEX_LOCALE` with an `RUV2207` warning. It never falls back to
+   * the build host's locale: word segmentation and case folding both depend on
+   * it, so that would make the emitted index differ between two machines
+   * building the same source.
+   */
   locale?: string
   stopWords?: string[]
   /** Ignore shorter search terms. @default 2 */
@@ -107,7 +120,10 @@ interface NormalizedContentEngineOptions {
   description: string
   appDir: string
   exclude: string[]
-  locale: string | undefined
+  /** Always concrete — see `resolveIndexLocale`. Never the host's default. */
+  locale: string
+  /** The locale the project actually configured, for the `RUV2207` check. */
+  configuredLocale: string | undefined
   stopWords: ReadonlySet<string>
   minTermLength: number
   manifestPath: string
@@ -146,8 +162,14 @@ export function contentEngine(options: ContentEngineOptions): RuvyxaPlugin {
     return artifacts
   }
 
+  const localeDiagnostic = unsetLocaleDiagnostic(
+    normalized.configuredLocale,
+    'content.engine.locale (or site.language)',
+  )
+
   return definePlugin({
     name: 'ruvyxa:content-engine',
+    ...(localeDiagnostic ? { diagnostics: localeDiagnostic } : {}),
     register({ http, build }) {
       http.onRequest({
         match: outputPaths,
@@ -241,13 +263,7 @@ function normalizeContentEngineOptions(
     throw new TypeError('contentEngine: appDir must stay inside the project root')
   }
   const exclude = normalizeRoutes(options.exclude, 'contentEngine') ?? []
-  if (options.locale !== undefined) {
-    try {
-      Intl.Segmenter.supportedLocalesOf(options.locale)
-    } catch {
-      throw new TypeError('contentEngine: locale must be a valid BCP 47 locale')
-    }
-  }
+  const locale = resolveIndexLocale(options.locale, 'contentEngine')
   if (
     options.stopWords !== undefined &&
     (!Array.isArray(options.stopWords) ||
@@ -289,13 +305,14 @@ function normalizeContentEngineOptions(
     description: options.description,
     appDir,
     exclude,
-    locale: options.locale,
+    locale,
+    configuredLocale: options.locale,
     stopWords: new Set(
-      // The locale here is the project's own config value, not the host's ICU
-      // default, so this folds identically on every machine that builds it.
-      // Search terms should fold the way the project's language does.
+      // `locale` is resolved above and is always a concrete string, so this
+      // folds the same way on every machine. Passing `options.locale` straight
+      // through would reach ICU as `undefined` and fold by the build host's.
       // oxlint-disable-next-line eslint/no-restricted-properties
-      (options.stopWords ?? []).map((word) => word.toLocaleLowerCase(options.locale)),
+      (options.stopWords ?? []).map((word) => word.toLocaleLowerCase(locale)),
     ),
     minTermLength,
     manifestPath,

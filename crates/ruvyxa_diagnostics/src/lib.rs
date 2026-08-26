@@ -436,6 +436,55 @@ mod path_tests {
         assert_eq!(label_with_code("RUV1700", "RUV17"), "RUV1700 RUV17");
     }
 
+    /// No host may join a code to a message by hand again.
+    ///
+    /// This started as one doubled code in a Vercel build log and turned out to
+    /// be fifteen call sites across three crates, each formatting `{code}` and
+    /// `{message}` itself. Six were fixed and nine were not, which is what a
+    /// list-shaped sweep does to a class — so the rule is asserted over the
+    /// source rather than left to whoever reads the next one.
+    #[test]
+    fn no_crate_formats_a_code_beside_a_message_by_hand() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../..")
+            .canonicalize()
+            .expect("workspace root");
+        let shapes = [
+            "format!(\"{code}: {message}\")",
+            "format!(\"{code}: {explanation}\")",
+        ];
+        let mut offenders = Vec::new();
+        for crate_name in ["ruvyxa_cli", "ruvyxa_dev_server", "ruvyxa_middleware"] {
+            let directory = root.join("crates").join(crate_name).join("src");
+            let Ok(entries) = std::fs::read_dir(&directory) else {
+                continue;
+            };
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                let Ok(source) = std::fs::read_to_string(&path) else {
+                    continue;
+                };
+                for shape in shapes {
+                    if source.contains(shape) {
+                        offenders.push(format!("{} contains {shape}", path.display()));
+                    }
+                }
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "join through label_with_code instead:
+  {}",
+            offenders.join(
+                "
+  "
+            )
+        );
+    }
+
     #[test]
     fn a_code_alone_is_a_code() {
         assert_eq!(label_with_code("RUV1700", "RUV3201"), "RUV3201");

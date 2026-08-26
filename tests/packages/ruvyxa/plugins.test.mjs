@@ -18,6 +18,7 @@ import {
   bundleBudget,
   cacheRules,
   contentEngine,
+  DEFAULT_INDEX_LOCALE,
   feed,
   fonts,
   headers,
@@ -46,7 +47,13 @@ import { definePlugin } from '../../../packages/@ruvyxa/core/dist/plugin.js'
  * it says nothing, and because most plugins register identically either way.
  */
 function register(plugin, environment = 'production') {
-  const registered = { middleware: [], resolveId: [], buildComplete: [], routes: [] }
+  const registered = {
+    middleware: [],
+    resolveId: [],
+    buildComplete: [],
+    routes: [],
+    diagnostics: [],
+  }
   plugin.register({
     environment,
     http: {
@@ -89,10 +96,54 @@ function register(plugin, environment = 'production') {
       },
     },
     dev: { onFileChange() {} },
-    diagnostics: { report() {} },
+    diagnostics: {
+      report(diagnostic) {
+        registered.diagnostics.push(diagnostic)
+      },
+    },
     native: { claim() {} },
   })
   return registered
+}
+
+/**
+ * Record every locale a build asks `Intl` for while `run` executes.
+ *
+ * Node reads its ICU default from the operating system and ignores `LC_ALL`
+ * and `LANG` on Windows, so a test cannot prove host-independence by running
+ * the same build under two locales. It can prove the stronger property that
+ * makes the host irrelevant: that no call reaches `Intl` without a locale at
+ * all. `undefined` is the value that means "ask this machine".
+ */
+async function recordRequestedLocales(run) {
+  const requested = []
+  const RealSegmenter = Intl.Segmenter
+  // `no-restricted-properties` and `no-extend-native` are both disabled across
+  // this helper, and both bans are the reason it exists: it observes the exact
+  // calls they forbid so a test can assert none of them reached ICU without a
+  // locale. The patch is scoped to one `run()` and restored in `finally`.
+  // oxlint-disable eslint/no-restricted-properties
+  // oxlint-disable eslint/no-extend-native
+  const realFold = String.prototype.toLocaleLowerCase
+  Intl.Segmenter = class RecordingSegmenter extends RealSegmenter {
+    constructor(locale, options) {
+      requested.push(['Intl.Segmenter', locale])
+      super(locale, options)
+    }
+  }
+  String.prototype.toLocaleLowerCase = function recordingFold(locale) {
+    requested.push(['toLocaleLowerCase', locale])
+    return realFold.call(this, locale)
+  }
+  try {
+    await run()
+  } finally {
+    Intl.Segmenter = RealSegmenter
+    String.prototype.toLocaleLowerCase = realFold
+  }
+  // oxlint-enable eslint/no-extend-native
+  // oxlint-enable eslint/no-restricted-properties
+  return requested
 }
 
 const middlewareContext = { plugin: 'test', root: 'D:/app' }
@@ -812,6 +863,63 @@ describe('searchIndex()', () => {
       }),
     )
     await assert.rejects(() => buildComplete[0](tempBuildContext({ routes: [] })), /duplicate id/)
+  })
+
+  // The index is a build artifact, so the same source has to emit the same
+  // bytes everywhere. Both ingredients are locale-sensitive -- `Intl.Segmenter`
+  // decides where words begin and case folding decides which key a document is
+  // filed under -- and both used to receive `options.locale` straight through.
+  // With `locale` unset that reached ICU as `undefined`, which does not mean
+  // "locale-independent": it means "this machine's locale". A build on the
+  // machine this framework is developed on segments as `th-TH`, the same build
+  // on GitHub's runners as `en-US`, and on a Turkish contributor's laptop
+  // `Istanbul` folds to `ıstanbul` and lands under a different term entirely.
+  // `scripts/verify-reproducible.mjs` builds twice on one host, so it could
+  // never see this.
+  describe('locale is a function of the project, never of the build host', () => {
+    const documents = [
+      { id: 'a', title: 'Istanbul Airport', url: '/a', text: 'สวัสดีชาวโลก I love IT' },
+      { id: 'b', title: 'ประเทศไทย', url: '/b', text: 'Istanbul again' },
+    ]
+
+    async function indexFor(options) {
+      const { buildComplete } = register(searchIndex({ documents, ...options }))
+      const context = tempBuildContext({ routes: [] })
+      await buildComplete[0](context)
+      return readFileSync(path.join(context.outDir, 'assets', 'search-index.json'), 'utf8')
+    }
+
+    it('falls back to a fixed locale rather than the host default', async () => {
+      assert.equal(await indexFor({}), await indexFor({ locale: DEFAULT_INDEX_LOCALE }))
+    })
+
+    it('never asks Intl for a locale it was not given', async () => {
+      const requested = await recordRequestedLocales(() => indexFor({}))
+      assert.ok(requested.length > 0, 'the build should have consulted Intl at all')
+      assert.deepEqual(
+        requested.filter(([, locale]) => locale === undefined),
+        [],
+        'a call with no locale resolves to the build host and must not exist',
+      )
+    })
+
+    it('says so rather than falling back silently', async () => {
+      const { diagnostics } = register(searchIndex({ documents }))
+      assert.deepEqual(
+        diagnostics.map(({ level, code }) => [level, code]),
+        [['warning', 'RUV2207']],
+      )
+      assert.match(diagnostics[0].message, /searchIndex: locale is not set/)
+    })
+
+    it('stays quiet once a project names one', async () => {
+      const { diagnostics } = register(searchIndex({ documents, locale: 'th' }))
+      assert.deepEqual(diagnostics, [])
+    })
+
+    it('rejects a malformed locale instead of reaching Intl with it', () => {
+      assert.throws(() => searchIndex({ documents, locale: 'invalid_locale' }), /BCP 47/)
+    })
   })
 })
 
