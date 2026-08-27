@@ -71,6 +71,7 @@ import { applyPluginHttp, loadActionModule, loadRouteModule } from './route-modu
 // needs must be reachable through the module graph. A sibling manifest.json
 // read from import.meta.dirname is not, and never reaches /var/task.
 import manifest from './manifest.mjs';
+import { createHash } from 'node:crypto';
 import { readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -92,10 +93,15 @@ const isrCacheDir = path.join(os.tmpdir(), 'ruvyxa-isr-cache');
  * The cache tag a document is stored under, so one path can be dropped from
  * Netlify's cache without dropping the site's.
  *
- * A tag list is comma-separated, so the path is folded to one token.
+ * A tag list is comma-separated, so the path has to become one token — and the
+ * mapping to that token has to be injective, which folding every run of
+ * non-alphanumerics to a single \`-\` is not: \`/a/b\`, \`/a-b\` and \`/a_b\` all
+ * produced \`ruvyxa-a-b\`, so \`revalidatePath('/a/b')\` dropped two other pages
+ * from the edge as well. A digest is one token, is the same length whatever the
+ * path, and cannot collide by construction.
  */
 function cacheTag(pathname) {
-  return 'ruvyxa' + pathname.replace(/[^A-Za-z0-9]+/g, '-').replace(/-+$/, '');
+  return 'ruvyxa-' + createHash('sha256').update(pathname).digest('hex').slice(0, 32);
 }
 
 /**

@@ -803,4 +803,21 @@ describe('vercel prerender functions', () => {
       delete process.env.RUVYXA_PREVIEW_SECRET
     }
   })
+
+  it('reads the origin to purge from the request being served, not from a shared slot', async () => {
+    const artifacts = (await build()).artifacts ?? []
+    const source = String(
+      artifacts.find((artifact) => artifact.kind === 'function')?.handlerSource ?? '',
+    )
+    // One instance of a Vercel function answers more than one request at a
+    // time, so a module-level `requestOrigin = url.origin` is overwritten by
+    // whatever arrived next: the purge then went to the other request's domain
+    // and left the page it was asked to drop cached on the domain a visitor was
+    // reading. Nothing about the response shows it, and it only happens under
+    // concurrency.
+    assert.match(source, /new AsyncLocalStorage\(\)/)
+    assert.match(source, /requestOrigin\.run\(url\.origin,/)
+    assert.match(source, /const origin = requestOrigin\.getStore\(\)/)
+    assert.doesNotMatch(source, /^\s*requestOrigin = /m)
+  })
 })

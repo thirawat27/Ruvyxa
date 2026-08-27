@@ -164,6 +164,21 @@ export default config({ adapter: cloudflare({ isr: { kvBinding: 'RUVYXA_ISR' } }
 สร้าง namespace ครั้งเดียวด้วย `wrangler kv namespace create RUVYXA_ISR` แล้วเอา id ที่ได้ไปใส่ใน
 `wrangler.jsonc` ที่ระบบสร้างให้ id ผูกกับบัญชี ไฟล์ที่ generate จึงใส่ placeholder ไว้แทนของจริง
 
+### On-demand revalidation บน Vercel
+
+route แบบ ISR บน Vercel ถูกเสิร์ฟด้วย Prerender Function ซึ่ง cache อยู่ "หน้า" function
+ไม่ใช่ข้างใน `revalidatePath()` จึงต้องยิงถึง CDN และ Vercel รับ credential เดียวสำหรับเรื่องนี้คือ
+prerender bypass token ที่ adapter เขียนลงใน `<route>.prerender-config.json` แต่ละไฟล์ และลงใน
+function ที่ส่ง token กลับไป
+
+ตั้ง `RUVYXA_PREVIEW_SECRET` ใน build environment adapter จะ hash ค่านั้นเป็น token
+ตัวค่าจริงจึงไม่เคย ไปโผล่ใน output ที่ deploy
+
+ถ้าไม่ตั้ง token จะ derive จาก build id ซึ่งทำให้ `ruvyxa build` ยัง reproducible แต่ก็แปลว่า token
+เป็น ฟังก์ชันของสิ่งที่ build เปิดเผยอยู่แล้ว ทั้งชื่อ asset, path ของเอกสาร และตาราง route
+ให้ถือว่าค่า default นี้ สะดวกสำหรับ preview deployment ไม่ใช่ความลับ ใครถือ token ก็สั่งข้าม CDN
+cache ได้ทุก request
+
 ### Edge Function ต่อ route บน Vercel
 
 route ที่ประกาศ `export const runtime = 'edge'` จะรันบน Node เหมือน route อื่นถ้าไม่ได้สั่งให้

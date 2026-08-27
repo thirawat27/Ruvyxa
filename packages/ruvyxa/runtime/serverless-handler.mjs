@@ -1370,6 +1370,30 @@ export function createHandler(options) {
   }
 }
 
+/**
+ * Whether `src` names a file under the project's `public/` directory.
+ *
+ * The rule `optimize` in `crates/ruvyxa_dev_server/src/dynamic_image.rs`
+ * applies before it touches the disk, and it has to be the same rule: one URL
+ * that answers under `ruvyxa start` and 400s on a deployed build — or the
+ * reverse — is a difference nothing about the markup or the status code shows.
+ *
+ * `.`, `..`, a backslash, a colon and the control characters are refused by
+ * `isUnsafeSegment`, which is this module's one answer to what may become a
+ * path. A query or fragment is refused outright: a `src` names a file rather
+ * than a URL, and an adapter that forwards it to a platform optimizer would
+ * otherwise hand that optimizer the rest of the string as parameters of its
+ * own.
+ */
+function isPublicImageSource(src) {
+  if (typeof src !== 'string') return false
+  if (!src.startsWith('/') || src.startsWith('//')) return false
+  if (src.includes('?') || src.includes('#')) return false
+  const segments = src.split('/').filter((segment) => segment !== '')
+  if (segments.length === 0) return false
+  return !segments.some(isUnsafeSegment)
+}
+
 async function handleDynamicImage(request, optimizer, defaultQuality = DEFAULT_IMAGE_QUALITY) {
   if (typeof optimizer !== 'function') return new Response('Not Found', { status: 404 })
   if (!['GET', 'HEAD'].includes(request.method)) {
@@ -1385,10 +1409,7 @@ async function handleDynamicImage(request, optimizer, defaultQuality = DEFAULT_I
   // default — the caller asked for something and got something else.
   const quality = requestedQuality === null ? defaultQuality : Number(requestedQuality)
   if (
-    typeof src !== 'string' ||
-    !src.startsWith('/') ||
-    src.startsWith('//') ||
-    src.includes('\\') ||
+    !isPublicImageSource(src) ||
     !Number.isInteger(width) ||
     width < MIN_IMAGE_WIDTH ||
     width > MAX_IMAGE_WIDTH ||

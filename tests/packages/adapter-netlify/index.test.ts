@@ -5,6 +5,7 @@ import { execFileSync } from 'node:child_process'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
+import { pathToFileURL } from 'node:url'
 
 import type { AdapterArtifact } from '../../../packages/@ruvyxa/core/dist/types.js'
 import { DEFAULT_SECURITY_HEADERS } from '../../../packages/@ruvyxa/core/dist/utils.js'
@@ -334,6 +335,38 @@ describe('netlify durable cache', () => {
     assert.match(source, /headers\.set\('cache-tag', cacheTag/)
     // Only a shared-cacheable response — never one rendered for one visitor.
     assert.match(source, /cacheControl\.includes\('s-maxage'\)/)
+  })
+
+  it('gives two different paths two different tags', async () => {
+    // The tag was `pathname.replace(/[^A-Za-z0-9]+/g, '-')`, which is not a
+    // mapping but a fold: `/a/b`, `/a-b` and `/a_b` all became `ruvyxa-a-b`, so
+    // `revalidatePath('/a/b')` dropped the other two from Netlify's edge as
+    // well. Nothing fails when that happens — the pages simply re-render, and
+    // the site pays for renders nobody asked for.
+    //
+    // Run rather than matched: a text assertion passes just as happily against
+    // a lossy expression as against an injective one.
+    const source = await handlerSource()
+    const body = /function cacheTag\(pathname\) \{[\s\S]*?\n\}/.exec(source)
+    assert.ok(body, 'the emitted handler must declare cacheTag')
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-netlify-tag-'))
+    try {
+      const file = path.join(root, 'cache-tag.mjs')
+      await writeFile(
+        file,
+        `import { createHash } from 'node:crypto'\n${body[0]}\nexport { cacheTag }\n`,
+      )
+      const { cacheTag } = (await import(pathToFileURL(file).href)) as {
+        cacheTag: (pathname: string) => string
+      }
+      const paths = ['/', '/a/b', '/a-b', '/a_b', '/a.b', '/blog/hello-world', '/blog/hello_world']
+      const tags = paths.map(cacheTag)
+      assert.equal(new Set(tags).size, paths.length, tags.join(' '))
+      // A tag list is comma-separated and the tag is one token.
+      for (const tag of tags) assert.match(tag, /^ruvyxa-[0-9a-f]{32}$/)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
   })
 
   it('purges the tag when revalidatePath() forces a write', async () => {

@@ -744,6 +744,42 @@ describe('serverless i18n and dynamic image parity', () => {
     )
     assert.equal(calls.length, 1)
   })
+
+  it('refuses an image src the native host refuses, segment for segment', async () => {
+    // `rejects_external_and_traversing_sources_before_io` and the `?`/`#` guard
+    // in `crates/ruvyxa_dev_server/src/dynamic_image.rs` decide the same thing
+    // under `ruvyxa dev` and `ruvyxa start`. This host used to check only the
+    // leading slash and the backslash, so `/../a.png` and `/a.png?x=1` reached
+    // the adapter's optimizer — one URL answering on one deployment target and
+    // 400ing on another, with nothing in the markup or the status to show it.
+    const calls = []
+    const handler = createHandler({
+      routes: [],
+      importPage: async () => ({}),
+      importApi: async () => ({}),
+      optimizeImage: async (_request, input) => {
+        calls.push(input)
+        return new Response('image', { headers: { 'content-type': 'image/webp' } })
+      },
+    })
+
+    for (const src of [
+      '/../a.png',
+      '/a/../../b.png',
+      '/a/./b.png',
+      '//host/a.png',
+      '/a:b.png',
+      '/a.png?x=1',
+      '/a.png#frag',
+      '/',
+    ]) {
+      const response = await handler(
+        new Request(`https://example.com/__ruvyxa/image?src=${encodeURIComponent(src)}&w=640`),
+      )
+      assert.equal(response.status, 400, src)
+    }
+    assert.equal(calls.length, 0)
+  })
 })
 
 describe('prerender cache path mapping', () => {

@@ -91,6 +91,7 @@ import { applyPluginHttp, loadActionModule, loadRouteModule } from './route-modu
 // carries files it can resolve statically (see the netlify adapter, where a
 // readFileSync of a sibling manifest.json crashed the deployed function).
 import manifest from './manifest.mjs';
+import { AsyncLocalStorage } from 'node:async_hooks';
 import { readFileSync, writeFileSync, mkdirSync, statSync } from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
@@ -111,17 +112,25 @@ const isrCacheDir = path.join(os.tmpdir(), 'ruvyxa-isr-cache');
 // the path carrying \`x-prerender-revalidate: <bypassToken>\`. That is what makes
 // \`revalidatePath()\` mean the same thing here as it does under \`ruvyxa start\`.
 const BYPASS_TOKEN = ${JSON.stringify(bypassToken)};
-// Set per request, read by the purge below: a request-scoped value rather than
-// a configured site URL, so a preview deployment purges its own domain.
-let requestOrigin = null;
+// The origin of the request being served, read by the purge below: a
+// request-scoped value rather than a configured site URL, so a preview
+// deployment purges its own domain and a custom domain purges its own.
+//
+// Held in an AsyncLocalStorage and not in a module-level variable. One instance
+// of this function answers more than one request at a time, so a plain
+// assignment is overwritten by whatever arrived next — and the purge then went
+// to the other request's domain, leaving the page it was asked to drop cached
+// on the domain a visitor was actually reading.
+const requestOrigin = new AsyncLocalStorage();
 
 async function revalidateOnVercel(pathname) {
-  if (requestOrigin === null) return;
+  const origin = requestOrigin.getStore();
+  if (origin === undefined) return;
   try {
     // This re-enters the function, which renders and stores the page again —
     // an ordinary refresh, not a forced one, so it cannot schedule a third
     // request and loop.
-    await fetch(new URL(pathname, requestOrigin), {
+    await fetch(new URL(pathname, origin), {
       method: 'GET',
       headers: { 'x-prerender-revalidate': BYPASS_TOKEN },
     });
@@ -209,7 +218,10 @@ async function readRequestBody(req) {
 
 export default async function(req, res, context) {
   const url = new URL(req.url, \`https://\${req.headers.host || 'localhost'}\`);
-  requestOrigin = url.origin;
+  return requestOrigin.run(url.origin, () => serve(req, res, context, url));
+}
+
+async function serve(req, res, context, url) {
   const headers = new Headers();
   for (const [key, value] of Object.entries(req.headers)) {
     if (value) headers.set(key, Array.isArray(value) ? value.join(', ') : value);
@@ -373,6 +385,15 @@ function functionOutputName(routePath: string): string {
  * from the build id — which is itself derived from the emitted output — so two
  * builds of one commit still produce identical bytes and `verify:reproducible`
  * keeps meaning something. A random token per build would not.
+ *
+ * That default is a convenience and not a secret, and the difference is worth
+ * naming rather than leaving in a hash: the build id is a digest of the build's
+ * own public surface — asset names, document paths, the route table — so anyone
+ * willing to reconstruct that input reconstructs the token. What the token buys
+ * them is a cache bypass, which turns every request into a render. A project
+ * that cares sets `RUVYXA_PREVIEW_SECRET`; `docs/en/20-platform-adapter-guide.md`
+ * says so under "On-demand revalidation on Vercel", because a mitigation nobody
+ * can find is not one.
  */
 function prerenderBypassToken(buildId: string): string {
   const configured = process.env.RUVYXA_PREVIEW_SECRET

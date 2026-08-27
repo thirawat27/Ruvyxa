@@ -167,6 +167,21 @@ Create the namespace once with `wrangler kv namespace create RUVYXA_ISR` and pas
 into the generated `wrangler.jsonc`. The id is account-specific, so the generated file carries a
 placeholder rather than a real one.
 
+### On-demand revalidation on Vercel
+
+An ISR route on Vercel is served by a Prerender Function, whose cache sits in front of the function
+rather than inside it. `revalidatePath()` therefore has to reach the CDN, and Vercel accepts exactly
+one credential for that: the prerender bypass token, which the adapter writes into each
+`<route>.prerender-config.json` and into the function that sends it back.
+
+Set `RUVYXA_PREVIEW_SECRET` in the build environment. The adapter hashes it into the token, so the
+value itself never reaches the deployed output.
+
+Without it the token is derived from the build id, which keeps `ruvyxa build` reproducible but makes
+the token a function of the build's own public surface — its asset names, its document paths, and
+its route table. Treat that default as a convenience for a preview deployment, not as a secret:
+anyone holding the token can bypass the CDN cache for a request, so every request renders.
+
 ### Per-route Edge Functions on Vercel
 
 A route that declares `export const runtime = 'edge'` runs on Node like any other unless the adapter

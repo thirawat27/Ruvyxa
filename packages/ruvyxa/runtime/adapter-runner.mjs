@@ -1,6 +1,5 @@
-import { cp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { cp, mkdir, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { existsSync, writeSync } from 'node:fs'
-import { symlink } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
