@@ -181,73 +181,86 @@ mod tests {
         }
     }
 
-    #[test]
-    fn cookie_wins_then_accept_language_matches_primary_subtags() {
-        let config = config();
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            header::ACCEPT_LANGUAGE,
-            HeaderValue::from_static("fr-CA,th;q=.8"),
-        );
-        assert_eq!(preferred_locale(&config, &headers), "fr-FR");
-        headers.insert(
-            header::COOKIE,
-            HeaderValue::from_static("x=1; RUVYXA_LOCALE=th"),
-        );
-        assert_eq!(preferred_locale(&config, &headers), "th");
+    fn page_route(path: &str) -> RouteEntry {
+        RouteEntry {
+            id: format!("app{path}/page"),
+            path: path.into(),
+            kind: RouteKind::Page,
+            file: PathBuf::from(format!("app{path}/page.tsx")),
+            layout_chain: vec![],
+            template_chain: Vec::new(),
+            slots: Vec::new(),
+            intercepts: Vec::new(),
+            server_modules: vec![],
+            client_modules: vec![],
+            runtime: ruvyxa_graph::RuntimeTarget::Node,
+            render: Default::default(),
+        }
     }
 
-    /// Reserved paths are excluded by whole segment, not by raw byte prefix.
-    /// A project route whose name merely begins with `/__ruvyxa` or `/api` is
-    /// the project's own page and must still be redirected to a locale.
+    /// The locale-redirect table, replayed from the fixture both hosts read.
+    ///
+    /// This replaced two hand-written tests that each pinned one behavior on
+    /// this side alone. Both were right and neither reached the deployed
+    /// handler, which is where `detectLocale: false` and the reserved-prefix
+    /// rule had drifted — see the fixture's own comment.
     #[test]
-    fn reserved_prefixes_are_excluded_by_segment_not_by_byte_prefix() {
-        let manifest = RouteManifest {
-            app_dir: PathBuf::from("app"),
-            i18n: Some(config()),
-            routes: vec![RouteEntry {
-                id: "app/[lang]/__ruvyxa-notes/page".into(),
-                path: "/[lang]/__ruvyxa-notes".into(),
-                kind: RouteKind::Page,
-                file: PathBuf::from("app/[lang]/__ruvyxa-notes/page.tsx"),
-                layout_chain: vec![],
-                template_chain: Vec::new(),
-                slots: Vec::new(),
-                intercepts: Vec::new(),
-                server_modules: vec![],
-                client_modules: vec![],
-                runtime: ruvyxa_graph::RuntimeTarget::Node,
-                render: Default::default(),
-            }],
-        };
-        let router = RadixRouter::compile(&manifest);
-        let headers = HeaderMap::new();
+    fn locale_redirects_match_the_shared_conformance_table() {
+        const FIXTURE: &str = include_str!("../../../tests/fixtures/i18n-routing-conformance.json");
+        let fixture: serde_json::Value = serde_json::from_str(FIXTURE).expect("fixture json");
+        let table = &fixture["config"];
+        let routes = fixture["routes"]
+            .as_array()
+            .expect("routes")
+            .iter()
+            .map(|path| page_route(path.as_str().expect("route path")))
+            .collect::<Vec<_>>();
+        let cases = fixture["cases"].as_array().expect("cases");
+        assert!(!cases.is_empty(), "the table must carry cases");
 
-        assert_eq!(
-            locale_redirect_path(
-                Some(&config()),
-                &manifest,
-                &router,
-                "/__ruvyxa-notes",
-                "GET",
-                &headers
-            ),
-            Some("/en/__ruvyxa-notes".to_string()),
-            "a project page is not a reserved endpoint just because it shares a byte prefix"
-        );
+        for case in cases {
+            let config = I18nRouting {
+                locales: table["locales"]
+                    .as_array()
+                    .expect("locales")
+                    .iter()
+                    .map(|value| value.as_str().expect("locale").to_string())
+                    .collect(),
+                default_locale: table["defaultLocale"].as_str().expect("default").into(),
+                locale_param: table["localeParam"].as_str().expect("param").into(),
+                detect_locale: case["detectLocale"].as_bool().expect("detectLocale"),
+                cookie: table["cookie"].as_str().expect("cookie").into(),
+            };
+            let manifest = RouteManifest {
+                app_dir: PathBuf::from("app"),
+                i18n: Some(config.clone()),
+                routes: routes.clone(),
+            };
+            let router = RadixRouter::compile(&manifest);
+            let mut headers = HeaderMap::new();
+            for (name, value) in case["headers"].as_object().expect("headers") {
+                headers.insert(
+                    header::HeaderName::from_bytes(name.as_bytes()).expect("header name"),
+                    HeaderValue::from_str(value.as_str().expect("header value"))
+                        .expect("header value"),
+                );
+            }
 
-        // The real reserved namespace still opts out.
-        assert_eq!(
-            locale_redirect_path(
-                Some(&config()),
-                &manifest,
-                &router,
-                "/__ruvyxa/flight",
-                "GET",
-                &headers
-            ),
-            None
-        );
+            assert_eq!(
+                locale_redirect_path(
+                    Some(&config),
+                    &manifest,
+                    &router,
+                    case["path"].as_str().expect("path"),
+                    case["method"].as_str().expect("method"),
+                    &headers,
+                ),
+                case["redirect"].as_str().map(str::to_string),
+                "{} {}",
+                case["path"],
+                case["$why"].as_str().unwrap_or_default()
+            );
+        }
     }
 
     #[test]

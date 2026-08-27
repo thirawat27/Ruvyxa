@@ -1,0 +1,126 @@
+{
+  "$comment": [
+    "Shared locale-redirect conformance table.",
+    "",
+    "An unprefixed URL cannot match a `/[lang]/…` route, so both hosts answer it",
+    "with a redirect to a prefixed one. They cannot share the code:",
+    "  - crates/ruvyxa_dev_server/src/i18n.rs        (`dev`, `start`, `preview`)",
+    "  - packages/ruvyxa/runtime/serverless-handler.mjs  (every serverless adapter)",
+    "",
+    "They had disagreed, in two ways, and both were invisible because every test",
+    "on both sides set `detectLocale: true` and asked for an ordinary path:",
+    "",
+    "  1. `detectLocale: false` turned the redirect off entirely in the deployed",
+    "     handler and only turned *detection* off in the native server. The",
+    "     option says which signals pick the locale, not whether locale routing",
+    "     happens — with it off, the native server still sent `/about` to",
+    "     `/en/about` while a deployed build returned no redirect at all, so",
+    "     every unprefixed URL 404ed once the project shipped.",
+    "  2. The reserved namespace was excluded by raw byte prefix in the deployed",
+    "     handler and by whole segment in the native server. `/__ruvyxa-notes` is",
+    "     a page a project may legitimately own; it was redirected under",
+    "     `ruvyxa dev` and silently excluded once deployed.",
+    "",
+    "The native server's behavior is the shared one in both: it is the one that",
+    "keeps a project's URLs resolving, and the segment rule is a decision that",
+    "was already made and reasoned about there.",
+    "",
+    "Every implementation replays this file:",
+    "  - crates/ruvyxa_dev_server/src/i18n.rs                    (Rust test)",
+    "  - tests/packages/ruvyxa/serverless-handler.test.mjs       (JavaScript test)",
+    "",
+    "Add a case here first when changing what gets redirected where; a port that",
+    "drifts then fails in the language that drifted rather than in a deployed",
+    "site nobody has clicked through yet."
+  ],
+
+  "$knownGap": [
+    "One difference is deliberately *not* settled here, because settling it is a",
+    "product decision rather than a port: the native server declines to redirect",
+    "any path that has a file extension (`Path::extension().is_some()`), while",
+    "the handler declines only paths with a known static-asset extension",
+    "(`isStaticAssetPath`). A page route such as `/docs/v1.2` is redirected by",
+    "one and not the other. No case below depends on it."
+  ],
+
+  "config": {
+    "locales": ["en", "th", "fr-FR"],
+    "defaultLocale": "en",
+    "localeParam": "lang",
+    "cookie": "RUVYXA_LOCALE"
+  },
+
+  "$routesNote": [
+    "The page routes a case is matched against. Both replays build these two and",
+    "nothing else, so a case expecting `null` because no page exists is distinct",
+    "from one expecting `null` because the request was excluded."
+  ],
+  "routes": ["/[lang]/about", "/[lang]/__ruvyxa-notes"],
+
+  "cases": [
+    {
+      "$why": "Accept-Language matches on the primary subtag when no exact locale is offered.",
+      "method": "GET",
+      "path": "/about",
+      "headers": { "accept-language": "fr-CA,th;q=.8" },
+      "detectLocale": true,
+      "redirect": "/fr-FR/about"
+    },
+    {
+      "$why": "The cookie outranks Accept-Language.",
+      "method": "GET",
+      "path": "/about",
+      "headers": { "cookie": "x=1; RUVYXA_LOCALE=th", "accept-language": "fr-CA" },
+      "detectLocale": true,
+      "redirect": "/th/about"
+    },
+    {
+      "$why": "Detection off still routes; it only stops the cookie and Accept-Language from being consulted. This is the case the two hosts answered differently.",
+      "method": "GET",
+      "path": "/about",
+      "headers": { "accept-language": "th", "cookie": "RUVYXA_LOCALE=th" },
+      "detectLocale": false,
+      "redirect": "/en/about"
+    },
+    {
+      "$why": "A project page is not a reserved endpoint just because it shares a byte prefix with one.",
+      "method": "GET",
+      "path": "/__ruvyxa-notes",
+      "headers": {},
+      "detectLocale": true,
+      "redirect": "/en/__ruvyxa-notes"
+    },
+    {
+      "$why": "The real reserved namespace still opts out.",
+      "method": "GET",
+      "path": "/__ruvyxa/flight",
+      "headers": {},
+      "detectLocale": true,
+      "redirect": null
+    },
+    {
+      "$why": "A path that already names a locale is left alone.",
+      "method": "GET",
+      "path": "/th/about",
+      "headers": {},
+      "detectLocale": true,
+      "redirect": null
+    },
+    {
+      "$why": "Only a navigation is redirected; a POST is the request it says it is.",
+      "method": "POST",
+      "path": "/about",
+      "headers": {},
+      "detectLocale": true,
+      "redirect": null
+    },
+    {
+      "$why": "No prefixed page exists, so there is nothing to redirect to.",
+      "method": "GET",
+      "path": "/missing",
+      "headers": {},
+      "detectLocale": true,
+      "redirect": null
+    }
+  ]
+}

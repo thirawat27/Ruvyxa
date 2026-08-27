@@ -1425,12 +1425,31 @@ async function handleDynamicImage(request, optimizer, defaultQuality = DEFAULT_I
   return optimizer(request, { src, width, quality })
 }
 
+/**
+ * The prefixed path an unprefixed URL belongs at, or `null` to leave it alone.
+ *
+ * Mirrored by `locale_redirect_path` in `crates/ruvyxa_dev_server/src/i18n.rs`,
+ * and both replay `tests/fixtures/i18n-routing-conformance.json`. Two things
+ * here used to differ from that host, and neither was visible because every
+ * test on both sides passed `detectLocale: true` and an ordinary path:
+ *
+ * `detectLocale: false` returned `null` from this function, which turned locale
+ * routing off rather than locale *detection* off — a deployed build answered
+ * every unprefixed URL with a 404 while `ruvyxa dev` served it. The option
+ * chooses which signals name the locale; with it off the default locale is the
+ * answer, and the redirect still happens. `preferredLocale` holds that now.
+ *
+ * The reserved namespace was excluded by byte prefix, so `/__ruvyxa-notes` — a
+ * page a project may legitimately own — was redirected under `ruvyxa dev` and
+ * silently excluded once deployed. It is matched by whole segment now, as
+ * `/api` already was.
+ */
 function localeRedirect(request, pathname, basePath, matchRoute, config) {
   if (
     !config ||
-    config.detectLocale === false ||
     !['GET', 'HEAD'].includes(request.method) ||
-    pathname.startsWith('/__ruvyxa') ||
+    pathname === '/__ruvyxa' ||
+    pathname.startsWith('/__ruvyxa/') ||
     pathname === '/api' ||
     pathname.startsWith('/api/') ||
     isStaticAssetPath(pathname) ||
@@ -1450,6 +1469,10 @@ function localeRedirect(request, pathname, basePath, matchRoute, config) {
 }
 
 function preferredLocale(headers, config) {
+  // Detection off means the cookie and Accept-Language are not consulted, not
+  // that locale routing stops — `preferred_locale` in
+  // `crates/ruvyxa_dev_server/src/i18n.rs` answers the same way.
+  if (config.detectLocale === false) return config.defaultLocale
   const locales = Array.isArray(config.locales) ? config.locales : []
   const canonical = (value) =>
     locales.find((locale) => locale.toLowerCase() === value.toLowerCase())

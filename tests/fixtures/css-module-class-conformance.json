@@ -1,0 +1,79 @@
+{
+  "$comment": [
+    "Shared CSS Module scoped-class-name conformance table.",
+    "",
+    "One rule, two implementations that cannot share code, and a project is",
+    "compiled by both of them in the same build:",
+    "  - crates/ruvyxa_bundler/src/style_module.rs   (emits the stylesheet)",
+    "  - packages/ruvyxa/runtime/compiler.mjs        (emits the class map the",
+    "    server renderer imports)",
+    "",
+    "The stylesheet comes from one and the class attribute in the rendered HTML",
+    "comes from the other, so a name they disagree on is not a mismatch anybody",
+    "sees as an error: the page renders with a class no rule matches and the",
+    "styles are simply absent. Nothing fails a build and nothing appears in a log.",
+    "",
+    "They had disagreed. Both fold the project-relative path before hashing it —",
+    "`reject_case_colliding_css_modules` in crates/ruvyxa_bundler/src/compiler.rs",
+    "states why: the same file must hash identically across case-insensitive",
+    "filesystems. JavaScript folded with `String.prototype.toLowerCase`, which is",
+    "the whole Unicode default case conversion; Rust folded with",
+    "`str::to_ascii_lowercase`, which leaves every non-ASCII letter alone. On a",
+    "case-insensitive filesystem `Ü/card.module.css` and `ü/card.module.css` are",
+    "one file, and Rust hashed them as two — so a project with any non-ASCII",
+    "uppercase letter in the path to a `.module.css` file rendered unstyled, and",
+    "the collision guard that exists to catch exactly this under-reported as well.",
+    "",
+    "Full Unicode folding is the shared behavior, because it is the one the guard",
+    "already claims and the one a case-insensitive filesystem actually performs.",
+    "",
+    "`relativePath` is the path from the project root, and the hash input is",
+    "`{folded relative path}:{local}` — so a case can be replayed against any",
+    "root, which is what lets the Rust test use a synthetic one and the",
+    "JavaScript test a real temporary directory.",
+    "",
+    "Every implementation replays this file:",
+    "  - crates/ruvyxa_bundler/src/style_module.rs        (Rust test)",
+    "  - tests/packages/ruvyxa/compiler.test.mjs          (JavaScript test)",
+    "",
+    "Add a case here first when changing how a scoped class name is minted; a",
+    "port that drifts then fails in the language that drifted rather than in a",
+    "browser looking at an unstyled page."
+  ],
+
+  "$formatNote": [
+    "A scoped name is `{stem}_{local}__{digest}`. The stem is the file name with",
+    "its extension and a trailing `.module` removed and every character that is",
+    "not ASCII alphanumeric replaced by `_` — it is a readability affordance and",
+    "is deliberately *not* case-folded, so it can differ from the folded path the",
+    "digest is taken over. The digest is FNV-1a/64 over the UTF-8 bytes of",
+    "`{folded relative path}:{local}`, lowercase hex, padded to 16 characters."
+  ],
+
+  "cases": [
+    {
+      "$why": "The plain case, and the golden the Rust side already carried alone.",
+      "relativePath": "styles/card.module.css",
+      "local": "card",
+      "className": "card_card__feff5ad3a1e67b7b"
+    },
+    {
+      "$why": "ASCII case is folded for the digest and kept for the stem, so this shares a digest with the case above and not a name.",
+      "relativePath": "Styles/Card.module.css",
+      "local": "card",
+      "className": "Card_card__feff5ad3a1e67b7b"
+    },
+    {
+      "$why": "A non-ASCII uppercase letter in a directory. This is the case the two implementations disagreed on.",
+      "relativePath": "Ü/card.module.css",
+      "local": "card",
+      "className": "card_card__0329bd46f6f816e8"
+    },
+    {
+      "$why": "The same letter in the file name, which also pins that the stem replaces it rather than folding it.",
+      "relativePath": "styles/Ü.module.css",
+      "local": "card",
+      "className": "__card__1ef885f6f9776772"
+    }
+  ]
+}

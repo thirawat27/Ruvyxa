@@ -2207,6 +2207,46 @@ export const marker = 'reached'
     })
   })
 
+  it('mints scoped class names from the shared conformance table', async () => {
+    // `scopeCssModule` here emits the class map the server renderer imports and
+    // `scope_css_module` in crates/ruvyxa_bundler/src/style_module.rs emits the
+    // stylesheet, so a name the two disagree on renders a page with a class no
+    // rule matches — no error, no log line, just missing styles. The table is
+    // replayed on both sides; the case-folding cases are the ones they used to
+    // answer differently.
+    const fixture = JSON.parse(
+      await readFile(
+        path.join(workspaceRoot, 'tests/fixtures/css-module-class-conformance.json'),
+        'utf8',
+      ),
+    )
+    assert.ok(fixture.cases.length > 0, 'the table must carry cases')
+
+    for (const testCase of fixture.cases) {
+      await withFixture(async ({ root, outDir }) => {
+        const cssFile = path.join(root, testCase.relativePath)
+        await mkdir(path.dirname(cssFile), { recursive: true })
+        await writeFile(cssFile, `.${testCase.local} { color: navy; }\n`)
+        const pageFile = path.join(root, 'page.ts')
+        await writeFile(
+          pageFile,
+          `import styles from ${JSON.stringify(toImportPath(cssFile))}\n` +
+            `export const scoped = styles[${JSON.stringify(testCase.local)}]\n`,
+        )
+        const outfile = path.join(outDir, 'scoped-class.mjs')
+        await compileBundleWithMetadata({
+          projectRoot: root,
+          entrySource: `export { scoped } from ${JSON.stringify(toImportPath(pageFile))}`,
+          sourcefile: 'ruvyxa:scoped-class-entry.ts',
+          outfile,
+          platform: 'node',
+        })
+        const mod = await import(`${pathToFileURL(outfile).href}?t=${Date.now()}`)
+        assert.equal(mod.scoped, testCase.className, `${testCase.relativePath} ${testCase.$why}`)
+      })
+    }
+  })
+
   it('derives a bundle content hash that only moves when the emitted code changes', async () => {
     // `contentHash` is the ESM import token used by the persistent worker.
     // Node never releases a loaded module URL, so an unchanged rebuild must

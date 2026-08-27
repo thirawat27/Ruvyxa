@@ -717,6 +717,39 @@ describe('serverless i18n and dynamic image parity', () => {
     assert.match(html, /hreflang="x-default" href="\/en\/about"/)
   })
 
+  it('redirects unprefixed URLs from the shared conformance table', async () => {
+    // `locale_redirect_path` in crates/ruvyxa_dev_server/src/i18n.rs answers the
+    // same table. Two of these cases used to be answered differently here, and
+    // neither showed up because every other test in both languages sets
+    // `detectLocale: true` and asks for an ordinary path.
+    const fixture = JSON.parse(
+      readFileSync(
+        path.join(workspaceRoot, 'tests/fixtures/i18n-routing-conformance.json'),
+        'utf8',
+      ),
+    )
+    assert.ok(fixture.cases.length > 0, 'the table must carry cases')
+    const routes = fixture.routes.map((routePath) => pageRoute(`app${routePath}/page`, routePath))
+
+    for (const testCase of fixture.cases) {
+      const handler = createHandler({
+        routes,
+        i18n: { ...fixture.config, detectLocale: testCase.detectLocale },
+        importPage: async () => ({ render: async () => '<html></html>' }),
+        importApi: async () => ({}),
+      })
+      const response = await handler(
+        new Request(`https://example.com${testCase.path}`, {
+          method: testCase.method,
+          headers: testCase.headers,
+        }),
+      )
+      const location =
+        response.status === 307 ? new URL(response.headers.get('location')).pathname : null
+      assert.equal(location, testCase.redirect, `${testCase.path} ${testCase.$why}`)
+    }
+  })
+
   it('validates image requests before invoking a platform optimizer', async () => {
     const calls = []
     const handler = createHandler({

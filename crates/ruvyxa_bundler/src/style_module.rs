@@ -354,6 +354,21 @@ fn fnv1a_64(input: &[u8]) -> u64 {
 /// name shipped in the CSS and the JavaScript, so two machines building one
 /// project disagree. `verify:reproducible` cannot see it: it builds twice on
 /// the same machine, where the wrong answer is still the same wrong answer.
+///
+/// The fold is `to_lowercase`, the whole Unicode default case conversion, not
+/// `to_ascii_lowercase`. What it is for is stated by
+/// `reject_case_colliding_css_modules` in [`crate::compiler`]: the same file
+/// must hash identically across a case-insensitive filesystem, and NTFS and
+/// APFS fold non-ASCII letters too. Folding only ASCII gave
+/// `Ü/card.module.css` and `ü/card.module.css` — one file on those filesystems
+/// — two different hashes, and disagreed with `scopedClassName` in
+/// `packages/ruvyxa/runtime/compiler.mjs`, whose `toLowerCase` never had the
+/// restriction. That module emits the class map the server renderer imports
+/// while this one emits the stylesheet, so a project with any non-ASCII
+/// uppercase letter on the path to a CSS Module rendered with a class no rule
+/// matched. Both sides replay
+/// `tests/fixtures/css-module-class-conformance.json` now. Neither fold is
+/// locale-sensitive, so this stays deterministic across hosts.
 pub(crate) fn normalized_relative_path(path: &Path, project_root: &Path) -> String {
     let path = ruvyxa_diagnostics::normalized_canonical_path(path);
     let root = ruvyxa_diagnostics::normalized_canonical_path(project_root);
@@ -362,7 +377,7 @@ pub(crate) fn normalized_relative_path(path: &Path, project_root: &Path) -> Stri
         .display()
         .to_string()
         .replace('\\', "/")
-        .to_ascii_lowercase()
+        .to_lowercase()
 }
 
 fn is_class_start(ch: char) -> bool {
@@ -437,11 +452,31 @@ mod tests {
         );
     }
 
+    /// The scoped-name table, replayed from the fixture both languages read.
+    ///
+    /// This used to be a lone golden value named for a cross-runtime contract
+    /// that nothing on the other side replayed, so the one input it pinned was
+    /// the one input the two implementations happened to agree on. The fixture
+    /// carries the case-folding cases as well, which is where they did not.
     #[test]
-    fn class_name_contract_has_a_cross_runtime_golden_value() {
+    fn class_names_match_the_shared_conformance_table() {
+        const FIXTURE: &str =
+            include_str!("../../../tests/fixtures/css-module-class-conformance.json");
+        let fixture: serde_json::Value = serde_json::from_str(FIXTURE).expect("fixture json");
+        let cases = fixture["cases"].as_array().expect("cases");
+        assert!(!cases.is_empty(), "the table must carry cases");
         let root = Path::new("/project");
-        let output = scope_css_module(".card {}", &root.join("styles/card.module.css"), root);
-        assert_eq!(output.classes["card"], "card_card__feff5ad3a1e67b7b");
+        for case in cases {
+            let relative = case["relativePath"].as_str().expect("relativePath");
+            let local = case["local"].as_str().expect("local");
+            let output = scope_css_module(&format!(".{local} {{}}"), &root.join(relative), root);
+            assert_eq!(
+                output.classes[local],
+                case["className"].as_str().expect("className"),
+                "{relative} {}",
+                case["$why"].as_str().unwrap_or_default()
+            );
+        }
     }
 
     #[test]
