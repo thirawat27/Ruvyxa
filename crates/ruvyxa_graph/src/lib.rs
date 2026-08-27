@@ -105,6 +105,44 @@ pub enum RenderStrategy {
     Ppr,
 }
 
+/// Cache-control for a pre-rendered document.
+///
+/// Safe to store, never safe to pin: a redeploy replaces the document under the
+/// same URL, and a reader holding a heuristically-cached copy would keep seeing
+/// the old site with no way to know.
+pub const DOCUMENT_CACHE_CONTROL: &str = "public, max-age=0, must-revalidate";
+
+/// What a server sends with a document it just rendered, by strategy.
+///
+/// ISR advertises the project's own clock so a CDN in front of the server can
+/// hold the page for exactly as long as the project asked, and refresh it
+/// without a gap. A per-request render advertises nothing cacheable: it may
+/// carry one visitor's data, and a shared cache with no instruction has been
+/// observed to store it anyway under heuristic freshness.
+///
+/// `max-age=0` is the same guard [`DOCUMENT_CACHE_CONTROL`] carries and for the
+/// same reason: `s-maxage` speaks to the shared cache only, so an ISR response
+/// that named no `max-age` left the *browser* with no freshness instruction and
+/// heuristic caching applies.
+///
+/// This lives here rather than beside the deploy manifest because both request
+/// hosts need the same answer: `ruvyxa start` serves through Axum and every
+/// deployed build serves through `createHandler`, and the Axum side sent no
+/// cache-control at all for a page it had just rendered. `documentCacheControl`
+/// in `@ruvyxa/core` and in `packages/ruvyxa/runtime/serverless-handler.mjs` are
+/// the JavaScript halves; all of them are replayed against
+/// `tests/fixtures/deploy-output-conformance.json`.
+pub fn document_cache_control(strategy: RenderStrategy, revalidate: Option<u64>) -> String {
+    match strategy {
+        RenderStrategy::Isr => format!(
+            "public, max-age=0, s-maxage={}, stale-while-revalidate",
+            revalidate.unwrap_or(60)
+        ),
+        RenderStrategy::Ssg | RenderStrategy::Csr => DOCUMENT_CACHE_CONTROL.to_string(),
+        RenderStrategy::Ssr | RenderStrategy::Ppr => "no-store".to_string(),
+    }
+}
+
 /// When a server-rendered route downloads and starts its client runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
@@ -4633,5 +4671,34 @@ import 'server-only';
             "the team slot has nothing for /dashboard/settings: {:?}",
             route.slots
         );
+    }
+
+    /// The cache-control table, replayed from the fixture both languages read.
+    ///
+    /// Held here rather than beside the deploy manifest because the function
+    /// moved: two Rust hosts answer with it now, and the strategy names in the
+    /// fixture are the serde names of [`RenderStrategy`], so a rename that broke
+    /// the wire format fails here too.
+    #[test]
+    fn document_cache_control_matches_the_shared_conformance_table() {
+        const FIXTURE: &str =
+            include_str!("../../../tests/fixtures/deploy-output-conformance.json");
+        let fixture: serde_json::Value = serde_json::from_str(FIXTURE).expect("fixture json");
+        let cases = fixture["documentCacheControl"]["cases"]
+            .as_array()
+            .expect("documentCacheControl cases");
+        assert!(!cases.is_empty(), "the table must carry cases");
+        for case in cases {
+            let strategy: RenderStrategy =
+                serde_json::from_value(case["strategy"].clone()).expect("strategy");
+            let revalidate = case["revalidate"].as_u64();
+            assert_eq!(
+                document_cache_control(strategy, revalidate),
+                case["expect"].as_str().expect("expect"),
+                "{} {}",
+                case["strategy"],
+                case["why"].as_str().unwrap_or_default()
+            );
+        }
     }
 }

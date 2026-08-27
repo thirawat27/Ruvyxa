@@ -130,7 +130,7 @@
       {
         "strategy": "isr",
         "revalidate": 60,
-        "expect": "s-maxage=60, stale-while-revalidate"
+        "expect": "public, max-age=0, s-maxage=60, stale-while-revalidate"
       },
       {
         "strategy": "ssg",
@@ -155,13 +155,13 @@
       {
         "strategy": "isr",
         "revalidate": 0,
-        "expect": "s-maxage=0, stale-while-revalidate",
+        "expect": "public, max-age=0, s-maxage=0, stale-while-revalidate",
         "why": "`0` means revalidate on every request and is a value, not an absence. `revalidate || 60` reads it as missing and pins the page for a minute, which is the difference between a live page and a stale one."
       },
       {
         "strategy": "isr",
         "revalidate": null,
-        "expect": "s-maxage=60, stale-while-revalidate",
+        "expect": "public, max-age=0, s-maxage=60, stale-while-revalidate",
         "why": "An ISR route that never named a window falls back to the shared default, and both lanes have to pick the same number."
       }
     ]

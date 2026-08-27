@@ -143,12 +143,20 @@ export function routeServeMode(
  * advertises nothing cacheable: it may carry one visitor's data, and a shared
  * cache given no instruction has been observed to store it under heuristic
  * freshness.
+ *
+ * `max-age=0` is the same guard `DOCUMENT_CACHE_CONTROL` carries and for the
+ * same reason: `s-maxage` speaks to the shared cache only, so an ISR response
+ * that named no `max-age` left the *browser* with no freshness instruction, and
+ * heuristic caching applies — a reader could hold the page across a redeploy
+ * with nothing to tell it otherwise.
  */
 export function documentCacheControl(
   strategy: RenderStrategy,
   revalidate: number | null | undefined,
 ): string {
-  if (strategy === 'isr') return `s-maxage=${revalidate ?? 60}, stale-while-revalidate`
+  if (strategy === 'isr') {
+    return `public, max-age=0, s-maxage=${revalidate ?? 60}, stale-while-revalidate`
+  }
   if (strategy === 'ssg' || strategy === 'csr') return DOCUMENT_CACHE_CONTROL
   return 'no-store'
 }

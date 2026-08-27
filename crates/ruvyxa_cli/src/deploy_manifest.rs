@@ -32,7 +32,9 @@
 
 use std::path::Path;
 
-use ruvyxa_graph::{RouteKind, RouteManifest, RuntimeTarget};
+use ruvyxa_graph::{
+    DOCUMENT_CACHE_CONTROL, RouteKind, RouteManifest, RuntimeTarget, document_cache_control,
+};
 
 use crate::artifact_cache::content_hash;
 use crate::prerender::{NOT_FOUND_DOCUMENT_FILE, PrerenderedRoute};
@@ -63,13 +65,6 @@ pub(crate) const CLIENT_CACHE_CONTROL: &str = "public, max-age=31536000, immutab
 /// The URL is chosen by the author, so the same path can mean something else
 /// after the next deploy — cacheable, never immutable.
 pub(crate) const ASSET_CACHE_CONTROL: &str = "public, max-age=3600, must-revalidate";
-
-/// Cache-control for a pre-rendered document served as a file.
-///
-/// Safe to store, never safe to pin: a redeploy replaces the document under the
-/// same URL, and a reader holding a heuristically-cached copy would keep seeing
-/// the old site with no way to know.
-pub(crate) const DOCUMENT_CACHE_CONTROL: &str = "public, max-age=0, must-revalidate";
 
 /// How a route is served once the build is deployed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -104,24 +99,6 @@ pub(crate) fn route_serve_mode(kind: RouteKind, strategy: &str, prerendered: boo
     match strategy {
         "ssg" | "csr" if prerendered => ServeMode::Static,
         _ => ServeMode::Function,
-    }
-}
-
-/// The cache-control a function returns with a document it just served.
-///
-/// ISR advertises the project's own clock so a CDN in front of the function can
-/// hold the page for exactly as long as the project asked, and refresh it
-/// without a gap. A per-request render advertises nothing cacheable: it may
-/// carry one visitor's data, and a shared cache with no instruction has been
-/// observed to store it anyway under heuristic freshness.
-pub(crate) fn document_cache_control(strategy: &str, revalidate: Option<u64>) -> String {
-    match strategy {
-        "isr" => format!(
-            "s-maxage={}, stale-while-revalidate",
-            revalidate.unwrap_or(60)
-        ),
-        "ssg" | "csr" => DOCUMENT_CACHE_CONTROL.to_string(),
-        _ => "no-store".to_string(),
     }
 }
 
@@ -202,7 +179,7 @@ pub(crate) fn deploy_manifest(input: &DeployManifestInput<'_>) -> serde_json::Va
             "serverComponents": route.render.server_components,
             "hydrate": route.render.ships_client_bundle(),
             "document": document,
-            "cacheControl": document_cache_control(strategy, route.render.revalidate),
+            "cacheControl": document_cache_control(route.render.strategy, route.render.revalidate),
         }));
     }
 
@@ -390,22 +367,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn document_cache_control_matches_the_shared_conformance_table() {
-        let fixture = fixture();
-        let cases = fixture["documentCacheControl"]["cases"]
-            .as_array()
-            .expect("documentCacheControl cases");
-        for case in cases {
-            let strategy = case["strategy"].as_str().expect("strategy");
-            let revalidate = case["revalidate"].as_u64();
-            assert_eq!(
-                document_cache_control(strategy, revalidate),
-                case["expect"].as_str().expect("expect"),
-                "{strategy}"
-            );
-        }
-    }
+    // The `documentCacheControl` half of this fixture is replayed in
+    // `ruvyxa_graph`, which owns the function now: both request hosts answer
+    // with it, so it cannot live in the crate that only writes the manifest.
 
     #[test]
     fn asset_classes_match_the_shared_conformance_table() {

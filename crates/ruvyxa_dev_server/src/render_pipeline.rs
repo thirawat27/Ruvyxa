@@ -17,7 +17,7 @@ use ruvyxa_bundler::JsxRuntime;
 use ruvyxa_diagnostics::{Diagnostic, Result, RuvyxaError};
 use ruvyxa_graph::{
     DiscoverOptions, RenderStrategy, RouteEntry, RouteKind, RouteManifest, RouteParams,
-    discover_routes,
+    discover_routes, document_cache_control,
 };
 use serde::Deserialize;
 
@@ -40,6 +40,24 @@ use crate::{
 };
 use crate::{render_cache, style::collect_styles};
 use futures_util::StreamExt;
+
+/// Send the caching contract this route's strategy names.
+///
+/// The deployed function has always done this — `documentCacheControl` in the
+/// serverless handler — while the Axum host sent a rendered document with **no**
+/// `cache-control` at all, and a `200` with no explicit freshness is exactly the
+/// response RFC 9111 lets a browser or an intermediary cache on a heuristic. So
+/// the same page carried opposite caching rules depending on which host answered
+/// it, and the host that got it wrong is the one `ruvyxa start` runs.
+///
+/// Not applied to a streamed document or to a response marked `uncacheable`:
+/// both already say `no-store`, which is stricter than anything the table names.
+fn insert_document_cache_control(response: &mut Response, route: &RouteEntry) {
+    let value = document_cache_control(route.render.strategy, route.render.revalidate);
+    let header = HeaderValue::from_str(&value)
+        .expect("document cache-control is built from ASCII literals and a number");
+    response.headers_mut().insert(header::CACHE_CONTROL, header);
+}
 
 fn worker_request_headers(headers: &HeaderMap) -> Vec<(String, String)> {
     headers
@@ -388,11 +406,9 @@ pub(crate) async fn render_request_pooled(
                 &styles,
             )
             .await?;
-            Ok(cached_html_response(
-                StatusCode::OK,
-                &html,
-                Some(request_headers),
-            ))
+            let mut response = cached_html_response(StatusCode::OK, &html, Some(request_headers));
+            insert_document_cache_control(&mut response, route_match.route);
+            Ok(response)
         }
         RouteKind::Api => {
             let headers = worker_request_headers(request_headers);
@@ -2318,6 +2334,58 @@ pub(crate) fn action_file_for(route: &RouteEntry) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The rendered document carries the strategy's caching contract.
+    ///
+    /// This host used to send a `200` with no `cache-control` at all while the
+    /// deployed function sent one, so the same page was cacheable-on-a-heuristic
+    /// under `ruvyxa start` and explicit everywhere else.
+    #[test]
+    fn a_rendered_document_carries_the_strategy_cache_control() {
+        let mut route = ruvyxa_graph::RouteEntry {
+            id: "page:/x".to_string(),
+            path: "/x".to_string(),
+            kind: RouteKind::Page,
+            file: std::path::PathBuf::from("app/x/page.tsx"),
+            layout_chain: Vec::new(),
+            template_chain: Vec::new(),
+            slots: Vec::new(),
+            intercepts: Vec::new(),
+            server_modules: Vec::new(),
+            client_modules: Vec::new(),
+            runtime: ruvyxa_graph::RuntimeTarget::Node,
+            render: Default::default(),
+        };
+
+        for (strategy, revalidate, expected) in [
+            (
+                RenderStrategy::Ssg,
+                None,
+                "public, max-age=0, must-revalidate",
+            ),
+            (
+                RenderStrategy::Csr,
+                None,
+                "public, max-age=0, must-revalidate",
+            ),
+            (RenderStrategy::Ssr, None, "no-store"),
+            (
+                RenderStrategy::Isr,
+                Some(30),
+                "public, max-age=0, s-maxage=30, stale-while-revalidate",
+            ),
+        ] {
+            route.render.strategy = strategy;
+            route.render.revalidate = revalidate;
+            let mut response = html_response(StatusCode::OK, "<html></html>".to_string());
+            insert_document_cache_control(&mut response, &route);
+            assert_eq!(
+                response.headers()[header::CACHE_CONTROL],
+                expected,
+                "{strategy:?}"
+            );
+        }
+    }
 
     /// Which routes stream, spelled out.
     ///

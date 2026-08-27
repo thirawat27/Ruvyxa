@@ -217,13 +217,21 @@ export const DOCUMENT_CACHE_CONTROL = 'public, max-age=0, must-revalidate'
  * without a gap. A per-request render advertises nothing cacheable: it may
  * carry one visitor's data.
  *
+ * `max-age=0` is the same guard `DOCUMENT_CACHE_CONTROL` carries and for the
+ * same reason: `s-maxage` speaks to the shared cache only, so an ISR response
+ * that named no `max-age` left the *browser* with no freshness instruction, and
+ * heuristic caching applies — a reader could hold the page across a redeploy
+ * with nothing to tell it otherwise.
+ *
  * The same table as `document_cache_control` in
  * `crates/ruvyxa_cli/src/deploy_manifest.rs` and `documentCacheControl` in
  * `@ruvyxa/core`; all three are replayed against
  * `tests/fixtures/deploy-output-conformance.json`.
  */
 export function documentCacheControl(strategy, revalidate) {
-  if (strategy === 'isr') return `s-maxage=${revalidate ?? 60}, stale-while-revalidate`
+  if (strategy === 'isr') {
+    return `public, max-age=0, s-maxage=${revalidate ?? 60}, stale-while-revalidate`
+  }
   if (strategy === 'ssg' || strategy === 'csr') return DOCUMENT_CACHE_CONTROL
   return 'no-store'
 }
@@ -1119,7 +1127,7 @@ export function createHandler(options) {
       if (cached.stale) await refreshStaleEntry(route, pathname, params, runtimeContext)
       return prerenderedResponse(cached.html, {
         'x-ruvyxa-isr': 'HIT',
-        'cache-control': `s-maxage=${revalidate}, stale-while-revalidate`,
+        'cache-control': documentCacheControl('isr', revalidate),
       })
     }
 
