@@ -52,26 +52,6 @@ export function deno(options: DenoAdapterOptions = {}): Adapter {
               `const status = await child.status\nDeno.exit(status.code)\n`,
           },
           {
-            // Deno Deploy resolves a framework it recognises to a preset that
-            // knows the entrypoint. Ruvyxa is not one of its presets, so the
-            // build settings are the project's to fill in — and a task file
-            // beside the server is the shortest way to make the answer
-            // discoverable rather than something to work out from a directory
-            // listing. `deno task serve` runs it either way.
-            kind: 'file',
-            path: 'deploy/deno/deno.json',
-            contents:
-              JSON.stringify(
-                {
-                  tasks: {
-                    serve: 'deno run -A --no-prompt server/index.mjs',
-                  },
-                },
-                null,
-                2,
-              ) + '\n',
-          },
-          {
             kind: 'file',
             path: 'deploy/deno/README.md',
             contents:
@@ -85,7 +65,12 @@ export function deno(options: DenoAdapterOptions = {}): Adapter {
               'entrypoint, relative to the repository root:\n\n' +
               '```\n.ruvyxa/deploy/deno/server/index.mjs\n```\n\n' +
               'The build detects Deno Deploy through `DENO_DEPLOY`, so no adapter\n' +
-              'needs naming in `ruvyxa.config.ts`. `PORT` is supplied by the platform.\n',
+              'needs naming in `ruvyxa.config.ts`. `PORT` is supplied by the platform.\n\n' +
+              'Do not put a `deno.json` in this directory. It would make the directory\n' +
+              "Deno's own configuration scope, and that scope declares no dependencies —\n" +
+              'so the npm packages a server-components render reaches for at request\n' +
+              'time stop resolving and every such route answers 500. Without one, Deno\n' +
+              'walks up to the project and resolves them.\n',
           },
         ],
       }

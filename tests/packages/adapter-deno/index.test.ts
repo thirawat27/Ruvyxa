@@ -17,16 +17,24 @@ describe('deno', () => {
         { kind: 'function', path: 'deploy/deno/server' },
         { kind: 'static-site', path: 'deploy/deno/public' },
         { kind: 'file', path: 'deploy/deno/start.mjs' },
-        { kind: 'file', path: 'deploy/deno/deno.json' },
         { kind: 'file', path: 'deploy/deno/README.md' },
       ],
     )
+    // **No `deno.json`.** A configuration file makes that directory Deno's own
+    // scope, and the scope it creates declares no dependencies and no
+    // `nodeModulesDir` — so the npm specifiers the server reaches for at
+    // request time stop resolving. One was emitted here as a place to put the
+    // entrypoint a Deno Deploy build needs, and it turned every
+    // server-components request into `Import "react-server-dom-webpack/
+    // client.edge" not a dependency` and a 500, while every other route kept
+    // answering. Without the file Deno walks up to the project and resolves
+    // them, which is what the deployment has always relied on.
+    assert.equal(
+      output.artifacts?.some((artifact) => artifact.path.endsWith('deno.json')),
+      false,
+    )
     // Deno Deploy has no framework preset for Ruvyxa, so the entrypoint is the
-    // project's to name. Both places that could answer it do.
-    const denoJson = output.artifacts?.find((artifact) => artifact.path.endsWith('deno.json'))
-    assert.deepEqual(JSON.parse(String(denoJson?.contents)).tasks, {
-      serve: 'deno run -A --no-prompt server/index.mjs',
-    })
+    // project's to name, and the README is where it is named.
     const readme = output.artifacts?.find((artifact) => artifact.path.endsWith('README.md'))
     assert.match(String(readme?.contents), /\.ruvyxa\/deploy\/deno\/server\/index\.mjs/)
     assert.match(String(readme?.contents), /DENO_DEPLOY/)
