@@ -65,6 +65,7 @@ export type { StandaloneServerOptions, StandaloneServerRuntime } from './standal
 export {
   CLIENT_BUNDLE_PREFIX,
   clientBuildOutput,
+  DEFAULT_IMAGE_MAX_WIDTH,
   DEFAULT_SECURITY_HEADERS,
   headersFileContents,
   IMMUTABLE_CACHE_CONTROL,

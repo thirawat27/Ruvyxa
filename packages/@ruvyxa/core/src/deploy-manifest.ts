@@ -136,6 +136,23 @@ export function routeServeMode(
 }
 
 /**
+ * The revalidation window an ISR route that named none is given.
+ */
+const DEFAULT_REVALIDATE_SECONDS = 60
+
+/**
+ * How long a stale ISR document may still be served while it refreshes.
+ *
+ * The stale window is `ISR_EXPIRE_SECONDS - revalidate`, the formula Next.js
+ * ships in production (its `expireTime`, one year by default). The directive
+ * has to carry a number: RFC 5861 defines
+ * `stale-while-revalidate=<delta-seconds>`, and Netlify's CDN documents only
+ * the numeric form — a bare directive is dropped there, which silently turns
+ * every refresh into a blocking render.
+ */
+const ISR_EXPIRE_SECONDS = 31_536_000
+
+/**
  * The cache-control a server sends with a document it just served.
  *
  * ISR advertises the project's own clock, so a CDN in front of the function can
@@ -155,7 +172,9 @@ export function documentCacheControl(
   revalidate: number | null | undefined,
 ): string {
   if (strategy === 'isr') {
-    return `public, max-age=0, s-maxage=${revalidate ?? 60}, stale-while-revalidate`
+    const window = revalidate ?? DEFAULT_REVALIDATE_SECONDS
+    const stale = Math.max(0, ISR_EXPIRE_SECONDS - window)
+    return `public, max-age=0, s-maxage=${window}, stale-while-revalidate=${stale}`
   }
   if (strategy === 'ssg' || strategy === 'csr') return DOCUMENT_CACHE_CONTROL
   return 'no-store'

@@ -1,5 +1,6 @@
 import type { Adapter, AdapterArtifact, AdapterOutput, BuildContext } from '@ruvyxa/core'
 import {
+  DEFAULT_IMAGE_MAX_WIDTH,
   clientBuildOutput,
   headersFileContents,
   projectRelativeOutDir,
@@ -150,7 +151,7 @@ function isrKey(pathname) {
 }
 
 async function optimizeImage(request, { src, width, quality }) {
-  if (width > (runtimePolicy.image?.maxWidth ?? 3840)) {
+  if (width > (runtimePolicy.image?.maxWidth ?? ${DEFAULT_IMAGE_MAX_WIDTH})) {
     return new Response('Image width exceeds configured maximum', { status: 400 });
   }
   const source = new URL(src, request.url);

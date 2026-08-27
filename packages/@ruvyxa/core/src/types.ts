@@ -940,8 +940,10 @@ export interface AdapterArtifact {
    *   pre-rendered pages and client assets.
    * - `'function'` — bundle a serverless/edge function from a handler entry
    *   point and a compiled static route registry.
+   * - `'function-alias'` — mount an already-emitted `function` artifact at a
+   *   second path, as a link rather than a second copy of the bundle.
    */
-  kind: 'file' | 'static-site' | 'function'
+  kind: 'file' | 'static-site' | 'function' | 'function-alias'
   /**
    * Destination relative to the Ruvyxa output directory (`scope: 'build'`,
    * the default) or the project root (`scope: 'project'`).
@@ -1006,6 +1008,24 @@ export interface AdapterArtifact {
    * it as the pre-revalidation cache entry.
    */
   excludeStrategies?: string[]
+  /**
+   * For `function-alias` artifacts: the `path` of the `function` artifact this
+   * one points at. It must appear earlier in the same `artifacts` array and
+   * carry the same `scope`.
+   *
+   * Vercel's Prerender Functions are configured by a `<name>.prerender-config.json`
+   * beside a `<name>.func` directory, so every incrementally-regenerated route
+   * needs its own `.func` — while the bundle behind them is one function. The
+   * Build Output API documents exactly this case: "A `.func` directory may be a
+   * symlink to another `.func` directory in cases where you want to have more
+   * than one path point to the same underlying Vercel Function." An application
+   * with fifty ISR pages would otherwise ship fifty copies of its server.
+   *
+   * Materialized as a directory symlink, or a junction on Windows. A platform
+   * or filesystem that refuses both falls back to a copy, because a working
+   * deployment that is larger beats a build that stops.
+   */
+  aliasOf?: string
 }
 
 export interface Adapter {

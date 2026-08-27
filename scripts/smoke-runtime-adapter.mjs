@@ -551,6 +551,10 @@ function parseHeaderRules() {
 function parsePlatformHeaderRules() {
   const file = platformConfigArg ? path.resolve(platformConfigArg) : null
   if (!file || !existsSync(file)) return []
+  // Netlify's default deployment is configured by a `netlify.toml`, not by the
+  // Frameworks API JSON: the publish directory cannot be declared through that
+  // API, so the adapter writes the file the platform actually reads.
+  if (file.endsWith('.toml')) return parseNetlifyToml(file)
   const config = JSON.parse(readFileSync(file, 'utf8'))
   if (runtime === 'vercel') {
     // The `continue: true` rules only: the ones that attach headers and let
@@ -619,6 +623,42 @@ function parseAmplifyCustomHttp(file) {
     }
   }
   return rules
+}
+
+/**
+ * The `[[headers]]` blocks of the `netlify.toml` the adapter emits.
+ *
+ * A purpose-built reader for the exact shape the adapter writes rather than a
+ * TOML dependency, for the same reason `parseAmplifyCustomHttp` is one: this
+ * has to assert the file the adapter produced, and a file it did not produce
+ * matches nothing here and fails the check that needs it.
+ */
+function parseNetlifyToml(file) {
+  const rules = []
+  let inValues = false
+  for (const line of readFileSync(file, 'utf8').split('\n')) {
+    if (/^\s*\[\[headers\]\]\s*$/.test(line)) {
+      rules.push({ pattern: null, headers: [] })
+      inValues = false
+      continue
+    }
+    if (/^\s*\[headers\.values\]\s*$/.test(line)) {
+      inValues = true
+      continue
+    }
+    const target = line.match(/^\s*for\s*=\s*"([^"]*)"\s*$/)
+    if (target && rules.length > 0) {
+      rules.at(-1).pattern = globToRegExp(target[1])
+      continue
+    }
+    const pair = line.match(/^\s*([A-Za-z0-9-]+)\s*=\s*"([^"]*)"\s*$/)
+    if (inValues && pair && rules.length > 0) {
+      rules.at(-1).headers.push([pair[1].toLowerCase(), pair[2]])
+    }
+  }
+  // A block whose `for` never parsed would match every path; drop it rather
+  // than assert against a rule this reader invented.
+  return rules.filter((rule) => rule.pattern !== null && rule.headers.length > 0)
 }
 
 /** `*` and `**` match any run of characters; everything else is literal. */

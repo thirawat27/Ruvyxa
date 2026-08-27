@@ -1,4 +1,24 @@
 {
+  "$comment": [
+    "The capabilities an adapter's emitted artifact actually carries.",
+    "",
+    "`onDemandImages` is whether the deployed function answers `/__ruvyxa/image`.",
+    "",
+    "`onDemandRevalidation` is whether `revalidatePath()` reaches what a visitor",
+    "is served. It is false where a cache sits in front of the function and the",
+    "adapter has no way to drop one path from it: Firebase Hosting and Amplify's",
+    "CloudFront both cache the function's response on the `s-maxage` it sends and",
+    "expose no per-path purge to the code running inside. A forced write there",
+    "refreshes the function's own store and nothing a reader can see, until the",
+    "window expires on its own. It is true where the store the function writes is",
+    "the cache a reader is served from (a Worker's KV, a standalone server's",
+    "filesystem) and where the adapter implements the platform's purge (Vercel's",
+    "`x-prerender-revalidate`, Netlify's `purgeCache` by cache tag).",
+    "",
+    "`ruvyxa build` reports a false against a project that uses ISR or PPR, the",
+    "same way it reports an adapter with no image pipeline: a deployment without",
+    "instant revalidation is still a valid deployment, and a silent one is not."
+  ],
   "contract": "ruvyxa.adapter",
   "schemaVersion": 1,
   "adapters": [
@@ -8,7 +28,8 @@
       "runtime": "node",
       "platform": "aws",
       "supports": ["ssr", "ssg", "csr", "isr", "ppr", "api"],
-      "onDemandImages": false
+      "onDemandImages": false,
+      "onDemandRevalidation": false
     },
     {
       "name": "bun",
@@ -16,7 +37,8 @@
       "runtime": "bun",
       "platform": "bun",
       "supports": ["ssr", "ssg", "csr", "isr", "ppr", "api"],
-      "onDemandImages": false
+      "onDemandImages": false,
+      "onDemandRevalidation": true
     },
     {
       "name": "cloudflare",
@@ -24,7 +46,8 @@
       "runtime": "edge",
       "platform": "cloudflare",
       "supports": ["ssr", "ssg", "csr", "api"],
-      "onDemandImages": true
+      "onDemandImages": true,
+      "onDemandRevalidation": true
     },
     {
       "name": "deno",
@@ -32,7 +55,8 @@
       "runtime": "deno",
       "platform": "deno",
       "supports": ["ssr", "ssg", "csr", "isr", "ppr", "api"],
-      "onDemandImages": false
+      "onDemandImages": false,
+      "onDemandRevalidation": true
     },
     {
       "name": "firebase",
@@ -40,7 +64,8 @@
       "runtime": "node",
       "platform": "firebase",
       "supports": ["ssr", "ssg", "csr", "isr", "ppr", "api"],
-      "onDemandImages": false
+      "onDemandImages": false,
+      "onDemandRevalidation": false
     },
     {
       "name": "netlify",
@@ -48,7 +73,8 @@
       "runtime": "node",
       "platform": "netlify",
       "supports": ["ssr", "ssg", "csr", "isr", "ppr", "api"],
-      "onDemandImages": false
+      "onDemandImages": false,
+      "onDemandRevalidation": true
     },
     {
       "name": "node",
@@ -56,7 +82,8 @@
       "runtime": "node",
       "platform": "node",
       "supports": ["ssr", "ssg", "csr", "isr", "ppr", "api"],
-      "onDemandImages": false
+      "onDemandImages": false,
+      "onDemandRevalidation": true
     },
     {
       "name": "railway",
@@ -64,7 +91,8 @@
       "runtime": "node",
       "platform": "railway",
       "supports": ["ssr", "ssg", "csr", "isr", "ppr", "api"],
-      "onDemandImages": false
+      "onDemandImages": false,
+      "onDemandRevalidation": true
     },
     {
       "name": "render",
@@ -72,7 +100,8 @@
       "runtime": "node",
       "platform": "render",
       "supports": ["ssr", "ssg", "csr", "isr", "ppr", "api"],
-      "onDemandImages": false
+      "onDemandImages": false,
+      "onDemandRevalidation": true
     },
     {
       "name": "static",
@@ -80,7 +109,8 @@
       "runtime": "static",
       "platform": "static",
       "supports": ["ssg", "csr"],
-      "onDemandImages": false
+      "onDemandImages": false,
+      "onDemandRevalidation": true
     },
     {
       "name": "vercel",
@@ -88,7 +118,8 @@
       "runtime": "node",
       "platform": "vercel",
       "supports": ["ssr", "ssg", "csr", "isr", "ppr", "api"],
-      "onDemandImages": true
+      "onDemandImages": true,
+      "onDemandRevalidation": true
     }
   ],
   "unsupportedDiagnostics": {

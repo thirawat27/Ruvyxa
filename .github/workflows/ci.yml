@@ -130,6 +130,28 @@ jobs:
         run: pnpm release:validate
       - name: Smoke test package tarballs
         run: pnpm pack:smoke
+      # Every lane below this one exercises a *build*. This one exercises the
+      # command developers actually run: it starts `ruvyxa dev`, edits the
+      # project under it, and checks what the browser would have been told —
+      # the watcher, the HMR tracker, the socket, and the client bundler are all
+      # covered a unit at a time and the seam between them by nobody.
+      - name: Exercise the dev server
+        timeout-minutes: 20
+        shell: bash
+        run: node scripts/smoke-dev-server.mjs examples/deploy-smoke 4402
+      # The scaffold-to-clean walk: `create-ruvyxa`, every CLI command, the
+      # build targets, dev/prod parity, the production server, `preview`, the
+      # build-time error scenarios, and a rebuild after `clean`. It is the most
+      # complete flow in the repository and it ran nowhere, so a regression in
+      # any of it was found by whoever next ran it by hand. PowerShell-only and
+      # bound to `target\debug\ruvyxa.exe`, which is why it is one leg.
+      - name: Walk the full project flow
+        if: matrix.os == 'windows-latest'
+        timeout-minutes: 45
+        shell: pwsh
+        run: |
+          cargo build -p ruvyxa_cli
+          pnpm test:full-flow
       # The deployment smoke builds examples/deploy-smoke, not examples/demo.
       # The demo is deployable now that a dynamic server-components route no
       # longer refuses (RUV2213 is gone), but it is the broad feature fixture:
@@ -242,7 +264,7 @@ jobs:
         shell: bash
         run: |
           cargo run -p ruvyxa_cli -- build --root examples/deploy-smoke --adapter netlify
-          node scripts/smoke-runtime-adapter.mjs netlify examples/deploy-smoke/.netlify/v1/functions/ruvyxa-handler 4395 examples/deploy-smoke/.ruvyxa/deploy/netlify/publish examples/deploy-smoke/.netlify/v1/config.json
+          node scripts/smoke-runtime-adapter.mjs netlify examples/deploy-smoke/.ruvyxa/deploy/netlify/functions/ruvyxa-handler 4395 examples/deploy-smoke/.ruvyxa/deploy/netlify/publish examples/deploy-smoke/netlify.toml
       - name: Build and launch the AWS Amplify compute bundle
         timeout-minutes: 15
         shell: bash

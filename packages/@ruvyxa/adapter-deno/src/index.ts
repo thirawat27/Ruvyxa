@@ -52,13 +52,40 @@ export function deno(options: DenoAdapterOptions = {}): Adapter {
               `const status = await child.status\nDeno.exit(status.code)\n`,
           },
           {
+            // Deno Deploy resolves a framework it recognises to a preset that
+            // knows the entrypoint. Ruvyxa is not one of its presets, so the
+            // build settings are the project's to fill in — and a task file
+            // beside the server is the shortest way to make the answer
+            // discoverable rather than something to work out from a directory
+            // listing. `deno task serve` runs it either way.
+            kind: 'file',
+            path: 'deploy/deno/deno.json',
+            contents:
+              JSON.stringify(
+                {
+                  tasks: {
+                    serve: 'deno run -A --no-prompt server/index.mjs',
+                  },
+                },
+                null,
+                2,
+              ) + '\n',
+          },
+          {
             kind: 'file',
             path: 'deploy/deno/README.md',
             contents:
               '# Ruvyxa Deno deployment\n\n' +
               'Run the self-contained server (no Ruvyxa CLI dependency):\n\n' +
               '```bash\ndeno run -A --no-prompt server/index.mjs\n```\n\n' +
-              'Run this command from the copied `deploy/deno/` directory. `PORT` defaults to 3000 and `HOST` to 0.0.0.0.\n',
+              'Run this command from the copied `deploy/deno/` directory. `PORT` defaults to 3000 and `HOST` to 0.0.0.0.\n\n' +
+              '## Deno Deploy\n\n' +
+              'Deno Deploy has no framework preset for Ruvyxa, so set the build\n' +
+              'configuration yourself. Use a **dynamic** runtime and give it this\n' +
+              'entrypoint, relative to the repository root:\n\n' +
+              '```\n.ruvyxa/deploy/deno/server/index.mjs\n```\n\n' +
+              'The build detects Deno Deploy through `DENO_DEPLOY`, so no adapter\n' +
+              'needs naming in `ruvyxa.config.ts`. `PORT` is supplied by the platform.\n',
           },
         ],
       }

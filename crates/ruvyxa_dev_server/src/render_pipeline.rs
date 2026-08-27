@@ -2372,7 +2372,7 @@ mod tests {
             (
                 RenderStrategy::Isr,
                 Some(30),
-                "public, max-age=0, s-maxage=30, stale-while-revalidate",
+                "public, max-age=0, s-maxage=30, stale-while-revalidate=31535970",
             ),
         ] {
             route.render.strategy = strategy;

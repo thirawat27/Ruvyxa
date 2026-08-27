@@ -17,9 +17,19 @@ describe('deno', () => {
         { kind: 'function', path: 'deploy/deno/server' },
         { kind: 'static-site', path: 'deploy/deno/public' },
         { kind: 'file', path: 'deploy/deno/start.mjs' },
+        { kind: 'file', path: 'deploy/deno/deno.json' },
         { kind: 'file', path: 'deploy/deno/README.md' },
       ],
     )
+    // Deno Deploy has no framework preset for Ruvyxa, so the entrypoint is the
+    // project's to name. Both places that could answer it do.
+    const denoJson = output.artifacts?.find((artifact) => artifact.path.endsWith('deno.json'))
+    assert.deepEqual(JSON.parse(String(denoJson?.contents)).tasks, {
+      serve: 'deno run -A --no-prompt server/index.mjs',
+    })
+    const readme = output.artifacts?.find((artifact) => artifact.path.endsWith('README.md'))
+    assert.match(String(readme?.contents), /\.ruvyxa\/deploy\/deno\/server\/index\.mjs/)
+    assert.match(String(readme?.contents), /DENO_DEPLOY/)
     // Deno's own server, not `node:http`: `createHandler` already is the
     // `Request` → `Response` function `Deno.serve` takes, and going through the
     // compatibility layer made every request pay for a translation in each

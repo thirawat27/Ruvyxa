@@ -112,6 +112,19 @@ pub enum RenderStrategy {
 /// the old site with no way to know.
 pub const DOCUMENT_CACHE_CONTROL: &str = "public, max-age=0, must-revalidate";
 
+/// The revalidation window an ISR route that named none is given.
+pub const DEFAULT_REVALIDATE_SECONDS: u64 = 60;
+
+/// How long a stale ISR document may still be served while it refreshes.
+///
+/// The stale window is `ISR_EXPIRE_SECONDS - revalidate`, which is the formula
+/// Next.js ships in production (its `expireTime`, one year by default). The
+/// directive has to carry a number: RFC 5861 defines
+/// `stale-while-revalidate=<delta-seconds>`, and Netlify's CDN documents only
+/// the numeric form — a bare directive is dropped there, which silently turns
+/// every refresh into a blocking render.
+pub const ISR_EXPIRE_SECONDS: u64 = 31_536_000;
+
 /// What a server sends with a document it just rendered, by strategy.
 ///
 /// ISR advertises the project's own clock so a CDN in front of the server can
@@ -134,10 +147,13 @@ pub const DOCUMENT_CACHE_CONTROL: &str = "public, max-age=0, must-revalidate";
 /// `tests/fixtures/deploy-output-conformance.json`.
 pub fn document_cache_control(strategy: RenderStrategy, revalidate: Option<u64>) -> String {
     match strategy {
-        RenderStrategy::Isr => format!(
-            "public, max-age=0, s-maxage={}, stale-while-revalidate",
-            revalidate.unwrap_or(60)
-        ),
+        RenderStrategy::Isr => {
+            let revalidate = revalidate.unwrap_or(DEFAULT_REVALIDATE_SECONDS);
+            format!(
+                "public, max-age=0, s-maxage={revalidate}, stale-while-revalidate={}",
+                ISR_EXPIRE_SECONDS.saturating_sub(revalidate)
+            )
+        }
         RenderStrategy::Ssg | RenderStrategy::Csr => DOCUMENT_CACHE_CONTROL.to_string(),
         RenderStrategy::Ssr | RenderStrategy::Ppr => "no-store".to_string(),
     }

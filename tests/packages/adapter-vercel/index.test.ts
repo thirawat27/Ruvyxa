@@ -667,3 +667,140 @@ describe('vercel per-route edge split', () => {
     )
   })
 })
+
+describe('vercel prerender functions', () => {
+  const manifest = {
+    buildId: '0123456789abcdef',
+    routes: [
+      {
+        id: 'app/isr-page/page',
+        path: '/isr-page',
+        kind: 'page',
+        serve: 'function',
+        strategy: 'isr',
+        runtime: 'node',
+        revalidate: 120,
+      },
+      {
+        id: 'app/ppr-page/page',
+        path: '/ppr-page',
+        kind: 'page',
+        serve: 'function',
+        strategy: 'ppr',
+        runtime: 'node',
+        revalidate: null,
+      },
+      {
+        id: 'app/news/[slug]/page',
+        path: '/news/[slug]',
+        kind: 'page',
+        serve: 'function',
+        strategy: 'isr',
+        runtime: 'node',
+        revalidate: 30,
+      },
+      {
+        id: 'app/about/page',
+        path: '/about',
+        kind: 'page',
+        serve: 'static',
+        strategy: 'ssg',
+        runtime: 'node',
+        revalidate: null,
+      },
+    ],
+    prerendered: [
+      { path: '/news/launch', document: 'news/launch/index.html', strategy: 'isr' },
+      { path: '/blog/hello', document: 'blog/hello/index.html', strategy: 'ssg' },
+    ],
+  } as unknown as BuildContext['deployManifest']
+
+  const build = () =>
+    vercel({ projectOutput: false }).build({
+      root: '.',
+      outDir: '.ruvyxa',
+      deployManifest: manifest,
+    } as BuildContext)
+
+  const configFor = (
+    artifacts: NonNullable<Awaited<ReturnType<typeof build>>['artifacts']>,
+    name: string,
+  ) =>
+    JSON.parse(
+      String(
+        artifacts.find((artifact) =>
+          artifact.path.endsWith(`/functions/${name}.prerender-config.json`),
+        )?.contents ?? '{}',
+      ),
+    )
+
+  it('mounts each ISR path as its own prerender function, linked to the one bundle', async () => {
+    const output = await build()
+    const artifacts = output.artifacts ?? []
+    const aliases = artifacts.filter((artifact) => artifact.kind === 'function-alias')
+
+    // The pattern itself is not a path anybody requests; the expansion is.
+    assert.deepEqual(
+      aliases.map((artifact) =>
+        artifact.path.replace('deploy/vercel/.vercel/output/functions/', ''),
+      ),
+      ['isr-page.func', 'news/launch.func'],
+    )
+    for (const alias of aliases) {
+      assert.equal(alias.aliasOf, 'deploy/vercel/.vercel/output/functions/__ruvyxa_handler.func')
+    }
+    // One bundle, aliased — never a second compiled function.
+    assert.equal(artifacts.filter((artifact) => artifact.kind === 'function').length, 1)
+  })
+
+  it('gives each one the window the route asked for, and a bypass token', async () => {
+    const artifacts = (await build()).artifacts ?? []
+    const page = configFor(artifacts, 'isr-page')
+    assert.equal(page.expiration, 120)
+    assert.deepEqual(page.allowQuery, [])
+    assert.match(String(page.bypassToken), /^[0-9a-f]{32}$/)
+
+    // An expansion has no window of its own and inherits the pattern's.
+    assert.equal(configFor(artifacts, 'news/launch').expiration, 30)
+
+    // PPR streams its holes at request time; a prerender cache in front of that
+    // is a different mechanism and is not claimed here.
+    assert.equal(
+      artifacts.some((artifact) => artifact.path.includes('ppr-page')),
+      false,
+    )
+    // An SSG route is answered from a file and never reaches a function.
+    assert.equal(
+      artifacts.some((artifact) => artifact.path.includes('about')),
+      false,
+    )
+  })
+
+  it('purges the CDN when revalidatePath() forces a write', async () => {
+    const artifacts = (await build()).artifacts ?? []
+    const source = String(
+      artifacts.find((artifact) => artifact.kind === 'function')?.handlerSource ?? '',
+    )
+    const token = configFor(artifacts, 'isr-page').bypassToken
+    // Writing to the function's own store leaves the Prerender cache in front
+    // of it serving the old document; this is the documented way to invalidate.
+    assert.match(source, /'x-prerender-revalidate': BYPASS_TOKEN/)
+    assert.match(source, new RegExp(`const BYPASS_TOKEN = "${token}"`))
+    assert.match(source, /forced === true\) return revalidateOnVercel/)
+  })
+
+  it('derives the bypass token so two builds of one commit agree', async () => {
+    const first = configFor((await build()).artifacts ?? [], 'isr-page').bypassToken
+    const second = configFor((await build()).artifacts ?? [], 'isr-page').bypassToken
+    assert.equal(first, second)
+
+    process.env.RUVYXA_PREVIEW_SECRET = 'a-project-secret'
+    try {
+      const configured = configFor((await build()).artifacts ?? [], 'isr-page').bypassToken
+      assert.notEqual(configured, first, 'the project secret decides the token when it is set')
+      assert.match(String(configured), /^[0-9a-f]{32}$/)
+    } finally {
+      delete process.env.RUVYXA_PREVIEW_SECRET
+    }
+  })
+})

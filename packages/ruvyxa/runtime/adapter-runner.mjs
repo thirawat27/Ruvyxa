@@ -1,5 +1,6 @@
 import { cp, mkdir, readdir, readFile, rm, writeFile } from 'node:fs/promises'
 import { existsSync, writeSync } from 'node:fs'
+import { symlink } from 'node:fs/promises'
 import { createRequire } from 'node:module'
 import path from 'node:path'
 import { fileURLToPath, pathToFileURL } from 'node:url'
@@ -544,6 +545,150 @@ function findConfig(root) {
   return null
 }
 
+/**
+ * One writer per artifact kind.
+ *
+ * Split out of the loop rather than hoisted for its own sake: the loop's job is
+ * to validate the envelope every artifact shares — its kind, its scope, and
+ * where that scope puts it — and each kind's job is different enough that the
+ * combined branch count outgrew what one screen holds.
+ *
+ * Each writer takes the artifact and the shared state, and returns the record
+ * that goes into the adapter's report.
+ */
+/**
+ * The writer for one artifact kind, or `null` for a kind nothing here handles.
+ *
+ * A lookup rather than an object literal because this module does its work
+ * while a `const` at this position is still in its temporal dead zone; a
+ * function declaration hoists and a table of them does not have to.
+ */
+function artifactWriter(kind) {
+  switch (kind) {
+    case 'file':
+      return writeFileArtifact
+    case 'static-site':
+      return writeStaticSiteArtifact
+    case 'function':
+      return writeFunctionArtifact
+    case 'function-alias':
+      return writeFunctionAliasArtifact
+    default:
+      return null
+  }
+}
+
+async function writeFileArtifact(artifact, { scope, destination }) {
+  if (typeof artifact.contents !== 'string') {
+    throw new Error(`RUV2200 file artifact ${artifact.path} must include string contents.`)
+  }
+  if (scope === 'project' && artifact.skipIfExists === true && existsSync(destination)) {
+    return { kind: 'file', path: artifact.path, skipped: true }
+  }
+  await mkdir(path.dirname(destination), { recursive: true })
+  await writeFile(destination, artifact.contents, 'utf8')
+  return { kind: 'file', path: artifact.path }
+}
+
+async function writeStaticSiteArtifact(artifact, { scope, destination, buildDir }) {
+  // Project-scope publish directories are replaced wholesale so hashed
+  // bundles from previous builds do not accumulate at the platform root.
+  if (scope === 'project') await rm(destination, { recursive: true, force: true })
+  await materializeStaticSite(buildDir, destination, {
+    requirePrerender: artifact.optional !== true,
+    excludeStrategies: Array.isArray(artifact.excludeStrategies) ? artifact.excludeStrategies : [],
+  })
+  return { kind: 'static-site', path: artifact.path }
+}
+
+async function writeFunctionArtifact(
+  artifact,
+  { scope, destination, buildDir, output, built, destinations },
+) {
+  if (typeof artifact.handlerSource !== 'string') {
+    throw new Error(`RUV2200 function artifact ${artifact.path} must include handlerSource string.`)
+  }
+  // A function may name its own runtime and its own slice of the routes,
+  // which is what lets one deployment answer some paths from an edge runtime
+  // and the rest from Node. Both default to the output's own answer, so an
+  // adapter that says nothing gets exactly what it got before. Both belong to
+  // the identity: two functions differing only in which routes they carry are
+  // not the same directory.
+  const functionTarget = artifact.target ?? output.target
+  const functionRoutes = Array.isArray(artifact.routes) ? [...artifact.routes].sort() : null
+  const functionKey = [
+    functionTarget ?? '',
+    functionRoutes ? functionRoutes.join(',') : '*',
+    artifact.handlerSource,
+  ].join('\n')
+  const alreadyBuilt = built.get(functionKey)
+  if (alreadyBuilt) {
+    await rm(destination, { recursive: true, force: true })
+    await mkdir(path.dirname(destination), { recursive: true })
+    await cp(alreadyBuilt, destination, { recursive: true })
+  } else {
+    await materializeFunction(
+      buildDir,
+      destination,
+      artifact.handlerSource,
+      functionTarget,
+      functionRoutes,
+    )
+    built.set(functionKey, destination)
+  }
+  destinations.set(`${scope}:${artifact.path}`, destination)
+  return { kind: 'function', path: artifact.path }
+}
+
+async function writeFunctionAliasArtifact(artifact, { scope, destination, destinations }) {
+  if (typeof artifact.aliasOf !== 'string' || artifact.aliasOf.trim() === '') {
+    throw new Error(
+      `RUV2200 function-alias artifact ${artifact.path} must name the function it aliases.`,
+    )
+  }
+  const source = destinations.get(`${scope}:${artifact.aliasOf}`)
+  if (source === undefined) {
+    throw new Error(
+      `RUV2200 function-alias artifact ${artifact.path} names ${artifact.aliasOf}, which is not ` +
+        `a function artifact emitted earlier in the same scope.`,
+    )
+  }
+  await rm(destination, { recursive: true, force: true })
+  await mkdir(path.dirname(destination), { recursive: true })
+  // A link, not a copy: the bundle behind fifty ISR routes is one function,
+  // and Vercel's Build Output API documents a `.func` directory being a
+  // symlink to another for exactly this reason.
+  const linked = await linkOrCopy(source, destination)
+  return { kind: 'function-alias', path: artifact.path, linked }
+}
+
+/**
+ * Point `destination` at `source`, falling back until something works.
+ *
+ * Relative first, so the deployment directory can be moved or archived and
+ * still resolve — a junction stores an absolute path, which stops being true
+ * the moment the output is packaged somewhere else. Windows refuses a directory
+ * symlink without Developer Mode and takes the junction instead, and a
+ * filesystem that takes neither gets a copy: a working deployment that is
+ * larger beats a build that stops.
+ */
+async function linkOrCopy(source, destination) {
+  try {
+    await symlink(path.relative(path.dirname(destination), source), destination, 'dir')
+    return true
+  } catch {
+    // a directory symlink is not always permitted
+  }
+  try {
+    await symlink(source, destination, 'junction')
+    return true
+  } catch {
+    // and a junction exists only on Windows
+  }
+  await cp(source, destination, { recursive: true })
+  return false
+}
+
 async function materializeArtifacts(output, buildDir) {
   if (!output || typeof output !== 'object') {
     throw new Error('RUV2200 config.adapter.build(context) must return an output object.')
@@ -555,7 +700,10 @@ async function materializeArtifacts(output, buildDir) {
   // (deploy directory + platform discovery directory). Compiling the route
   // registry is the expensive step, so identical handler sources are built
   // once and copied afterwards.
-  const materializedFunctions = new Map()
+  const built = new Map()
+  // Where each `function` artifact landed, keyed by scope and declared path, so
+  // a `function-alias` can point at one rather than build a second copy.
+  const destinations = new Map()
   for (const artifact of output.artifacts) {
     if (!artifact || typeof artifact !== 'object') {
       throw new Error('RUV2200 adapter artifact must be an object.')
@@ -564,86 +712,25 @@ async function materializeArtifacts(output, buildDir) {
     if (scope !== 'build' && scope !== 'project') {
       throw new Error(`RUV2200 unsupported adapter artifact scope: ${String(artifact.scope)}.`)
     }
+    const write = artifactWriter(artifact.kind)
+    if (write === null) {
+      throw new Error(`RUV2200 unsupported adapter artifact kind: ${String(artifact.kind)}.`)
+    }
     const destination =
       scope === 'project'
         ? projectArtifactDestination(artifact.path)
         : artifactDestination(buildDir, artifact.path)
-    if (artifact.kind === 'file') {
-      if (typeof artifact.contents !== 'string') {
-        throw new Error(`RUV2200 file artifact ${artifact.path} must include string contents.`)
-      }
-      if (scope === 'project' && artifact.skipIfExists === true && existsSync(destination)) {
-        artifacts.push({ kind: 'file', path: artifact.path, scope, skipped: true })
-        continue
-      }
-      await mkdir(path.dirname(destination), { recursive: true })
-      await writeFile(destination, artifact.contents, 'utf8')
-      artifacts.push(
-        scope === 'project'
-          ? { kind: 'file', path: artifact.path, scope }
-          : { kind: 'file', path: artifact.path },
-      )
-      continue
-    }
-    if (artifact.kind === 'static-site') {
-      // Project-scope publish directories are replaced wholesale so hashed
-      // bundles from previous builds do not accumulate at the platform root.
-      if (scope === 'project') await rm(destination, { recursive: true, force: true })
-      await materializeStaticSite(buildDir, destination, {
-        requirePrerender: artifact.optional !== true,
-        excludeStrategies: Array.isArray(artifact.excludeStrategies)
-          ? artifact.excludeStrategies
-          : [],
-      })
-      artifacts.push(
-        scope === 'project'
-          ? { kind: 'static-site', path: artifact.path, scope }
-          : { kind: 'static-site', path: artifact.path },
-      )
-      continue
-    }
-    if (artifact.kind === 'function') {
-      if (typeof artifact.handlerSource !== 'string') {
-        throw new Error(
-          `RUV2200 function artifact ${artifact.path} must include handlerSource string.`,
-        )
-      }
-      // A function may name its own runtime and its own slice of the routes,
-      // which is what lets one deployment answer some paths from an edge
-      // runtime and the rest from Node. Both default to the output's own
-      // answer, so an adapter that says nothing gets exactly what it got
-      // before. Both belong to the identity: two functions differing only in
-      // which routes they carry are not the same directory.
-      const functionTarget = artifact.target ?? output.target
-      const functionRoutes = Array.isArray(artifact.routes) ? [...artifact.routes].sort() : null
-      const functionKey = [
-        functionTarget ?? '',
-        functionRoutes ? functionRoutes.join(',') : '*',
-        artifact.handlerSource,
-      ].join('\n')
-      const alreadyBuilt = materializedFunctions.get(functionKey)
-      if (alreadyBuilt) {
-        await rm(destination, { recursive: true, force: true })
-        await mkdir(path.dirname(destination), { recursive: true })
-        await cp(alreadyBuilt, destination, { recursive: true })
-      } else {
-        await materializeFunction(
-          buildDir,
-          destination,
-          artifact.handlerSource,
-          functionTarget,
-          functionRoutes,
-        )
-        materializedFunctions.set(functionKey, destination)
-      }
-      artifacts.push(
-        scope === 'project'
-          ? { kind: 'function', path: artifact.path, scope }
-          : { kind: 'function', path: artifact.path },
-      )
-      continue
-    }
-    throw new Error(`RUV2200 unsupported adapter artifact kind: ${String(artifact.kind)}.`)
+    const record = await write(artifact, {
+      scope,
+      destination,
+      buildDir,
+      output,
+      built,
+      destinations,
+    })
+    // The scope is reported only when it is not the default, which is the shape
+    // every consumer of this report already reads.
+    artifacts.push(scope === 'project' ? { ...record, scope } : record)
   }
   return artifacts
 }

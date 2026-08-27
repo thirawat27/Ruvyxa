@@ -120,6 +120,23 @@ export const IMMUTABLE_CACHE_CONTROL = 'public, max-age=31536000, immutable'
  */
 export const PUBLIC_ASSET_CACHE_CONTROL = 'public, max-age=3600, must-revalidate'
 
+/**
+ * Largest width `/__ruvyxa/image` accepts when the build named none.
+ *
+ * `ruvyxa build` publishes the project's own `image.onDemand.maxWidth` into the
+ * runtime policy, so this is the answer for a function bundle built before that
+ * field existed — and it has to be the same number the native host uses, or the
+ * same URL is a 200 under `ruvyxa start` and a 400 from the deployment.
+ *
+ * It is `defaultMaxWidth` in `tests/fixtures/dynamic-image-conformance.json`.
+ * Two Rust declarations replay that file; the JavaScript side had three more
+ * written as literals — one per adapter that can optimize — and replayed none.
+ * This is the one JavaScript declaration, and
+ * `tests/packages/ruvyxa/serverless-shared-tables.test.mjs` holds it and every
+ * emitted function source to the fixture.
+ */
+export const DEFAULT_IMAGE_MAX_WIDTH = 3840
+
 /** Non-breaking response security defaults shared by every Ruvyxa runtime. */
 export const DEFAULT_SECURITY_HEADERS = {
   'X-Content-Type-Options': 'nosniff',

@@ -106,7 +106,7 @@ build ชุดเดียว deploy ได้ทุกที่เพราะ
         "serve": "function", // must reach the server
         "strategy": "isr",
         "revalidate": 60,
-        "cacheControl": "public, max-age=0, s-maxage=60, stale-while-revalidate",
+        "cacheControl": "public, max-age=0, s-maxage=60, stale-while-revalidate=31535940",
       },
     ],
     "staticPaths": ["/"],

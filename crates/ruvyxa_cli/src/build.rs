@@ -391,6 +391,7 @@ fn run_adapter_stage(
     out_dir: &Path,
     detected_adapter: &Option<(String, String)>,
     show_summary: bool,
+    revalidating_routes: bool,
 ) -> anyhow::Result<Option<serde_json::Value>> {
     if config.adapter.is_none() && args.adapter.is_none() && detected_adapter.is_none() {
         return Ok(None);
@@ -419,6 +420,7 @@ fn run_adapter_stage(
         print_build_phase(spinner, "adapter", detail, phase_started.elapsed());
     }
     report_native_only_image_optimization(config, reported_adapter);
+    report_stale_revalidation(revalidating_routes, reported_adapter);
     Ok(Some(serde_json::to_value(artifacts)?))
 }
 
@@ -454,6 +456,28 @@ pub(crate) fn adapter_on_demand_images(adapter: &str) -> Option<bool> {
         .as_bool()
 }
 
+/// Whether `revalidatePath()` reaches what a visitor is served on this platform.
+///
+/// Read from `tests/fixtures/adapter-contract.json` for the same reason
+/// [`adapter_on_demand_images`] is: the capability is a property of the platform
+/// the adapter targets, not of anything this crate can inspect, and a restated
+/// list is only correct until somebody forgets it.
+///
+/// `None` is "the table has no entry" — an object-form `adapter:` or a
+/// third-party package — and stays distinct from `Some(false)`, which is the
+/// only value that may be reported.
+pub(crate) fn adapter_on_demand_revalidation(adapter: &str) -> Option<bool> {
+    const CONTRACT: &str = include_str!("../../../tests/fixtures/adapter-contract.json");
+    let contract: serde_json::Value = serde_json::from_str(CONTRACT).ok()?;
+    contract
+        .get("adapters")?
+        .as_array()?
+        .iter()
+        .find(|candidate| candidate["name"].as_str() == Some(adapter))?
+        .get("onDemandRevalidation")?
+        .as_bool()
+}
+
 /// Say that on-demand image optimization does not survive into this artifact.
 ///
 /// `image.onDemand` is served at `/__ruvyxa/image` by the Axum host, which
@@ -485,6 +509,51 @@ pub(crate) fn should_report_native_only_images(
     adapter: Option<&str>,
 ) -> bool {
     config.images.on_demand.enabled() && adapter.and_then(adapter_on_demand_images) == Some(false)
+}
+
+/// Whether the revalidation report below has something true to say.
+///
+/// Separated from the printing so it can be asserted, the same way
+/// [`should_report_native_only_images`] is: the report is a warning nobody's
+/// build fails on, which is exactly the kind of condition that drifts back to
+/// "always" without anyone noticing.
+pub(crate) fn should_report_stale_revalidation(
+    revalidating_routes: bool,
+    adapter: Option<&str>,
+) -> bool {
+    revalidating_routes && adapter.and_then(adapter_on_demand_revalidation) == Some(false)
+}
+
+/// Say that `revalidatePath()` will not reach a reader on this platform.
+///
+/// The forced write still lands in the function's own store. What it cannot do
+/// is drop the copy the platform is serving, because the platform caches the
+/// response on the `s-maxage` the handler sends and offers the code inside no
+/// way to invalidate one path. The page therefore keeps answering with the
+/// document it had until the window expires on its own — which is a correct
+/// deployment, just not the one the call implies.
+fn report_stale_revalidation(revalidating_routes: bool, adapter: Option<&str>) {
+    if !should_report_stale_revalidation(revalidating_routes, adapter) {
+        return;
+    }
+    let Some(adapter) = adapter else {
+        return;
+    };
+    warn!(
+        adapter,
+        "revalidatePath() cannot drop a cached document on this platform"
+    );
+    println!(
+        "  {} {}",
+        warn_text("warn"),
+        dim(format!(
+            "the {adapter} platform caches this build's responses and exposes no per-path \
+             purge, so revalidatePath() refreshes the function's own store while readers keep \
+             the previous document until `revalidate` elapses. Shorten `revalidate` for a page \
+             that must change on demand, or deploy it through an adapter that implements the \
+             platform's purge (vercel, netlify, cloudflare)."
+        ))
+    );
 }
 
 fn report_native_only_image_optimization(config: &ProjectConfig, adapter: Option<&str>) {
@@ -1178,9 +1247,22 @@ pub(crate) async fn build_with_cache_override(
     // Adapters must snapshot the committed output after build-complete hooks:
     // first-party and application plugins can add public artifacts such as a
     // sitemap or service worker that must be present in static deploy output.
-    if let Some(artifacts) =
-        run_adapter_stage(&args, &config, &out_dir, &detected_adapter, show_summary)?
-    {
+    // Only a route the platform is asked to hold can go stale behind a
+    // `revalidatePath()` it cannot deliver.
+    let revalidating_routes = manifest.routes.iter().any(|route| {
+        matches!(
+            route.render.strategy,
+            ruvyxa_graph::RenderStrategy::Isr | ruvyxa_graph::RenderStrategy::Ppr
+        )
+    });
+    if let Some(artifacts) = run_adapter_stage(
+        &args,
+        &config,
+        &out_dir,
+        &detected_adapter,
+        show_summary,
+        revalidating_routes,
+    )? {
         build_info["adapterArtifacts"] = artifacts;
     }
     build_info["timing"]["totalMs"] = serde_json::json!(duration_ms(started.elapsed()));

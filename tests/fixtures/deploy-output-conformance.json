@@ -124,13 +124,19 @@
     "$comment": [
       "What a function returns with a document it rendered, by strategy. ISR",
       "advertises its own clock so a CDN in front of the function can hold the",
-      "page for exactly as long as the project asked."
+      "page for exactly as long as the project asked.",
+      "",
+      "The stale window is `expire - revalidate` with `expire` fixed at one year,",
+      "which is the formula Next.js ships in production. It has to carry a number:",
+      "RFC 5861 defines `stale-while-revalidate=<delta-seconds>` and Netlify's CDN",
+      "documents only the numeric form, so a bare directive is dropped there and",
+      "the page stops being served stale while it refreshes."
     ],
     "cases": [
       {
         "strategy": "isr",
         "revalidate": 60,
-        "expect": "public, max-age=0, s-maxage=60, stale-while-revalidate"
+        "expect": "public, max-age=0, s-maxage=60, stale-while-revalidate=31535940"
       },
       {
         "strategy": "ssg",
@@ -155,14 +161,20 @@
       {
         "strategy": "isr",
         "revalidate": 0,
-        "expect": "public, max-age=0, s-maxage=0, stale-while-revalidate",
+        "expect": "public, max-age=0, s-maxage=0, stale-while-revalidate=31536000",
         "why": "`0` means revalidate on every request and is a value, not an absence. `revalidate || 60` reads it as missing and pins the page for a minute, which is the difference between a live page and a stale one."
       },
       {
         "strategy": "isr",
         "revalidate": null,
-        "expect": "public, max-age=0, s-maxage=60, stale-while-revalidate",
+        "expect": "public, max-age=0, s-maxage=60, stale-while-revalidate=31535940",
         "why": "An ISR route that never named a window falls back to the shared default, and both lanes have to pick the same number."
+      },
+      {
+        "strategy": "isr",
+        "revalidate": 31536000,
+        "expect": "public, max-age=0, s-maxage=31536000, stale-while-revalidate=0",
+        "why": "A revalidate at or past the one-year expire leaves no stale window. Subtracting has to saturate at zero: an unsigned wrap would emit a stale window of eighteen quintillion seconds, and a signed one a negative directive every CDN drops."
       }
     ]
   }

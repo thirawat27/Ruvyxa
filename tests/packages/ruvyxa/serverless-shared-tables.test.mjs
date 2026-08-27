@@ -101,6 +101,53 @@ describe('serverless handler security header table', () => {
   })
 })
 
+describe('default image max width', () => {
+  const table = fixture('dynamic-image-conformance.json')
+
+  /**
+   * `defaultMaxWidth` had a Rust replay and no JavaScript one.
+   *
+   * `dynamic_image.rs` asserts it, so the two Rust declarations stay level. The
+   * JavaScript side had three more — one in `@ruvyxa/adapter-cloudflare`, two in
+   * `@ruvyxa/adapter-vercel` — each written into a deployed function as a
+   * literal, and each outside every gate. Raising the Rust default would have
+   * left the deployed optimizer refusing widths the native host resizes, on
+   * exactly the two targets that can optimize at all.
+   */
+  it('is one number, and every adapter that emits it reads that one', async () => {
+    const { DEFAULT_IMAGE_MAX_WIDTH } = await import(
+      `file://${path.join(workspaceRoot, 'packages/@ruvyxa/core/dist/utils.js').replaceAll('\\', '/')}`
+    )
+    assert.equal(DEFAULT_IMAGE_MAX_WIDTH, table.defaultMaxWidth)
+
+    const emitted = await Promise.all(
+      ['adapter-vercel', 'adapter-cloudflare'].map(async (name) => {
+        const module = await import(
+          `file://${path.join(workspaceRoot, 'packages/@ruvyxa', name, 'dist/index.js').replaceAll('\\', '/')}`
+        )
+        const output = await module.default().build({ root: '.', outDir: '.ruvyxa' })
+        return [
+          name,
+          String(output.artifacts.find((item) => item.kind === 'function').handlerSource),
+        ]
+      }),
+    )
+    for (const [name, source] of emitted) {
+      assert.match(
+        source,
+        new RegExp(`maxWidth \\?\\? ${table.defaultMaxWidth}`),
+        `${name} must fall back to the shared default width`,
+      )
+      // And no other width literal pretending to be it.
+      assert.equal(
+        (source.match(/\?\? \d{4}\b/g) ?? []).every((hit) => hit === `?? ${table.defaultMaxWidth}`),
+        true,
+        `${name} carries a width default the fixture does not name`,
+      )
+    }
+  })
+})
+
 describe('serverless handler dynamic image bounds', () => {
   const table = fixture('dynamic-image-conformance.json')
 
@@ -228,6 +275,67 @@ describe('serverless handler dynamic image bounds', () => {
         passesOptimizer
           ? `adapter ${adapter.name} passes an optimizer but the contract says it serves no on-demand images, so the build warns a working deployment is broken`
           : `adapter ${adapter.name} passes no optimizer but the contract claims it serves on-demand images, so nothing warns that /__ruvyxa/image answers 404 there`,
+      )
+    }
+  })
+})
+
+/**
+ * `onDemandRevalidation` is a platform fact, so the fixture states it — but the
+ * half of it this repository owns is checkable, and that half is what drifts.
+ *
+ * An adapter claims the capability either because the store its handler writes
+ * *is* the cache a reader is served from, or because the handler implements the
+ * platform's own purge. The second kind is code, and code that is deleted or
+ * never written leaves the flag saying a deployment revalidates on demand when
+ * it does not.
+ */
+describe('adapter on-demand revalidation', () => {
+  const contract = fixture('adapter-contract.json')
+
+  /** The adapters whose claim rests on a purge call rather than on their store. */
+  const PURGES = new Map([
+    ['vercel', /'x-prerender-revalidate'/],
+    ['netlify', /purgeCache\(\{ tags:/],
+  ])
+
+  it('is declared for every adapter', () => {
+    for (const adapter of contract.adapters) {
+      assert.equal(
+        typeof adapter.onDemandRevalidation,
+        'boolean',
+        `adapter ${adapter.name} must declare onDemandRevalidation`,
+      )
+    }
+  })
+
+  it('is earned by the adapters that implement a purge', () => {
+    for (const [name, marker] of PURGES) {
+      const adapter = contract.adapters.find((entry) => entry.name === name)
+      assert.equal(adapter?.onDemandRevalidation, true, `${name} should claim the capability`)
+      const source = adapterSource(name)
+      assert.match(source, marker, `adapter-${name} no longer purges its platform's cache`)
+      // A purge that is never reached is the same as no purge: only a forced
+      // write may trigger one, and the handler has to be told which it is.
+      assert.match(
+        source,
+        /writePrerendered: \(pathname, html, revalidate, forced\)/,
+        `adapter-${name} must receive the forced flag to know when to purge`,
+      )
+    }
+  })
+
+  it('is refused by the adapters whose platform cache they cannot reach', () => {
+    // Firebase Hosting and Amplify's CloudFront both cache the response and
+    // expose no per-path purge inside the function, so neither may claim it —
+    // and neither may quietly start claiming it without the code to back it up.
+    for (const name of ['firebase', 'aws']) {
+      const adapter = contract.adapters.find((entry) => entry.name === name)
+      assert.equal(adapter?.onDemandRevalidation, false, `${name} cannot drop a cached document`)
+      assert.doesNotMatch(
+        adapterSource(name),
+        /purgeCache|x-prerender-revalidate/,
+        `adapter-${name} appears to purge now; the contract has to say so`,
       )
     }
   })

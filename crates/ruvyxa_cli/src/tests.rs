@@ -3705,6 +3705,62 @@ fn the_on_demand_image_report_follows_the_adapter() {
     ));
 }
 
+/// The build says so when `revalidatePath()` cannot reach a reader.
+///
+/// An ISR page is served from a cache, and which cache decides what
+/// `revalidatePath()` can do. Where the store the function writes is the copy a
+/// reader gets — a Worker's KV, a standalone server's filesystem — a forced
+/// write is the whole revalidation. Where the platform caches the *response*
+/// instead, the function has to ask the platform to drop that path, and two
+/// adapters have no way to: Firebase Hosting and Amplify's CloudFront both cache
+/// on the `s-maxage` the handler sends and give code inside no purge.
+///
+/// The forced write still succeeds there, and nothing a reader can see changes
+/// until the window expires on its own. Reported rather than refused, exactly
+/// like the image report beside it: such a deployment is still valid, and a
+/// project may never call `revalidatePath()` at all.
+#[test]
+fn the_revalidation_report_follows_the_adapter() {
+    assert!(
+        !crate::build::should_report_stale_revalidation(false, Some("firebase")),
+        "a project with no incrementally-regenerated route has nothing to be warned about"
+    );
+
+    for adapter in ["firebase", "aws"] {
+        assert!(
+            crate::build::should_report_stale_revalidation(true, Some(adapter)),
+            "{adapter} caches the response and exposes no purge, so a forced write reaches \
+             the store and not the reader"
+        );
+    }
+
+    for adapter in [
+        "vercel",
+        "netlify",
+        "cloudflare",
+        "node",
+        "bun",
+        "deno",
+        "railway",
+        "render",
+    ] {
+        assert!(
+            !crate::build::should_report_stale_revalidation(true, Some(adapter)),
+            "{adapter} either writes the cache a reader is served from or implements the \
+             platform's own purge"
+        );
+    }
+
+    // The same rule as the image report: an unnamed or third-party adapter is
+    // not in the table, and claiming a working deployment is broken is the
+    // worse of the two wrong answers.
+    assert!(!crate::build::should_report_stale_revalidation(true, None));
+    assert!(!crate::build::should_report_stale_revalidation(
+        true,
+        Some("@acme/ruvyxa-adapter-unknown")
+    ));
+}
+
 /// A route's `flight` export has to survive a build that runs from elsewhere.
 ///
 /// `ClientBundle::entry` is the route file as the published manifest carries

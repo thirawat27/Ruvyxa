@@ -1,7 +1,8 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
-import { mkdtemp, rm } from 'node:fs/promises'
+import { execFileSync } from 'node:child_process'
+import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 
@@ -19,7 +20,12 @@ import {
 
 describe('netlify', () => {
   it('returns serverless deployment output with function artifacts', async () => {
-    const output = await netlify().build({ root: '.', outDir: '.ruvyxa' })
+    // The Frameworks API is the other half of the pair — see the defaults test
+    // below — so it is asked for by name here rather than assumed.
+    const output = await netlify({ frameworksApi: true, projectConfig: false }).build({
+      root: '.',
+      outDir: '.ruvyxa',
+    })
 
     assert.deepEqual(
       output.artifacts?.map(({ kind, path, scope }) => ({ kind, path, scope })),
@@ -171,16 +177,13 @@ describe('netlify', () => {
     assert.match(projectTomlContents, /functions = "\.ruvyxa\/deploy\/netlify\/functions"/)
     assert.doesNotMatch(projectTomlContents, /D:\\/)
 
-    // projectConfig defaults to off: no root netlify.toml artifact
-    assert.equal(
-      output.artifacts?.some((artifact) => artifact.path === 'netlify.toml'),
-      false,
-    )
-
     // frameworksApi: false drops the .netlify/v1 artifacts
     assert.deepEqual(
       (
-        await netlify({ frameworksApi: false }).build({ root: '.', outDir: '.ruvyxa' })
+        await netlify({ frameworksApi: false, projectConfig: false }).build({
+          root: '.',
+          outDir: '.ruvyxa',
+        })
       ).artifacts?.map(({ path }) => path),
       [
         'deploy/netlify/publish',
@@ -298,5 +301,83 @@ describe('netlify', () => {
     } finally {
       await rm(root, { recursive: true, force: true })
     }
+  })
+})
+
+describe('netlify durable cache', () => {
+  const handlerSource = async () => {
+    const output = await netlify({ frameworksApi: false }).build({ root: '.', outDir: '.ruvyxa' })
+    const artifact = output.artifacts?.find((item) => item.kind === 'function')
+    return String((artifact as { handlerSource?: string } | undefined)?.handlerSource ?? '')
+  }
+
+  it('emits a handler node can parse', async () => {
+    // The generated source is a template literal, so one unescaped backtick in
+    // a comment ends the string early and emits JavaScript that does not parse.
+    // Nothing else here would notice: every assertion below is a text match,
+    // and a broken file matches text just as well as a working one.
+    const root = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-netlify-parse-'))
+    try {
+      const file = path.join(root, 'index.mjs')
+      await writeFile(file, await handlerSource())
+      execFileSync(process.execPath, ['--check', file], { stdio: 'pipe' })
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+
+  it('restates a cacheable answer for Netlify, durably and by tag', async () => {
+    const source = await handlerSource()
+    // `durable` is read by Netlify alone, which is why the header has to be
+    // repeated rather than the existing `Cache-Control` reused.
+    assert.match(source, /netlify-cdn-cache-control', 'public, durable, ' \+ cacheControl/)
+    assert.match(source, /headers\.set\('cache-tag', cacheTag/)
+    // Only a shared-cacheable response — never one rendered for one visitor.
+    assert.match(source, /cacheControl\.includes\('s-maxage'\)/)
+  })
+
+  it('purges the tag when revalidatePath() forces a write', async () => {
+    const source = await handlerSource()
+    assert.match(source, /forced === true\) return purgeDurableCache/)
+    assert.match(source, /await import\('@netlify\/functions'\)/)
+    // A project without the package must still boot: the import is where the
+    // revalidation happens, not at module load.
+    assert.doesNotMatch(source, /^import .*@netlify\/functions/m)
+  })
+})
+
+describe('netlify project configuration', () => {
+  const paths = async (options = {}) =>
+    ((await netlify(options).build({ root: '.', outDir: '.ruvyxa' })).artifacts ?? []).map(
+      (artifact) => artifact.path,
+    )
+
+  it('writes the root netlify.toml by default, because nothing else can name the publish directory', async () => {
+    // The Frameworks API has no key for the publish directory, and a build
+    // plugin cannot supply one without a netlify.toml of its own: Netlify
+    // installs a plugin from its UI only when the plugin is in Netlify's own
+    // directory. So the file is the mechanism, and generating it once beats
+    // asking every project to write it by hand.
+    assert.ok((await paths()).includes('netlify.toml'))
+  })
+
+  it('never ships both halves at once', async () => {
+    // Two functions, both declaring `path: '/*'` — the one the netlify.toml
+    // functions directory holds and the one under .netlify/v1/functions — is a
+    // site where which of them answers a request has no defined answer.
+    const byDefault = await paths()
+    assert.equal(
+      byDefault.some((entry) => entry.startsWith('.netlify/v1/')),
+      false,
+    )
+
+    const frameworksApi = await paths({ projectConfig: false })
+    assert.ok(frameworksApi.includes('.netlify/v1/functions/ruvyxa-handler'))
+    assert.equal(frameworksApi.includes('netlify.toml'), false)
+
+    // Both, only when the project insists — it has to be possible to say.
+    const both = await paths({ frameworksApi: true })
+    assert.ok(both.includes('netlify.toml'))
+    assert.ok(both.includes('.netlify/v1/config.json'))
   })
 })

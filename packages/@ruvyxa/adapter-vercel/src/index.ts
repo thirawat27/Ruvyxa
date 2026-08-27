@@ -1,5 +1,8 @@
+import { createHash } from 'node:crypto'
+
 import type { Adapter, AdapterOutput, BuildContext, DeployRoute } from '@ruvyxa/core'
 import {
+  DEFAULT_IMAGE_MAX_WIDTH,
   DEFAULT_SECURITY_HEADERS,
   clientBuildOutput,
   nonPublishableStrategies,
@@ -77,7 +80,11 @@ export interface VercelAdapterOptions {
  * serverless function (Node.js runtime). Reads the route manifest and handles
  * SSR/API/ISR/PPR requests.
  */
-function vercelHandlerSource(runtimePolicy: unknown, imageSizes: readonly number[]): string {
+function vercelHandlerSource(
+  runtimePolicy: unknown,
+  imageSizes: readonly number[],
+  bypassToken: string,
+): string {
   return `import { createHandler, prerenderRelativePath } from './serverless-handler.mjs';
 import { applyPluginHttp, loadActionModule, loadRouteModule } from './route-modules.mjs';
 // Imported, not read from disk: a platform that re-bundles the function only
@@ -97,6 +104,31 @@ const prerenderDir = path.join(import.meta.dirname, 'prerender');
 // tmp directory accepts writes. ISR revalidations land there and are read
 // back before the bundled deploy-time prerender output.
 const isrCacheDir = path.join(os.tmpdir(), 'ruvyxa-isr-cache');
+
+// The Prerender Function's cache lives in front of this function, so writing a
+// fresh document to the store below does not change what a visitor is served
+// until the window expires. Vercel documents one way to invalidate it: a GET to
+// the path carrying \`x-prerender-revalidate: <bypassToken>\`. That is what makes
+// \`revalidatePath()\` mean the same thing here as it does under \`ruvyxa start\`.
+const BYPASS_TOKEN = ${JSON.stringify(bypassToken)};
+// Set per request, read by the purge below: a request-scoped value rather than
+// a configured site URL, so a preview deployment purges its own domain.
+let requestOrigin = null;
+
+async function revalidateOnVercel(pathname) {
+  if (requestOrigin === null) return;
+  try {
+    // This re-enters the function, which renders and stores the page again —
+    // an ordinary refresh, not a forced one, so it cannot schedule a third
+    // request and loop.
+    await fetch(new URL(pathname, requestOrigin), {
+      method: 'GET',
+      headers: { 'x-prerender-revalidate': BYPASS_TOKEN },
+    });
+  } catch (error) {
+    console.error('[ruvyxa] could not revalidate ' + pathname + ' on the CDN:', error);
+  }
+}
 
 const readEntry = (htmlPath, revalidate) => {
   const html = readFileSync(htmlPath, 'utf8');
@@ -131,12 +163,13 @@ const handler = createHandler({
       return null;
     }
   },
-  writePrerendered: (pathname, html, revalidate) => {
+  writePrerendered: (pathname, html, revalidate, forced) => {
     const relative = prerenderRelativePath(pathname);
     if (relative === null) return;
     const htmlPath = path.join(isrCacheDir, relative);
     mkdirSync(path.dirname(htmlPath), { recursive: true });
     writeFileSync(htmlPath, html, 'utf8');
+    if (forced === true) return revalidateOnVercel(pathname);
   },
   // The project's own not-found page, pre-rendered by the build and carried
   // inline in the manifest: an unmatched URL is answered with the page the
@@ -175,7 +208,8 @@ async function readRequestBody(req) {
 }
 
 export default async function(req, res, context) {
-  const url = new URL(req.url, \`http://\${req.headers.host || 'localhost'}\`);
+  const url = new URL(req.url, \`https://\${req.headers.host || 'localhost'}\`);
+  requestOrigin = url.origin;
   const headers = new Headers();
   for (const [key, value] of Object.entries(req.headers)) {
     if (value) headers.set(key, Array.isArray(value) ? value.join(', ') : value);
@@ -257,7 +291,7 @@ function vercelImageSizes(runtimePolicy: Readonly<Record<string, unknown>>): num
   if (!image || typeof image !== 'object' || Array.isArray(image)) return []
   const policy = image as Readonly<Record<string, unknown>>
   if (policy.onDemand !== true) return []
-  const maxWidth = typeof policy.maxWidth === 'number' ? policy.maxWidth : 3840
+  const maxWidth = typeof policy.maxWidth === 'number' ? policy.maxWidth : DEFAULT_IMAGE_MAX_WIDTH
   const configured = Array.isArray(policy.sizes) ? policy.sizes : []
   const sizes = configured
     .filter((size): size is number => Number.isInteger(size) && size >= 16 && size <= maxWidth)
@@ -297,7 +331,7 @@ function vercelImageSizesSource(imageSizes: readonly number[]): string {
   return `const imageSizes = ${JSON.stringify(imageSizes)};
 
 function optimizeImage(request, { src, width, quality }) {
-  if (width > (runtimePolicy.image?.maxWidth ?? 3840)) {
+  if (width > (runtimePolicy.image?.maxWidth ?? ${DEFAULT_IMAGE_MAX_WIDTH})) {
     return new Response('Image width exceeds configured maximum', { status: 400 });
   }
   const allowedWidth =
@@ -309,6 +343,95 @@ function optimizeImage(request, { src, width, quality }) {
   return Response.redirect(destination, 307);
 }
 `
+}
+
+/** Every emitted config file ends with one, the way the rest of this adapter writes them. */
+const NEWLINE = '\n'
+
+/**
+ * Where a route path's function directory lives, without the `.func` suffix.
+ *
+ * `/` is `index`, matching the static file of the same name — the Build Output
+ * API resolves a function exactly the way it resolves a file.
+ */
+function functionOutputName(routePath: string): string {
+  const trimmed = routePath.replace(/^\/+/, '').replace(/\/+$/, '')
+  return trimmed === '' ? 'index' : trimmed
+}
+
+/**
+ * The token that turns a Prerender Function's cache off for one request.
+ *
+ * It gates two documented features at once: setting `__prerender_bypass` to it
+ * enables Draft Mode, and a `GET` carrying `x-prerender-revalidate: <token>`
+ * revalidates that path on demand. Both are how Vercel's own ISR works, so
+ * without a token `revalidatePath()` can refresh the function's store and leave
+ * the CDN serving the old document until the window expires.
+ *
+ * `RUVYXA_PREVIEW_SECRET` wins when the project sets one, which is the only way
+ * to hold a value the build output does not contain. Otherwise it is derived
+ * from the build id — which is itself derived from the emitted output — so two
+ * builds of one commit still produce identical bytes and `verify:reproducible`
+ * keeps meaning something. A random token per build would not.
+ */
+function prerenderBypassToken(buildId: string): string {
+  const configured = process.env.RUVYXA_PREVIEW_SECRET
+  if (typeof configured === 'string' && configured.trim() !== '') {
+    return createHash('sha256').update(configured).digest('hex').slice(0, 32)
+  }
+  return createHash('sha256')
+    .update(`ruvyxa-prerender-bypass:${buildId}`)
+    .digest('hex')
+    .slice(0, 32)
+}
+
+/**
+ * The routes that become Prerender Functions, and the paths they answer.
+ *
+ * ISR only. PPR streams its dynamic holes at request time, and a cache in front
+ * of a streamed shell is a different mechanism with different failure modes —
+ * it stays on the catch-all until it is built deliberately.
+ *
+ * A path with a dynamic segment is left out too: a Prerender Function is mounted
+ * at a literal path, so `/blog/[slug]` would cache one entry for every slug
+ * under the pattern's own name. The expansions a build did produce are here by
+ * name, through the manifest's `prerendered` list.
+ */
+function prerenderPaths(ctx: BuildContext): Array<{ path: string; revalidate: number }> {
+  const manifest = ctx.deployManifest
+  if (!manifest) return []
+  const seen = new Set<string>()
+  const paths: Array<{ path: string; revalidate: number }> = []
+  const add = (routePath: string, revalidate: number | null | undefined) => {
+    if (routePath.includes('[') || seen.has(routePath)) return
+    seen.add(routePath)
+    // Vercel measures the window in whole seconds and treats `0` as "no
+    // expiration named"; the project's `revalidate: 0` means the opposite, so
+    // it becomes the shortest window the platform accepts.
+    paths.push({ path: routePath, revalidate: Math.max(1, revalidate ?? 60) })
+  }
+  const revalidateOf = new Map(
+    (manifest.routes ?? []).map((route) => [route.path, route.revalidate]),
+  )
+  for (const route of manifest.routes ?? []) {
+    if (route.kind !== 'page' || route.strategy !== 'isr') continue
+    add(route.path, route.revalidate)
+  }
+  for (const entry of manifest.prerendered ?? []) {
+    if (entry.strategy !== 'isr') continue
+    // An expansion has no revalidate of its own; it inherits the route's, and
+    // the only route it can have come from is the one whose pattern it fills.
+    const parent = [...revalidateOf.keys()]
+      .filter((candidate) => candidate.includes('['))
+      .find((candidate) => matchesPattern(candidate, entry.path))
+    add(entry.path, parent === undefined ? 60 : revalidateOf.get(parent))
+  }
+  return paths
+}
+
+/** Whether a concrete path is one the dynamic route pattern produces. */
+function matchesPattern(pattern: string, candidate: string): boolean {
+  return new RegExp(routeSourcePattern(pattern)).test(candidate)
 }
 
 /** The Build Output `src` pattern that matches one route path. */
@@ -414,6 +537,8 @@ export function vercel(options: VercelAdapterOptions = {}): Adapter {
       const images = vercelImagesConfig(runtimePolicy)
       const imageSizes = vercelImageSizes(runtimePolicy)
       const STATIC_ASSET_PATTERN = staticAssetPattern()
+      const isrPaths = prerenderPaths(ctx)
+      const bypassToken = prerenderBypassToken(ctx.deployManifest?.buildId ?? '')
 
       // Routes that asked for a point of presence, and got one.
       //
@@ -445,6 +570,57 @@ export function vercel(options: VercelAdapterOptions = {}): Adapter {
       // both means such a request renders the right page from the wrong
       // runtime, instead of 404ing from the right one. The cost is that the
       // route's modules are compiled twice.
+
+      /**
+       * The Prerender Functions, which is how Vercel itself does ISR.
+       *
+       * Each one is the *same* function mounted at a second path, because the
+       * `<name>.prerender-config.json` that carries the window has to sit beside
+       * a `<name>.func`. Vercel then caches that path's response at the edge for
+       * `expiration` seconds and re-invokes the function behind the scenes —
+       * rather than the function answering every request and keeping its own
+       * copy in a per-instance tmp directory.
+       *
+       * No `fallback` file is emitted: the deploy-time document is already
+       * inside the function bundle, which `readPrerendered` answers the first
+       * request from, so a second copy beside the config would only be a second
+       * thing to keep in step.
+       */
+      const prerenderArtifacts = (
+        base: string,
+        scope?: 'project',
+      ): NonNullable<AdapterOutput['artifacts']> =>
+        edge
+          ? []
+          : isrPaths.flatMap(({ path: routePath, revalidate }) => {
+              const name = functionOutputName(routePath)
+              return [
+                {
+                  kind: 'function-alias' as const,
+                  path: `${base}/functions/${name}.func`,
+                  aliasOf: `${base}/functions/__ruvyxa_handler.func`,
+                  ...(scope ? { scope } : {}),
+                },
+                {
+                  kind: 'file' as const,
+                  path: `${base}/functions/${name}.prerender-config.json`,
+                  ...(scope ? { scope } : {}),
+                  contents:
+                    JSON.stringify(
+                      {
+                        expiration: revalidate,
+                        // One entry per path. Left undefined every distinct
+                        // query string would cache separately, so a page linked
+                        // with `?utm_source=` would be regenerated per campaign.
+                        allowQuery: [],
+                        bypassToken,
+                      },
+                      null,
+                      2,
+                    ) + NEWLINE,
+                },
+              ]
+            })
 
       /** The second function, when there is one. `base` is the scope's prefix. */
       const edgeFunctionArtifacts = (
@@ -589,7 +765,7 @@ export function vercel(options: VercelAdapterOptions = {}): Adapter {
                 scope: 'project',
                 handlerSource: edge
                   ? vercelEdgeHandlerSource(runtimePolicy, imageSizes)
-                  : vercelHandlerSource(runtimePolicy, imageSizes),
+                  : vercelHandlerSource(runtimePolicy, imageSizes, bypassToken),
               },
               {
                 kind: 'file',
@@ -597,6 +773,7 @@ export function vercel(options: VercelAdapterOptions = {}): Adapter {
                 scope: 'project',
                 contents: vcConfig + '\n',
               },
+              ...prerenderArtifacts('.vercel/output', 'project'),
               ...edgeFunctionArtifacts('.vercel/output', 'project'),
               {
                 kind: 'file',
@@ -631,7 +808,7 @@ export function vercel(options: VercelAdapterOptions = {}): Adapter {
             path: 'deploy/vercel/.vercel/output/functions/__ruvyxa_handler.func',
             handlerSource: edge
               ? vercelEdgeHandlerSource(runtimePolicy, imageSizes)
-              : vercelHandlerSource(runtimePolicy, imageSizes),
+              : vercelHandlerSource(runtimePolicy, imageSizes, bypassToken),
           },
           // Function config
           {
@@ -639,6 +816,7 @@ export function vercel(options: VercelAdapterOptions = {}): Adapter {
             path: 'deploy/vercel/.vercel/output/functions/__ruvyxa_handler.func/.vc-config.json',
             contents: vcConfig + '\n',
           },
+          ...prerenderArtifacts('deploy/vercel/.vercel/output'),
           ...edgeFunctionArtifacts('deploy/vercel/.vercel/output'),
           // Build Output API config
           {

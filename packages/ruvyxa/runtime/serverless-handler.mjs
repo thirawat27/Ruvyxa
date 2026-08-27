@@ -152,7 +152,7 @@ const MAX_IMAGE_WIDTH = 8192
  *   only store an edge deployment has could not be consulted here. Awaiting a
  *   value that is not a promise costs a microtask and keeps every filesystem
  *   adapter exactly as it was.
- * @property {(path: string, html: string, revalidate?: number) => void|Promise<void>} [writePrerendered]
+ * @property {(path: string, html: string, revalidate?: number, forced?: boolean) => void|Promise<void>} [writePrerendered]
  *   Write pre-rendered HTML to ISR cache with a TTL.
  * @property {string[]} [supportedStrategies]
  *   Strategies the platform supports. Defaults to ['ssr','ssg','csr','isr','ppr','api'].
@@ -209,6 +209,21 @@ export const HANDLER_RUNTIME_FILES = Object.freeze([
  */
 export const DOCUMENT_CACHE_CONTROL = 'public, max-age=0, must-revalidate'
 
+/** The revalidation window an ISR route that named none is given. */
+const DEFAULT_REVALIDATE_SECONDS = 60
+
+/**
+ * How long a stale ISR document may still be served while it refreshes.
+ *
+ * The stale window is `ISR_EXPIRE_SECONDS - revalidate`, the formula Next.js
+ * ships in production (its `expireTime`, one year by default). The directive
+ * has to carry a number: RFC 5861 defines
+ * `stale-while-revalidate=<delta-seconds>`, and Netlify's CDN documents only
+ * the numeric form — a bare directive is dropped there, which silently turns
+ * every refresh into a blocking render.
+ */
+const ISR_EXPIRE_SECONDS = 31_536_000
+
 /**
  * What a server sends with a document it just served, by rendering strategy.
  *
@@ -230,7 +245,9 @@ export const DOCUMENT_CACHE_CONTROL = 'public, max-age=0, must-revalidate'
  */
 export function documentCacheControl(strategy, revalidate) {
   if (strategy === 'isr') {
-    return `public, max-age=0, s-maxage=${revalidate ?? 60}, stale-while-revalidate`
+    const window = revalidate ?? DEFAULT_REVALIDATE_SECONDS
+    const stale = Math.max(0, ISR_EXPIRE_SECONDS - window)
+    return `public, max-age=0, s-maxage=${window}, stale-while-revalidate=${stale}`
   }
   if (strategy === 'ssg' || strategy === 'csr') return DOCUMENT_CACHE_CONTROL
   return 'no-store'
@@ -319,12 +336,18 @@ export function createHandler(options) {
    */
   async function persistPrerendered(pathname, html, revalidate, forced = false) {
     if (!writePrerendered) return false
+    // `forced` reaches the adapter, because a store is not always the only
+    // thing that has to be told. A platform that caches the *response* in front
+    // of this function — Vercel's Prerender Functions — keeps serving the old
+    // document until its own window expires, so an adapter has to be able to
+    // tell an ordinary background refresh from a `revalidatePath()` that must
+    // reach the CDN as well.
     if (forced) {
-      await writePrerendered(pathname, html, revalidate)
+      await writePrerendered(pathname, html, revalidate, true)
       return true
     }
     try {
-      await writePrerendered(pathname, html, revalidate)
+      await writePrerendered(pathname, html, revalidate, false)
       return true
     } catch (error) {
       console.error(`[ruvyxa] could not store the rendered page for ${pathname}:`, error)
