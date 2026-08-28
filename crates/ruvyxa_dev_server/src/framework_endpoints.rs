@@ -994,6 +994,49 @@ pub(crate) async fn dynamic_image_endpoint(
     with_security_headers(response)
 }
 
+/// Liveness and readiness for a long-running Ruvyxa process.
+///
+/// `200` while serving and `503` once a drain has begun, which is the whole
+/// point: an orchestrator that keeps routing to a process after it has stopped
+/// accepting sends it work it can only refuse, and the probe is the only thing
+/// that tells it otherwise in time. `Retry-After` says the refusal is about
+/// this moment rather than about this build.
+///
+/// Deliberately incurious. This is a public path on a deployed server, so it
+/// reports a status and the host that answered and nothing else — in-flight
+/// counts and queue depth are a load oracle for anyone who asks often enough.
+///
+/// The generated standalone server answers the same path the same way; see
+/// `tests/fixtures/framework-endpoint-conformance.json`, which is where the two
+/// hosts agree about it.
+pub(crate) async fn health_endpoint(State(state): State<Arc<AppState>>) -> Response {
+    let draining = state.draining.load(std::sync::atomic::Ordering::Relaxed);
+    let (status, body) = if draining {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "{\"status\":\"draining\",\"host\":\"native\"}
+",
+        )
+    } else {
+        (
+            StatusCode::OK,
+            "{\"status\":\"ok\",\"host\":\"native\"}
+",
+        )
+    };
+    let mut response = (status, body).into_response();
+    let headers = response.headers_mut();
+    headers.insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/json; charset=utf-8"),
+    );
+    headers.insert(header::CACHE_CONTROL, HeaderValue::from_static("no-store"));
+    if draining {
+        headers.insert(header::RETRY_AFTER, HeaderValue::from_static("1"));
+    }
+    with_security_headers(response)
+}
+
 pub(crate) async fn action_endpoint(
     State(state): State<Arc<AppState>>,
     axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<SocketAddr>,

@@ -156,7 +156,13 @@ async function startProcessServer(
   args: string[],
   server: string,
   extraEnv: Record<string, string> = {},
-): Promise<{ client: Client; stop: () => void; port: number }> {
+): Promise<{
+  client: Client
+  stop: () => void
+  drain: () => void
+  output: () => string
+  port: number
+}> {
   const port = await freePort()
   const child = spawn(executable, [...args, path.join(server, 'index.mjs')], {
     cwd: server,
@@ -185,6 +191,12 @@ async function startProcessServer(
   return {
     client: (pathname, init) => fetch(`http://127.0.0.1:${port}${pathname}`, init),
     stop: () => child.kill(),
+    // The signal an orchestrator sends, as opposed to `stop()`, which is the
+    // test runner giving up on the process.
+    drain: () => child.kill('SIGTERM'),
+    // Everything the process has written so far, which for a server is the
+    // whole of its structured output.
+    output: () => output,
     port,
   }
 }
@@ -631,6 +643,256 @@ describe('generated standalone server render deadline', () => {
         // then stopped serving would have traded one hung route for all of them.
         const asset = await started.client('/logo.png')
         assert.equal(asset.status, 200)
+      } finally {
+        started.stop()
+      }
+    })
+  }
+})
+
+/**
+ * The health probe an orchestrator points at this process.
+ *
+ * Answered before routing and before admission, which is the part worth a test:
+ * a probe that queues behind the renders it exists to report on says
+ * "unhealthy" when the server is merely busy, and the orchestrator restarts a
+ * process that was working. Driven here against a server whose every slot is
+ * held by a render that never settles.
+ */
+describe('generated standalone server health endpoint', () => {
+  for (const runtime of runtimes) {
+    const launcher = executables[runtime]
+    it(`answers the probe while every render slot is taken (${runtime}, ${launcher ? 'installed' : 'stubbed'})`, async () => {
+      const server = stageDeployment(runtime, true, { hangingRoute: true })
+      const limits = { RUVYXA_MAX_CONCURRENCY: '1', RUVYXA_MAX_QUEUE: '1' }
+      const started = launcher
+        ? await startProcessServer(launcher.executable, launcher.args, server, limits)
+        : await startFetchServer(server, limits)
+      try {
+        const healthy = await started.client('/__ruvyxa/health', {
+          signal: AbortSignal.timeout(6_000),
+        })
+        assert.equal(healthy.status, 200)
+        assert.equal(healthy.headers.get('cache-control'), 'no-store')
+        assert.deepEqual(await healthy.json(), { status: 'ok', host: runtime })
+
+        // Fill both slots with renders that will never finish, then ask again.
+        const parked = Array.from({ length: 2 }, () =>
+          started.client('/', { signal: AbortSignal.timeout(15_000) }).catch(() => null),
+        )
+        await new Promise((resolve) => setTimeout(resolve, 400))
+
+        const underLoad = await started.client('/__ruvyxa/health', {
+          signal: AbortSignal.timeout(6_000),
+        })
+        assert.equal(
+          underLoad.status,
+          200,
+          'a busy server is not an unhealthy one, and a probe that queues cannot tell them apart',
+        )
+
+        // A probe often asks with HEAD; the status has to mean the same thing.
+        const head = await started.client('/__ruvyxa/health', {
+          method: 'HEAD',
+          signal: AbortSignal.timeout(6_000),
+        })
+        assert.equal(head.status, 200)
+        assert.equal(await head.text(), '')
+
+        // The path exists; this verb does not. A 404 would say the endpoint is
+        // absent, which is what the native host answers 405 to avoid — and a
+        // probe misconfigured to POST should be told which verb to use rather
+        // than that the endpoint was never deployed.
+        const wrongVerb = await started.client('/__ruvyxa/health', {
+          method: 'POST',
+          signal: AbortSignal.timeout(6_000),
+        })
+        assert.equal(wrongVerb.status, 405)
+        assert.equal(wrongVerb.headers.get('allow'), 'GET, HEAD')
+
+        void parked
+      } finally {
+        started.stop()
+      }
+    })
+  }
+
+  /**
+   * The readiness half: once a drain has begun the probe has to say so.
+   *
+   * An orchestrator still routing to a process that has stopped accepting sends
+   * it work it can only refuse, and this is the only thing that tells it in
+   * time. Needs a real `SIGTERM` to a real process, so it runs where signals
+   * mean what they say: Windows maps `child.kill('SIGTERM')` onto
+   * `TerminateProcess`, which gives the program no chance to answer anything.
+   */
+  it(
+    'reports itself draining once a shutdown signal has arrived',
+    { skip: process.platform === 'win32' ? 'SIGTERM is not deliverable on Windows' : false },
+    async () => {
+      const server = stageDeployment('node')
+      const started = await startProcessServer(process.execPath, [], server, {
+        // Long enough that the process is still draining when the probe lands.
+        RUVYXA_SHUTDOWN_GRACE: '10000',
+      })
+      try {
+        assert.equal((await started.client('/__ruvyxa/health')).status, 200)
+
+        // Held open so the drain has something to wait for; without it the
+        // process exits before there is anything to ask.
+        const held = started.client('/', { signal: AbortSignal.timeout(15_000) }).catch(() => null)
+        started.drain()
+        await new Promise((resolve) => setTimeout(resolve, 300))
+
+        const draining = await started.client('/__ruvyxa/health', {
+          signal: AbortSignal.timeout(6_000),
+        })
+        assert.equal(draining.status, 503)
+        assert.equal(draining.headers.get('retry-after'), '1')
+        assert.deepEqual(await draining.json(), { status: 'draining', host: 'node' })
+        void held
+      } finally {
+        started.stop()
+      }
+    },
+  )
+})
+
+/**
+ * Every line the process writes is one record a collector can read.
+ *
+ * The point of the format is not that it looks tidy: it is that the escaping
+ * stops being something a future edit has to remember. `JSON.stringify` cannot
+ * emit a raw newline, so a value a caller supplied cannot become a second record
+ * — which is a thing that happened, see the log-injection test over
+ * `serverless-handler.mjs`.
+ *
+ * Node only. What is under test is the shared program text, and the three
+ * transports write through the same writer.
+ */
+describe('generated standalone server structured logging', () => {
+  it('writes one JSON record per line when asked to', async () => {
+    const server = stageDeployment('node')
+    const started = await startProcessServer(process.execPath, [], server, {
+      RUVYXA_LOG_FORMAT: 'json',
+      RUVYXA_MAX_CONCURRENCY: '2',
+    })
+    try {
+      // A request that is logged, so the request record is in the output too.
+      await started.client('/logo.png')
+      await new Promise((resolve) => setTimeout(resolve, 200))
+
+      const lines = started
+        .output()
+        .split('\n')
+        .map((line) => line.trim())
+        .filter((line) => line !== '')
+      assert.ok(lines.length > 0, 'the server must have said something')
+      for (const line of lines) {
+        // The whole claim: no line needs a parser other than JSON.
+        const record = JSON.parse(line) as { level?: string; msg?: string }
+        assert.ok(record.level, `every record carries a level: ${line}`)
+        assert.ok(record.msg, `every record carries a message: ${line}`)
+      }
+      const listening = lines
+        .map((line) => JSON.parse(line) as { msg?: string; url?: string })
+        .find((record) => record.msg === 'listening on')
+      assert.ok(listening?.url, 'the readiness record carries where it is listening')
+    } finally {
+      started.stop()
+    }
+  })
+
+  it('keeps the human shape by default', async () => {
+    const server = stageDeployment('node')
+    const started = await startProcessServer(process.execPath, [], server)
+    try {
+      const first = started.output().split('\n')[0]
+      assert.match(first, /^\[ruvyxa] /, first)
+      assert.throws(() => JSON.parse(first), 'the default must not be JSON')
+    } finally {
+      started.stop()
+    }
+  })
+})
+
+/**
+ * Metrics, and the token that is the only reason they can be public at all.
+ *
+ * These are the numbers the health probe deliberately withholds — concurrency,
+ * queue depth, refusals — so the interesting assertions are the negative ones:
+ * unset, the path must not exist; set, a caller without the token must not get
+ * a single number out of it.
+ */
+describe('generated standalone server metrics endpoint', () => {
+  const TOKEN = 'metrics-token-for-the-test'
+
+  for (const runtime of runtimes) {
+    const launcher = executables[runtime]
+    const start = (extraEnv: Record<string, string>) =>
+      launcher
+        ? startProcessServer(launcher.executable, launcher.args, stageDeployment(runtime), extraEnv)
+        : startFetchServer(stageDeployment(runtime), extraEnv)
+
+    it(`does not advertise the path when no token is configured (${runtime})`, async () => {
+      const started = await start({})
+      try {
+        // 404 rather than 401: a deployment that never turned metrics on should
+        // not tell a stranger that the endpoint is there to be attacked.
+        const response = await started.client('/__ruvyxa/metrics')
+        assert.equal(response.status, 404)
+      } finally {
+        started.stop()
+      }
+    })
+
+    it(`refuses a scrape without the token (${runtime})`, async () => {
+      const started = await start({ RUVYXA_METRICS_TOKEN: TOKEN })
+      try {
+        const anonymous = await started.client('/__ruvyxa/metrics')
+        assert.equal(anonymous.status, 401)
+        assert.equal(anonymous.headers.get('www-authenticate'), 'Bearer')
+        assert.doesNotMatch(await anonymous.text(), /ruvyxa_/, 'a refusal must carry no numbers')
+
+        const wrong = await started.client('/__ruvyxa/metrics', {
+          headers: { authorization: `Bearer ${TOKEN}x` },
+        })
+        assert.equal(wrong.status, 401)
+        // Same length, different bytes: the comparison must not accept a
+        // prefix, which is the shape a `startsWith` or a truncated compare has.
+        const sameLength = await started.client('/__ruvyxa/metrics', {
+          headers: { authorization: `Bearer ${'x'.repeat(TOKEN.length)}` },
+        })
+        assert.equal(sameLength.status, 401)
+      } finally {
+        started.stop()
+      }
+    })
+
+    it(`reports the admission numbers to a scrape that holds the token (${runtime})`, async () => {
+      const started = await start({
+        RUVYXA_METRICS_TOKEN: TOKEN,
+        RUVYXA_MAX_CONCURRENCY: '3',
+        RUVYXA_MAX_QUEUE: '7',
+      })
+      try {
+        const response = await started.client('/__ruvyxa/metrics', {
+          headers: { authorization: `Bearer ${TOKEN}` },
+        })
+        assert.equal(response.status, 200)
+        assert.match(String(response.headers.get('content-type')), /^text\/plain; version=0\.0\.4/)
+        assert.equal(response.headers.get('cache-control'), 'no-store')
+
+        const body = await response.text()
+        // The configured limits, read back — a scrape that reported defaults
+        // would be describing a server other than this one.
+        assert.match(body, /^ruvyxa_renders_max_concurrent 3$/m, body)
+        assert.match(body, /^ruvyxa_renders_max_queued 7$/m, body)
+        assert.match(body, /^ruvyxa_renders_active \d+$/m, body)
+        assert.match(body, /^ruvyxa_renders_rejected_total \d+$/m, body)
+        assert.match(body, new RegExp(`^ruvyxa_build_info\\{runtime="${runtime}"\\} 1$`, 'm'), body)
+        // Prometheus needs the type line to read a counter as one.
+        assert.match(body, /^# TYPE ruvyxa_renders_rejected_total counter$/m, body)
       } finally {
         started.stop()
       }

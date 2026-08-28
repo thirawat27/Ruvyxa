@@ -128,6 +128,37 @@ request and never finishes it is retired on the same `RUVYXA_HEADERS_TIMEOUT` wi
 own `headersTimeout` does not fire for that shape; Bun retires it itself and Deno's server offers no
 way to, so put a reverse proxy in front of a Deno deployment that faces the internet directly.
 
+**Health.** `GET /__ruvyxa/health` answers `{"status":"ok","host":"<runtime>"}` with `no-store`
+while the process is serving, and `503` with `{"status":"draining"}` and `Retry-After` once a
+shutdown signal has arrived — so an orchestrator stops routing to a process that has begun shutting
+down rather than sending it work it is about to refuse. `HEAD` answers the same status. It is served
+ahead of routing and ahead of admission, because a probe that queues behind the renders it exists to
+report on says "unhealthy" when the server is merely busy, and the orchestrator restarts something
+that was working. `ruvyxa start` answers the same path the same way; the two hosts are held to
+`tests/fixtures/framework-endpoint-conformance.json`. A serverless deployment has no such path,
+because a function's liveness belongs to the platform that invokes it. The body carries a status and
+the runtime name and nothing else: it is a public path on a deployed server, and in-flight counts
+and queue depth are a load oracle for anyone willing to ask often enough.
+
+**Logging.** `RUVYXA_LOG_FORMAT=json` makes every line the server writes one JSON record —
+`{"level","msg",…fields}` — which is what a collector wants and what makes the escaping structural
+rather than remembered: `JSON.stringify` cannot emit a raw newline. The default stays the readable
+`[ruvyxa] msg key=value` shape, with the same values escaped by hand. Either way a caller-supplied
+value cannot open a second line: a query parameter is percent-decoded before it reaches a log
+message, so `?name=bad%0Ainjected…` on the action endpoint used to add an entry to a deployed log
+that nobody wrote. The readiness line still contains the words `listening on` in both formats,
+because a supervisor waiting on stdout is reading it. Serverless adapters are left in their
+platform's shape and are not affected.
+
+**Metrics.** `GET /__ruvyxa/metrics` serves Prometheus text exposition — render concurrency, queue
+depth, refusals, render timeouts, uptime — and exists only when `RUVYXA_METRICS_TOKEN` is set.
+Without it the path answers `404` rather than `401`, because a deployment that never turned metrics
+on should not advertise that the endpoint is there. With it, a scrape must send
+`Authorization: Bearer <token>`; the token is compared in constant time, so the time a refusal takes
+does not say how long a guessed prefix was. These are exactly the numbers `/__ruvyxa/health`
+withholds, which is why they sit behind a token instead of beside the public probe. Standalone only:
+`ruvyxa start` has no admission controller of its own to report on.
+
 **Capacity.** More renders than the machine can run are refused rather than started.
 `RUVYXA_MAX_CONCURRENCY` is how many run at once — by default the container's share of the cores,
 clamped to between two and eight, because a render is CPU-bound and admitting more than that only

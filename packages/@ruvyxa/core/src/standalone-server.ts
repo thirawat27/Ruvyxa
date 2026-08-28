@@ -77,7 +77,7 @@ function sharedServerSource(
   const isrCacheDirectory =
     options.isrCache === 'tmp' ? "path.join(os.tmpdir(), 'ruvyxa-isr-cache')" : 'prerenderDir'
 
-  return `import { createHandler, parseByteRange, prerenderRelativePath } from './serverless-handler.mjs';
+  return `import { createHandler, logRecord, parseByteRange, prerenderRelativePath } from './serverless-handler.mjs';
 import { applyPluginHttp, loadActionModule, loadRouteModule } from './route-modules.mjs';
 // The controller the render worker pool already runs on, reused rather than
 // rewritten: bounded FIFO admission is one decision, and two implementations of
@@ -101,6 +101,19 @@ const runtimePolicy = ${JSON.stringify(options.runtimePolicy ?? {})};
 // indistinguishable from one that is.
 const RUVYXA_RUNTIME = ${JSON.stringify(runtime)};
 
+// The message stays \`listening on\` in both formats because it is a readiness
+// signal, not prose: a supervisor, a container healthcheck script, and this
+// repository's own conformance harness all wait for those words on stdout, and
+// renaming it would leave every one of them waiting for twenty seconds and then
+// giving up.
+//
+// One object per line for a collector, or the human shape for a terminal. The
+// escaping is structural in the first and applied by hand in the second, so a
+// value carrying a newline cannot become a record nobody wrote either way; see
+// \`logValue\` in serverless-handler.mjs for the request that proved it could.
+const LOG_FORMAT = process.env.RUVYXA_LOG_FORMAT === 'json' ? 'json' : 'text';
+const log = (level, message, fields) => logRecord(LOG_FORMAT, level, message, fields ?? {});
+
 const here = import.meta.dirname;
 const prerenderDir = path.join(here, 'prerender');
 const isrCacheDir = ${isrCacheDirectory};
@@ -115,6 +128,7 @@ const handler = createHandler({
   importAction: loadActionModule,
   pluginHttp: applyPluginHttp,
   security: runtimePolicy.security,
+  logFormat: LOG_FORMAT,
   readPrerendered: (pathname, revalidate = 60) => {
     // prerenderRelativePath rejects any request path that cannot be mapped to a
     // location inside the selected cache root, so the cache read can never escape it.
@@ -531,9 +545,153 @@ const admission =
         maxQueuedRequests: Math.trunc(MAX_QUEUED_RENDERS),
       });
 
+/**
+ * Liveness and readiness for this process.
+ *
+ * Answered before routing and before admission, because a probe must not queue
+ * behind the renders it exists to report on: a server whose health check waits
+ * for a slot reports "unhealthy" exactly when it is merely busy, and the
+ * orchestrator restarts a process that was working.
+ *
+ * \`200\` while serving and \`503\` once a drain has begun. That ordering is the
+ * point — an orchestrator still routing to a process that has stopped accepting
+ * sends it work it can only refuse, and this is the only thing that tells it in
+ * time.
+ *
+ * Deliberately incurious: a status and the runtime that answered, nothing more.
+ * This is a public path on a deployed server, and in-flight counts and queue
+ * depth are a load oracle for anyone willing to ask often enough. The native
+ * host answers the same path the same way; the two are held to
+ * \`tests/fixtures/framework-endpoint-conformance.json\`.
+ */
+const HEALTH_PATH = '/__ruvyxa/health';
+
+/**
+ * Prometheus text exposition, off unless an operator turns it on.
+ *
+ * These are the numbers \`/__ruvyxa/health\` deliberately withholds — how many
+ * renders are running, how deep the queue is, how many callers have been
+ * refused. That is a load oracle for anyone willing to ask often enough, which
+ * is why it is behind a bearer token rather than beside the public probe, and
+ * why an unset token answers \`404\` rather than \`401\`: a deployment that never
+ * turned metrics on should not advertise that the path exists.
+ */
+const METRICS_PATH = '/__ruvyxa/metrics';
+const METRICS_TOKEN = (process.env.RUVYXA_METRICS_TOKEN ?? '').trim();
+const STARTED_AT = Date.now();
+let renderTimeouts = 0;
+
+/**
+ * Compare a presented token with the configured one without leaking where they
+ * first differ.
+ *
+ * A \`===\` on secrets returns as soon as two bytes disagree, so the time it
+ * takes says how long a guessed prefix was — enough to recover a token one byte
+ * at a time from a few thousand requests. Length is compared first and does
+ * leak, which is the accepted shape of this check everywhere it appears.
+ */
+function tokenMatches(presented) {
+  if (presented.length !== METRICS_TOKEN.length) return false;
+  let difference = 0;
+  for (let index = 0; index < presented.length; index += 1) {
+    difference |= presented.charCodeAt(index) ^ METRICS_TOKEN.charCodeAt(index);
+  }
+  return difference === 0;
+}
+
+function metricsResponse(request) {
+  // Not configured: the path does not exist, as far as anyone asking can tell.
+  if (METRICS_TOKEN === '') return null;
+
+  const authorization = request.headers.get('authorization') ?? '';
+  const presented = authorization.startsWith('Bearer ') ? authorization.slice(7).trim() : '';
+  if (!tokenMatches(presented)) {
+    return new Response('Unauthorized', {
+      status: 401,
+      headers: {
+        'www-authenticate': 'Bearer',
+        'content-type': 'text/plain; charset=utf-8',
+        'cache-control': 'no-store',
+      },
+    });
+  }
+
+  const snapshot = admission?.snapshot() ?? null;
+  const lines = [
+    '# HELP ruvyxa_build_info The runtime this deployment was emitted for.',
+    '# TYPE ruvyxa_build_info gauge',
+    \`ruvyxa_build_info{runtime="\${RUVYXA_RUNTIME}"} 1\`,
+    '# HELP ruvyxa_uptime_seconds Seconds since this process began serving.',
+    '# TYPE ruvyxa_uptime_seconds gauge',
+    \`ruvyxa_uptime_seconds \${Math.floor((Date.now() - STARTED_AT) / 1000)}\`,
+    '# HELP ruvyxa_render_timeouts_total Renders abandoned at RUVYXA_RENDER_TIMEOUT.',
+    '# TYPE ruvyxa_render_timeouts_total counter',
+    \`ruvyxa_render_timeouts_total \${renderTimeouts}\`,
+    '# HELP ruvyxa_draining Whether a shutdown signal has arrived.',
+    '# TYPE ruvyxa_draining gauge',
+    \`ruvyxa_draining \${shuttingDown ? 1 : 0}\`,
+  ];
+  // Absent rather than zero when admission is off: a scrape that reported
+  // "0 renders running, 0 queued" for a server with no limiter would read as a
+  // healthy idle process rather than as an unbounded one.
+  if (snapshot) {
+    lines.push(
+      '# HELP ruvyxa_renders_active Renders holding a slot right now.',
+      '# TYPE ruvyxa_renders_active gauge',
+      \`ruvyxa_renders_active \${snapshot.activeRequests}\`,
+      '# HELP ruvyxa_renders_queued Requests waiting for a slot.',
+      '# TYPE ruvyxa_renders_queued gauge',
+      \`ruvyxa_renders_queued \${snapshot.queuedRequests}\`,
+      '# HELP ruvyxa_renders_max_concurrent Configured render concurrency.',
+      '# TYPE ruvyxa_renders_max_concurrent gauge',
+      \`ruvyxa_renders_max_concurrent \${snapshot.maxConcurrentRequests}\`,
+      '# HELP ruvyxa_renders_max_queued Configured queue depth.',
+      '# TYPE ruvyxa_renders_max_queued gauge',
+      \`ruvyxa_renders_max_queued \${snapshot.maxQueuedRequests}\`,
+      '# HELP ruvyxa_renders_rejected_total Requests refused because the queue was full.',
+      '# TYPE ruvyxa_renders_rejected_total counter',
+      \`ruvyxa_renders_rejected_total \${snapshot.rejectedRequests}\`,
+    );
+  }
+  return new Response(lines.join('\\n') + '\\n', {
+    status: 200,
+    headers: {
+      'content-type': 'text/plain; version=0.0.4; charset=utf-8',
+      'cache-control': 'no-store',
+    },
+  });
+}
+
+function healthResponse(method) {
+  // The path exists; this verb does not. A 404 here would say the endpoint is
+  // absent, which is what the native host answers 405 to avoid — see the
+  // method-dispatch rules the three hosts already share.
+  if (method !== 'GET' && method !== 'HEAD') {
+    return new Response('Method Not Allowed', {
+      status: 405,
+      headers: {
+        allow: 'GET, HEAD',
+        'content-type': 'text/plain; charset=utf-8',
+        'cache-control': 'no-store',
+      },
+    });
+  }
+  const status = shuttingDown ? 503 : 200;
+  const headers = {
+    'content-type': 'application/json; charset=utf-8',
+    'cache-control': 'no-store',
+  };
+  if (shuttingDown) headers['retry-after'] = '1';
+  const body =
+    JSON.stringify({ status: shuttingDown ? 'draining' : 'ok', host: RUVYXA_RUNTIME }) + '\\n';
+  // A HEAD asks for the headers of the body it would have received, so the
+  // status still says whether this process is taking traffic.
+  return new Response(method === 'HEAD' ? null : body, { status, headers });
+}
+
 /** The answer to a request this server has decided not to start. */
 function overloaded(reason) {
-  console.error(\`[ruvyxa] \${reason}\`);
+  log('warn', 'refused', { reason });
   return new Response('Service Unavailable', {
     status: 503,
     headers: {
@@ -595,6 +753,7 @@ async function handleWithTimeout(request) {
   try {
     const settled = await Promise.race([rendered, deadline]);
     if (settled === RENDER_TIMED_OUT) {
+      renderTimeouts += 1;
       return overloaded(
         \`render timed out after \${RENDER_TIMEOUT_MS}ms: \${new URL(request.url).pathname}\`,
       );
@@ -652,7 +811,7 @@ function pipeCompressed(source, res, encoding) {
   // The status and headers are already committed, so a failure here can only
   // become a dropped connection — but unhandled it would take the process down.
   encoder.on('error', (error) => {
-    console.error('[ruvyxa] response compression failed:', error);
+    log('error', 'response compression failed', { error: String(error) });
     res.destroy(error);
   });
   res.on('close', () => encoder.destroy());
@@ -704,7 +863,7 @@ function sendStatic(req, res, plan) {
   // body would look like anyway. Without this listener the 'error' event is
   // unhandled and takes the whole process down.
   file.on('error', (error) => {
-    console.error('[ruvyxa] static read failed:', error);
+    log('error', 'static read failed', { error: String(error) });
     res.destroy(error);
   });
   // A client that disconnects mid-download leaves the read stream open;
@@ -738,6 +897,29 @@ const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url, \`http://\${req.headers.host || 'localhost'}\`);
     const isRead = req.method === 'GET' || req.method === 'HEAD';
+
+    // Ahead of everything: a probe that queues behind the renders it exists to
+    // report on says "unhealthy" when the server is merely busy.
+    if (url.pathname === HEALTH_PATH) {
+      const health = healthResponse(req.method);
+      res.statusCode = health.status;
+      for (const [key, value] of health.headers.entries()) res.setHeader(key, value);
+      res.end(req.method === 'HEAD' ? undefined : await health.text());
+      return;
+    }
+    if (isRead && url.pathname === METRICS_PATH) {
+      // A null answer means no token is configured, so the path falls through
+      // to routing and answers whatever an unknown URL answers.
+      const metrics = metricsResponse(
+        new Request(url.toString(), { headers: { authorization: req.headers.authorization ?? '' } }),
+      );
+      if (metrics) {
+        res.statusCode = metrics.status;
+        for (const [key, value] of metrics.headers.entries()) res.setHeader(key, value);
+        res.end(req.method === 'HEAD' ? undefined : await metrics.text());
+        return;
+      }
+    }
 
     // Hashed client bundles and asset-shaped paths are served before routing,
     // the order the Rust server uses. Page-shaped paths go through the handler
@@ -818,7 +1000,7 @@ const server = createServer(async (req, res) => {
     // event would terminate the process and take every concurrent request with
     // it — one aborted download must not be able to do that.
     body.on('error', (error) => {
-      console.error('[ruvyxa] response stream failed:', error);
+      log('error', 'response stream failed', { error: String(error) });
       res.destroy(error);
     });
     // Stop producing for a client that has gone away: without this an aborted
@@ -848,7 +1030,9 @@ const server = createServer(async (req, res) => {
       res.end('Request body is too large');
       return;
     }
-    console.error('[ruvyxa] request failed:', error instanceof Error ? error.message : error);
+    log('error', 'request failed', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     if (!res.headersSent) {
       res.statusCode = 500;
       res.setHeader('content-type', 'text/plain; charset=utf-8');
@@ -924,7 +1108,7 @@ let shuttingDown = false;
 function shutdown(reason, exitCode) {
   if (shuttingDown) return;
   shuttingDown = true;
-  console.log(\`[ruvyxa] \${reason}: draining connections\`);
+  log('info', 'draining connections', { reason });
   // A request parked in the queue during a drain would wait for a slot this
   // process is about to stop handing out. Settling them refuses them instead,
   // which is an answer the caller can retry against the next instance.
@@ -935,7 +1119,7 @@ function shutdown(reason, exitCode) {
   // that moment fails in the user's browser.
   server.close(() => {
     clearTimeout(forceExit);
-    console.log('[ruvyxa] shutdown complete');
+    log('info', 'shutdown complete');
     process.exit(exitCode);
   });
 
@@ -947,7 +1131,7 @@ function shutdown(reason, exitCode) {
   // A request that never finishes must not outlive the platform's own grace
   // period, or the process is SIGKILLed and the drain was pointless.
   const forceExit = setTimeout(() => {
-    console.error('[ruvyxa] drain timed out; exiting with requests still open');
+    log('error', 'drain timed out', { detail: 'exiting with requests still open' });
     process.exit(exitCode);
   }, SHUTDOWN_GRACE_MS);
   forceExit.unref();
@@ -960,19 +1144,24 @@ onShutdownSignal(shutdown);
 // every other in-flight request down with it. A single bad request must not be
 // able to do that, so this is reported and the server keeps serving.
 process.on('unhandledRejection', (reason) => {
-  console.error('[ruvyxa] unhandled promise rejection:', reason);
+  log('error', 'unhandled promise rejection', { reason: String(reason) });
 });
 
 // An uncaught exception is different: the process state after it is undefined,
 // so continuing to serve from it is not trustworthy. Drain what is in flight,
 // then leave with a non-zero code so the supervisor restarts a clean process.
 process.on('uncaughtException', (error) => {
-  console.error('[ruvyxa] uncaught exception:', error);
+  log('error', 'uncaught exception', {
+    error: error instanceof Error ? error.message : String(error),
+  });
   shutdown('uncaught exception', 1);
 });
 
 server.listen(port, host, () => {
-  console.log(\`[ruvyxa] \${RUVYXA_RUNTIME} standalone server listening on http://\${host === '0.0.0.0' ? 'localhost' : host}:\${port}\`);
+  log('info', 'listening on', {
+    runtime: RUVYXA_RUNTIME,
+    url: \`http://\${host === '0.0.0.0' ? 'localhost' : host}:\${port}\`,
+  });
 });
 `
 }
@@ -1038,7 +1227,9 @@ const server = Bun.serve({
   ...idleTimeout,
   fetch: handleRequest,
   error: (error) => {
-    console.error('[ruvyxa] request failed:', error instanceof Error ? error.message : error);
+    log('error', 'request failed', {
+      error: error instanceof Error ? error.message : String(error),
+    });
     return new Response('Internal Server Error', {
       status: 500,
       headers: { 'content-type': 'text/plain; charset=utf-8' },
@@ -1057,12 +1248,15 @@ function closeServer() {
     port,
     hostname: host,
     onListen: ({ hostname, port: boundPort }) => {
-      console.log(
-        \`[ruvyxa] \${RUVYXA_RUNTIME} standalone server listening on http://\${hostname === '0.0.0.0' ? 'localhost' : hostname}:\${boundPort}\`,
-      );
+      log('info', 'listening on', {
+        runtime: RUVYXA_RUNTIME,
+        url: \`http://\${hostname === '0.0.0.0' ? 'localhost' : hostname}:\${boundPort}\`,
+      });
     },
     onError: (error) => {
-      console.error('[ruvyxa] request failed:', error instanceof Error ? error.message : error);
+      log('error', 'request failed', {
+        error: error instanceof Error ? error.message : String(error),
+      });
       return new Response('Internal Server Error', {
         status: 500,
         headers: { 'content-type': 'text/plain; charset=utf-8' },
@@ -1080,9 +1274,10 @@ function closeServer() {
 
   const banner =
     runtime === 'bun'
-      ? `console.log(
-  \`[ruvyxa] \${RUVYXA_RUNTIME} standalone server listening on http://\${host === '0.0.0.0' ? 'localhost' : host}:\${port}\`,
-);
+      ? `log('info', 'listening on', {
+  runtime: RUVYXA_RUNTIME,
+  url: \`http://\${host === '0.0.0.0' ? 'localhost' : host}:\${port}\`,
+});
 `
       : ''
 
@@ -1203,6 +1398,13 @@ async function handleRequest(request) {
   const url = new URL(request.url);
   const isRead = request.method === 'GET' || request.method === 'HEAD';
 
+  // Ahead of everything, for the reason the Node transport gives.
+  if (url.pathname === HEALTH_PATH) return healthResponse(request.method);
+  if (isRead && url.pathname === METRICS_PATH) {
+    const metrics = metricsResponse(request);
+    if (metrics) return metrics;
+  }
+
   // Hashed client bundles and asset-shaped paths are served before routing,
   // the order the Rust server uses. Page-shaped paths go through the handler
   // first so ISR revalidation and dynamic routes keep working; unmatched
@@ -1238,7 +1440,7 @@ let shuttingDown = false;
 async function shutdown(reason, exitCode) {
   if (shuttingDown) return;
   shuttingDown = true;
-  console.log(\`[ruvyxa] \${reason}: draining connections\`);
+  log('info', 'draining connections', { reason });
   // A request parked in the queue during a drain would wait for a slot this
   // process is about to stop handing out. Settling them refuses them instead,
   // which is an answer the caller can retry against the next instance.
@@ -1247,7 +1449,7 @@ async function shutdown(reason, exitCode) {
   // A request that never finishes must not outlive the platform's own grace
   // period, or the process is SIGKILLed and the drain was pointless.
   const forceExit = setTimeout(() => {
-    console.error('[ruvyxa] drain timed out; exiting with requests still open');
+    log('error', 'drain timed out', { detail: 'exiting with requests still open' });
     process.exit(exitCode);
   }, SHUTDOWN_GRACE_MS);
   if (typeof forceExit?.unref === 'function') forceExit.unref();
@@ -1255,10 +1457,10 @@ async function shutdown(reason, exitCode) {
   try {
     await closeServer();
   } catch (error) {
-    console.error('[ruvyxa] shutdown failed:', error);
+    log('error', 'shutdown failed', { error: String(error) });
   }
   clearTimeout(forceExit);
-  console.log('[ruvyxa] shutdown complete');
+  log('info', 'shutdown complete');
   process.exit(exitCode);
 }
 
@@ -1269,14 +1471,16 @@ onShutdownSignal(shutdown);
 // single bad request must not be able to do that, so this is reported and the
 // server keeps serving.
 process.on('unhandledRejection', (reason) => {
-  console.error('[ruvyxa] unhandled promise rejection:', reason);
+  log('error', 'unhandled promise rejection', { reason: String(reason) });
 });
 
 // An uncaught exception is different: the process state after it is undefined,
 // so continuing to serve from it is not trustworthy. Drain what is in flight,
 // then leave with a non-zero code so the supervisor restarts a clean process.
 process.on('uncaughtException', (error) => {
-  console.error('[ruvyxa] uncaught exception:', error);
+  log('error', 'uncaught exception', {
+    error: error instanceof Error ? error.message : String(error),
+  });
   void shutdown('uncaught exception', 1);
 });
 

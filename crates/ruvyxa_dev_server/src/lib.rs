@@ -161,8 +161,8 @@ mod framework_endpoints;
 pub(crate) use framework_endpoints::{ActionQuery, RuntimeTrace, TraceAssets};
 use framework_endpoints::{
     action_endpoint, client_bundle, client_manifest, client_vendor, devtools_dashboard,
-    devtools_data, dynamic_image_endpoint, flight_endpoint, hydration_loader, rsc_action_endpoint,
-    rsc_payload_endpoint, trace_ack_endpoint, trace_endpoint,
+    devtools_data, dynamic_image_endpoint, flight_endpoint, health_endpoint, hydration_loader,
+    rsc_action_endpoint, rsc_payload_endpoint, trace_ack_endpoint, trace_endpoint,
 };
 
 mod postcss;
@@ -650,6 +650,13 @@ pub(crate) struct AppState {
     devtools: Arc<DevToolsMetrics>,
     dynamic_image_cache: Arc<DynamicImageCache>,
     edit_traces: Arc<trace::TraceStore>,
+    /// Set once a termination signal has arrived and the drain has begun.
+    ///
+    /// Read by `/__ruvyxa/health` and nothing else. An orchestrator that is
+    /// still routing to a process which has stopped accepting sends it work it
+    /// can only refuse, so the readiness answer has to change before the socket
+    /// does.
+    draining: Arc<std::sync::atomic::AtomicBool>,
 }
 
 #[derive(Clone)]
@@ -679,7 +686,7 @@ struct PresenceRuntime {
 /// the server at startup instead of getting RUV1701. The comment claiming the
 /// two stayed in sync was the only thing holding them together;
 /// `every_registered_route_is_reserved` reads the route chain now.
-const RESERVED_FRAMEWORK_ROUTES: [&str; 12] = [
+const RESERVED_FRAMEWORK_ROUTES: [&str; 13] = [
     "/__ruvyxa/hmr",
     "/__ruvyxa/client",
     "/__ruvyxa/action",
@@ -692,6 +699,7 @@ const RESERVED_FRAMEWORK_ROUTES: [&str; 12] = [
     "/__ruvyxa/hydration-loader.js",
     "/__ruvyxa/client/route-manifest.json",
     "/__ruvyxa/client/vendor",
+    "/__ruvyxa/health",
 ];
 
 /// Process-wide startup hooks recognised by the JavaScript compiler/runtime.
@@ -1304,6 +1312,10 @@ fn build_app_router(config: &ServerConfig, state: Arc<AppState>) -> Router {
         )
         .route("/__ruvyxa/image", get(dynamic_image_endpoint))
         .route(
+            "/__ruvyxa/health",
+            get(health_endpoint).head(health_endpoint),
+        )
+        .route(
             "/__ruvyxa/action",
             post(action_endpoint).layer(DefaultBodyLimit::max(config.action_body_limit_bytes)),
         )
@@ -1388,8 +1400,10 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
     let presence = presence_runtime(plugin_runtime.as_ref())?;
     assert_transport_paths_distinct(realtime.as_ref(), presence.as_ref())?;
     let native_only = native_only_capability_notes(&config, realtime.as_ref(), presence.as_ref());
+    let draining = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let state = AppState {
         config: config.clone(),
+        draining: Arc::clone(&draining),
         reload_tx,
         runtime_cache,
         action_limiter: Arc::new(Mutex::new(ActionRateLimiter::new(
@@ -1451,7 +1465,7 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
     }
     print_server_ready(&config, &manifest, bound_address, startup_started.elapsed());
     print_native_only_capabilities(&native_only);
-    let server_result = serve_until_shutdown(listeners, app).await;
+    let server_result = serve_until_shutdown(listeners, app, draining).await;
 
     worker_pool.shutdown().await;
     server_result?;
@@ -1466,6 +1480,7 @@ pub async fn serve(config: ServerConfig) -> Result<()> {
 async fn serve_until_shutdown(
     listeners: Vec<tokio::net::TcpListener>,
     app: Router,
+    draining: Arc<std::sync::atomic::AtomicBool>,
 ) -> std::io::Result<()> {
     let (shutdown_tx, _) = tokio::sync::watch::channel(false);
     // One server per address the host answers to, over one router. They share
@@ -1490,6 +1505,10 @@ async fn serve_until_shutdown(
         result = &mut servers => result,
         signal = shutdown_signal() => {
             info!(signal, "shutting down Ruvyxa server");
+            // Before the listeners stop accepting, so a probe on a connection
+            // that is already open learns this too rather than only the ones
+            // that fail to connect afterwards.
+            draining.store(true, std::sync::atomic::Ordering::Relaxed);
             let _ = shutdown_tx.send(true);
             match tokio::time::timeout(SERVER_SHUTDOWN_GRACE, &mut servers).await {
                 Ok(result) => result,
@@ -1953,8 +1972,13 @@ mod tests {
             .expect("endpoints must be an array")
         {
             let path = endpoint["path"].as_str().expect("path must be a string");
-            if endpoint["native"].as_str().is_none() {
-                continue;
+            // `none` is the one value that says the Axum host deliberately does
+            // not serve this path. Any other string, including a misspelling of
+            // that one, still has to be registered — the skip is explicit so a
+            // typo fails closed rather than quietly exempting an endpoint.
+            match endpoint["native"].as_str() {
+                None | Some("none") => continue,
+                Some(_) => {}
             }
             assert!(
                 source.contains(&format!(".route(\"{path}\""))
@@ -2542,19 +2566,70 @@ Host: localhost
                 .await;
         server.abort();
         let _ = server.await;
+        let shown = single_log_line(&response);
         assert!(
             read.is_ok(),
-            "the server kept the connection open, so the client was never told to              stop reading: {response}"
+            "the server kept the connection open, so the client was never told to \
+             stop reading: {shown}"
         );
         read.unwrap().unwrap();
 
-        assert!(response.starts_with("HTTP/1.1 413"), "{response}");
+        assert!(response.starts_with("HTTP/1.1 413"), "{shown}");
         assert!(
             response
                 .lines()
                 .any(|line| line.eq_ignore_ascii_case("connection: close")),
-            "hyper must forward the close option, not strip it: {response}"
+            "hyper must forward the close option, not strip it: {shown}"
         );
+    }
+
+    /// Bytes read off a socket, rendered safe to put in a failure message.
+    ///
+    /// A panic message is a log line, and this text arrived over the network, so
+    /// it is remote-controlled as far as anything reading the code can tell. A
+    /// response carrying a carriage return splices whatever follows it into the
+    /// log as a line of its own — a forged entry in the output a person or a CI
+    /// job reads to decide what happened. That is `rust/log-injection`, and it
+    /// is also just unreadable: an HTTP response is many lines and only the
+    /// first few say anything.
+    ///
+    /// Rebuilt from an allowlist rather than escaped: every character that is
+    /// not printable ASCII becomes a dot, so there is no escape syntax to get
+    /// wrong and nothing to reason about. Bounded too, because a failure message
+    /// carrying a megabyte of body helps nobody.
+    fn single_log_line(response: &str) -> String {
+        const LIMIT: usize = 240;
+        let mut rendered = String::with_capacity(LIMIT);
+        for character in response.chars() {
+            if rendered.len() >= LIMIT {
+                rendered.push('…');
+                break;
+            }
+            rendered.push(if character.is_ascii_graphic() || character == ' ' {
+                character
+            } else {
+                '.'
+            });
+        }
+        rendered
+    }
+
+    /// The property the helper above exists for: no forged line, ever.
+    #[test]
+    fn a_socket_response_cannot_forge_a_line_in_a_failure_message() {
+        let forged = "HTTP/1.1 200 OK\r\n\r\nthread 'main' panicked at: everything is fine";
+        let rendered = single_log_line(forged);
+        assert!(
+            !rendered.contains('\n') && !rendered.contains('\r'),
+            "a carriage return splices the rest into the log as its own entry: {rendered}"
+        );
+        // The text is still there to read, which is the point of showing it.
+        assert!(rendered.contains("HTTP/1.1 200 OK"), "{rendered}");
+
+        // Bounded, so a response body cannot bury the assertion that failed.
+        let long = single_log_line(&"x".repeat(10_000));
+        assert!(long.chars().count() <= 241, "{}", long.chars().count());
+        assert!(long.ends_with('…'));
     }
 
     #[test]

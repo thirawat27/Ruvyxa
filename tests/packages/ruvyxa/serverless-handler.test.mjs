@@ -1514,3 +1514,113 @@ describe('deployed document validators', () => {
     return `W/"${hex}"`
   }
 })
+
+/**
+ * A log line is a record, and a caller must not be able to write one.
+ *
+ * `?name=` on the action endpoint is percent-decoded by `searchParams.get`, so
+ * it arrives with whatever bytes the caller chose — and it was interpolated
+ * straight into `console.error`. Measured before the fix:
+ * `?name=bad%0Ainjected...` produced `[ruvyxa] Server action bad\ninjected...`,
+ * a second line in the deployed log written by whoever sent the request. Every
+ * adapter runs this handler, so it was every deployment.
+ */
+describe('log records', () => {
+  const FORGED = '\ninjected: everything is fine'
+
+  /** Run `body` with the console captured, and hand back what it wrote. */
+  async function captureLogs(body) {
+    const captured = []
+    const originals = {}
+    for (const level of ['log', 'info', 'warn', 'error']) {
+      originals[level] = console[level]
+      console[level] = (...args) => captured.push(args.map((value) => String(value)).join(' '))
+    }
+    try {
+      await body()
+    } finally {
+      for (const [level, original] of Object.entries(originals)) console[level] = original
+    }
+    return captured
+  }
+
+  it('never lets a caller-supplied value open a second line', async () => {
+    const failing = async () => {
+      throw new Error('boom')
+    }
+    failing.ruvyxa = { kind: 'action' }
+    const handler = createHandler({
+      routes: [pageRoute('home', '/target')],
+      importPage: async () => ({ render: async () => '<html></html>' }),
+      importApi: async () => ({}),
+      importAction: async () => ({ [`bad${FORGED}`]: failing }),
+    })
+
+    const logs = await captureLogs(() =>
+      handler(
+        new Request(
+          `http://localhost/__ruvyxa/action?path=/target&name=${encodeURIComponent(`bad${FORGED}`)}`,
+          {
+            method: 'POST',
+            headers: {
+              'content-type': 'application/json',
+              host: 'localhost',
+              origin: 'http://localhost',
+              'sec-fetch-site': 'same-origin',
+            },
+            body: '{}',
+          },
+        ),
+      ),
+    )
+
+    assert.ok(logs.length > 0, 'the failure must still be reported')
+    for (const line of logs) {
+      assert.ok(
+        !line.includes('\n') && !line.includes('\r'),
+        `forged line: ${JSON.stringify(line)}`,
+      )
+    }
+    // Still says which action failed, which is the reason the value is there.
+    assert.ok(
+      logs.some((line) => line.includes('bad')),
+      logs.join(' | '),
+    )
+  })
+
+  it('writes the request log as one JSON record when the host asks for it', async () => {
+    const handler = createHandler({
+      routes: [pageRoute('home', '/')],
+      importPage: async () => ({ render: async () => '<html>home</html>' }),
+      importApi: async () => ({}),
+      middleware: { builtin: { log: true } },
+      logFormat: 'json',
+    })
+
+    const logs = await captureLogs(() =>
+      handler(new Request('http://localhost/', { headers: { host: 'localhost' } })),
+    )
+    const request = logs.map((line) => JSON.parse(line)).find((record) => record.msg === 'request')
+    assert.ok(request, logs.join(' | '))
+    assert.equal(request.level, 'info')
+    assert.equal(request.path, '/')
+    assert.equal(request.method, 'GET')
+    assert.equal(typeof request.duration_ms, 'number')
+  })
+
+  it('leaves the request log human-readable by default', async () => {
+    const handler = createHandler({
+      routes: [pageRoute('home', '/')],
+      importPage: async () => ({ render: async () => '<html>home</html>' }),
+      importApi: async () => ({}),
+      middleware: { builtin: { log: true } },
+    })
+    const logs = await captureLogs(() =>
+      handler(new Request('http://localhost/', { headers: { host: 'localhost' } })),
+    )
+    assert.ok(
+      logs.some((line) => line.startsWith('[ruvyxa] request ') && line.includes('path=/')),
+      logs.join(' | '),
+    )
+  })
+})

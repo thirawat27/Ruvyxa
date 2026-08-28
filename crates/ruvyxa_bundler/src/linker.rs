@@ -3429,25 +3429,34 @@ export const q = readFile;
     /// ship a document whose first interaction threw `RUV1611` — which is what
     /// a hosting platform produces when a package resolves through another
     /// package's `node_modules` on the developer's machine and not on theirs.
+    ///
+    /// The collector is process-global and the harness runs tests on concurrent
+    /// threads, so this one links a specifier no other test links and asserts
+    /// only on that key. Asserting `is_empty()` over the whole map instead made
+    /// it flaky: the sibling above links `react` from the same `/app/page.tsx`
+    /// and records without draining, and its write landed between this test's
+    /// drain and its emptiness check. It reproduced roughly once in seventy-five
+    /// runs on sixteen threads, which is why it only ever showed up under the
+    /// CPU pressure of a workspace-wide run.
     #[test]
     fn client_link_records_what_it_stubbed_for_the_build_to_report() {
-        let _ = take_unresolved_client_imports();
+        let specifier = "ruvyxa-record-drain-fixture";
         link_unresolved_import(
             BundleTarget::Client,
-            "import React from \"react\";
+            "import Recorded from \"ruvyxa-record-drain-fixture\";
 export default function Page() {}",
         );
 
-        let recorded = take_unresolved_client_imports();
+        let mut recorded = take_unresolved_client_imports();
         let importers = recorded
-            .get("react")
+            .remove(specifier)
             .expect("the stubbed specifier must be recorded");
         assert!(
             importers.iter().any(|path| path.contains("page.tsx")),
             "the record must name the importer: {importers:?}"
         );
         assert!(
-            take_unresolved_client_imports().is_empty(),
+            !take_unresolved_client_imports().contains_key(specifier),
             "taking must drain, so one build does not repeat the previous one"
         );
     }

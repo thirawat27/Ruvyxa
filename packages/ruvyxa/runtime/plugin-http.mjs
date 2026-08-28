@@ -58,6 +58,7 @@ export const RESERVED_FRAMEWORK_PATHS = Object.freeze([
   '/__ruvyxa/hydration-loader.js',
   '/__ruvyxa/client/route-manifest.json',
   '/__ruvyxa/client/vendor',
+  '/__ruvyxa/health',
 ])
 
 /**

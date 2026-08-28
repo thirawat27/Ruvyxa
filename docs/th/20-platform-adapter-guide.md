@@ -126,6 +126,37 @@ log บน Node connection ที่เริ่ม request แล้วส่�
 เพราะ `headersTimeout` ของ Node เองไม่ทำงานกับรูปแบบนี้ ส่วน Bun ปิดเอง และ Deno ไม่มี API ให้ทำ —
 deployment ของ Deno ที่เปิดสู่อินเทอร์เน็ตโดยตรงจึงควรมี reverse proxy ด้านหน้า
 
+**Health** `GET /__ruvyxa/health` ตอบ `{"status":"ok","host":"<runtime>"}` พร้อม `no-store` ขณะที่
+process ยังให้บริการ และตอบ `503` พร้อม `{"status":"draining"}` กับ `Retry-After` เมื่อได้รับสัญญาณ
+shutdown แล้ว — orchestrator จึงหยุดส่งทราฟฟิกไปยัง process ที่เริ่มปิดตัวแล้ว
+แทนที่จะส่งงานที่มันกำลังจะปฏิเสธ `HEAD` ตอบ status เดียวกัน endpoint นี้ถูกเสิร์ฟก่อน routing
+และก่อน admission เพราะ probe ที่ต้องเข้าคิวรอ render ที่มันมีหน้าที่รายงาน จะบอกว่า "ไม่แข็งแรง"
+ทั้งที่เซิร์ฟเวอร์แค่ยุ่ง แล้ว orchestrator จะรีสตาร์ตสิ่งที่ยังทำงานได้อยู่ `ruvyxa start` ตอบ path
+เดียวกันแบบเดียวกัน ทั้งสอง host ถูกยึดไว้ด้วย `tests/fixtures/framework-endpoint-conformance.json`
+ส่วน deployment แบบ serverless ไม่มี path นี้ เพราะ liveness ของ function เป็นเรื่องของ platform
+ที่เรียกมัน body มีแค่ status กับชื่อ runtime ไม่มีอย่างอื่น เพราะนี่คือ path
+สาธารณะบนเซิร์ฟเวอร์ที่ deploy แล้ว และจำนวนงานที่ค้างอยู่กับความลึกของคิวคือ load oracle
+สำหรับใครก็ตามที่ยอมถามบ่อยพอ
+
+**Logging** ตั้ง `RUVYXA_LOG_FORMAT=json` แล้วทุกบรรทัดที่เซิร์ฟเวอร์เขียนจะเป็น JSON record
+หนึ่งอัน — `{"level","msg",…fields}` — ซึ่งเป็นสิ่งที่ collector ต้องการ และทำให้การ escape
+เป็นเรื่องเชิงโครงสร้างแทนที่จะเป็นเรื่องที่ต้องจำ เพราะ `JSON.stringify` เขียน newline ดิบไม่ได้
+ค่าปริยายยังเป็นรูปแบบที่คนอ่านได้ `[ruvyxa] msg key=value` โดย escape ค่าเดียวกันด้วยมือ
+ไม่ว่าทางไหนค่าที่ผู้เรียกส่งมาก็เปิดบรรทัดที่สองไม่ได้: query parameter ถูก percent-decode
+ก่อนถึงข้อความ log ดังนั้น `?name=bad%0Ainjected…` บน action endpoint เคยเพิ่ม entry ลงใน log ของ
+deployment ที่ไม่มีใครเขียน บรรทัดบอกความพร้อมยังมีคำว่า `listening on` ในทั้งสองรูปแบบ เพราะ
+supervisor ที่รอบน stdout อ่านบรรทัดนี้อยู่ ส่วน serverless adapter ถูกปล่อยไว้ในรูปแบบของ platform
+ตัวเองและไม่ได้รับผลกระทบ
+
+**Metrics** `GET /__ruvyxa/metrics` เสิร์ฟ Prometheus text exposition — render concurrency,
+ความลึกของคิว, จำนวนที่ถูกปฏิเสธ, render timeout, uptime — และมีอยู่ก็ต่อเมื่อตั้ง
+`RUVYXA_METRICS_TOKEN` เท่านั้น ถ้าไม่ตั้ง path จะตอบ `404` ไม่ใช่ `401` เพราะ deployment
+ที่ไม่เคยเปิด metrics ไม่ควรประกาศว่ามี endpoint นี้อยู่ เมื่อตั้งแล้ว scrape ต้องส่ง
+`Authorization: Bearer <token>` โดย token ถูกเปรียบเทียบแบบ constant time
+เวลาที่ใช้ปฏิเสธจึงไม่บอกว่าเดา prefix ถูกไปกี่ตัว ตัวเลขชุดนี้คือสิ่งที่ `/__ruvyxa/health`
+จงใจไม่บอก จึงอยู่หลัง token แทนที่จะอยู่ข้าง probe สาธารณะ มีเฉพาะ standalone: `ruvyxa start` ไม่มี
+admission controller ของตัวเองให้รายงาน
+
 **Capacity** render ที่เกินกำลังเครื่องจะถูกปฏิเสธแทนที่จะเริ่มทำ `RUVYXA_MAX_CONCURRENCY`
 คือจำนวนที่รันพร้อมกัน — ค่าปริยายคือส่วนแบ่ง core ของ container จำกัดไว้ระหว่างสองถึงแปด เพราะ
 render ใช้ CPU เป็นหลัก การรับเกินกว่านั้นมีแต่ทำให้ตัวที่กำลังทำอยู่ช้าลง — ส่วน `RUVYXA_MAX_QUEUE`

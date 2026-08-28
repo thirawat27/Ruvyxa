@@ -292,6 +292,75 @@ export function documentCacheControl(strategy, revalidate) {
   return 'no-store'
 }
 
+/** Longest a single interpolated value may be in a log line. */
+const LOG_VALUE_LIMIT = 256
+
+/**
+ * One caller-supplied value, rendered safe to put in a log line.
+ *
+ * A log line is a record something else parses — a collector, a `grep`, a
+ * person deciding what happened. A value carrying a line terminator does not
+ * appear in that record, it *becomes* a second record, written by whoever sent
+ * the request. Proven rather than assumed: `?name=` on the action endpoint is
+ * percent-decoded by `searchParams.get`, so
+ * `?name=bad%0Ainjected%20line:%20everything%20is%20fine` reached
+ * `console.error` with a real newline in it and the deployed log gained an entry
+ * nobody wrote.
+ *
+ * Only the terminators and the other control characters are removed; the rest
+ * is kept, because a path with an accented character in it is a path an operator
+ * still has to be able to read. Bounded too — one field must not be able to bury
+ * the rest of the line.
+ */
+export function logValue(value) {
+  const text = typeof value === 'string' ? value : String(value)
+  let rendered = ''
+  for (const character of text) {
+    if (rendered.length >= LOG_VALUE_LIMIT) return `${rendered}…`
+    const code = character.codePointAt(0)
+    const isControl = code < 0x20 || code === 0x7f || (code >= 0x80 && code <= 0x9f)
+    // U+2028 and U+2029 terminate a line for enough readers to count as one.
+    const isLineSeparator = code === 0x2028 || code === 0x2029
+    rendered += isControl || isLineSeparator ? '.' : character
+  }
+  return rendered
+}
+
+/**
+ * The console method a level writes through, read at call time.
+ *
+ * Captured once into a table instead, this stopped honouring a `console` a host
+ * replaced after import — which is what a logging library and several platform
+ * log shims do, and what this repository's own tests do to read the output.
+ */
+function logWriter(level) {
+  if (level === 'error') return console.error
+  if (level === 'warn') return console.warn
+  return console.info
+}
+
+/**
+ * Emit one operational record.
+ *
+ * `json` writes a single object per line, which is what a collector wants and
+ * which also makes the escaping above structural rather than remembered:
+ * `JSON.stringify` cannot emit a raw newline. `text` keeps the shape a person
+ * reading a terminal expects. The host decides, because only the host knows
+ * where its output goes — a serverless adapter's log is the platform's, and it
+ * is left alone.
+ */
+export function logRecord(format, level, message, fields = {}) {
+  const write = logWriter(level)
+  if (format === 'json') {
+    write(JSON.stringify({ level, msg: message, ...fields }))
+    return
+  }
+  const rendered = Object.entries(fields)
+    .map(([name, value]) => `${name}=${logValue(value)}`)
+    .join(' ')
+  write(rendered === '' ? `[ruvyxa] ${message}` : `[ruvyxa] ${message} ${rendered}`)
+}
+
 /** Security defaults shared with the native and standalone runtimes. */
 export const DEFAULT_SECURITY_HEADERS = Object.freeze({
   'x-content-type-options': 'nosniff',
@@ -327,6 +396,7 @@ export function createHandler(options) {
     imageQuality,
     notFoundDocument,
     clientIpHeaders,
+    logFormat,
   } = options
   // An explicit `securityHeaders` option still wins, so a caller constructing
   // the handler directly keeps full control; otherwise the project's own
@@ -351,6 +421,9 @@ export function createHandler(options) {
   // writes, because a header nobody guaranteed is a header the caller typed.
   // See `clientAddress` for what treating that as an identity costs.
   const ingressHeaders = parseIngressHeaders(clientIpHeaders)
+  // Only a host that knows where its output goes asks for this; a serverless
+  // adapter's log belongs to its platform and is left in the shape it expects.
+  const logAs = logFormat === 'json' ? 'json' : 'text'
   const actionBuckets = new Map()
   const actionNonces = new Map()
   /** Live nonce count per client address, kept level with `actionNonces`. */
@@ -394,7 +467,7 @@ export function createHandler(options) {
       await writePrerendered(pathname, html, revalidate, false)
       return true
     } catch (error) {
-      console.error(`[ruvyxa] could not store the rendered page for ${pathname}:`, error)
+      console.error(`[ruvyxa] could not store the rendered page for ${logValue(pathname)}:`, error)
       return false
     }
   }
@@ -417,7 +490,7 @@ export function createHandler(options) {
   const forcedRevalidations = new Map()
   let nextRevalidationGeneration = 0
   let bypassPrerendered = false
-  const fetchMiddleware = createFetchMiddleware(middleware, trustedProxies, ingressHeaders)
+  const fetchMiddleware = createFetchMiddleware(middleware, trustedProxies, ingressHeaders, logAs)
 
   function failClosedRevalidations(message) {
     if (bypassPrerendered) return
@@ -513,7 +586,7 @@ export function createHandler(options) {
       // paths. Anything else is a plugin fault and is reported as such.
       if (isBodyLimitError(error)) return textResponse(413, ingress.message)
       const message = error instanceof Error ? error.message : String(error)
-      console.error('[ruvyxa] Plugin HTTP middleware failed:', message)
+      console.error('[ruvyxa] Plugin HTTP middleware failed:', logValue(message))
       return textResponse(500, 'Internal Server Error')
     }
   }
@@ -560,7 +633,7 @@ export function createHandler(options) {
       canonicalPathname = canonicalRequestPath(rawPathname)
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      console.error(`[ruvyxa] Malformed request path ${rawPathname}:`, message)
+      console.error(`[ruvyxa] Malformed request path ${logValue(rawPathname)}:`, logValue(message))
       return new Response('Bad Request', {
         status: 400,
         headers: { 'content-type': 'text/plain; charset=utf-8' },
@@ -665,7 +738,7 @@ export function createHandler(options) {
         return textResponse(413, 'Request body is too large')
       }
       const message = error instanceof Error ? error.message : String(error)
-      console.error(`[ruvyxa] Error handling ${pathname}:`, message)
+      console.error(`[ruvyxa] Error handling ${logValue(pathname)}:`, logValue(message))
       // Log the detail server-side only: serverless is production, and the
       // dev server likewise never exposes internal error text to clients.
       return new Response('Internal Server Error', {
@@ -770,7 +843,7 @@ export function createHandler(options) {
       })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      console.error(`[ruvyxa] Flight render ${pathname} failed:`, message)
+      console.error(`[ruvyxa] Flight render ${logValue(pathname)} failed:`, logValue(message))
       return new Response(publicFlightError(error, pathname), {
         status: 500,
         headers: {
@@ -841,7 +914,10 @@ export function createHandler(options) {
       })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      console.error(`[ruvyxa] Server-components payload ${pathname} failed:`, message)
+      console.error(
+        `[ruvyxa] Server-components payload ${logValue(pathname)} failed:`,
+        logValue(message),
+      )
       // The text is deliberately not the error's: this endpoint answers a
       // browser, and the native server does not expose internal render text
       // either.
@@ -924,7 +1000,10 @@ export function createHandler(options) {
       })
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error)
-      console.error(`[ruvyxa] Server function ${reference} on ${pathname} failed:`, message)
+      console.error(
+        `[ruvyxa] Server function ${logValue(reference)} on ${logValue(pathname)} failed:`,
+        logValue(message),
+      )
       return textResponse(500, 'Server function failed')
     }
   }
@@ -1059,7 +1138,10 @@ export function createHandler(options) {
         return textResponse(413, 'Action payload is too large')
       }
       const message = error instanceof Error ? error.message : String(error)
-      console.error(`[ruvyxa] Server action ${actionName} on ${canonicalTarget} failed:`, message)
+      console.error(
+        `[ruvyxa] Server action ${logValue(actionName)} on ${logValue(canonicalTarget)} failed:`,
+        logValue(message),
+      )
       // Serverless is production: the detail stays in the platform log, exactly
       // as the native server does outside dev.
       return textResponse(500, 'Internal Server Error')
@@ -1418,7 +1500,7 @@ export function createHandler(options) {
         const html = localizeHtmlDocument(rendered, route.path, pathname, params ?? {}, i18n)
         await persistPrerendered(pathname, html, route.render.revalidate ?? 60)
       } catch (error) {
-        console.error(`[ruvyxa] ISR revalidation failed for ${pathname}:`, error)
+        console.error(`[ruvyxa] ISR revalidation failed for ${logValue(pathname)}:`, error)
       } finally {
         pendingRevalidations.delete(pathname)
       }
@@ -1605,7 +1687,7 @@ function escapeHtmlAttribute(value) {
 const MAX_TRACKED_RATE_LIMIT_KEYS = 10_000
 
 /** Compile validated built-in middleware into a Fetch-native wrapper. */
-function createFetchMiddleware(config, trustedProxies = [], ingressHeaders = []) {
+function createFetchMiddleware(config, trustedProxies = [], ingressHeaders = [], logAs = 'text') {
   const builtin = config?.builtin
   if (!builtin || typeof builtin !== 'object') {
     return async (_request, next) => next()
@@ -1645,10 +1727,13 @@ function createFetchMiddleware(config, trustedProxies = [], ingressHeaders = [])
       headers,
     })
     if (builtin.log === true) {
-      console.info(
-        `[ruvyxa] request_id=${requestId} method=${request.method} path=${new URL(request.url).pathname} ` +
-          `status=${result.status} duration_ms=${Math.floor(elapsed)}`,
-      )
+      logRecord(logAs, 'info', 'request', {
+        request_id: requestId,
+        method: request.method,
+        path: new URL(request.url).pathname,
+        status: result.status,
+        duration_ms: Math.floor(elapsed),
+      })
     }
     return result
   }

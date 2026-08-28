@@ -3,8 +3,8 @@
   "why": "Ruvyxa has two request hosts: the Axum server behind `ruvyxa dev`/`start`, and `createHandler` in packages/ruvyxa/runtime/serverless-handler.mjs, which every adapter's function artifact and the generated standalone server run. Endpoints were added to the Axum router by hand and ported to the handler one at a time, with nothing checking that the two agreed. `/__ruvyxa/image` was ported; `/__ruvyxa/action` was not, so every server action -- the crud template's forms, examples/demo/app/todos, and the markup `ruvyxa add` generates -- returned 404 on every deployed build while working locally. This table is the agreement. Add the endpoint here first; both languages replay it.",
   "fields": {
     "reserved": "Must appear in RESERVED_FRAMEWORK_ROUTES (crates/ruvyxa_dev_server/src/lib.rs) and RESERVED_FRAMEWORK_PATHS (packages/ruvyxa/runtime/plugin-http.mjs). A plugin that registers one of these paths panics axum, so both lists have to name the same set.",
-    "native": "Served by the Axum host. `always` in every mode, `dev` only when config.watch is set.",
-    "serverless": "How createHandler answers. `dispatch` means the path is handled before route matching and must never fall through to the generic route-miss 404. `static` means the build emits the bytes and a CDN or publish directory answers, so a function never sees it. `none` means the endpoint does not exist outside the native host.",
+    "native": "Served by the Axum host. `always` in every mode, `dev` only when config.watch is set, `none` when that host deliberately does not serve the path at all. `every_contract_endpoint_is_registered_on_the_native_router` requires a route for every other value, including a misspelling of `none`, so the exemption cannot be taken by accident.",
+    "serverless": "How createHandler answers. `dispatch` means the path is handled before route matching and must never fall through to the generic route-miss 404. `static` means the build emits the bytes and a CDN or publish directory answers, so a function never sees it. `none` means the endpoint does not exist outside the native host. `standalone` means the generated standalone server answers it and `createHandler` does not -- an endpoint that only makes sense to a long-running process, which the six self-hosted adapters emit and the four serverless ones do not.",
     "probe": "Request the Node conformance test sends when serverless is `dispatch`. Use `probes` instead when an endpoint answers more than one verb: a single probe checks one verb and says nothing about the others, which is how `POST /__ruvyxa/rsc` -- every server-function call on a deployed server-components page -- returned 405 with this table green.",
     "probes": "Several such requests, replayed one at a time. An endpoint that answers more than one verb lists each of them here rather than one in `probe`.",
     "requiredHeaders": "Request headers the endpoint refuses with 400 when absent, as name -> value. This is where a same-origin gate that is not CORS is written down. `/__ruvyxa/rsc` renders with the visitor's cookies on GET and runs a server function on POST, and its only cross-origin defence is a header a third-party page cannot set without a preflight nothing answers -- spelled independently in `framework_endpoints.rs`, `serverless-handler.mjs`, `rsc-client-runtime.mjs`, and `@ruvyxa/react`'s router. The dispatch probes send these, and a companion test drops them one at a time, so a host that stopped checking answers 404-or-200 instead of 400 and fails here."
@@ -121,6 +121,20 @@
       "native": "always",
       "serverless": "none",
       "note": "React and its family, compiled once and imported by URL from every bundle this host compiles on demand. A build gives those routes a shared chunk instead, so a deployed function never emits these URLs and never serves them."
+    },
+    {
+      "path": "/__ruvyxa/health",
+      "reserved": true,
+      "native": "always",
+      "serverless": "standalone",
+      "note": "Liveness and readiness for a long-running process. Answered by the Axum host and by the generated standalone server, and by nothing else: a serverless function's liveness belongs to the platform that invokes it, and a public path on those four deployments would buy nothing. 200 while serving and 503 while draining, so an orchestrator stops routing to a process that has begun shutting down rather than sending it work it is about to refuse. The body is deliberately incurious -- a status and the runtime name, no counters -- because this is a public path on a deployed server and queue depth is a load oracle."
+    },
+    {
+      "path": "/__ruvyxa/metrics",
+      "reserved": false,
+      "native": "none",
+      "serverless": "standalone",
+      "note": "Prometheus text exposition for a long-running process, served only by the generated standalone server and only when RUVYXA_METRICS_TOKEN is set -- without it the path answers 404 rather than advertising that it exists. The numbers are the ones /__ruvyxa/health deliberately withholds (render concurrency, queue depth, refusals), which is why they sit behind a bearer token compared in constant time instead of beside the public probe. Not reserved, and that is the one trade here: a plugin may still register this path and the standalone server would shadow it. The alternative was reserving it in both lists, which would oblige the Axum host to serve it too -- and that host has no admission controller of its own, so it would have had to invent a metric set to report. An operator who turns metrics on is the one who would notice, and no first-party plugin claims the path."
     }
   ],
   "capabilities": [
