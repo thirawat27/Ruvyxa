@@ -8,7 +8,7 @@ import {
   readFileSync,
   writeFileSync,
 } from 'node:fs'
-import { createServer } from 'node:net'
+import { connect as netConnect, createServer } from 'node:net'
 import { homedir, tmpdir } from 'node:os'
 import path from 'node:path'
 import { Readable } from 'node:stream'
@@ -43,7 +43,11 @@ type Client = (pathname: string, init?: RequestInit) => Promise<Response>
  * against a stand-in that agrees with it today. Only the route modules are
  * stubbed, because compiling a project is not what this is measuring.
  */
-function stageDeployment(runtime: 'node' | 'bun' | 'deno', securityHeaders = true): string {
+function stageDeployment(
+  runtime: 'node' | 'bun' | 'deno',
+  securityHeaders = true,
+  { hangingRoute = false }: { hangingRoute?: boolean } = {},
+): string {
   const root = mkdtempSync(path.join(tmpdir(), `ruvyxa-standalone-${runtime}-`))
   const server = path.join(root, 'server')
   const publicDir = path.join(root, 'public')
@@ -77,8 +81,12 @@ function stageDeployment(runtime: 'node' | 'bun' | 'deno', securityHeaders = tru
     path.join(server, 'route-modules.mjs'),
     [
       'export async function loadRouteModule(routeId) {',
-      '  return { render: async ({ path: pathname }) =>',
-      '    `<!doctype html><title>${routeId}</title><p>${pathname}</p>` }',
+      // A render that never settles: an await on something that never
+      // resolves is what a hung upstream call looks like from here.
+      hangingRoute
+        ? '  return { render: () => new Promise(() => {}) }'
+        : '  return { render: async ({ path: pathname }) =>\n' +
+          '    `<!doctype html><title>${routeId}</title><p>${pathname}</p>` }',
       '}',
       'export async function loadActionModule() { return {} }',
       '// Matches what the generator emits for a project with no HTTP plugins.',
@@ -147,11 +155,12 @@ async function startProcessServer(
   executable: string,
   args: string[],
   server: string,
-): Promise<{ client: Client; stop: () => void }> {
+  extraEnv: Record<string, string> = {},
+): Promise<{ client: Client; stop: () => void; port: number }> {
   const port = await freePort()
   const child = spawn(executable, [...args, path.join(server, 'index.mjs')], {
     cwd: server,
-    env: { ...process.env, PORT: String(port), HOST: '127.0.0.1' },
+    env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', ...extraEnv },
     stdio: ['ignore', 'pipe', 'pipe'],
   })
   let output = ''
@@ -176,6 +185,7 @@ async function startProcessServer(
   return {
     client: (pathname, init) => fetch(`http://127.0.0.1:${port}${pathname}`, init),
     stop: () => child.kill(),
+    port,
   }
 }
 
@@ -224,8 +234,19 @@ globals.Deno = {
  * two suites loading at once would each take the other's.
  */
 let loading: Promise<unknown> = Promise.resolve()
-function startFetchServer(server: string): Promise<{ client: Client; stop: () => void }> {
+function startFetchServer(
+  server: string,
+  extraEnv: Record<string, string> = {},
+): Promise<{ client: Client; stop: () => void }> {
   const next = loading.then(async () => {
+    // The emitted program reads its deadlines from the environment at load, and
+    // this stand-in loads it in-process — so the variables have to be here
+    // before the import and gone after it, or the next server to load inherits
+    // them.
+    const restore = Object.entries(extraEnv).map(
+      ([name, value]) => [name, process.env[name], value] as const,
+    )
+    for (const [name, , value] of restore) process.env[name] = value
     // Signals and error events do not share an overload on `process`, and this
     // needs to treat them alike.
     const emitter = process as unknown as {
@@ -238,6 +259,10 @@ function startFetchServer(server: string): Promise<{ client: Client; stop: () =>
     try {
       await import(pathToFileURL(path.join(server, 'index.mjs')).href)
     } finally {
+      for (const [name, previous] of restore) {
+        if (previous === undefined) delete process.env[name]
+        else process.env[name] = previous
+      }
       // The emitted program installs process-wide handlers, and its
       // `uncaughtException` handler exits the process. Loading it into a test
       // runner must not leave that behind for whatever runs next.
@@ -512,6 +537,163 @@ for (const runtime of runtimes) {
     })
   })
 }
+
+/**
+ * A connection that never finishes its request is retired.
+ *
+ * `headersTimeout` is the knob Node documents for this and the one the emitted
+ * program has always set — and on Node 24 it does not fire. Measured against a
+ * bare `node:http` server: a socket that writes a request line and stops is held
+ * open at every value down to three seconds, with `requestTimeout` no better,
+ * so each one costs a socket and a parser for as long as the caller cares to
+ * hold it.
+ *
+ * Node only. Bun retires the same connection on its own (measured: twelve
+ * seconds, unprompted) and Deno's server exposes nothing to bound it with, so
+ * this is the one transport that both needed the guard and could carry it.
+ */
+describe('generated standalone server connection deadlines', () => {
+  it('retires a connection that stalls halfway through its request', async () => {
+    const server = stageDeployment('node')
+    const started = await startProcessServer(process.execPath, [], server, {
+      // The same value the program already computes for this, dialled down so
+      // the test measures behaviour rather than patience.
+      RUVYXA_KEEP_ALIVE_TIMEOUT: '800',
+      RUVYXA_HEADERS_TIMEOUT: '1200',
+    })
+    try {
+      // A request that has begun and will never end. `fetch` cannot express
+      // this, which is why the socket is driven directly.
+      const socket = netConnect(started.port, '127.0.0.1')
+      const closed = new Promise<string>((resolve) => {
+        const timer = setTimeout(() => resolve('still open'), 8_000)
+        const settle = (how: string) => {
+          clearTimeout(timer)
+          resolve(how)
+        }
+        socket.on('connect', () => socket.write('GET / HTTP/1.1\r\nHost: localhost\r\n'))
+        socket.on('close', () => settle('closed'))
+        socket.on('error', () => settle('closed'))
+      })
+      assert.equal(
+        await closed,
+        'closed',
+        'a half-sent request holds a socket and a parser until somebody closes it',
+      )
+      socket.destroy()
+
+      // And the guard is only about that window: a complete request is still
+      // answered on a connection the same deadline governs.
+      const response = await started.client('/logo.png')
+      assert.equal(response.status, 200)
+    } finally {
+      started.stop()
+    }
+  })
+})
+
+/**
+ * A render that never settles is given up on.
+ *
+ * `ruvyxa start` bounds the same render through the worker pool's
+ * `RUVYXA_WORKER_TIMEOUT_MS`, and a serverless adapter inherits its platform's
+ * invocation limit. This host had neither, so one hung route held its
+ * connection, its memory, and whatever it was waiting on for as long as the
+ * process lived — a slow leak that ends as an out-of-memory kill with nothing
+ * in the log.
+ *
+ * Every runtime, because the decision is shared: a Bun deployment that kept
+ * serving a hung render while the Node one gave up would be the two disagreeing
+ * about the same build.
+ */
+describe('generated standalone server render deadline', () => {
+  for (const runtime of runtimes) {
+    const launcher = executables[runtime]
+    it(`answers 503 when a render never settles (${runtime}, ${launcher ? 'installed' : 'stubbed'})`, async () => {
+      const server = stageDeployment(runtime, true, { hangingRoute: true })
+      const started = launcher
+        ? await startProcessServer(launcher.executable, launcher.args, server, {
+            RUVYXA_RENDER_TIMEOUT: '700',
+          })
+        : await startFetchServer(server, { RUVYXA_RENDER_TIMEOUT: '700' })
+      try {
+        // Bounded well past the deadline under test: without the guard the
+        // server never answers, and an unbounded wait would make that a hanging
+        // test rather than a failing one.
+        const response = await started.client('/', { signal: AbortSignal.timeout(6_000) })
+        assert.equal(response.status, 503)
+        // What a proxy reads to decide this is worth trying again, and what
+        // keeps a shared cache from storing the giving-up as the page.
+        assert.equal(response.headers.get('retry-after'), '1')
+        assert.equal(response.headers.get('cache-control'), 'no-store')
+
+        // The deadline belongs to one request. A server that answered 503 and
+        // then stopped serving would have traded one hung route for all of them.
+        const asset = await started.client('/logo.png')
+        assert.equal(asset.status, 200)
+      } finally {
+        started.stop()
+      }
+    })
+  }
+})
+
+/**
+ * More requests than the machine can render are refused, not accepted.
+ *
+ * Nothing bounded this: every request that arrived got a render started for it,
+ * so a burst larger than the machine became a heap holding every in-flight
+ * render at once. The failure that produces is not a slow server — it is an
+ * out-of-memory kill that takes down the requests already nearly finished along
+ * with the ones that caused it.
+ *
+ * Driven with a route that never settles, because that is the only way to hold
+ * every slot at once deterministically: a render that finishes would free its
+ * slot before the next request could be refused, and the test would pass on an
+ * unbounded server too.
+ */
+describe('generated standalone server admission control', () => {
+  for (const runtime of runtimes) {
+    const launcher = executables[runtime]
+    it(`refuses a render it has no capacity for (${runtime}, ${launcher ? 'installed' : 'stubbed'})`, async () => {
+      const server = stageDeployment(runtime, true, { hangingRoute: true })
+      const limits = {
+        RUVYXA_MAX_CONCURRENCY: '2',
+        RUVYXA_MAX_QUEUE: '2',
+        // Long enough that the deadline cannot be what answers here: this is
+        // measuring admission, not the render timeout beside it.
+        RUVYXA_RENDER_TIMEOUT: '30000',
+      }
+      const started = launcher
+        ? await startProcessServer(launcher.executable, launcher.args, server, limits)
+        : await startFetchServer(server, limits)
+      try {
+        // Two fill the slots and two fill the queue; none of them will ever
+        // settle, so every later arrival has nowhere to go.
+        const parked = Array.from({ length: 4 }, () =>
+          started.client('/', { signal: AbortSignal.timeout(20_000) }).catch(() => null),
+        )
+        // Give them time to be admitted before measuring the overflow. Without
+        // this the fifth request could win the race for a slot and the
+        // assertion below would be about scheduling rather than about capacity.
+        await new Promise((resolve) => setTimeout(resolve, 500))
+
+        const refused = await started.client('/', { signal: AbortSignal.timeout(6_000) })
+        assert.equal(refused.status, 503)
+        assert.equal(refused.headers.get('retry-after'), '1')
+
+        // Static files never entered admission, so a page that is failing does
+        // not take its own stylesheet down with it.
+        const asset = await started.client('/logo.png', { signal: AbortSignal.timeout(6_000) })
+        assert.equal(asset.status, 200)
+
+        void parked
+      } finally {
+        started.stop()
+      }
+    })
+  }
+})
 
 /**
  * `security.headers: false` is a project's decision and every runtime has to

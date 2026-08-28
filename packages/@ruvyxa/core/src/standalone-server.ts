@@ -79,6 +79,10 @@ function sharedServerSource(
 
   return `import { createHandler, parseByteRange, prerenderRelativePath } from './serverless-handler.mjs';
 import { applyPluginHttp, loadActionModule, loadRouteModule } from './route-modules.mjs';
+// The controller the render worker pool already runs on, reused rather than
+// rewritten: bounded FIFO admission is one decision, and two implementations of
+// it would be two overload behaviours for one framework.
+import { WorkerAdmissionController } from './worker-admission.mjs';
 // Imported so the directory stays deployable through any bundler that a host
 // puts in front of it, matching the serverless adapters.
 import manifest from './manifest.mjs';
@@ -443,7 +447,7 @@ function staticResponsePlan(pathname, rangeHeader, conditional = {}) {
 const port = Number(process.env.PORT || 3000);
 const host = process.env.HOST || '0.0.0.0';
 
-function positiveMs(name, fallback) {
+function positiveNumber(name, fallback) {
   const raw = Number(process.env[name]);
   return Number.isFinite(raw) && raw > 0 ? raw : fallback;
 }
@@ -451,7 +455,156 @@ function positiveMs(name, fallback) {
 // How long in-flight work may finish after a shutdown signal. Platforms send
 // SIGTERM and then SIGKILL after their own grace period (commonly 30s), so
 // this stays under the usual floor.
-const SHUTDOWN_GRACE_MS = positiveMs('RUVYXA_SHUTDOWN_GRACE', 25_000);
+const SHUTDOWN_GRACE_MS = positiveNumber('RUVYXA_SHUTDOWN_GRACE', 25_000);
+
+/**
+ * How long the handler may take to produce a response.
+ *
+ * A route whose render never settles has nothing to stop it here. On
+ * \`ruvyxa start\` the same render is a worker round-trip the native host bounds
+ * at \`RUVYXA_WORKER_TIMEOUT_MS\` (30s), and on a serverless adapter the platform
+ * bounds the invocation — this is the only host where a hung render holds its
+ * connection, its memory, and whatever it was waiting on for as long as the
+ * process lives. One such route under ordinary traffic is a slow leak that ends
+ * as an out-of-memory kill with no error in the log.
+ *
+ * The default matches the native host so one project is bounded the same way
+ * under \`ruvyxa start\` and under its own build. \`RUVYXA_RENDER_TIMEOUT=0\` turns
+ * it off for a deployment that genuinely renders longer than this and knows it.
+ */
+const RENDER_TIMEOUT_MS = process.env.RUVYXA_RENDER_TIMEOUT?.trim() === '0'
+  ? 0
+  : positiveNumber('RUVYXA_RENDER_TIMEOUT', 30_000);
+
+/**
+ * Run the handler, and give up on it after {@link RENDER_TIMEOUT_MS}.
+ *
+ * Bounds the wait for the \`Response\`, never the body behind it. A streamed
+ * document and a server-sent-event stream both resolve their \`Response\` as soon
+ * as the headers are known and then write for as long as they like, so this
+ * cannot cut one short — which is why it is a render timeout and not a request
+ * timeout.
+ *
+ * The handler is not cancellable, so the losing promise keeps running; its
+ * rejection is swallowed here rather than left to surface later as an unhandled
+ * rejection about a request nobody is waiting for any more.
+ *
+ * \`503\` rather than \`500\`: the render did not fail, this server stopped
+ * waiting for it, and a caller that retries may well be served. \`Retry-After\`
+ * says so in the one place a proxy reads.
+ */
+/**
+ * How many renders may run at once, and how many may wait.
+ *
+ * Nothing bounded this. Every request that arrived got a render started for it,
+ * so a burst larger than the machine turned into a heap holding every in-flight
+ * render at once — and the failure is not a slow server, it is an
+ * out-of-memory kill that takes the requests already nearly finished down with
+ * the ones that caused it. \`ruvyxa start\` has never had that problem: its
+ * render worker bounds itself with this same controller.
+ *
+ * The width is the core count rather than a large fixed number, because a render
+ * is CPU-bound and admitting more than the machine can run only slows down the
+ * ones already going. Four waiters per slot absorbs an ordinary burst; past that
+ * a caller is told to come back rather than being parked on memory this process
+ * would have to keep. Both are the worker pool's numbers, for the worker pool's
+ * reasons.
+ *
+ * \`RUVYXA_MAX_CONCURRENCY=0\` turns admission off for a deployment that has
+ * something else in front of it doing this.
+ */
+const MAX_CONCURRENT_RENDERS = process.env.RUVYXA_MAX_CONCURRENCY?.trim() === '0'
+  ? 0
+  : positiveNumber(
+      'RUVYXA_MAX_CONCURRENCY',
+      // \`availableParallelism\` is the container's share where it exists, which
+      // is the number that matters; \`cpus()\` reports the host's on some of them.
+      Math.max(2, Math.min(8, (os.availableParallelism?.() ?? os.cpus().length) || 2)),
+    );
+const MAX_QUEUED_RENDERS = positiveNumber('RUVYXA_MAX_QUEUE', MAX_CONCURRENT_RENDERS * 4 || 1);
+
+const admission =
+  MAX_CONCURRENT_RENDERS === 0
+    ? null
+    : new WorkerAdmissionController({
+        maxConcurrentRequests: Math.trunc(MAX_CONCURRENT_RENDERS),
+        maxQueuedRequests: Math.trunc(MAX_QUEUED_RENDERS),
+      });
+
+/** The answer to a request this server has decided not to start. */
+function overloaded(reason) {
+  console.error(\`[ruvyxa] \${reason}\`);
+  return new Response('Service Unavailable', {
+    status: 503,
+    headers: {
+      'content-type': 'text/plain; charset=utf-8',
+      'retry-after': '1',
+      'cache-control': 'no-store',
+    },
+  });
+}
+
+/**
+ * Take a render slot, run the handler, and give the slot back.
+ *
+ * The slot is released when the **response** exists, not when its body has
+ * finished — the same boundary the render deadline uses, and for a sharper
+ * reason here: a server-sent-event stream holds its body open for hours, and a
+ * slot held that long would take the pool down to nothing after a handful of
+ * subscribers. What is being bounded is the render, which is the part that
+ * competes for the CPU.
+ *
+ * Only the handler is admitted. A static file is answered before this and stays
+ * answered under load, so a page that is failing does not take its own
+ * stylesheet down with it.
+ */
+async function handleAdmitted(request) {
+  if (!admission) return handleWithTimeout(request);
+  const admitted = await admission.acquire();
+  if (!admitted) {
+    // Either the queue is full or the server is draining. Both mean the same
+    // thing to the caller, and \`Retry-After\` is true of both.
+    return overloaded(
+      \`refused \${new URL(request.url).pathname}: \${MAX_CONCURRENT_RENDERS} renders running and \${MAX_QUEUED_RENDERS} waiting\`,
+    );
+  }
+  try {
+    return await handleWithTimeout(request);
+  } finally {
+    admission.release();
+  }
+}
+
+const RENDER_TIMED_OUT = Symbol('ruvyxa.renderTimedOut');
+
+async function handleWithTimeout(request) {
+  if (RENDER_TIMEOUT_MS === 0) return handler(request);
+
+  let expire;
+  const deadline = new Promise((resolve) => {
+    expire = setTimeout(() => resolve(RENDER_TIMED_OUT), RENDER_TIMEOUT_MS);
+  });
+  // A rejection is carried rather than thrown, so that losing the race cannot
+  // leave it unhandled: the request that would have caught it has already been
+  // answered by the time it arrives.
+  const rendered = handler(request).then(
+    (response) => ({ response }),
+    (error) => ({ error }),
+  );
+
+  try {
+    const settled = await Promise.race([rendered, deadline]);
+    if (settled === RENDER_TIMED_OUT) {
+      return overloaded(
+        \`render timed out after \${RENDER_TIMEOUT_MS}ms: \${new URL(request.url).pathname}\`,
+      );
+    }
+    if ('error' in settled) throw settled.error;
+    return settled.response;
+  } finally {
+    clearTimeout(expire);
+  }
+}
 
 // SIGTERM is what an orchestrator sends and SIGINT is what an operator sends.
 // Registered one at a time inside a try: Deno on Windows supports only a subset
@@ -610,7 +763,7 @@ const server = createServer(async (req, res) => {
       requestInit.body = await readRequestBody(req);
     }
     const request = new Request(url.toString(), requestInit);
-    const response = await handler(request);
+    const response = await handleAdmitted(request);
 
     if (response.status === 404 && isRead) {
       const plan = staticResponsePlan(url.pathname, req.headers.range, {
@@ -711,10 +864,60 @@ const server = createServer(async (req, res) => {
 // request that lands on it fails as a 502 — intermittently, under load, and
 // only in production. Staying above the proxy's idle window makes the proxy,
 // not the origin, the side that retires a connection.
-server.keepAliveTimeout = positiveMs('RUVYXA_KEEP_ALIVE_TIMEOUT', 65_000);
+server.keepAliveTimeout = positiveNumber('RUVYXA_KEEP_ALIVE_TIMEOUT', 65_000);
 // Must exceed keepAliveTimeout, or Node can time out the headers of a request
 // arriving on a connection it was still willing to keep.
-server.headersTimeout = positiveMs('RUVYXA_HEADERS_TIMEOUT', server.keepAliveTimeout + 5_000);
+server.headersTimeout = positiveNumber('RUVYXA_HEADERS_TIMEOUT', server.keepAliveTimeout + 5_000);
+
+/**
+ * Enforce that header deadline, because Node does not.
+ *
+ * \`headersTimeout\` is the documented knob for a request that never finishes
+ * arriving, and on Node 24 it does not fire: a connection that writes
+ * \`GET / HTTP/1.1\\r\\nHost: x\\r\\n\` and then stops is held open indefinitely, with
+ * \`requestTimeout\` no better. Measured against a bare \`node:http\` server at
+ * every value down to three seconds, so this is the runtime's behaviour rather
+ * than anything about this program. Each such connection costs a socket and a
+ * parser for as long as the client cares to hold it.
+ *
+ * Bun retires the same connection on its own, and Deno's server exposes no knob
+ * for it — so this is the one transport with both the exposure and a way to
+ * close it.
+ *
+ * Armed only while no request is being served, which is what keeps it from
+ * being a request timeout: a slow upload, a long download, a streamed document
+ * and a server-sent-event stream all clear it for as long as they run. The idle
+ * keep-alive window is \`keepAliveTimeout\`'s, which does fire and is shorter, so
+ * a well-behaved client never reaches this at all.
+ */
+const handshakeDeadlines = new WeakMap();
+
+function clearHandshakeDeadline(socket) {
+  const timer = handshakeDeadlines.get(socket);
+  if (timer === undefined) return;
+  clearTimeout(timer);
+  handshakeDeadlines.delete(socket);
+}
+
+function armHandshakeDeadline(socket) {
+  if (socket.destroyed) return;
+  clearHandshakeDeadline(socket);
+  const timer = setTimeout(() => socket.destroy(), server.headersTimeout);
+  // Never a reason to keep the process alive: nothing is being served.
+  if (typeof timer.unref === 'function') timer.unref();
+  handshakeDeadlines.set(socket, timer);
+}
+
+server.on('connection', (socket) => {
+  armHandshakeDeadline(socket);
+  socket.on('close', () => clearHandshakeDeadline(socket));
+});
+server.on('request', (request, response) => {
+  clearHandshakeDeadline(request.socket);
+  // Re-armed once the answer is out, because the next request on a keep-alive
+  // connection can stall halfway exactly like the first one.
+  response.on('close', () => armHandshakeDeadline(request.socket));
+});
 
 let shuttingDown = false;
 
@@ -722,6 +925,10 @@ function shutdown(reason, exitCode) {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(\`[ruvyxa] \${reason}: draining connections\`);
+  // A request parked in the queue during a drain would wait for a slot this
+  // process is about to stop handing out. Settling them refuses them instead,
+  // which is an answer the caller can retry against the next instance.
+  admission?.close();
 
   // Stop accepting new connections and wait for in-flight responses. Without
   // this a deploy kills the process outright and every request being served at
@@ -1012,7 +1219,7 @@ async function handleRequest(request) {
   // check reads \`content-length\` and answers 413 before a body is consumed,
   // so there is nothing for this transport to buffer or bound — the Node one
   // buffers only because \`node:http\` gave it a stream and not a \`Request\`.
-  const response = await handler(request);
+  const response = await handleAdmitted(request);
 
   if (response.status === 404 && isRead) {
     const plan = staticResponsePlan(url.pathname, request.headers.get('range'), {
@@ -1032,6 +1239,10 @@ async function shutdown(reason, exitCode) {
   if (shuttingDown) return;
   shuttingDown = true;
   console.log(\`[ruvyxa] \${reason}: draining connections\`);
+  // A request parked in the queue during a drain would wait for a slot this
+  // process is about to stop handing out. Settling them refuses them instead,
+  // which is an answer the caller can retry against the next instance.
+  admission?.close();
 
   // A request that never finishes must not outlive the platform's own grace
   // period, or the process is SIGKILLed and the drain was pointless.

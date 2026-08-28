@@ -1660,6 +1660,35 @@ fn local_display_url(config: &ServerConfig, address: SocketAddr) -> String {
     format!("http://{}:{}", display_host, address.port())
 }
 
+/// The answer to a request whose body exceeded `security.apiLimit`.
+///
+/// `Connection: close` is the load-bearing part. The limit exists so the rest of
+/// the upload is *not* read, which means it is still in flight on this socket
+/// when the answer goes out — and a client that reuses the connection has those
+/// bytes read as the beginning of its next request. hyper closes the connection
+/// for us because the body was never drained, so without the header the client
+/// is told it may reuse a socket that is already gone, and a later, unrelated
+/// request dies with a connection reset naming nothing to do with the upload.
+/// RFC 9112 §9.6 is explicit: a response without the `close` option is one the
+/// client may reuse.
+///
+/// The standalone server the adapters emit answers the same way for the same
+/// reason — see the 413 branch in
+/// `packages/@ruvyxa/core/src/standalone-server.ts`. Draining megabytes to keep
+/// the connection warm is the cost the limit exists to avoid, on both hosts.
+fn request_body_too_large(error: impl std::fmt::Display) -> Response {
+    let mut response = (
+        StatusCode::PAYLOAD_TOO_LARGE,
+        format!("Request body exceeded the API body limit or could not be read: {error}"),
+    )
+        .into_response();
+    response.headers_mut().insert(
+        axum::http::header::CONNECTION,
+        axum::http::HeaderValue::from_static("close"),
+    );
+    response
+}
+
 async fn handle_request(
     State(state): State<Arc<AppState>>,
     request: Request<Body>,
@@ -1692,15 +1721,7 @@ async fn handle_request(
             Ok(bytes) if bytes.is_empty() => None,
             Ok(bytes) => Some(bytes.to_vec()),
             Err(error) => {
-                return with_security_headers(
-                    (
-                        StatusCode::PAYLOAD_TOO_LARGE,
-                        format!(
-                            "Request body exceeded the API body limit or could not be read: {error}"
-                        ),
-                    )
-                        .into_response(),
-                );
+                return with_security_headers(request_body_too_large(error));
             }
         }
     } else {
@@ -2460,6 +2481,80 @@ mod tests {
 
         assert!(response.starts_with("HTTP/1.1 200"));
         assert!(response.ends_with("127.0.0.1"));
+    }
+
+    /// The 413 retires the connection, and says so.
+    ///
+    /// Without the header a pooling client — every browser, and `fetch` itself —
+    /// is entitled to reuse a socket hyper has already closed, so a later and
+    /// unrelated request dies with a connection reset naming nothing to do with
+    /// the upload that caused it.
+    #[test]
+    fn an_over_limit_body_is_refused_with_the_connection_retired() {
+        let response = request_body_too_large("length limit exceeded");
+        assert_eq!(response.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert_eq!(
+            response.headers()[axum::http::header::CONNECTION],
+            "close",
+            "the rest of the upload is still in flight on this socket"
+        );
+    }
+
+    /// And hyper puts it on the wire.
+    ///
+    /// A header a handler sets is not a header the client receives: hyper owns
+    /// the connection options and rewrites some of them. Asserting the response
+    /// object alone would pass on a fix that never reaches anybody, so this
+    /// reads the bytes.
+    #[tokio::test]
+    async fn the_connection_close_on_a_413_reaches_the_client() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        async fn over_limit() -> Response {
+            request_body_too_large("length limit exceeded")
+        }
+
+        let app = Router::new().route("/", get(over_limit));
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            axum::serve(listener, server_make_service(app))
+                .await
+                .unwrap();
+        });
+
+        let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+        client
+            .write_all(
+                b"GET / HTTP/1.1
+Host: localhost
+
+",
+            )
+            .await
+            .unwrap();
+        // Bounded: `read_to_string` ends when the server closes, which is the
+        // behaviour under test. Without the bound a missing `close` option makes
+        // this hang instead of fail, and a test that hangs reports nothing.
+        let mut response = String::new();
+        let read =
+            tokio::time::timeout(Duration::from_secs(5), client.read_to_string(&mut response))
+                .await;
+        server.abort();
+        let _ = server.await;
+        assert!(
+            read.is_ok(),
+            "the server kept the connection open, so the client was never told to              stop reading: {response}"
+        );
+        read.unwrap().unwrap();
+
+        assert!(response.starts_with("HTTP/1.1 413"), "{response}");
+        assert!(
+            response
+                .lines()
+                .any(|line| line.eq_ignore_ascii_case("connection: close")),
+            "hyper must forward the close option, not strip it: {response}"
+        );
     }
 
     #[test]

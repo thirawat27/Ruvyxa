@@ -114,6 +114,38 @@ after five seconds and the proxy's next request on it fails as a 502 — and, wh
 Bun's `idleTimeout` (in seconds, capped at 255). Bun is left at its own default otherwise, which
 never retires an idle connection and never cuts a long streamed response short.
 
+**Deadlines.** A render that never settles is given up on after `RUVYXA_RENDER_TIMEOUT`
+milliseconds, default 30000 — the same window `ruvyxa start` gives a worker round-trip, so one
+project is bounded the same way under the development command and under its own build. The answer is
+`503` with `Retry-After`, because the render did not fail: this server stopped waiting for it, and a
+caller that retries may well be served. Only the wait for the response is bounded, never the body
+behind it, so a streamed document and a server-sent-event stream both run as long as they like once
+their headers are out. `RUVYXA_RENDER_TIMEOUT=0` turns it off for a deployment that genuinely
+renders longer than that and knows it. Without it the connection, the memory, and whatever the
+render was waiting on are held for as long as the process lives — one such route under ordinary
+traffic ends as an out-of-memory kill with nothing in the log. On Node a connection that starts a
+request and never finishes it is retired on the same `RUVYXA_HEADERS_TIMEOUT` window, because Node's
+own `headersTimeout` does not fire for that shape; Bun retires it itself and Deno's server offers no
+way to, so put a reverse proxy in front of a Deno deployment that faces the internet directly.
+
+**Capacity.** More renders than the machine can run are refused rather than started.
+`RUVYXA_MAX_CONCURRENCY` is how many run at once — by default the container's share of the cores,
+clamped to between two and eight, because a render is CPU-bound and admitting more than that only
+slows down the ones already going — and `RUVYXA_MAX_QUEUE` is how many may wait, four per slot by
+default. Past that a caller gets the same `503` with `Retry-After` rather than being parked on
+memory this process would have to keep. Unbounded, a burst larger than the machine becomes a heap
+holding every in-flight render at once, and the failure is not a slow server but an out-of-memory
+kill that takes the nearly-finished requests down with the ones that caused it. `ruvyxa start` has
+never had that problem: its render worker is bounded by the same controller, and the standalone
+server now runs the same one.
+
+A slot is held until the **response** exists, not until its body has finished, so a streamed
+document and a server-sent-event stream cost a slot for milliseconds rather than for their lifetime
+— a hundred concurrent streams against the default limits are all served. Static files never enter
+admission at all, so a page that is failing does not take its own stylesheet down with it.
+`RUVYXA_MAX_CONCURRENCY=0` turns admission off for a deployment that has something else in front of
+it doing this.
+
 **Compression.** All three compress text-shaped responses — documents, JSON, JavaScript, CSS, SVG —
 with gzip when the client accepts it, and declare `Vary: Accept-Encoding` on every response that
 could have been compressed so a shared cache keys them apart. Already-compressed types (images,

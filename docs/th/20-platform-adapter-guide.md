@@ -113,6 +113,35 @@ proxy — ถ้าไม่ตั้ง Node จะปิด idle connection �
 นอกนั้นปล่อย Bun ไว้ที่ default ของมันเอง ซึ่งไม่ปิด idle connection เลยและไม่ตัด streamed response
 ที่ยาว
 
+**Deadline** render ที่ไม่มีวันเสร็จจะถูกเลิกรอหลัง `RUVYXA_RENDER_TIMEOUT` มิลลิวินาที ค่าปริยาย
+30000 — เท่ากับ window ที่ `ruvyxa start` ให้ worker round-trip หนึ่งครั้ง
+โปรเจกต์เดียวกันจึงถูกจำกัดแบบเดียวกันทั้งตอนพัฒนาและตอน build ของตัวเอง คำตอบคือ `503` พร้อม
+`Retry-After` เพราะ render ไม่ได้ล้มเหลว เซิร์ฟเวอร์แค่เลิกรอ และผู้เรียกที่ลองใหม่อาจได้รับบริการ
+สิ่งที่ถูกจำกัดคือการรอ response เท่านั้น ไม่ใช่ body ที่ตามมา — streamed document และ
+server-sent-event stream จึงทำงานได้นานเท่าที่ต้องการเมื่อ header ออกไปแล้ว ตั้ง
+`RUVYXA_RENDER_TIMEOUT=0` เพื่อปิด สำหรับ deployment ที่ render นานกว่านั้นจริง ๆ และรู้ตัว
+ถ้าไม่มีสิ่งนี้ connection หน่วยความจำ และสิ่งที่ render รออยู่ จะถูกถือไว้ตราบเท่าที่ process
+ยังมีชีวิต — route แบบนั้นเพียงตัวเดียวภายใต้ ทราฟฟิกปกติจบลงด้วย out-of-memory kill โดยไม่มีอะไรใน
+log บน Node connection ที่เริ่ม request แล้วส่งไม่จบจะถูกปิดตาม window ของ `RUVYXA_HEADERS_TIMEOUT`
+เพราะ `headersTimeout` ของ Node เองไม่ทำงานกับรูปแบบนี้ ส่วน Bun ปิดเอง และ Deno ไม่มี API ให้ทำ —
+deployment ของ Deno ที่เปิดสู่อินเทอร์เน็ตโดยตรงจึงควรมี reverse proxy ด้านหน้า
+
+**Capacity** render ที่เกินกำลังเครื่องจะถูกปฏิเสธแทนที่จะเริ่มทำ `RUVYXA_MAX_CONCURRENCY`
+คือจำนวนที่รันพร้อมกัน — ค่าปริยายคือส่วนแบ่ง core ของ container จำกัดไว้ระหว่างสองถึงแปด เพราะ
+render ใช้ CPU เป็นหลัก การรับเกินกว่านั้นมีแต่ทำให้ตัวที่กำลังทำอยู่ช้าลง — ส่วน `RUVYXA_MAX_QUEUE`
+คือจำนวนที่รอได้ ค่าปริยายสี่ตัวต่อหนึ่งช่อง เกินจากนั้นผู้เรียกจะได้ `503` พร้อม `Retry-After`
+แทนที่จะถูกพักไว้บนหน่วยความจำที่ process นี้ต้องแบก ถ้าไม่จำกัด
+ทราฟฟิกที่พุ่งเกินกำลังเครื่องจะกลายเป็น heap ที่ถือ render ทุกตัวไว้พร้อมกัน
+และความล้มเหลวไม่ใช่เซิร์ฟเวอร์ช้า แต่เป็น out-of-memory kill ที่ลาก request
+ที่เกือบเสร็จแล้วลงไปด้วย `ruvyxa start` ไม่เคยมีปัญหานี้ เพราะ render worker ของมันถูกจำกัดด้วย
+controller ตัวเดียวกัน และตอนนี้ standalone server ใช้ตัวเดียวกันแล้ว
+
+ช่องจะถูกถือไว้จนกว่า **response** จะเกิดขึ้น ไม่ใช่จนกว่า body จะจบ streamed document และ
+server-sent-event stream จึงกินช่องแค่ระดับมิลลิวินาที ไม่ใช่ตลอดอายุของมัน — stream
+พร้อมกันร้อยตัวบนค่าปริยายถูกเสิร์ฟครบ ส่วนไฟล์ static ไม่เข้าสู่ admission เลย
+หน้าเว็บที่กำลังพังจึงไม่ลาก stylesheet ของตัวเองลงไปด้วย ตั้ง `RUVYXA_MAX_CONCURRENCY=0` เพื่อปิด
+admission สำหรับ deployment ที่มีอย่างอื่นด้านหน้าทำหน้าที่นี้อยู่แล้ว
+
 **Compression** ทั้งสามตัวบีบอัด response ที่เป็น text — document, JSON, JavaScript, CSS, SVG — ด้วย
 gzip เมื่อ client รับได้ และประกาศ `Vary: Accept-Encoding` บนทุก response ที่บีบอัดได้ เพื่อให้
 shared cache แยก key ได้ถูก ประเภทที่บีบอัดมาแล้ว (รูป วิดีโอ ฟอนต์) ถูกปล่อยไว้เหมือนเดิม

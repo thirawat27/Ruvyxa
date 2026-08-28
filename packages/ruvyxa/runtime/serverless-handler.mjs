@@ -197,6 +197,13 @@ export const HANDLER_RUNTIME_FILES = Object.freeze([
   // two native hosts so the three cannot disagree about it.
   'api-methods.mjs',
   'flight.mjs',
+  // Not imported by this file: the standalone server the node, bun, deno, aws,
+  // railway, and render adapters emit bounds its own render concurrency with it,
+  // and a deployed function directory resolves no bare specifiers, so it has to
+  // be copied in beside that program. The serverless adapters carry the file and
+  // never import it — a kilobyte against a second copy of a controller the
+  // worker pool already proved.
+  'worker-admission.mjs',
 ])
 
 /**
