@@ -2,6 +2,7 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 
 import { execFileSync } from 'node:child_process'
+import { globSync, mkdirSync, mkdtempSync, rmSync, statSync, writeFileSync } from 'node:fs'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
@@ -18,6 +19,42 @@ import {
   ECHO_BINARY_BODY,
   ECHO_COOKIES,
 } from '../../deployed-function.ts'
+
+/**
+ * The `includedFiles` globs of an emitted handler, resolved the way Netlify
+ * resolves them.
+ *
+ * A function directory is staged with one prerendered document in it, the
+ * config is read out of the generated source, and the globs are matched with
+ * `cwd` set to the directory holding the entry file — which is what
+ * `zip-it-and-ship-it` does with an in-source `includedFiles`. Returns the
+ * matched paths, so a glob that reaches nothing is an empty array rather than a
+ * passing substring.
+ */
+function resolveIncludedFiles(handlerSource: string, functionPath: string): string[] {
+  const declaration = /export const config = (\{[\s\S]*?\n\});/.exec(handlerSource)
+  assert.ok(declaration, `no config export in the handler for ${functionPath}`)
+  const config = JSON.parse(declaration[1]) as { includedFiles?: string[] }
+  assert.ok(Array.isArray(config.includedFiles), `no includedFiles for ${functionPath}`)
+
+  const root = mkdtempSync(path.join(os.tmpdir(), 'ruvyxa-netlify-included-'))
+  try {
+    // The layout `materializeFunction` writes: the entry beside the runtime
+    // modules, with the deploy-time prerender output in a subdirectory.
+    const functionDir = path.join(root, functionPath)
+    mkdirSync(path.join(functionDir, 'prerender'), { recursive: true })
+    writeFileSync(path.join(functionDir, 'index.mjs'), 'export default () => {}\n')
+    writeFileSync(path.join(functionDir, 'prerender', 'index.html'), '<!doctype html>')
+    // Directories are dropped the way `getPathsOfIncludedFiles` drops them, so
+    // what is left is what would actually be copied into the bundle.
+    return globSync(config.includedFiles, { cwd: functionDir })
+      .filter((match) => statSync(path.join(functionDir, match)).isFile())
+      .map((match) => match.replaceAll('\\', '/'))
+      .sort()
+  } finally {
+    rmSync(root, { force: true, recursive: true })
+  }
+}
 
 describe('netlify', () => {
   it('returns serverless deployment output with function artifacts', async () => {
@@ -134,12 +171,22 @@ describe('netlify', () => {
       assert.match(handlerSource, /"name": "Ruvyxa SSR"/)
 
       // The deploy-time prerender output is not in the module graph, so it
-      // only survives esbuild bundling if the config declares it. Each
-      // artifact names its own location, because the glob resolves against
-      // the site's base directory rather than the function directory.
-      assert.ok(
-        handlerSource.includes(`"${functionPath.replace('deploy/netlify/', '')}/prerender/**"`),
-        `includedFiles must cover the prerender directory of ${functionPath}`,
+      // only survives esbuild bundling if the config declares it — and a glob
+      // that names nothing declares nothing while looking like it does.
+      //
+      // Resolved rather than matched, because the base directory is the whole
+      // question and a string comparison cannot see it. `zip-it-and-ship-it`
+      // sets `includedFilesBasePath = dirname(mainFile)` for an in-source
+      // `includedFiles` (`runtimes/node/in_source_config/index.js`) and hands
+      // that to `getPathsOfIncludedFiles`, which globs with `cwd: basePath` —
+      // so the paths are relative to the function's own directory, not to the
+      // site base. Both artifacts named a site-relative path, which resolved
+      // to `<function>/functions/ruvyxa-handler/prerender/**`: nothing, in
+      // every deploy workflow, with a green build behind it.
+      assert.deepEqual(
+        resolveIncludedFiles(handlerSource, functionPath),
+        ['prerender/index.html'],
+        `includedFiles must reach the prerender directory of ${functionPath}`,
       )
 
       // Netlify bundles the function with esbuild, so the manifest has to be

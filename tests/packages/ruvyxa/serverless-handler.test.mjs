@@ -98,6 +98,13 @@ describe('serverless request body limits', () => {
       // The action rate limiter would answer long before the replay guard
       // filled; this test is about the guard's own bound.
       security: { actionRateLimit: { max: maxEntries * 2, window: 60 } },
+      // The requests below vary the client through `cf-connecting-ip`, which
+      // only names a client where the platform's own ingress writes it — so
+      // this handler declares that platform the way the Cloudflare adapter
+      // does. Without the declaration every request is one anonymous client
+      // and the per-client quota, which is what this measures, has nothing to
+      // measure.
+      clientIpHeaders: ['cf-connecting-ip'],
     })
     const invoke = (nonce, client = '203.0.113.1') =>
       handler(
@@ -154,6 +161,9 @@ describe('serverless request body limits', () => {
       importApi: async () => ({}),
       importAction: async () => ({ submit }),
       security: { actionRateLimit: { max: maxEntries * 2, window: 60 } },
+      // As above: the addresses below reach the guard only because this
+      // handler declares the ingress header that carries them.
+      clientIpHeaders: ['cf-connecting-ip'],
     })
     const invoke = (nonce, client) =>
       handler(
@@ -1394,4 +1404,113 @@ describe('internal framework headers stay inside the framework', () => {
       invalidated: ['user:42:cart'],
     })
   })
+})
+
+/**
+ * The document validator, on the host every deployed build runs.
+ *
+ * `documentCacheControl` tells a browser to revalidate a stored document before
+ * every reuse, and this handler gave it nothing to revalidate against — so a
+ * page a reader already held was sent again in full on every navigation. The
+ * membership half of the rule is `tests/fixtures/deploy-output-conformance.json`,
+ * replayed in `deploy-manifest.test.mjs`; what is measured here is the answer.
+ */
+describe('deployed document validators', () => {
+  const storedDocument = '<html><body>stored</body></html>'
+
+  function documentHandler(strategy, overrides = {}) {
+    return createHandler({
+      routes: [pageRoute('page', '/', strategy)],
+      importPage: async () => ({ render: async () => '<html><body>rendered</body></html>' }),
+      importApi: async () => ({}),
+      readPrerendered: () => ({ html: storedDocument, stale: false }),
+      ...overrides,
+    })
+  }
+
+  const get = (handler, headers = {}) =>
+    handler(new Request('http://localhost/', { headers: { host: 'localhost', ...headers } }))
+
+  for (const strategy of ['ssg', 'csr', 'isr']) {
+    it(`answers a revalidation of a ${strategy} document with 304`, async () => {
+      const handler = documentHandler(strategy)
+      const first = await get(handler)
+      assert.equal(first.status, 200)
+      const etag = first.headers.get('etag')
+      assert.ok(etag, `a ${strategy} document must carry a validator`)
+      assert.match(etag, /^W\//, 'weak: the same document is served identity or compressed')
+
+      const revalidated = await get(handler, { 'if-none-match': etag })
+      assert.equal(revalidated.status, 304)
+      assert.equal(revalidated.headers.get('etag'), etag)
+      // What a cache still needs: when to ask again. What it must not be given:
+      // a length describing a body that is not there.
+      assert.equal(
+        revalidated.headers.get('cache-control'),
+        first.headers.get('cache-control'),
+        'the 304 keeps the lifetime its 200 named',
+      )
+      assert.equal(revalidated.headers.get('content-length'), null)
+      assert.equal(await revalidated.text(), '')
+    })
+  }
+
+  it('never validates a per-request render', async () => {
+    // An `ssr` document may carry one visitor's data. A validator on it invites
+    // a 304 for a page that was rendered for somebody else.
+    const response = await get(documentHandler('ssr', { readPrerendered: undefined }))
+    assert.equal(response.status, 200)
+    assert.equal(response.headers.get('etag'), null)
+  })
+
+  /**
+   * The validator has to describe the bytes that leave, not the bytes the
+   * strategy layer read.
+   *
+   * A plugin `http.onResponse` hook may replace the document body — the
+   * first-party `pwa` plugin injects into every HTML response — so a validator
+   * written where the document is read would name bytes nobody received, and
+   * answer 304 for a document that changed.
+   */
+  it('validates the body a plugin actually left behind', async () => {
+    const injected = '<html><body>stored+plugin</body></html>'
+    const handler = documentHandler('ssg', {
+      pluginHttp: async (request, next) => {
+        const response = await next(request)
+        if (!response.headers.get('content-type')?.includes('text/html')) return response
+        const headers = new Headers(response.headers)
+        await response.text()
+        return new Response(injected, { status: response.status, headers })
+      },
+    })
+
+    const first = await get(handler)
+    assert.equal(await first.text(), injected)
+    const etag = first.headers.get('etag')
+    assert.ok(etag)
+
+    // The validator the strategy layer would have produced must not match.
+    const stale = await documentValidatorOf(storedDocument)
+    assert.notEqual(etag, stale, 'the validator must describe the injected body')
+
+    assert.equal((await get(handler, { 'if-none-match': etag })).status, 304)
+    assert.equal((await get(handler, { 'if-none-match': stale })).status, 200)
+  })
+
+  it('publishes no internal marker header on a validated document', async () => {
+    const response = await get(documentHandler('ssg'))
+    const published = [...response.headers.keys()].filter(
+      (name) => name.startsWith('x-ruvyxa-') && name !== 'x-ruvyxa-isr',
+    )
+    assert.deepEqual(published, [])
+  })
+
+  /** The validator this handler computes for a body, recomputed independently. */
+  async function documentValidatorOf(body) {
+    const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(body))
+    const hex = Array.from(new Uint8Array(digest, 0, 8), (byte) =>
+      byte.toString(16).padStart(2, '0'),
+    ).join('')
+    return `W/"${hex}"`
+  }
 })

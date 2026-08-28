@@ -23,6 +23,14 @@ secret storage, upstream network control และ infrastructure policy ยั�
   application กำหนดเอง เช่น API key และถูกใช้ตามค่าที่ส่งมาตรง ๆ การชี้ไปที่ `x-forwarded-for`
   จึงเท่ากับยกกุญแจ bucket ให้ผู้เรียก และ client เดียวหมุนค่าเพื่อขอโควตาไม่จำกัดได้
   เซิร์ฟเวอร์จะเตือนตอน startup เมื่อพบการตั้งค่าแบบนั้น
+- build ที่ deploy แล้วตอบคำถามเดียวกันโดยไม่มี transport peer ให้ชั่งน้ำหนัก adapter
+  ที่ปล่อยมันออกมาจึงประกาศเองว่า platform ingress ของตัวเองเขียนและเขียนทับ header ตัวไหน:
+  `CF-Connecting-IP` บน Cloudflare Workers และ `X-Vercel-Forwarded-For` บน Vercel เป้าหมายอื่น
+  ทั้งหมด — standalone server ที่ adapter node, bun, deno, aws, railway, render ปล่อยออกมา รวมถึง
+  function ของ Netlify และ Firebase — ไม่ประกาศตัวไหนเลย และไล่ `X-Forwarded-For` ตามกฎข้างบน
+  เพราะไม่มีอะไรข้างหน้าที่รับประกันว่า header นั้นถูกเขียนโดย proxy ไม่ใช่ถูกพิมพ์มาโดยผู้เรียก
+  เมื่ออยู่หลัง nginx, Traefik, Cloudflare หรือ proxy อื่น ให้ระบุไว้ใน `security.trustedProxyIps`
+  มิฉะนั้น hop ขวาสุดคือตัว proxy เอง และ client ทุกคนจะใช้ bucket เดียวกัน
 - first-party `redirects` plugin validate destination ต่อ scheme-relative, backslash และ
   invalid-origin form ที่ไม่ปลอดภัย `securityHeaders` validate CSP directive map และให้ HSTS เป็น
   default

@@ -19,9 +19,15 @@
 //! What stays outside the shared table is deliberate, and mirrors
 //! `ForwardedScheme` in `@ruvyxa/core/origin-policy`: whether this request's
 //! upstream hop may be believed at all. The native server weighs the transport
-//! peer against the trusted list; a deployed function has no peer and treats
-//! its platform ingress as trusted by construction. Everything after that
-//! decision is identical.
+//! peer against the trusted list; a deployed function has no peer to weigh, so
+//! the adapter that emitted it names the header its own platform ingress writes
+//! and overwrites through `createHandler`'s `clientIpHeaders`. Everything after
+//! that decision is identical.
+//!
+//! That declaration is per-adapter and not a property of being deployed: the
+//! standalone server the node, bun, deno, aws, railway, and render adapters
+//! emit binds `0.0.0.0` with nothing in front of it by default, so it declares
+//! none and weighs `X-Forwarded-For` exactly the way this module does.
 
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 

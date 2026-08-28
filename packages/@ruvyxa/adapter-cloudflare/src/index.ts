@@ -207,6 +207,13 @@ const handler = createHandler({
   // application actually wrote, on every host.
   notFoundDocument: manifest.notFoundDocument,
   supportedStrategies: ${JSON.stringify(workerStrategies(kvBinding))},
+  // Cloudflare sets \`CF-Connecting-IP\` on every proxied request and replaces
+  // whatever the caller sent, and a Worker is reachable only through that
+  // ingress — so on this platform, and only where an adapter says so, the
+  // header is the client. \`True-Client-IP\` is deliberately absent: it is the
+  // same value under another name, on Enterprise plans only, so a deployment
+  // that does not have it would be trusting a header nothing writes.
+  clientIpHeaders: ['cf-connecting-ip'],
 });
 
 export default {

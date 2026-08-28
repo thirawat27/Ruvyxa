@@ -173,12 +173,63 @@ function resolveStaticFile(pathname) {
   for (const candidate of candidates) {
     try {
       const stats = statSync(candidate);
-      if (stats.isFile()) return { file: candidate, size: stats.size };
+      if (stats.isFile()) return { file: candidate, size: stats.size, modified: stats.mtimeMs };
     } catch {
       // try the next candidate
     }
   }
   return null;
+}
+
+/**
+ * The validator a revalidation of this file is answered against.
+ *
+ * Without one, \`cache-control: public, max-age=3600, must-revalidate\` on a
+ * public asset is a promise this server cannot keep: the browser comes back
+ * after the hour with nothing to ask about, so every image, font, and video is
+ * re-sent in full. \`ruvyxa start\` has always answered the same file with an
+ * ETag and a 304, so a project got smaller responses from the development
+ * command than from its own production build.
+ *
+ * Weak, and from size and mtime rather than a content hash, for two reasons.
+ * The same file is served identity or gzipped depending on what the client
+ * accepts, and those are equivalent representations rather than byte-identical
+ * ones — which is what a weak validator states. And this server has no
+ * fingerprint index in front of it, so hashing a file to decide whether to send
+ * it is exactly the work a 304 exists to avoid.
+ */
+function fileValidator(hit) {
+  const modified = Math.floor(hit.modified / 1000);
+  return {
+    etag: 'W/"' + hit.size.toString(16) + '-' + modified.toString(16) + '"',
+    lastModified: new Date(modified * 1000).toUTCString(),
+    modified,
+  };
+}
+
+/**
+ * Whether \`if-none-match\` names the version the client already holds.
+ *
+ * Compared weakly, which is what a revalidation asks for: a \`W/\` prefix on
+ * either side is ignored rather than making the comparison fail, and \`*\`
+ * matches any existing representation.
+ */
+function matchesEtag(header, etag) {
+  const value = String(header ?? '').trim();
+  if (value === '') return false;
+  if (value === '*') return true;
+  const bare = (candidate) => candidate.trim().replace(/^W\\//, '');
+  return value.split(',').some((candidate) => bare(candidate) === bare(etag));
+}
+
+/** Whether \`if-modified-since\` already covers this file's modification time. */
+function notModifiedSince(header, modified) {
+  if (typeof header !== 'string' || header.trim() === '') return false;
+  const since = Date.parse(header);
+  // Seconds, because that is the resolution the header carries: comparing a
+  // millisecond mtime against a second-resolution date makes every file look
+  // newer than the copy the client just received.
+  return Number.isFinite(since) && modified <= Math.floor(since / 1000);
 }
 
 const ASSET_EXTENSIONS = new Set(${JSON.stringify(STATIC_ASSET_EXTENSIONS)});
@@ -313,9 +364,39 @@ function withVaryAcceptEncoding(existing) {
  * Returns null when no file matches, which is the caller's signal to fall
  * through to routing.
  */
-function staticResponsePlan(pathname, rangeHeader) {
+function staticResponsePlan(pathname, rangeHeader, conditional = {}) {
   const hit = resolveStaticFile(pathname);
   if (!hit) return null;
+
+  const validator = fileValidator(hit);
+  const cacheControl = pathname.startsWith(${JSON.stringify(CLIENT_BUNDLE_PREFIX)})
+    ? ${JSON.stringify(IMMUTABLE_CACHE_CONTROL)}
+    : ${JSON.stringify(PUBLIC_ASSET_CACHE_CONTROL)};
+
+  // A revalidation is answered before the range is parsed and before the file
+  // is opened: a 304 carries no body, so nothing below it has any work to do.
+  // \`if-none-match\` wins over \`if-modified-since\` when both are present, which
+  // is what RFC 9110 asks of a server that understands both.
+  const noneMatch = conditional.ifNoneMatch;
+  const fresh =
+    typeof noneMatch === 'string' && noneMatch.trim() !== ''
+      ? matchesEtag(noneMatch, validator.etag)
+      : notModifiedSince(conditional.ifModifiedSince, validator.modified);
+  if (fresh) {
+    return {
+      // No \`content-length\`: it describes the body a 200 would have carried,
+      // and declaring it beside an empty one is a framing error the client
+      // reads as a truncated response.
+      status: 304,
+      headers: {
+        etag: validator.etag,
+        'last-modified': validator.lastModified,
+        'cache-control': cacheControl,
+      },
+      file: hit.file,
+      partial: null,
+    };
+  }
 
   // Ranges, decided by the same table the Rust server answers. This host and
   // \`ruvyxa start\` serve the same public/ directory, so a video that scrubs
@@ -343,9 +424,11 @@ function staticResponsePlan(pathname, rangeHeader) {
     // Same cache policy the Rust server applies to the same files: hashed
     // bundles are immutable, everything else from public/ revalidates hourly
     // instead of on every navigation.
-    'cache-control': pathname.startsWith(${JSON.stringify(CLIENT_BUNDLE_PREFIX)})
-      ? ${JSON.stringify(IMMUTABLE_CACHE_CONTROL)}
-      : ${JSON.stringify(PUBLIC_ASSET_CACHE_CONTROL)},
+    'cache-control': cacheControl,
+    // What that revalidation is answered against, on the 200 as well as the
+    // 206: a client that resumes a download compares the two.
+    etag: validator.etag,
+    'last-modified': validator.lastModified,
   };
   if (partial) {
     headers['content-range'] = 'bytes ' + partial.start + '-' + partial.end + '/' + hit.size;
@@ -441,7 +524,7 @@ const REQUEST_BODY_LIMIT = Number.isInteger(runtimePolicy.security?.apiLimit)
 function sendStatic(req, res, plan) {
   res.statusCode = plan.status;
   for (const [name, value] of Object.entries(plan.headers)) res.setHeader(name, value);
-  if (plan.status === 416 || req.method === 'HEAD') {
+  if (plan.status === 416 || plan.status === 304 || req.method === 'HEAD') {
     res.end();
     return;
   }
@@ -508,7 +591,10 @@ const server = createServer(async (req, res) => {
     // first so ISR revalidation and dynamic routes keep working; unmatched
     // paths fall back to static files.
     if (isRead && (url.pathname.startsWith('/__ruvyxa/') || isAssetPath(url.pathname))) {
-      const plan = staticResponsePlan(url.pathname, req.headers.range);
+      const plan = staticResponsePlan(url.pathname, req.headers.range, {
+        ifNoneMatch: req.headers['if-none-match'],
+        ifModifiedSince: req.headers['if-modified-since'],
+      });
       if (plan) {
         sendStatic(req, res, plan);
         return;
@@ -527,7 +613,10 @@ const server = createServer(async (req, res) => {
     const response = await handler(request);
 
     if (response.status === 404 && isRead) {
-      const plan = staticResponsePlan(url.pathname, req.headers.range);
+      const plan = staticResponsePlan(url.pathname, req.headers.range, {
+        ifNoneMatch: req.headers['if-none-match'],
+        ifModifiedSince: req.headers['if-modified-since'],
+      });
       if (plan) {
         sendStatic(req, res, plan);
         return;
@@ -829,7 +918,7 @@ async function staticResponse(plan, method) {
   // A 416 carries no body, and a HEAD asks for the headers of the body it
   // would have received — including its \`content-length\`, which is why the
   // plan's headers are sent unchanged rather than recomputed for an empty one.
-  if (plan.status === 416 || method === 'HEAD') {
+  if (plan.status === 416 || plan.status === 304 || method === 'HEAD') {
     return new Response(null, { status: plan.status, headers });
   }
   return new Response(await openStaticBody(plan), { status: plan.status, headers });
@@ -912,7 +1001,10 @@ async function handleRequest(request) {
   // first so ISR revalidation and dynamic routes keep working; unmatched
   // paths fall back to static files.
   if (isRead && (url.pathname.startsWith('/__ruvyxa/') || isAssetPath(url.pathname))) {
-    const plan = staticResponsePlan(url.pathname, request.headers.get('range'));
+    const plan = staticResponsePlan(url.pathname, request.headers.get('range'), {
+      ifNoneMatch: request.headers.get('if-none-match'),
+      ifModifiedSince: request.headers.get('if-modified-since'),
+    });
     if (plan) return withCompression(await staticResponse(plan, request.method), request);
   }
 
@@ -923,7 +1015,10 @@ async function handleRequest(request) {
   const response = await handler(request);
 
   if (response.status === 404 && isRead) {
-    const plan = staticResponsePlan(url.pathname, request.headers.get('range'));
+    const plan = staticResponsePlan(url.pathname, request.headers.get('range'), {
+      ifNoneMatch: request.headers.get('if-none-match'),
+      ifModifiedSince: request.headers.get('if-modified-since'),
+    });
     if (plan) return withCompression(await staticResponse(plan, request.method), request);
   }
   return withCompression(withSecurityHeaders(response), request);

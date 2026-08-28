@@ -14,6 +14,21 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use crate::apply_security_headers;
 
+/// How long a hashed client bundle may be reused without asking again.
+///
+/// Named rather than written out at each site because the 200 and the 304 for
+/// the same file both send it, and the 304 sent nothing at all while four
+/// copies of the literal sat in this file — the drift a shared name removes.
+/// `IMMUTABLE_CACHE_CONTROL` in `packages/@ruvyxa/core/src/utils.ts` is the
+/// deployed half of the same fact.
+pub(crate) const IMMUTABLE_CACHE_CONTROL: &str = "public, max-age=31536000, immutable";
+
+/// How long an unhashed `public/` asset may be reused without asking again.
+///
+/// The deployed half is `PUBLIC_ASSET_CACHE_CONTROL` in
+/// `packages/@ruvyxa/core/src/utils.ts`.
+pub(crate) const PUBLIC_ASSET_CACHE_CONTROL: &str = "public, max-age=3600, must-revalidate";
+
 /// Maximum number of asset fingerprints kept in memory.
 const ASSET_ETAG_CACHE_LIMIT: usize = 1024;
 
@@ -110,14 +125,28 @@ fn is_settled(identity: &AssetIdentity, now: SystemTime) -> bool {
 }
 
 /// True when the request already holds the version identified by `etag`.
-fn request_matches_etag(request_headers: Option<&HeaderMap>, etag: &str) -> bool {
+pub(crate) fn request_matches_etag(request_headers: Option<&HeaderMap>, etag: &str) -> bool {
     request_headers
         .and_then(|headers| headers.get(header::IF_NONE_MATCH))
         .is_some_and(|value| etag_matches(value, etag))
 }
 
-fn not_modified_response() -> Response {
+/// A 304 for a resource whose 200 would have carried `etag` and `cache_control`.
+///
+/// RFC 9110 §15.4.5 asks for both: a cache that revalidates and is told only
+/// "unchanged" cannot refresh the freshness of what it stored, and cannot learn
+/// the validator to send next time if it never held one. This sent neither,
+/// while `dynamic_image_endpoint` one module over already sent both.
+fn not_modified_response(etag: &str, cache_control: &'static str) -> Response {
     let mut response = StatusCode::NOT_MODIFIED.into_response();
+    let headers = response.headers_mut();
+    if let Ok(value) = HeaderValue::from_str(etag) {
+        headers.insert(header::ETAG, value);
+    }
+    headers.insert(
+        header::CACHE_CONTROL,
+        HeaderValue::from_static(cache_control),
+    );
     apply_security_headers(&mut response);
     response
 }
@@ -299,7 +328,10 @@ pub(crate) async fn serve_public_file(
         && let Some(etag) = cached_asset_etag(&file, identity)
         && request_matches_etag(request_headers, &etag)
     {
-        return Ok(Some(not_modified_response()));
+        return Ok(Some(not_modified_response(
+            &etag,
+            PUBLIC_ASSET_CACHE_CONTROL,
+        )));
     }
 
     let content_type = content_type_for(&file);
@@ -314,7 +346,10 @@ pub(crate) async fn serve_public_file(
         if let Some(etag) = &validator
             && request_matches_etag(request_headers, etag)
         {
-            return Ok(Some(not_modified_response()));
+            return Ok(Some(not_modified_response(
+                etag,
+                PUBLIC_ASSET_CACHE_CONTROL,
+            )));
         }
         let range = match requested_range(request_headers, metadata.len(), validator.as_deref()) {
             RangeRequest::Whole => None,
@@ -347,7 +382,10 @@ pub(crate) async fn serve_public_file(
 
     // Check If-None-Match for conditional response
     if request_matches_etag(request_headers, &etag) {
-        return Ok(Some(not_modified_response()));
+        return Ok(Some(not_modified_response(
+            &etag,
+            PUBLIC_ASSET_CACHE_CONTROL,
+        )));
     }
 
     // Ranges are honoured here too, not only above the streaming threshold.
@@ -378,7 +416,7 @@ pub(crate) async fn serve_public_file(
     );
     headers.insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_static("public, max-age=3600, must-revalidate"),
+        HeaderValue::from_static(PUBLIC_ASSET_CACHE_CONTROL),
     );
     if let Some(range) = range {
         *response.status_mut() = StatusCode::PARTIAL_CONTENT;
@@ -482,7 +520,7 @@ async fn streamed_file_response(
     }
     headers.insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_static("public, max-age=3600, must-revalidate"),
+        HeaderValue::from_static(PUBLIC_ASSET_CACHE_CONTROL),
     );
     if let Some(range) = range {
         *response.status_mut() = StatusCode::PARTIAL_CONTENT;
@@ -576,7 +614,7 @@ pub(crate) fn serve_client_file_sync(
         .insert(header::CONTENT_TYPE, content_type);
     response.headers_mut().insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_static("public, max-age=31536000, immutable"),
+        HeaderValue::from_static(IMMUTABLE_CACHE_CONTROL),
     );
     apply_security_headers(&mut response);
     Ok(Some(response))
@@ -604,7 +642,7 @@ pub(crate) async fn serve_client_file(
         && let Some(etag) = cached_asset_etag(&file, identity)
         && request_matches_etag(request_headers, &etag)
     {
-        return Ok(Some(not_modified_response()));
+        return Ok(Some(not_modified_response(&etag, IMMUTABLE_CACHE_CONTROL)));
     }
 
     let bytes = tokio::fs::read(&file)
@@ -624,7 +662,7 @@ pub(crate) async fn serve_client_file(
     }
 
     if request_matches_etag(request_headers, &etag) {
-        return Ok(Some(not_modified_response()));
+        return Ok(Some(not_modified_response(&etag, IMMUTABLE_CACHE_CONTROL)));
     }
 
     let content_type = client_asset_content_type(&file);
@@ -633,7 +671,7 @@ pub(crate) async fn serve_client_file(
     headers.insert(header::CONTENT_TYPE, content_type);
     headers.insert(
         header::CACHE_CONTROL,
-        HeaderValue::from_static("public, max-age=31536000, immutable"),
+        HeaderValue::from_static(IMMUTABLE_CACHE_CONTROL),
     );
     headers.insert(
         header::ETAG,
@@ -787,6 +825,17 @@ pub(crate) fn is_safe_relative_path(path: &str) -> bool {
 pub(crate) fn compute_etag(bytes: &[u8]) -> String {
     let hash = blake3::hash(bytes);
     format!("\"{}\"", &hash.to_hex()[..16])
+}
+
+/// A weak validator over content that is served in more than one encoding.
+///
+/// Documents leave this host identity-encoded or brotli/gzip-encoded depending
+/// on what the client accepts, and those are equivalent representations rather
+/// than byte-identical ones — which is exactly what the `W/` marker states. A
+/// strong tag here would let a shared cache hand one client's compressed copy to
+/// a client that asked for neither encoding.
+pub(crate) fn weak_content_etag(bytes: &[u8]) -> String {
+    format!("W/{}", compute_etag(bytes))
 }
 
 /// An entity tag reduced to the part that identifies the representation.
@@ -1371,6 +1420,99 @@ mod tests {
 
         assert_eq!(status, StatusCode::NOT_MODIFIED);
         assert_eq!(body_len, 0, "a 304 must not carry a body");
+    }
+
+    /// A 304 restates the headers the 200 would have carried.
+    ///
+    /// RFC 9110 §15.4.5 requires `ETag` and `Cache-Control` on a 304 whenever a
+    /// 200 to the same request would have sent them, and this host sent neither
+    /// — while `dynamic_image_endpoint` in `framework_endpoints.rs`, one crate
+    /// over, already sent both, and the standalone server emitted by
+    /// `@ruvyxa/core/standalone-server` does too. Three answers to one question
+    /// inside one framework.
+    ///
+    /// Both fields are read off the 200 rather than written out here, because a
+    /// literal repeated in the test is a fourth copy that can drift with the
+    /// other three.
+    #[tokio::test]
+    async fn a_304_carries_the_validator_and_lifetime_its_200_would_have() {
+        let temp = tempfile::tempdir().unwrap();
+        let public_dir = temp.path();
+        fs::write(public_dir.join("logo.png"), vec![7u8; 4096]).unwrap();
+        // Past the threshold, so the weak-validator branch is exercised too:
+        // that path answers from a different validator than the buffered one.
+        let streamed = vec![b'x'; (DEFAULT_STREAMED_ASSET_THRESHOLD + 1) as usize];
+        fs::write(public_dir.join("movie.webm"), &streamed).unwrap();
+
+        for request_path in ["/logo.png", "/movie.webm"] {
+            let full = serve_public_file(public_dir, request_path, None)
+                .await
+                .unwrap()
+                .unwrap();
+            let etag = full.headers()[header::ETAG].clone();
+            let cache_control = full.headers()[header::CACHE_CONTROL].clone();
+
+            let mut headers = HeaderMap::new();
+            headers.insert(header::IF_NONE_MATCH, etag.clone());
+            let revalidated = serve_public_file(public_dir, request_path, Some(&headers))
+                .await
+                .unwrap()
+                .unwrap();
+
+            assert_eq!(
+                revalidated.status(),
+                StatusCode::NOT_MODIFIED,
+                "{request_path}"
+            );
+            assert_eq!(
+                revalidated.headers().get(header::ETAG),
+                Some(&etag),
+                "{request_path}: a 304 without the validator leaves a cache unable to \
+                 refresh what it stored"
+            );
+            assert_eq!(
+                revalidated.headers().get(header::CACHE_CONTROL),
+                Some(&cache_control),
+                "{request_path}: and without the lifetime it cannot refresh when to ask again"
+            );
+        }
+    }
+
+    /// The same rule for hashed client bundles, whose lifetime is the other one.
+    ///
+    /// A bundle is `immutable` for a year, so a 304 that drops the header is the
+    /// case where the omission costs the most: the entry a cache keeps is the
+    /// one it never has to revalidate again.
+    #[tokio::test]
+    async fn a_client_bundle_304_carries_its_immutable_lifetime() {
+        let temp = tempfile::tempdir().unwrap();
+        let client_dir = temp.path();
+        fs::write(client_dir.join("app.abc123.js"), b"export default 1\n").unwrap();
+
+        let full = serve_client_file(client_dir, "/__ruvyxa/client/app.abc123.js", None)
+            .await
+            .unwrap()
+            .unwrap();
+        let etag = full.headers()[header::ETAG].clone();
+        assert_eq!(
+            full.headers()[header::CACHE_CONTROL],
+            HeaderValue::from_static(IMMUTABLE_CACHE_CONTROL)
+        );
+
+        let mut headers = HeaderMap::new();
+        headers.insert(header::IF_NONE_MATCH, etag.clone());
+        let revalidated =
+            serve_client_file(client_dir, "/__ruvyxa/client/app.abc123.js", Some(&headers))
+                .await
+                .unwrap()
+                .unwrap();
+
+        assert_eq!(revalidated.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(revalidated.headers().get(header::ETAG), Some(&etag));
+        assert_eq!(
+            revalidated.headers().get(header::CACHE_CONTROL),
+            Some(&HeaderValue::from_static(IMMUTABLE_CACHE_CONTROL))
+        );
     }
 
     #[tokio::test]

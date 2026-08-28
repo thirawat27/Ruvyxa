@@ -459,6 +459,57 @@ for (const runtime of runtimes) {
       assert.equal(response.headers.get('content-encoding'), null)
       assert.equal(response.headers.get('content-length'), '4')
     })
+
+    /**
+     * `cache-control: public, max-age=3600, must-revalidate` is a promise that
+     * a revalidation will be answered, and without a validator this server had
+     * nothing to answer it with: every image, font, and video came back in full
+     * on every revalidation, while `ruvyxa start` answered the same file with an
+     * ETag and a 304. Same project, same file, different bytes on the wire
+     * depending on which server picked it up.
+     */
+    it('answers a revalidation of a public asset with 304', async () => {
+      await ready
+      const first = await request('/logo.png')
+      assert.equal(first.status, 200)
+      const etag = first.headers.get('etag')
+      assert.ok(etag, 'a public asset must carry a validator to revalidate against')
+      assert.ok(first.headers.get('last-modified'), 'and a date, for a client that sends neither')
+
+      const revalidated = await request('/logo.png', { headers: { 'if-none-match': etag } })
+      assert.equal(revalidated.status, 304)
+      assert.equal(revalidated.headers.get('etag'), etag)
+      // A `content-length` beside an empty body is a framing error the client
+      // reads as a truncated response.
+      assert.equal(revalidated.headers.get('content-length'), null)
+      assert.equal(await revalidated.text(), '')
+    })
+
+    it('answers a revalidation by date when the client has no validator', async () => {
+      await ready
+      const first = await request('/logo.png')
+      const modified = first.headers.get('last-modified') ?? ''
+      const response = await request('/logo.png', { headers: { 'if-modified-since': modified } })
+      assert.equal(response.status, 304)
+    })
+
+    it('sends the file when the validator names a version it no longer holds', async () => {
+      await ready
+      const response = await request('/logo.png', { headers: { 'if-none-match': '"stale"' } })
+      assert.equal(response.status, 200)
+      assert.equal(await response.text(), 'not-really-a-png')
+    })
+
+    /**
+     * The validator is weak because the same file is served identity or gzipped
+     * depending on what the client accepts. A shared cache that stored the gzip
+     * copy under a strong ETag would hand it to a client that cannot read it.
+     */
+    it('validates a compressible asset weakly', async () => {
+      await ready
+      const response = await request('/__ruvyxa/client/app.abc123.js')
+      assert.match(String(response.headers.get('etag') ?? ''), /^W\//)
+    })
   })
 }
 

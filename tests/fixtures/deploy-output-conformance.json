@@ -120,6 +120,35 @@
       }
     ]
   },
+  "documentValidator": {
+    "$comment": [
+      "Which strategies serve a document a client may revalidate, rather than",
+      "re-download. `documentCacheControl` above tells a browser to revalidate",
+      "before every reuse, and without a validator that revalidation can only be",
+      "answered with the whole page again — so a reader who already held the",
+      "document was sent it in full on every navigation, on both hosts.",
+      "",
+      "`ssr` and `ppr` are false because their document is produced for this",
+      "request: it may carry one visitor's data, it may still be streaming, and",
+      "it is `no-store` either way, so there is nothing for a validator to be",
+      "about.",
+      "",
+      "Only *which* documents get one is shared. The value is not: the native",
+      "host hashes with blake3 and the deployed one with SHA-256, because a",
+      "validator is opaque and scoped to the origin that issued it and no client",
+      "ever holds one from both. Both are weak (`W/`), because the same document",
+      "leaves identity-encoded or compressed depending on what the client",
+      "accepts, and those are equivalent representations rather than",
+      "byte-identical ones."
+    ],
+    "cases": [
+      { "strategy": "ssg", "expect": true },
+      { "strategy": "csr", "expect": true },
+      { "strategy": "isr", "expect": true },
+      { "strategy": "ssr", "expect": false },
+      { "strategy": "ppr", "expect": false }
+    ]
+  },
   "documentCacheControl": {
     "$comment": [
       "What a function returns with a document it rendered, by strategy. ISR",

@@ -23,6 +23,15 @@ secret storage, upstream network controls, and infrastructure policy remain your
   the escape hatch for an application-defined identity such as an API key and is used verbatim, so
   pointing it at `x-forwarded-for` hands the bucket key to the caller and one client can rotate it
   for an unlimited allowance; the server warns at startup when it sees that.
+- A deployed build answers the same question without a transport peer to weigh, so the adapter that
+  emitted it declares which header its own platform ingress writes and overwrites:
+  `CF-Connecting-IP` on Cloudflare Workers and `X-Vercel-Forwarded-For` on Vercel. Every other
+  target — the standalone server the node, bun, deno, aws, railway, and render adapters emit, plus
+  the Netlify and Firebase functions — declares none and scans `X-Forwarded-For` by the rule above,
+  because nothing in front of them guarantees such a header was written by a proxy rather than typed
+  by the caller. Behind nginx, Traefik, Cloudflare, or any other proxy, name it in
+  `security.trustedProxyIps`: without that the rightmost hop is the proxy itself and every client
+  shares one bucket.
 - The first-party `redirects` plugin validates destinations against unsafe scheme-relative,
   backslash, and invalid-origin forms. `securityHeaders` validates CSP directive maps and defaults
   HSTS.

@@ -209,6 +209,38 @@ export const HANDLER_RUNTIME_FILES = Object.freeze([
  */
 export const DOCUMENT_CACHE_CONTROL = 'public, max-age=0, must-revalidate'
 
+/**
+ * The strategies whose document is stored bytes, and may therefore be validated.
+ *
+ * `DOCUMENT_CACHE_CONTROL` tells a browser to revalidate before every reuse, and
+ * without a validator that revalidation can only be answered with the whole
+ * document again — so a page a reader already holds was re-sent in full on every
+ * navigation. ISR is the same question with `s-maxage` in front of it.
+ *
+ * `ssr` and `ppr` are absent because their document is produced for this request:
+ * it may carry one visitor's data, it may still be streaming, and it is
+ * `no-store` either way, so there is nothing for a validator to be about. The
+ * same table is `document_validator_strategies` in
+ * `crates/ruvyxa_graph/src/lib.rs`; both are replayed against
+ * `tests/fixtures/deploy-output-conformance.json`.
+ */
+export const DOCUMENT_VALIDATOR_STRATEGIES = Object.freeze(['ssg', 'csr', 'isr'])
+
+/**
+ * Marker a stored document leaves the strategy layer with.
+ *
+ * The validator cannot be computed where the document is read, because a plugin
+ * `http.onResponse` hook may still replace the body — the first-party `pwa`
+ * plugin does exactly that, injecting into every HTML response. An ETag written
+ * before that runs would describe bytes nobody received, and a validator that is
+ * wrong is worse than none: it answers `304` for a document that changed.
+ *
+ * So the strategy layer only says "this one is validatable" and the outermost
+ * wrapper, where the body is final, decides. Deleted there, so it never reaches
+ * a client.
+ */
+const DOCUMENT_VALIDATOR_HEADER = 'x-ruvyxa-validate'
+
 /** The revalidation window an ISR route that named none is given. */
 const DEFAULT_REVALIDATE_SECONDS = 60
 
@@ -287,6 +319,7 @@ export function createHandler(options) {
     optimizeImage,
     imageQuality,
     notFoundDocument,
+    clientIpHeaders,
   } = options
   // An explicit `securityHeaders` option still wins, so a caller constructing
   // the handler directly keeps full control; otherwise the project's own
@@ -307,6 +340,10 @@ export function createHandler(options) {
     ? Math.min(MAX_IMAGE_QUALITY, Math.max(MIN_IMAGE_QUALITY, imageQuality))
     : DEFAULT_IMAGE_QUALITY
   const trustedProxies = parseTrustedProxies(security?.trustedProxyIps)
+  // Empty unless the adapter declared which headers its platform's ingress
+  // writes, because a header nobody guaranteed is a header the caller typed.
+  // See `clientAddress` for what treating that as an identity costs.
+  const ingressHeaders = parseIngressHeaders(clientIpHeaders)
   const actionBuckets = new Map()
   const actionNonces = new Map()
   /** Live nonce count per client address, kept level with `actionNonces`. */
@@ -373,7 +410,7 @@ export function createHandler(options) {
   const forcedRevalidations = new Map()
   let nextRevalidationGeneration = 0
   let bypassPrerendered = false
-  const fetchMiddleware = createFetchMiddleware(middleware, trustedProxies)
+  const fetchMiddleware = createFetchMiddleware(middleware, trustedProxies, ingressHeaders)
 
   function failClosedRevalidations(message) {
     if (bypassPrerendered) return
@@ -431,7 +468,10 @@ export function createHandler(options) {
     const response = await fetchMiddleware(request, () =>
       limitThenDispatch(request, runtimeContext),
     )
-    return securityHeaders ? withDefaultSecurityHeaders(response) : response
+    // Last, because this is the first point at which the body is the body: the
+    // plugin response stage and the built-in middleware have both run.
+    const validated = await withDocumentValidator(request, response)
+    return securityHeaders ? withDefaultSecurityHeaders(validated) : validated
   }
 
   /**
@@ -1024,7 +1064,7 @@ export function createHandler(options) {
     if (!/^[A-Za-z0-9._~-]{16,128}$/.test(nonce)) {
       return textResponse(400, 'Versioned action requests require a valid replay nonce')
     }
-    const client = clientAddress(headers, trustedProxies)
+    const client = clientAddress(headers, trustedProxies, ingressHeaders)
     const now = Date.now()
 
     // Every nonce is stored with the same TTL, so a Map's insertion order is
@@ -1088,17 +1128,28 @@ export function createHandler(options) {
    * middleware is reused here rather than adding a second scheme.
    */
   function actionRateLimitResponse(request, targetPath, actionName) {
-    const key = `${clientAddress(request.headers, trustedProxies)}:${targetPath}:${actionName}`
+    const key = `${clientAddress(request.headers, trustedProxies, ingressHeaders)}:${targetPath}:${actionName}`
     return consumeFixedWindow(actionBuckets, key, actionRateLimit.max, actionRateLimit.window, {
       message: 'Action rate limit exceeded',
     })
   }
 
-  /** Serve a stored HTML document as-is. */
+  /**
+   * Serve a stored HTML document as-is.
+   *
+   * Marked validatable: these are the bytes the build or a revalidation stored,
+   * so two readers of this URL receive the same document and a reader who
+   * already holds it can be told so. See `DOCUMENT_VALIDATOR_HEADER` for why the
+   * ETag is not written here.
+   */
   function prerenderedResponse(html, extraHeaders = {}) {
     return new Response(html, {
       status: 200,
-      headers: { 'content-type': 'text/html; charset=utf-8', ...extraHeaders },
+      headers: {
+        'content-type': 'text/html; charset=utf-8',
+        [DOCUMENT_VALIDATOR_HEADER]: '1',
+        ...extraHeaders,
+      },
     })
   }
 
@@ -1547,7 +1598,7 @@ function escapeHtmlAttribute(value) {
 const MAX_TRACKED_RATE_LIMIT_KEYS = 10_000
 
 /** Compile validated built-in middleware into a Fetch-native wrapper. */
-function createFetchMiddleware(config, trustedProxies = []) {
+function createFetchMiddleware(config, trustedProxies = [], ingressHeaders = []) {
   const builtin = config?.builtin
   if (!builtin || typeof builtin !== 'object') {
     return async (_request, next) => next()
@@ -1570,7 +1621,7 @@ function createFetchMiddleware(config, trustedProxies = []) {
     if (preflight) {
       response = preflight
     } else {
-      const limited = rateLimitResponse(request, rate, buckets, trustedProxies)
+      const limited = rateLimitResponse(request, rate, buckets, trustedProxies, ingressHeaders)
       response = limited ?? (await next())
       response = withCorsHeaders(response, request, cors)
     }
@@ -1678,7 +1729,7 @@ function appendVaryOrigin(headers) {
   headers.set('vary', values.join(', '))
 }
 
-function rateLimitResponse(request, rate, buckets, trustedProxies) {
+function rateLimitResponse(request, rate, buckets, trustedProxies, ingressHeaders) {
   if (!rate) return null
   const max = Number(rate.max)
   const windowSeconds = Number(rate.window)
@@ -1687,7 +1738,7 @@ function rateLimitResponse(request, rate, buckets, trustedProxies) {
   }
   return consumeFixedWindow(
     buckets,
-    rateLimitKey(request, rate.key, trustedProxies),
+    rateLimitKey(request, rate.key, trustedProxies, ingressHeaders),
     max,
     windowSeconds,
   )
@@ -1744,11 +1795,11 @@ function rateLimited(message, retryAfterSeconds) {
   })
 }
 
-function rateLimitKey(request, configuredKey, trustedProxies) {
+function rateLimitKey(request, configuredKey, trustedProxies, ingressHeaders) {
   if (typeof configuredKey === 'string' && configuredKey.startsWith('header:')) {
     return request.headers.get(configuredKey.slice('header:'.length)) ?? 'unknown'
   }
-  return clientAddress(request.headers, trustedProxies)
+  return clientAddress(request.headers, trustedProxies, ingressHeaders)
 }
 
 // ─── Client Identity ────────────────────────────────────────────────────────
@@ -1756,9 +1807,24 @@ function rateLimitKey(request, configuredKey, trustedProxies) {
 /**
  * Best available client address for rate limiting.
  *
- * Edge runtimes expose no transport peer, so the platform's own ingress header
- * is authoritative when present: a deployed function is reachable only through
- * that ingress, which makes it the trusted hop by construction.
+ * `ingressHeaders` names the headers **this deployment's own ingress writes and
+ * overwrites**, and is declared by the adapter that knows which platform the
+ * handler was emitted for — never guessed from the request. An edge function
+ * exposes no transport peer, so on Cloudflare `CF-Connecting-IP` and on Vercel
+ * `X-Vercel-Forwarded-For` are authoritative: the function is reachable only
+ * through the ingress that set them, and that ingress replaces whatever the
+ * client sent.
+ *
+ * Reading that list unconditionally is what this used to do, and it was wrong
+ * everywhere the premise does not hold. The standalone server the node, bun,
+ * deno, aws, railway, and render adapters emit is an ordinary `0.0.0.0` HTTP
+ * server — the README says Docker, PM2, systemd, any PaaS — so `CF-Connecting-IP`
+ * on it is a header the caller typed. One client rotating a fresh value per
+ * request got a fresh bucket per request, which defeats the built-in `rate`
+ * middleware, the server-action rate limiter, and the action replay guard's
+ * per-client quota at once. `stack.rs` already refuses `rate.key:
+ * "header:cf-connecting-ip"` for exactly that reason; the default path must not
+ * do quietly what the configured path is rejected for.
  *
  * Failing that — a standalone server behind nginx, Traefik, or a service mesh —
  * `X-Forwarded-For` is scanned from the right, skipping addresses listed in
@@ -1768,10 +1834,14 @@ function rateLimitKey(request, configuredKey, trustedProxies) {
  * rotate fabricated addresses straight through the limiter, which is the bug
  * `forwarded_client_ip` in the native server exists to avoid.
  */
-export function clientAddress(headers, trustedProxies) {
-  for (const name of ['cf-connecting-ip', 'x-vercel-forwarded-for', 'true-client-ip']) {
-    const value = headers.get(name)
-    if (typeof value === 'string' && value.trim() !== '') return value.trim()
+export function clientAddress(headers, trustedProxies, ingressHeaders = []) {
+  for (const name of ingressHeaders) {
+    // Parsed rather than trimmed. A value that is not an address identifies
+    // nobody, and returning it verbatim is the same unbounded-key rotation the
+    // forwarded chain below is careful to avoid — the ingress that writes this
+    // header writes an address, so anything else came from somewhere else.
+    const address = parseIpAddress(String(headers.get(name) ?? '').trim())
+    if (address) return formatAddress(address)
   }
 
   const forwarded = headers.get('x-forwarded-for') ?? headers.get('x-real-ip')
@@ -1801,6 +1871,22 @@ function formatAddress(address) {
     hextets.push(((address[index] << 8) | address[index + 1]).toString(16))
   }
   return hextets.join(':')
+}
+
+/**
+ * Normalize an adapter's `clientIpHeaders` declaration into lookup names.
+ *
+ * A header name is compared case-insensitively by `Headers`, but the list is
+ * lowercased here so a declaration written `CF-Connecting-IP` and one written
+ * `cf-connecting-ip` cannot become two different deployments. Anything that is
+ * not a non-empty string is dropped rather than throwing: narrowing the list
+ * narrows trust, which is the direction this is allowed to be wrong in.
+ */
+export function parseIngressHeaders(values) {
+  if (!Array.isArray(values)) return []
+  return values
+    .filter((value) => typeof value === 'string' && value.trim() !== '')
+    .map((value) => value.trim().toLowerCase())
 }
 
 /** Parse `security.trustedProxyIps` into matchable prefixes, skipping bad entries. */
@@ -2011,6 +2097,78 @@ function normalizedRequestId(value) {
 
 function nowMilliseconds() {
   return globalThis.performance?.now?.() ?? Date.now()
+}
+
+/**
+ * Weak comparison of `if-none-match` against a validator.
+ *
+ * Weak is what a revalidation asks for: `*` matches any stored representation,
+ * and a `W/` prefix on either side is ignored rather than making the comparison
+ * fail. Mirrors `etag_matches` on the native host.
+ */
+function etagMatches(header, etag) {
+  const value = String(header ?? '').trim()
+  if (value === '') return false
+  if (value === '*') return true
+  const bare = (candidate) => candidate.trim().replace(/^W\//, '')
+  return value.split(',').some((candidate) => bare(candidate) === bare(etag))
+}
+
+/**
+ * The weak validator for a document's bytes.
+ *
+ * `crypto.subtle` rather than `node:crypto`: this module is copied verbatim into
+ * a Cloudflare Worker and a Vercel Edge Function, where the Node built-in is not
+ * there to import. Weak, because the same document leaves here identity-encoded
+ * or gzipped depending on what the client accepts, and those are equivalent
+ * representations rather than byte-identical ones — which is exactly what a weak
+ * validator states.
+ *
+ * Truncated to sixteen hex characters, the width `compute_etag` on the native
+ * host uses. The two hosts deliberately do not produce the *same* value — one
+ * hashes with blake3 and one with SHA-256 — because a validator is opaque and
+ * scoped to the origin that issued it, and no client ever holds one from both.
+ * What has to agree is which documents get one at all, which is
+ * `DOCUMENT_VALIDATOR_STRATEGIES`.
+ */
+async function documentValidator(body) {
+  const digest = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(body))
+  const hex = Array.from(new Uint8Array(digest, 0, 8), (byte) =>
+    byte.toString(16).padStart(2, '0'),
+  ).join('')
+  return `W/"${hex}"`
+}
+
+/**
+ * Attach a validator to a stored document, and answer a revalidation of one.
+ *
+ * Only responses the strategy layer marked, so nothing else pays for this: an
+ * unmarked response is returned untouched, with its body never read. A marked
+ * one has its body consumed here, which is free — it was a string.
+ */
+async function withDocumentValidator(request, response) {
+  if (!response.headers.has(DOCUMENT_VALIDATOR_HEADER)) return response
+
+  const body = await response.text()
+  const etag = await documentValidator(body)
+  const headers = new Headers(response.headers)
+  headers.delete(DOCUMENT_VALIDATOR_HEADER)
+  headers.set('etag', etag)
+
+  if (!etagMatches(request.headers.get('if-none-match'), etag)) {
+    return new Response(body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers,
+    })
+  }
+
+  // A 304 keeps what guides the cache — `cache-control`, `vary`, the ISR status
+  // — and drops what describes a body it is not sending. `content-length` beside
+  // an empty body is a framing error the client reads as a truncated response.
+  headers.delete('content-length')
+  headers.delete('content-type')
+  return new Response(null, { status: 304, headers })
 }
 
 function withDefaultSecurityHeaders(response) {

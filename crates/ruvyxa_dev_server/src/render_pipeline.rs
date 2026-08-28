@@ -17,7 +17,7 @@ use ruvyxa_bundler::JsxRuntime;
 use ruvyxa_diagnostics::{Diagnostic, Result, RuvyxaError};
 use ruvyxa_graph::{
     DiscoverOptions, RenderStrategy, RouteEntry, RouteKind, RouteManifest, RouteParams,
-    discover_routes, document_cache_control,
+    discover_routes, document_cache_control, document_has_validator,
 };
 use serde::Deserialize;
 
@@ -31,7 +31,8 @@ use crate::render_cache::{CachedDocument, ForcedRevalidationClaim, RenderCache};
 use crate::router::RadixRouter;
 use crate::static_assets::{
     contained_public_asset, is_safe_relative_path, is_static_asset_request, public_asset_links,
-    serve_client_file, serve_client_file_sync, serve_public_file, serve_public_file_sync,
+    request_matches_etag, serve_client_file, serve_client_file_sync, serve_public_file,
+    serve_public_file_sync, weak_content_etag,
 };
 use crate::worker_pool::{PostedForm, RenderActionRequest, RenderApiRequest, WorkerApiResponse};
 use crate::{
@@ -57,6 +58,24 @@ fn insert_document_cache_control(response: &mut Response, route: &RouteEntry) {
     let header = HeaderValue::from_str(&value)
         .expect("document cache-control is built from ASCII literals and a number");
     response.headers_mut().insert(header::CACHE_CONTROL, header);
+}
+
+/// Answer a revalidation of a stored document with the version it already holds.
+///
+/// Carries the validator and the strategy's own lifetime, which is what a cache
+/// needs to know when to ask again, and `Vary` for the same reason the `200`
+/// does: the document is served identity-encoded or compressed depending on that
+/// header. Nothing that describes a body, because it is not sending one.
+fn not_modified_document(etag: &str, route: &RouteEntry) -> Response {
+    let mut response = StatusCode::NOT_MODIFIED.into_response();
+    if let Ok(value) = HeaderValue::from_str(etag) {
+        response.headers_mut().insert(header::ETAG, value);
+    }
+    insert_document_cache_control(&mut response, route);
+    response
+        .headers_mut()
+        .insert(header::VARY, HeaderValue::from_static("accept-encoding"));
+    response
 }
 
 fn worker_request_headers(headers: &HeaderMap) -> Vec<(String, String)> {
@@ -406,8 +425,25 @@ pub(crate) async fn render_request_pooled(
                 &styles,
             )
             .await?;
+            // A stored document — ssg, csr, isr — is the same bytes for every
+            // reader, so a reader who already holds it can be told so instead of
+            // being sent it again. `document_cache_control` asks the browser to
+            // revalidate before every reuse, and until now that revalidation had
+            // nothing to be answered with.
+            let validator = document_has_validator(route_match.route.render.strategy)
+                .then(|| weak_content_etag(html.html.as_bytes()));
+            if let Some(etag) = &validator
+                && request_matches_etag(Some(request_headers), etag)
+            {
+                return Ok(not_modified_document(etag, route_match.route));
+            }
             let mut response = cached_html_response(StatusCode::OK, &html, Some(request_headers));
             insert_document_cache_control(&mut response, route_match.route);
+            if let Some(etag) = &validator
+                && let Ok(value) = HeaderValue::from_str(etag)
+            {
+                response.headers_mut().insert(header::ETAG, value);
+            }
             Ok(response)
         }
         RouteKind::Api => {
@@ -2385,6 +2421,78 @@ mod tests {
                 "{strategy:?}"
             );
         }
+    }
+
+    /// A 304 for a stored document carries what a cache needs and no body.
+    ///
+    /// The `200` half is exercised end to end by the pipeline; what is pinned
+    /// here is the shape of the answer, because a 304 that forgot its lifetime
+    /// or its validator leaves the next revalidation with nothing to send.
+    #[test]
+    fn a_document_304_carries_its_validator_and_lifetime() {
+        let mut route = ruvyxa_graph::RouteEntry {
+            id: "page:/x".to_string(),
+            path: "/x".to_string(),
+            kind: RouteKind::Page,
+            file: std::path::PathBuf::from("app/x/page.tsx"),
+            layout_chain: Vec::new(),
+            template_chain: Vec::new(),
+            slots: Vec::new(),
+            intercepts: Vec::new(),
+            server_modules: Vec::new(),
+            client_modules: Vec::new(),
+            runtime: ruvyxa_graph::RuntimeTarget::Node,
+            render: Default::default(),
+        };
+        route.render.strategy = RenderStrategy::Isr;
+        route.render.revalidate = Some(30);
+
+        let etag = weak_content_etag(b"<html></html>");
+        assert!(
+            etag.starts_with("W/"),
+            "documents are served in more than one              encoding, so the validator is weak"
+        );
+        let response = not_modified_document(&etag, &route);
+
+        assert_eq!(response.status(), StatusCode::NOT_MODIFIED);
+        assert_eq!(response.headers()[header::ETAG], etag);
+        assert_eq!(
+            response.headers()[header::CACHE_CONTROL],
+            "public, max-age=0, s-maxage=30, stale-while-revalidate=31535970"
+        );
+        assert_eq!(response.headers()[header::VARY], "accept-encoding");
+        assert!(
+            !response.headers().contains_key(header::CONTENT_LENGTH),
+            "a length beside an absent body reads as a truncated response"
+        );
+    }
+
+    /// A request holding the served version is recognised, whatever form it took.
+    ///
+    /// The weak marker says the two representations are semantically rather than
+    /// byte-for-byte equivalent, which is not what `If-None-Match` is deciding —
+    /// so a client echoing the tag back without it still matches.
+    #[test]
+    fn a_document_validator_is_compared_weakly() {
+        let etag = weak_content_etag(b"<html></html>");
+        let strong = etag.trim_start_matches("W/").to_string();
+        for candidate in [etag.as_str(), strong.as_str(), "*"] {
+            let mut headers = HeaderMap::new();
+            headers.insert(
+                header::IF_NONE_MATCH,
+                HeaderValue::from_str(candidate).unwrap(),
+            );
+            assert!(
+                request_matches_etag(Some(&headers), &etag),
+                "{candidate} names the served version"
+            );
+        }
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::IF_NONE_MATCH,
+            HeaderValue::from_static("W/\"stale\""),
+        );
+        assert!(!request_matches_etag(Some(&headers), &etag));
     }
 
     /// Which routes stream, spelled out.

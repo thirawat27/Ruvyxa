@@ -64,6 +64,27 @@ describe('deployment output conformance', () => {
     }
   })
 
+  it('validates exactly the documents the shared table names', () => {
+    // Membership only. The validator's value is host-local — the native server
+    // hashes with blake3, this one with SHA-256 — because a validator is opaque
+    // and scoped to the origin that issued it. Which documents get one is the
+    // part that has to agree: validating an `ssr` document would answer `304`
+    // for a page rendered for somebody else.
+    const validated = new Set(handler.DOCUMENT_VALIDATOR_STRATEGIES)
+    for (const testCase of fixture.documentValidator.cases) {
+      assert.equal(
+        validated.has(testCase.strategy),
+        testCase.expect,
+        `serverless-handler.mjs: ${testCase.strategy}`,
+      )
+    }
+    assert.equal(
+      validated.size,
+      fixture.documentValidator.cases.filter((testCase) => testCase.expect).length,
+      'the handler must validate nothing the table does not name',
+    )
+  })
+
   it('carries the same cache-control per asset class as the servers send', () => {
     assert.equal(fixture.assetClasses.client.cacheControl, core.IMMUTABLE_CACHE_CONTROL)
     assert.equal(fixture.assetClasses.asset.cacheControl, core.PUBLIC_ASSET_CACHE_CONTROL)

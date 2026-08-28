@@ -185,6 +185,12 @@ const handler = createHandler({
   // application actually wrote, on every host.
   notFoundDocument: manifest.notFoundDocument,
   supportedStrategies: ['ssr', 'ssg', 'csr', 'isr', 'ppr', 'api'],
+  // Vercel writes \`X-Vercel-Forwarded-For\` itself, and overwrites
+  // \`X-Forwarded-For\` rather than forwarding an external one — its own docs
+  // say that is to prevent IP spoofing — so on this platform the header is the
+  // client. Declared here rather than assumed by the handler: the same handler
+  // runs on a self-hosted server where nothing writes it.
+  clientIpHeaders: ['x-vercel-forwarded-for'],
 });
 
 async function readRequestBody(req) {
@@ -284,6 +290,12 @@ const handler = createHandler({
   // application actually wrote, on every host.
   notFoundDocument: manifest.notFoundDocument,
   supportedStrategies: ['ssr', 'ssg', 'csr', 'api'],
+  // Vercel writes \`X-Vercel-Forwarded-For\` itself, and overwrites
+  // \`X-Forwarded-For\` rather than forwarding an external one — its own docs
+  // say that is to prevent IP spoofing — so on this platform the header is the
+  // client. Declared here rather than assumed by the handler: the same handler
+  // runs on a self-hosted server where nothing writes it.
+  clientIpHeaders: ['x-vercel-forwarded-for'],
 });
 
 export default function(request, context) {

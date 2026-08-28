@@ -159,6 +159,36 @@ pub fn document_cache_control(strategy: RenderStrategy, revalidate: Option<u64>)
     }
 }
 
+/// The strategies whose document is stored bytes, and may therefore be validated.
+///
+/// [`DOCUMENT_CACHE_CONTROL`] tells a browser to revalidate before every reuse,
+/// and without a validator that revalidation can only be answered with the whole
+/// document again — so a page a reader already holds was re-sent in full on
+/// every navigation, on both hosts. ISR is the same question with `s-maxage` in
+/// front of it.
+///
+/// `Ssr` and `Ppr` are absent because their document is produced for this
+/// request: it may carry one visitor's data, it may still be streaming, and it
+/// is `no-store` either way, so there is nothing for a validator to be about.
+///
+/// `DOCUMENT_VALIDATOR_STRATEGIES` in
+/// `packages/ruvyxa/runtime/serverless-handler.mjs` is the JavaScript half; both
+/// are replayed against `tests/fixtures/deploy-output-conformance.json`. What
+/// the two deliberately do **not** share is the validator's value — this host
+/// hashes with blake3 and the deployed one with SHA-256 — because a validator is
+/// opaque and scoped to the origin that issued it, and no client ever holds one
+/// from both.
+pub const DOCUMENT_VALIDATOR_STRATEGIES: [RenderStrategy; 3] = [
+    RenderStrategy::Ssg,
+    RenderStrategy::Csr,
+    RenderStrategy::Isr,
+];
+
+/// Whether a document served under `strategy` carries a validator.
+pub fn document_has_validator(strategy: RenderStrategy) -> bool {
+    DOCUMENT_VALIDATOR_STRATEGIES.contains(&strategy)
+}
+
 /// When a server-rendered route downloads and starts its client runtime.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "kebab-case")]
@@ -4714,6 +4744,32 @@ import 'server-only';
                 "{} {}",
                 case["strategy"],
                 case["why"].as_str().unwrap_or_default()
+            );
+        }
+    }
+
+    /// Which documents carry a validator, replayed from the same fixture.
+    ///
+    /// The value is host-local and deliberately not shared; the membership is
+    /// the whole contract, because a host that validated an `ssr` document
+    /// would answer `304` for a page rendered for somebody else.
+    #[test]
+    fn document_validator_membership_matches_the_shared_conformance_table() {
+        const FIXTURE: &str =
+            include_str!("../../../tests/fixtures/deploy-output-conformance.json");
+        let fixture: serde_json::Value = serde_json::from_str(FIXTURE).expect("fixture json");
+        let cases = fixture["documentValidator"]["cases"]
+            .as_array()
+            .expect("documentValidator cases");
+        assert!(!cases.is_empty(), "the table must carry cases");
+        for case in cases {
+            let strategy: RenderStrategy =
+                serde_json::from_value(case["strategy"].clone()).expect("strategy");
+            assert_eq!(
+                document_has_validator(strategy),
+                case["expect"].as_bool().expect("expect"),
+                "{}",
+                case["strategy"]
             );
         }
     }

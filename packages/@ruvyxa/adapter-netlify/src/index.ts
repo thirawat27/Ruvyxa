@@ -217,8 +217,18 @@ export const config = ${JSON.stringify(functionConfig, null, 2)};
  * `includedFiles` is what carries the deploy-time prerender output into the
  * bundle. Netlify bundles the function with esbuild, which copies only what the
  * module graph reaches, so the HTML `readPrerendered` falls back to was being
- * dropped. The globs resolve against the site's base directory, which is why
- * each artifact declares its own path instead of sharing one.
+ * dropped.
+ *
+ * The glob is relative to **the function's own directory**, not to the site's
+ * base directory. `zip-it-and-ship-it` sets
+ * `includedFilesBasePath = dirname(mainFile)` whenever `includedFiles` comes
+ * from an in-source `config` export, and every one of its bundlers passes that
+ * to `getPathsOfIncludedFiles`, which globs with `cwd: basePath`. Each artifact
+ * used to name its own site-relative path instead — which resolved to
+ * `<function>/functions/ruvyxa-handler/prerender/**`, matching nothing, in both
+ * the deploy-directory workflow and the project-root one, with a green build
+ * behind it. One path is now correct for both, which is why this takes no
+ * argument.
  */
 interface NetlifyFunctionConfig {
   path: string
@@ -241,13 +251,13 @@ function packageVersion(): string {
   return metadata.version
 }
 
-function functionConfigFor(functionRoot: string): NetlifyFunctionConfig {
+function functionConfigFor(): NetlifyFunctionConfig {
   return {
     path: '/*',
     preferStatic: true,
     name: 'Ruvyxa SSR',
     generator: `ruvyxa/${packageVersion()}`,
-    includedFiles: [`${functionRoot}/prerender/**`],
+    includedFiles: ['prerender/**'],
   }
 }
 
@@ -376,10 +386,7 @@ export function netlify(options: NetlifyAdapterOptions = {}): Adapter {
           {
             kind: 'function',
             path: 'deploy/netlify/functions/ruvyxa-handler',
-            handlerSource: netlifyHandlerSource(
-              runtimePolicy,
-              functionConfigFor('functions/ruvyxa-handler'),
-            ),
+            handlerSource: netlifyHandlerSource(runtimePolicy, functionConfigFor()),
           },
           // Netlify config for the deploy directory
           {
@@ -396,10 +403,7 @@ export function netlify(options: NetlifyAdapterOptions = {}): Adapter {
                   kind: 'function',
                   path: '.netlify/v1/functions/ruvyxa-handler',
                   scope: 'project',
-                  handlerSource: netlifyHandlerSource(
-                    runtimePolicy,
-                    functionConfigFor('.netlify/v1/functions/ruvyxa-handler'),
-                  ),
+                  handlerSource: netlifyHandlerSource(runtimePolicy, functionConfigFor()),
                 } satisfies AdapterArtifact,
                 {
                   kind: 'file',

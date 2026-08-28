@@ -90,9 +90,20 @@ const REGISTRY = [
     why: 'Replayed by both hosts as part of the document cache-control table.',
   },
   {
+    name: 'DOCUMENT_VALIDATOR_STRATEGIES',
+    kind: 'fixture',
+    held: 'tests/fixtures/deploy-output-conformance.json',
+    why: 'Which documents carry a validator, replayed by both. The value is deliberately host-local — blake3 here, SHA-256 there — but the membership is not: a host that validated an `ssr` document would answer 304 for a page rendered for somebody else.',
+  },
+  {
     name: 'HELPER_RUNTIME_PREFIX',
     kind: 'sameValue',
     why: 'The specifier prefix both resolvers recognise as an oxc helper import. Teaching one and not the other is the two-module-graphs trap in its cheapest form.',
+  },
+  {
+    name: 'IMMUTABLE_CACHE_CONTROL',
+    kind: 'sameValue',
+    why: 'How long a hashed client bundle may be reused. `ruvyxa start` sends it and the emitted standalone server sends it for the same file, so a project that disagreed would ship one lifetime in development and another in production.',
   },
   {
     name: 'INSTRUMENTATION_FILES',
@@ -143,6 +154,11 @@ const REGISTRY = [
     name: 'NOT_FOUND_DOCUMENT_FILE',
     kind: 'sameValue',
     why: 'The file the prerenderer writes the 404 document to and the adapter runner looks for. A split serves no 404 page at all.',
+  },
+  {
+    name: 'PUBLIC_ASSET_CACHE_CONTROL',
+    kind: 'sameValue',
+    why: 'The same fact for an unhashed `public/` asset. Both hosts also restate it on the 304 that answers its revalidation, so the value is read three times and must be one.',
   },
   {
     name: 'ROUTE_SLOT_PRELUDE',
