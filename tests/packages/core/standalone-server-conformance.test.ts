@@ -156,6 +156,7 @@ async function startProcessServer(
   args: string[],
   server: string,
   extraEnv: Record<string, string> = {},
+  { drainable = false }: { drainable?: boolean } = {},
 ): Promise<{
   client: Client
   stop: () => void
@@ -164,10 +165,39 @@ async function startProcessServer(
   port: number
 }> {
   const port = await freePort()
-  const child = spawn(executable, [...args, path.join(server, 'index.mjs')], {
+
+  // Windows maps child.kill('SIGTERM') onto TerminateProcess, which gives the
+  // program no chance to answer anything — so a drain test that only knows how
+  // to send a real signal is skipped there, and CI on another platform becomes
+  // the only place it ever runs. It stopped being run and started being
+  // discovered: the drain shipped broken and a macOS runner found it.
+  //
+  // Raising the signal inside the child instead runs the very listener
+  // onShutdownSignal registered, which is the half this repository owns. Signal
+  // delivery is the operating system's half and is not what is under test.
+  const drainOnStdin = drainable && process.platform === 'win32'
+  const preload: string[] = []
+  if (drainOnStdin) {
+    const trigger = path.join(server, 'drain-trigger.mjs')
+    writeFileSync(
+      trigger,
+      [
+        "process.stdin.setEncoding('utf8')",
+        "process.stdin.on('data', () => { process.emit('SIGTERM') })",
+        '',
+      ].join('\n'),
+      'utf8',
+    )
+    preload.push('--import', pathToFileURL(trigger).href)
+  }
+
+  const child = spawn(executable, [...preload, ...args, path.join(server, 'index.mjs')], {
     cwd: server,
     env: { ...process.env, PORT: String(port), HOST: '127.0.0.1', ...extraEnv },
-    stdio: ['ignore', 'pipe', 'pipe'],
+    // Always a pipe, so this stays the literal TypeScript narrows the stream
+    // handles from. A child that never reads it is unaffected, and an unread
+    // stdin pipe does not hold the event loop open.
+    stdio: ['pipe', 'pipe', 'pipe'],
   })
   let output = ''
   child.stdout.setEncoding('utf8')
@@ -193,7 +223,10 @@ async function startProcessServer(
     stop: () => child.kill(),
     // The signal an orchestrator sends, as opposed to `stop()`, which is the
     // test runner giving up on the process.
-    drain: () => child.kill('SIGTERM'),
+    drain: () => {
+      if (drainOnStdin) child.stdin?.write('drain\n')
+      else child.kill('SIGTERM')
+    },
     // Everything the process has written so far, which for a server is the
     // whole of its structured output.
     output: () => output,
@@ -722,40 +755,81 @@ describe('generated standalone server health endpoint', () => {
    *
    * An orchestrator still routing to a process that has stopped accepting sends
    * it work it can only refuse, and this is the only thing that tells it in
-   * time. Needs a real `SIGTERM` to a real process, so it runs where signals
-   * mean what they say: Windows maps `child.kill('SIGTERM')` onto
-   * `TerminateProcess`, which gives the program no chance to answer anything.
+   * time. Runs everywhere — see `startProcessServer` for how the signal is
+   * raised on a platform that cannot deliver one.
    */
-  it(
-    'reports itself draining once a shutdown signal has arrived',
-    { skip: process.platform === 'win32' ? 'SIGTERM is not deliverable on Windows' : false },
-    async () => {
-      const server = stageDeployment('node')
-      const started = await startProcessServer(process.execPath, [], server, {
-        // Long enough that the process is still draining when the probe lands.
+  it('reports itself draining once a shutdown signal has arrived', async () => {
+    const server = stageDeployment('node')
+    const started = await startProcessServer(
+      process.execPath,
+      [],
+      server,
+      {
         RUVYXA_SHUTDOWN_GRACE: '10000',
+        // Stated rather than left to the default, so this measures the window
+        // and not the number the default happens to hold. Long enough that
+        // the probe lands inside it, short enough to wait out.
+        RUVYXA_DRAIN_DELAY: '3000',
+      },
+      { drainable: true },
+    )
+    try {
+      assert.equal((await started.client('/__ruvyxa/health')).status, 200)
+
+      started.drain()
+      await new Promise((resolve) => setTimeout(resolve, 300))
+
+      // A new connection, which is what a readiness probe opens. Answering it
+      // is the whole point: closing the socket on the signal made this a
+      // connection refusal, so nothing could ever read the draining status.
+      const draining = await started.client('/__ruvyxa/health', {
+        signal: AbortSignal.timeout(6_000),
       })
-      try {
-        assert.equal((await started.client('/__ruvyxa/health')).status, 200)
+      assert.equal(draining.status, 503)
+      assert.equal(draining.headers.get('retry-after'), '1')
+      assert.deepEqual(await draining.json(), { status: 'draining', host: 'node' })
 
-        // Held open so the drain has something to wait for; without it the
-        // process exits before there is anything to ask.
-        const held = started.client('/', { signal: AbortSignal.timeout(15_000) }).catch(() => null)
-        started.drain()
-        await new Promise((resolve) => setTimeout(resolve, 300))
-
-        const draining = await started.client('/__ruvyxa/health', {
-          signal: AbortSignal.timeout(6_000),
-        })
-        assert.equal(draining.status, 503)
-        assert.equal(draining.headers.get('retry-after'), '1')
-        assert.deepEqual(await draining.json(), { status: 'draining', host: 'node' })
-        void held
-      } finally {
-        started.stop()
+      // The window has to end, or a deploy never replaces the process. Waited
+      // for rather than assumed, because a drain that only ever begins looks
+      // exactly like this one until it does not finish.
+      const deadline = Date.now() + 12_000
+      while (!started.output().includes('shutdown complete')) {
+        assert.ok(Date.now() < deadline, `the drain never finished:\n${started.output()}`)
+        await new Promise((resolve) => setTimeout(resolve, 100))
       }
-    },
-  )
+    } finally {
+      started.stop()
+    }
+  })
+
+  /**
+   * The window is one decision; only how a transport stops listening differs.
+   *
+   * The drain above runs the Node process, because that is the transport whose
+   * close is hand-built. Bun and Deno hand theirs to the runtime, and a fix
+   * applied to the one that is measured and not to the two that are not is the
+   * shape this repository keeps paying for.
+   *
+   * Presence, not wiring: what the window does is proved by the process test.
+   * This exists so removing it from a transport cannot be silent.
+   */
+  it('holds every transport behind the drain window before it stops accepting', () => {
+    for (const runtime of ['node', 'bun', 'deno'] as const) {
+      const source = standaloneServerSource({ runtime })
+      // Node defers its own `server.close`; the other two await the delay before
+      // handing the close to the runtime.
+      const deferral =
+        runtime === 'node' ? '}, DRAIN_DELAY_MS);' : 'setTimeout(resolve, DRAIN_DELAY_MS)'
+      assert.ok(
+        source.includes(deferral),
+        `${runtime}: the socket must not close until the drain window has passed`,
+      )
+      assert.ok(
+        source.includes('RUVYXA_DRAIN_DELAY'),
+        `${runtime}: the window must stay configurable`,
+      )
+    }
+  })
 })
 
 /**

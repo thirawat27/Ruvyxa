@@ -140,6 +140,17 @@ because a function's liveness belongs to the platform that invokes it. The body 
 the runtime name and nothing else: it is a public path on a deployed server, and in-flight counts
 and queue depth are a load oracle for anyone willing to ask often enough.
 
+**Draining.** That answer is only worth writing if something can still reach it, so a shutdown
+signal does not close the socket. The process keeps listening, and keeps serving normally, for
+`RUVYXA_DRAIN_DELAY` milliseconds — default 5000, capped at half of `RUVYXA_SHUTDOWN_GRACE` so
+in-flight work keeps a budget of its own — and only then stops accepting and waits its open
+responses out. Closing on the signal made `{"status":"draining"}` unreachable: a readiness probe
+opens a new connection and was refused, so the one answer that tells a load balancer to stop routing
+here never arrived, and everything it sent while it was still deregistering failed in a browser
+instead of being retried against another instance. Set `RUVYXA_DRAIN_DELAY=0` where nothing is
+load-balancing the process. A second signal exits immediately, so an operator pressing Ctrl-C twice
+is not held for a window that exists for a load balancer.
+
 **Logging.** `RUVYXA_LOG_FORMAT=json` makes every line the server writes one JSON record —
 `{"level","msg",…fields}` — which is what a collector wants and what makes the escaping structural
 rather than remembered: `JSON.stringify` cannot emit a raw newline. The default stays the readable

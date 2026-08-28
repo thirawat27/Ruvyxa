@@ -472,6 +472,29 @@ function positiveNumber(name, fallback) {
 const SHUTDOWN_GRACE_MS = positiveNumber('RUVYXA_SHUTDOWN_GRACE', 25_000);
 
 /**
+ * How long the process keeps listening, and serving, after a shutdown signal
+ * before it stops accepting new connections.
+ *
+ * Closing the socket the instant the signal lands makes the draining status
+ * unreachable: a readiness probe opens a new connection and is refused, so the
+ * one answer that tells an orchestrator to stop routing here never arrives.
+ * Everything it sends while it is still deregistering then fails in a browser
+ * instead of being retried against another instance — which is the failure a
+ * drain exists to prevent, and it happened on every self-hosted deployment.
+ *
+ * The process serves normally for the whole window; only the readiness answer
+ * changes. Capped at half of SHUTDOWN_GRACE_MS so in-flight work keeps a budget
+ * of its own however the two are configured, and RUVYXA_DRAIN_DELAY=0 closes
+ * straight away, which is right where nothing is load-balancing this process.
+ */
+const DRAIN_DELAY_MS = Math.min(
+  process.env.RUVYXA_DRAIN_DELAY?.trim() === '0'
+    ? 0
+    : positiveNumber('RUVYXA_DRAIN_DELAY', 5_000),
+  SHUTDOWN_GRACE_MS / 2,
+);
+
+/**
  * How long the handler may take to produce a response.
  *
  * A route whose render never settles has nothing to stop it here. On
@@ -1106,27 +1129,14 @@ server.on('request', (request, response) => {
 let shuttingDown = false;
 
 function shutdown(reason, exitCode) {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  log('info', 'draining connections', { reason });
-  // A request parked in the queue during a drain would wait for a slot this
-  // process is about to stop handing out. Settling them refuses them instead,
-  // which is an answer the caller can retry against the next instance.
-  admission?.close();
-
-  // Stop accepting new connections and wait for in-flight responses. Without
-  // this a deploy kills the process outright and every request being served at
-  // that moment fails in the user's browser.
-  server.close(() => {
-    clearTimeout(forceExit);
-    log('info', 'shutdown complete');
+  // A second signal means now. An operator pressing Ctrl-C twice, or a platform
+  // escalating, must not be held for a window that exists for a load balancer.
+  if (shuttingDown) {
+    log('warn', 'shutdown forced', { reason });
     process.exit(exitCode);
-  });
-
-  // Idle keep-alive sockets hold the close callback for as long as
-  // keepAliveTimeout, which would make every deploy wait a full minute for
-  // connections carrying nothing. Requests in progress are unaffected.
-  if (typeof server.closeIdleConnections === 'function') server.closeIdleConnections();
+  }
+  shuttingDown = true;
+  log('info', 'draining connections', { reason, delay_ms: DRAIN_DELAY_MS });
 
   // A request that never finishes must not outlive the platform's own grace
   // period, or the process is SIGKILLed and the drain was pointless.
@@ -1135,6 +1145,30 @@ function shutdown(reason, exitCode) {
     process.exit(exitCode);
   }, SHUTDOWN_GRACE_MS);
   forceExit.unref();
+
+  // Still listening, and still answering, for this window: the readiness probe
+  // reads 503 and stops routing here before the socket goes away.
+  const stopAccepting = setTimeout(() => {
+    // A request parked in the queue during a drain would wait for a slot this
+    // process is about to stop handing out. Settling them refuses them instead,
+    // which is an answer the caller can retry against the next instance.
+    admission?.close();
+
+    // Stop accepting new connections and wait for in-flight responses. Without
+    // this a deploy kills the process outright and every request being served
+    // at that moment fails in the user's browser.
+    server.close(() => {
+      clearTimeout(forceExit);
+      log('info', 'shutdown complete');
+      process.exit(exitCode);
+    });
+
+    // Idle keep-alive sockets hold the close callback for as long as
+    // keepAliveTimeout, which would make every deploy wait a full minute for
+    // connections carrying nothing. Requests in progress are unaffected.
+    if (typeof server.closeIdleConnections === 'function') server.closeIdleConnections();
+  }, DRAIN_DELAY_MS);
+  stopAccepting.unref();
 }
 
 onShutdownSignal(shutdown);
@@ -1438,13 +1472,14 @@ ${listen}
 let shuttingDown = false;
 
 async function shutdown(reason, exitCode) {
-  if (shuttingDown) return;
+  // A second signal means now. An operator pressing Ctrl-C twice, or a platform
+  // escalating, must not be held for a window that exists for a load balancer.
+  if (shuttingDown) {
+    log('warn', 'shutdown forced', { reason });
+    process.exit(exitCode);
+  }
   shuttingDown = true;
-  log('info', 'draining connections', { reason });
-  // A request parked in the queue during a drain would wait for a slot this
-  // process is about to stop handing out. Settling them refuses them instead,
-  // which is an answer the caller can retry against the next instance.
-  admission?.close();
+  log('info', 'draining connections', { reason, delay_ms: DRAIN_DELAY_MS });
 
   // A request that never finishes must not outlive the platform's own grace
   // period, or the process is SIGKILLed and the drain was pointless.
@@ -1453,6 +1488,16 @@ async function shutdown(reason, exitCode) {
     process.exit(exitCode);
   }, SHUTDOWN_GRACE_MS);
   if (typeof forceExit?.unref === 'function') forceExit.unref();
+
+  // Still listening, and still answering, for this window: the readiness probe
+  // reads 503 and stops routing here before the socket goes away.
+  if (DRAIN_DELAY_MS > 0) {
+    await new Promise((resolve) => setTimeout(resolve, DRAIN_DELAY_MS));
+  }
+  // A request parked in the queue during a drain would wait for a slot this
+  // process is about to stop handing out. Settling them refuses them instead,
+  // which is an answer the caller can retry against the next instance.
+  admission?.close();
 
   try {
     await closeServer();
