@@ -1,5 +1,255 @@
 # Changelog
 
+## v1.1.3 (2026-08-29)
+
+A release about the deployed process as something an operator has to run: taken out of a load
+balancer, probed for liveness, held to a deadline, and asked whether the page a reader already holds
+is still current. Every suite in this repository asked a fresh server one request and got a correct
+answer back, which is why none of what follows was visible. A process is only wrong about draining
+while it is being drained, only wrong about a deadline when a render never settles, and only wrong
+about a validator when the same reader comes back.
+
+The other half is the shape that has cost the most here — one rule, two implementations, and nothing
+holding them together. Two more of those are settled with a fixture each, and a check now fails the
+build on a constant declared in both languages that nobody said how to keep in step.
+
+### The socket closed before anything could learn the process was draining
+
+A shutdown signal stopped the listener in the same tick it arrived. A readiness probe answers on a
+new connection, so the one answer that tells an orchestrator to stop routing here could not be
+reached: by the time the probe was refused, the process it was asking about was already gone.
+Everything the load balancer sent while it was still deregistering then failed in a browser instead
+of being retried against another instance, which is the exact failure a drain exists to prevent. It
+happened on every self-hosted deployment.
+
+The process now keeps listening, and serving normally, for a drain window before it stops accepting
+connections. Only the readiness answer changes during it. `RUVYXA_DRAIN_DELAY` sets the window and
+defaults to five seconds, capped at half of `RUVYXA_SHUTDOWN_GRACE` so in-flight work keeps a budget
+of its own however the two are configured; `RUVYXA_DRAIN_DELAY=0` closes straight away, which is
+right where nothing is load-balancing this process. A second signal — Ctrl-C twice — shuts down
+immediately.
+
+The test that would have caught this was skipped on Windows, because `child.kill('SIGTERM')` maps
+onto `TerminateProcess` there and gives the program no chance to answer anything, and a lane that
+runs on one platform is a lane nobody watches. It stopped being run and started being discovered.
+The drain test now raises the signal inside the child instead, which runs the listener this
+repository owns; signal delivery is the operating system's half and was never what was under test.
+
+### `/__ruvyxa/health`, answered the same way by both hosts
+
+A liveness and readiness probe: `200` with `{"status":"ok","host":…}` while the process is serving,
+`503` with `{"status":"draining"}` and `Retry-After: 1` once a shutdown signal has arrived. `GET`
+and `HEAD` answer; any other verb is `405` with `Allow`, because a `404` would say the endpoint is
+absent rather than that the verb is. It is a reserved framework route on the Axum host and on the
+standalone server the adapters emit, and `tests/fixtures/framework-endpoint-conformance.json` holds
+the two to the same answers.
+
+It is deliberately incurious: a status and the runtime that answered, nothing else. In-flight counts
+and queue depth on a public path are a load oracle for anyone willing to ask often enough.
+
+Those numbers are available, at `/__ruvyxa/metrics`, in Prometheus text exposition — render
+concurrency, queue depth, refusals, render timeouts, uptime, and whether a shutdown signal has
+arrived. It is served only by the generated standalone server and only when `RUVYXA_METRICS_TOKEN`
+is set, compared in constant time; without the token the path answers `404` rather than `401`, so a
+deployment that never turned metrics on does not advertise that the path exists. Admission numbers
+are absent rather than zero when there is no limiter, because "0 renders running, 0 queued" reads as
+a healthy idle process rather than as an unbounded one.
+
+### A render that never settles held its connection for the life of the process
+
+Under `ruvyxa start` a render is a worker round-trip the native host bounds at
+`RUVYXA_WORKER_TIMEOUT_MS`, and on a serverless adapter the platform bounds the invocation. The
+generated standalone server bounded nothing, so one route that never resolves is a slow leak under
+ordinary traffic that ends as an out-of-memory kill with no error in the log.
+
+`RUVYXA_RENDER_TIMEOUT` bounds it, defaulting to the same thirty seconds as the native host so one
+project is bounded the same way under `ruvyxa start` and under its own build. A render that passes
+it is abandoned with `503` and `Retry-After`. What is bounded is the wait for the `Response`, never
+the body behind it — a streamed document and a server-sent-event stream both resolve their
+`Response` immediately and then write for as long as they need to. `RUVYXA_RENDER_TIMEOUT=0` turns
+it off for a deployment that genuinely renders longer than this and knows it.
+
+### A `413` left the connection reusable
+
+An API route that exceeds its body limit is answered without the rest of the request being read, so
+the socket still has a partial body on it. Both hosts sent that `413` on a keep-alive connection:
+the client reused it, and its next request was parsed starting from the middle of the body it had
+already sent. The symptom is a connection reset on the request _after_ the one that was too large,
+which is not the request anybody looks at.
+
+The response now carries `Connection: close` on both hosts. Draining megabytes to keep the
+connection warm is the cost the limit exists to avoid.
+
+### A stored document was re-sent in full on every navigation
+
+`DOCUMENT_CACHE_CONTROL` tells a browser to revalidate before every reuse, and a revalidation with
+no validator to offer can only be answered with the whole document again. Every SSG, CSR, and ISR
+document was therefore re-sent in full to a reader who already had it, on both hosts.
+
+Those three strategies now carry a weak `ETag`, and an `If-None-Match` that matches is answered
+`304`. SSR and PPR are deliberately absent: their document is produced for this request, may carry
+one visitor's data, may still be streaming, and is `no-store` either way, so there is nothing for a
+validator to be about. `document_has_validator` in `ruvyxa_graph` is the single answer to which
+strategies those are, and `tests/fixtures/deploy-output-conformance.json` replays both halves.
+
+The two hosts deliberately do **not** share the validator's value — the native one hashes with
+blake3 and the deployed one with SHA-256. A validator is opaque and scoped to the origin that issued
+it, and no client ever holds one from both.
+
+### Both hosts send one `Cache-Control` for a document
+
+`document_cache_control` lived in the CLI crate, so it described what a deployed function would send
+and the dev server sent nothing of the kind. The same route was cached one way under `ruvyxa start`
+and another way once deployed — a difference that only appears on the second request, which is not
+the one a parity check makes.
+
+It moved to `ruvyxa_graph`, where both callers can own it, and the render pipeline applies it. The
+conformance test moved with the function rather than being copied.
+
+### A deployed server trusted a header nothing was writing
+
+A deployed function has no transport peer to weigh, so the previous rule was that it treats its
+platform ingress as trusted by construction and reads `cf-connecting-ip`, `x-vercel-forwarded-for`,
+and `true-client-ip` first. That is right on Cloudflare and on Vercel, where the ingress writes
+those headers and overwrites what a caller sent. It is wrong on the standalone server the `node`,
+`bun`, `deno`, `aws`, `railway`, and `render` adapters emit, which is an ordinary HTTP server bound
+to `0.0.0.0` with nothing in front of it: the header was simply whatever the caller typed, so one
+client rotating it got a fresh rate-limit bucket per request.
+
+The declaration is per-adapter now, through `createHandler`'s `clientIpHeaders`, and an adapter that
+declares none weighs `X-Forwarded-For` exactly the way the native host does — against the trusted
+list, taking the rightmost hop that is not itself a trusted proxy.
+`tests/fixtures/client-ip-conformance.json` carries the cases.
+
+### Two rules, two implementations, and now a fixture for each
+
+**The CSS Module class name.** The stylesheet comes from `crates/ruvyxa_bundler`, and the class map
+the server renderer imports comes from `packages/ruvyxa/runtime/compiler.mjs`. Both fold the
+project-relative path before hashing it, so that a case-insensitive filesystem cannot produce two
+hashes for one file — and they folded differently. JavaScript used `String.prototype.toLowerCase`,
+which is the full Unicode default case conversion; Rust used `str::to_ascii_lowercase`, which leaves
+every non-ASCII letter alone. On a case-insensitive filesystem `Ü/card.module.css` and
+`ü/card.module.css` are one file, and Rust hashed them as two.
+
+A project with any non-ASCII uppercase letter in the path to a `.module.css` file therefore rendered
+with a class no rule matched. The page is not broken in any way a build or a log can report; the
+styles are simply absent. The collision guard that exists to catch exactly this under-reported for
+the same reason. Full Unicode folding is the shared behavior now, because it is what the guard
+already claims and what a case-insensitive filesystem actually performs, and
+`tests/fixtures/css-module-class-conformance.json` holds both.
+
+**The locale redirect.** An unprefixed URL cannot match a `/[lang]/…` route, so both hosts redirect
+it to a prefixed one — `crates/ruvyxa_dev_server/src/i18n.rs` for `dev`, `start`, and `preview`, and
+`packages/ruvyxa/runtime/serverless-handler.mjs` for every serverless adapter. They disagreed twice,
+and both were invisible because every test on both sides set `detectLocale: true` and asked for an
+ordinary path:
+
+- `detectLocale: false` turned the redirect off entirely in the deployed handler and turned only
+  _detection_ off in the native server. The option says which signals pick the locale, not whether
+  locale routing happens — so with it off, `/about` reached `/en/about` under `ruvyxa dev` and 404ed
+  once the project shipped, for every unprefixed URL.
+- The reserved namespace was excluded by raw byte prefix in the deployed handler and by whole
+  segment in the native server, so `/__ruvyxa-notes` — a page a project may legitimately own — was
+  redirected in development and silently excluded once deployed.
+
+The native server's behavior is the shared one in both, and
+`tests/fixtures/i18n-routing-conformance.json` is replayed by a Rust test and a JavaScript one.
+
+**And the constants nobody had registered.** `scripts/check-cross-language-constants.mjs` enumerates
+every `SCREAMING_SNAKE` constant declared in both languages and requires each name to say what holds
+the two together: a shared fixture, a cross-language test, a scalar this script normalizes and
+compares itself, or an explicit note that the name means two unrelated things. A pair registered
+nowhere fails the build. It does not diff every value, because the same fact is legitimately encoded
+differently in the two languages — `&["tsx"]` against `['.tsx']`, `52_428_800` against
+`50 * 1024 * 1024` — and a blanket comparison would be noise rather than a gate. Twenty-nine pairs
+are held today. It runs in `pnpm release:validate` and on its own as
+`pnpm check:cross-language-constants`.
+
+### `revalidatePath()` reaches what a visitor is served, or says that it cannot
+
+**Netlify dropped two other pages with it.** A cache tag list is comma-separated, so a path has to
+become one token, and the mapping has to be injective — which folding every run of non-alphanumerics
+to a single `-` is not. `/a/b`, `/a-b`, and `/a_b` all produced `ruvyxa-a-b`, so revalidating one
+dropped the other two from the edge. The tag is a SHA-256 digest now: one token, the same length
+whatever the path, and unable to collide by construction.
+
+**Vercel purged the wrong domain.** The origin a purge is sent to is read from the request being
+served, so that a preview deployment purges its own domain and a custom domain purges its own. It
+was held in a module-level variable, and one instance of the function answers more than one request
+at a time — so a concurrent request overwrote it, and the purge went to the other request's domain
+while the page it was asked to drop stayed cached on the domain a visitor was actually reading. It
+is an `AsyncLocalStorage` now, and the handler runs inside a request-scoped context.
+
+**And the platforms where it cannot work say so at build time.** `onDemandRevalidation` joins
+`onDemandImages` in `tests/fixtures/adapter-contract.json`, per adapter. Where a cache sits in front
+of the function and the adapter has no way to drop one path from it — Firebase Hosting and Amplify's
+CloudFront both cache on the `s-maxage` the handler sends — a project with revalidating routes is
+warned during `ruvyxa build`. The forced write still lands in the function's own store; what it
+cannot do is drop the copy the platform is serving, so the page keeps answering with the document it
+had until the window expires on its own. That is a correct deployment, just not the one the call
+implies.
+
+### Netlify writes `netlify.toml` by default
+
+`projectConfig` now defaults to `true`, and `frameworksApi` defaults to `!projectConfig`.
+
+The publish directory is the one question Netlify cannot learn from the build: the Frameworks API
+has no key for it, and a plugin cannot supply it without a `netlify.toml` of its own — Netlify
+installs a plugin from its own UI only when the plugin is listed in Netlify's directory, and a
+community package has to be declared in `[[plugins]]` and installed as a devDependency. So the
+choice was never "config file or no config file"; it was "one generated file, or the same file
+written by hand".
+
+The two are alternatives rather than layers, which is why turning one on turns the other off.
+Shipping both puts two functions on the site — the one under `.netlify/v1/functions` and the one the
+`netlify.toml` `functions` directory declares — and both claim `path: '/*'`, so which of them
+answers a request is not a question with an answer.
+
+Netlify reads `netlify.toml` _before_ it runs the build command, so the file has to be committed to
+take effect. The build writes it once and never overwrites an existing one.
+
+### Deno Deploy: no `deno.json` in the deploy directory
+
+The Deno adapter emitted one, and a `deno.json` makes the directory it sits in Deno's own
+configuration scope. That scope declared no dependencies, so the npm packages a server-components
+render reaches for at request time stopped resolving and every such route answered `500`. Without
+the file, Deno walks up to the project and resolves them. The adapter's README says why, and names
+the entrypoint to give the platform.
+
+### Cloudflare Workers Builds and Deno Deploy are detected
+
+`WORKERS_CI` and `DENO_DEPLOY` join the platform environment variables the build reads, so neither
+needs an adapter named in `ruvyxa.config.ts`. `ARCHITECTURE.md` documents all eight, and says which
+of them is Cloudflare Pages and which is Workers.
+
+### Vercel image widths are snapped rather than forwarded
+
+Vercel answers `400` for any `?w=` its `images.sizes` did not declare, and `<Image>` writes the
+author's own `width` into the `srcset` without snapping it — so forwarding the requested width
+verbatim broke exactly the images that render correctly under `ruvyxa start`. A request is widened
+to the nearest declared size instead, which is the size Vercel would have served anyway. The widths
+are computed once and threaded into the emitted handler rather than hardcoded in it, so the declared
+list and the code that snaps to it cannot disagree.
+
+### The dev server is exercised end to end, and one flaky test is not flaky
+
+Every other end-to-end lane here exercises a build, and the Rust suites cover the dev server's
+pieces — the watcher, the HMR tracker, the router, the render cache — one at a time. Nothing started
+the command developers run all day and watched an edit travel from the filesystem to the socket, so
+the seam between those pieces was covered by nobody: a watcher that stops emitting, a tracker that
+classifies an edit wrongly, a sequence number that stops increasing, and a socket that never sends
+anything at all all leave every unit test green.
+
+`scripts/smoke-dev-server.mjs` runs the real command against a real project, edits files under it,
+and checks what the browser would have been told. Every edit is reverted in a `finally`, and the run
+fails if a source file is not byte-identical afterwards — a smoke test that leaves the tree dirty is
+a smoke test nobody will run twice. It runs in CI, alongside the full project flow on Windows.
+
+Separately, a linker test asserted `is_empty()` over a process-global collector while a sibling test
+recorded into it from another thread. It reproduced roughly once in seventy-five runs on sixteen
+threads, which is why it only ever appeared under the CPU pressure of a workspace-wide run. It links
+a specifier no other test links now, and asserts on that key alone.
+
 ## v1.1.2 (2026-08-26)
 
 A release about answers that were wrong and looked right. A read that fails says something the
