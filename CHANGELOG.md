@@ -2,6 +2,59 @@
 
 ## Unreleased
 
+### A plugin that passes its tests is one the server will run
+
+The harness that validates a plugin and the runtime that runs it each carried their own copy of the
+registration rules, and the two had stopped agreeing: the harness accepted an `http.route()` on a
+path the framework answers itself, which the server refuses — and the native host panics when a
+second handler registers one. Both now apply one shared rule, so a registration cannot be valid in
+testing and invalid in production.
+
+### The service worker claims a new cache only when the site actually changed
+
+The name was derived from the build manifest, which carries the build's timestamp, so every rebuild
+claimed a fresh cache — making returning visitors re-download a site that had not changed, and
+making two builds of identical sources produce different files. It is derived from what the build
+emitted now: it moves when any output moves, and stays put when none does, so an unfingerprinted
+asset still reaches a returning visitor and an unchanged rebuild costs nobody anything.
+
+### `ruvyxa start` recovers a build that was interrupted mid-commit
+
+Committing a build moves twice: the previous output into a rollback directory, then the staged build
+into place. A process killed between them left the only complete build in the rollback directory,
+and only the next `ruvyxa build` swept it back — so starting the server on the same machine reported
+`RUV1015 Build output was not found` while a complete build sat one directory away. A start is when
+that matters most: whatever was interrupted was usually a deploy step, and the server is what runs
+next.
+
+### A locale redirect normalises the query the same way on every host
+
+The native server reproduced the request's raw query bytes into the redirect target while deployed
+builds passed them through `URL`, so one project deployed two ways answered the same request with
+two different `Location` values. `URL` is now the rule on both — a `Location` is a URI reference and
+a literal space is not allowed in one. Its exact behaviour was measured rather than assumed: space,
+`"`, `<` and `>` are percent-encoded, tab, carriage return and line feed are removed, and everything
+else including `%` is passed through unchanged, so an already-encoded value is never encoded twice.
+Dropping the newline pair also closes the shape of a response-splitting `Location`.
+
+### `Retry-After` names a time the client can actually retry at
+
+The native rate limiter truncated the remaining window to whole seconds, so 2.4 seconds left
+answered `Retry-After: 2` and a client that obeyed it came back half a second early, was refused
+again, and paid for the round trip. It rounds up now, which is what the deployed handler has always
+done.
+
+### A disconnected client stops the work it started
+
+A worker talks to the server over a pipe, so a browser closing its connection reached it as nothing
+at all: a route that streams — a long poll, a server-sent-event endpoint, anything that produces
+until told to stop — kept producing for a client that had gone, and the server kept counting the
+request as in flight, which made a worker with an abandoned stream look busy and stop attracting new
+work. The disconnect now crosses the process boundary as its own protocol frame, a route handler
+observes it through `request.signal`, and the stream's own `cancel()` runs — which is where a route
+releases the timer or subscription driving it. The request ends with an explicit error rather than a
+normal completion, because it stopped for a reason the caller should be able to tell apart.
+
 ### A release is gated on both dependency audits
 
 Both audit lanes lived in a workflow the release did not depend on, whose push triggers were

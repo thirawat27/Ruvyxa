@@ -80,6 +80,10 @@
       "types": "./dist/origin-policy.d.ts",
       "default": "./dist/origin-policy.js"
     },
+    "./plugin-registration": {
+      "types": "./dist/plugin-registration.d.ts",
+      "default": "./dist/plugin-registration.js"
+    },
     "./route-match": {
       "types": "./dist/route-match.d.ts",
       "default": "./dist/route-match.js"

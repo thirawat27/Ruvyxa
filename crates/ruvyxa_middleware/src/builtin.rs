@@ -607,10 +607,15 @@ impl RateLimitLayer {
         state
             .get(key)
             .map(|bucket| {
-                self.window
-                    .saturating_sub(bucket.last_refill.elapsed())
-                    .as_secs()
-                    .max(1)
+                let remaining = self.window.saturating_sub(bucket.last_refill.elapsed());
+                // Rounded up, not truncated. `as_secs()` drops the fraction, so
+                // 2.4 seconds left answered `Retry-After: 2` and the client
+                // retried at 2.0 -- still inside the window, refused again, and
+                // charged another round trip for it. `consumeFixedWindow` in
+                // `packages/ruvyxa/runtime/serverless-handler.mjs` has always
+                // used `Math.ceil` here; this is the half that disagreed.
+                let seconds = remaining.as_secs() + u64::from(remaining.subsec_nanos() > 0);
+                seconds.max(1)
             })
             .unwrap_or(1)
     }
@@ -850,6 +855,62 @@ mod tests {
                 .contains_key(header::ACCESS_CONTROL_ALLOW_METHODS),
             "a refusal is not a preflight answer, so it owes no negotiation headers"
         );
+    }
+
+    /// `Retry-After` is rounded up, or the client retries inside the window.
+    ///
+    /// `Duration::as_secs()` truncates. With 2.4 seconds left in the window that
+    /// answered `2`, the client waited two seconds, was refused again, and paid
+    /// for a second round trip to learn nothing. The deployed host has always
+    /// used `Math.ceil` for the same value, so the two also disagreed about what
+    /// one `rateLimit.window` means.
+    #[test]
+    fn retry_after_rounds_up_to_the_end_of_the_window() {
+        let limiter = RateLimitLayer::from_config(&RateLimitConfig {
+            max_requests: 1,
+            window_secs: 5,
+            key_by: "ip".to_string(),
+        });
+
+        // 2.4 seconds have passed, so 2.6 remain: a client told `2` comes back
+        // half a second early.
+        {
+            let mut state = limiter.state.lock().unwrap();
+            state.insert(
+                "client".to_string(),
+                RateBucket {
+                    tokens: 0,
+                    last_refill: Instant::now() - Duration::from_millis(2_400),
+                },
+            );
+        }
+        assert_eq!(limiter.retry_after_seconds("client"), 3);
+
+        // A whole number of seconds is not rounded up past itself.
+        {
+            let mut state = limiter.state.lock().unwrap();
+            state.insert(
+                "exact".to_string(),
+                RateBucket {
+                    tokens: 0,
+                    last_refill: Instant::now() - Duration::from_secs(2),
+                },
+            );
+        }
+        assert_eq!(limiter.retry_after_seconds("exact"), 3);
+
+        // Never zero: a client told to retry immediately would spin.
+        {
+            let mut state = limiter.state.lock().unwrap();
+            state.insert(
+                "elapsed".to_string(),
+                RateBucket {
+                    tokens: 0,
+                    last_refill: Instant::now() - Duration::from_secs(90),
+                },
+            );
+        }
+        assert_eq!(limiter.retry_after_seconds("elapsed"), 1);
     }
 
     /// The shared preflight table, replayed against the layered stack.

@@ -3647,6 +3647,62 @@ fn recovery_restores_the_outputs_a_dead_build_stranded() {
     assert!(!has_temp_build_dir(&out_dir, ".build-rollback"));
 }
 
+/// Starting the server recovers a build the previous run left half-committed.
+///
+/// The commit moves twice: the existing output into a rollback directory, then
+/// the staged build into place. A process killed between them leaves the only
+/// complete build in the rollback directory, and until now only the *next*
+/// `ruvyxa build` swept it back. So `ruvyxa start` on the same machine refused
+/// with RUV1015 — "Build output was not found" — while a complete build sat one
+/// directory away.
+///
+/// A start is when it matters most: whatever crashed was probably a deploy
+/// step, and the server is what runs next.
+#[test]
+fn starting_the_server_recovers_a_half_committed_build() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let root = temp.path();
+    std::fs::create_dir_all(root.join("app")).expect("app dir");
+
+    // What a commit killed between its two moves leaves behind: no `server/`
+    // in the output, and the previous build parked in a rollback directory
+    // whose owner is gone.
+    let out_dir = root.join(".ruvyxa");
+    let stranded = out_dir.join(format!(".build-rollback-{UNREACHABLE_PID}-1"));
+    std::fs::create_dir_all(stranded.join("server").join("app")).expect("mkdir");
+    std::fs::write(
+        stranded.join("server").join("app").join("page.mjs"),
+        "export default 1\n",
+    )
+    .expect("write");
+    std::fs::write(
+        stranded.join(".ruvyxa-rollback.json"),
+        format!("{{\"pid\":{UNREACHABLE_PID},\"outputs\":[\"server\"]}}"),
+    )
+    .expect("write marker");
+
+    assert!(
+        !out_dir.join("server").join("app").exists(),
+        "the test has to start from the half-committed state",
+    );
+
+    let args = crate::ServerArgs {
+        root: root.to_path_buf(),
+        host: None,
+        port: None,
+        runtime: None,
+    };
+    let config = crate::ProjectConfig::default();
+
+    crate::runtime_config::ensure_build_output_exists(&args, &config)
+        .expect("a recoverable build must not be reported as missing");
+
+    assert!(
+        out_dir.join("server").join("app").join("page.mjs").exists(),
+        "the previous build was left in the rollback directory",
+    );
+}
+
 /// The production shape of a dead owner: a process that really ran and really
 /// exited, rather than an id that never named anything. On Windows those are
 /// different answers — a process that has exited can still be opened while a

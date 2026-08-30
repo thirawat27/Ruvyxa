@@ -827,32 +827,66 @@ describe('pwa()', () => {
     assert.match(appSource, /\.catch\(\(\) => undefined\)/)
   })
 
-  it('derives the cache name from the build instead of a stamp', async () => {
-    // Trap #4: cache identity is derived, never stamped. The worker is
-    // cache-first with no revalidation, and `activate` drops only caches whose
-    // name *differs*, so a fixed `-v1` suffix meant the install-time copy of an
-    // unfingerprinted `/logo.png` or `/vendor.js` was served forever.
+  /**
+   * Trap #4: cache identity is derived, never stamped. The worker is
+   * cache-first with no revalidation, and `activate` drops only caches whose
+   * name *differs*, so a fixed `-v1` suffix meant the install-time copy of an
+   * unfingerprinted `/logo.png` or `/vendor.js` was served forever.
+   *
+   * Derived from what the build *emitted*, not from the build manifest. The
+   * manifest carries `createdAtUnix`, so hashing it moved the name on every
+   * build whether or not anything changed — which is the same defect wearing
+   * the opposite mask: it broke `pnpm verify:reproducible`, and it made every
+   * visitor re-download a site that was byte-identical to the one they had.
+   *
+   * Both directions are asserted here, because either alone is satisfied by a
+   * bug: a name that never moves passes the second, and a name built from a
+   * clock passes the first.
+   */
+  it('derives the cache name from what the build emitted', async () => {
     const registered = register(pwa({ name: 'Example' }))
-    const first = tempBuildContext({ routes: 2, createdAtUnix: 1 })
-    const second = tempBuildContext({ routes: 2, createdAtUnix: 2 })
 
-    await registered.buildComplete[0](first)
-    const firstCache = cacheNameOf(readFileSync(path.join(first.outDir, 'assets', 'sw.js'), 'utf8'))
-    await registered.buildComplete[0](second)
-    const secondSource = readFileSync(path.join(second.outDir, 'assets', 'sw.js'), 'utf8')
-    const secondCache = cacheNameOf(secondSource)
+    const buildWith = async (assets) => {
+      const context = tempBuildContext({ routes: 2, createdAtUnix: Date.now() })
+      mkdirSync(path.join(context.outDir, 'client'), { recursive: true })
+      for (const [name, contents] of Object.entries(assets)) {
+        writeFileSync(path.join(context.outDir, 'client', name), contents)
+      }
+      await registered.buildComplete[0](context)
+      return {
+        context,
+        cache: cacheNameOf(readFileSync(path.join(context.outDir, 'assets', 'sw.js'), 'utf8')),
+      }
+    }
 
-    assert.notEqual(firstCache, secondCache)
+    const first = await buildWith({ 'app.js': 'export default 1' })
+    const same = await buildWith({ 'app.js': 'export default 1' })
+    const changed = await buildWith({ 'app.js': 'export default 2' })
+
+    assert.equal(
+      first.cache,
+      same.cache,
+      'two builds that emitted the same bytes must claim the same cache, or every ' +
+        'visitor re-downloads an unchanged site and verify:reproducible fails',
+    )
+    assert.notEqual(
+      first.cache,
+      changed.cache,
+      'a build that emitted different bytes must claim a different cache, or a ' +
+        'cache-first worker serves the install-time copy of a changed asset forever',
+    )
+
     // Both must keep the scope-derived prefix, or `activate` cannot recognise
     // the previous build's cache as one of ours and never deletes it.
-    const prefix = secondSource.match(/const CACHE_PREFIX = "([^"]+)"/)[1]
-    assert.ok(firstCache.startsWith(prefix), `${firstCache} does not start with ${prefix}`)
-    assert.ok(secondCache.startsWith(prefix), `${secondCache} does not start with ${prefix}`)
+    const source = readFileSync(path.join(changed.context.outDir, 'assets', 'sw.js'), 'utf8')
+    const prefix = source.match(/const CACHE_PREFIX = "([^"]+)"/)[1]
+    assert.ok(first.cache.startsWith(prefix), `${first.cache} does not start with ${prefix}`)
+    assert.ok(changed.cache.startsWith(prefix), `${changed.cache} does not start with ${prefix}`)
 
     // The dev handler serves `/sw.js` from the same value the build wrote, or
     // the served worker and the deployed worker claim different caches.
     const served = await registered.middleware[0].onRequest(request('/sw.js'))
-    assert.equal(cacheNameOf(await served.text()), secondCache)
+    assert.equal(cacheNameOf(await served.text()), changed.cache)
   })
 
   it('keeps version as an override of the derived cache name', async () => {
@@ -2686,4 +2720,74 @@ describe('the plugin rate limiter answers the shared admission table', () => {
       }
     })
   }
+})
+
+/**
+ * The harness and the runtime apply one registration rule, not two that agree.
+ *
+ * They were two, each commented as mirroring the other, and they had already
+ * drifted: `plugin-harness.ts` accepted an `http.route()` on a reserved
+ * framework path that `plugin-http.mjs` refuses. A plugin could therefore pass
+ * the harness that validates it and be rejected by the server that runs it —
+ * and a reserved path is not a cosmetic disagreement, because the native host
+ * panics inside axum when a second handler registers one.
+ *
+ * Both are now `packages/@ruvyxa/core/src/plugin-registration.ts`, copied into
+ * the runtime by `pnpm --filter ruvyxa sync:runtime` because a serverless
+ * function bundle resolves no bare specifiers.
+ */
+describe('the shared plugin registration rules', () => {
+  it('refuses a reserved framework path in both validators', async () => {
+    const shared = await import('../../../packages/ruvyxa/runtime/plugin-registration.mjs')
+    assert.ok(
+      shared.RESERVED_FRAMEWORK_PATHS.length > 0,
+      'the reserved list has to have entries for this to assert anything',
+    )
+
+    for (const reserved of shared.RESERVED_FRAMEWORK_PATHS) {
+      // The real registry every host runs, not the stub `register` helper
+      // above -- that one records registrations and validates nothing.
+      await assert.rejects(
+        createPluginRegistry({
+          root: '.',
+          environment: 'production',
+          plugins: [
+            {
+              name: 'claimer',
+              register: (api) =>
+                api.http.route({ path: reserved, handler: () => new Response('') }),
+            },
+          ],
+        }),
+        /reserved framework route/,
+        `the runtime accepted ${reserved}`,
+      )
+    }
+  })
+
+  it('answers the transport-path rule the same way from either side', async () => {
+    const shared = await import('../../../packages/ruvyxa/runtime/plugin-registration.mjs')
+
+    // The allowlist, not the old axum-0.7 denylist. `/{room}` registered a
+    // single-segment wildcard that shadowed every one-segment project page.
+    for (const literal of ['/socket', '/a/b', '/x-1.2_3~4']) {
+      assert.equal(shared.isLiteralTransportPath(literal), true, literal)
+    }
+    for (const wildcard of ['/{room}', '/{', '/*rest', '/a?b', '/a#b', 'socket', '/']) {
+      assert.equal(shared.isLiteralTransportPath(wildcard), false, wildcard)
+    }
+  })
+
+  it('keeps the heartbeat bounds on both transports', async () => {
+    const shared = await import('../../../packages/ruvyxa/runtime/plugin-registration.mjs')
+
+    for (const normalize of [shared.normalizeRealtime, shared.normalizePresence]) {
+      assert.throws(() => normalize('p', { heartbeatMs: 4_999 }), /between 5000 and 120000/)
+      assert.throws(() => normalize('p', { heartbeatMs: 120_001 }), /between 5000 and 120000/)
+      assert.equal(normalize('p', { heartbeatMs: 25_000 }).heartbeatMs, 25_000)
+      // A reserved path is refused here too, which is the check that used to
+      // exist in one validator and not the other.
+      assert.throws(() => normalize('p', { path: '/__ruvyxa/hmr' }), /reserved framework route/)
+    }
+  })
 })

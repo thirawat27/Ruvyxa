@@ -841,7 +841,8 @@ can be declared done without pretending these do not exist.
 
 ### Carried by a file-ownership boundary, not by difficulty
 
-- [ ] **F-01 — Single-source the plugin registration normaliser.** `plugin-harness.ts` and
+- [ ] **F-01 — Single-source the plugin registration normaliser.** Not attempted 2026-08-30; see the
+      section at the end for why and what it needs. `plugin-harness.ts` and
       `runtime/plugin-http.mjs` now state the rules twice, each commenting the other. The move needs
       `plugin-http.mjs`, `sync-shared-runtime.mjs` (`SYNCED_MODULES`), and the registration lists in
       one change. Carry `RESERVED_FRAMEWORK_PATHS` and the `normalizeRealtime`/`normalizePresence`
@@ -863,6 +864,7 @@ can be declared done without pretending these do not exist.
       the two hosts level on everything else.
 - [ ] **F-06 — `SOURCE_DATE_EPOCH` and the PWA cache name are in direct conflict.** Real and
       unfixed; it will redden the new reproducibility CI lane the moment a fixture enables `pwa`.
+      Investigated 2026-08-30 and it is a decision, not a defect — see the section below.
 - [ ] **F-07 — Start-time rollback recovery** (from Task 63's scope, never dispatched).
 
 ### Untested corners left behind by a fix
@@ -947,3 +949,55 @@ can be declared done without pretending these do not exist.
       entry meaning "content not available", so this is now the one place a missing source could be
       read as an empty line list. It is in test code, which `check-silent-defaults` deliberately
       does not scan, so no gate will ever say so.
+
+### F-06 in detail: why it is a decision and not a defect
+
+The obvious fix — project the build manifest to its content-bearing fields and drop `createdAtUnix`
+and `timing` before hashing — was implemented and then reverted, because it reintroduces a bug the
+current design documents avoiding.
+
+`pwa()`'s own doc comment states the trade: the per-build cache name exists "so a change to an
+unfingerprinted asset reaches a returning visitor", against the alternative of "a cache-first worker
+serving an unfingerprinted asset from the install-time copy forever". `precache` holds
+author-supplied paths such as `/logo.png`, not content-hashed URLs, so a content-only identity
+cannot see that file change. A test already pins the current behaviour —
+`derives the cache name from the build instead of a stamp` — and the reverted change turned it red,
+which is the design defending itself.
+
+`SOURCE_DATE_EPOCH` is not the answer either. It would make the timestamp _stable_ without making it
+_mean_ anything, so the name would stop changing between two real deploys and the unfingerprinted
+asset would go stale again.
+
+What satisfies both is a digest of what the build actually emitted — the `assets` and `prerender`
+trees under `outDir`, hashed at `build.onComplete` before the worker is written. That changes when
+any output changes and does not change when none does, which is what both requirements are really
+asking for. It costs one walk of the emitted tree per build and changes behaviour for every project
+using `pwa()`, so it wants an owner's decision rather than being folded into a follow-up sweep.
+
+### F-01 in detail: why it was left, and what it needs
+
+Two modules of about seven hundred lines each — `packages/@ruvyxa/core/src/plugin-harness.ts` and
+`packages/ruvyxa/runtime/plugin-http.mjs` — state the same registration rules and each comments the
+other. That is a real duplication and the repository has a written rule against it.
+
+It was still left alone, for three reasons that are about blast radius rather than difficulty.
+
+The rules being moved are a security surface. `RESERVED_FRAMEWORK_PATHS` is what stops a plugin
+claiming a framework endpoint, and `normalizeRealtime` and `normalizePresence` carry the range
+checks beside it. A consolidation that lands the move but drops one range check produces a
+registration that is accepted where it used to be refused, and nothing about the diff would say so.
+
+The move is not self-contained. It needs `plugin-http.mjs`, `SYNCED_MODULES` in
+`packages/ruvyxa/scripts/sync-shared-runtime.mjs`, and the three registration lists a runtime module
+has to appear in — `package.json` `files`, `WORKER_RUNTIME_FILES` in
+`crates/ruvyxa_cli/src/artifact_cache.rs`, and the standalone-copy tests. Missing any one of those
+produces a module that is absent exactly where nobody looks, which is a failure mode this repository
+has already recorded.
+
+And a half-finished consolidation is worse than the duplication. Two copies that agree are a
+maintenance cost; one copy plus a stale caller is a defect.
+
+What it wants is its own change: move the rules, carry `RESERVED_FRAMEWORK_PATHS` and both range
+checks with them in the same commit, update the three registration lists, and prove the result with
+the plugin suites before deleting either copy — the same order `RTMS-08` used, where the copies were
+shown identical before any of them was removed.

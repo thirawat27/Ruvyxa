@@ -39,29 +39,22 @@ export function isNullBodyStatus(status) {
   return status === 101 || status === 103 || status === 204 || status === 205 || status === 304
 }
 
+import {
+  isExactApplicationPath,
+  normalizePresence,
+  normalizeRealtime,
+  RESERVED_FRAMEWORK_PATHS,
+} from './plugin-registration.mjs'
+
 /**
- * Framework endpoints a plugin-declared route or native transport must not
- * claim.
+ * Re-exported, not redefined.
  *
- * Held to `tests/fixtures/framework-endpoint-conformance.json` together with
- * `RESERVED_FRAMEWORK_ROUTES` in the native server, which panics inside axum
- * if a second handler registers one of these paths.
+ * The list and the rules around it live in
+ * `packages/@ruvyxa/core/src/plugin-registration.ts` and are copied here by
+ * `pnpm --filter ruvyxa sync:runtime`. This name stays exported from this module
+ * because `serverless-handler.mjs` and the plugin tests already reach it here.
  */
-export const RESERVED_FRAMEWORK_PATHS = Object.freeze([
-  '/__ruvyxa/hmr',
-  '/__ruvyxa/client',
-  '/__ruvyxa/action',
-  '/__ruvyxa/flight',
-  '/__ruvyxa/rsc',
-  '/__ruvyxa/trace',
-  '/__ruvyxa/devtools',
-  '/__ruvyxa/devtools/data',
-  '/__ruvyxa/image',
-  '/__ruvyxa/hydration-loader.js',
-  '/__ruvyxa/client/route-manifest.json',
-  '/__ruvyxa/client/vendor',
-  '/__ruvyxa/health',
-])
+export { RESERVED_FRAMEWORK_PATHS }
 
 /**
  * Build the plugin registry by running every plugin's `register(api)`.
@@ -595,40 +588,6 @@ function normalizePatterns(plugin, field, value, requireSlash = true) {
   return [...value]
 }
 
-function isExactApplicationPath(value) {
-  return (
-    value.startsWith('/') && !value.includes('?') && !value.includes('#') && !value.includes('*')
-  )
-}
-
-/**
- * Whether a `realtime@1` / `presence@1` transport path is a literal route.
- *
- * A socket transport is not an `http.route` above: the Axum host registers this
- * string on its router, so any character that router assigns a meaning to is a
- * wildcard rather than a path. That check was a denylist of `?`, `#`, and `*`
- * -- the axum 0.7 wildcard set -- in both hosts, long after the workspace moved
- * to axum 0.8, where a capture is `{name}` and a catch-all `{*rest}`. `/{room}`
- * passed both guards and registered a single-segment wildcard that shadowed
- * every one-segment project page; `/{` passed both and panicked `matchit`
- * inside `Router::route`, which is the outcome the guards exist to prevent. A
- * denylist is only correct while it tracks the router's syntax and nothing
- * makes it, so the rule is an allowlist: one or more `/`-prefixed segments of
- * RFC 3986 unreserved characters, which is a literal path in every router
- * version and can never acquire a meaning.
- *
- * The twin of `is_literal_transport_path` in
- * `crates/ruvyxa_dev_server/src/lib.rs`, held level by `transportPaths` in
- * `tests/fixtures/framework-endpoint-conformance.json`.
- */
-function isLiteralTransportPath(value) {
-  return typeof value === 'string' && /^(\/[A-Za-z0-9._~-]+)+$/.test(value)
-}
-
-/** What a refused transport path is told it may contain. */
-const TRANSPORT_PATH_RULE =
-  'must be an exact absolute path of `/`-prefixed segments containing only letters, digits, `-`, `.`, `_`, or `~`'
-
 function normalizeDiagnostic(plugin, value) {
   if (!value || typeof value !== 'object' || Array.isArray(value)) {
     throw new TypeError(`plugin "${plugin}" diagnostics.report() expects an object`)
@@ -648,50 +607,6 @@ function normalizeDiagnostic(plugin, value) {
     code: value.code,
     message: value.message.trim(),
   })
-}
-
-function normalizeRealtime(plugin, value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new TypeError(`plugin "${plugin}" native.claim('realtime@1') expects an options object`)
-  }
-  const pathValue = value.path ?? '/__ruvyxa/realtime'
-  const heartbeatMs = value.heartbeatMs ?? 25_000
-  const capacity = value.capacity ?? 256
-  if (!isLiteralTransportPath(pathValue)) {
-    throw new TypeError(`plugin "${plugin}" realtime path ${TRANSPORT_PATH_RULE}`)
-  }
-  if (!Number.isInteger(heartbeatMs) || heartbeatMs < 5_000 || heartbeatMs > 120_000) {
-    throw new TypeError(`plugin "${plugin}" realtime heartbeatMs must be between 5000 and 120000`)
-  }
-  if (!Number.isInteger(capacity) || capacity < 16 || capacity > 4096) {
-    throw new TypeError(`plugin "${plugin}" realtime capacity must be between 16 and 4096`)
-  }
-  if (RESERVED_FRAMEWORK_PATHS.includes(pathValue)) {
-    throw new TypeError(
-      `plugin "${plugin}" realtime path "${pathValue}" collides with a reserved framework route`,
-    )
-  }
-  return Object.freeze({ id: 'realtime@1', plugin, path: pathValue, heartbeatMs, capacity })
-}
-
-function normalizePresence(plugin, value) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    throw new TypeError(`plugin "${plugin}" native.claim('presence@1') expects an options object`)
-  }
-  const pathValue = value.path ?? '/__ruvyxa/collab'
-  const heartbeatMs = value.heartbeatMs ?? 25_000
-  if (!isLiteralTransportPath(pathValue)) {
-    throw new TypeError(`plugin "${plugin}" presence path ${TRANSPORT_PATH_RULE}`)
-  }
-  if (!Number.isInteger(heartbeatMs) || heartbeatMs < 5_000 || heartbeatMs > 120_000) {
-    throw new TypeError(`plugin "${plugin}" presence heartbeatMs must be between 5000 and 120000`)
-  }
-  if (RESERVED_FRAMEWORK_PATHS.includes(pathValue)) {
-    throw new TypeError(
-      `plugin "${plugin}" presence path "${pathValue}" collides with a reserved framework route`,
-    )
-  }
-  return Object.freeze({ id: 'presence@1', plugin, path: pathValue, heartbeatMs })
 }
 
 /**

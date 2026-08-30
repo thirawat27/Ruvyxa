@@ -304,6 +304,25 @@ pub(crate) fn ensure_build_output_exists(
     config: &ProjectConfig,
 ) -> anyhow::Result<()> {
     let out_dir = args.root.join(config.out_dir());
+
+    // A build killed between the two moves of its commit leaves the previous
+    // build in a rollback directory beside the output rather than in it. Only
+    // the next `ruvyxa build` swept that up, so `ruvyxa start` on the same
+    // machine either refused with RUV1015 or served a half-committed tree —
+    // with a complete previous build sitting one directory away, recoverable.
+    //
+    // A start is exactly when it matters: the build that crashed was probably a
+    // deploy step, and the thing that runs next is the server. Fail-soft,
+    // because recovery is an improvement on the situation and not a
+    // precondition for it: if the sweep cannot run, the check below still gives
+    // the honest answer about what is on disk.
+    if let Err(error) = crate::build_output::recover_stranded_build_outputs(&out_dir) {
+        eprintln!(
+            "{}",
+            warn_text(format!("stranded build output was not recovered: {error}"))
+        );
+    }
+
     if out_dir.join("server").join(config.app_dir()).exists() {
         return Ok(());
     }

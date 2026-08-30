@@ -33,7 +33,6 @@
     "drifts then fails in the language that drifted rather than in a deployed",
     "site nobody has clicked through yet."
   ],
-
   "$knownGap": [
     "One difference is deliberately *not* settled here, because settling it is a",
     "product decision rather than a port: the native server declines to redirect",
@@ -42,14 +41,12 @@
     "(`isStaticAssetPath`). A page route such as `/docs/v1.2` is redirected by",
     "one and not the other. No case below depends on it."
   ],
-
   "config": {
     "locales": ["en", "th", "fr-FR"],
     "defaultLocale": "en",
     "localeParam": "lang",
     "cookie": "RUVYXA_LOCALE"
   },
-
   "$routesNote": [
     "The page routes a case is matched against. Both replays build these two and",
     "nothing else, so a case expecting `null` because no page exists is distinct",
@@ -63,7 +60,6 @@
     "every case here for a reason that has nothing to do with locales."
   ],
   "routes": ["/[lang]/about", "/[lang]/__ruvyxa-notes"],
-
   "$queryNote": [
     "`query` is the request's query string without its leading `?`, and is absent",
     "on a case that sends none. Routing never consults it — it exists here only",
@@ -79,13 +75,14 @@
     "the first hit. The query is part of the target URI and is reproduced",
     "verbatim, after the locale prefix is applied to the path."
   ],
-
   "cases": [
     {
       "$why": "Accept-Language matches on the primary subtag when no exact locale is offered.",
       "method": "GET",
       "path": "/about",
-      "headers": { "accept-language": "fr-CA,th;q=.8" },
+      "headers": {
+        "accept-language": "fr-CA,th;q=.8"
+      },
       "detectLocale": true,
       "redirect": "/fr-FR/about"
     },
@@ -93,7 +90,10 @@
       "$why": "The cookie outranks Accept-Language.",
       "method": "GET",
       "path": "/about",
-      "headers": { "cookie": "x=1; RUVYXA_LOCALE=th", "accept-language": "fr-CA" },
+      "headers": {
+        "cookie": "x=1; RUVYXA_LOCALE=th",
+        "accept-language": "fr-CA"
+      },
       "detectLocale": true,
       "redirect": "/th/about"
     },
@@ -101,7 +101,10 @@
       "$why": "Detection off still routes; it only stops the cookie and Accept-Language from being consulted. This is the case the two hosts answered differently.",
       "method": "GET",
       "path": "/about",
-      "headers": { "accept-language": "th", "cookie": "RUVYXA_LOCALE=th" },
+      "headers": {
+        "accept-language": "th",
+        "cookie": "RUVYXA_LOCALE=th"
+      },
       "detectLocale": false,
       "redirect": "/en/about"
     },
@@ -159,7 +162,9 @@
       "method": "GET",
       "path": "/about",
       "query": "code=abc123&state=xyz",
-      "headers": { "cookie": "RUVYXA_LOCALE=th" },
+      "headers": {
+        "cookie": "RUVYXA_LOCALE=th"
+      },
       "detectLocale": true,
       "redirect": "/th/about?code=abc123&state=xyz"
     },
@@ -199,5 +204,72 @@
       "detectLocale": true,
       "redirect": "/en/about"
     }
-  ]
+  ],
+  "queryCases": {
+    "$comment": [
+      "How a redirect target reproduces the request's query.",
+      "",
+      "The two hosts disagreed. The native host had the raw request-target",
+      "bytes and reproduced them verbatim; the deployed host reads",
+      "`URL.search`, which normalizes. One project deployed two ways answered",
+      "the same request with two different `Location` values.",
+      "",
+      "`URL` is the rule, and not by preference: a `Location` is a URI",
+      "reference, and a literal space is not allowed in one. The exact",
+      "behaviour was measured against Node rather than derived from the spec,",
+      "because a rule written from the spec was wrong in both directions -- it",
+      "encoded characters `URL` leaves alone, and it left the newline pair,",
+      "which `URL` deletes.",
+      "",
+      "The deletions matter beyond parity: a raw CR or LF reproduced into a",
+      "`Location` header is response splitting."
+    ],
+    "cases": [
+      {
+        "name": "an ordinary query is unchanged",
+        "query": "q=hello&page=2",
+        "expect": "q=hello&page=2"
+      },
+      {
+        "name": "a space is percent-encoded",
+        "query": "q=hello world",
+        "expect": "q=hello%20world"
+      },
+      {
+        "name": "the three characters a URI may not carry literally",
+        "query": "a=\"x\"&b=<y>&c=>z",
+        "expect": "a=%22x%22&b=%3Cy%3E&c=%3Ez"
+      },
+      {
+        "name": "an already-encoded value is not encoded twice",
+        "query": "q=hello%20world",
+        "expect": "q=hello%20world"
+      },
+      {
+        "name": "the separators a query is made of are left alone",
+        "query": "a=1&b=2+3&c=/d",
+        "expect": "a=1&b=2+3&c=/d"
+      },
+      {
+        "name": "characters URL leaves alone stay literal",
+        "query": "a={b}|c^d`e",
+        "expect": "a={b}|c^d`e"
+      },
+      {
+        "name": "a carriage return and line feed are removed, not encoded",
+        "query": "a=1\r\nX-Injected: 1",
+        "expect": "a=1X-Injected:%201"
+      },
+      {
+        "name": "a tab is removed too",
+        "query": "a=\t1",
+        "expect": "a=1"
+      },
+      {
+        "name": "other control characters are encoded",
+        "query": "a=\u0000b",
+        "expect": "a=%00b"
+      }
+    ]
+  }
 }

@@ -28,6 +28,7 @@ crates/
 # output by `pnpm --filter ruvyxa sync:runtime`. Reformatting them would make
 # the sync check fail on files nobody edited.
 packages/ruvyxa/runtime/route-match.mjs
+packages/ruvyxa/runtime/plugin-registration.mjs
 packages/ruvyxa/runtime/origin-policy.mjs
 
 # Environment

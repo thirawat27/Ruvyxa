@@ -42,7 +42,19 @@ walkdir.workspace = true
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61.2", features = ["Win32_System_ProcessStatus", "Win32_System_SystemInformation", "Win32_System_Threading"] }
 
-[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies]
+# Every unix, not only Darwin.
+#
+# The pid-liveness probes in `build_output.rs` read `/proc` on Linux and reach
+# for `libc` only on Darwin, which is why this used to be Darwin-only. Restoring
+# the default `SIGPIPE` disposition in `main` needs it everywhere: Rust ignores
+# that signal at startup so a write returns `EPIPE`, and `println!` panics on a
+# failed write -- so `ruvyxa routes | head -3` ended in a panic naming a broken
+# pipe rather than in the silence every other tool in a pipeline manages.
+#
+# It is not a new dependency in any real sense: twenty-six crates in this
+# lockfile already pull `libc` in, tokio and socket2 among them, so it is
+# compiled on every unix target with or without this line.
+[target.'cfg(unix)'.dependencies]
 libc = "0.2.189"
 
 [dev-dependencies]

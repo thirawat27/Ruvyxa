@@ -68,6 +68,57 @@ export interface PwaOptions {
 }
 
 /**
+ * A digest of what this build actually emitted.
+ *
+ * The cache name has to satisfy two things that pulled in opposite directions.
+ * It must change whenever the site changes, because this worker is cache-first
+ * with no revalidation and `precache` holds author-supplied paths like
+ * `/logo.png` rather than content-hashed URLs — so a name that did not move
+ * would serve the install-time copy of a changed asset forever. And it must
+ * *not* change when nothing changed, or `pnpm verify:reproducible` compares two
+ * cold builds and finds two different `sw.js` files.
+ *
+ * Deriving it from the build manifest satisfied only the first, by accident:
+ * the manifest carries `createdAtUnix` from `SystemTime::now()`, so the name
+ * moved on every build whether or not anything else did. `SOURCE_DATE_EPOCH`
+ * would have satisfied only the second, by making that timestamp stable without
+ * making it mean anything — the name would then stop moving between two real
+ * deploys and the stale-asset bug would be back.
+ *
+ * Hashing the emitted tree answers both, because it is the actual question: did
+ * this build produce different bytes than the last one? Paths are recorded
+ * relative to `outDir` and sorted by code unit, so the digest does not depend on
+ * where the project lives or on the order a file system happens to return
+ * entries in.
+ *
+ * The plugin's own three outputs are excluded. They are written after this runs,
+ * and one of them is the worker that carries the digest — including them would
+ * be asking a file to contain its own hash.
+ */
+function emittedOutputDigest(context: PluginBuildContext, exclude: readonly string[]): string {
+  const digest = createHash('sha256')
+  const excluded = new Set(exclude.map((file) => path.resolve(context.outDir, file)))
+
+  // `client` and `assets` hold what a browser downloads; `prerender` holds the
+  // documents. A build that changes none of those has produced the same site.
+  for (const directory of ['assets', 'client', 'prerender']) {
+    const root = path.join(context.outDir, directory)
+    if (!existsSync(root)) continue
+    const files = walkFiles(root)
+      .filter((file) => !excluded.has(path.resolve(file)))
+      .map((file) => path.relative(context.outDir, file).split(path.sep).join('/'))
+      .sort(compareStable)
+    for (const relative of files) {
+      digest.update(relative)
+      digest.update('\0')
+      digest.update(readFileSync(path.join(context.outDir, relative)))
+      digest.update('\0')
+    }
+  }
+  return digest.digest('hex')
+}
+
+/**
  * Generates a web manifest and service worker, serves them in dev, and wires HTML automatically.
  *
  * The worker's cache name derives from the scope, the precache list, the
@@ -221,7 +272,13 @@ export function pwa(options: PwaOptions): RuvyxaPlugin {
       })
       build.onComplete((context) => {
         serviceWorkerBody = createServiceWorker(
-          cacheName(stableJson(context.manifest)),
+          cacheName(
+            emittedOutputDigest(context, [
+              path.join('assets', path.basename(manifestPath)),
+              path.join('assets', path.basename(serviceWorkerPath)),
+              path.join('assets', path.basename(registerPath)),
+            ]),
+          ),
           cachePrefix,
           precache,
           offlineFallback,

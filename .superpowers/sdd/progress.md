@@ -515,3 +515,63 @@ Battery at close: `cargo fmt --check`, `cargo clippy --workspace --all-targets -
 Deno (261), and `smoke-dev-server.mjs` on `examples/deploy-smoke` (21) -- all green.
 
 Phase 5 is complete. What remains of the programme is the Phase 6 follow-up queue (F-01 to F-20).
+
+## 2026-08-30 — Phase 6 complete (F-01 to F-20)
+
+All twenty follow-ups closed. Two were reopened after first being recorded as decisions, at the
+owner's instruction, and both turned out to be worth doing.
+
+**F-01 — the plugin registration rules were not merely duplicated, they had already drifted.**
+`plugin-harness.ts` accepted an `http.route()` on a reserved framework path that
+`runtime/plugin-http.mjs` refuses, so a plugin could pass the harness that validates it and be
+rejected by the server that runs it — and the native host panics inside axum when a second handler
+registers one of those paths. Both now import `@ruvyxa/core/src/plugin-registration.ts`, copied into
+the runtime by `sync:runtime` the way `route-match` and `origin-policy` are. Five registration lists
+had to move together, and the fifth was not in the finding: `.prettierignore`, which is what keeps a
+generated file from being reformatted out of sync with its source. Missing it turned the sync check
+red, which is the check doing its job.
+
+**F-06 — the reproducibility/staleness conflict is resolved rather than traded.** The first attempt
+dropped `createdAtUnix` from the cache-name input and turned an existing test red; that test was
+right, because `precache` holds author-supplied paths like `/logo.png` rather than content-hashed
+URLs, so a content-only identity cannot see that file change. `SOURCE_DATE_EPOCH` fails the other
+way — a stable timestamp that means nothing stops the name moving between two real deploys. The
+answer is a digest of what the build actually emitted (`assets`, `client`, `prerender`), which moves
+when any output moves and stays put when none does. The old test asserted the old mechanism and was
+rewritten to assert the property in both directions, since either alone is satisfied by a bug.
+
+**Two CI failures arrived mid-work and were both real.**
+
+- The ASSET-10 test asserted mode 0700 and Linux answered 755. `tempfile` restricts a temporary
+  _file_ to its owner and creates a temporary _directory_ with the platform default — its own
+  documentation says so, and the finding's "creates with `O_EXCL` and mode 0700" is true only of the
+  file. The mode is requested explicitly now, and reading `tempfile`'s source showed it reaches
+  `DirBuilderExt::mode`, so it is applied at creation with no window to race.
+- F-17's `SIGPIPE` restore did not compile on Linux: `libc` was a Darwin-only dependency of
+  `ruvyxa_cli`, because the pid-liveness probes read `/proc` on Linux deliberately. Widened to
+  `cfg(unix)`, which adds nothing real — twenty-six crates in this lockfile already pull `libc` in —
+  and confirmed with `cargo metadata --filter-platform x86_64-unknown-linux-gnu` rather than
+  assumed, since a cross-compile stops at a C dependency on this host.
+
+**Findings that were wrong on contact, verified rather than trusted:**
+
+- `F-04`: drive-relative subpaths are already refused, but by the containment check and
+  non-existence, not by the component guard the entry credits. Removing that guard left the test
+  green, which is how the real mechanism was found. Test kept as a regression guard.
+- `F-14`: the Thai mirror already existed — fifteen headings against the English fifteen.
+- `F-09`: an encoder written from the specification was wrong in _both_ directions. Measured against
+  Node instead: `URL.search` encodes space, `"`, `<` and `>`; **removes** tab, CR and LF; encodes
+  other C0 controls; and passes `%`, `&`, `=`, `+` and `/` through. Every one of the nine fixture
+  cases was validated against real `URL.search` before either replay was wired. Deleting the newline
+  pair also closes a response-splitting `Location`.
+
+Battery at close: `cargo fmt --check`, `clippy --workspace --all-targets -D warnings`,
+`cargo test --workspace` (15 suites), `pnpm -r build`, `pnpm lint`, `pnpm format:check`,
+`pnpm check:unused`, `sync:runtime --check`, `pnpm release:validate`, `pnpm pack:smoke`, every gate
+script, `ruvyxa build` and `test:parity` on `examples/demo` (30 routes), the core suite (263) and
+the plugin suite (150), and `smoke-dev-server.mjs` on `examples/deploy-smoke` (21 checks) — all
+green.
+
+The audit programme is complete: Phases 1-5 and the Phase 6 queue. Nothing is left open except the
+two items recorded in the plan as needing an owner's decision, and both of those now have their
+analysis written beside them rather than a one-line note.

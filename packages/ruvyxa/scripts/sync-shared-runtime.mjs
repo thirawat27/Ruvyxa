@@ -50,6 +50,17 @@ const SYNCED_MODULES = [
       'deployed handler can resolve the same URL to different routes.',
   },
   {
+    specifier: '@ruvyxa/core/plugin-registration',
+    source: 'packages/@ruvyxa/core/src/plugin-registration.ts',
+    file: 'plugin-registration.mjs',
+    why:
+      'It is the copy of @ruvyxa/core/plugin-registration that ships inside\n' +
+      'serverless function bundles. Letting it drift means a plugin passes the\n' +
+      'harness that validates it and is refused by the server that runs it --\n' +
+      'which had already happened: the harness accepted an http.route() on a\n' +
+      'reserved framework path that the runtime rejects.',
+  },
+  {
     specifier: '@ruvyxa/core/origin-policy',
     source: 'packages/@ruvyxa/core/src/origin-policy.ts',
     file: 'origin-policy.mjs',

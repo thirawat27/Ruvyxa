@@ -2825,3 +2825,57 @@ fn a_private_env_variable_read_several_times_is_reported_once() {
     assert!(leaks[0].contains("DATABASE_URL"), "{leaks:?}");
     assert!(leaks[1].contains("API_TOKEN"), "{leaks:?}");
 }
+
+/// The synthesised `"app/layout"` resolves a `.jsx` root layout.
+///
+/// `render_root_not_found` in `crates/ruvyxa_dev_server/src/render_pipeline.rs`
+/// builds its own `RouteEntry` for the 404 boundary and puts the string
+/// `"app/layout"` in its chain — an id with no extension, because a chain entry
+/// never carries one. Nothing tested that the probe behind it offers `.jsx`, and
+/// the failure would have been quiet: the chain names a layout nothing can load,
+/// its imports are never staged, and the route silently falls back to SSR.
+///
+/// Both spellings, and both shapes of the id, because the resolver offers the
+/// project-root candidate and the app-relative one in that order and either
+/// could be the one that answers.
+#[test]
+fn the_synthesised_root_layout_id_resolves_in_either_extension() {
+    for extension in COMPONENT_EXTENSIONS {
+        let temp = tempfile::tempdir().expect("temp dir");
+        let app_dir = temp.path().join("app");
+        std::fs::create_dir_all(&app_dir).expect("mkdir");
+        let layout = app_dir.join(format!("layout.{extension}"));
+        std::fs::write(&layout, b"export default function Layout() {}\n").expect("write");
+
+        let resolved = crate::discovery::resolve_layout_file(&app_dir, "app/layout")
+            .unwrap_or_else(|| panic!("`app/layout` did not resolve a layout.{extension}"));
+        assert_eq!(
+            resolved,
+            ruvyxa_diagnostics::normalized_canonical_path(&layout),
+            "layout.{extension}",
+        );
+    }
+}
+
+/// An id whose last segment carries a dot is not turned into another file.
+///
+/// The extension is appended, never substituted. `Path::with_extension` would
+/// read `app/layout.mobile` as a stem plus an extension and probe
+/// `app/layout.tsx`, answering with a layout the author did not name.
+#[test]
+fn a_dotted_layout_id_is_not_rewritten_into_another_file() {
+    let temp = tempfile::tempdir().expect("temp dir");
+    let app_dir = temp.path().join("app");
+    std::fs::create_dir_all(&app_dir).expect("mkdir");
+    std::fs::write(
+        app_dir.join("layout.tsx"),
+        b"export default function L() {}\n",
+    )
+    .expect("write");
+
+    assert_eq!(
+        crate::discovery::resolve_layout_file(&app_dir, "app/layout.mobile"),
+        None,
+        "`app/layout.mobile` must not resolve to `app/layout.tsx`",
+    );
+}

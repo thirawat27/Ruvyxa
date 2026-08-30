@@ -1990,3 +1990,41 @@ describe('a preflight against the shared rate-limit table', () => {
     })
   }
 })
+
+/**
+ * The JavaScript half of the shared query-normalisation table.
+ *
+ * `crates/ruvyxa_dev_server/src/i18n.rs` replays the same cases against its own
+ * `encoded_query`. This side asserts what that implementation was written to
+ * match: `URL.search`, which is what the deployed host actually uses when it
+ * reattaches a query to a locale redirect.
+ *
+ * The expectations were measured against `URL` rather than derived from the
+ * spec, and that mattered — a rule written from the spec was wrong in both
+ * directions, encoding characters `URL` leaves alone and preserving the newline
+ * pair, which `URL` deletes.
+ */
+describe('the shared query normalisation', () => {
+  const contract = JSON.parse(
+    readFileSync(path.join(workspaceRoot, 'tests/fixtures/i18n-routing-conformance.json'), 'utf8'),
+  )
+
+  it('is what URL.search does, for every case the native host replays', () => {
+    assert.ok(contract.queryCases.cases.length > 0, 'an empty table asserts nothing')
+    for (const testCase of contract.queryCases.cases) {
+      assert.equal(
+        new URL(`https://example.test/p?${testCase.query}`).search.slice(1),
+        testCase.expect,
+        testCase.name,
+      )
+    }
+  })
+
+  it('drops the bytes that would split a Location header', () => {
+    const injected = contract.queryCases.cases.find((testCase) =>
+      testCase.name.includes('carriage return'),
+    )
+    assert.ok(injected, 'the table has to keep a response-splitting case')
+    assert.doesNotMatch(injected.expect, /[\r\n]/)
+  })
+})

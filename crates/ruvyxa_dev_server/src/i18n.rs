@@ -66,11 +66,69 @@ pub(crate) fn locale_redirect_path(
 /// An empty query is not a query: a bare `/about?` redirects to `/en/about`
 /// rather than `/en/about?`, which is also what `URL.search` reports on the
 /// deployed host.
+///
+/// The bytes are normalized on the way out, and that is the half the two hosts
+/// disagreed about. This host had the raw request-target query and reproduced it
+/// verbatim; the deployed host reads `URL.search`, which percent-encodes the
+/// characters a URI may not carry literally. So one project deployed two ways
+/// answered the same request with two different `Location` values.
+///
+/// `URL.search` is the right answer of the two, and not by preference. A
+/// `Location` is a URI reference (RFC 9110 §10.2.2), and a literal space, `"`,
+/// `<`, `>`, `` ` ``, `{`, `}`, `|`, `\` or `^` is not allowed in one — so the
+/// verbatim spelling could emit a header a client is entitled to reject, while
+/// the encoded spelling always names the same resource. Encoding here is
+/// idempotent: an already-encoded `%20` is left alone, because `%` itself is
+/// passed through.
 fn with_query(location: String, query: Option<&str>) -> String {
     match query.filter(|query| !query.is_empty()) {
-        Some(query) => format!("{location}?{query}"),
+        Some(query) => format!("{location}?{}", encoded_query(query)),
         None => location,
     }
+}
+
+/// Normalize a query the way `URL.search` normalizes one.
+///
+/// Measured against Node rather than derived from the spec, because the deployed
+/// host's behaviour *is* `URL`, and a rule written from the spec would have been
+/// wrong in both directions: a first attempt encoded `` ` ``, `{`, `}`, `|`,
+/// `\` and `^` -- all of which `URL` leaves alone -- and left tab, newline and
+/// carriage return in place, which `URL` deletes outright.
+///
+/// What `URL` does, exactly:
+///
+/// - space, `"`, `<`, `>` are percent-encoded;
+/// - tab, line feed and carriage return are **removed**, not encoded;
+/// - other C0 controls and `DEL` are percent-encoded;
+/// - everything else, `%` and `&` and `=` and `+` included, is passed through.
+///
+/// That last point is why this is not a general-purpose encoder. Re-encoding
+/// `%` would turn one `%20` into `%2520` every time a redirect chained, and
+/// re-encoding `&` or `=` would rewrite a query the caller meant literally.
+///
+/// Dropping the newline pair is also the one part of this with a security edge:
+/// a raw CR or LF reproduced into a `Location` header is response splitting.
+/// Axum's `HeaderValue` would refuse the header rather than emit it, so the
+/// failure mode here was a dropped redirect rather than a split response -- but
+/// removing them is both what the other host does and the answer that cannot go
+/// wrong.
+fn encoded_query(query: &str) -> String {
+    let mut encoded = String::with_capacity(query.len());
+    for byte in query.bytes() {
+        match byte {
+            b'\t' | b'\n' | b'\r' => {}
+            b' ' => encoded.push_str("%20"),
+            b'"' => encoded.push_str("%22"),
+            b'<' => encoded.push_str("%3C"),
+            b'>' => encoded.push_str("%3E"),
+            0x00..=0x1F | 0x7F => {
+                encoded.push('%');
+                encoded.push_str(&format!("{byte:02X}"));
+            }
+            _ => encoded.push(char::from(byte)),
+        }
+    }
+    encoded
 }
 
 pub(crate) fn localized_head(
@@ -195,6 +253,125 @@ fn localized_path(locale: &str, rest: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// The shared query-normalisation table.
+    ///
+    /// `tests/packages/ruvyxa/serverless-handler.test.mjs` replays the same
+    /// cases through `URL.search`, which is the deployed host's implementation.
+    /// This host used to reproduce the raw request-target bytes instead, so one
+    /// project deployed two ways answered the same request with two different
+    /// `Location` values.
+    #[test]
+    fn replays_the_shared_query_normalisation_table() {
+        let fixture_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/i18n-routing-conformance.json");
+        let fixture: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(&fixture_path)
+                .unwrap_or_else(|error| panic!("read {}: {error}", fixture_path.display())),
+        )
+        .expect("the i18n fixture is valid JSON");
+
+        let cases = fixture["queryCases"]["cases"]
+            .as_array()
+            .expect("the fixture carries query cases");
+        assert!(!cases.is_empty(), "an empty table asserts nothing");
+
+        for case in cases {
+            let name = case["name"].as_str().expect("each case is named");
+            let query = case["query"].as_str().expect("each case has a query");
+            let expect = case["expect"].as_str().expect("each case has an answer");
+            assert_eq!(encoded_query(query), expect, "query case: {name}");
+
+            // And through the function that actually builds the header, so the
+            // normalisation cannot be correct in isolation and unreached in use.
+            assert_eq!(
+                with_query("/en/about".to_string(), Some(query)),
+                format!("/en/about?{expect}"),
+                "redirect target: {name}",
+            );
+        }
+    }
+
+    /// The root path keeps its query when it is redirected.
+    ///
+    /// `prefixed_path` special-cases `"/"` so the redirect is `/en` rather than
+    /// `/en/`, and nothing exercised that branch together with a query — the two
+    /// halves were tested apart. A 307 preserves the method and the body and says
+    /// nothing about the query, so the query has to be reproduced explicitly; a
+    /// branch that forgot it would send `/` visitors to a bare `/en` and drop
+    /// whatever they arrived with, which for a marketing link is the entire
+    /// point of the visit.
+    ///
+    /// The obvious fixture route for this is `/[lang]`, and the shared i18n
+    /// table deliberately leaves it out: one dynamic segment matches any
+    /// one-segment path, so `/about` would match it and the two replays would
+    /// disagree for a reason that has nothing to do with locales. Its
+    /// `$routesNote` says so. This lives here instead.
+    #[test]
+    fn the_root_path_carries_its_query_into_the_locale_redirect() {
+        let config = config();
+        // `/[lang]` alone, and nothing beside it. The shared fixture leaves this
+        // route out on purpose -- one dynamic segment matches any one-segment
+        // path, so `/about` would match `[lang]=about` and never reach the
+        // redirect -- which is exactly why this case has no home there.
+        let manifest = RouteManifest {
+            app_dir: PathBuf::from("app"),
+            i18n: Some(config.clone()),
+            routes: vec![page_route("/[lang]")],
+        };
+        let router = RadixRouter::compile(&manifest);
+        let headers = HeaderMap::new();
+
+        for (query, expected) in [
+            (None, "/en"),
+            (Some(""), "/en"),
+            (Some("q=hello"), "/en?q=hello"),
+            (Some("a=1&b=2"), "/en?a=1&b=2"),
+        ] {
+            assert_eq!(
+                locale_redirect_path(
+                    Some(&config),
+                    &manifest,
+                    &router,
+                    "/",
+                    query,
+                    "GET",
+                    &headers,
+                )
+                .as_deref(),
+                Some(expected),
+                "query {query:?}",
+            );
+        }
+    }
+
+    /// The same rule one segment down, so the `"/"` branch is the only special
+    /// case and not a place where two behaviours quietly diverged.
+    #[test]
+    fn a_nested_path_carries_its_query_the_same_way() {
+        let config = config();
+        let manifest = RouteManifest {
+            app_dir: PathBuf::from("app"),
+            i18n: Some(config.clone()),
+            routes: vec![page_route("/[lang]/about")],
+        };
+        let router = RadixRouter::compile(&manifest);
+        let headers = HeaderMap::new();
+
+        assert_eq!(
+            locale_redirect_path(
+                Some(&config),
+                &manifest,
+                &router,
+                "/about",
+                Some("q=hello"),
+                "GET",
+                &headers,
+            )
+            .as_deref(),
+            Some("/en/about?q=hello"),
+        );
+    }
+
     use super::*;
     use axum::http::HeaderValue;
     use ruvyxa_graph::RouteEntry;

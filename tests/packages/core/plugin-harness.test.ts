@@ -383,3 +383,44 @@ function appendHeader(response: Response, name: string, value: string): Response
   headers.append(name, value)
   return new Response(response.body, { status: response.status, headers })
 }
+
+describe('the registration rules the harness shares with the runtime', () => {
+  /**
+   * The harness accepted this and the runtime refuses it.
+   *
+   * `plugin-harness.ts` and `packages/ruvyxa/runtime/plugin-http.mjs` each
+   * carried their own copy of the registration rules with a comment saying they
+   * mirrored each other — and they had already stopped. A plugin claiming a
+   * framework endpoint passed the harness that validates it and was rejected by
+   * the server that runs it, and a reserved path is not a cosmetic
+   * disagreement: the native host panics inside axum when a second handler
+   * registers one.
+   *
+   * Both now import `@ruvyxa/core/plugin-registration`, which is copied into the
+   * runtime by `pnpm --filter ruvyxa sync:runtime` because a serverless function
+   * bundle resolves no bare specifiers.
+   */
+  it('refuses an http.route() on a reserved framework path', async () => {
+    const plugin = definePlugin({
+      name: 'claimer',
+      register: (api) => api.http.route({ path: '/__ruvyxa/hmr', handler: () => new Response('') }),
+    })
+
+    await assert.rejects(
+      async () => createPluginHarness(plugin),
+      /reserved framework route/,
+      'a plugin that cannot run must not pass the harness that validates it',
+    )
+  })
+
+  it('still accepts an ordinary application path', async () => {
+    const plugin = definePlugin({
+      name: 'ordinary',
+      register: (api) => api.http.route({ path: '/api/thing', handler: () => new Response('ok') }),
+    })
+
+    // The guard has to refuse the reserved set and nothing else, or every
+    // plugin route becomes unregisterable.
+    await assert.doesNotReject(async () => createPluginHarness(plugin))
+  })
+})

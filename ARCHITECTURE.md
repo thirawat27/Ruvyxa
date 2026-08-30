@@ -251,7 +251,23 @@ file change
   -> manifest/HMR dependency update + cache invalidation
   -> invalidate every worker's process-local bundle cache
   -> HMR message or browser full reload
+
+client disconnect
+  -> Axum notices the response future was dropped
+  -> `cancel` frame for that request id, over the same NDJSON pipe
+  -> worker aborts the request's `AbortController`
+  -> route handler sees `request.signal` abort; stream reader is cancelled
+  -> terminal `api-error`/`RUV1704` frame releases the host's pending entry
 ```
+
+The third flow is the one that is easy to leave out. A worker serves requests over a pipe, so
+nothing about a dropped HTTP connection reaches it on its own: without an explicit frame, a handler
+that streams — a long poll, a server-sent-event route, anything producing until told to stop — keeps
+producing for a client that has gone, and the host keeps counting the request as in flight. The
+`cancel` frame is what carries the disconnect across the process boundary, `request.signal` is where
+a route handler observes it, and the terminal error frame is what lets the host stop holding the
+slot. A cancelled stream ends with an error frame rather than a normal end deliberately: it stopped
+because nobody was reading it, not because the route finished.
 
 #### Production build lifecycle
 

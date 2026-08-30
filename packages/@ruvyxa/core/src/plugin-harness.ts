@@ -1,4 +1,5 @@
 import { canonicalRoutePath } from './route-match.js'
+import { isExactApplicationPath, isReservedFrameworkPath } from './plugin-registration.js'
 import type {
   PluginBuildContext,
   PluginBuildLoadHandler,
@@ -518,6 +519,14 @@ function normalizeHttpRoute(
   if (typeof value.path !== 'string' || !isExactApplicationPath(value.path)) {
     throw new TypeError(`plugin "${plugin}" http.route().path must be an exact absolute path`)
   }
+  // The harness accepted this and the runtime refuses it, so a plugin could
+  // pass the tests that validate it and be rejected by the server that runs it.
+  // `plugin-http.mjs` has always made this refusal; the two are one rule now.
+  if (isReservedFrameworkPath(value.path)) {
+    throw new TypeError(
+      `plugin "${plugin}" http.route().path "${value.path}" collides with a reserved framework route`,
+    )
+  }
   if (typeof value.handler !== 'function') {
     throw new TypeError(`plugin "${plugin}" http.route() requires handler`)
   }
@@ -622,12 +631,6 @@ function normalizePatterns(
     }
   }
   return [...value]
-}
-
-function isExactApplicationPath(value: string): boolean {
-  return (
-    value.startsWith('/') && !value.includes('?') && !value.includes('#') && !value.includes('*')
-  )
 }
 
 /** Mirrors `normalizeDiagnostic` in `runtime/plugin-http.mjs`. */
