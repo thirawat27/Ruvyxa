@@ -99,6 +99,21 @@ const port = Number(portArg)
 const base = `http://127.0.0.1:${port}`
 
 /**
+ * What a browser puts on a same-origin fetch, which is the only caller
+ * `/__ruvyxa/rsc` has.
+ *
+ * The endpoint fails closed when a request carries neither `Origin` nor
+ * `Sec-Fetch-Site`: its browser halves always run in a browser, and a browser
+ * sends one of the two. This smoke sent neither and passed for as long as the
+ * custom header was the whole gate, so the day the origin pair was added — to
+ * close a hole a project's own CORS config could open — every deployed-host lane
+ * went red at once, and the failure read as a broken endpoint rather than as a
+ * caller that was never a browser. `smoke-dev-server.mjs` was taught this at the
+ * time; this file, driving the other host, was not.
+ */
+const SAME_ORIGIN = Object.freeze({ origin: base, 'sec-fetch-site': 'same-origin' })
+
+/**
  * The route strategies this deployment can serve — `adapter.supports`, verbatim.
  *
  * An edge target has no ISR, and a static publish directory has no server at
@@ -1024,7 +1039,10 @@ async function checkCompression() {
  * not be able to tell which host answered it.
  */
 async function checkRscPayload() {
-  const payload = await rawGet('/__ruvyxa/rsc?path=/rsc', { 'x-ruvyxa-rsc': '1' })
+  const payload = await rawGet('/__ruvyxa/rsc?path=/rsc', {
+    'x-ruvyxa-rsc': '1',
+    ...SAME_ORIGIN,
+  })
   if (payload.status !== 200) {
     throw new Error(`${runtime}: payload endpoint answered ${payload.status}\n${output}`)
   }
@@ -1042,13 +1060,30 @@ async function checkRscPayload() {
     throw new Error(`${runtime}: payload names no client reference: ${body.slice(0, 200)}`)
   }
 
-  // The header is what keeps this endpoint out of reach of a cross-origin page,
-  // which cannot set it without a preflight.
-  const unguarded = await rawGet('/__ruvyxa/rsc?path=/rsc', {})
+  // The header is one of the two gates, so this request is same-origin in every
+  // other respect: what it proves is that the header alone is still required.
+  const unguarded = await rawGet('/__ruvyxa/rsc?path=/rsc', { ...SAME_ORIGIN })
   if (unguarded.status !== 400) {
     throw new Error(`${runtime}: payload endpoint answered ${unguarded.status} without its header`)
   }
-  console.log(`[ok] ${runtime} · /__ruvyxa/rsc serves a payload and refuses an unmarked request`)
+
+  // The other gate, asserted rather than merely satisfied. Both smokes used to
+  // send neither `Origin` nor `Sec-Fetch-Site` and pass, which is the exemption
+  // no browser gets; sending the right headers everywhere would have made this
+  // green again while proving nothing about the check that had just been added.
+  const foreign = await rawGet('/__ruvyxa/rsc?path=/rsc', {
+    'x-ruvyxa-rsc': '1',
+    origin: 'http://evil.example',
+    'sec-fetch-site': 'cross-site',
+  })
+  if (foreign.status !== 403) {
+    throw new Error(
+      `${runtime}: a cross-site payload request answered ${foreign.status} instead of 403`,
+    )
+  }
+  console.log(
+    `[ok] ${runtime} · /__ruvyxa/rsc serves a payload, refuses an unmarked one, refuses cross-site`,
+  )
 }
 
 /**
@@ -1088,6 +1123,7 @@ async function checkServerFunction() {
       'x-ruvyxa-action': reference[0],
       'content-type': 'text/plain;charset=UTF-8',
       // What `encodeReply` produces for a single string argument.
+      ...SAME_ORIGIN,
     },
     '["smoke"]',
   )
@@ -1102,7 +1138,11 @@ ${output}`,
     throw new Error(`${runtime}: server function returned ${answer.slice(0, 200)}`)
   }
 
-  const unguarded = await rawPost('/__ruvyxa/rsc?path=/rsc', { 'x-ruvyxa-rsc': '1' }, '["smoke"]')
+  const unguarded = await rawPost(
+    '/__ruvyxa/rsc?path=/rsc',
+    { 'x-ruvyxa-rsc': '1', ...SAME_ORIGIN },
+    '["smoke"]',
+  )
   if (unguarded.status !== 400) {
     throw new Error(`${runtime}: a call naming no reference answered ${unguarded.status}`)
   }
