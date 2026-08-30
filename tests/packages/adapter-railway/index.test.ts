@@ -60,3 +60,33 @@ describe('railway', () => {
     assert.equal(config.deploy.startCommand, 'node build/deploy/railway/server/index.mjs')
   })
 })
+
+/**
+ * An `outDir` that cannot survive interpolation is refused at build time.
+ *
+ * The generated file is assembled by string concatenation and the path was not
+ * quoted: `#` starts a YAML comment and truncates the command, `: ` turns the
+ * scalar into a nested mapping and fails the parse, and a space produces valid
+ * YAML and an invalid shell command. The value comes from `ruvyxa.config.ts`, so
+ * the failure landed on the platform rather than on the developer's machine —
+ * the expensive place to find it. `adapter-static` already refused its
+ * equivalent input this way.
+ */
+describe('railway outDir validation', () => {
+  for (const outDir of ['out dir', 'out#dir', 'out: dir', 'out|dir', 'out$(whoami)']) {
+    it(`refuses an outDir containing ${JSON.stringify(outDir)}`, async () => {
+      await assert.rejects(
+        async () => railway().build({ root: '.', outDir }),
+        /RUV2001/,
+        'an outDir that breaks the generated command must fail the build, not the deploy',
+      )
+    })
+  }
+
+  it('still accepts the ordinary shapes a project uses', async () => {
+    for (const outDir of ['.ruvyxa', 'dist', 'build/out', 'my-app.out', 'a_b']) {
+      const output = await railway().build({ root: '.', outDir })
+      assert.ok(output.artifacts && output.artifacts.length > 0, outDir)
+    }
+  })
+})

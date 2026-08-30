@@ -203,9 +203,12 @@ npm run build -- --target static
 publish folder ปริยายคือ `<outDir>/static/` factory `static` รับเฉพาะ relative directory ที่ไม่ว่าง
 และไม่ทับ protected build folder เนื่องจาก `static` เป็น reserved word เมื่อเรียก function โดยตรง
 ให้ import ด้วย alias เช่น `staticOutput` แล้วเรียก `staticOutput({ outputDir })` ให้ publish folder
-นั้น `_headers` ถูกสร้างสำหรับ host ที่รู้จักไฟล์นี้; host ที่ไม่สนใจไม่ได้รับผล หาก build ปฏิเสธ
-route ให้คง route เป็น static/CSR หรือเลือก server-capable adapter—อย่า publish static build ที่ทำ
-SSR/API behavior ของคุณไม่ได้
+นั้น `_headers` ถูกสร้างสำหรับ host ที่อ่านไฟล์นี้เท่านั้น — Netlify และ Cloudflare Pages บน host
+อื่นไฟล์นี้ไม่มีผล และเนื่องจากทุกหน้าที่ adapter นี้สร้างเป็นเอกสาร pre-render ที่ CDN เป็นคนเสิร์ฟ
+จึงไม่มีที่อื่นให้ security header มาจากได้อีก: static deployment บน GitHub Pages หรือ S3 จะไม่มี
+header เหล่านั้นเลย เว้นแต่คุณตั้งค่าไว้ที่ CDN หรือ bucket เอง หาก build ปฏิเสธ route ให้คง route
+เป็น static/CSR หรือเลือก server-capable adapter—อย่า publish static build ที่ทำ SSR/API behavior
+ของคุณไม่ได้
 
 ## Vercel, Netlify และ Cloudflare
 

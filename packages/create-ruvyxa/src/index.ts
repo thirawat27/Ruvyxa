@@ -48,6 +48,45 @@ const EXCLUDED_TEMPLATE_DIRECTORIES = new Set(['.ruvyxa', 'dist', 'node_modules'
 const RESERVED_WINDOWS_NAMES = /^(con|prn|aux|nul|com[1-9]|lpt[1-9])(\..*)?$/i
 
 /**
+ * Check every segment of the target path, not only its last.
+ *
+ * Each name check below reads `basename(trimmed)`, so a path argument slipped
+ * past all of them: `../../my-app` has the basename `my-app`, `/etc/my-app`
+ * likewise, and `C:\\Windows\\Temp\\my-app` is worse — `basename` strips the drive
+ * letter that the invalid-character check would otherwise reject. `nul/my-app`
+ * bypassed the reserved-Windows-name check for the segment that is actually
+ * reserved.
+ *
+ * A path argument stays *allowed*: `create-ruvyxa ~/projects/foo` is a
+ * reasonable thing to type on your own machine, and this is not a trust
+ * boundary — the value is typed by the person running the command. What changes
+ * is that the checks now cover the value that gets resolved, rather than
+ * describing a safety they did not provide. The empty-directory guard
+ * downstream was the only thing between a mistyped path and a project
+ * scaffolded somewhere surprising.
+ */
+function assertEverySegmentIsSafe(target: string): void {
+  for (const segment of target.split(/[\\/]+/)) {
+    // What a path is legitimately made of: `..`, `.`, an empty segment from a
+    // leading separator, and a bare Windows drive.
+    if (segment === '' || segment === '.' || segment === '..') continue
+    if (/^[A-Za-z]:$/.test(segment)) continue
+    if (INVALID_DIR_CHARS.test(segment)) {
+      throw new Error(
+        `Invalid path segment "${segment}". Directory names cannot contain: < > : " | ? *\n` +
+          '  Try a name with only letters, numbers, dashes, and underscores.',
+      )
+    }
+    if (RESERVED_WINDOWS_NAMES.test(segment)) {
+      throw new Error(
+        `Invalid path segment "${segment}". This name is reserved or unsafe on Windows.\n` +
+          '  Try a name like: my-ruvyxa-app',
+      )
+    }
+  }
+}
+
+/**
  * Create a new Ruvyxa application from a packaged starter template.
  *
  * Performs the following safety checks before scaffolding:
@@ -83,6 +122,8 @@ export async function createRuvyxaApp(
   }
 
   const dirName = basename(trimmed)
+  assertEverySegmentIsSafe(trimmed)
+
   const template = options.template ?? 'minimal'
   if (!STARTER_TEMPLATES.includes(template)) {
     throw new Error(

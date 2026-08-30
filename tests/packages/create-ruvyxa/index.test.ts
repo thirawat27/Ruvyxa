@@ -316,3 +316,51 @@ async function readPackageJson(root: string): Promise<{
 }> {
   return JSON.parse(await readFile(join(root, 'package.json'), 'utf8'))
 }
+
+describe('the target path, not only its last segment', () => {
+  /**
+   * Every check used to read `basename(trimmed)`, so a path argument slipped
+   * past all of them. `nul/my-app` has the basename `my-app` and a reserved
+   * Windows name in the segment that is actually reserved; `C:\\Windows\\my-app`
+   * is worse, because `basename` strips the drive letter that the
+   * invalid-character check would otherwise reject.
+   *
+   * The checks now cover the value that gets resolved rather than describing a
+   * safety they did not provide.
+   */
+  it('refuses a reserved or invalid name in any segment', async () => {
+    for (const target of ['nul/my-app', 'foo/con/my-app', 'aux/bar/my-app']) {
+      await assert.rejects(
+        createRuvyxaApp(target),
+        /reserved or unsafe/,
+        `${target} carries a reserved Windows name in a segment that is not the last`,
+      )
+    }
+
+    for (const target of ['a"b/my-app', 'a|b/my-app', 'a?b/my-app', 'a*b/my-app']) {
+      await assert.rejects(
+        createRuvyxaApp(target),
+        /cannot contain/,
+        `${target} carries a character a directory name may not have`,
+      )
+    }
+  })
+
+  /**
+   * A path argument stays allowed. `create-ruvyxa ~/projects/foo` is a
+   * reasonable thing to type, this is not a trust boundary, and refusing it
+   * would be a worse answer than the bug.
+   */
+  it('still allows an ordinary relative path', async () => {
+    const root = await mkdtemp(join(tmpdir(), 'ruvyxa-create-path-'))
+    try {
+      const nested = join(root, 'nested', 'my-app')
+      await mkdir(join(root, 'nested'), { recursive: true })
+      await createRuvyxaApp(nested)
+      const entries = await readdir(nested)
+      assert.ok(entries.includes('package.json'), `scaffolded into ${nested}: ${entries}`)
+    } finally {
+      await rm(root, { recursive: true, force: true })
+    }
+  })
+})

@@ -575,3 +575,24 @@ green.
 The audit programme is complete: Phases 1-5 and the Phase 6 queue. Nothing is left open except the
 two items recorded in the plan as needing an owner's decision, and both of those now have their
 analysis written beside them rather than a one-line note.
+
+## 2026-08-30 — the gap the completion claim had
+
+Tasks 51 and 58 were both killed mid-flight and I said I would verify them at the end. I then
+reported Phase 5 complete without doing it. Checking afterwards:
+
+- **Task 51 had in fact landed all three.** `CLIB-07` carries its correction and fixed both the CLI
+  loader and `loadClientAssets` in `adapter-runner.mjs` — the reader for the deployed half, which
+  had the identical `catch { return new Map() }` and would have made every live-rendered page in a
+  deployment answer 200 and never hydrate. `CLIB-08` writes the final `build.json` through
+  `write_atomic`. `CLIB-09` drops the redundant canonicalisation and keeps the deliberate one in
+  `store_server_component_entry`, with a test pinning it.
+- **Task 58 had landed nothing.** `ADP-04`, `ADP-05` and `ADP-06` were all still open, and are now
+  done: one shared `assertSafeOutDirForCommand` for the two adapters that interpolate `outDir` into
+  a generated command, segment-wise validation in `create-ruvyxa` (extracted to its own function,
+  since inlining it pushed `createRuvyxaApp` past the complexity limit — the lint was right), and
+  the static adapter's header claim corrected in its docstring and in both documentation languages.
+
+The lesson is the claim, not the code: "verify at the end" is not a plan unless something makes the
+end verify it. Two agents dying mid-flight left one task complete and one empty, and nothing in the
+tree distinguished them.

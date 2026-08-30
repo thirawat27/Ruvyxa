@@ -12,9 +12,26 @@ export interface StaticAdapterOptions {
 /**
  * Create a static site deployment adapter for Ruvyxa.
  *
- * Pre-renders all pages to static HTML files suitable for deployment on
- * any static hosting service (GitHub Pages, S3, Netlify CDN, etc.).
- * No server runtime is required.
+ * Pre-renders all pages to static HTML files suitable for deployment on any
+ * static hosting service (GitHub Pages, S3, Netlify CDN, etc.). No server
+ * runtime is required.
+ *
+ * ## Response headers are not part of the output everywhere
+ *
+ * The only header mechanism this adapter emits is a `_headers` file, which
+ * Netlify and Cloudflare Pages read and other hosts ignore. That file's own
+ * comment says hosts which ignore it "are unaffected by its presence", and that
+ * is true about the *file* — it is not true about the *deployment*. Every page
+ * this adapter produces is a CDN-served pre-rendered document, so `createHandler`
+ * never runs and there is no second place the security headers could come from.
+ *
+ * On GitHub Pages, S3, or any other host without a `_headers` reader, the
+ * deployed site therefore ships no `X-Frame-Options`, no `X-Content-Type-Options`
+ * and no `Content-Security-Policy`, and re-fetches every asset on every
+ * navigation. Those hosts expect headers to be configured at the CDN or bucket,
+ * which is a reasonable division — but it is worth saying plainly here, because
+ * this is the one adapter whose entire output is CDN-served and therefore the
+ * one where the gap covers every response rather than some of them.
  *
  * @example
  * ```ts

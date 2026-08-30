@@ -2,6 +2,31 @@
 
 ## Unreleased
 
+### A misconfigured `outDir` fails the build instead of the deployment
+
+The Render blueprint and the Railway config interpolate `outDir` into a generated start command, and
+neither quoted it: a `#` starts a YAML comment and truncates the command, a `: ` turns the scalar
+into a nested mapping, and a space produces valid YAML and an invalid shell command. The value comes
+from `ruvyxa.config.ts`, so the failure surfaced on the platform rather than on the machine that
+built it. Both adapters now refuse it with `RUV2001` at build time, keeping the allowed set wide
+enough that every ordinary path still works.
+
+### `create-ruvyxa` checks the path you gave it, not just its last segment
+
+Every name check read the basename, so `nul/my-app` passed the reserved-name check that exists for
+exactly that word, and a Windows path passed the invalid-character check because the drive letter
+had already been stripped off. Passing a path is still supported — `create-ruvyxa ~/projects/foo` is
+a reasonable thing to type — but the checks now cover the value that actually gets used.
+
+### The static adapter says what it does and does not emit
+
+Its documentation offered "GitHub Pages, S3, Netlify CDN, etc." while the only header mechanism it
+emits is a `_headers` file that Netlify and Cloudflare Pages read and other hosts ignore. Every page
+this adapter produces is a CDN-served pre-rendered document, so there is no second place the
+security headers could come from — on the other hosts the deployment simply has none. That was true
+before and is now written down, in both documentation languages, instead of being implied away by a
+note that hosts ignoring the file "are unaffected".
+
 ### A plugin that passes its tests is one the server will run
 
 The harness that validates a plugin and the runtime that runs it each carried their own copy of the

@@ -1,6 +1,7 @@
 import type { Adapter, AdapterArtifact, AdapterOutput, BuildContext } from '@ruvyxa/core'
 import {
   clientBuildOutput,
+  assertSafeOutDirForCommand,
   projectRelativeOutDir,
   runtimeBuildPolicy,
   standaloneServerSource,
@@ -39,6 +40,7 @@ export function render(options: RenderAdapterOptions = {}): Adapter {
       // `outDir` rather than the `.ruvyxa` default, which a project that
       // configures `outDir` does not have.
       const relativeOutDir = projectRelativeOutDir(ctx)
+      assertSafeOutDirForCommand('renderAdapter', relativeOutDir)
       const serverEntry = `${relativeOutDir}/deploy/render/server/index.mjs`
 
       const renderBlueprint =

@@ -207,10 +207,12 @@ npm run build -- --target static
 The default publish folder is `<outDir>/static/`. The `static` factory accepts only a non-empty
 relative directory that does not overlap protected build folders. Because `static` is reserved in a
 direct function call, import it with an alias such as `staticOutput` and call
-`staticOutput({ outputDir })`. Publish that folder. `_headers` is emitted for hosts that recognize
-it; hosts that ignore it are unaffected. If the build rejects a route, keep the route static/CSR or
-choose a server-capable adapter—do not publish a static build that cannot execute your SSR/API
-behavior.
+`staticOutput({ outputDir })`. Publish that folder. `_headers` is emitted for the hosts that read it
+— Netlify and Cloudflare Pages. On any other host it is inert, and because every page this adapter
+produces is a CDN-served pre-rendered document there is no second place the security headers could
+come from: a static deployment to GitHub Pages or S3 ships none of them unless you configure them at
+the CDN or bucket. If the build rejects a route, keep the route static/CSR or choose a
+server-capable adapter—do not publish a static build that cannot execute your SSR/API behavior.
 
 ## Vercel, Netlify, and Cloudflare
 

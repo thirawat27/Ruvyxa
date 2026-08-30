@@ -212,6 +212,42 @@ export function runtimeBuildPolicy(ctx: BuildContext): Readonly<Record<string, u
 }
 
 /**
+ * Characters an `outDir` may contain when it is going into a generated command.
+ *
+ * Deliberately wide: this is not a security boundary — `outDir` is the
+ * project's own configuration, not request input — so the only job is to refuse
+ * the values that produce a *deployment* that fails rather than a build that
+ * does.
+ */
+const SAFE_OUT_DIR = /^[A-Za-z0-9._/-]+$/
+
+/**
+ * Refuse an `outDir` that cannot be interpolated into a generated deployment.
+ *
+ * `adapter-render` writes its blueprint by string concatenation
+ * (`'    startCommand: node ' + serverEntry`) and `adapter-railway` interpolates
+ * the same path into a `startCommand` string. Neither quoted it, and the
+ * characters come from `ruvyxa.config.ts`:
+ *
+ * - `#` starts a YAML comment and truncates the command;
+ * - `: ` turns the scalar into a nested mapping and fails the parse;
+ * - a space produces valid YAML and an invalid shell command.
+ *
+ * The failure then lands on the platform rather than on the developer's
+ * machine, which is the expensive place to find it — so it is refused at build
+ * time, naming the setting. `adapter-static` already validated its equivalent
+ * input this way; this is the same refusal for the two that did not.
+ */
+export function assertSafeOutDirForCommand(adapter: string, relativeOutDir: string): void {
+  if (!SAFE_OUT_DIR.test(relativeOutDir)) {
+    throw new Error(
+      `[RUV2001] ${adapter}: "outDir" must contain only letters, digits, and \`.\`, \`_\`, ` +
+        `\`-\` or \`/\` to be used in a generated start command; got "${relativeOutDir}"`,
+    )
+  }
+}
+
+/**
  * Return `ctx.outDir` as a project-root-relative POSIX path.
  *
  * Adapter-generated config files (netlify.toml, wrangler.jsonc) are read on

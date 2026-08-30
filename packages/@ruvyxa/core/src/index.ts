@@ -69,6 +69,7 @@ export {
   DEFAULT_SECURITY_HEADERS,
   headersFileContents,
   IMMUTABLE_CACHE_CONTROL,
+  assertSafeOutDirForCommand,
   projectRelativeOutDir,
   PUBLIC_ASSET_CACHE_CONTROL,
   publicAssetGlobs,

@@ -1,6 +1,7 @@
 import type { Adapter, AdapterArtifact, AdapterOutput, BuildContext } from '@ruvyxa/core'
 import {
   clientBuildOutput,
+  assertSafeOutDirForCommand,
   projectRelativeOutDir,
   runtimeBuildPolicy,
   standaloneServerSource,
@@ -31,6 +32,7 @@ export function railway(options: RailwayAdapterOptions = {}): Adapter {
       // `outDir` rather than the `.ruvyxa` default, which a project that
       // configures `outDir` does not have.
       const relativeOutDir = projectRelativeOutDir(ctx)
+      assertSafeOutDirForCommand('railwayAdapter', relativeOutDir)
       const serverEntry = `${relativeOutDir}/deploy/railway/server/index.mjs`
 
       const railwayConfig = JSON.stringify(
