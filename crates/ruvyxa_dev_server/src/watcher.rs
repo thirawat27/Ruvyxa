@@ -296,7 +296,7 @@ fn handle_watch_batch(context: &WatchBatchContext, paths: Vec<PathBuf>) {
         hmr_update.event_type = HmrEventType::FullReload;
     }
     // Selective cache invalidation based on affected routes.
-    let rediscover = hmr_update.full_reload || hmr_update.affected_routes.is_empty();
+    let rediscover = should_rediscover(&hmr_update, roots, &paths);
     invalidate_runtime_caches(runtime_cache, rediscover, &paths);
     if rediscover {
         render_cache.invalidate_all_blocking();
@@ -688,6 +688,46 @@ fn invalidate_runtime_caches(runtime_cache: &RuntimeCache, rediscover: bool, pat
     }
 }
 
+/// Whether this batch may have changed the route set, rather than the contents
+/// of a route that still exists.
+///
+/// A function rather than three terms inline because it is the whole of what
+/// separates the two invalidation branches, and the third term was missing for
+/// as long as it was written out at the call site.
+fn should_rediscover(update: &HmrUpdate, roots: &WatchRoots, paths: &[PathBuf]) -> bool {
+    update.full_reload || update.affected_routes.is_empty() || source_was_removed(roots, paths)
+}
+
+/// Whether the batch removed a file rather than edited one.
+///
+/// A deletion is not an edit, and the difference decides whether the route set
+/// is discovered again. `affected_routes` answers "which routes read this
+/// file", and for a deleted `page.tsx` it answers with the very route that just
+/// stopped existing -- a non-empty list, which took the *selective* branch and
+/// left the route manifest, and everything derived from it, describing a page
+/// whose source is gone. `ruvyxa dev` kept routing to it (a render error rather
+/// than a 404), and `sitemap.xml`, which is rewritten only when discovery runs,
+/// kept advertising it to crawlers.
+///
+/// The mirror case worked by accident: a route *added* while the server runs has
+/// no file-to-route edge yet, so `affected_routes` came back empty and the
+/// manifest was rebuilt. Only removal was silent.
+///
+/// Existence, not an event kind, because a batch is a list of paths by the time
+/// it arrives here. An editor that saves by renaming can therefore be caught
+/// mid-write and read as a removal; the cost of that is one extra rediscovery,
+/// and the cost of the opposite mistake is the stale route above.
+fn source_was_removed(roots: &WatchRoots, paths: &[PathBuf]) -> bool {
+    paths.iter().any(|path| {
+        let absolute = if path.is_absolute() {
+            path.clone()
+        } else {
+            roots.canonical.join(path)
+        };
+        !absolute.exists()
+    })
+}
+
 fn instrumentation_source_changed(roots: &WatchRoots, paths: &[PathBuf]) -> bool {
     let root = &roots.canonical;
     paths.iter().any(|path| {
@@ -852,6 +892,54 @@ mod tests {
                 "rediscover={rediscover}: the table must not survive a watcher event"
             );
         }
+    }
+
+    /// Deleting a route's source has to re-discover the route set.
+    ///
+    /// The update this builds is the one `HmrTracker` really returns for a
+    /// deleted page -- asserted directly below, so this stays honest if the
+    /// tracker changes: the file is still mapped to the route it belonged to,
+    /// so `affected_routes` holds the route that just stopped existing, and
+    /// `full_reload` is false for an ordinary `.tsx`. Both of the other terms
+    /// therefore say "selective", and the watcher went on serving a page with
+    /// no source while `sitemap.xml` -- rewritten only when discovery runs --
+    /// advertised it to crawlers.
+    #[test]
+    fn a_removed_source_is_not_an_edit() {
+        let temp = tempfile::tempdir().unwrap();
+        let roots = WatchRoots::new(temp.path());
+        let page = temp.path().join("app/blog/page.tsx");
+        std::fs::create_dir_all(page.parent().unwrap()).unwrap();
+        std::fs::write(&page, "export default function Blog() { return <main /> }").unwrap();
+
+        let relative = PathBuf::from("app/blog/page.tsx");
+        let tracker = HmrTracker::new();
+        tracker.register_route("/blog", std::slice::from_ref(&relative));
+        let update = tracker.compute_update(std::slice::from_ref(&relative));
+        assert_eq!(
+            update.affected_routes,
+            vec!["/blog".to_string()],
+            "the premise: the tracker still maps a route's own file to that route",
+        );
+        assert!(
+            !update.full_reload,
+            "the other premise: a page is not a layout"
+        );
+
+        assert!(
+            !should_rediscover(&update, &roots, std::slice::from_ref(&relative)),
+            "a file that is still there was edited, and the selective branch is the point",
+        );
+
+        std::fs::remove_file(&page).unwrap();
+        assert!(
+            should_rediscover(&update, &roots, &[relative]),
+            "a page whose source is gone changes the route set, whatever the tracker still maps",
+        );
+        assert!(
+            should_rediscover(&update, &roots, &[page]),
+            "the watcher may report either spelling, and both name the same file",
+        );
     }
 
     #[tokio::test]
