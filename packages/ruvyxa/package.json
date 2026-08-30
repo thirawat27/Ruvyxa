@@ -189,7 +189,7 @@
     "build": "node scripts/sync-shared-runtime.mjs --check && tsc -p tsconfig.json",
     "sync:runtime": "node scripts/sync-shared-runtime.mjs",
     "check": "tsc -p tsconfig.check.json",
-    "test": "pnpm run build && node --test \"../../tests/packages/ruvyxa/**/*.test.mjs\"",
+    "test": "pnpm run build && node --test --test-timeout=300000 \"../../tests/packages/ruvyxa/**/*.test.mjs\"",
     "format": "tsc -p tsconfig.check.json",
     "prepack": "pnpm run build && node scripts/prepare-native-binary.mjs"
   }

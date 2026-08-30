@@ -425,6 +425,21 @@ describe('the server-components dependency contract', () => {
  */
 describe('the abandoned payload branch', () => {
   /**
+   * Assert a condition that becomes true on some later turn of the loop.
+   *
+   * Bounded, and it fails with the caller's own message, so a condition that
+   * never arrives reads as the assertion it is rather than as a hung suite —
+   * which is what a bare `await` on stream teardown gave the file this lives in.
+   */
+  async function waitFor(condition, message, timeoutMs = 2_000) {
+    const deadline = Date.now() + timeoutMs
+    while (!condition()) {
+      assert.ok(Date.now() < deadline, message)
+      await new Promise((resolve) => setTimeout(resolve, 10))
+    }
+  }
+
+  /**
    * The real render, behind a stream that delivers every row and never closes.
    *
    * A page that suspends past the worker timeout is the shape that matters, and
@@ -493,7 +508,14 @@ describe('the abandoned payload branch', () => {
       settled,
       'cancelling the payload branch must settle the promise nobody is awaiting',
     )
-    assert.equal(observed.cancelled, true, 'the Flight source never observed a cancel')
+    // Eventually, not synchronously. `cancelPayload` promises this branch is
+    // released, and it settles as soon as that is true; the tee only forwards
+    // the cancel to its source once *both* branches are gone, and the HTML
+    // branch above reaches that state through React's own teardown, a turn or
+    // more later. Waiting for the state rather than for a fixed delay is what
+    // keeps this an assertion instead of a race: it fails by timing out with
+    // the same message, and passes on the turn the cancel actually lands.
+    await waitFor(() => observed.cancelled, 'the Flight source never observed a cancel')
   })
 
   it('never leaves the payload promise unhandled, even when nobody awaits it', async () => {

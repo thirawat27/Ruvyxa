@@ -590,7 +590,11 @@ function writeWorkerMessage(message) {
  * releases the timer or subscription driving it.
  */
 async function emitApiStream(id, result, signal) {
-  const { streamResponse, streamTrailer, ...head } = result
+  // `cancelStream` is destructured out rather than left in `head` for the same
+  // reason the two above are: `head` is spread into a frame that is written as
+  // JSON, and a key whose value disappears in serialisation is a key that
+  // misleads whoever reads this next.
+  const { streamResponse, streamTrailer, cancelStream, ...head } = result
   await writeWorkerMessage({
     id,
     frame: 'api-start',
@@ -645,6 +649,10 @@ async function emitApiStream(id, result, signal) {
     // arrives, so that a worker with an abandoned stream stops attracting new
     // requests instead of looking idle.
     if (signal?.aborted) {
+      // Before the frame, so the count it carries is taken after the release
+      // rather than before it. `streamTrailer` is what drains a server
+      // components render on the way out, and this path never reaches it.
+      await cancelStream?.(signal.reason)
       await writeWorkerMessage({
         id,
         frame: 'api-error',
@@ -662,6 +670,7 @@ async function emitApiStream(id, result, signal) {
     } catch {
       // The source may already be closed; the protocol error below is authoritative.
     }
+    await cancelStream?.(error)
     await writeWorkerMessage({
       id,
       frame: 'api-error',
@@ -2718,6 +2727,14 @@ async function handleServerComponentsDocument(request) {
         console.error('[ruvyxa] server component failed after the shell was sent', failure)
       }
       return { rscPayload: payload }
+    },
+    // The other end of `streamTrailer`. That one is only ever called on the
+    // success path, so on a disconnect or an idle timeout the payload branch
+    // behind this render kept reading with nobody left to hand it to — a
+    // retained React render, per abandoned request, for the life of the worker.
+    // `emitApiStream` calls this instead on exactly those paths.
+    async cancelStream(reason) {
+      await rendered.cancelPayload(reason)
     },
     // Read from the `api-start` frame, so the host can keep its dependency
     // bookkeeping current without waiting for the body. A form action has

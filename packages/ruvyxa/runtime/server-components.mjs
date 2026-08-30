@@ -185,6 +185,36 @@ export async function renderServerComponentsStream({
   // `readStreamText`: a caller holding only the promise cannot release a stream
   // that promise has already locked.
   const payloadReader = forPayload.getReader()
+  // The HTML branch, kept reachable. React's SSR pass locks whatever stream it
+  // is handed and never lets go of it, and cancelling the *HTML* stream it
+  // produces does not travel back here — so with `forHtml` passed straight in,
+  // no code path in this process could cancel that branch. The tee forwards a
+  // cancel to its source only once **both** branches are cancelled, which made
+  // the release below unreachable in practice: the Flight source stayed
+  // subscribed, and with it the React render it was still feeding.
+  //
+  // Reading it through a reader we hold and relaying into a stream React may
+  // lock instead costs one pass-through and buys the handle back.
+  const htmlReader = forHtml.getReader()
+  const releaseHtmlBranch = (reason) => {
+    htmlReader.cancel(reason).catch(() => {
+      // Already closed or errored; the branch is released either way. Never
+      // awaited, for the same tee reason `cancelPayload` documents below.
+    })
+  }
+  const htmlSource = new ReadableStream({
+    async pull(controller) {
+      const { done, value } = await htmlReader.read()
+      if (done) {
+        controller.close()
+        return
+      }
+      controller.enqueue(value)
+    },
+    cancel(reason) {
+      releaseHtmlBranch(reason)
+    },
+  })
   // Started now, awaited by the caller at the end. Not awaited here: the point
   // of this function is to return before the render has finished.
   const payload = readReaderText(payloadReader)
@@ -197,25 +227,45 @@ export async function renderServerComponentsStream({
   payload.catch((error) => {
     console.error('[ruvyxa] server components payload stream failed', error)
   })
-  const stream = await flightStreamToHtmlStream(forHtml, ctx, routePath, { formState })
+  const stream = await flightStreamToHtmlStream(htmlSource, ctx, routePath, { formState })
   return {
     stream,
     payload,
     /**
-     * Release the payload branch when the response it belonged to is lost.
+     * Release the render when the response it belonged to is lost.
      *
      * Safe on the error path precisely because the response is already gone:
      * the partial text is worth nothing to anyone, and cancelling is what lets
      * the tee source — and with both branches cancelled, the React render
      * behind it — be collected. `cancel()` settles a parked `read()`, so
      * `payload` resolves with whatever had arrived instead of hanging.
+     *
+     * Both branches, not just the payload one, which is what makes the sentence
+     * above true rather than aspirational: a tee only forwards a cancel to its
+     * source once neither branch wants it, so releasing one of two is releasing
+     * nothing. Its name is still the payload's because that is the branch with
+     * no other owner — the HTML branch is abandoned here only because reaching
+     * this at all means the response carrying it is gone.
+     *
+     * The promise `cancel()` *returns* is a different matter, and awaiting it
+     * is what this used to get wrong. `tee()` gives both branches one shared
+     * cancel promise and settles it only once both have been cancelled, so
+     * releasing this branch while the HTML branch was still owned awaited a
+     * promise nothing later could settle — a caller that cancelled the payload
+     * first hung forever. The cancellation itself is not deferred: `cancel()`
+     * closes this branch and settles its parked `read()` before returning. So
+     * the branch is released either way, and `payload` — which that read
+     * resolves — is the signal that it actually drained.
      */
     async cancelPayload(reason) {
-      try {
-        await payloadReader.cancel(reason)
-      } catch {
+      payloadReader.cancel(reason).catch(() => {
         // Already closed or errored; the branch is released either way.
-      }
+      })
+      releaseHtmlBranch(reason)
+      await payload.catch(() => {
+        // Reported by the handler attached above; a caller releasing the
+        // branch is not asking to be told how the render it abandoned ended.
+      })
     },
     failures,
   }

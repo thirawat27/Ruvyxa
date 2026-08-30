@@ -124,7 +124,14 @@ jobs:
         run: pnpm -r build
       - name: Check packages
         run: pnpm -r check
+      # Bounded, because the failure this step actually had was not a failing
+      # assertion. A test awaited a promise nothing could settle, so the runner
+      # never printed a summary and never exited: five platforms sat at the
+      # job's 60-minute ceiling and reported "cancelled", which reads as a
+      # runner problem rather than as the deterministic bug it was. A hang here
+      # now costs 20 minutes and names the step.
       - name: Test packages
+        timeout-minutes: 20
         run: pnpm -r test
       - name: Validate release metadata
         run: pnpm release:validate
