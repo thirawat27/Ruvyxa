@@ -421,6 +421,7 @@ fn run_adapter_stage(
     }
     report_native_only_image_optimization(config, reported_adapter);
     report_stale_revalidation(revalidating_routes, reported_adapter);
+    report_skipped_platform_config(&artifacts, reported_adapter);
     Ok(Some(serde_json::to_value(artifacts)?))
 }
 
@@ -552,6 +553,46 @@ fn report_stale_revalidation(revalidating_routes: bool, adapter: Option<&str>) {
              the previous document until `revalidate` elapses. Shorten `revalidate` for a page \
              that must change on demand, or deploy it through an adapter that implements the \
              platform's purge (vercel, netlify, cloudflare)."
+        ))
+    );
+}
+
+/// The project-scope files an adapter declined to write because one was there.
+///
+/// `skipIfExists` is how an adapter offers a platform config — `vercel.json`,
+/// `netlify.toml`, `firebase.json` — without overwriting one the project
+/// already keeps under version control. Deferring is the right default: the
+/// hand-written file is the one the author reasons about.
+///
+/// What was missing is that it happened in silence. The build reported the
+/// artifact count and nothing else, so a `vercel.json` predating a framework
+/// change kept a deployment on the old routing, cache headers, or function
+/// runtime, and the only evidence was the deployed behaviour. The runner has
+/// recorded `skipped: true` on the report all along and nothing read it.
+pub(crate) fn skipped_platform_config_paths(artifacts: &[AdapterArtifactReport]) -> Vec<&str> {
+    artifacts
+        .iter()
+        .filter(|artifact| artifact.skipped == Some(true))
+        .map(|artifact| artifact.path.as_str())
+        .collect()
+}
+
+fn report_skipped_platform_config(artifacts: &[AdapterArtifactReport], adapter: Option<&str>) {
+    let skipped = skipped_platform_config_paths(artifacts);
+    if skipped.is_empty() {
+        return;
+    }
+    let names = skipped.join(", ");
+    warn!(
+        adapter = adapter.unwrap_or("adapter"),
+        files = %names,
+        "kept the project's own platform config instead of writing this build's"
+    );
+    println!(
+        "  {} {}",
+        warn_text("warn"),
+        dim(format!(
+            "{names} already exists, so this build did not write it. The deployment runs under              the file in your project, which this build has not checked against what it emitted.              Delete it to take the generated one, or re-read it after a framework upgrade."
         ))
     );
 }

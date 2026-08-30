@@ -4338,6 +4338,41 @@ fn the_on_demand_image_report_follows_the_adapter() {
     ));
 }
 
+/// A platform config the adapter declined to write is named, not swallowed.
+///
+/// `skipIfExists` defers to the file the project keeps under version control,
+/// which is the right default and was the whole of the behaviour: the build
+/// reported an artifact count and the `skipped: true` the runner had been
+/// recording went unread. A `vercel.json` predating a framework change then
+/// kept a deployment on the old routing with no evidence anywhere in the build.
+#[test]
+fn a_skipped_platform_config_is_reported() {
+    use crate::config::AdapterArtifactReport;
+
+    let report = |path: &str, skipped: Option<bool>| AdapterArtifactReport {
+        kind: "file".to_string(),
+        path: path.to_string(),
+        scope: Some("project".to_string()),
+        skipped,
+    };
+
+    let artifacts = vec![
+        report("vercel.json", Some(true)),
+        report(".vercel/output/config.json", None),
+        report("netlify.toml", Some(false)),
+    ];
+    assert_eq!(
+        crate::build::skipped_platform_config_paths(&artifacts),
+        vec!["vercel.json"],
+        "only an artifact the runner marked skipped is named"
+    );
+
+    assert!(
+        crate::build::skipped_platform_config_paths(&[]).is_empty(),
+        "a build that skipped nothing reports nothing"
+    );
+}
+
 /// The build says so when `revalidatePath()` cannot reach a reader.
 ///
 /// An ISR page is served from a cache, and which cache decides what

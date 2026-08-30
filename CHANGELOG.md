@@ -2,6 +2,16 @@
 
 ## Unreleased
 
+### A platform config the adapter kept its hands off is now named
+
+Adapters offer `vercel.json`, `netlify.toml` and their siblings with `skipIfExists`, so a file the
+project keeps under version control is never overwritten. That default is right — the hand-written
+file is the one the author reasons about — but it happened in silence: the build printed an artifact
+count, and the `skipped: true` the runner had been recording on every such artifact was read by
+nothing. A `vercel.json` predating a framework change kept a deployment on the old routing, cache
+headers, or function runtime, and the only evidence was the deployed behaviour. The build now says
+which files it did not write, and why that is your call to make.
+
 ### A misconfigured `outDir` fails the build instead of the deployment
 
 The Render blueprint and the Railway config interpolate `outDir` into a generated start command, and
