@@ -667,3 +667,27 @@ plan's checkboxes, which were never ticked and are worth nothing as a record. Tw
 open this way that a sampled check had passed: `Task 11`'s first half (`RUV-H6`, a skipped platform
 config nothing read) and `BUNF-07`'s first half. Both are the same failure of method — a task that
 reads as one item is two, and landing one half looks exactly like landing both.
+
+## 2026-08-30 — Phase 5 walked finding by finding, and the half-landed pattern held a third time
+
+All 60 IDs checked against the tree. Fifty-nine had landed. `CORE-10` had not, and it failed the
+same way `Task 11` and `BUNF-07` did: the finding names one defect, the code has four copies of it,
+and fixing the copy the finding points at looks exactly like fixing the defect.
+
+`standalone-server.ts` — the `isrCache: 'tmp'` path `adapter-aws` uses — had the whole fix: the
+directory derived from the build id hashed with the bundle location, created `mode: 0o700`, with a
+comment explaining why both halves of the identity are needed. The Vercel, Netlify and Firebase
+adapters each inline their own `path.join(os.tmpdir(), 'ruvyxa-isr-cache')` and were untouched, so
+three of the four hosts still had the defect the fourth documented at length.
+
+Two things worth keeping from doing it:
+
+- The Vercel adapter's existing test **evaluates the generated source**, so adding `createHash(...)`
+  to the emitted module without adding its import turned that suite red immediately with
+  `ReferenceError: createHash is not defined`. That is the generated-source trap caught by a gate
+  that already existed, which is the outcome the rule about compiling generated output is for.
+- Each adapter test now asserts the derivation and the mode. Putting the fixed name back turns
+  Vercel's red naming the rule, so a fourth copy cannot reappear quietly.
+
+Phases 1 through 6 have now each been walked item by item. Three tasks were found half-landed this
+way, all three by the same mechanism, and none of them by sampling.

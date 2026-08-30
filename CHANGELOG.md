@@ -2,6 +2,21 @@
 
 ## Unreleased
 
+### The ISR temporary cache carries a per-deployment identity on every adapter
+
+`os.tmpdir()/ruvyxa-isr-cache` was a fixed name: the same directory for every Ruvyxa deployment on a
+host and for every previous build of the same one, read _before_ the bundled prerender output, so
+whatever was already there won. A redeploy served the previous build's documents, whose
+`<script src>` names client chunks the new build no longer publishes, until each page's revalidate
+window expired. On Linux the parent is mode 1777, so a file or symlink planted at a known route path
+was served as that page and written through on the next refresh.
+
+The standalone server had already been fixed. The Vercel, Netlify and Firebase adapters each inline
+their own copy of the same constant and had not, so three of the four hosts still carried it. All
+four now derive the directory from the build id hashed together with the function bundle's own
+location, and create it with `mode: 0o700`. Each adapter's test asserts the derivation and the mode,
+so a fourth copy cannot quietly reappear.
+
 ### `#` imports and package self-reference resolve, in both module graphs
 
 Neither graph implemented Node's `imports` map. `#internal/db` was read as a package named
