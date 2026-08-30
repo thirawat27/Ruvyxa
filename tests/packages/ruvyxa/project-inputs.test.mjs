@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict'
-import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { after, describe, it } from 'node:test'
@@ -26,7 +26,14 @@ import {
  * `fingerprintInputs` — so a dependency edited in place by `patch-package` or a
  * linked workspace still forces a recompile. Both are asserted below.
  */
-const workspace = await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-project-inputs-'))
+// `realpath`, because one assertion below compares an absolute path this file
+// built against an absolute path the compiler reported — and the compiler
+// canonicalises where `path.resolve` does not. On macOS `os.tmpdir()` is
+// `/var/folders/...` and `/var` is a symlink to `/private/var`, so the two
+// spellings of the same file never matched and `readFiles` looked as though it
+// had dropped the dependency. macOS only: Linux hands back a real `/tmp`, and
+// on Windows the compiler's own `\\?\` stripping already lines the two up.
+const workspace = await realpath(await mkdtemp(path.join(os.tmpdir(), 'ruvyxa-project-inputs-')))
 after(() => rm(workspace, { recursive: true, force: true, maxRetries: 5, retryDelay: 100 }))
 
 /** A project whose only import is a package installed inside its own root. */
